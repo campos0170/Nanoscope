@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanoscope"
+version = "0.1.0"
+description = "Desktop nanopore signal analysis, event curation, and supervised-learning labelling tool."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.11",
+    "pyqtgraph>=0.13",
+    "numpy>=1.26",
+    "h5py>=3.12",
+    "npTDMS>=1.9",
+    "neo>=0.14",
+    "pandas>=2.2",
+    "scipy>=1.11",
+    "scikit-learn>=1.3",
+    "matplotlib>=3.8",
+    "pyarrow>=14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-qt>=4"]
+
+[project.scripts]
+nanoscope = "nanoscope.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["nanoscope*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "corpus: test reads real recordings from /Users/abrahamcampos; skipped when absent.",
+]

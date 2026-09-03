@@ -1,0 +1,69 @@
+NanoScope 0.1.0 — install
+=========================
+
+Requirements
+------------
+  * A Mac with Apple Silicon (M1, M2, M3, M4). This build does NOT run on Intel Macs.
+  * macOS 15 Sequoia or newer. (The bundled Qt is built for 15.0; on an older Mac
+    the app starts and then quits silently.)
+  * ~1.2 GB of disk space. Nothing else — no Python, no Anaconda, no pip.
+
+Install
+-------
+  Drag NanoScope onto the Applications folder in this window.
+
+
+First launch — READ THIS
+------------------------
+NanoScope is not signed with an Apple Developer certificate and is not notarised by
+Apple. This is normal for lab-built software, but it means macOS will stop you the
+first time you open it. macOS is telling you "I have not personally checked this app",
+NOT "this app is broken" or "this app is malware".
+
+WHAT YOU WILL SEE
+  A dialog saying Apple could not verify that NanoScope is free of malware, offering
+  only "Move to Trash" / "Done". There is no "Open" button. Do NOT move it to Trash.
+
+WHAT TO DO — pick either route.
+
+  ROUTE A — System Settings (no Terminal, works on every macOS version)
+    1. Double-click NanoScope in Applications. Let it get blocked. Click "Done".
+    2. Open System Settings > Privacy & Security.
+    3. Scroll down to the Security section. There is now a line saying
+       "NanoScope was blocked to protect your Mac." Click "Open Anyway".
+    4. Authenticate with your password or Touch ID.
+    5. Double-click NanoScope again and click "Open" in the confirmation dialog.
+    You only do this once. Afterwards it opens by double-click like any other app.
+
+  ROUTE B — one Terminal command (fastest)
+    Open Terminal and paste:
+
+        xattr -d -r com.apple.quarantine /Applications/NanoScope.app
+
+    Then open the app normally. This removes the "downloaded from the internet" flag
+    that triggers the check. It changes nothing else and does not need admin rights.
+
+NOTE ON "right-click > Open": that shortcut used to bypass this. Apple removed it in
+macOS 15 Sequoia, so on macOS 15, 26 and later it does NOT work. Use Route A or B.
+
+If you copied NanoScope.app off a USB stick or a network share rather than downloading
+it, macOS may not flag it at all and it will simply open. That is expected too.
+
+
+First run is slow
+-----------------
+The first launch takes 10-30 seconds while macOS verifies the app and the font cache
+is built. Later launches are much faster. The ML detector loads TensorFlow the first
+time you actually run it, which adds a few seconds once per session.
+
+
+If something goes wrong
+-----------------------
+The app writes everything it prints to:
+
+    ~/Library/Logs/NanoScope/nanoscope.log
+
+Send that file along with a description of what you did. There is also a built-in
+self-check that reports which subsystems work:
+
+    /Applications/NanoScope.app/Contents/MacOS/NanoScope --self-test

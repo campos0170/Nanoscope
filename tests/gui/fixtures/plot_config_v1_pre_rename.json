@@ -1,0 +1,105 @@
+{
+  "format": "nanoscope-plot-config",
+  "version": 1,
+  "app_version": "0.1.0",
+  "plot_type": "Histogram",
+  "norm_user_set": true,
+  "selection": {
+    "source_keys": [
+      "apo -700 mV"
+    ],
+    "accepted_only": true
+  },
+  "histogram": {
+    "column": "dwell_s",
+    "bins": 41,
+    "normalization": "density (area = 1)",
+    "colour_by": "None",
+    "log_x": true,
+    "log_y": false,
+    "include_filter_limited": false
+  },
+  "scatter": {
+    "x": "dwell_s",
+    "y": "depth_pA",
+    "log_x": false,
+    "log_y": false,
+    "colour_by": "None"
+  },
+  "kde": {
+    "x": "dwell_s",
+    "y": "frac_depth",
+    "log_x": true,
+    "log_y": false,
+    "levels": 8
+  },
+  "cluster": {
+    "features": [
+      "dwell_s",
+      "depth_pA",
+      "frac_depth",
+      "ecd_pA_s",
+      "max_dev_pA",
+      "rise_s",
+      "fall_s",
+      "snr"
+    ],
+    "method": "GMM",
+    "k_mode": "Auto (BIC)",
+    "k": 2
+  },
+  "fit": {
+    "kind": "exponential",
+    "k": 1,
+    "k_auto": false,
+    "scatter_kind": "none",
+    "applied": "exponential",
+    "applied_k": 1,
+    "applied_k_auto": false,
+    "applied_scatter": "none",
+    "range_lo": "",
+    "range_hi": "",
+    "range_unit": "ms"
+  },
+  "axes": {
+    "time_unit": "ms",
+    "x_min": "",
+    "x_max": "",
+    "y_min": "",
+    "y_max": "",
+    "manual_x": null,
+    "manual_y": null
+  },
+  "style": {
+    "title": "figure 3b",
+    "x_label": "",
+    "y_label": "",
+    "show_legend": true,
+    "font_family": "",
+    "font_size_pt": 10,
+    "data_color": "#0072B2",
+    "fit_color": "#D55E00",
+    "point_size": 7,
+    "line_width": 1,
+    "background": "dark",
+    "export_w": 0,
+    "export_h": 0,
+    "fit_values_on_plot": false,
+    "label_overrides": {},
+    "legend_pos": null,
+    "legend_font_size_pt": 0,
+    "legend_counts": true,
+    "legend_include": {},
+    "show_grid": true,
+    "title_font_size_pt": 0,
+    "axis_label_font_size_pt": 0,
+    "tick_font_size_pt": 0,
+    "title_bold": false,
+    "title_italic": false,
+    "show_r2": true,
+    "show_gof": true,
+    "show_ci_band": false,
+    "show_provenance": false,
+    "show_residuals": false
+  }
+}

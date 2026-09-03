@@ -1,0 +1,78 @@
+# Python and test caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local environments, editors, and agent state
+.venv/
+venv/
+.idea/
+.vscode/
+.claude/
+.ipynb_checkpoints/
+.DS_Store
+*.swp
+*.tmp
+*.bak
+
+# Build and generated application artifacts
+build/
+dist/
+*.app/
+*.dmg
+*.pkg
+tests/screenshots/
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+credentials*.json
+secrets*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Recordings, user projects, recovery data, calibration, and trained models
+*.abf
+*.tdms
+*.h5
+*.hdf5
+*.nwb
+*.nanoscope
+*.nanoscope-recovery
+*.npcal.json
+*.npy
+*.pkl
+*.pickle
+*.joblib
+*.keras
+*.onnx
+*.pt
+*.pth
+
+# Generated documentation
+/docs/_build/
+/docs/manual.html
+/docs/manual-markdown/manual.html
+/docs/nanoscope-manual.pdf
+/docs/nanoscope-manual.zip
+
+# Internal QA/audit working material (kept locally, not published)
+/docs/notes-*/
+/docs/sweep*/scratch/
+/docs/sweep*/raw/
+/docs/sweep*/fixes/reports/
+/docs/sweep*/repros/
+*.log

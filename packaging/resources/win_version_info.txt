@@ -1,0 +1,34 @@
+# PyInstaller version resource for NanoScope.exe.
+#
+# Windows reads this for the Properties > Details pane, and SmartScreen weighs its presence when
+# deciding how loudly to warn about an unsigned binary. An exe with no version resource is the
+# most suspicious shape a download can have.
+#
+# Keep the four-part tuples in step with APP_VERSION in NanoScope-win.spec.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(0, 1, 0, 0),
+    prodvers=(0, 1, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,          # VOS_NT_WINDOWS32
+    fileType=0x1,        # VFT_APP
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',      # US English, Unicode
+        [StringStruct('CompanyName', 'NanoScope'),
+         StringStruct('FileDescription', 'NanoScope — nanopore recording analysis'),
+         StringStruct('FileVersion', '0.1.0'),
+         StringStruct('InternalName', 'NanoScope'),
+         StringStruct('LegalCopyright', 'NanoScope'),
+         StringStruct('OriginalFilename', 'NanoScope.exe'),
+         StringStruct('ProductName', 'NanoScope'),
+         StringStruct('ProductVersion', '0.1.0')])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
