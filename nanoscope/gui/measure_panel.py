@@ -808,6 +808,36 @@ class _MeasurementsModel(QAbstractTableModel):
         self.endInsertRows()
         return at
 
+    def replace(self, source_row: int, row: dict[str, Any]) -> bool:
+        """Replace one SOURCE row without changing its position or identity.
+
+        A saved manual measurement is an editable record, not an append-only note: after
+        returning to its cursors and refining their bounds, the user can deliberately
+        replace its computed values in place. Coercing the one incoming row through the
+        same schema door as a project restore is important here: a replacement must retain
+        the frozen measurement dtypes *and* the additive signal-basis stamp rather than
+        leaving a mixed-object DataFrame that later exports differently.
+
+        ``dataChanged`` deliberately covers every column and the raw sort role. The proxy
+        may currently be sorted by a measurement value which has just changed, and the
+        panel's existing connection turns this one mutation into the normal
+        ``measurementsChanged`` announcement (dirty state + undo checkpoint).
+        """
+        if not (0 <= int(source_row) < len(self._df)):
+            return False
+        replacement = _cast_measurements(pd.DataFrame([row]))
+        if len(replacement) != 1:
+            return False
+        row_index = self._df.index[int(source_row)]
+        for column in self._columns:
+            self._df.at[row_index, column] = replacement.at[0, column]
+        left = self.index(int(source_row), 0)
+        right = self.index(int(source_row), max(len(self._columns) - 1, 0))
+        self.dataChanged.emit(
+            left, right,
+            [Qt.DisplayRole, Qt.EditRole, Qt.ToolTipRole, Qt.ForegroundRole, _SORT_ROLE])
+        return True
+
     def remove_rows(self, rows) -> int:
         """Drop every SOURCE row in ``rows`` (any order, duplicates fine). Returns the
         count actually removed. Deleting back-to-front keeps the earlier indices valid."""
@@ -889,8 +919,8 @@ class MeasurePanel(QtWidgets.QWidget):
             an event the DETECTOR missed. The owner (AnalysisPanel) characterizes the
             bracketed span and appends it to the active detection as an ``added`` event
             — the panel itself never touches the detection, only announces the request.
-        measurementsChanged(): the saved-measurements table gained or lost a row through
-            a user edit (Add to list / Remove selected / a label edit) — lets MainWindow
+        measurementsChanged(): the saved-measurements table gained, lost, or replaced a row through
+            a user edit (Add to list / Update selected / Remove selected / a label edit) — lets MainWindow
             treat manual measurements as unsaved work. NOT emitted by
             ``set_measurements_df`` (a bulk project restore), so reopening a project never
             looks dirty.
@@ -1050,9 +1080,15 @@ class MeasurePanel(QtWidgets.QWidget):
         self._snap_event_btn = QtWidgets.QPushButton("Snap to selected event")
         self._snap_event_btn.setToolTip("Set the cursors to the event last selected in the event table.")
         self._snap_event_btn.clicked.connect(self._snap_to_event)
+        self._clear_mask_btn = QtWidgets.QPushButton("Clear mask")
+        self._clear_mask_btn.setToolTip(
+            "Remove the live cursor mask. This never deletes a saved measurement or event.")
+        self._clear_mask_btn.setEnabled(False)
+        self._clear_mask_btn.clicked.connect(self.clear_mask)
         tools.addWidget(self._toggle)
         tools.addWidget(self._snap_view_btn)
         tools.addWidget(self._snap_event_btn)
+        tools.addWidget(self._clear_mask_btn)
         tools.addStretch(1)
         root.addLayout(tools)
 
@@ -1172,6 +1208,14 @@ class MeasurePanel(QtWidgets.QWidget):
             "Append the current measurement to the table below.  (Ctrl+M)")
         self._add_button.setEnabled(False)
         self._add_button.clicked.connect(self.add_current)
+        self._update_button = QtWidgets.QPushButton("Update selected")
+        self._update_tip = (
+            "Replace one selected saved measurement with the current cursor span and "
+            "statistics. Its measurement ID and label are retained. Select a row, use "
+            "Go to measurement, adjust the mask, then update it.")
+        self._update_button.setToolTip(self._update_tip)
+        self._update_button.setEnabled(False)
+        self._update_button.clicked.connect(self.update_selected)
         self._remove_button = QtWidgets.QPushButton("Remove selected")
         self._remove_button.setToolTip(
             "Delete every selected row. Shift/Ctrl-click to select more than one.")
@@ -1219,9 +1263,10 @@ class MeasurePanel(QtWidgets.QWidget):
         btn_grid.addWidget(self._remove_button, 0, 1)
         btn_grid.addWidget(self._export_button, 0, 2)
         btn_grid.addWidget(self._goto_button, 1, 0)
-        btn_grid.addWidget(self._scope_check, 1, 1)
-        btn_grid.addWidget(self._markers_check, 1, 2)
-        btn_grid.addWidget(self._export_processed_button, 2, 0, 1, 3)
+        btn_grid.addWidget(self._update_button, 1, 1)
+        btn_grid.addWidget(self._scope_check, 1, 2)
+        btn_grid.addWidget(self._markers_check, 2, 0)
+        btn_grid.addWidget(self._export_processed_button, 3, 0, 1, 3)
         btn_grid.setColumnStretch(3, 1)
         root.addLayout(btn_grid)
         self._sync_processed_export()
@@ -1695,6 +1740,23 @@ class MeasurePanel(QtWidgets.QWidget):
         if self._toggle.isChecked() != on:
             self._toggle.setChecked(on)
 
+    def clear_mask(self) -> bool:
+        """Remove the transient cursor mask without touching anything saved.
+
+        A trace double-click intentionally creates the same live cursor selection as the
+        Measure tool.  Clearing that selection must be a separate, reversible-in-spirit
+        operation from deleting a table row: it turns the tool off, drops only the
+        ``LinearRegionItem``, and leaves saved manual measurements, detector events,
+        labels, and project history unchanged.
+        """
+        if not self.is_active():
+            self._set_status("There is no live annotation mask to clear.")
+            return False
+        self.set_active(False)
+        self._set_status(
+            "Cleared the live annotation mask. Saved measurements and events were not changed.")
+        return True
+
     def set_method(self, method: str) -> None:
         """Choose the amplitude method by name (recomputes live)."""
         if method in AMPLITUDE_METHODS:
@@ -1754,14 +1816,18 @@ class MeasurePanel(QtWidgets.QWidget):
             self._stop_pending_recompute()   # the region is gone; nothing left to measure
             self._refusal = None             # ... and so is the selection it described
             self._install_stats(None)
+        self._clear_mask_btn.setEnabled(checked)
         self._sync_snaps()
         self._sync_mark_missed()
+        self._sync_update_button()
         self.measureActiveChanged.emit(checked)
 
     def _on_trace_measure_active_changed(self, active: bool) -> None:
         """Mirror a TraceView-side teardown (notably hiding the target layer) onto this owner."""
         if not active and self._toggle.isChecked():
             self._toggle.setChecked(False)
+        self._clear_mask_btn.setEnabled(bool(active and self._toggle.isChecked()))
+        self._sync_update_button()
 
     def _snap_to_view(self) -> None:
         self._place_mask_in_view()
@@ -2014,6 +2080,7 @@ class MeasurePanel(QtWidgets.QWidget):
         self._render_refusal_note()
         self._add_button.setEnabled(stats is not None)
         self._sync_mark_missed()
+        self._sync_update_button()
 
     def _stop_pending_recompute(self) -> None:
         """Cancel a queued recompute — the thing it would have measured is gone."""
@@ -2199,31 +2266,19 @@ class MeasurePanel(QtWidgets.QWidget):
         return cal.target_units or info.raw_units or ""
 
     # -- the saved table -------------------------------------------------------------------------
-    def add_current(self) -> bool:
-        """Append the current measurement, computed over EVERY sample of its span.
+    def _saved_row_from_exact(self, exact: dict[str, Any], *, label: str,
+                              measurement_id: int) -> dict[str, Any] | None:
+        """Stamp one exact cursor measurement as a durable saved-table row.
 
-        The live readout may be a bounded preview (see the module docstring); a saved row
-        may not be, so this re-measures with ``max_samples=None`` first and stamps THOSE
-        numbers. When the readout was already exact — any selection under the live bound,
-        i.e. essentially every hand-measured event — ``_exact_stats`` hands the same dict
-        straight back and nothing is recomputed. The refreshed exact values then replace the
-        preview in the readout, so what the user sees after saving is what was saved.
-
-        Stamps BOTH the human labels (``recording`` / ``channel``) and the durable identity
-        (``doc_key`` = :func:`~nanoscope.core.segment.persistent_key`, ``channel_index``)
-        that *Go to measurement* resolves against — a display name is not an identity (a
-        segment can carry its parent's name verbatim)."""
-        if self._last_stats is None or self._target is None:
-            return False
+        Both *Add to list* and *Update selected* use this one writer.  That prevents an
+        in-place update from quietly keeping stale calibration, clock, signal-basis, or
+        target metadata while changing only its start/end indices.
+        """
+        if self._target is None:
+            return None
         doc_id, channel = self._target
         if not self._session.has_document(doc_id):
-            return False
-        exact = self._exact_stats()
-        if exact is None:
-            self._set_status("Could not re-measure the selection exactly; nothing was added.")
-            return False
-        if exact is not self._last_stats:
-            self._install_stats(exact)   # the readout now shows what is about to be stored
+            return None
         doc = self._session.document(doc_id)
         row = dict(exact)
         for key in MEASUREMENT_DIAGNOSTIC_KEYS:
@@ -2232,7 +2287,7 @@ class MeasurePanel(QtWidgets.QWidget):
         row["doc_key"] = persistent_key(doc)        # path (file) or segment uid — THE identity
         row["channel"] = doc.meta.channels[channel].name
         row["channel_index"] = int(channel)         # the stable channel key; the name is not
-        row["label"] = ""
+        row["label"] = str(label)
         # WHICH SIGNAL these numbers describe. Stamped from the basis the measurement was
         # actually taken on — `_exact_stats` re-measures through the same `_measure`, so a
         # row can only exist if that basis was reachable. A pooled table of 30 pA rows
@@ -2260,7 +2315,35 @@ class MeasurePanel(QtWidgets.QWidget):
         # can change afterwards (the header tooltip says so when one is in force). None
         # (no sample rate → no clock, see core/clock.py) becomes the schema's NaN default.
         row["t0_s"] = clock.instrument_origin_s(doc.meta)
-        row["measurement_id"] = self._next_id       # running, never reused
+        row["measurement_id"] = int(measurement_id)
+        return row
+
+    def add_current(self) -> bool:
+        """Append the current measurement, computed over EVERY sample of its span.
+
+        The live readout may be a bounded preview (see the module docstring); a saved row
+        may not be, so this re-measures with ``max_samples=None`` first and stamps THOSE
+        numbers. When the readout was already exact — any selection under the live bound,
+        i.e. essentially every hand-measured event — ``_exact_stats`` hands the same dict
+        straight back and nothing is recomputed. The refreshed exact values then replace the
+        preview in the readout, so what the user sees after saving is what was saved.
+
+        Stamps BOTH the human labels (``recording`` / ``channel``) and the durable identity
+        (``doc_key`` = :func:`~nanoscope.core.segment.persistent_key`, ``channel_index``)
+        that *Go to measurement* resolves against — a display name is not an identity (a
+        segment can carry its parent's name verbatim)."""
+        if self._last_stats is None or self._target is None:
+            return False
+        exact = self._exact_stats()
+        if exact is None:
+            self._set_status("Could not re-measure the selection exactly; nothing was added.")
+            return False
+        if exact is not self._last_stats:
+            self._install_stats(exact)   # the readout now shows what is about to be stored
+        row = self._saved_row_from_exact(
+            exact, label="", measurement_id=self._next_id)
+        if row is None:
+            return False
         self._next_id += 1
         source_row = self._model.append(row)
         self._refresh_stale_rows()   # the new row is fresh by construction; older ones may not be
@@ -2271,6 +2354,68 @@ class MeasurePanel(QtWidgets.QWidget):
                          f"({len(self._model.df)} in list), measured on "
                          f"{basis_label(row[SIGNAL_BASIS_COLUMN])}.")
         self.measurementsChanged.emit()
+        return True
+
+    def _selected_update_candidate(self) -> tuple[int, dict[str, Any]] | None:
+        """The one saved row the live cursors may deliberately replace, if any.
+
+        A table can be sorted, filtered, and multi-selected, so the answer must be a
+        source row and must be exactly one row.  The cursor selection also has to be on
+        that row's open recording/channel; otherwise an innocent selection change could
+        overwrite a row from another trace with unrelated samples.
+        """
+        rows = self._selected_source_rows()
+        if len(rows) != 1 or self._target is None or not self.is_active() \
+                or self._last_stats is None:
+            return None
+        if self._trace_view.measure_target() != self._target \
+                or self._trace_view.measure_bounds() is None:
+            return None
+        source_row = rows[0]
+        row = self._model.row_dict(source_row)
+        if row is None or self._resolve_row_target(row) != self._target:
+            return None
+        mid = row.get("measurement_id")
+        if mid is None or pd.isna(mid):
+            return None
+        return source_row, row
+
+    def update_selected(self) -> bool:
+        """Replace one saved measurement with the current cursor measurement in place.
+
+        The row's durable ID and human annotation are kept; its bounds, statistics,
+        calibration/basis stamps, and target metadata are remeasured from the live
+        selection.  ``_MeasurementsModel.replace`` emits ``dataChanged``, so this flows
+        through the ordinary dirty-state, project-save, and measurement-history paths.
+        """
+        candidate = self._selected_update_candidate()
+        if candidate is None:
+            self._set_status(
+                "Select one saved measurement on this recording, return to it, then adjust "
+                "the live mask before updating it.")
+            self._sync_update_button()
+            return False
+        source_row, previous = candidate
+        exact = self._exact_stats()
+        if exact is None:
+            self._set_status("Could not re-measure the selection exactly; nothing was updated.")
+            return False
+        if exact is not self._last_stats:
+            self._install_stats(exact)
+        measurement_id = int(previous["measurement_id"])
+        replacement = self._saved_row_from_exact(
+            exact, label=self._row_text(previous, "label"), measurement_id=measurement_id)
+        if replacement is None or not self._model.replace(source_row, replacement):
+            self._set_status("Could not update the saved measurement.")
+            self._sync_update_button()
+            return False
+        self._refresh_stale_rows()
+        self._select_source_row(source_row)
+        self._refresh_markers()
+        self._sync_update_button()
+        self._set_status(
+            f"Updated measurement #{measurement_id} in place, measured on "
+            f"{basis_label(replacement[SIGNAL_BASIS_COLUMN])}.")
         return True
 
     def _confirm_remove(self, n: int) -> bool:
@@ -2538,6 +2683,21 @@ class MeasurePanel(QtWidgets.QWidget):
 
     def _sync_goto(self) -> None:
         self._goto_button.setEnabled(bool(self._selected_source_rows()))
+        self._sync_update_button()
+
+    def _sync_update_button(self) -> None:
+        """Enable the explicit overwrite only for a safe, single live target."""
+        button = getattr(self, "_update_button", None)
+        if button is None:
+            return
+        enabled = self._selected_update_candidate() is not None
+        button.setEnabled(enabled)
+        if enabled:
+            button.setToolTip(self._update_tip)
+            return
+        button.setToolTip(
+            self._update_tip + "\n\nRequires exactly one selected row and an active mask on "
+            "that row's open recording/channel.")
 
     # -- calibration staleness of saved rows -----------------------------------------------------
     def _refresh_stale_rows(self) -> None:
@@ -2980,6 +3140,8 @@ class MeasurePanel(QtWidgets.QWidget):
             self._toggle.setChecked(False)
         self._sync_snaps()
         self._sync_mark_missed()
+        self._clear_mask_btn.setEnabled(bool(ok and self.is_active()))
+        self._sync_update_button()
 
     def _sync_snaps(self) -> None:
         ok = self.can_measure()
