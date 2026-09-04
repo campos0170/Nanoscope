@@ -50,7 +50,7 @@ from ..analysis.baseline import (
 from ..analysis.baseline_probe import BaselineProposal
 from ..analysis.characterize import recharacterize_span
 from ..analysis.detect import gap_window_samples
-from ..analysis.conditioning import conditioned_trace
+from ..analysis.conditioning import characterization_trace, conditioned_trace
 from ..analysis.events import EventSet, mark_reviewed
 from ..analysis.merge import (
     MIN_MERGE_OCCUPANCY,
@@ -2363,13 +2363,15 @@ class AnalysisPanel(QtWidgets.QWidget):
         button.) A probe is exactly the kind of thing a user presses twice if the
         window stops repainting for two seconds.
 
-        The probe runs on the SAME conditioned trace detection will run on, rebuilt
-        from the live form — a proposal measured on the raw channel would size its
-        windows against mains hum and drift the detector never sees. It is handed the
-        polarity the detection form has settled on, because everything the probe
-        measures is one-sided: `derive_polarity` reads +1 on the owner's own drifting
-        raw traces, and a probe pointed the wrong way measures the drift's dwell
-        distribution instead of the events'.
+        The probe runs on the quantitative CHARACTERIZATION trace rebuilt from the live
+        form. That is the same chain classical detection uses for baseline and amplitude
+        measurement, with high-pass omitted even when the orange candidate-localization
+        preview includes it. A proposal measured on raw data would still size its
+        windows against mains hum and other enabled conditioning the measurement path
+        does not see. It is handed the polarity the detection form has settled on,
+        because everything the probe measures is one-sided: `derive_polarity` reads +1
+        on the owner's own drifting raw traces, and a probe pointed the wrong way
+        measures the drift's dwell distribution instead of the events'.
         """
         if self._sel is None:
             self._baseline.set_busy(False)
@@ -2386,9 +2388,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         params = self._detection.params()
         pol = params.get("polarity")
         raw = np.asarray(ch.data)
-        # Bound as a plain function, not through ``self``: the closure runs on the
-        # worker thread and must not hold a reference to a widget, let alone read one.
-        condition = self._conditioned_from_form
+        # Bound as a plain pure function, not through ``self``: the closure runs on the
+        # worker thread and must not hold a widget. Unlike the orange preview's
+        # candidate-localization trace, this quantitative path omits high-pass.
+        condition = characterization_trace
 
         def job():
             from ..analysis.baseline import characterisation_baseline
@@ -2407,9 +2410,10 @@ class AnalysisPanel(QtWidgets.QWidget):
             # which the user has left by then. The confirmation click, which decides every
             # depth_pA in the table, was made blind.
             #
-            # It is the same estimator, at the PROPOSED config, on the SAME conditioned
-            # trace, at the polarity the probe settled on, so the checks shown here are
-            # the checks the detection will stamp — not an approximation of them.
+            # It is the same estimator, at the PROPOSED config, on the SAME quantitative
+            # characterization trace, at the polarity the probe settled on, so the
+            # checks shown here are the checks the detection will stamp — not an
+            # approximation of them.
             # Measured cost of this second pass on the owner's own recordings: 560 ms
             # (-600 mV, 3.0 M samples), 2.6 s (-500 mV, 12.5 M), 3.8 s (-700 mV, 9.1 M),
             # roughly the probe again. It is off-thread and cancellable like everything
@@ -4249,41 +4253,39 @@ class AnalysisPanel(QtWidgets.QWidget):
     def _conditioned_from_form(
         raw: np.ndarray, fs: float, params: dict[str, Any]
     ) -> np.ndarray:
-        """``raw`` as the detector will see it, from the LIVE form's parameters.
+        """``raw`` as candidate localization will see it, from the LIVE form.
 
         ``lowpass(preprocess_for_detection(raw))`` -- the same two steps, in the same
         order, with the user's own low-pass DESIGN rather than the kernel defaults.
 
-        ONE function, because two callers need the identical array and they used to
-        be two copies of it: the live preview (what the user is looking at) and the
-        baseline probe (what proposes the windows those depths are measured with). A
-        probe that measured on the raw channel would size its rough window against
-        mains hum and drift the detector never sees; a probe that used a different
-        low-pass from the preview would propose windows for a trace nobody has seen.
-        The provenance-driven `_active_signal` is the sibling of this for rows that
-        have ALREADY been measured; this one is for a form that has not run yet.
+        This is the orange preview's candidate-localization path. The baseline probe
+        uses :func:`~nanoscope.analysis.conditioning.characterization_trace` instead,
+        so high-pass can help find boundaries without high-pass itself erasing the DC
+        baseline used for classical event-table amplitudes. Every other enabled stage
+        still applies; Normalize can still recenter that branch. The provenance-driven `_active_signal` is the sibling
+        of this for rows that have ALREADY been measured; this one is for a live form
+        that has not run yet.
 
         Raises whatever the kernels raise (a cutoff above Nyquist, a detrend window
-        longer than the trace) -- both callers turn that into a visible message.
+        longer than the trace); the preview turns that into a visible message.
 
         DELEGATES to :func:`~nanoscope.analysis.conditioning.conditioned_trace`, which is
         THE definition. This body used to be a bit-identical copy of it, which is two
         writers for one array: the Measure tool and the processed-trace export read the
-        pure module, the preview and the probe read this method, and the day one of the
-        two grew a stage the user would have been measuring a trace nobody had drawn.
-        The method stays, because it is the panel's own door (a GUI class may not be
-        imported by ``analysis/``, and the two in-panel callers ask for it by this name);
-        what it no longer is, is a second answer.
+        pure module while the preview read this method. The method stays because it is
+        the panel's own door (a GUI class may not be imported by ``analysis/``); what it
+        no longer is, is a second answer.
         """
         return conditioned_trace(raw, fs, params)
 
     def _update_filter_preview(self) -> None:
-        """Draw the trace as the detector will see it: the full pre-detection chain
+        """Draw the candidate-localization trace: the full pre-detection chain
         (notch / high-pass / baseline-drift / savgol, whichever are on) THEN low-passed
         (if on). preprocess_for_detection performs the chain exactly as detection does;
         the low-pass is applied here to mirror what detect_events does internally, so the
-        single managed preview curve is the true preprocessed signal — even when only one
-        pre-detection stage is enabled."""
+        single managed orange preview is the true localization signal — even when only
+        one pre-detection stage is enabled. With high-pass on, quantitative baseline and
+        amplitude measurements use the companion chain with that one stage omitted."""
         if self._sel is None:
             return
         params = self._detection.params()

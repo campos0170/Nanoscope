@@ -29,8 +29,8 @@ LIVE IS BOUNDED; SAVED IS EXACT (why step 2 and step 4 do not compute the same t
 measured cost is ~8 ms at 200 k samples, ~80 ms at 2 M and ~1.1 s at 15 M — and this app's
 recordings ARE 15 M samples. Wired naively (one synchronous full recompute per
 ``sigRegionChanged``, which fires per drag FRAME) the readout freezes the whole app for
-about a second per frame the moment the selection gets big, and "Snap to view" on a
-zoomed-out recording is a trap rather than a shortcut. Two mechanisms fix that, and one
+about a second per frame the moment the selection gets big, and a very large manually
+resized selection can otherwise become a trap rather than a shortcut. Two mechanisms fix that, and one
 rule keeps it honest:
 
 * **Coalesce.** A drag frame does not recompute; it (re)starts a single-shot
@@ -40,8 +40,8 @@ rule keeps it honest:
   cancels the timer and settles immediately, so releasing the mouse never feels laggy.
 * **Bound.** The live recompute always passes ``max_samples=_LIVE_MAX_SAMPLES``, so above
   that a preview is computed over a strided subsample. This applies to the settle path
-  too, deliberately: "Snap to view" selects the entire visible window, so the eager path
-  is exactly where the unbounded cost would still bite.
+  too, deliberately: programmatic placement settles immediately, so the eager path is
+  exactly where the unbounded cost would still bite.
 * **THE RULE: nothing approximate is ever saved.** :meth:`add_current` re-measures the
   selection with ``max_samples=None`` before stamping a row, so a saved measurement is
   computed over EVERY sample of its span whatever the readout happened to be showing. The
@@ -243,7 +243,7 @@ from ..core.session import Session
 from ..core.sources import DETECTION_MODULE_IDS
 from ..core.types import ChannelKind
 from .export_paths import ask_export_path
-from .trace_view import TraceView
+from .trace_view import MEASURE_MAX_VIEW_FRACTION, TraceView
 
 __all__ = ["MeasurePanel"]
 
@@ -947,7 +947,6 @@ class MeasurePanel(QtWidgets.QWidget):
         # Why the last measurement attempt produced nothing, when the reason is a defect
         # in the DATA rather than an ordinary gesture. See `_measure` / `refusal_note`.
         self._refusal: str | None = None
-        self._view_range: tuple[float, float] | None = None
         self._next_id: int = 0                          # running measurement_id
         #: The LAST calibration-stamp verdict each row got while its recording was open
         #: (``measurement_id`` -> ``CAL_STAMP_*``). Session-lived and never persisted: it
@@ -999,12 +998,13 @@ class MeasurePanel(QtWidgets.QWidget):
         self._build_ui()
 
         # The live wires: the region moves → schedule a recompute; the region SETTLES (mouse
-        # released, or placed programmatically) → recompute now. Also track the visible
-        # x-range so "Snap to view" has a window even before the user pans.
+        # released, or placed programmatically) → recompute now. Double-click placement
+        # arrives as a data-x request; this panel resolves it against its authoritative target.
         self._trace_view.sigMeasureChanged.connect(self._on_measure_changed)
         self._trace_view.sigMeasureFinished.connect(self._on_measure_finished)
-        self._trace_view.sigVisibleRangeChanged.connect(self._on_visible_range)
         self._trace_view.sigMeasureActiveChanged.connect(self._on_trace_measure_active_changed)
+        self._trace_view.sigMeasurePlacementRequested.connect(
+            self._on_trace_measure_placement_requested)
         # A layer toggle / view-mode change REBUILDS the TraceView, destroying every overlay
         # with its plot. Session is the panel's only other permitted correspondent, so redraw
         # from it. TraceView subscribes to the same signal first (it is constructed first), so
@@ -1039,10 +1039,13 @@ class MeasurePanel(QtWidgets.QWidget):
         self._toggle.setCheckable(True)
         self._toggle.setToolTip(
             "Show a movable region on the current-channel trace; its two edges are "
-            "the boundary cursors. Drag them around ONE event to measure it live.")
+            "the boundary cursors. Double-click the trace to place it, drag the shaded "
+            "body to move it, or drag either circular handle to resize it.")
         self._toggle.toggled.connect(self._on_toggle)
         self._snap_view_btn = QtWidgets.QPushButton("Snap to view")
-        self._snap_view_btn.setToolTip("Set the cursors to span the current visible window, then trim.")
+        self._snap_view_btn.setToolTip(
+            "Place a mask over the middle 20% of the visible view, then drag its circular "
+            "edge handles to fit the event. Double-clicking the trace places it at the click.")
         self._snap_view_btn.clicked.connect(self._snap_to_view)
         self._snap_event_btn = QtWidgets.QPushButton("Snap to selected event")
         self._snap_event_btn.setToolTip("Set the cursors to the event last selected in the event table.")
@@ -1761,37 +1764,74 @@ class MeasurePanel(QtWidgets.QWidget):
             self._toggle.setChecked(False)
 
     def _snap_to_view(self) -> None:
-        if not self.can_measure():
-            return
+        self._place_mask_in_view()
+
+    def _on_trace_measure_placement_requested(self, x: float) -> None:
+        """Place the working annotation mask where the user double-clicked the trace."""
+        self._place_mask_in_view(float(x))
+
+    def _place_mask_in_view(self, centre_x: float | None = None) -> bool:
+        """Place a visible mask no wider than 20% of the current x window.
+
+        ``centre_x`` is the trace double-click location; ``None`` is the Snap-to-view
+        button and uses the middle of this recording's visible overlap. The mask is
+        clamped wholly inside both that overlap and the target recording. This cap is
+        intentionally placement-only: either handle can still be dragged beyond it.
+        """
+        if not self.can_measure() or self._target is None:
+            return False
+        rng = self._trace_view.visible_x_range_for(*self._target)
+        extent = self._trace_view.measure_cursor_extent(*self._target)
+        if rng is None or extent is None:
+            self._set_status(
+                "This recording has no visible sample span for the annotation mask.")
+            return False
+
+        vlo, vhi = sorted((float(rng[0]), float(rng[1])))
+        e0, e1 = sorted((float(extent[0]), float(extent[1])))
+        overlap0, overlap1 = max(vlo, e0), min(vhi, e1)
+        view_span = vhi - vlo
+        overlap_span = overlap1 - overlap0
+        if (not np.isfinite([vlo, vhi, e0, e1]).all()
+                or view_span <= 0.0 or overlap_span <= 0.0):
+            self._set_status(
+                "The visible view does not overlap this recording. Pan to where this "
+                "recording is drawn, then place the mask again.")
+            return False
+
+        clicked = centre_x is not None
+        if clicked:
+            centre = float(centre_x)
+            if not np.isfinite(centre) or centre < overlap0 or centre > overlap1:
+                self._set_status(
+                    "That point is outside the visible part of the selected recording. "
+                    "Double-click where its trace is drawn.")
+                return False
+        else:
+            centre = 0.5 * (overlap0 + overlap1)
+
+        width = min(MEASURE_MAX_VIEW_FRACTION * view_span, overlap_span)
+        if not np.isfinite(width) or width <= 0.0:
+            return False
+        lo = centre - 0.5 * width
+        lo = min(max(lo, overlap0), overlap1 - width)
+        hi = lo + width
+
         self.set_active(True)
-        rng = self._view_range
-        if rng is None:
-            anchor = self._trace_view.anchor_plot()
-            if anchor is not None:
-                xr = anchor.vb.viewRange()[0]
-                rng = (float(xr[0]), float(xr[1]))
-        if rng is not None and rng[1] > rng[0]:
-            assert self._target is not None       # can_measure() above established this
-            extent = self._trace_view.measure_cursor_extent(*self._target)
-            if extent is None:
-                self._set_status(
-                    "This recording has no sample span to snap the Measure cursors to.")
-                return
-            lo, hi = max(float(rng[0]), extent[0]), min(float(rng[1]), extent[1])
-            if hi <= lo:
-                # set_active(True) has already made a valid target-local seed. Preserve it: an
-                # invalid (n,n) cursor pair is worse than declining a union-view gesture, and the
-                # user needs to know why a visible click did not move anything.
-                self._set_status(
-                    "The visible view does not overlap this recording. Pan to where this "
-                    "recording is drawn, then choose Snap to view again.")
-                return
-            self._trace_view.set_measure_region(lo, hi)
-            if lo != float(rng[0]) or hi != float(rng[1]):
-                self._set_status(
-                    "Selected the part of the visible view that overlaps this recording.")
-            else:
-                self._set_status("Measure cursors snapped to the visible view.")
+        self._trace_view.set_measure_region(lo, hi)
+        if clicked:
+            self._set_status(
+                "Placed a Measure mask at the double-click (maximum 20% of the view). "
+                "Drag the shaded body to move it or a circular handle to resize it.")
+        elif overlap0 != vlo or overlap1 != vhi:
+            self._set_status(
+                "Placed a Measure mask in the visible part of this recording "
+                "(maximum 20% of the view).")
+        else:
+            self._set_status(
+                "Placed a Measure mask over the middle 20% of the visible view. "
+                "Drag its handles to fit the event.")
+        return True
 
     def _snap_to_event(self) -> None:
         if not self.can_measure() or self._selected_event is None:
@@ -1876,14 +1916,11 @@ class MeasurePanel(QtWidgets.QWidget):
         """The selection came to rest. Drop any pending frame and settle immediately.
 
         This is what keeps the readout feeling instant on mouse-release and on every
-        programmatic placement (snap / go-to). It is still the BOUNDED path: "Snap to view"
-        selects the whole visible window, so an unbounded eager recompute here would
-        reintroduce the very freeze the debounce was added to remove."""
+        programmatic placement (snap / go-to). It is still the BOUNDED path: a user can
+        resize the mask across a very large span, so an unbounded eager recompute here
+        would reintroduce the very freeze the debounce was added to remove."""
         self._recompute_timer.stop()
         self._recompute()
-
-    def _on_visible_range(self, xmin: float, xmax: float) -> None:
-        self._view_range = (float(xmin), float(xmax))
 
     def _on_calibration_changed(self, doc_id: str, channel: int) -> None:
         """The calibration of (doc_id, channel) changed.

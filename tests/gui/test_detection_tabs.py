@@ -303,6 +303,49 @@ def test_show_tab_helpers_raise_the_right_index(qtbot):
     assert panel.mode_tabs.currentWidget() is panel._preprocess_page
 
 
+def test_preprocess_section_helpers_are_progressive_and_plain_navigation_preserves_state(qtbot):
+    panel = DetectionPanel()
+    qtbot.addWidget(panel)
+    baseline = QWidget()
+    panel.set_baseline_widget(baseline)
+    panel.show()
+    qtbot.waitExposed(panel)
+
+    assert [panel.preprocess_section_selector.itemText(i) for i in range(2)] == [
+        "Signal chain", "Open-pore baseline"]
+    panel.show_open_pore_baseline()
+    assert panel.preprocess_sections.currentIndex() == 1
+    assert baseline.isVisibleTo(panel)
+    assert not panel.filter_selector.isVisibleTo(panel)
+
+    panel.show_detection_tab()
+    panel.show_preprocess_tab()  # ordinary navigation must not reset the user's section
+    assert panel.preprocess_sections.currentIndex() == 1
+
+    panel.show_signal_chain()
+    assert panel.preprocess_sections.currentIndex() == 0
+    assert panel.filter_selector.isVisibleTo(panel)
+    assert not baseline.isVisibleTo(panel)
+
+
+def test_preprocess_stack_height_tracks_the_visible_subsection(qtbot):
+    """The short baseline page must not reserve the whole signal-chain page below it."""
+    panel = DetectionPanel()
+    qtbot.addWidget(panel)
+    baseline = QWidget()
+    baseline.setFixedHeight(40)
+    panel.set_baseline_widget(baseline)
+
+    panel.show_signal_chain()
+    signal_height = panel.preprocess_sections.sizeHint().height()
+    assert signal_height == panel._signal_chain_page.sizeHint().height()
+
+    panel.show_open_pore_baseline()
+    baseline_height = panel.preprocess_sections.sizeHint().height()
+    assert baseline_height == panel._baseline_page.sizeHint().height()
+    assert baseline_height < signal_height
+
+
 # ================================================================================================
 # params() / ml_params() are identical no matter which tab is active
 # ================================================================================================
@@ -474,12 +517,15 @@ def test_strip_filter_reveals_analysis_tab_and_raises_the_preprocess_inner_tab(w
     win._on_selection(doc_id, 0)
     # Park on a different inspector tab AND a different inner tab, to prove both move.
     win._inspector_tabs.setCurrentWidget(win._cal_scroll)
-    win._analysis_panel.detection_panel.show_ml_tab()
+    panel = win._analysis_panel.detection_panel
+    panel.show_ml_tab()
+    panel.preprocess_section_selector.setCurrentIndex(1)
 
     win._workflow_strip.stageActivated.emit(Stage.FILTER.value)
 
     assert win._inspector_tabs.currentWidget() is win._analysis_panel
-    assert win._analysis_panel.detection_panel.mode_tabs.currentIndex() == 0
+    assert panel.mode_tabs.currentIndex() == 0
+    assert panel.preprocess_sections.currentIndex() == 0
 
 
 def test_strip_detect_reveals_analysis_tab_and_raises_the_detection_inner_tab(win, tmp_path):

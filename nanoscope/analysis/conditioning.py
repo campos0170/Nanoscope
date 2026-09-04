@@ -1,11 +1,12 @@
-"""The CONDITIONED trace: the array the user is looking at, as a pure function.
+"""Conditioned traces: explicit localization and quantitative-measurement paths.
 
-Every surface in this app that shows or measures "the processed signal" has to mean the
-same array, sample for sample. Before this module existed exactly one place could build
-it — ``AnalysisPanel._conditioned_from_form``, a private staticmethod on a GUI panel —
+Most surfaces in this app that show or export "the processed signal" mean the same
+candidate-localization array, sample for sample. Before this module existed one place
+could build it — ``AnalysisPanel._conditioned_from_form``, a private staticmethod on a
+GUI panel —
 and its own docstring says why it exists: *"ONE function, because two callers need the
-identical array"*. That worked while the two callers were both inside that panel (the
-live preview and the baseline probe). It stops working the moment a THIRD surface needs
+identical array"*. That worked while the callers were inside that panel. It stops
+working the moment another surface needs
 it, because a panel in this codebase may not reach for a sibling panel (there are AST
 guard tests that enforce it) and ``analysis/`` may not import ``gui/`` at all. The
 measured consequence, from the 2026-09-02 audit: with the orange processed curve on
@@ -22,9 +23,10 @@ So the array moves here, to a pure module with no Qt in it:
   BODY of it in the codebase. ``AnalysisPanel._conditioned_from_form`` used to be a
   second copy of the same two calls; its whole body is now
   ``return conditioned_trace(raw, fs, params)``. The method itself stays, because it is
-  the panel's own door — a GUI class may not be imported by ``analysis/``, and the two
-  in-panel callers (the live preview and the baseline probe) ask for the array by that
-  name — but it is no longer a second ANSWER. The delegation was landed on evidence
+  the panel's own door — a GUI class may not be imported by ``analysis/`` — but it is no
+  longer a second ANSWER. The live preview still asks for this candidate-localization
+  array; the baseline probe deliberately asks for :func:`characterization_trace`.
+  The delegation was landed on evidence
   rather than by inspection: while both bodies still existed they hashed identically
   (``sha256`` over the arrays' bytes) on the owner's own -1000 mV apo recording
   (749,651 samples, ch2) under five chains — no stage, 5 kHz Bessel low-pass, notch
@@ -66,8 +68,16 @@ WHAT "PROCESSED" MEANS HERE — and what it does NOT mean
 stages (notch / median / high-pass / baseline-drift / running-mean / SavGol / normalize,
 each gated by its own ``*_enabled`` flag) and THEN the low-pass, which
 :func:`~nanoscope.analysis.modules.preprocess_for_detection` deliberately leaves out
-because ``detect_events`` owns it. That is what the preview curve draws, so it is what
-"measure what is on screen" has to mean.
+because ``detect_events`` owns it. That is the candidate-localization trace and what the
+orange preview curve draws.
+
+``characterization_trace`` is the companion quantitative path. It applies the same
+ordered chain and low-pass after forcing only ``hp_enabled`` off. Classical detectors
+find event boundaries on the candidate-localization trace, then measure baseline,
+depth, fractional blockade, mean/max amplitude and SNR on this characterization trace.
+Boundary-dependent values (start/end, dwell, rise/fall and ECD integration limits)
+still inherit the high-pass-derived candidate boundaries. With high-pass off, the two
+functions are byte-identical.
 
 It is NOT the open-pore baseline estimator. Two different things on the Preprocess tab
 wear the word "baseline" — the characterisation baseline every ``depth_pA`` is measured
@@ -108,6 +118,7 @@ from .modules import (
     DETREND_PARAM_KEYS,
     FILTER_PARAM_KEYS,
     any_preprocess_enabled,
+    characterization_params,
     notch_freqs_param,
     preprocess_for_detection,
 )
@@ -121,6 +132,7 @@ __all__ = [
     "SIGNAL_BASIS_TIP",
     "basis_label",
     "chain_description",
+    "characterization_trace",
     "conditioned_trace",
     "conditioning_enabled",
     "conditioning_params",
@@ -137,13 +149,13 @@ __all__ = [
 def conditioned_trace(
     raw: np.ndarray, fs: float, params: Mapping[str, Any]
 ) -> np.ndarray:
-    """``raw`` as the detector — and the preview curve — see it, from ``params``.
+    """``raw`` as candidate localization — and the orange preview — see it.
 
     ``lowpass(preprocess_for_detection(raw, fs, params))``: the same two steps, in the
     same order, with the form's own low-pass DESIGN rather than the kernel defaults.
     This is the definition, and since 2026-09-02 the only body of it:
-    ``AnalysisPanel._conditioned_from_form`` — the preview's and the baseline probe's own
-    door into this function — delegates here in one line. It was a bit-identical copy
+    ``AnalysisPanel._conditioned_from_form`` — the preview's own door into this
+    function — delegates here in one line. It was a bit-identical copy
     before that, held to this function by hash tests on the owner's real recording,
     because a preview the user is looking at and a measurement taken "on what is on
     screen" that differ by one filter design are two traces nobody can tell apart by eye.
@@ -172,6 +184,26 @@ def conditioned_trace(
         order=int(params.get("filter_order", 8)),
         kind=str(params.get("filter_kind", "bessel")),
     ))
+
+
+def characterization_trace(
+    raw: np.ndarray, fs: float, params: Mapping[str, Any]
+) -> np.ndarray:
+    """Build the classical detector's quantitative measurement trace.
+
+    This delegates to :func:`conditioned_trace` after disabling only high-pass via
+    :func:`~nanoscope.analysis.modules.characterization_params`. Classical Schmitt and
+    CUSUM runs can therefore use high-pass to localize candidates without high-pass
+    itself erasing the DC open-pore level used for baseline, depth, fractional blockade,
+    mean/max amplitude and SNR. Every other enabled stage still applies; Normalize, in
+    particular, recenters the trace and makes physical-current and dI/I0 interpretation
+    invalid. Candidate-derived boundaries still determine start/end, dwell, rise/fall
+    and ECD integration limits.
+
+    Delegation keeps one builder for the form-driven chain and guarantees byte identity
+    whenever high-pass is already off.
+    """
+    return conditioned_trace(raw, fs, characterization_params(params))
 
 
 def conditioning_enabled(params: Mapping[str, Any] | None) -> bool:

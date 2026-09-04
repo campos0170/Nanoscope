@@ -690,10 +690,54 @@ def test_config_validation_rejects_nonsense():
         mp.MLPreprocessConfig(notch_q=0.0)
     with pytest.raises(ValueError, match="baseline_decim"):
         mp.MLPreprocessConfig(baseline_decim=0)
+    for field, value in (
+        ("notch_q", np.nan),
+        ("normalize_clip_sigma", np.inf),
+        ("baseline_window_s", np.nan),
+        ("masked_rough_s", np.inf),
+        ("masked_base_s", np.nan),
+        ("masked_mask_sigma", np.nan),
+        ("masked_dilate_ms", -0.1),
+    ):
+        with pytest.raises(ValueError, match=field):
+            mp.MLPreprocessConfig(**{field: value})
+    for field, value in (
+        ("baseline_decim", 2.5),
+        ("baseline_poly", 2.5),
+        ("despike_size", -1),
+        ("despike_size", 3.5),
+    ):
+        with pytest.raises(ValueError, match=field):
+            mp.MLPreprocessConfig(**{field: value})
+    with pytest.raises(ValueError, match="notch_freqs"):
+        mp.MLPreprocessConfig(notch_freqs=(60.0, np.nan))
+    with pytest.raises(ValueError, match="notch_freqs"):
+        mp.MLPreprocessConfig(notch_freqs=())
     with pytest.raises(ValueError, match="exit"):
         mp.MLDecodeConfig(enter_threshold=0.4, exit_threshold=0.9)
     with pytest.raises(ValueError, match="enter"):
         mp.MLDecodeConfig(enter_threshold=1.5)
+
+
+def test_notch_rejects_invalid_q_and_lines_instead_of_skipping_them():
+    x = np.sin(np.linspace(0.0, 20.0, 2000))
+    with pytest.raises(ValueError, match="q must be positive and finite"):
+        mp.notch_sequential(x, FS, q=np.nan)
+    with pytest.raises(ValueError, match="frequencies must be positive and finite"):
+        mp.notch_sequential(x, FS, freqs=(60.0, -120.0))
+
+
+def test_ml_pipeline_refuses_a_stage_that_produces_nonfinite_output(monkeypatch):
+    cfg = mp.MLPreprocessConfig(baseline_method="none")
+
+    def broken_notch(sig, fs, freqs, q):
+        out = np.asarray(sig, dtype=float).copy()
+        out[len(out) // 2] = np.nan
+        return out
+
+    monkeypatch.setattr(mp, "notch_sequential", broken_notch)
+    with pytest.raises(ValueError, match="notch produced NaN/Inf"):
+        mp.apply_ml_preprocess(np.ones(200), FS, cfg)
 
 
 def test_deviations_from_names_exactly_the_changed_fields():

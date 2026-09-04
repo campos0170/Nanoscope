@@ -780,8 +780,29 @@ def training_provenance(
         "detrend_enabled", "detrend_method", "detrend_window_s",
         "notch_enabled", "notch_freq_hz", "notch_harmonics", "notch_q",
         "median_enabled", "median_window_s", "hp_enabled", "hp_cutoff_hz",
+        "hp_order", "hp_kind",
         "rmean_enabled", "rmean_window_s",
         "savgol_enabled", "savgol_window_s", "savgol_polyorder",
+        # Dual-signal classical detection. The top-level baseline/noise block names
+        # the trace that produced the exported row values; these fields retain the
+        # high-pass localization contract and its independently measured diagnostics.
+        "highpass_localization_only", "characterization_hp_omitted",
+        "detection_signal_domain", "characterization_signal_domain",
+        "detection_noise_rms_pA", "detection_noise_method",
+        "measurement_noise_rms_pA", "threshold_noise_source",
+        "detection_baseline", "detection_baseline_median_pA",
+        "detection_baseline_warnings",
+        "detection_polarity", "detection_polarity_source",
+        "detection_polarity_measured", "detection_polarity_evidence",
+        "candidate_signal_polarity_source",
+        "candidate_signal_polarity_measured",
+        "candidate_signal_polarity_evidence",
+        "characterization_polarity_measured",
+        "characterization_polarity_evidence",
+        "polarity_domain_disagreement",
+        "polarity_retry_after_highpass_mismatch",
+        "candidate_initial_polarity", "characterization_resolved_polarity",
+        "candidate_localization_attempts",
     )
     contract = {k: prov[k] for k in contract_keys if k in prov}
     meta["detrend_contract"] = contract

@@ -65,9 +65,15 @@ The **analysis launcher** is the Analyze stage spelled out: one button per analy
 **V-dependence** and **Export figures**. A button you cannot use yet stays on the row, greyed;
 hover it to read what the surface does and why it is not available, or click it to have the reason
 posted in the status bar. Each button opens exactly what the matching **Analysis** menu item does.
+The interactive surfaces share one **Analysis Explorer** instead of opening a pile of overlapping
+windows. Its tabs are **Distributions**, **Event waveforms**, **Noise**, **I-V**, **Voltage
+series**, and **Subpopulations**. The header keeps the selected recording, result freshness
+(`CURRENT`, `STALE`, or `SAVED SNAPSHOT`), and **Refresh current** visible while you move between
+pages. Pages are created only when first used; switching back to a live page refreshes it before it
+is drawn, while a saved project snapshot is left intact until you explicitly refresh it.
 
 The Inspector's **Analysis** tab is where the work happens, and it has its own four-tab strip:
-**Preprocess** (the filter chain *and*, at the top, the open-pore baseline — §5a) · **Detection** ·
+**Preprocess** (choose **Signal chain** or **Open-pore baseline** from its section selector — §5a) · **Detection** ·
 **ML detector** · **Manual measurement**. All four are ways of producing events, so they feed the
 **shared event-table surface** below the strip. When the recording holds more than one detector
 result, the **Event table** selector chooses which stored table is shown; changing that selector
@@ -266,13 +272,15 @@ checked". Likewise the PSD panel now distinguishes *this channel has no noise in
   a read-only mirror of the boundary cursors; the shaded view region remains the navigation control.
 - **Zoom.**
   - *Box-zoom* (default): drag a rectangle on the trace to dive into it.
-  - *Mouse wheel*: zooms the **time axis only**.
+  - *Mouse wheel*: moves the signal **vertically only** without changing either axis span. Scroll
+    up to move the waveform up and down to move it down.
   - The **− / +** buttons in the **Scan** strip zoom out / in one step around the centre. Unlike
     Reset, **−** keeps you in local context instead of jumping straight back to the full recording.
-  - *Double-click*: resets to the full trace.
+  - **Full** in the Scan strip returns to the complete trace. **Reset zoom** (Ctrl+0) and
+    trace-focused **Home** do the same.
   - **Zoom Back / Forward** (Ctrl+← / Ctrl+→) step through your view history — dive into an event,
     reject it, and pop back to where you were browsing.
-  - **Reset zoom** (Ctrl+0). **View ▸ Drag draws zoom box** toggles between box-zoom and pan.
+  - **View ▸ Drag draws zoom box** toggles between box-zoom and pan.
 - **Scan at the current zoom.** The **◀ / ▶** buttons beside the zoomed-in scrollbar move to the
   previous / next view while preserving the current scale. Each move advances by 90% of the window,
   leaving **10% overlap** so an event at a boundary is not lost. If the Measure cursors are active,
@@ -284,29 +292,69 @@ checked". Likewise the PSD panel now distinguishes *this channel has no noise in
 
 ## 5. Filtering
 
-Filters are **pre-detection signal conditioning**: they clean the trace fed to the detector, and the
-**"show processed trace on the plot"** toggle previews exactly the signal the detector sees — every
-enabled stage of the chain, then the low-pass. All filters are **zero-phase** (they do not shift
-event timing). Each can be enabled independently, and whatever you enable runs in one fixed order —
-notch, median, high-pass, baseline drift, running mean, Savitzky-Golay, **Normalize** — with the
-low-pass applied last, inside the detector. The table below is ordered for reading, not for execution.
+Filters are **pre-detection signal conditioning**. For the classical Schmitt and CUSUM detectors,
+the orange trace is the exact **candidate-localization** signal: every enabled stage of the chain,
+then the low-pass. Each stage is zero-phase, so it introduces no phase delay; filtering can still
+reshape an event and move a threshold crossing. This matters especially for high-pass filtering.
+
+Each filter can be enabled independently, and the fixed order is **notch → median → high-pass →
+baseline drift → running mean → Savitzky-Golay → Normalize → low-pass**. The low-pass is
+applied last inside the detector. The table below is ordered for reading, not for execution.
+
+High-pass creates one deliberate exception to the single-chain model. A new Schmitt or CUSUM run
+uses the orange, high-passed branch only to find candidate boundaries. NanoScope then rebuilds the
+same chain with only high-pass disabled and measures the rows on that
+**characterization branch**. High-pass itself therefore does not erase its DC reference; every
+other enabled transform still applies. In particular, Normalize still recenters the branch and
+makes physical-current and fractional-blockade interpretation invalid. With high-pass off,
+localization and characterization receive the same samples.
+
+Open **Preprocess**, then leave **Preprocess section** on **Signal chain**. The baseline estimator is
+now a separate subsection rather than a long form above the filters, so the active recipe, processed
+trace preview and selected stage remain reachable in the narrow Inspector. Choosing the **Filter**
+step on the workflow rail opens this subsection directly.
+
+The line headed **Active execution order** is the recipe NanoScope will actually run, including the
+detector-owned low-pass in its real last position. When high-pass is on, it instead names the
+**Candidate-localization order** and says that quantitative measurement omits high-pass. Pick a
+stage to edit it. Its response graph says **ON · included in execution chain**, **ON · candidate
+localization only** for high-pass, or **OFF · design preview only**. An off-stage design is grey and
+dashed so inspecting a useful-looking curve cannot be mistaken for enabling it.
+
+Tick **show combined response of enabled linear stages** to replace that curve with the cumulative
+response of the active linear cascade. NanoScope multiplies the zero-phase responses on one shared
+frequency grid and names the stages it cannot honestly put in a fixed transfer function: median,
+baseline estimation and normalization are nonlinear or data-dependent. When high-pass is on, both
+this combined response and the orange trace show the **localization branch**, not the no-high-pass
+branch used for quantitative measurement.
 
 | Filter | What it does | When to use it |
 |---|---|---|
 | **Low-pass** (8-pole Bessel) | Removes high-frequency noise above a cutoff. Applied inside the detector so rise-time and filter-limited flags stay correct. | Almost always — set the cutoff to your acquisition bandwidth. |
-| **High-pass** (Butterworth/Bessel) | Removes very low frequencies / DC drift. **Warning:** distorts square translocation events (droops the flat top). | Special cases only; prefer *Baseline drift* for flattening a wandering baseline. |
+| **High-pass** (Butterworth/Bessel) | Removes very low frequencies / DC drift from the **candidate-localization branch only** for new Schmitt/CUSUM runs. Baseline, depth, fractional depth, mean/max deviation and SNR are measured on the otherwise identical branch with high-pass omitted. High-pass still reshapes the candidates: start/end, dwell and rise/fall remain boundary-dependent, and ECD uses high-pass-derived integration limits. | Locating candidates in special cases only; prefer *Baseline drift* when you need drift removal without high-pass boundary distortion. |
 | **Notch** | Removes mains hum at a frequency (default 60 Hz) and its harmonics. | When line pickup contaminates the trace. |
 | **Savitzky-Golay** | Polynomial smoothing that preserves peak shape better than a moving average. | Gentle smoothing without a hard low-pass. |
 | **Running mean** | Simple moving average. | Fast, coarse smoothing (blurs edges). |
 | **Median** | Sliding median. **Removes impulse/spike noise while preserving square event edges.** | Despiking a noisy trace before detection. |
 | **Baseline drift** | Estimates the slow open-pore level and *subtracts the drift*, keeping event depths intact (not a high-pass). Methods: block-median, percentile, ASLS. | Long recordings with electrode/temperature/clogging drift. |
-| **Normalize** | Rescales the whole conditioned trace onto a **dimensionless** scale — `z-score`, `robust z` (÷ the same 1.4826·MAD sigma the detector thresholds on) or `min–max` → [−0.5, +0.5]. Applied **last**, after every other stage. **It divides the picoamps out:** depths, baselines, thresholds and every exported column downstream are still *labelled* pA and are no longer in pA, and nothing downstream can put them back. Off by default; while it is on an amber banner stays up on every page of the Signal-filters group. | Feeding a model, or putting recordings on a common scale — **never** to measure a conductance. |
+| **Normalize** | Rescales the whole conditioned trace onto a **dimensionless** scale — `z-score`, `robust z` (÷ the same 1.4826·MAD sigma the detector thresholds on), `min–max` → [−0.5, +0.5], or the clipped `model input` transform. Applied **last**, after every other stage. **It divides the picoamps out:** current-derived amplitudes, baselines, thresholds and pA/pA·s export fields retain physical-unit labels while no longer carrying physical units. Centering makes `frac_depth`/dI/I0 invalid; model-input clipping can also move boundaries or counts. Index, time, source, review and status fields keep their ordinary meanings. Off by default; while it is on an amber banner stays up on every page of the Signal-filters group. | Feeding a model, or putting recordings on a common scale — **never** to measure a conductance. |
 
 Notes:
 - The **Baseline drift** window must be *much longer than your longest event* (it flattens drift, not
   events). Of its methods, **block-median** and **percentile** flatten drift effectively; **ASLS** is
   a stiff global fit and is weak at default settings.
 - The low-pass and Savitzky-Golay are both smoothers — usually you use one or the other.
+- A result restored from an older NanoScope build has no dual-signal marker. If high-pass was on,
+  its baseline and amplitudes really were measured on the zero-DC trace. NanoScope keeps those old
+  rows reproducible, labels them candidate-only, and tells you to re-run; it does not silently
+  reinterpret them as measurements from the new branch.
+- A narrow low-frequency notch can require a very long end-settling pad. The Notch response note
+  reports the exact seconds and samples per side before you run. NanoScope refuses a pad above its
+  2,000,000-sample safety limit rather than attempting a surprise allocation; remove or raise the
+  lowest-frequency notch line, or reduce Q.
+- Rise-time measurement is likewise refused above a 2,000,000-sample impulse probe. This protects
+  the app from an accidental resource spike; choose a physically meaningful bandwidth/order rather
+  than interpreting an unbounded probe as extra precision.
 - **The preview says why it is empty.** A ticked box that draws nothing used to be the only symptom
   of an over-Nyquist cutoff, a detrend window longer than the trace, or a legacy TDMS with no sample
   rate. Now an amber line under the toggle names the reason — *processed-trace preview unavailable:
@@ -320,10 +368,12 @@ Notes:
 
 ## 5a. The open-pore baseline — measure this recording
 
-At the top of the same **Preprocess** tab is **Open-pore baseline**. This is not signal conditioning
+In **Preprocess**, choose **Open-pore baseline** from the section selector. This is not signal conditioning
 and it is not cosmetic: it is the estimate of `I₀(t)`, the current your pore carries with nothing in
 it, and **every depth in the app is measured against it.** It also feeds the detector's threshold, so
-it decides where events *start and stop*, not only how deep they are.
+it decides where events *start and stop*, not only how deep they are. When high-pass is enabled, the
+same estimator settings are applied separately to the localization branch for thresholding and to
+the no-high-pass characterization branch for the values written into the event table.
 
 The estimator is a two-pass masked median with two windows you set:
 
@@ -335,9 +385,11 @@ The estimator is a two-pass masked median with two windows you set:
 
 ### Press "Measure this recording"
 
-The button probes the **whole channel** — usually a few seconds: measured 2 s on a 3 M-sample
-recording and 6 s on 9 M samples, with the button reading "Measuring…" meanwhile — and measures three things from
-the trace itself: a robust noise σ, the distribution of excursion dwells (with short gaps closed, or
+The button probes the **whole channel on the quantitative characterization branch** — the current
+filter recipe and low-pass, but with high-pass omitted even when the orange localization preview
+includes it. It usually takes a few seconds: measured 2 s on a 3 M-sample recording and 6 s on 9 M
+samples, with the button reading "Measuring…" meanwhile. It measures three things from that trace:
+a robust noise σ, the distribution of excursion dwells (with short gaps closed, or
 the apo file's shallow 521 ms clog fragments into ≤ 26 ms runs and is missed entirely), and whether
 the pore is **gating**, plus the mean interval between its conductance steps. It then shows a
 **proposal with its evidence**.
@@ -512,13 +564,25 @@ parent's.
 
 ## 6. Event detection
 
-**Analysis ▸ Run detection** (Ctrl+D). Detection is a **two-threshold (Schmitt) trigger** on the
-current channel: an event starts when the signal crosses `baseline ± k_in·σ` and ends when it
-returns within `baseline ± k_out·σ`, where σ is the **MAD** noise estimate. Polarity (blockade vs
-enhancement) is **measured from the data**, not assumed.
+**Analysis ▸ Run detection** (Ctrl+D). Choose either classical detector in the Detection controls.
+**Schmitt** is a two-threshold trigger: an event starts when the signal crosses
+`baseline ± k_in·σ` and ends when it returns within `baseline ± k_out·σ`, where σ is the **MAD**
+noise estimate. **CUSUM** accumulates one-sided evidence sample by sample and reports an estimated
+changepoint when that evidence crosses `h`. Both operate over the whole current channel and return
+the same event-table schema.
 
-That `baseline` is the open-pore estimate from **§5a**, so it sets where events *begin and end*, not
-only how deep they are — which is why §5a comes before this section. If you have not pressed
+Polarity (blockade vs enhancement) is **measured from the data**, not assumed. In an Auto run with
+high-pass enabled, the no-high-pass characterization branch owns the physical polarity decision. If
+the high-pass branch votes for the opposite direction because its step response rings, NanoScope
+discards that first candidate pass and repeats localization once with the physical direction.
+
+That `baseline` is the open-pore estimator from **§5a**, so it affects where events *begin and end*,
+not only how deep they are — which is why §5a comes before this section. With high-pass on, the
+threshold uses the localization branch's baseline/noise while the row's baseline, depth,
+fractional depth, mean/max deviation and SNR use the independently measured no-high-pass branch.
+The candidate boundaries are deliberately retained, so start/end, dwell and rise/fall remain
+high-pass-dependent; ECD is integrated from the no-high-pass samples but over those same inherited
+limits. If you have not pressed
 **"Measure this recording"** yet, do that first; a re-detection afterwards is one Ctrl/⌘Z away from
 being undone (§9b), but a dwell time measured against the wrong baseline is not recoverable by any
 later step.
@@ -530,8 +594,11 @@ greyed with an honest reason (e.g. a legacy TDMS file has no rate → dwell woul
 
 | Parameter | Effect | To reduce over-detection |
 |---|---|---|
-| **k_in** (enter, in σ) | Threshold to *start* an event. The primary knob. | Raise it (5 → 6, 7). |
-| **k_out** (exit, in σ) | Threshold to *end* an event; must be `< k_in` (hysteresis). | Keep well below k_in (default 2.0). |
+| **Detector** | **Schmitt** uses threshold crossings; **CUSUM** accumulates evidence and estimates a changepoint. | Start with Schmitt for the familiar, fast threshold detector; try CUSUM for shallow persistent events. |
+| **Schmitt k_in** (enter, in σ) | Threshold to *start* an event. The primary Schmitt knob. | Raise it (5 → 6, 7). |
+| **Schmitt k_out** (exit, in σ) | Threshold to *end* an event; must be `< k_in` (hysteresis). | Keep well below k_in (default 2.0). |
+| **CUSUM k** (drift, in σ) | Minimum sustained deviation that can accumulate evidence. | Raise it to ignore shallow noise; lower it to reach shallow events. |
+| **CUSUM h** (threshold, in σ·samples) | Accumulated evidence required to fire; larger values trade sensitivity for delay. The reported onset is the estimated changepoint, not the crossing sample. | Raise it to require more sustained evidence. |
 | **min dwell** | Events shorter than this are dropped. | Raise it to kill brief noise blips. |
 | **max dwell** | Events longer than this are flagged (kept, not accepted). | Set to exclude clogs/wander. |
 | **merge gap** | Events closer than this are merged into one, transitively along a chain. In **milliseconds** (0–1000 ms; `0` = off, and this is the one merge control where 0 really does mean off). A run whose merged span would be mostly open pore is **refused** rather than merged — see *Merging fragmented events* below. | Raise to combine fragmented events. |
@@ -725,12 +792,14 @@ whenever it produces such rows.
 For events you want to measure by hand (or to check the detector), use the **Manual measurement**
 section of the Analysis tab.
 
-1. Zoom to a useful inspection scale with box-zoom, the mouse wheel, or the **− / +** buttons in the
+1. Zoom to a useful inspection scale with box-zoom or the **− / +** buttons in the
    Scan strip. At event scale the Navigator changes from **Full recording** to a **9× local-context**
    lens, so you can still pan precisely without zooming all the way out.
-2. Click **Measure event (cursors)**. A draggable region appears on the current-channel trace — its
-   **two edges are your boundary cursors**. (Or use **Snap to view** / **Snap to selected event**.)
-3. Drag the edges to bracket the event; everything recomputes live. The blue band in the Navigator
+2. **Double-click the trace at the event**. This activates Measure and places a mask centred at the
+   click, clamped fully on screen and no wider than **20% of the visible view**. Alternatively use
+   **Measure event (cursors)**, **Snap to view**, or **Snap to selected event**.
+3. Drag either circular edge handle to resize the mask, or drag its shaded body to move the whole
+   mask; everything recomputes live. The blue band in the Navigator
    mirrors this working selection, while the shaded region shows the visible trace window.
 4. Choose the **amplitude method**: `median`, `mean`, `min` (deepest/peak), `max`, or `mode`. Amplitude
    is `baseline − level`, where the baseline is the robust median of the current just *outside* your
@@ -1055,11 +1124,19 @@ Those steps need an external dataset/versioning pipeline.
 
 ## 10. Population plots & machine learning
 
-**Analysis ▸ Plots…** opens an interactive plotting window over the per-event tables the app holds:
+**Analysis ▸ Plots…** opens the **Distributions** page of the Analysis Explorer over the per-event
+tables the app holds:
 **one source per (recording, channel, detector result) with at least one row** — Schmitt, CUSUM, ML,
 and Reconciled tables are offered separately, segments included — plus your **manual measurements**.
 **Use accepted events only** is ticked by default; untick it to plot the rejected rows alongside the
 kept ones.
+
+The page opens in a compact beginner view: **Data** shows source selection and the essential plot
+recipe. The fixed toolbar keeps **Plot / Apply** and **Export** reachable. Use the **Section** picker
+for the less frequent **Analysis** (fit, PCA, clustering and axis limits), **Appearance**, and
+**Export** controls; only the chosen section is expanded. A short **Result** and first actionable
+warning stay under the canvas. Expand **Details — methods and provenance** when you need the full
+audit trail.
 
 ### Comparing two of anything
 
@@ -1133,6 +1210,11 @@ Three things happen automatically so the comparison actually means something:
   there are no residual degrees of freedom left), and a flat response reads
   `R² undefined (y does not vary)` instead of `nan`. In a log-log fit, points with `x ≤ 0`, `y ≤ 0`
   or a non-finite value have no logarithm; they are excluded and the count is said in **Details**.
+  Click a point to select that exact source row in the event table and focus its span on the trace.
+  Ctrl, Command, or Shift-click adds/removes points without losing the multi-row selection. The
+  handoff preserves the plotted recording and detector identity, so two detector results from the
+  same channel cannot send you to one another's table. Manual-measurement points remain visible but
+  correctly report that they are not detector-table rows.
 - **KDE (density)** — 2-D kernel-density contours of any two numeric columns; one contour set per
   ticked source, in that source's colour, on shared axes. It is a **plot type here beside the others**,
   with the same source overlay, styling and **Save image…** as the rest of the window — not a separate
@@ -1143,7 +1225,8 @@ Three things happen automatically so the comparison actually means something:
   factor. (**Analysis ▸ Export density figure…** is still the separate publication export — the same
   view with marginal distributions, written as PNG + PDF + a CSV of the plotted points.)
 - **PCA** — projects a chosen feature set to two components, coloured by cluster (with a legend),
-  and shows the explained variance.
+  and shows the explained variance. Its points have the same click-to-event handoff as Scatter,
+  including the exact kept-row mapping after non-finite rows are removed.
 
 ### Clustering
 
@@ -1173,17 +1256,22 @@ tool. Clustering runs on the **first ticked** source.
   editable**: double-click a row in the source list and type, and that series is renamed everywhere it
   is named — legend, fit lines, Details and the plot title. The real name is kept underneath, so
   clearing the edit back to empty restores it rather than legending a blank.
-- **Save image…** exports the current plot as a PNG at the chosen resolution.
+- **Export ▾** keeps the outputs together: **Save image…** writes the live plot as PNG, SVG, or
+  vector PDF; **Export plot data…** writes the exact plotted values as CSV; and **Export
+  configuration JSON…** saves the reproducible plot recipe. The chosen export width/height applies
+  to PNG and PDF; SVG follows the live canvas.
 
 ---
 
 ## 11. Noise spectra (PSD)
 
-**Analysis ▸ Power spectrum (noise / PSD)…** opens the log-log current-noise spectrum every
+**Analysis ▸ Power spectrum (noise / PSD)…** opens the **Noise** page of the Analysis Explorer: the
+log-log current-noise spectrum every
 nanopore paper uses to grade a pore. It runs on the **raw calibrated trace** (no detection needed,
 no filter chain applied), over a chosen quiet open-pore segment, and separates the three noise
 regimes: the low-frequency **1/f (flicker)** power law (α and the 1 Hz magnitude are fit and the
-line overlaid), the mid-decade **thermal / white floor**, and the high-frequency **dielectric /
+line overlaid), a **mid-log-frequency median proxy** (a heuristic summary band, not proof
+of a white-noise plateau), and the high-frequency **dielectric /
 capacitive rise**. It reports the **band-integrated RMS noise** — a total, the standard
 `<1 kHz / 1-10 kHz / 10 kHz-Nyquist` split, and a live read-out over a band you set.
 
@@ -1207,7 +1295,7 @@ Pick the **primary** recording in *Source*, then tick any other open recordings 
 in **Compare with**. Their spectra are overlaid on the same axes, each in its own colour with a
 **legend** giving its name and total RMS. Every curve uses the same Welch settings, so the
 comparison is like-for-like, and every curve is **reported separately**: its own noise summary
-(α, white floor, band RMS), its own sample rate and Nyquist, its own units, and its own band-RMS
+(α, mid-log median proxy, band RMS), its own sample rate and Nyquist, its own units, and its own band-RMS
 read-out. A comparison recording shorter than the chosen window is analysed over what it has, and
 says so.
 
@@ -1215,6 +1303,23 @@ says so.
 > rise starts). Their absolute **heights** are not, until the recordings share a real current
 > calibration — a PSD value is a squared current, so it carries the amplifier gain. The window
 > prints that caution, and calls out curves that are in different units.
+
+### Spectrogram timing and large selections
+
+The spectrogram caption distinguishes four quantities that are easy to confuse: the FFT source-block
+duration, overlap hop, drawn column step, and nominal temporal support after display columns are
+merged. When a long spectrogram must be narrowed to the screen, NanoScope uses equal-width fractional
+column averaging: every complete source column contributes, the mean is preserved, and a short leftover
+group cannot make the final column appear to have a different duration. Standard Welch segmentation can
+leave fewer than one hop of trailing requested samples outside a complete block; the caption states that
+tail explicitly. **Export data (CSV)…** records each
+drawn bin's start/stop time, contributing source-column count, block duration, hop, drawn step and
+nominal support, plus the analysed and uncovered-tail sample counts, so the image can be reconstructed
+without guessing its time geometry.
+
+Very large FFTs and spectrogram matrices are refused *before* their full float64/SciPy work arrays are
+allocated. The message gives the requested size and asks you to analyse a shorter **Segment** or the
+**Visible view**. This is a resource guard, not silent downsampling of scientific output.
 
 ---
 
@@ -1407,7 +1512,18 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   file of that name is already on disk, you are told **which files under this base name are left over
   from an earlier export**, with their dates — including when *every* figure failed, which is the
   case where the most is stale.
-- **Plots ▸ Save image…** — the current interactive plot as a PNG.
+- **Analysis Explorer ▸ Export image (PNG/PDF/SVG)…** — the plot that is actually on
+  screen, including companion axes such as density marginals and spectrogram colour bars. The
+  Distributions page exposes the same choices from **Export ▾**.
+- **Analysis Explorer ▸ Export data (CSV)…** — the exact numeric values behind the
+  visible plot, rather than a recomputation from its controls. Depending on the page this includes
+  histogram bin edges, scatter/event identities, ensemble traces, spectral grids, fitted curves,
+  excluded points, source identity, settings, warnings, and analysis provenance. An empty view is
+  refused instead of producing a plausible-looking header-only CSV. Event ensembles and
+  spectrograms are exact long-form tables; above 250,000 rows NanoScope refuses the interactive
+  export before allocating it, explains the event×point or frequency×time size, and tells you to
+  lower **Ensemble › Points** or shorten the analysed **Segment**. It never silently samples the
+  displayed result. The Distributions page calls this **Export plot data…** under **Export ▾**.
 
 Every export replaces its target the same way a project save does: staged beside it and moved into
 place, so a failure leaves the previous file whole rather than truncated.
@@ -1425,13 +1541,13 @@ it can, because the replace leaves no trace of either afterwards:
   you typed.
 
 This is now the default for every writer, not an opt-in the project save alone used: the events CSV
-and its sidecar, every exported figure, and **Save image…** on all five plotting panels. The note
-appears as a small dialog titled after the command — *Export events*, *Export figures*, *Save plot
-image* — scoped to the files that command just wrote, and said once per file per session. An
+and its sidecar, every exported figure, and image/data export on all five live plotting panels. The
+note appears as a small dialog titled after the command — *Export events*, *Export figures*, *Save
+plot image* — scoped to the files that command just wrote, and said once per file per session. An
 ordinary save of an ordinary file says nothing at all; silence here means *nothing unusual*, not
 *not checked*.
 
-And because nothing is written until the render succeeds, a failed image export no longer claims
+And because nothing is written until rendering or CSV generation succeeds, a failed plot export no longer claims
 "the file was not created" over a file that is sitting there. It tells you the file in that folder is
 the **earlier** export, with the date it carries, untouched but now older than the figure on screen.
 
@@ -1468,13 +1584,13 @@ end to end.
 | **Ctrl+G** | **Open the Event gallery** |
 | **Ctrl+M** | **Save the current cursor region as an independent manual measurement (works from any tab; not a detector-training candidate)** |
 | **Ctrl+Shift+M** | **Write the current cursor region as a reviewed, accepted, hand-added event in the selected source detector table; loudly refuses without a source or on Reconciled** |
-| Ctrl+0 / Home | Reset zoom |
+| Ctrl+0 / trace-focused Home / **Full** button | Reset zoom to the complete trace |
 | Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history) |
 | Ctrl+E | Centre the view on the current selection |
 | **Trace focused: Shift+← / Shift+→** | **Scan to the previous / next view at the current zoom, with 10% overlap; carry active Measure cursors with it** |
 | **Trace focused: Shift+↑ / Shift+↓** | **Zoom in / out one incremental step around the centre** |
-| Double-click trace | Reset to full extent |
-| Mouse wheel on trace | Zoom time axis |
+| Double-click trace | Place/activate a Measure mask at the click, capped at 20% of the visible view |
+| Mouse wheel on trace | Move the signal vertically only (up moves up; down moves down) |
 | **Event inspector:** ←/→ | Previous / Next event |
 | **Event inspector:** A / R / Space | Accept / Reject / toggle |
 | **Event inspector:** T | Centre the main trace on the event on screen |
@@ -1543,8 +1659,13 @@ end to end.
 - **Legacy TDMS** files declare no sample rate → the x-axis is in samples and detection is disabled.
 - **Raw-Volts TDMS** channels are stored as Volts; they need a gain to become current, so they are
   not auto-classified as a current channel.
-- **High-pass** distorts square events (use Baseline drift instead for flattening drift); **ASLS**
-  baseline flattening is weak at default parameters — prefer block-median/percentile.
+- **High-pass is localization-only in new Schmitt/CUSUM runs, not consequence-free.** The event
+  table's baseline, depth, fractional depth, mean/max deviation and SNR come from the equivalent
+  no-high-pass branch, but start/end, dwell and rise/fall retain high-pass-derived boundaries, and
+  those boundaries set ECD's integration limits. Review candidates when the cutoff approaches the
+  event bandwidth. Legacy high-pass results remain candidate-only and should be re-run. Use
+  Baseline drift when you need quantitative drift removal without this boundary dependence;
+  **ASLS** baseline flattening is weak at default parameters — prefer block-median/percentile.
 
 ---
 

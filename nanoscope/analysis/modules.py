@@ -42,12 +42,13 @@ from .baseline import (
     ConstantBaselineWarning,
     baseline_config_from_params,
     baseline_progress_scope,
+    characterisation_baseline,
     collect_baseline_warnings,
     remove_baseline_wander,
     resolve_param_source,
 )
 from .cancel import check_cancelled
-from .detect import detect_events
+from .detect import detect_events, detect_polarity
 from .detect_cusum import (
     DEFAULT_CUSUM_H,
     DEFAULT_CUSUM_K,
@@ -55,7 +56,7 @@ from .detect_cusum import (
     DEFAULT_CUSUM_MIN_DWELL_S,
     detect_events_cusum,
 )
-from .characterize import FLAG_SATURATED, saturated_warning
+from .characterize import FLAG_SATURATED, characterize, saturated_warning
 from .events import (
     EventSet,
     clipped_boundary_warning,
@@ -71,6 +72,7 @@ from .filters import (
     highpass,
     lowpass,
     median_filter,
+    noise_rms,
     normalize,
     notch,
     notch_frequencies,
@@ -101,6 +103,7 @@ __all__ = [
     "fit_depth",
     "fit_levels",
     "preprocess_for_detection",
+    "characterization_params",
     "preprocess_params_from_provenance",
     "detection_params_from_provenance",
     "DETECT_PARAM_KEYS",
@@ -392,7 +395,30 @@ def preprocess_for_detection(
     loads a model. Nothing about the numerics moved — :func:`check_cancelled` returns
     immediately when no cancel token is installed, which is every non-worker caller.
     """
-    arr = np.ascontiguousarray(signal, dtype=np.float32)
+    # Validate BEFORE the first filter. Several conditioning kernels are local
+    # smoothers (especially the median) and can replace an isolated NaN/Inf with a
+    # finite neighbour. Waiting for ``detect_events`` to validate its input would
+    # then turn corrupt acquisition data into an apparently healthy trace. The
+    # preprocessing boundary is therefore the fail-closed door for every caller.
+    source = np.asarray(signal)
+    if source.ndim != 1:
+        raise ValueError(f"signal must be 1-D before preprocessing, got shape {source.shape}")
+    try:
+        finite = bool(np.isfinite(source).all())
+    except TypeError as exc:
+        raise ValueError("signal must contain numeric samples before preprocessing") from exc
+    if not finite:
+        raise ValueError(
+            "signal contains NaN/Inf before preprocessing; filtering is refused because "
+            "a median or smoother could hide the corrupt samples"
+        )
+    with np.errstate(over="ignore", invalid="ignore"):
+        arr = np.ascontiguousarray(source, dtype=np.float32)
+    if not np.isfinite(arr).all():
+        raise ValueError(
+            "signal contains values outside the float32 processing range; converting "
+            "them would create NaN/Inf"
+        )
     if fs is None:
         # Every OTHER stage needs a time base. Normalize does not -- no window, no kernel,
         # no time constant -- so an unknown rate is no reason to skip the one stage whose
@@ -665,6 +691,21 @@ def preprocess_params_from_provenance(prov: Mapping[str, Any]) -> dict[str, Any]
     return params
 
 
+def characterization_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the conditioning recipe used for quantitative event measurement.
+
+    High-pass is a candidate-localisation aid: it may remove enough wander for a
+    threshold detector to find stable boundaries, but it also removes the open-pore DC
+    reference and makes a square event droop/ring. Quantitative rows therefore use the
+    otherwise identical chain with only ``hp_enabled`` forced off. The input mapping is
+    never mutated, and all of the high-pass design values remain available in the run's
+    provenance to reproduce the candidate search.
+    """
+    out = dict(params)
+    out["hp_enabled"] = False
+    return out
+
+
 # The detect_events kwargs the DetectionPanel form owns, in the spelling ``params()`` uses.
 # The preprocessing keys are DETREND_PARAM_KEYS + FILTER_PARAM_KEYS; together the three
 # tuples are the whole Schmitt form.
@@ -744,28 +785,44 @@ def detection_params_from_provenance(prov: Mapping[str, Any]) -> dict[str, Any]:
 def detection_signal(
     signal: np.ndarray, fs: float | None, prov: Mapping[str, Any]
 ) -> np.ndarray:
-    """The trace the detector ACTUALLY measured its events on, rebuilt from provenance.
+    """The trace quantitative event rows were measured on, rebuilt from provenance.
 
     ``preprocess_for_detection`` conditions the signal and then ``detect_events`` applies
-    its own low-pass, so the current every reported ``depth_pA`` / ``baseline_pA`` /
-    ``rise_s`` was read off is ``lowpass(preprocess_for_detection(raw))`` -- NOT the raw
-    channel. Anything that re-measures an event after the fact (a merge, an Event
-    Inspector mask resize, a hand-added missed event) has to start from the same array or
-    it is reporting a different measurement under the same column names.
+    its own low-pass. Ordinarily, the current every reported ``depth_pA`` /
+    ``baseline_pA`` / ``rise_s`` was read off is
+    ``lowpass(preprocess_for_detection(raw))`` -- NOT the raw channel. For a new
+    classical result stamped ``highpass_localization_only``, the same reconstruction
+    forces only high-pass off: its bounds came from the candidate trace, while its row
+    measurements came from the companion characterization trace. Anything that
+    re-measures an event after the fact (a merge, an Event Inspector mask resize, a
+    hand-added missed event) has to start from this row-measurement array or it is
+    reporting a different measurement under the same column names.
 
     Measured on the user's -600 mV recording, re-characterizing merged spans on the raw
     channel instead of this shifted ``frac_depth`` by 2.6% at the median (10 kHz Bessel,
     the app default) and much further with a slower filter.
 
-    Only the stages provenance actually describes are applied, so a detection that
-    recorded nothing (an old project, a hand-built EventSet, an ML run with its own
-    chain) is left alone rather than guessed at. Returns contiguous float32.
+    Only the stages provenance actually describes are applied. A legacy high-pass
+    result without the split marker retains its historical all-on-one-trace replay;
+    an old project, hand-built EventSet or ML run with no classical chain is otherwise
+    left alone rather than guessed at. Returns contiguous float32.
     """
     arr = np.ascontiguousarray(signal, dtype=np.float32)
     if fs is None:
         return arr
     fs_f = float(fs)
-    arr = preprocess_for_detection(arr, fs_f, preprocess_params_from_provenance(prov))
+    preprocess = preprocess_params_from_provenance(prov)
+    # New classical runs use high-pass only to localise candidate boundaries. All
+    # post-hoc row rebuilds (merge, mask resize, hand-add) must therefore reconstruct
+    # the non-high-passed CHARACTERISATION trace. Absence of the stamp means a legacy
+    # result that really was measured on high-pass, so its historical semantics remain
+    # reproducible rather than being silently rewritten on open.
+    if (
+        prov.get("highpass_localization_only")
+        or prov.get("characterization_hp_omitted")
+    ):
+        preprocess = characterization_params(preprocess)
+    arr = preprocess_for_detection(arr, fs_f, preprocess)
 
     cutoff = prov.get("filter_cutoff_hz")
     if cutoff is None:
@@ -797,6 +854,14 @@ def detection_signal_key(prov: Mapping[str, Any]) -> tuple[Any, ...]:
     an Event Inspector drag would otherwise pay that on every release); this is the key
     that says when the cached copy is still the right one.
     """
+    effective = dict(prov)
+    if (
+        prov.get("highpass_localization_only")
+        or prov.get("characterization_hp_omitted")
+    ):
+        effective["hp_enabled"] = False
+        for key in ("hp_cutoff_hz", "hp_order", "hp_kind"):
+            effective.pop(key, None)
     keys = (
         "filter_cutoff_hz", "filter_kind", "filter_order",
         "polarity", "polarity_requested",
@@ -804,7 +869,7 @@ def detection_signal_key(prov: Mapping[str, Any]) -> tuple[Any, ...]:
     )
     method = str(prov.get("detrend_method", "block_median"))
     kernel_keys = tuple(k for _p, k, _d in DETREND_METHOD_PARAMS.get(method, ()))
-    return tuple(prov.get(k) for k in (*keys, *kernel_keys))
+    return tuple(effective.get(k) for k in (*keys, *kernel_keys))
 
 
 def _fingerprint(params: Mapping[str, Any]) -> tuple[float, float]:
@@ -985,14 +1050,72 @@ def normalized_units_warning(prov: Mapping[str, Any]) -> str:
     return (
         f"Preprocess ▸ Normalize was ON, so the detector measured a DIMENSIONLESS "
         f"trace [{domain}]. depth_pA, baseline_pA, ecd_pA_s, max_dev_pA, mean_dev_pA "
-        f"and every exported column are still SPELLED \"pA\" while carrying those "
-        f"units — the label is written from the channel, not measured, so nothing "
+        f"and other current-derived pA/pA·s export fields retain physical-unit labels "
+        f"while carrying transformed values — the label is written from the channel, "
+        f"not measured, so nothing "
         f"downstream can see it.{clipped} Do not pool these depths with an "
         f"un-normalized run, and do not reach for frac_depth as the way out: the "
         f"rescale subtracts a location as well as dividing, so |baseline_pA| lands "
         f"at ~0 and dI/I0 blows up (measured on a 100 pA blockade in a 1000 pA pore: "
-        f"0.100 raw against 105 through 'robust'). dwell_s and the event count are "
-        f"unaffected."
+        f"0.100 raw against 105 through 'robust'). Index, time, source, review and "
+        f"status fields keep their ordinary meanings. Model-input clipping can also "
+        f"move threshold crossings or change the event count."
+    )
+
+
+def highpass_measurement_warning(prov: Mapping[str, Any]) -> str:
+    """Explain the classical detector's high-pass localization/measurement split."""
+    cutoff = prov.get("hp_cutoff_hz", DEFAULT_HP_CUTOFF_HZ)
+    try:
+        cutoff_text = f"{float(cutoff):g} Hz"
+    except (TypeError, ValueError):
+        cutoff_text = "an unknown cutoff"
+    if not (
+        prov.get("highpass_localization_only")
+        or prov.get("characterization_hp_omitted")
+    ):
+        # Backward-compatible truth for a legacy result loaded from a project written
+        # before the split existed. Its values really were measured on high-pass and
+        # must not be retroactively described as repaired.
+        return (
+            f"Preprocess ▸ High-pass was ON ({cutoff_text}) in a legacy run that found "
+            "AND characterised events on the zero-DC trace. baseline_pA, frac_depth, "
+            "depth_pA, mean_dev_pA, max_dev_pA, ecd_pA_s and SNR are not reliable physical "
+            "measurements; treat these rows as candidate locations and re-run them."
+        )
+    # ``detection_polarity`` is the sign APPLIED to candidate localization and is
+    # intentionally the characterization-domain sign. ``detection_polarity_measured``
+    # is the unconstrained vote on the high-pass trace -- the diagnostic that reveals
+    # ringing tried to reverse it.
+    detection_pol = prov.get("detection_polarity_measured")
+    measurement_pol = prov.get("polarity")
+    polarity_clause = ""
+    if detection_pol in (-1, 1) and measurement_pol in (-1, 1) \
+            and int(detection_pol) != int(measurement_pol):
+        if prov.get("polarity_retry_after_highpass_mismatch"):
+            polarity_clause = (
+                f" The high-pass trace itself voted {int(detection_pol):+d}, opposite "
+                f"the {int(measurement_pol):+d} physical-branch vote; NanoScope "
+                "repeated localization with the physical sign instead of accepting "
+                "the ringing direction. Inspect these candidates closely."
+            )
+        else:
+            polarity_clause = (
+                f" The high-pass trace itself voted {int(detection_pol):+d}, opposite "
+                f"the user's {int(measurement_pol):+d} polarity override; localization "
+                "honored the user's direction. Inspect these candidates closely."
+            )
+    return (
+        f"Preprocess ▸ High-pass was ON ({cutoff_text}) for CANDIDATE LOCALIZATION ONLY. "
+        "baseline_pA, depth_pA, frac_depth, mean_dev_pA, max_dev_pA, ecd_pA_s and SNR "
+        "were measured on the otherwise identical conditioned trace with High-pass "
+        "omitted, so High-pass itself does not erase their DC/open-pore reference. "
+        "Every other enabled stage still applies; Normalize, in particular, remains "
+        "dimensionless and is disclosed separately. Event "
+        "start/end, dwell, rise/fall and ECD's integration limits still inherit the "
+        "high-pass detector boundaries; ringing or plateau droop can therefore move "
+        "those boundaries. Review them when the cutoff approaches the event bandwidth."
+        + polarity_clause
     )
 
 
@@ -1004,11 +1127,27 @@ def _build_warnings(prov: dict[str, Any], df: pd.DataFrame) -> tuple[str, ...]:
     # The estimator's own advisories first: a baseline that fell back, or whose
     # health checks fired, is upstream of every other number in the table.
     warns.extend(str(w) for w in (prov.get("baseline_warnings") or ()))
+    # A split run estimates another baseline on the high-pass candidate trace to set
+    # its thresholds. Its failure does not invalidate the measurement baseline above,
+    # but it can invalidate the localized bounds, so a distinct advisory must travel.
+    measurement_baseline = set(
+        str(w) for w in (prov.get("baseline_warnings") or ())
+    )
+    for warning in (prov.get("detection_baseline_warnings") or ()):
+        if str(warning) not in measurement_baseline:
+            warns.append(f"Candidate-localization baseline: {warning}")
     # Then the preprocess detrend's own advisories (captured in run() from the
     # kernel): "window yields 1 block ... cannot track drift" means the enabled
     # detrend was a no-op, which nothing downstream can see from the data — the
     # trace simply still drifts — so it must be SAID here or nowhere.
     warns.extend(str(w) for w in (prov.get("detrend_warnings") or ()))
+    # In split high-pass runs the primary warning block above belongs to the
+    # quantitative trace. Candidate-only detrending can fail differently and that
+    # matters to the boundaries, so surface distinct detector-branch advisories too.
+    measurement_detrend = set(str(w) for w in (prov.get("detrend_warnings") or ()))
+    for warning in (prov.get("detection_detrend_warnings") or ()):
+        if str(warning) not in measurement_detrend:
+            warns.append(f"Candidate-localization chain: {warning}")
     pw = prov.get("polarity_warning")
     if pw:
         warns.append(str(pw))
@@ -1045,6 +1184,12 @@ def _build_warnings(prov: dict[str, Any], df: pd.DataFrame) -> tuple[str, ...]:
     smoothing = _smoothing_warning(prov, df)
     if smoothing:
         warns.append(smoothing)
+    # High-pass remains scientifically important after the dual-signal fix: row
+    # magnitudes are now measured without it, but the event bounds still came from its
+    # frequency-shaped trace. Legacy runs without the split stamp retain the stronger
+    # candidate-only warning above.
+    if prov.get("hp_enabled"):
+        warns.append(highpass_measurement_warning(prov))
     # ...and the one conditioning stage that changes the UNIT rather than the value.
     # LAST, because it is the widest claim in the list: the two above say some rows
     # are wrong, this one says the axis is. It fires on an EMPTY table too (unlike the
@@ -1316,6 +1461,403 @@ def stamp_preprocess_provenance(
     return prov
 
 
+def _recharacterize_highpass_candidates(
+    raw_signal: np.ndarray,
+    fs: float,
+    params: Mapping[str, Any],
+    df: pd.DataFrame,
+    prov: dict[str, Any],
+    *,
+    baseline_config: Any,
+    baseline_param_source: str,
+    pore_id: str,
+    recording: str,
+    units: str,
+) -> tuple[pd.DataFrame, dict[str, Any], tuple[Warning, ...]]:
+    """Measure high-pass-localised spans on the equivalent non-high-passed trace.
+
+    The detector call has already finished, so ``df[start_idx, end_idx]`` is the
+    candidate-localisation result and every detector counter/threshold in ``prov`` is
+    final. This function replaces only the row measurements and the top-level
+    measurement-domain baseline/noise/polarity. Candidate-domain values are retained
+    under explicit ``detection_*`` keys, making both halves independently auditable.
+
+    Sequential execution is deliberate. The candidate detector's full work arrays have
+    returned before the characterization trace is built, so a large recording does not
+    require both filter pipelines simultaneously. The baseline caches remove entries as
+    soon as those temporary trace objects die (see ``baseline._BaselineCache``).
+    """
+    if not prov.get("hp_enabled"):
+        return df, prov, ()
+
+    # Preserve every baseline fact that produced the threshold/localisation decision
+    # before replacing the top-level baseline namespace with the physical measurement
+    # baseline. A nested block avoids inventing a second hand-maintained list of keys.
+    detection_baseline = {
+        key: value for key, value in prov.items() if key.startswith("baseline_")
+    }
+    detection_noise = float(prov["noise_rms_pA"])
+    detection_noise_method = str(prov.get("noise_method", "MAD (filters.noise_rms)"))
+    detection_polarity = int(prov["polarity"])
+    candidate_polarity_source = str(prov.get("polarity_source", "unknown"))
+    candidate_polarity_measured = prov.get("polarity_measured")
+    candidate_polarity_evidence = prov.get("polarity_evidence")
+    candidate_polarity_warning = prov.get("polarity_warning")
+
+    prov["highpass_localization_only"] = True
+    prov["characterization_hp_omitted"] = True
+    prov["detection_signal_domain"] = "conditioned trace including high-pass"
+    prov["characterization_signal_domain"] = (
+        "same conditioned trace with high-pass omitted"
+    )
+
+    # ``detection_signal`` is the single provenance-driven builder used by every
+    # post-hoc remeasurement. The stamp above switches it to the characterization
+    # domain while preserving legacy high-pass results that lack the stamp.
+    with collect_baseline_warnings() as measurement_detrend_warns:
+        measurement = detection_signal(raw_signal, fs, prov)
+
+    requested_polarity = params.get("polarity")
+    base_result = characterisation_baseline(
+        measurement,
+        fs,
+        config=baseline_config,
+        # Auto polarity must be measured in the physical, non-high-passed domain.
+        # The one-sided baseline mask therefore gets the user's override when one
+        # exists and otherwise uses the baseline door's robust multi-scale vote.
+        polarity=(None if requested_polarity is None else int(requested_polarity)),
+        param_source=baseline_param_source,
+    )
+    base = np.asarray(base_result.baseline, dtype=np.float64)
+    current = np.asarray(measurement, dtype=np.float64)
+    measurement_noise = float(noise_rms(current - base))
+    if not np.isfinite(measurement_noise) or measurement_noise <= 0:
+        raise ValueError(
+            f"measurement noise RMS is {measurement_noise!r}; cannot characterize "
+            "high-pass-localised events on a trace with no measurable noise."
+        )
+
+    # Resolve the detector direction again on the trace whose amplitudes will be
+    # reported. A high-pass step response is biphasic; letting its ringing cast the
+    # only polarity vote can point localization at the edge lobes rather than at the
+    # events. Schmitt historically uses k_in for this vote; CUSUM uses the app-wide
+    # 5-sigma polarity threshold.
+    polarity_k = (
+        float(prov.get("k_in", 5.0))
+        if prov.get("detector") == "schmitt_hysteresis"
+        else 5.0
+    )
+    measured_polarity, measurement_polarity_evidence = detect_polarity(
+        current, base, k=polarity_k
+    )
+    measurement_polarity = (
+        int(measured_polarity)
+        if requested_polarity is None
+        else int(requested_polarity)
+    )
+
+    # The first candidate pass is intentionally allowed to vote on its own trace: in
+    # the common case that saves a whole extra conditioning/baseline pass. If the two
+    # domains disagree, however, those are candidates in the wrong direction. Signal
+    # the adapter to discard them and repeat candidate localization with the physical
+    # branch's sign. The retry remains sequential, so the two full-size arrays and
+    # baselines are never retained together.
+    if requested_polarity is None and detection_polarity != measurement_polarity:
+        raise _HighpassPolarityMismatch(
+            measurement_polarity,
+            measurement_polarity_evidence,
+            candidate_polarity=detection_polarity,
+        )
+
+    starts = df["start_idx"].to_numpy(dtype=np.int64)
+    ends = df["end_idx"].to_numpy(dtype=np.int64)
+    measured = characterize(
+        current,
+        base,
+        starts,
+        ends,
+        fs,
+        measurement_polarity,
+        noise_rms=measurement_noise,
+        filter_rise_s=prov.get("filter_rise_s"),
+        max_dwell_s=prov.get("max_dwell_s"),
+        clip_bounds=(0, int(current.size)),
+        pore_id=pore_id,
+        recording=recording,
+        units=units,
+    )
+    # Preserve the detector functions' public contract: their final conservative
+    # dwell-vs-rise check is OR-ed with characterize's half-height-width test.
+    rise_s = prov.get("filter_rise_s")
+    if rise_s is not None and not measured.empty:
+        limited = measured["dwell_s"].to_numpy(dtype=float) < 2.0 * float(rise_s)
+        measured["filter_limited"] = (
+            measured["filter_limited"].to_numpy(dtype=bool) | limited
+        )
+
+    # Top-level baseline/noise/polarity always describe the values in the event rows.
+    # Candidate-domain values remain explicit and reproduce the threshold decision.
+    for key in tuple(prov):
+        if key.startswith("baseline_"):
+            prov.pop(key, None)
+    prov.update(base_result.provenance())
+    prov["baseline_method"] = str(base_result.config.method)
+    prov["baseline_provided"] = False
+    prov["baseline_warnings"] = list(base_result.warnings)
+    prov["baseline_median_pA"] = float(base_result.median_pA)
+    prov["detection_baseline"] = detection_baseline
+    prov["detection_baseline_median_pA"] = float(
+        detection_baseline.get("baseline_median_pA", np.nan)
+    )
+    prov["detection_baseline_warnings"] = list(
+        detection_baseline.get("baseline_warnings") or ()
+    )
+
+    prov["detection_noise_rms_pA"] = detection_noise
+    prov["detection_noise_method"] = detection_noise_method
+    prov["measurement_noise_rms_pA"] = measurement_noise
+    prov["noise_rms_pA"] = measurement_noise
+    prov["noise_method"] = (
+        "MAD (filters.noise_rms) on characterization trace without high-pass"
+    )
+
+    # Preserve what an unconstrained vote on the high-pass candidate trace said; it is
+    # useful evidence of ringing, but it is not allowed to choose the event direction.
+    prov["candidate_signal_polarity_source"] = candidate_polarity_source
+    prov["candidate_signal_polarity_measured"] = candidate_polarity_measured
+    prov["candidate_signal_polarity_evidence"] = candidate_polarity_evidence
+    prov["candidate_signal_polarity_warning"] = candidate_polarity_warning
+    prov["detection_polarity"] = measurement_polarity
+    prov["detection_polarity_source"] = (
+        "characterization_trace_measured"
+        if requested_polarity is None else "user_provided"
+    )
+    prov["detection_polarity_measured"] = candidate_polarity_measured
+    prov["detection_polarity_evidence"] = candidate_polarity_evidence
+    prov["detection_polarity_warning"] = candidate_polarity_warning
+    prov["characterization_polarity_measured"] = int(measured_polarity)
+    prov["characterization_polarity_evidence"] = measurement_polarity_evidence
+    prov["polarity_domain_disagreement"] = (
+        candidate_polarity_measured in (-1, 1)
+        and int(candidate_polarity_measured) != int(measured_polarity)
+    )
+    measurement_polarity_warning = _polarity_warning_from_evidence(
+        measurement_polarity_evidence,
+        measurement_polarity,
+        measured=requested_polarity is None,
+    )
+    # Top-level polarity describes both the sign used to localize and the sign used
+    # for quantitative rows. ``polarity_requested`` remains the user's request (None
+    # for Auto), even when the adapter had to force the resolved sign on a retry.
+    prov["polarity"] = measurement_polarity
+    prov["polarity_requested"] = requested_polarity
+    prov["polarity_source"] = (
+        "measured" if requested_polarity is None else "provided"
+    )
+    prov["polarity_measured"] = int(measured_polarity)
+    prov["polarity_evidence"] = measurement_polarity_evidence
+    prov["polarity_warning"] = measurement_polarity_warning
+
+    # Detection thresholds stay in the candidate domain. Top-level noise describes
+    # the row SNR denominator, so spell the threshold source explicitly rather than
+    # leaving a reader to (incorrectly) multiply by the replacement value.
+    prov["threshold_noise_source"] = "detection_noise_rms_pA"
+    if prov.get("detector") == "cusum_sequential":
+        prov["cusum_sigma_source"] = (
+            "detection_noise_rms_pA: MAD residual on high-pass candidate trace"
+        )
+
+    prov.update(reconcile_row_counts(prov, measured))
+    return measured, prov, tuple(measurement_detrend_warns)
+
+
+class _HighpassPolarityMismatch(RuntimeError):
+    """Internal retry signal when high-pass ringing reversed Auto polarity."""
+
+    def __init__(
+        self,
+        polarity: int,
+        evidence: Mapping[str, Any],
+        *,
+        candidate_polarity: int,
+    ) -> None:
+        self.polarity = int(polarity)
+        self.evidence = dict(evidence)
+        self.candidate_polarity = int(candidate_polarity)
+        super().__init__(
+            "candidate and characterization traces resolved opposite polarities: "
+            f"{self.candidate_polarity:+d} vs {self.polarity:+d}"
+        )
+
+
+def _polarity_warning_from_evidence(
+    evidence: Mapping[str, Any], polarity: int, *, measured: bool
+) -> str | None:
+    """The adapter-level polarity advisory for the characterization-domain vote."""
+    if not measured:
+        return None
+    verdict = str(evidence.get("verdict", "undetermined"))
+    if verdict == "undetermined":
+        return (
+            "polarity is undetermined on the characterization trace (no coherent "
+            "excursions above threshold); proceeding with "
+            f"polarity={int(polarity):+d}."
+        )
+    if evidence.get("decided_by") == "coherent_samples":
+        return (
+            "polarity run vote was ambiguous on the characterization trace and the "
+            "direction was taken from coherent signal mass instead "
+            f"(confidence {float(evidence.get('confidence', 0.0)):.2f})."
+        )
+    if (
+        "decided_by" in evidence
+        and not evidence.get("corroborated_by_samples", False)
+    ):
+        return (
+            "polarity was measured at low confidence on the characterization trace "
+            f"({float(evidence.get('confidence', 0.0)):.2f}); proceeding with "
+            f"polarity={int(polarity):+d}."
+        )
+    return None
+
+
+def _run_highpass_dual_path(
+    ctx: Any,
+    *,
+    detector: Any,
+    module_id: str,
+    baseline_config: Any,
+    baseline_param_source: str,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Localize with high-pass, then measure the same spans without it.
+
+    Auto polarity gets one optimistic candidate pass. The characterization branch
+    independently measures the physical direction; if high-pass ringing reversed the
+    candidate vote, both temporary traces are released and localization is repeated
+    once with that resolved sign. This makes the common case two sequential pipelines
+    and the pathological case four, rather than retaining two recording-sized signals
+    and baselines at the same time.
+    """
+    ch = ctx.channel
+    fs = float(ch.sample_rate_hz)
+    raw = np.asarray(ch.data)
+    forced_polarity: int | None = None
+    initial_candidate_polarity: int | None = None
+    characterization_resolved_polarity: int | None = None
+
+    for attempt in range(2):
+        if attempt == 0:
+            candidate_lo, candidate_hi = 0.02, 0.44
+            measure_lo, measure_hi = 0.46, 0.90
+        else:
+            candidate_lo, candidate_hi = 0.90, 0.94
+            measure_lo, measure_hi = 0.94, 0.99
+
+        # The conditioning recipe remains the user's recipe on a retry. Only the
+        # detector's direction is forced; in particular an Auto detrend still uses
+        # its own recorded Auto semantics rather than becoming a different filter.
+        with collect_baseline_warnings() as detrend_warns:
+            candidate_signal = preprocess_for_detection(raw, fs, ctx.params)
+        detector_params = dict(ctx.params)
+        if forced_polarity is not None:
+            detector_params["polarity"] = forced_polarity
+
+        with baseline_progress_scope(
+            lambda f, m, lo=candidate_lo, hi=candidate_hi: ctx.report_progress(
+                lo + (hi - lo) * f, f"detecting candidates ({m})")
+        ):
+            df, prov = detector(
+                candidate_signal,
+                fs,
+                units=ch.units,
+                recording=ctx.meta.path.name,
+                pore_id=str(ctx.params.get("pore_id", "")),
+                baseline_config=baseline_config,
+                baseline_param_source=baseline_param_source,
+                **_detect_kwargs(detector_params, module_id),
+            )
+        stamp_preprocess_provenance(prov, ctx.params, fs, detrend_warns)
+        # On a retry the low-level engine quite correctly records the forced value as
+        # its request. The result contract records what the USER requested; reset it
+        # before detection_signal reconstructs the no-high-pass branch so an Auto
+        # detrend is replayed as Auto.
+        prov["polarity_requested"] = ctx.params.get("polarity")
+        candidate_detrend_warns = tuple(detrend_warns)
+
+        del candidate_signal
+        ctx.report_progress(measure_lo, "measuring candidates without high-pass")
+        try:
+            with baseline_progress_scope(
+                lambda f, m, lo=measure_lo, hi=measure_hi: ctx.report_progress(
+                    lo + (hi - lo) * f, f"measuring candidates ({m})")
+            ):
+                df, prov, measurement_detrend_warns = (
+                    _recharacterize_highpass_candidates(
+                        raw,
+                        fs,
+                        ctx.params,
+                        df,
+                        prov,
+                        baseline_config=baseline_config,
+                        baseline_param_source=baseline_param_source,
+                        pore_id=str(ctx.params.get("pore_id", "")),
+                        recording=ctx.meta.path.name,
+                        units=ch.units,
+                    )
+                )
+        except _HighpassPolarityMismatch as exc:
+            if forced_polarity is not None:
+                raise RuntimeError(
+                    "high-pass polarity retry did not converge on the "
+                    "characterization-domain direction"
+                ) from exc
+            # Keep only scalars. Holding the exception itself would retain its
+            # traceback, which retains the helper frame and therefore the full
+            # measurement signal + float64 baseline while the candidate retry runs.
+            initial_candidate_polarity = exc.candidate_polarity
+            characterization_resolved_polarity = exc.polarity
+            forced_polarity = exc.polarity
+            exc.__traceback__ = None
+            ctx.report_progress(
+                measure_hi,
+                "high-pass ringing reversed Auto polarity; repeating localization",
+            )
+            continue
+
+        if prov.get("detrend_enabled"):
+            prov["detection_detrend_warnings"] = tuple(
+                str(w) for w in candidate_detrend_warns
+            )
+            prov["detection_detrend_effective"] = not any(
+                isinstance(w, ConstantBaselineWarning)
+                for w in candidate_detrend_warns
+            )
+            prov["detection_detrend_amplified"] = any(
+                isinstance(w, AmplifiedWanderWarning)
+                for w in candidate_detrend_warns
+            )
+        # Primary detrend provenance describes the trace the quantitative rows use.
+        stamp_preprocess_provenance(
+            prov,
+            ctx.params,
+            fs,
+            measurement_detrend_warns,
+        )
+        if initial_candidate_polarity is not None:
+            prov["polarity_retry_after_highpass_mismatch"] = True
+            prov["candidate_initial_polarity"] = initial_candidate_polarity
+            prov["characterization_resolved_polarity"] = (
+                characterization_resolved_polarity
+            )
+            prov["candidate_localization_attempts"] = 2
+        else:
+            prov["polarity_retry_after_highpass_mismatch"] = False
+            prov["candidate_localization_attempts"] = 1
+        return df, prov
+
+    raise RuntimeError("high-pass dual-signal localization exhausted its retry")
+
+
 class DetectSchmitt:
     """Schmitt-trigger event detection as an :class:`AnalysisModule`."""
 
@@ -1346,14 +1888,6 @@ class DetectSchmitt:
         # detection; detect_events still owns the low-pass. preprocess_for_detection
         # is the shared transform the preview and surrogate studies reuse verbatim.
         ctx.report_progress(0.0, "detecting events")
-        # Collect the preprocessing kernels' own advisories (thread-local sink, see
-        # collect_baseline_warnings). The one stage that emits BaselineWarnings here
-        # is the detrend: a window that degenerates to one block warns "the baseline
-        # is effectively constant and cannot track drift" and then does NOTHING —
-        # and a warning that dies in the warnings machinery while provenance stamps
-        # detrend_enabled=True is a silent no-op no surface would ever disclose.
-        with collect_baseline_warnings() as detrend_warns:
-            signal = preprocess_for_detection(ch.data, ch.sample_rate_hz, ctx.params)
         # ONE resolution of the characterisation-baseline knobs, from the one
         # resolver, into the one config object that also reaches the ML
         # characteriser, `truth` and every row rebuild. This module holds no
@@ -1374,23 +1908,40 @@ class DetectSchmitt:
         # construction; the remaining Schmitt + characterise stages ride from 0.88
         # to the 1.0 reported below. On a small file the whole ladder flies by in
         # milliseconds; at the ceiling the bar now moves every few seconds.
-        with baseline_progress_scope(
-            lambda f, m: ctx.report_progress(0.02 + 0.86 * f, f"detecting events ({m})")
-        ):
-            df, prov = detect_events(
-                signal,
-                ch.sample_rate_hz,
-                units=ch.units,
-                recording=ctx.meta.path.name,
-                pore_id=str(ctx.params.get("pore_id", "")),
+        highpass_split = bool(ctx.params.get("hp_enabled"))
+        if highpass_split:
+            df, prov = _run_highpass_dual_path(
+                ctx,
+                detector=detect_events,
+                module_id=self.id,
                 baseline_config=base_cfg,
                 baseline_param_source=base_source,
-                **_detect_kwargs(ctx.params, self.id),
+            )
+        else:
+            # Collect the preprocessing kernels' own advisories (thread-local sink,
+            # see collect_baseline_warnings). This is deliberately the historical
+            # one-array path when high-pass is off; its numerics stay untouched.
+            with collect_baseline_warnings() as detrend_warns:
+                signal = preprocess_for_detection(
+                    ch.data, ch.sample_rate_hz, ctx.params)
+            with baseline_progress_scope(
+                lambda f, m: ctx.report_progress(
+                    0.02 + 0.86 * f, f"detecting candidates ({m})")
+            ):
+                df, prov = detect_events(
+                    signal,
+                    ch.sample_rate_hz,
+                    units=ch.units,
+                    recording=ctx.meta.path.name,
+                    pore_id=str(ctx.params.get("pore_id", "")),
+                    baseline_config=base_cfg,
+                    baseline_param_source=base_source,
+                    **_detect_kwargs(ctx.params, self.id),
+                )
+            stamp_preprocess_provenance(
+                prov, ctx.params, float(ch.sample_rate_hz), detrend_warns
             )
         ctx.report_progress(1.0, f"{len(df)} event(s)")
-
-        stamp_preprocess_provenance(
-            prov, ctx.params, float(ch.sample_rate_hz), detrend_warns)
 
         # THE DETECTOR'S OWN BOUNDS, recorded before any hand edit can move them.
         # Stamped HERE and only here (detection is the one moment they are the
@@ -1488,8 +2039,6 @@ class DetectCusum:
         fp = _fingerprint(ctx.params)
 
         ctx.report_progress(0.0, "detecting events (CUSUM)")
-        with collect_baseline_warnings() as detrend_warns:
-            signal = preprocess_for_detection(ch.data, ch.sample_rate_hz, ctx.params)
         base_cfg, base_source, params_record = _resolve_run_baseline(
             ctx.params, (doc_id, channel))
 
@@ -1498,23 +2047,37 @@ class DetectCusum:
         # ambient progress channel, so its own 0..1 is mapped onto [0.02, 0.88] of
         # this job. The CUSUM core itself is 0.23 s on an 11.3 M-sample trace, so the
         # remaining span is almost entirely `characterize`.
-        with baseline_progress_scope(
-            lambda f, m: ctx.report_progress(0.02 + 0.86 * f, f"detecting events ({m})")
-        ):
-            df, prov = detect_events_cusum(
-                signal,
-                ch.sample_rate_hz,
-                units=ch.units,
-                recording=ctx.meta.path.name,
-                pore_id=str(ctx.params.get("pore_id", "")),
+        highpass_split = bool(ctx.params.get("hp_enabled"))
+        if highpass_split:
+            df, prov = _run_highpass_dual_path(
+                ctx,
+                detector=detect_events_cusum,
+                module_id=self.id,
                 baseline_config=base_cfg,
                 baseline_param_source=base_source,
-                **_detect_kwargs(ctx.params, self.id),
+            )
+        else:
+            with collect_baseline_warnings() as detrend_warns:
+                signal = preprocess_for_detection(
+                    ch.data, ch.sample_rate_hz, ctx.params)
+            with baseline_progress_scope(
+                lambda f, m: ctx.report_progress(
+                    0.02 + 0.86 * f, f"detecting candidates ({m})")
+            ):
+                df, prov = detect_events_cusum(
+                    signal,
+                    ch.sample_rate_hz,
+                    units=ch.units,
+                    recording=ctx.meta.path.name,
+                    pore_id=str(ctx.params.get("pore_id", "")),
+                    baseline_config=base_cfg,
+                    baseline_param_source=base_source,
+                    **_detect_kwargs(ctx.params, self.id),
+                )
+            stamp_preprocess_provenance(
+                prov, ctx.params, float(ch.sample_rate_hz), detrend_warns
             )
         ctx.report_progress(1.0, f"{len(df)} event(s)")
-
-        stamp_preprocess_provenance(
-            prov, ctx.params, float(ch.sample_rate_hz), detrend_warns)
 
         # Same two stamps, same moment, same reasons as the Schmitt path -- see
         # there. ``self.id`` is ``detect.cusum``, so a table that pooled a Schmitt
@@ -1682,6 +2245,12 @@ def depth_floor_from_provenance(
 ):
     """The detector's effective depth floor in the units of ``column``, or None.
 
+    A split high-pass run has no defensible measurement-domain floor: its exit
+    threshold is in candidate-trace pA while the fitted depths were measured on the
+    no-high-pass trace. They are related by the filter response, not by one scalar, so
+    this returns ``None`` whenever ``highpass_localization_only`` (or its durable
+    ``characterization_hp_omitted`` alias) is stamped.
+
     The Schmitt trigger keeps a run only while ``dev > k_out * noise``, and
     ``depth_pA`` is the MEDIAN in-event deviation, so the reported depths are
     truncated at roughly ``threshold_out_pA`` -- not at ``threshold_in_pA``, and
@@ -1719,6 +2288,11 @@ def depth_floor_from_provenance(
             ``column='frac_depth'``; ignored for the pA columns, whose floor is
             ``threshold_out_pA`` outright.
     """
+    if (
+        prov.get("highpass_localization_only")
+        or prov.get("characterization_hp_omitted")
+    ):
+        return None
     thr = prov.get("threshold_out_pA")
     if thr is None or not np.isfinite(float(thr)) or float(thr) <= 0:
         return None

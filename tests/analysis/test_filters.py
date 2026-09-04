@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 from scipy import signal
 
+from nanoscope.analysis import filters as filters_module
 from nanoscope.analysis.filters import (
     _design_sos,
     highpass,
@@ -143,6 +144,12 @@ def test_rise_time_independent_of_sampling_rate():
     a = measure_rise_time(250e3, 10e3, order=8)
     b = measure_rise_time(500e3, 10e3, order=8)
     assert a == pytest.approx(b, rel=0.03)
+
+
+def test_rise_time_preflight_refuses_an_unbounded_step_before_allocating_it():
+    """A legal low cutoff must not turn provenance measurement into a multi-GB job."""
+    with pytest.raises(ValueError, match="above the safe.*limit"):
+        measure_rise_time(5_000_000.0, 1.0, order=8)
 
 
 def test_lowpass_rise_time_is_the_measured_rise_time():
@@ -403,6 +410,13 @@ def test_notch_rejects_nonsense_args():
         notch(x, FS, 60.0, q=0)
     with pytest.raises(ValueError):
         notch(x, FS, 60.0, harmonics=0)
+
+
+def test_notch_preflight_refuses_oversized_settling_padding(monkeypatch):
+    """The kernel enforces its memory budget even when called outside the GUI."""
+    monkeypatch.setattr(filters_module, "MAX_NOTCH_PAD_SAMPLES", 100)
+    with pytest.raises(ValueError, match="padding samples per side.*above the safe"):
+        notch(np.zeros(1_000), 50_000.0, 60.0, q=30.0, harmonics=1)
 
 
 # -- psd ----------------------------------------------------------------------

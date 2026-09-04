@@ -102,7 +102,7 @@ def test_rebuild_keeps_the_wiring(view, qapp):
 
 def test_ne05_day_deep_zoom_labels_are_distinct_on_the_trace_pane(view, qapp):
     pane = view._panes[-1]
-    # The zoom gesture lands exactly here: wheel/box-zoom ends in a viewbox range set.
+    # Box zoom and every programmatic x-framing gesture land in this ViewBox range set.
     pane.plot.vb.setXRange(86_400.0, 86_400.0001, padding=0)
     qapp.processEvents()
     view.grab()

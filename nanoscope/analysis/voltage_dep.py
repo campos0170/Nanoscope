@@ -392,6 +392,9 @@ class VDepPoint(NamedTuple):
             prints against every point it lists. A filename-derived bias is a much
             weaker claim than a measured one, and the window that turns these
             voltages into a fitted LAW needs to say which kind each one is.
+        doc_id: Stable source-document identity. Display names may collide when two
+            folders contain the same basename; ``""`` is the explicit unavailable
+            value for older callers and restored legacy analyses.
     """
 
     v_volts: float
@@ -410,7 +413,8 @@ class VDepPoint(NamedTuple):
     #: The FOURTH poolable property -- see
     #: :func:`nanoscope.core.sources.signal_domain_of`.
     #:
-    #: APPENDED LAST ON PURPOSE. A NamedTuple's field ORDER is API: this type is
+    #: APPENDED after the original positional fields ON PURPOSE. A NamedTuple's
+    #: field ORDER is API: this type is
     #: built POSITIONALLY in the corpus (tests/test_fix_vdep_gain_rule.py passes
     #: seven positional arguments), so inserting a field mid-list silently slides
     #: every later argument into the wrong slot -- a detection's own warnings
@@ -418,6 +422,9 @@ class VDepPoint(NamedTuple):
     #: Defaulted, so a caller that states no domain is read as picoamps rather than
     #: as a fourth "unknown" -- the same convention ``signal_domain_of`` uses.
     signal_domain: str = DEFAULT_SIGNAL_DOMAIN
+    #: APPENDED LAST for stable source identity without shifting any positional
+    #: caller. Empty means unavailable; it is never reconstructed from ``recording``.
+    doc_id: str = ""
 
 
 class VDepExclusion(NamedTuple):
@@ -701,6 +708,7 @@ def _gather(
                 str(w) for w in (getattr(res, "warnings", ()) or ())),
             analyzed_duration_s=_analyzed_duration(prov),
             voltage_source=pt.voltage_source,
+            doc_id=doc_id,
         ))
     return out, dropped
 

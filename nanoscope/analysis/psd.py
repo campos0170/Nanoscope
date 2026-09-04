@@ -14,8 +14,10 @@ physical noise regimes every pore-QC plot reads off:
 * **1/f (flicker) noise** at low frequency — a ``S(f) = A · f^(-alpha)`` power
   law (``alpha`` near 1 for ideal flicker), dominant below the thermal knee.
   :func:`fit_flicker` recovers ``alpha`` and the magnitude at 1 Hz.
-* **the thermal / white floor** in the mid decade — a flat ``S(f) ≈ const``
-  Johnson/shot plateau. :func:`noise_summary` reports its median level.
+* a **mid-log-frequency median proxy** — :func:`noise_summary` reports the median
+  level over a deterministic middle decade. It is useful for comparison but is not,
+  by itself, proof that this band is a flat Johnson/shot-noise plateau; mains lines or
+  a sloped region can fall inside it.
 * **the high-frequency dielectric (``~f``) / capacitance (``~f^2``) rise** near
   Nyquist, where amplifier + membrane capacitance lift the spectrum.
 
@@ -50,10 +52,12 @@ __all__ = [
     "fft_magnitude",
     "FFTSpectrum",
     "FFT_MAX_POINTS",
+    "MAX_FFT_INPUT_SAMPLES",
     "spectrogram_psd",
     "Spectrogram",
     "default_spectrogram_nperseg",
     "TARGET_COLUMNS",
+    "MAX_SPECTROGRAM_CELLS",
     "band_rms",
     "band_support",
     "fit_flicker",
@@ -318,7 +322,7 @@ def welch_psd(
 
 def band_support(freqs: np.ndarray, f_lo: float, f_hi: float) -> tuple[float, float] | None:
     """The band :func:`band_rms` will actually integrate: the request clipped to the
-    spectrum's own support ``[0, Nyquist]``.
+    spectrum's finite sampled support.
 
     Returns ``(lo, hi)`` with ``hi > lo``, or ``None`` when the clipped band is empty
     (degenerate, inverted, wholly above Nyquist, or there are no frequencies) — the
@@ -332,11 +336,11 @@ def band_support(freqs: np.ndarray, f_lo: float, f_hi: float) -> tuple[float, fl
     Nyquist (a band that does not exist).
     """
     freqs = np.asarray(freqs, dtype=np.float64).ravel()
-    if freqs.size == 0:
+    finite = freqs[np.isfinite(freqs)]
+    if finite.size == 0 or np.isnan(float(f_lo)) or np.isnan(float(f_hi)):
         return None
-    nyq = float(np.nanmax(freqs))
-    lo = max(float(f_lo), 0.0)
-    hi = min(float(f_hi), nyq)
+    lo = max(float(f_lo), float(np.min(finite)))
+    hi = min(float(f_hi), float(np.max(finite)))
     if not (hi > lo):
         return None
     return (lo, hi)
@@ -345,13 +349,17 @@ def band_support(freqs: np.ndarray, f_lo: float, f_hi: float) -> tuple[float, fl
 def band_rms(freqs: np.ndarray, psd: np.ndarray, f_lo: float, f_hi: float) -> float:
     """RMS noise over ``[f_lo, f_hi]`` — ``sqrt(∫ PSD df)`` in signal units.
 
-    Integrates the PSD over the requested band (trapezoidal rule) and returns the
-    square root, i.e. the standard deviation of the signal restricted to that
-    frequency band. For a full-band ``[0, Nyquist]`` request this is the total
-    RMS noise (Parseval); for a narrow band around a tone it is that tone's RMS.
+    Integrates the piecewise-linear PSD over the requested band (trapezoidal rule)
+    and returns the square root, i.e. the standard deviation of the signal restricted
+    to that frequency band. The PSD is interpolated at both requested edges before
+    integration. Consequently a real band narrower than one native frequency bin still
+    has a real, non-zero width; it is never mistaken for an empty band merely because
+    neither edge happened to land on a Welch bin. For a full-band ``[0, Nyquist]``
+    request this is the total RMS noise (Parseval); for a narrow band around a tone it
+    is that tone's RMS.
 
-    The band is clipped to the spectrum's own support ``[max(f_lo, 0), min(f_hi,
-    Nyquist)]`` — by :func:`band_support`, which is also the function any caller that
+    The band is clipped to the spectrum's finite sampled support by
+    :func:`band_support`, which is also the function any caller that
     RESTATES the band beside this value must use. A band that is genuinely EMPTY —
     degenerate, inverted, or wholly above Nyquist — integrates to nothing and returns
     ``0.0``, so per-band summaries stay well-defined at any sample rate.
@@ -385,6 +393,11 @@ def band_rms(freqs: np.ndarray, psd: np.ndarray, f_lo: float, f_hi: float) -> fl
     """
     freqs = np.asarray(freqs, dtype=np.float64).ravel()
     psd = np.asarray(psd, dtype=np.float64).ravel()
+    if freqs.size != psd.size:
+        raise ValueError(
+            f"band_rms needs aligned frequency and PSD arrays; got {freqs.size} and "
+            f"{psd.size} values"
+        )
     if psd.size == 0:
         return 0.0
 
@@ -396,23 +409,42 @@ def band_rms(freqs: np.ndarray, psd: np.ndarray, f_lo: float, f_hi: float) -> fl
         return 0.0
     lo, hi = support
 
-    in_band = (freqs >= lo) & (freqs <= hi) & np.isfinite(freqs)
-    n_in_band = int(np.count_nonzero(in_band))
-    if n_in_band < 2:
-        return 0.0                     # genuinely nothing in the band — an honest zero
+    finite_frequency = np.isfinite(freqs)
+    f = freqs[finite_frequency]
+    p = psd[finite_frequency]
+    if f.size < 2:
+        warnings.warn(
+            f"the spectrum has fewer than two finite frequency samples, so the band RMS "
+            f"over {lo:.4g}–{hi:.4g} Hz is undefined (NaN).",
+            RuntimeWarning, stacklevel=2)
+        return float("nan")
+    if np.any(np.diff(f) <= 0.0):
+        raise ValueError("band_rms needs a strictly increasing frequency axis")
 
-    n_bad = int(np.count_nonzero(~np.isfinite(psd[in_band])))
+    # Integrate the requested interval itself, not merely the native samples that happen
+    # to fall inside it. The latter returns 0 for, say, 1–9 Hz on a 10 Hz grid even though
+    # that band is eight hertz wide. Interpolated boundary values make the trapezoid exact
+    # for the piecewise-linear spectrum represented by the sampled PSD and preserve the
+    # old bit-for-bit arithmetic whenever both edges are native bins.
+    interior = (f > lo) & (f < hi)
+    f_band = np.concatenate(([lo], f[interior], [hi]))
+    p_band = np.concatenate((
+        ([np.interp(lo, f, p)]),
+        p[interior],
+        ([np.interp(hi, f, p)]),
+    ))
+
+    n_bad = int(np.count_nonzero(~np.isfinite(p_band)))
     if n_bad:
         warnings.warn(
-            f"{n_bad} of {n_in_band} PSD bin(s) in {lo:.4g}–{hi:.4g} Hz are non-finite, so "
+            f"{n_bad} of {p_band.size} PSD support value(s) in {lo:.4g}–{hi:.4g} Hz are "
+            f"non-finite, so "
             f"the band RMS is undefined (NaN). One non-finite sample in the signal poisons "
             f"every Welch bin — check the recording's load issues.",
             RuntimeWarning, stacklevel=2)
         return float("nan")
 
-    f = freqs[in_band]
-    p = psd[in_band]
-    var = float(trapezoid(p, f))
+    var = float(trapezoid(p_band, f_band))
     if not np.isfinite(var):
         warnings.warn(
             f"the PSD integral over {lo:.4g}–{hi:.4g} Hz is not finite; the band RMS is "
@@ -564,7 +596,7 @@ def _white_floor(freqs: np.ndarray, psd: np.ndarray) -> tuple[float, tuple[float
 
 
 def noise_summary(freqs: np.ndarray, psd: np.ndarray, fs: float) -> dict:
-    """A whole-spectrum noise report: total + per-band RMS, white floor, flicker.
+    """A whole-spectrum noise report: total + per-band RMS, mid-log proxy, flicker.
 
     Bundles the quantities a pore-QC read-out shows, all derived from a single
     Welch PSD:
@@ -682,6 +714,13 @@ def noise_summary(freqs: np.ndarray, psd: np.ndarray, fs: float) -> dict:
 #: bins and a mains line lands in the discarded 74 about 99% of the time.
 FFT_MAX_POINTS = 20_000
 
+# The draw cap above reduces only *after* NumPy has built the full transform. Bound the
+# real work as well: 16 M float samples already require several simultaneous 128 MB
+# arrays (input, taper, product, complex FFT and magnitude). The GUI lets users analyse
+# a selected segment, so refusing a larger whole-trace FFT is recoverable and preferable
+# to macOS killing the application under memory pressure.
+MAX_FFT_INPUT_SAMPLES = 16_000_000
+
 
 @dataclass(frozen=True)
 class FFTSpectrum:
@@ -721,12 +760,12 @@ def fft_magnitude(
 
     The normalisation is ``2 |X_k| / sum(w)`` for every bin except DC and (for an even
     ``n``) Nyquist, which take ``|X_k| / sum(w)``. Dividing by the window's SUM rather
-    than by ``n`` is the coherent-gain correction, and it is what makes the scaling
-    exact rather than approximate: for ``x[t] = A cos(2π k₀ t / n)`` with integer
-    ``k₀`` the windowed transform is ``A/2 · (W(0) + W(2k₀))`` and ``W(2k₀) = 0`` for
-    every taper here, so the bin reads ``A`` to float precision under ANY window — the
-    property :func:`test_a_bin_centred_sinusoid_reads_its_own_amplitude_under_every_window`
-    pins across all seven tapers the GUI offers.
+    than by ``n`` is the coherent-gain correction. At the first one or two bins, the
+    Blackman-family tapers have overlapping positive- and negative-frequency lobes, so
+    ``2 |X_k| / sum(w)`` alone is phase-dependent. Those bins are solved as the exact
+    two-equation real-sinusoid system before their magnitude is reported. Thus a
+    bin-centred sinusoid reads its own peak amplitude, including immediately beside DC,
+    under all seven tapers the GUI offers.
 
     Args:
         signal: 1-D span to transform (already sliced — this function never sees, and
@@ -752,12 +791,21 @@ def fft_magnitude(
     Raises:
         ValueError: on fewer than 2 samples or a non-finite / non-positive ``fs``.
     """
-    x = np.asarray(signal, dtype=np.float64).ravel()
-    n = x.size
+    source = np.asarray(signal)
+    n = int(source.size)
     if n < 2:
         raise ValueError(f"fft_magnitude needs at least 2 samples; got {n}")
     if not np.isfinite(fs) or fs <= 0.0:
         raise ValueError(f"fft_magnitude needs a finite, positive sample rate; got fs={fs!r}")
+    if n > MAX_FFT_INPUT_SAMPLES:
+        duration = n / float(fs)
+        raise ValueError(
+            f"the requested FFT has {n:,} samples ({duration:.4g} s), above the safe "
+            f"{MAX_FFT_INPUT_SAMPLES:,}-sample working limit. Select a shorter Segment "
+            "or Visible view; use Welch PSD when a whole-recording noise estimate is "
+            "the goal."
+        )
+    x = np.asarray(source, dtype=np.float64).ravel()
 
     # One non-finite sample makes EVERY bin NaN (the transform is a full-support sum), the
     # same failure welch_psd warns about. Count it here so the caller can say so on screen
@@ -767,9 +815,14 @@ def fft_magnitude(
     w = _sp_signal.get_window(window, n, fftbins=True)
     if detrend and n_bad == 0:
         x = x - x.mean()
-    spec = np.fft.rfft(x * w)
+    # ``inf * 0`` at a taper endpoint is expected to be invalid once a poisoned span
+    # has already been counted; suppress that redundant NumPy warning and carry the
+    # all-non-finite spectrum to the caller's explicit health message.
+    with np.errstate(invalid="ignore"):
+        spec = np.fft.rfft(x * w)
     scale = 2.0 / float(np.sum(w))
     mag = np.abs(spec) * scale
+    _correct_low_bin_window_overlap(spec, mag, w, str(window))
     if mag.size:
         mag[0] *= 0.5                       # DC is not a two-sided pair
         if n % 2 == 0:
@@ -787,6 +840,51 @@ def fft_magnitude(
         df_hz=float(fs) / float(n), window=str(window), reduced=reduced,
         n_nonfinite=n_bad,
     )
+
+
+def _correct_low_bin_window_overlap(
+    spectrum: np.ndarray,
+    magnitude: np.ndarray,
+    taper: np.ndarray,
+    window: str,
+) -> None:
+    """Remove near-DC mirror-lobe bias for the GUI's Blackman-family tapers.
+
+    For a real bin-centred sinusoid, with complex positive-frequency amplitude ``a``,
+    the windowed coefficient at bin ``k`` is::
+
+        Y[k] = W[0] a + W[2k] conj(a)
+
+    The familiar coherent-gain formula assumes ``W[2k] == 0``. That is true away from
+    DC, and for Hann/Hamming/Bartlett/boxcar at every positive bin, but it is false in
+    the first lobe of Blackman, Blackman-Harris and flattop. Solving the equation and
+    its conjugate recovers ``2*abs(a)`` without phase bias. Only bins known to overlap
+    for the periodic SciPy windows exposed by the UI are touched; the remainder retain
+    the conventional, directly comparable coherent-gain spectrum.
+    """
+    correction_bins = {
+        "blackman": 1,
+        "blackmanharris": 1,
+        "flattop": 2,
+    }.get(window.lower(), 0)
+    if correction_bins == 0 or spectrum.size <= 1:
+        return
+
+    n = int(taper.size)
+    w0 = float(np.sum(taper))
+    sample = np.arange(n, dtype=np.float64)
+    last = min(correction_bins, spectrum.size - 1)
+    for k in range(1, last + 1):
+        # Directly evaluate only W[2] (and W[4] for flattop). This O(n) correction
+        # avoids a second full FFT of the taper on million-sample recordings.
+        phase = np.exp((-2j * np.pi * (2 * k) / n) * sample)
+        w2k = complex(np.dot(taper, phase))
+        determinant = w0 * w0 - abs(w2k) ** 2
+        if determinant <= np.finfo(np.float64).eps * w0 * w0:
+            continue
+        yk = complex(spectrum[k])
+        a = (w0 * yk - w2k * np.conjugate(yk)) / determinant
+        magnitude[k] = 2.0 * abs(a)
 
 
 def _log_peak_envelope(freqs: np.ndarray, values: np.ndarray,
@@ -809,15 +907,32 @@ def _log_peak_envelope(freqs: np.ndarray, values: np.ndarray,
     keep[0] = True
     keep[1:] = starts[1:] > starts[:-1]      # drop geometric bins holding no native bin
     starts_u = starts[keep]
-    out_v = np.maximum.reduceat(v, starts_u)
+    # ``np.maximum`` propagates NaN. More importantly, the old peak-index search then
+    # found no value equal to that NaN and returned its sentinel ``v.size`` as an index,
+    # crashing only when a poisoned FFT was large enough to need screen reduction. Keep
+    # a NaN for an all-invalid bin, but perform the reduction and index search on a safe
+    # ``-inf`` projection so the UI can report ``n_nonfinite`` instead of crashing.
+    finite = np.isfinite(v)
+    safe = np.where(finite, v, -np.inf)
+    out_safe = np.maximum.reduceat(safe, starts_u)
+    valid_counts = np.add.reduceat(finite.astype(np.int64), starts_u)
+    out_v = np.where(valid_counts > 0, out_safe, np.nan)
     # The frequency reported is the peak's OWN, not the bin's centre. A geometric centre is
     # off by up to half a bin, which at a screen-sized 400-point envelope is 0.55% — 59.67 Hz
     # printed for a 60 Hz line, measured, and telling 50 Hz mains from 60 Hz is most of why
     # anyone opens this view. Three extra passes over the positive bins buy the exact answer.
     counts = np.diff(np.append(starts_u, v.size))
     lin = np.arange(v.size)
-    at_max = np.where(v >= np.repeat(out_v, counts), lin, v.size)
-    out_f = f[np.minimum.reduceat(at_max, starts_u)]
+    at_max = np.where(
+        finite & (safe >= np.repeat(out_safe, counts)),
+        lin,
+        v.size,
+    )
+    peak_index = np.minimum.reduceat(at_max, starts_u)
+    # Any frequency is a harmless carrier for an all-invalid envelope bin; choose its
+    # first native bin deterministically while leaving the magnitude NaN.
+    peak_index[valid_counts == 0] = starts_u[valid_counts == 0]
+    out_f = f[peak_index]
     return out_f, out_v
 
 
@@ -841,6 +956,12 @@ def _log_peak_envelope(freqs: np.ndarray, values: np.ndarray,
 #: 400 columns at 50% overlap gives ~800, comfortably more than the ~700 px a plot is wide.
 TARGET_COLUMNS = 400
 
+# SciPy materialises the complete (frequency x time) periodogram before our draw-side
+# merge. At float64, 25 M cells is 191 MiB for the PSD grid alone, before input, window,
+# FFT and rebinned output. Refuse before converting/calling SciPy so the limit protects
+# the process rather than documenting a crash after it happens.
+MAX_SPECTROGRAM_CELLS = 25_000_000
+
 
 @dataclass(frozen=True)
 class Spectrogram:
@@ -863,6 +984,7 @@ class Spectrogram:
     n_samples: int
     columns_merged: int        # >1 == neighbouring columns were averaged to fit max_columns
     n_nonfinite: int
+    source_columns: int = 0    # unmerged SciPy columns represented by the drawn grid
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -870,8 +992,115 @@ class Spectrogram:
 
     @property
     def time_resolution_s(self) -> float:
-        """Seconds covered by one drawn column, after any merge."""
-        return self.nperseg / self.fs * max(self.columns_merged, 1)
+        """Approximate signal support contributing to one drawn time column.
+
+        This is deliberately *not* ``block_duration * columns_merged``. Neighbouring
+        spectrogram blocks overlap, so pooling ``g`` of them spans one full block plus
+        only ``g - 1`` hops. The old product overstated an 8-way, 50%-overlap column by
+        almost twofold (163.84 ms instead of 92.16 ms for 1024 samples at 50 kHz).
+
+        ``columns_merged`` is the maximum/nominal group size. Uniform fractional
+        rebinning can give edge columns fractional contributions and can touch one more
+        source column at a fractional boundary, hence this is a *nominal* support rather
+        than a strict upper bound; :attr:`time_step_s` is the exact spacing of the
+        uniformly drawn column centres.
+        """
+        hop = max(self.nperseg - self.noverlap, 1)
+        group = max(self.columns_merged, 1)
+        return (self.nperseg + (group - 1) * hop) / self.fs
+
+    @property
+    def block_duration_s(self) -> float:
+        """Support of each original (unmerged) spectral estimate."""
+        return self.nperseg / self.fs
+
+    @property
+    def hop_s(self) -> float:
+        """Spacing of adjacent original block centres."""
+        return (self.nperseg - self.noverlap) / self.fs
+
+    @property
+    def time_step_s(self) -> float:
+        """Exact spacing/width of the uniformly drawn time bins."""
+        if self.times.size > 1:
+            return float(np.median(np.diff(self.times)))
+        represented = self.source_columns if self.source_columns > 0 else 1
+        if represented == 1:
+            # There is no neighbour from which to infer a hop. Paint the sole raw
+            # estimate over the block it actually analysed, not half a block at the
+            # usual 50% overlap.
+            return self.block_duration_s
+        return self.hop_s * represented
+
+    @property
+    def analyzed_samples(self) -> int:
+        """Samples covered by complete source blocks before display rebinning.
+
+        SciPy does not zero-pad a final partial block. Consequently a requested span can
+        end with fewer than one hop of samples that are not represented by any source
+        column. This property makes that coverage explicit instead of conflating the
+        requested span with the interval actually analysed.
+        """
+        hop = max(self.nperseg - self.noverlap, 1)
+        if self.n_samples < self.nperseg:
+            return 0
+        return min(
+            self.n_samples,
+            self.nperseg + ((self.n_samples - self.nperseg) // hop) * hop,
+        )
+
+    @property
+    def uncovered_tail_samples(self) -> int:
+        """Requested tail samples omitted because they do not fill a complete block."""
+        return max(0, self.n_samples - self.analyzed_samples)
+
+
+def _uniform_column_average(
+    values: np.ndarray,
+    times: np.ndarray,
+    n_out: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Average every input column into ``n_out`` equal-width time bins.
+
+    A simple fixed-size ``reduceat`` leaves one short trailing group whenever the source
+    count is not divisible by the merge factor. ``ImageItem`` has one affine time scale,
+    so that short group was nevertheless painted as a full-width column and its centre
+    was misplaced. Treating each source column as a unit-width interval and splitting
+    boundary columns fractionally makes every output bin the same width, represents every
+    source column exactly once, and preserves the all-column mean.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    times = np.asarray(times, dtype=np.float64)
+    n_in = int(times.size)
+    n_out = int(n_out)
+    if values.ndim != 2 or values.shape[1] != n_in:
+        raise ValueError("spectrogram values and time centres must be aligned")
+    if not (1 <= n_out <= n_in):
+        raise ValueError(f"output column count must be in [1, {n_in}]; got {n_out}")
+    if n_out == n_in:
+        return values, times
+
+    edges = np.linspace(0.0, float(n_in), n_out + 1, dtype=np.float64)
+    width = float(n_in) / float(n_out)
+    out = np.empty((values.shape[0], n_out), dtype=np.float64)
+    for j, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+        first = int(np.floor(lo))
+        last = min(int(np.ceil(hi)), n_in)
+        weights = np.ones(last - first, dtype=np.float64)
+        if weights.size == 1:
+            weights[0] = hi - lo
+        else:
+            weights[0] = min(float(first + 1), hi) - lo
+            weights[-1] = hi - max(float(last - 1), lo)
+        out[:, j] = np.sum(values[:, first:last] * weights, axis=1) / width
+
+    # SciPy centres are an arithmetic progression. Equal intervals in source-column
+    # coordinates therefore map to exactly equal time intervals; deriving the centres
+    # analytically avoids the tiny alternating jitter a weighted centre can acquire.
+    hop = float(times[1] - times[0]) if n_in > 1 else 0.0
+    centre_indices = 0.5 * (edges[:-1] + edges[1:]) - 0.5
+    out_times = float(times[0]) + centre_indices * hop
+    return out, out_times
 
 
 def default_spectrogram_nperseg(n: int, target_columns: int = TARGET_COLUMNS) -> int:
@@ -914,30 +1143,47 @@ def spectrogram_psd(
             slow baseline drift does not paint a bright low-frequency stripe across
             every column.
         max_columns: ``0`` = no cap. Otherwise, when the block layout would produce more
-            columns than this, neighbouring columns are AVERAGED in groups (the merge
-            factor is reported as ``columns_merged``). Averaging rather than dropping is
-            the whole point: a dropped column is a stretch of the recording that is on
-            NO pixel of the image, and a burst that lands in one is invisible — which is
-            the exact failure this view exists to prevent. An averaged column still
-            carries the burst's power, just spread over a wider time bin.
+            columns than this, neighbouring columns are AVERAGED into equal-width time
+            bins (the largest/nominal merge factor is reported as ``columns_merged``).
+            A source column cut by a bin boundary contributes fractionally to both bins.
+            Averaging rather than dropping *complete source columns* is the whole point:
+            every block SciPy produced contributes to the image. As in standard Welch
+            segmentation, fewer than one hop of trailing samples that cannot fill a
+            complete block may remain outside those columns; :attr:`Spectrogram.uncovered_tail_samples`
+            reports that tail. Equal-width bins also prevent a short trailing group from
+            being painted as though it covered a full group.
 
     Returns:
         :class:`Spectrogram`.
 
     Raises:
-        ValueError: on fewer than 2 samples or a non-finite / non-positive ``fs``.
+        ValueError: on fewer than 2 samples, a non-finite / non-positive ``fs``, or a
+            request whose pre-merge periodogram would exceed the safe working budget.
     """
-    x = np.asarray(signal, dtype=np.float64).ravel()
-    n = x.size
+    source = np.asarray(signal)
+    n = int(source.size)
     if n < 2:
         raise ValueError(f"spectrogram_psd needs at least 2 samples; got {n}")
     if not np.isfinite(fs) or fs <= 0.0:
         raise ValueError(f"spectrogram_psd needs a finite, positive sample rate; got fs={fs!r}")
-    n_bad = int(np.count_nonzero(~np.isfinite(x)))
 
     nps = default_spectrogram_nperseg(n) if nperseg is None else min(int(nperseg), n)
     nps = max(int(nps), 2)
     nov = nps // 2 if noverlap is None else int(np.clip(int(noverlap), 0, nps - 1))
+    hop = nps - nov
+    source_columns_expected = 1 + (n - nps) // hop
+    source_cells = (nps // 2 + 1) * source_columns_expected
+    if source_cells > MAX_SPECTROGRAM_CELLS:
+        grid_mib = source_cells * np.dtype(np.float64).itemsize / (1024.0**2)
+        raise ValueError(
+            f"the requested spectrogram would create {source_cells:,} pre-merge PSD "
+            f"cells ({grid_mib:.0f} MiB for that grid alone), above the safe "
+            f"{MAX_SPECTROGRAM_CELLS:,}-cell working limit. Select a shorter Segment "
+            "or Visible view, or use a lower-rate copy. The on-screen column cap cannot "
+            "reduce memory because SciPy builds the full grid first."
+        )
+    x = np.asarray(source, dtype=np.float64).ravel()
+    n_bad = int(np.count_nonzero(~np.isfinite(x)))
 
     freqs, times, sxx = _sp_signal.spectrogram(
         x, fs=float(fs), window=window, nperseg=nps, noverlap=nov,
@@ -946,21 +1192,19 @@ def spectrogram_psd(
     times = np.asarray(times, dtype=np.float64)
     sxx = np.asarray(sxx, dtype=np.float64)
 
+    source_columns = int(times.size)
     merged = 1
     if max_columns and times.size > int(max_columns):
         merged = int(np.ceil(times.size / float(max_columns)))
-        starts = np.arange(0, times.size, merged)
-        counts = np.diff(np.append(starts, times.size)).astype(np.float64)
-        sxx = np.add.reduceat(sxx, starts, axis=1) / counts
-        times = np.add.reduceat(times, starts) / counts
-        # Each group is divided by its OWN count, so every merged column is a true mean of
-        # the columns it covers and the image keeps the PSD's units. Note what this does NOT
-        # promise: the mean over MERGED columns equals the mean over all columns only when
-        # the count divides evenly, since a short trailing group then carries more than its
-        # share of the average. The per-column values are exact either way.
+        n_drawn = int(np.ceil(times.size / float(merged)))
+        sxx, times = _uniform_column_average(sxx, times, n_drawn)
+        # Equal-width bins are important twice: the affine image now puts every column at
+        # its real time, and their ordinary mean remains the source-column mean even when
+        # the source count did not divide evenly. Boundary source columns contribute
+        # fractionally rather than being dropped or overweighted.
 
     return Spectrogram(
         freqs=freqs, times=times, psd=sxx, fs=float(fs), nperseg=int(nps),
         noverlap=int(nov), n_samples=int(n), columns_merged=int(merged),
-        n_nonfinite=n_bad,
+        n_nonfinite=n_bad, source_columns=source_columns,
     )

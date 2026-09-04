@@ -1,24 +1,24 @@
-"""Sweep-5 IF-01 regression: wheel zoom-out is CLAMPED at MAX_X_SPAN_FACTOR x the data
-extent, so a zoom-out storm coasts to a stop instead of driving the span astronomically
-past the recording and crashing pyqtgraph's auto-downsampler.
+"""Trace-input regressions: wheel is vertical pan, while horizontal scale-out remains
+clamped at MAX_X_SPAN_FACTOR x the data extent so no supported x-zoom path can drive the
+span astronomically past the recording and crash pyqtgraph's auto-downsampler.
 
 The defect, measured on the pristine code: from full extent on an 8 s / 2M-sample
 recording, 123 plain 120-delta wheel notches (a held wheel or one trackpad inertia
 fling) drove the visible span to 5.9e16 s, at which point every repaint raised
 ``ValueError: Maximum allowed dimension exceeded`` from PlotDataItem's downsampler —
 a dead, non-updating curve, +1 console traceback per further notch, recoverable only
-by knowing Ctrl+0 / double-click reset. The y-side has had a ``minYRange`` floor since
+by knowing the reset action. The y-side has had a ``minYRange`` floor since
 v1; the x zoom-out side was the one unguarded direction.
 
-The fix (gui/trace_view.py): ``_apply_x_zoom_ceiling`` sets
+The x-ceiling fix (gui/trace_view.py): ``_apply_x_zoom_ceiling`` sets
 ``setLimits(maxXRange=MAX_X_SPAN_FACTOR * extent)`` on every pane at each ``rebuild``,
-so the wheel, right-drag pan-mode scaling and programmatic ``setXRange`` all hit the
-same ceiling inside ``ViewBox.setRange`` itself. Only the SPAN is limited, never the
+so right-drag pan-mode scaling and programmatic ``setXRange`` both hit the same ceiling
+inside ``ViewBox.setRange`` itself. Only the SPAN is limited, never the
 position — panning off the recording stays a legitimate, reversible gesture that other
 surfaces already answer honestly.
 
-Driven through a wired MainWindow with real QWheelEvents on the viewport (the shipped
-gesture), offscreen.
+The wheel contract is driven through a wired MainWindow with real QWheelEvents on the
+viewport (the shipped gesture), offscreen.
 """
 from __future__ import annotations
 
@@ -71,16 +71,15 @@ def window(qapp, qtbot):
     w._analysis_controller.abort()
 
 
-def _wheel_out(view, qapp, notches: int) -> None:
-    """Send real 120-delta zoom-out QWheelEvents at the anchor pane's centre — the exact
-    gesture of a held wheel / trackpad inertia fling over the trace."""
+def _wheel(view, qapp, delta: int, notches: int = 1) -> None:
+    """Send real wheel events at the anchor pane's centre."""
     vp = view.viewport()
     anchor = view.anchor_plot()
     sc = anchor.vb.sceneBoundingRect()
     pos = QtCore.QPointF(sc.center().x(), sc.center().y())
     gpf = QtCore.QPointF(vp.mapToGlobal(pos.toPoint()))
     for _ in range(notches):
-        ev = QtGui.QWheelEvent(pos, gpf, QtCore.QPoint(0, 0), QtCore.QPoint(0, -120),
+        ev = QtGui.QWheelEvent(pos, gpf, QtCore.QPoint(0, 0), QtCore.QPoint(0, delta),
                                QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
                                QtCore.Qt.NoScrollPhase, False)
         QtWidgets.QApplication.sendEvent(vp, ev)
@@ -93,42 +92,45 @@ def _extent_span(view) -> float:
     return extent[1] - extent[0]
 
 
-def test_wheel_zoomout_storm_coasts_to_the_ceiling(window, qapp, qtbot, tmp_path):
-    """200 held zoom-out notches (well past the pristine code's 123-notch crash point)
-    leave the span AT the ceiling, the view finite, and the curve still updatable."""
+def test_real_wheel_events_pan_only_vertically_in_the_requested_direction(
+        window, qapp, qtbot, tmp_path):
+    """Up moves a fixed signal point up, down moves it down, with both spans unchanged."""
     _install(window, _synth_doc(tmp_path))
     qtbot.wait(50)
     view = window._trace_view
     anchor = view.anchor_plot()
-    span_full = _extent_span(view)
-
-    _wheel_out(view, qapp, 200)
-
-    x0, x1 = anchor.vb.viewRange()[0]
-    span = x1 - x0
-    assert np.isfinite(x0) and np.isfinite(x1)
-    # AT the ceiling (the storm coasted to a stop there), never past it. Small relative
-    # margin: pyqtgraph applies the clamp through float scale math.
-    ceiling = MAX_X_SPAN_FACTOR * span_full
-    assert span <= ceiling * (1 + 1e-6)
-    assert span == pytest.approx(ceiling, rel=1e-3)
-
-    # The renderer is still alive: a repaint-driving range change goes through without
-    # the downsampler's ValueError (on the pristine code this raised on every repaint).
-    anchor.vb.setXRange(x0, x1 - span * 0.25, padding=0)
+    view.zoom_x_to(1.0, 2.0)
+    anchor.vb.setYRange(-60.0, -40.0, padding=0)
     qapp.processEvents()
+    x0 = tuple(anchor.vb.viewRange()[0])
+    y0 = tuple(anchor.vb.viewRange()[1])
+    fixed = QtCore.QPointF(1.5, -50.0)
+    scene_y0 = float(anchor.vb.mapViewToScene(fixed).y())
 
-    # ...and reset still recovers the full framing, exactly as before the fix.
-    view.reset_zoom()
-    qapp.processEvents()
-    r = anchor.vb.viewRange()[0]
-    assert r[1] - r[0] == pytest.approx(span_full, rel=1e-3)
+    _wheel(view, qapp, 120)
+
+    x1 = tuple(anchor.vb.viewRange()[0])
+    y1 = tuple(anchor.vb.viewRange()[1])
+    scene_y1 = float(anchor.vb.mapViewToScene(fixed).y())
+    assert x1 == pytest.approx(x0, abs=1e-9)
+    assert (y1[1] - y1[0]) == pytest.approx(y0[1] - y0[0], abs=1e-9)
+    assert y1[0] < y0[0] and y1[1] < y0[1]
+    assert scene_y1 < scene_y0
+
+    _wheel(view, qapp, -120)
+
+    x2 = tuple(anchor.vb.viewRange()[0])
+    y2 = tuple(anchor.vb.viewRange()[1])
+    scene_y2 = float(anchor.vb.mapViewToScene(fixed).y())
+    assert x2 == pytest.approx(x0, abs=1e-9)
+    assert y2 == pytest.approx(y0, abs=1e-9)
+    assert scene_y2 == pytest.approx(scene_y0, abs=1e-6)
 
 
 def test_programmatic_and_scale_paths_hit_the_same_ceiling(window, qapp, qtbot, tmp_path):
     """The clamp lives in ViewBox.setRange, so the pan-mode right-drag scaling route
     (scaleBy — the verifier's independent path) and a programmatic setXRange are bounded
-    by the same rule as the wheel: one limit, every zoom-out path."""
+    by the same rule: one limit, every horizontal zoom-out path."""
     _install(window, _synth_doc(tmp_path))
     qtbot.wait(50)
     view = window._trace_view
@@ -147,8 +149,8 @@ def test_programmatic_and_scale_paths_hit_the_same_ceiling(window, qapp, qtbot, 
     assert (r[1] - r[0]) <= ceiling * (1 + 1e-6)
 
 
-def test_zoom_history_stays_sane_after_a_storm(window, qapp, qtbot, tmp_path):
-    """After a zoom-out storm the Back/Forward trail holds only render-safe framings
+def test_zoom_history_stays_sane_after_a_scale_out_storm(window, qapp, qtbot, tmp_path):
+    """After a scale-out storm the Back/Forward trail holds only render-safe framings
     (every recorded span under the ceiling) and Back still restores a real view."""
     _install(window, _synth_doc(tmp_path))
     qtbot.wait(50)
@@ -160,8 +162,9 @@ def test_zoom_history_stays_sane_after_a_storm(window, qapp, qtbot, tmp_path):
     # A dive first, so there is a framing to come back to...
     view.zoom_x_to(1.0, 1.5)
     view._settle.stop(); view._commit_view()       # the suite's deterministic-settle idiom
-    # ...then the storm, settled into history.
-    _wheel_out(view, qapp, 150)
+    # ...then a right-drag-equivalent scale-out storm, settled into history.
+    for _ in range(150):
+        anchor.vb.scaleBy(x=1.35)
     view._settle.stop(); view._commit_view()
 
     assert all((b - a) <= ceiling * (1 + 1e-6) for a, b in view._view_hist)

@@ -315,12 +315,7 @@ def test_under_the_ceiling_the_window_stays_quiet(qapp, win):
 
 
 def test_the_line_appears_once_and_then_only_its_number_moves(qapp, win):
-    """It must not re-announce itself on every change past the bound.
-
-    The persistent form IS the disclosure; re-firing it would interrupt a user 300
-    changes into a figure a hundred times. Counted as SHOW events on the label, which is
-    the only thing that could flash.
-    """
+    """The hidden advanced section stays quiet, then discloses once when opened."""
     shows = {"n": 0}
 
     class _Spy(QtCore.QObject):
@@ -334,8 +329,14 @@ def test_the_line_appears_once_and_then_only_its_number_moves(qapp, win):
 
     _sprint(qapp, win, pp._HISTORY_DEPTH + 40)
     assert win._history.dropped == 40
-    assert shows["n"] == 1, "shown on the change that crossed the bound, and not again"
-    assert "its 40 oldest steps have been dropped" in win._history_note.text()
+    assert shows["n"] == 0, "the collapsed Export section must not flash behind Data"
+
+    win._show_control_section("Export")
+    _pump(qapp, 5)
+    assert shows["n"] == 1, "shown once when the user opens the section that owns it"
+    _sprint(qapp, win, 5)
+    assert shows["n"] == 1, "later edits update the number without re-showing the line"
+    assert "its 45 oldest steps have been dropped" in win._history_note.text()
 
 
 def test_the_standing_line_says_what_was_lost_not_what_the_stack_is(qapp, win):
@@ -426,47 +427,30 @@ def _press_key(qapp, w: PlotsWindow, code, mods=QtCore.Qt.NoModifier) -> None:
 
 
 def test_the_line_is_not_on_screen_just_because_the_button_is(qapp, win):
-    """WHERE THE SENTENCE ACTUALLY IS, stated the uncomfortable way round.
+    """Progressive disclosure keeps the Undo row and its warning together.
 
-    This replaces ``test_a_refused_undo_brings_the_line_into_view``, which pinned the
-    scroll that is now gone. The claim it leaves behind is the one that used to be made
-    loosely in a comment — "the line is on screen for a user who has already scrolled down
-    to the Undo button" — and which is false: parked with the button flush at the fold, the
-    natural stop for somebody who scrolled to it, the line's rect clears the viewport's
-    bottom edge by 51 px. Measured the same at 775x450, 900x600, 1120x720 and 1512x900, so
-    it is not one window size's accident. It takes another 51 px of scrolling, which is
-    what "found by scrolling on to the controls it explains" means, and pinning it here is
-    what stops the comfortable version of the sentence coming back.
+    The former all-expanded column placed the warning 51 px below the fold. Export is
+    now a compact, explicit section, so opening that section must reveal the control and
+    its consequence together without a scroll hunt.
     """
     _sprint(qapp, win, pp._HISTORY_DEPTH + OVER)
+    win._show_control_section("Export")
+    _pump(qapp, 5)
     scroll = _controls_scroll(win)
     bar = scroll.verticalScrollBar()
     assert scroll.widget() is win._controls_host, "the column found through the button"
     assert scroll.widget().isAncestorOf(win._history_note), "and the line is inside it"
-    assert bar.maximum() > 0, "the column really does scroll"
-    assert not win._history_note.isHidden(), "the line exists — it is not hidden, it is below"
+    assert not win._history_note.isHidden()
 
     for width, height in ((775, 450), (900, 600), (1120, 720), (1512, 900)):
         win.resize(width, height)
         _pump(qapp, 8)
-        _park_button_at_the_fold(qapp, win)
         assert _on_screen(win, win._undo_btn), (
-            f"{width}x{height}: the button they scrolled to is in view")
-        assert not _on_screen(win, win._history_note), (
-            f"{width}x{height}: the line is NOT on screen just because the button is")
-        viewport = scroll.viewport()
-        rect = QtCore.QRect(
-            win._history_note.mapTo(viewport, QtCore.QPoint(0, 0)), win._history_note.size())
-        assert rect.bottom() - viewport.rect().bottom() == 51, (
-            f"{width}x{height}: {rect.bottom() - viewport.rect().bottom()} px short, not 51")
+            f"{width}x{height}: the Undo control is in the selected Export section")
+        assert _on_screen(win, win._history_note), (
+            f"{width}x{height}: its loss disclosure is visible beside it")
+        assert bar.value() == 0
 
-    # AND IT IS NOT CLIPPED WHERE IT DOES SIT: a word-wrapped label in a scrolling column
-    # is the classic half-a-sentence bug, so the whole sentence has to fit its own box.
-    win.resize(1120, 720)
-    _pump(qapp, 8)
-    bar.setValue(bar.maximum())
-    _pump(qapp, 5)
-    assert _on_screen(win, win._history_note), "scrolled to the bottom, the line is readable"
     assert win._history_note.height() == win._history_note.heightForWidth(
         win._history_note.width())
 
@@ -490,7 +474,49 @@ def test_no_code_in_this_window_moves_the_controls_column(qapp, win):
         assert hits == [], f"{banned} is back in the code: {hits}"
 
 
-def test_no_gesture_at_the_undo_floor_scrolls_the_controls_column(qapp, win):
+def test_compact_export_section_stays_put_at_the_undo_floor(qapp, win):
+    """The new section layout removes the old 1,900 px scroll hazard entirely."""
+    _sprint(qapp, win, pp._HISTORY_DEPTH + OVER)
+    win._show_control_section("Export")
+    _pump(qapp, 5)
+    bar = _controls_scroll(win).verticalScrollBar()
+    assert bar.maximum() == 0
+
+    _undo_by_keyboard(qapp, win, pp._HISTORY_DEPTH)
+    assert win._history.depth() == (0, pp._HISTORY_DEPTH)
+    assert win.undo_config() is False
+    assert bar.value() == 0
+    assert _on_screen(win, win._undo_btn)
+    assert _on_screen(win, win._history_note)
+
+
+def test_compact_export_section_click_can_empty_undo_without_moving(qapp, win):
+    win.set_bins(123)
+    win._show_control_section("Export")
+    _pump(qapp, 5)
+    bar = _controls_scroll(win).verticalScrollBar()
+    assert win._undo_btn.isEnabled() and bar.maximum() == 0
+
+    win._undo_btn.click()
+    _pump(qapp, 5)
+
+    assert not win._undo_btn.isEnabled()
+    assert win._redo_btn.isEnabled()
+    assert bar.value() == 0
+    assert _on_screen(win, win._undo_btn) and _on_screen(win, win._redo_btn)
+
+
+def test_compact_export_section_needs_no_resize_clamp(qapp, win):
+    win._show_control_section("Export")
+    _pump(qapp, 5)
+    bar = _controls_scroll(win).verticalScrollBar()
+    for width, height in ((775, 450), (900, 600), (1120, 720), (1512, 900)):
+        win.resize(width, height)
+        _pump(qapp, 5)
+        assert bar.maximum() == 0 and bar.value() == 0
+
+
+def _legacy_no_gesture_at_the_undo_floor_scrolls_the_all_expanded_column(qapp, win):
     """THE PROPERTY THE BUILD SHOULD HAVE, driven: the column goes where the user puts it
     and stays there.
 
@@ -669,7 +695,7 @@ def _park_widget_at_the_fold(qapp, w: PlotsWindow, widget) -> int:
     return bar.value()
 
 
-def test_a_click_that_empties_the_undo_stack_does_not_move_the_column(qapp, win):
+def _legacy_click_that_empties_undo_in_the_all_expanded_column(qapp, win):
     """THE GESTURE THE FLOOR TESTS CANNOT SEE: the click on the button while it is ALIVE.
 
     Every gesture in ``test_no_gesture_at_the_undo_floor_scrolls_the_controls_column`` is
@@ -799,7 +825,7 @@ def test_a_click_that_empties_the_undo_stack_does_not_move_the_column(qapp, win)
     assert win._redo_btn.hasFocus(), "and focus went to its partner, not past the line"
 
 
-def test_a_resize_that_shortens_the_range_clamps_the_column(qapp, win):
+def _legacy_resize_clamp_in_the_all_expanded_column(qapp, win):
     """THE ONE THING THAT STILL MOVES THIS COLUMN, pinned at a parking that can catch it.
 
     "A resize" was on the still-list for two rounds, driven at the fold from 1120x720 to

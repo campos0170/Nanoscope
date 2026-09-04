@@ -2,16 +2,16 @@
 
 The bug these pin: the live readout used to recompute SYNCHRONOUSLY ON THE GUI THREAD, once
 per ``sigRegionChanged`` (which fires per drag FRAME), over the whole selection with no size
-cap — ~1.1 s per frame on a 15 M-sample recording, and "Snap to view" on a zoomed-out trace
-walks straight into it. The fix is a debounce plus a bounded preview, and it is only
+cap — ~1.1 s per frame on a 15 M-sample recording, and a mask manually widened across a
+zoomed-out trace walks straight into it. The fix is a debounce plus a bounded preview, and it is only
 acceptable because a SAVED row is still measured over every sample. So:
 
   - a simulated drag produces ONE recompute, not one per frame, and a superseded frame is
     dropped rather than queued;
   - releasing the mouse (and any programmatic placement) settles at once, without waiting
     out the debounce;
-  - the live path NEVER calls ``measure_selection`` unbounded — including on the eager
-    settle path, which is where "Snap to view" lands;
+  - the live path NEVER calls ``measure_selection`` unbounded — including on every eager
+    programmatic-placement settle path;
   - under the bound nothing strides and nothing is flagged;
   - over it the readout is a flagged preview whose blanked statistics read as "—";
   - ``add_current`` stores values equal to a full-precision ``measure_selection``, even when
@@ -42,10 +42,10 @@ from nanoscope.gui import measure_panel as mp_mod
 from nanoscope.gui.main_window import MainWindow
 
 FS = 100_000.0
-# Comfortably over _LIVE_MAX_SAMPLES (200 k) so a whole-trace selection really strides, but
+# Comfortably over _LIVE_MAX_SAMPLES (200 k) so a manually expanded whole-trace selection strides, but
 # small enough that the EXACT commit these tests force is still fast.
 N = 600_000
-_BIG = (0, N)                       # the whole trace: what "Snap to view" selects zoomed out
+_BIG = (0, N)                       # the whole trace: a deliberately expanded manual selection
 _SMALL = (100_000, 130_000)         # 30 k samples: under the bound, must be untouched
 
 # Every schema column that comes from the SIGNAL rather than from the caller's stamp. A saved
@@ -252,12 +252,11 @@ def test_every_live_measurement_passes_the_bound(panel, window, monkeypatch, qtb
         "a live recompute must never run unbounded"
 
 
-def test_snap_to_view_on_a_fully_zoomed_out_trace_is_bounded(panel, window, monkeypatch):
-    """THE trap in the original bug: snap sets the region to the whole visible window, which
-    zoomed out is the whole recording, and the settle path then measures it eagerly."""
+def test_snap_to_view_on_a_fully_zoomed_out_trace_places_only_a_middle_fifth(
+        panel, window, monkeypatch):
+    """A placement convenience must not start by masking the whole recording."""
     mp, doc_id = panel
-    vals = window._session.x_axis(doc_id).values
-    window._trace_view.sigVisibleRangeChanged.emit(float(vals[0]), float(vals[-1]))
+    _place(window, doc_id, 0, 10_000)  # move away from the activation seed first
     spy = _Spy(monkeypatch)
 
     mp._snap_to_view()
@@ -265,9 +264,9 @@ def test_snap_to_view_on_a_fully_zoomed_out_trace_is_bounded(panel, window, monk
     assert len(spy) >= 1
     assert all(c["max_samples"] == mp_mod._LIVE_MAX_SAMPLES for c in spy.calls)
     stats = mp.current_measurement()
-    assert stats is not None and stats["approximate"] is True
-    assert stats["n_measured"] <= mp_mod._LIVE_MAX_SAMPLES
-    assert stats["n_samples"] > mp_mod._LIVE_MAX_SAMPLES     # ...over the whole span
+    assert stats is not None and stats["approximate"] is False
+    assert stats["n_measured"] == stats["n_samples"]
+    assert stats["n_samples"] == pytest.approx(0.20 * N, rel=2e-4)
 
 
 def test_no_live_measurement_ever_reads_more_than_the_bound(panel, window, qtbot):

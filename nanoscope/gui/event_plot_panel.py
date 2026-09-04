@@ -29,11 +29,12 @@ around them.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
-from pyqtgraph.exporters import ImageExporter
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
@@ -42,6 +43,9 @@ from ..analysis.events import EventSet
 from ..core.session import Session
 from ..plot.style import OKABE_ITO
 from .export_paths import ask_export_path
+from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
+                          data_write_failure_text, require_csv_row_budget,
+                          write_live_plot_image, write_plot_csv)
 
 __all__ = ["EventPlotWindow"]
 
@@ -60,6 +64,12 @@ _METRICS: tuple[tuple[str, str], ...] = (
     (_M_FRAC, "dI/I₀"),
     (_M_ECD, "ECD (charge deficit)"),
 )
+
+# Long-form keeps every visible sample and its event identity easy to understand,
+# but millions of Python dict rows can exhaust RAM before pandas even writes the CSV.
+# Refuse before constructing them; the user can lower *Points* or curate a smaller
+# accepted set and gets a precise, non-lossy explanation from the export dialog.
+MAX_ENSEMBLE_CSV_ROWS = 250_000
 
 _COLORMAPS = ("viridis", "magma", "plasma", "inferno", "cividis")
 
@@ -193,10 +203,16 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         row2.addWidget(self._d_xlabel, 1)
         row2.addWidget(QtWidgets.QLabel("Y label"))
         row2.addWidget(self._d_ylabel, 1)
-        self._d_save = QtWidgets.QPushButton("Save image…")
-        self._d_save.setToolTip("Export the density map (with marginals) as a PNG.")
+        self._d_save = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
+        self._d_save.setToolTip(
+            "Export the density map, marginals, and colour bar as PNG, SVG, or PDF.")
         self._d_save.clicked.connect(lambda: self.save_image())
         row2.addWidget(self._d_save)
+        self._d_data = QtWidgets.QPushButton("Export data (CSV)…")
+        self._d_data.setToolTip(
+            "Export exact density bin edges/counts and source-event identities.")
+        self._d_data.clicked.connect(lambda: self.export_data())
+        row2.addWidget(self._d_data)
         root.addLayout(row2)
 
         # The density scene: top marginal + main image + right marginal + colour bar.
@@ -263,10 +279,15 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._e_title.setPlaceholderText("title (auto)")
         row2.addWidget(QtWidgets.QLabel("Title"))
         row2.addWidget(self._e_title, 1)
-        self._e_save = QtWidgets.QPushButton("Save image…")
-        self._e_save.setToolTip("Export the event ensemble as a PNG.")
+        self._e_save = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
+        self._e_save.setToolTip("Export the event ensemble as PNG, SVG, or PDF.")
         self._e_save.clicked.connect(lambda: self.save_image())
         row2.addWidget(self._e_save)
+        self._e_data = QtWidgets.QPushButton("Export data (CSV)…")
+        self._e_data.setToolTip(
+            "Export individual resampled traces, mean, median, and event identities.")
+        self._e_data.clicked.connect(lambda: self.export_data())
+        row2.addWidget(self._e_data)
         root.addLayout(row2)
 
         self._ensemble_widget = pg.PlotWidget()
@@ -762,7 +783,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     # -- export ----------------------------------------------------------------------------------
     def save_image(self, path: str | None = None) -> Path | None:
-        """Export the CURRENT view (density scene or ensemble plot) as a PNG.
+        """Export the current view as PNG, SVG or PDF by extension.
 
         With ``path`` None a file dialog is shown; returns the written path, or
         None when the user cancelled OR the write failed (a failed write is
@@ -773,26 +794,21 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         if path is None:
             chosen = ask_export_path(
                 self, title="Save event-plot image", suggestion=default,
-                filters="PNG image (*.png);;All files (*)")   # writes exactly this file
+                filters=IMAGE_FILTERS)   # writes exactly this file
             if chosen is None:
                 return None
             path = str(chosen)
-        target = self._density_glw.scene() if density else self._ensemble_plot
+        # The GraphicsLayout root owns the density main plot, both marginals and colour
+        # bar. Exporting only ``_density_main`` silently loses three of those four items.
+        target = self._density_glw.ci if density else self._ensemble_plot
         out = Path(path)
-        # STAGED, like every other export (USER_GUIDE §12). pyqtgraph's ImageExporter
-        # ends in ``QImage.save``, which OPENS AND TRUNCATES its target and reports
-        # failure by RETURNING False — writing ``out`` directly destroyed the previous
-        # export for any format QImage cannot write and then said "The file was not
-        # created". Rendering into a staged sibling costs the user nothing on failure,
-        # which is what lets the message below say so truthfully (EXP3-06).
-        from ..plot.figures import image_write_failure_text, save_plot_image
-
-        exporter = ImageExporter(target)
+        from ..plot.figures import image_write_failure_text
         try:
-            notes = save_plot_image(out, lambda staged: exporter.export(str(staged)))
+            notes = write_live_plot_image(out, target)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
-                self, "Save event-plot image", image_write_failure_text(out, exc))
+                self, "Save event-plot image",
+                image_write_failure_text(out, exc, formats=IMAGE_FORMATS))
             return None
         # What the replace changed about the FILE (symlink followed, hard-linked names
         # left holding the previous contents) — unrecoverable after the fact, so it is
@@ -800,6 +816,212 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         if notes:
             QtWidgets.QMessageBox.information(
                 self, "Save event-plot image", "\n\n".join(notes))
+        return out
+
+    @staticmethod
+    def _json_default(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, tuple):
+            return list(value)
+        return str(value)
+
+    def _export_common(self, view: str) -> dict:
+        provenance = dict(self._eventset.provenance) if self._eventset is not None else {}
+        return {
+            "view": view, "source_identity_available": bool(self._doc_id),
+            "source_doc_id": self._doc_id or "",
+            "source_channel": np.nan if self._channel is None else self._channel,
+            "source_units": self._units,
+            "provenance_json": json.dumps(
+                provenance, ensure_ascii=False, default=self._json_default),
+        }
+
+    def _density_plot_data(self) -> pd.DataFrame:
+        counts = self._density_counts
+        xe, ye = self._density_x_edges, self._density_y_edges
+        if counts is None or xe is None or ye is None or not np.asarray(counts).size:
+            return pd.DataFrame()
+        counts = np.asarray(counts, dtype=np.float64)
+        xe = np.asarray(xe, dtype=np.float64)
+        ye = np.asarray(ye, dtype=np.float64)
+        x_id, y_id = self._x_combo.currentData(), self._y_combo.currentData()
+        logx, logy = self._logx.isChecked(), self._logy.isChecked()
+        common = {
+            **self._export_common("density"), "x_metric": x_id, "y_metric": y_id,
+            "log_x": logx, "log_y": logy, "bins": self._bins.value(),
+            "colormap": self._cmap_combo.currentText(),
+            "title": self._d_title.text(), "x_label": self._d_xlabel.text(),
+            "y_label": self._d_ylabel.text(),
+        }
+        rows: list[dict] = []
+        for i in range(counts.shape[0]):
+            for j in range(counts.shape[1]):
+                rows.append({
+                    "part": "density_bin", "x_bin": i, "y_bin": j,
+                    "x_left": xe[i], "x_right": xe[i + 1],
+                    "y_left": ye[j], "y_right": ye[j + 1],
+                    "x_center": 0.5 * (xe[i] + xe[i + 1]),
+                    "y_center": 0.5 * (ye[j] + ye[j + 1]),
+                    "count": counts[i, j], "event_row_id": "",
+                    "event_row_id_json": "", "x_value": np.nan,
+                    "y_value": np.nan, "included_in_view": True, **common,
+                })
+
+        # Bin rows reproduce the visible map exactly. Source-event rows add the identities
+        # behind it when the live EventSet is available; a restored orphan snapshot simply
+        # leaves them absent rather than inventing positional ids.
+        acc = self._accepted()
+        if acc is not None:
+            x = self._metric_values(x_id, acc)
+            y = self._metric_values(y_id, acc)
+            keep = np.isfinite(x) & np.isfinite(y)
+            if logx:
+                keep &= x > 0
+            if logy:
+                keep &= y > 0
+            event_ids = (acc.df["event_id"].tolist() if "event_id" in acc.df
+                         else [None] * len(acc.df))
+            recordings = (acc.df["recording"].tolist() if "recording" in acc.df
+                          else [None] * len(acc.df))
+            pore_ids = (acc.df["pore_id"].tolist() if "pore_id" in acc.df
+                        else [None] * len(acc.df))
+            for row_id, event_id, recording, pore_id, xv, yv, kept in zip(
+                    acc.df.index, event_ids, recordings, pore_ids, x, y, keep):
+                rows.append({
+                    "part": "source_event", "x_bin": np.nan, "y_bin": np.nan,
+                    "x_left": np.nan, "x_right": np.nan, "y_left": np.nan,
+                    "y_right": np.nan, "x_center": np.nan, "y_center": np.nan,
+                    "count": np.nan, "event_row_id": row_id,
+                    "event_row_id_json": json.dumps(
+                        row_id, ensure_ascii=False, default=self._json_default),
+                    "event_id": event_id, "event_recording": recording,
+                    "event_pore_id": pore_id,
+                    "x_value": xv, "y_value": yv,
+                    "included_in_view": bool(kept), **common,
+                })
+        return pd.DataFrame(rows)
+
+    def _ensemble_kept_identities(self, n_rows: int) -> list[dict]:
+        """Source identities for ensemble rows in exact input POSITION order.
+
+        Dataframe indices are labels, not positions, and need not be unique.  A dict
+        keyed by index therefore maps two same-labelled rows onto one event.  The
+        ensemble kernel walks accepted rows positionally; replay that keep mask and
+        use ``iloc`` so even duplicate indices retain their own event_id/recording.
+        """
+        acc = self._accepted()
+        if acc is None or self._signal is None:
+            return []
+        df = acc.df
+        starts = df["start_idx"].to_numpy(dtype=np.int64)
+        ends = df["end_idx"].to_numpy(dtype=np.int64)
+        lengths = ends - starts
+        n = int(self._signal.size)
+        pad_frac = float(self._pad.value()) / 100.0
+        valid = lengths > 0
+        if self._normalize.isChecked():
+            valid &= (starts - pad_frac * lengths >= 0.0)
+            valid &= (ends + pad_frac * lengths <= n)
+        elif np.any(valid):
+            width = int(lengths[valid].max())
+            wpad = int(round(pad_frac * width))
+            total = width + 2 * wpad
+            if self._align_combo.currentText() == "center":
+                a_all = np.round((starts + ends) / 2.0 - total / 2.0).astype(np.int64)
+            else:
+                a_all = starts - wpad
+            valid &= (a_all >= 0) & (a_all + total <= n)
+        positions = np.flatnonzero(valid)
+        if positions.size != int(n_rows):
+            return []
+        identities: list[dict] = []
+        for position in positions:
+            row = df.iloc[int(position)]
+            identities.append({
+                "event_row_id": df.index[int(position)],
+                "event_id": row.get("event_id") if "event_id" in df.columns else None,
+                "event_recording": (row.get("recording")
+                                    if "recording" in df.columns else None),
+                "event_pore_id": row.get("pore_id") if "pore_id" in df.columns else None,
+            })
+        return identities
+
+    def _ensemble_kept_row_ids(self, n_rows: int) -> list[object]:
+        """Backward-compatible source-index accessor; mapping is positional."""
+        return [identity["event_row_id"]
+                for identity in self._ensemble_kept_identities(n_rows)]
+
+    def _ensemble_plot_data(self) -> pd.DataFrame:
+        if self._ensemble is None:
+            return pd.DataFrame()
+        time, matrix, mean, median = (np.asarray(value) for value in self._ensemble)
+        if matrix.ndim != 2 or matrix.shape[0] == 0:
+            return pd.DataFrame()
+        row_count = int(matrix.shape[0]) * int(matrix.shape[1])
+        require_csv_row_budget(
+            row_count, limit=MAX_ENSEMBLE_CSV_ROWS,
+            description=(f"event ensemble ({matrix.shape[0]:,} events × "
+                         f"{matrix.shape[1]:,} points)"),
+            advice=("Lower Ensemble › Points, or curate a smaller accepted event set, "
+                    "then export again."))
+        identities = self._ensemble_kept_identities(matrix.shape[0])
+        identity_available = len(identities) == int(matrix.shape[0])
+        skipped = max(0, (len(self._accepted().df) if self._accepted() is not None else
+                          matrix.shape[0]) - matrix.shape[0])
+        common = {
+            **self._export_common("ensemble"),
+            "normalize_time": self._normalize.isChecked(),
+            "align": self._align_combo.currentText(), "n_points": self._npoints.value(),
+            "pad_percent": self._pad.value(), "edge_skipped_count": skipped,
+        }
+        rows: list[dict] = []
+        for trace_i, trace in enumerate(matrix):
+            identity = identities[trace_i] if identity_available else {}
+            row_id = identity.get("event_row_id")
+            row_json = (json.dumps(row_id, ensure_ascii=False, default=self._json_default)
+                        if identity_available else "")
+            for sample_i, (tv, value) in enumerate(zip(time, trace)):
+                rows.append({
+                    "part": "event_trace", "trace_index": trace_i,
+                    "event_row_id": row_id,
+                    "event_row_id_json": row_json,
+                    "identity_available": identity_available,
+                    "event_id": identity.get("event_id"),
+                    "event_recording": identity.get("event_recording"),
+                    "event_pore_id": identity.get("event_pore_id"),
+                    "sample_index": sample_i, "time": tv, "event_current": value,
+                    "mean_current": mean[sample_i], "median_current": median[sample_i],
+                    **common,
+                })
+        return pd.DataFrame(rows)
+
+    def _plot_data(self) -> pd.DataFrame:
+        """The exact numeric values behind the currently visible event-plot view."""
+        return (self._density_plot_data() if self.current_view() == DENSITY
+                else self._ensemble_plot_data())
+
+    def export_data(self, path: str | None = None) -> Path | None:
+        """Export the current density or ensemble view and provenance as staged CSV."""
+        density = self.current_view() == DENSITY
+        default = "event_density.csv" if density else "event_ensemble.csv"
+        if path is None:
+            chosen = ask_export_path(
+                self, title="Export event-plot data", suggestion=default,
+                filters=DATA_FILTERS)
+            if chosen is None:
+                return None
+            path = str(chosen)
+        out = Path(path)
+        try:
+            notes = write_plot_csv(out, self._plot_data())
+        except Exception as exc:  # noqa: BLE001
+            QtWidgets.QMessageBox.warning(
+                self, "Export event-plot data", data_write_failure_text(out, exc))
+            return None
+        if notes:
+            QtWidgets.QMessageBox.information(
+                self, "Export event-plot data", "\n\n".join(notes))
         return out
 
 

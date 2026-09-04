@@ -141,7 +141,7 @@ def test_the_details_pane_reports_both_curves_under_their_own_headings(two_pores
     text = w.details_text()
     assert "quiet.dat" in text and "noisy.dat" in text
     assert text.count("Total RMS noise:") == 2, "one full report per curve"
-    assert text.count("White floor:") == 2
+    assert text.count("Mid-log median proxy:") == 2
 
 
 def test_the_band_rms_readout_is_per_curve(two_pores):

@@ -214,13 +214,19 @@ def notch_sequential(
     fs = float(fs)
     if not np.isfinite(fs) or fs <= 0:
         raise ValueError(f"fs must be a positive, finite sample rate, got {fs!r}")
+    q = float(q)
+    if not np.isfinite(q) or q <= 0:
+        raise ValueError(f"q must be positive and finite, got {q!r}")
+    lines = tuple(float(f) for f in freqs)
+    bad = [f for f in lines if not np.isfinite(f) or f <= 0]
+    if bad:
+        raise ValueError(f"notch frequencies must be positive and finite, got {bad}")
     out = np.asarray(sig).copy()
     nyq = fs / 2.0
-    for f0 in freqs:
-        f0 = float(f0)
-        if not (0.0 < f0 < nyq):
+    for f0 in lines:
+        if f0 >= nyq:
             continue
-        b, a = iirnotch(f0, Q=float(q), fs=fs)
+        b, a = iirnotch(f0, Q=q, fs=fs)
         out = filtfilt(b, a, out)
     return out
 
@@ -541,6 +547,31 @@ class MLPreprocessConfig:
     last_start_inclusive: bool = False
 
     def __post_init__(self) -> None:
+        def finite_float(name: str, *, positive: bool = False,
+                         nonnegative: bool = False) -> float:
+            raw = getattr(self, name)
+            try:
+                value = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} must be a finite number, got {raw!r}") from exc
+            if not np.isfinite(value):
+                raise ValueError(f"{name} must be finite, got {raw!r}")
+            if positive and value <= 0:
+                raise ValueError(f"{name} must be > 0, got {raw!r}")
+            if nonnegative and value < 0:
+                raise ValueError(f"{name} must be >= 0, got {raw!r}")
+            return value
+
+        def exact_int(name: str, *, minimum: int) -> int:
+            raw = getattr(self, name)
+            value = finite_float(name)
+            if not value.is_integer():
+                raise ValueError(f"{name} must be an integer, got {raw!r}")
+            integer = int(value)
+            if integer < minimum:
+                raise ValueError(f"{name} must be >= {minimum}, got {raw!r}")
+            return integer
+
         if self.baseline_method not in BASELINE_METHODS:
             raise ValueError(
                 f"baseline_method must be one of {BASELINE_METHODS}, "
@@ -556,21 +587,30 @@ class MLPreprocessConfig:
                 f"normalize_method must be one of {NORMALIZE_METHODS}, "
                 f"got {self.normalize_method!r}"
             )
-        if not (float(self.normalize_clip_sigma) > 0):
-            raise ValueError(
-                f"normalize_clip_sigma must be > 0, got {self.normalize_clip_sigma}"
-            )
-        if float(self.notch_q) <= 0:
-            raise ValueError(f"notch_q must be > 0, got {self.notch_q}")
-        if int(self.baseline_decim) < 1:
-            raise ValueError(f"baseline_decim must be >= 1, got {self.baseline_decim}")
+        finite_float("normalize_clip_sigma", positive=True)
+        finite_float("notch_q", positive=True)
+        exact_int("baseline_decim", minimum=1)
+        exact_int("baseline_poly", minimum=1)
+        exact_int("despike_size", minimum=0)
         for name in ("baseline_window_s", "masked_rough_s", "masked_base_s"):
-            if float(getattr(self, name)) <= 0:
-                raise ValueError(f"{name} must be > 0, got {getattr(self, name)}")
+            finite_float(name, positive=True)
+        finite_float("masked_mask_sigma", positive=True)
+        finite_float("masked_dilate_ms", nonnegative=True)
         # Normalize the freq container so equality/round-trip are stable.
-        object.__setattr__(
-            self, "notch_freqs", tuple(float(f) for f in self.notch_freqs)
-        )
+        try:
+            notch_freqs = tuple(float(f) for f in self.notch_freqs)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("notch_freqs must be a sequence of finite positive numbers") from exc
+        bad = [f for f in notch_freqs if not np.isfinite(f) or f <= 0]
+        if bad:
+            raise ValueError(
+                f"notch_freqs must contain only finite positive frequencies, got {bad}"
+            )
+        if self.notch_enabled and not notch_freqs:
+            raise ValueError(
+                "notch_freqs must name at least one line when notch_enabled is True"
+            )
+        object.__setattr__(self, "notch_freqs", notch_freqs)
 
     # -- (de)serialisation -------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -1422,6 +1462,14 @@ def apply_ml_preprocess(
     if not np.isfinite(fs) or fs <= 0:
         raise ValueError(f"fs must be a positive, finite sample rate, got {fs!r}")
 
+    def require_finite(stage: str, values: np.ndarray) -> np.ndarray:
+        if not np.isfinite(values).all():
+            raise ValueError(
+                f"{stage} produced NaN/Inf; ML preprocessing stopped before a later "
+                "stage could hide the invalid samples"
+            )
+        return values
+
     if config.notch_enabled and len(config.notch_freqs):
         # filtfilt pads by ~3 * ntaps (9 for the 2nd-order iirnotch); below that the
         # whole contract is undefined, so fail with one clear message.
@@ -1433,6 +1481,7 @@ def apply_ml_preprocess(
         out: np.ndarray = notch_sequential(
             x, fs, freqs=config.notch_freqs, q=config.notch_q
         )
+        require_finite("notch", out)
         if config.notch_float32:
             # The apo notebook's apply_notch_filter_harmonics ends with
             # ``.astype(np.float32)``, so its SavGol sees -- and accumulates in --
@@ -1461,9 +1510,10 @@ def apply_ml_preprocess(
             out, fs, window_s=config.baseline_window_s, poly=config.baseline_poly
         )
     # "none": leave the notched signal alone.
+    require_finite(f"{method} baseline stage", np.asarray(out))
 
     out = despike_median(out, size=config.despike_size)
-    return np.asarray(out, dtype=np.float32)
+    return np.asarray(require_finite("despike", np.asarray(out)), dtype=np.float32)
 
 
 def normalization_center(sig: np.ndarray) -> float:

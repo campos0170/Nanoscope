@@ -37,6 +37,7 @@ from nanoscope.analysis.conditioning import (
     BASIS_UNKNOWN,
     SIGNAL_BASIS_COLUMN,
     chain_description,
+    characterization_trace,
     conditioned_trace,
     conditioning_enabled,
     ensure_signal_basis_column,
@@ -138,6 +139,102 @@ def test_an_empty_chain_returns_the_samples_it_was_given():
     assert conditioning_enabled(None) is False
     assert conditioning_enabled({"filter_cutoff_hz": 5000.0}) is True
     assert conditioning_enabled({"notch_enabled": True}) is True
+
+
+def test_characterization_trace_is_identical_when_highpass_is_off():
+    """The dual path must cost no numerical change in the ordinary no-HP case."""
+    raw = _trace()
+    params = dict(CHAINS["full chain"], hp_enabled=False, hp_cutoff_hz=20.0)
+    assert _digest(characterization_trace(raw, FS, params)) == \
+        _digest(conditioned_trace(raw, FS, params))
+
+
+def test_characterization_trace_omits_only_highpass():
+    """Candidate localization may remove DC; quantitative measurement must not.
+
+    Comparing against the same public builder with only ``hp_enabled`` disabled pins
+    both halves: high-pass is genuinely absent, while every other stage and its order
+    remain exactly the same.
+    """
+    raw = _trace()
+    params = {
+        "hp_enabled": True, "hp_cutoff_hz": 20.0, "hp_order": 4,
+        "hp_kind": "butter", "filter_cutoff_hz": 5_000.0,
+        "filter_order": 4, "filter_kind": "bessel",
+    }
+    candidate = conditioned_trace(raw, FS, params)
+    quantitative = characterization_trace(raw, FS, params)
+    expected = conditioned_trace(raw, FS, {**params, "hp_enabled": False})
+
+    assert _digest(quantitative) == _digest(expected)
+    assert _digest(quantitative) != _digest(candidate)
+    assert abs(float(np.median(quantitative)) - 100.0) < 2.0
+    assert abs(float(np.median(candidate))) < 2.0
+
+
+def test_baseline_probe_uses_the_quantitative_trace_not_the_orange_preview(monkeypatch):
+    """Drive the real handler and inspect the samples handed to the probe worker."""
+    from types import SimpleNamespace
+
+    from nanoscope.gui.analysis_panel import AnalysisPanel
+
+    raw = _trace()
+    params = {
+        "hp_enabled": True, "hp_cutoff_hz": 20.0, "hp_order": 4,
+        "hp_kind": "butter", "polarity": -1,
+    }
+    seen: dict[str, object] = {}
+    real_characterization = characterization_trace
+
+    def characterization_spy(data, fs, live_params):
+        out = real_characterization(data, fs, live_params)
+        seen["conditioned"] = np.asarray(out).copy()
+        return out
+
+    proposal = SimpleNamespace(
+        config=object(), probe=SimpleNamespace(polarity=-1))
+
+    def fake_probe(data, fs, *, polarity):
+        seen["probe_data"] = np.asarray(data).copy()
+        seen["polarity"] = polarity
+        return proposal
+
+    def fake_health(data, fs, **kwargs):
+        seen["health_data"] = np.asarray(data).copy()
+        return SimpleNamespace(health="healthy")
+
+    monkeypatch.setattr(
+        "nanoscope.gui.analysis_panel.characterization_trace", characterization_spy)
+    monkeypatch.setattr(
+        "nanoscope.analysis.baseline_probe.probe_and_propose", fake_probe)
+    monkeypatch.setattr(
+        "nanoscope.analysis.baseline.characterisation_baseline", fake_health)
+
+    class ImmediateController:
+        def run_callable(self, job, *, label):
+            seen["label"] = label
+            seen["answer"] = job()
+            return True
+
+    panel = SimpleNamespace(
+        _sel=("doc", 0),
+        _session=SimpleNamespace(calibrated=lambda *_a: SimpleNamespace(
+            data=raw, sample_rate_hz=FS)),
+        _detection=SimpleNamespace(params=lambda: dict(params)),
+        _baseline=SimpleNamespace(set_busy=lambda *_a: None, set_gate=lambda *_a: None),
+        _controller=ImmediateController(),
+        _pending=None,
+        _pending_sel=None,
+    )
+    AnalysisPanel._on_probe_requested(panel)
+
+    expected = characterization_trace(raw, FS, params)
+    candidate = conditioned_trace(raw, FS, params)
+    assert np.array_equal(seen["probe_data"], expected)
+    assert np.array_equal(seen["health_data"], expected)
+    assert not np.array_equal(seen["probe_data"], candidate)
+    assert seen["polarity"] == -1
+    assert seen["label"] == "baseline_probe"
 
 
 # ================================================================================================

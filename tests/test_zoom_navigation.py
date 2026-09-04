@@ -118,26 +118,32 @@ def test_zoom_history_back_and_forward(qapp):
     assert _xspan(win) == pytest.approx(dived, rel=0.2)
 
 
-def test_wheel_zoom_is_x_only(qapp):
-    """The time-only wheel: zooming must not also rescale the amplitude axis."""
+def test_wheel_pans_signal_vertically_without_zooming(qapp):
+    """Wheel up/down moves the waveform only up/down; neither axis span may change."""
     win = MainWindow()
     _open(win, qapp, ABF)
     vb = win._trace_view.anchor_plot().vb
+    vb.setYRange(-60.0, -40.0, padding=0)
     x0 = tuple(vb.viewRange()[0]); y0 = tuple(vb.viewRange()[1])
 
-    class _Wheel:  # shape pyqtgraph's ViewBox.wheelEvent expects
-        def __init__(self, d, p): self._d, self._p = d, p
+    class _Wheel:
+        def __init__(self, d): self._d = d
         def delta(self): return self._d
-        def pos(self): return self._p
         def accept(self): pass
+        def ignore(self): pass
 
-    from PySide6.QtCore import QPointF
-    center = vb.mapViewToScene(QPointF((x0[0] + x0[1]) / 2, (y0[0] + y0[1]) / 2))
-    vb.wheelEvent(_Wheel(120, center))
+    vb.wheelEvent(_Wheel(120))
     _pump(qapp)
     x1 = tuple(vb.viewRange()[0]); y1 = tuple(vb.viewRange()[1])
-    assert abs((x1[1] - x1[0]) - (x0[1] - x0[0])) > 1e-6      # x changed (zoomed)
-    assert (y1[1] - y1[0]) == pytest.approx(y0[1] - y0[0], abs=1e-9)  # y unchanged
+    assert x1 == pytest.approx(x0, abs=1e-9)
+    assert (y1[1] - y1[0]) == pytest.approx(y0[1] - y0[0], abs=1e-9)
+    assert y1[0] < y0[0] and y1[1] < y0[1]  # lower view range -> fixed signal moves up on screen
+
+    vb.wheelEvent(_Wheel(-120))
+    _pump(qapp)
+    x2 = tuple(vb.viewRange()[0]); y2 = tuple(vb.viewRange()[1])
+    assert x2 == pytest.approx(x0, abs=1e-9)
+    assert y2 == pytest.approx(y0, abs=1e-9)
 
 
 def test_navigator_drag_still_drives_view(qapp):

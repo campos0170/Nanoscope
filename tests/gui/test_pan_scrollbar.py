@@ -8,8 +8,8 @@ horizontal scroller (appears only once zoomed) to centre events." So the contrac
     recording, it stays hidden rather than dividing by zero;
   - PAN, NOT ZOOM: dragging the handle translates the view and preserves the zoom width EXACTLY,
     including across twenty successive pans (the integer<->float mapping must not accumulate);
-  - TWO-WAY: every other way of moving the view (box zoom, wheel, navigator drag, double-click
-    reset, zoom back/forward, an event-table jump) restates the bar, and neither side re-triggers
+  - TWO-WAY: every other way of moving the view (box zoom, navigator drag, Full reset,
+    zoom back/forward, an event-table jump) restates the bar, and neither side re-triggers
     the other — the emission counts are asserted, not assumed;
   - AGREEMENT: the Navigator (the OTHER controller bound to the same x-range) and the bar always
     describe the same window;
@@ -102,6 +102,7 @@ def test_hidden_at_full_extent(rig):
     assert _width(view) == pytest.approx(view.full_x_extent()[1] - view.full_x_extent()[0], rel=1e-6)
     assert bar.is_active() is False
     assert bar.scrollbar().isHidden() is True
+    assert bar._full_trace_button.isEnabled() is False
 
 
 def test_shown_as_soon_as_the_view_is_narrower(rig):
@@ -116,7 +117,7 @@ def test_hidden_again_on_reset(rig):
     _session, view, bar, _doc = rig
     _zoom_middle(view, 0.05)
     assert bar.is_active() is True
-    view.reset_zoom()                        # the double-click / Ctrl+0 path
+    view.reset_zoom()                        # the Full / Ctrl+0 path
     assert bar.is_active() is False
     assert bar.scrollbar().isHidden() is True
 
@@ -175,6 +176,7 @@ def test_no_document_is_inert(qapp):
     bar.bind(session, view)
     assert view.anchor_plot() is None
     assert bar.is_active() is False
+    assert bar._full_trace_button.isEnabled() is False
     bar.refresh()                            # must not raise
     bar.scrollbar().setValue(500)            # must not raise, must not activate
     assert bar.is_active() is False

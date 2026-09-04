@@ -101,6 +101,7 @@ from ..core import clock
 from ..analysis import events as events_mod
 from ..analysis import baseline as baseline_mod
 from ..analysis import filters, ml_detect
+from ..analysis.conditioning import chain_description
 from ..analysis.modules import DETECTOR_PRIVATE_KEYS
 from ..analysis.detect_cusum import (
     DEFAULT_CUSUM_H,
@@ -351,6 +352,35 @@ class _ElidingCheckBox(QCheckBox):
         QStylePainter(self).drawControl(QStyle.ControlElement.CE_CheckBox, opt)
 
 
+class _CurrentPageStackedWidget(QStackedWidget):
+    """A stack whose vertical size follows the page the user can actually see.
+
+    Qt's stock ``QStackedWidget`` reports the maximum size hint of every page. That is
+    useful for a fixed dialog, but inside the Inspector's scroll area it made the short
+    Open-pore baseline subsection reserve the full Signal-chain height and leave a large
+    blank region below its controls. Width remains the stack-wide maximum so subsection
+    switches do not make the narrow dock jitter horizontally.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.currentChanged.connect(lambda _index: self.updateGeometry())
+
+    def sizeHint(self) -> QSize:  # noqa: D102 - Qt override
+        overall = super().sizeHint()
+        page = self.currentWidget()
+        if page is None:
+            return overall
+        return QSize(overall.width(), page.sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: D102 - Qt override
+        overall = super().minimumSizeHint()
+        page = self.currentWidget()
+        if page is None:
+            return overall
+        return QSize(overall.width(), page.minimumSizeHint().height())
+
+
 class DetectionPanel(QWidget):
     """Filter, threshold, dwell and polarity controls for event detection.
 
@@ -510,7 +540,7 @@ class DetectionPanel(QWidget):
     # probe and a ~640 MB peak). A live readout must never do that on the GUI thread; past
     # this many samples it says so instead. Detection itself is unaffected — it runs off
     # the GUI thread and measures whatever the user asked for.
-    _MAX_RISE_PROBE_SAMPLES = 2_000_000
+    _MAX_RISE_PROBE_SAMPLES = filters.MAX_RISE_TIME_PROBE_SAMPLES
 
     #: The loaded-models combo's empty-state row. It carries NO itemData, which is what
     #: makes it inert (`_on_model_combo_changed` only acts on an entry with a path) and
@@ -615,13 +645,37 @@ class DetectionPanel(QWidget):
         ml_layout.setContentsMargins(0, 0, 0, 0)
         self._measure_layout = QVBoxLayout(self._measure_page)
         self._measure_layout.setContentsMargins(0, 0, 0, 0)
-        # Same arrangement for the open-pore baseline controls: this module HOSTS the
-        # page and never builds, wires or reads the widget. That control group has to
-        # talk to `analysis.baseline_probe` and to an off-thread job, so building it
-        # here would drag both into a module that is deliberately view-only.
-        self._baseline_slot = QVBoxLayout()
+        # Preprocess contains two sizeable, independent jobs. Keep only the selected
+        # one open so the signal-chain controls and their preview are reachable without
+        # first scrolling through the open-pore characterisation form.
+        preprocess_section_row = QHBoxLayout()
+        preprocess_section_row.addWidget(QLabel("Preprocess section:"))
+        self.preprocess_section_selector = QComboBox()
+        self.preprocess_section_selector.addItems(
+            ["Signal chain", "Open-pore baseline"])
+        self.preprocess_section_selector.setToolTip(
+            "Signal chain edits the ordered filters used for detection. Open-pore "
+            "baseline configures the reference used to measure event depths.")
+        preprocess_section_row.addWidget(self.preprocess_section_selector, 1)
+        preprocess_layout.addLayout(preprocess_section_row)
+
+        self.preprocess_sections = _CurrentPageStackedWidget()
+        self._signal_chain_page = QWidget()
+        self._baseline_page = QWidget()
+        signal_chain_layout = QVBoxLayout(self._signal_chain_page)
+        signal_chain_layout.setContentsMargins(0, 0, 0, 0)
+        # This module HOSTS the baseline page and never builds, wires or reads the
+        # widget. That control group talks to `analysis.baseline_probe` and an
+        # off-thread job, so building it here would break the view-only seam.
+        self._baseline_slot = QVBoxLayout(self._baseline_page)
         self._baseline_slot.setContentsMargins(0, 0, 0, 0)
-        preprocess_layout.addLayout(self._baseline_slot)
+        self.preprocess_sections.addWidget(self._signal_chain_page)
+        self.preprocess_sections.addWidget(self._baseline_page)
+        self.preprocess_section_selector.currentIndexChanged.connect(
+            self.preprocess_sections.setCurrentIndex)
+        self.preprocess_section_selector.setCurrentIndex(0)
+        self.preprocess_sections.setCurrentIndex(0)
+        preprocess_layout.addWidget(self.preprocess_sections)
         self.mode_tabs.addTab(self._preprocess_page, "Preprocess")
         self.mode_tabs.addTab(self._detection_page, "Detection")
         self.mode_tabs.addTab(self._ml_page, "ML detector")
@@ -629,63 +683,23 @@ class DetectionPanel(QWidget):
         root.addWidget(self.mode_tabs)
 
         # -- Signal filters (dropdown + stacked pages) --------------------
-        # The seven pre-detection filter stages share ONE compact group instead of
-        # seven stacked group boxes: a combo picks which stage's controls are shown, a
+        # The eight pre-detection filter stages share ONE compact group instead of
+        # eight stacked group boxes: a combo picks which stage's controls are shown, a
         # QStackedWidget holds one page per stage, and an active-filters indicator keeps
         # the whole chain visible without clicking through. CRITICAL: the stack keeps
-        # every page constructed, so params() still reads all seven regardless of which
+        # every page constructed, so params() still reads all eight regardless of which
         # page is raised, and a stage stays enabled while hidden. This is layout only —
         # the widgets, params(), setters and emitted signals are byte-for-byte as before,
         # just re-parented into pages.
         filters_box = QGroupBox("Signal filters")
         filters_layout = QVBoxLayout(filters_box)
 
-        # -- the one line that says the response curve exists -------------
-        # The live |H(f)| plot is the whole reason a user can see that zero-phase filtering
-        # makes the nominal cutoff a -6 dB point — and it sits at content y=722..912, i.e.
-        # 256 px below the fold on the tab that opens by default, with ``visibleRegion()``
-        # empty at rest. Enumerating every visible label above the fold on this page turned
-        # up nothing containing "response", "H(f)" or "frequency", so a user tuning a filter
-        # had no way to learn that a picture of what they just did is drawn at all.
-        #
-        # It cannot be brought above the fold from here: the page's first ~325 px belong to
-        # the baseline group this module only HOSTS, and the plot's own 150 px minimum sits
-        # under the parameter stack it responds to (moving it above them would separate the
-        # curve from the controls that shape it). So the remedy is the other one the defect
-        # allows — one line, in this group, where every filter control is; it is static
-        # text, so nothing here ever moves with state.
-        #
-        # IT RIDES THE STAGE COMBO'S OWN ROW, and that is the correction. The first version
-        # of this hint was a line of its OWN at the HEAD of the group, and a disclosure that
-        # takes a row displaces what it explains: measured on a real MainWindow on a fresh
-        # profile, ``filter_selector`` — the control a user needs FIRST, to choose which
-        # filter they are editing — sat at content y=447..470 against a 457 px viewport at
-        # 1512x900 (13 px of it clipped) and was ``visibleRegion().isEmpty()`` at 1280x800,
-        # 74 px under a 396 px fold. Beside the combo the caption costs ZERO vertical
-        # pixels (row height = max(combo 23, caption 15) = the combo's own 23), so the
-        # stage selector is back at the head of the group, above the fold at all three
-        # sizes, and the sentence is still the first thing read on the filter controls.
-        # The protocol row and its three verbs follow it (see ``stage_row`` below).
-        #
-        # An ``_ElidingCaption``, not a QLabel: a plain label reports its FULL text width as
-        # ``minimumSizeHint()`` and that number becomes a floor on how narrow the Inspector
-        # can be dragged — the very defect this round removed from three other controls.
-        # Sharing a row leaves it only what the combo does not take, so the sentence is the
-        # SHORT one — and at the shipped width it is not cut at all: measured on a real
-        # MainWindow at 1512x900, Inspector 502 px, the combo is 121 px and this caption
-        # 289 px, and it paints "↓ live |H(f)| response plotted below" whole.
-        #
-        # WHAT GOES WHEN THE DOCK IS DRAGGED IN IS THE TAIL, because these captions pass
-        # ``Qt.ElideRight``: dragged to 380 px and on down to 200 the label bottoms out at
-        # 177 px (the column's own width floor — past it the dock scrolls sideways instead
-        # of squeezing) and the paint is "↓ live |H(f)| response plotte…" at every one of
-        # those widths. So the surviving half is the HEAD,
-        # and that is why the arrow LEADS the sentence rather than trailing it — the two
-        # things a reader must not lose are "there is a live |H(f)| response" and "it is
-        # below", and the second is carried by the ↓ that elision cannot reach. The full
-        # string stays in ``text()`` and in the tooltip either way.
+        # The selected-stage response is a DESIGN preview even while that stage is off.
+        # Keep that distinction in the above-fold caption; the plot title and verdict
+        # below state the current ON/OFF execution status explicitly. An eliding caption
+        # avoids imposing a minimum width on the Inspector dock.
         self.response_hint = _ElidingCaption(
-            "↓ live |H(f)| response plotted below",
+            "↓ selected-stage |H(f)| design preview",
             elide=Qt.ElideRight)
         self.response_hint.setStyleSheet("color:#8b9199;")
 
@@ -695,7 +709,8 @@ class DetectionPanel(QWidget):
             "in the summary below; every stage stays active whether or not its page is "
             "the one currently shown."
         )
-        self.active_filters_label = QLabel("Active: none")
+        self.active_filters_label = QLabel(
+            "Active execution order: raw calibrated signal (no stages enabled)")
         self.active_filters_label.setWordWrap(True)
         self.active_filters_label.setStyleSheet("color:#8b9199;")
         self.filter_stack = QStackedWidget()
@@ -708,7 +723,7 @@ class DetectionPanel(QWidget):
         # untouched panel detects byte-for-byte as before.
         lp_page = QWidget()
         filt_form = QFormLayout(lp_page)
-        self.filter_enabled = _ElidingCheckBox("enable")
+        self.filter_enabled = _ElidingCheckBox("enable Low-pass")
         self.filter_kind = QComboBox()
         self.filter_kind.addItems([self._KIND_LABELS[k] for k in filters.KINDS])
         self.filter_kind.setCurrentIndex(filters.KINDS.index("bessel"))
@@ -757,19 +772,20 @@ class DetectionPanel(QWidget):
         self.filter_stack.addWidget(lp_page)
 
         # -- page: High-pass filter --------------------------------------
-        # A zero-phase high-pass for DC / slow-drift removal. It DISTORTS square
-        # translocation events (droops the flat top, goes biphasic), so it is baseline
-        # hygiene, not event conditioning — the tooltip warns loudly. Applied before the
-        # baseline-drift stage in preprocess_for_detection.
+        # A zero-phase high-pass for DC / slow-drift removal in the classical
+        # CANDIDATE-LOCALIZATION path. It distorts square translocation events, so the
+        # quantitative path deliberately omits it; the tooltip names the metrics that
+        # remain boundary-dependent. Applied before the baseline-drift stage in
+        # preprocess_for_detection.
         hp_page = QWidget()
         hp_form = QFormLayout(hp_page)
-        self.hp_enabled = _ElidingCheckBox("enable")
+        self.hp_enabled = _ElidingCheckBox("enable High-pass")
         self.hp_kind = QComboBox()
         self.hp_kind.addItems([self._KIND_LABELS[k] for k in filters.HP_KINDS])
         self.hp_kind.setCurrentIndex(filters.HP_KINDS.index("butter"))
         self.hp_kind.setToolTip(
-            "Butterworth has a maximally flat pass-band, so the open-pore level it "
-            "leaves is not rippled. Bessel trades that for a flat group delay. "
+            "Butterworth has a maximally flat pass-band above the cutoff. Bessel "
+            "trades some roll-off sharpness for a flatter group delay. "
             "(Gaussian is a low-pass kernel and has no high-pass counterpart.)"
         )
         self.hp_order = QSpinBox()
@@ -788,12 +804,13 @@ class DetectionPanel(QWidget):
         self.hp_cutoff_hz.setSuffix(" Hz")
         self.hp_cutoff_hz.setKeyboardTracking(False)
         _hp_warning = (
-            "Removes DC offset and slow baseline drift. WARNING: a high-pass DISTORTS "
-            "square translocation events — it droops the flat top and makes them "
-            "biphasic, so depths read shallow and phantom opposite-polarity blips appear. "
-            "Use it for DC/baseline hygiene only, with a cutoff far below the event "
-            "bandwidth; to flatten drift while keeping event shape, prefer the Baseline "
-            "drift stage instead. Zero-phase, so kept edges do not shift."
+            "Used by classical Schmitt/CUSUM for CANDIDATE LOCALIZATION only. The "
+            "orange preview and candidate-response plot include it; quantitative "
+            "baseline, depth, fractional blockade, mean/max amplitude and SNR are "
+            "measured on the equivalent chain with high-pass omitted. Because the event "
+            "boundaries still come from this filtered trace, start/end, dwell, rise/fall "
+            "and ECD integration limits can change. Keep the cutoff well below the event "
+            "bandwidth."
         )
         self.hp_enabled.setToolTip(_hp_warning)
         self.hp_cutoff_hz.setToolTip(_hp_warning)
@@ -1242,9 +1259,9 @@ class DetectionPanel(QWidget):
         # -- page: Normalize ---------------------------------------------
         # THE ONE STAGE IN THIS CHAIN THAT CHANGES THE UNIT, and the whole design of the
         # page follows from that. Everything downstream of detection — depth_pA, the
-        # characterisation baseline, every CSV column, the Event Inspector readout, the
-        # figure axes — is LABELLED pA, and those labels are written from the channel's
-        # units, not measured. A z-score or min-max rescale divides the picoamps out of
+        # characterisation baseline, current-derived CSV columns, the Event Inspector
+        # amplitude readout, and current/depth figure axes — is LABELLED pA, and those
+        # labels are written from the channel's units, not measured. A z-score or min-max rescale divides the picoamps out of
         # the trace the detector measures on, so with this stage on, a "depth_pA" of 10
         # means ten sigma (or 0.3 of the recording's full span), not ten picoamps.
         #
@@ -1267,8 +1284,10 @@ class DetectionPanel(QWidget):
         self.normalize_enabled.setToolTip(
             "Rescale the conditioned trace onto a dimensionless scale. Applied LAST, "
             "after every other stage.\n\n"
-            "WARNING: this divides the picoamps out. Depths, baselines, thresholds and "
-            "exports downstream are still LABELLED pA but are no longer in pA.")
+            "WARNING: this divides the picoamps out. Current-derived amplitudes, "
+            "baselines, thresholds and pA/pA·s export fields downstream retain their "
+            "legacy labels but are no longer in physical units. Centering also makes "
+            "fractional blockade (dI/I0) invalid.")
         # Sentence-length mode labels; capped so they cannot floor the page (_narrow_combo).
         self.normalize_mode = _narrow_combo()
         # Combo data == the kernel's mode strings, taken from
@@ -1317,11 +1336,13 @@ class DetectionPanel(QWidget):
         # The page's own restatement of the cost, always visible (not only when on) so
         # someone reading the menu before ticking it learns what it does first.
         normalize_note = QLabel(
-            "Depths, baselines and every exported column downstream of detection are "
-            "labelled pA and are written from the channel's units, not measured. This "
-            "stage removes the picoamps, and nothing downstream can put them back — a "
+            "Current-derived amplitudes, baselines and pA/pA·s export fields downstream "
+            "of detection retain labels written from the channel, not from the transformed "
+            "data. This stage removes the picoamps, and nothing downstream can put them "
+            "back — a "
             "depth reads in sigma (z-score / robust) or in fractions of the trace's "
-            "full span (min–max). Use it to feed a model or to compare recordings on a "
+            "full span (min–max); fractional blockade (dI/I0) is invalid after centering. "
+            "Use it to feed a model or to compare recordings on a "
             "common scale, NOT to measure a conductance.")
         normalize_note.setWordWrap(True)
         normalize_note.setStyleSheet("color:#FFB74D;")
@@ -1365,10 +1386,25 @@ class DetectionPanel(QWidget):
         self.response_note.setWordWrap(True)
         self.response_note.setStyleSheet("color:#8b9199;")
 
+        self.response_chain_check = _ElidingCheckBox(
+            "show combined response of enabled linear stages")
+        self.response_chain_check.setToolTip(
+            "Multiply every enabled linear stage on one shared frequency grid. "
+            "Median, baseline estimation and normalization are signal-dependent or "
+            "nonlinear; the note names them instead of fabricating a transfer function. "
+            "When high-pass is enabled, this is explicitly the candidate-localization "
+            "response; quantitative measurement omits high-pass.")
+
         # The "show processed trace" preview reflects the WHOLE chain (every enabled
         # stage, then the low-pass), not one filter — so it lives at the group level,
-        # below the stack, rather than on any single page.
+        # directly below the execution summary rather than on any single stage page.
         self.filter_preview = _ElidingCheckBox("show processed trace on the plot")
+        self.filter_preview.setToolTip(
+            "Show the full candidate-localization chain as the orange trace. When "
+            "high-pass is enabled, the orange trace includes it; classical detector "
+            "event-table amplitudes are measured on the equivalent chain without "
+            "high-pass. Manual measurement of ‘Processed signal’ follows the orange "
+            "trace, including high-pass.")
         self.filter_preview.setEnabled(False)   # only meaningful once a preprocessing stage is on
 
         # When the chain raises, the preview curve simply disappeared and the checkbox
@@ -1396,7 +1432,7 @@ class DetectionPanel(QWidget):
         self.filter_selector.addItems([label for label, _ in self._filter_specs])
 
         # The unit banner for the Normalize stage. It lives at the GROUP level, beside
-        # the "Active: …" summary, rather than on the Normalize page: the page is hidden
+        # the execution summary, rather than on the Normalize page: the page is hidden
         # the moment the user pages away, and "the trace the detector measures is no
         # longer in pA" is not a fact that may go off screen while it is true. Hidden
         # whenever the stage is off, so it costs nothing in the ordinary case.
@@ -1405,6 +1441,12 @@ class DetectionPanel(QWidget):
         self.normalize_units_label.setStyleSheet(
             "color:#FFB74D; font-weight:bold;")
         self.normalize_units_label.setVisible(False)
+
+        self.highpass_measurement_label = QLabel("")
+        self.highpass_measurement_label.setWordWrap(True)
+        self.highpass_measurement_label.setStyleSheet(
+            "color:#FFB74D; font-weight:bold;")
+        self.highpass_measurement_label.setVisible(False)
 
         # THE REFUSAL BANNER, and it lives here for the same reason the unit banner
         # does. `set_detrend_method` refuses a method this combo does not offer instead
@@ -1460,8 +1502,6 @@ class DetectionPanel(QWidget):
         proto_btn_row.addWidget(self.protocol_rename_btn)
         proto_btn_row.addWidget(self.protocol_delete_btn)
         proto_btn_row.addStretch(1)
-        filters_layout.addLayout(proto_row)
-        filters_layout.addLayout(proto_btn_row)
         self._protocol_updating = False
         self._load_protocols_into_combo()
         self.protocol_combo.currentTextChanged.connect(self._on_protocol_selected)
@@ -1470,28 +1510,31 @@ class DetectionPanel(QWidget):
         self.protocol_delete_btn.clicked.connect(self._delete_protocol)
         self.paramsChanged.connect(self._protocol_drop_to_manual)
 
-        # THE STAGE SELECTOR IS THE HEAD OF THIS GROUP, and the response hint rides its
-        # row instead of taking one above it (see the hint's own comment). ``insertLayout``
-        # at 0 puts it ahead of the protocol row built just above, which is a static
-        # build-time order — the rows never rearrange with state or with dock width, so
-        # nothing moves out from under a pointer. Measured effect at 1512x900: the combo
-        # rises from y=447..470 (13 px past the 457 px fold) to y=366..389, and at 1280x800
-        # from 74 px under the fold with an EMPTY visible region to wholly on screen.
+        # The stage selector is the head of this group, and the response hint rides its
+        # row instead of spending another vertical row. The execution summary and
+        # whole-chain preview follow immediately; protocol management and the selected
+        # stage's controls come afterwards.
         stage_row = QHBoxLayout()
         stage_row.setContentsMargins(0, 0, 0, 0)
         stage_row.addWidget(self.filter_selector, 0)
         stage_row.addWidget(self.response_hint, 1)
-        filters_layout.insertLayout(0, stage_row)
+        filters_layout.addLayout(stage_row)
         filters_layout.addWidget(self.active_filters_label)
+        # This checkbox previews the WHOLE chain, so keep it beside the execution
+        # summary rather than below the selected-stage editor and response graph.
+        filters_layout.addWidget(self.filter_preview)
+        filters_layout.addWidget(self.preview_error_label)
+        filters_layout.addLayout(proto_row)
+        filters_layout.addLayout(proto_btn_row)
+        filters_layout.addWidget(self.highpass_measurement_label)
         filters_layout.addWidget(self.normalize_units_label)
         filters_layout.addWidget(self.detrend_refusal_label)
         filters_layout.addWidget(self.filter_stack)
+        filters_layout.addWidget(self.response_chain_check)
         filters_layout.addWidget(self.response_plot)
         filters_layout.addWidget(self.response_note)
-        filters_layout.addWidget(self.filter_preview)
-        filters_layout.addWidget(self.preview_error_label)
-        preprocess_layout.addWidget(filters_box)
-        preprocess_layout.addStretch(1)
+        signal_chain_layout.addWidget(filters_box)
+        signal_chain_layout.addStretch(1)
 
         # Selecting a filter in the combo raises its page (index-based on purpose:
         # rewriting an item's TEXT for the ● marker fires currentTextChanged, NOT
@@ -1502,6 +1545,7 @@ class DetectionPanel(QWidget):
         # pointer. See that method for the measurement.
         self.filter_selector.currentIndexChanged.connect(self._raise_filter_page)
         self.filter_selector.currentIndexChanged.connect(self._update_response_plot)
+        self.response_chain_check.toggled.connect(self._update_response_plot)
         self.filter_selector.setCurrentIndex(0)
         self.filter_stack.setCurrentIndex(0)
 
@@ -1958,10 +2002,11 @@ class DetectionPanel(QWidget):
             cb.toggled.connect(self._on_preprocess_stage_toggled)
 
         # Active-filters indicator: whenever ANY stage's enable toggles, refresh the
-        # ● markers in the combo and the "Active: …" summary, so the whole chain is
+        # ● markers in the combo and the execution-order summary, so the whole chain is
         # visible without paging through the stack (independent of the shown page).
         for _label, _cb in self._filter_specs:
             _cb.toggled.connect(self._refresh_active_filters)
+            _cb.toggled.connect(self._update_response_plot)
 
         # Every widget that changes a detection parameter re-emits paramsChanged
         # (the AnalysisPanel recomputes the live preview from it).
@@ -3020,8 +3065,18 @@ class DetectionPanel(QWidget):
 
     # -- public API -------------------------------------------------------
     def show_preprocess_tab(self) -> None:
-        """Raise the Preprocess (signal-filter) tab."""
+        """Raise Preprocess without changing its current inner section."""
         self.mode_tabs.setCurrentWidget(self._preprocess_page)
+
+    def show_signal_chain(self) -> None:
+        """Raise Preprocess and reveal the ordered signal-chain controls."""
+        self.show_preprocess_tab()
+        self.preprocess_section_selector.setCurrentIndex(0)
+
+    def show_open_pore_baseline(self) -> None:
+        """Raise Preprocess and reveal the open-pore baseline controls."""
+        self.show_preprocess_tab()
+        self.preprocess_section_selector.setCurrentIndex(1)
 
     def show_detection_tab(self) -> None:
         """Raise the Detection (Schmitt threshold / polarity / run) tab."""
@@ -3057,13 +3112,11 @@ class DetectionPanel(QWidget):
         self._measure_layout.addWidget(widget)
 
     def set_baseline_widget(self, widget: QWidget) -> None:
-        """Install the owner's open-pore baseline controls at the top of Preprocess.
+        """Install the owner's controls in the Open-pore baseline subsection.
 
         Install-only, exactly like :meth:`set_measure_widget`: the panel reparents the
-        widget and never connects to it, reads it or gates it. It sits FIRST in the
-        Preprocess tab because the baseline is what every reported depth is measured
-        against -- it is the most consequential thing on that page, not an afterthought
-        below seven filter stages.
+        widget and never connects to it, reads it or gates it. The subsection label
+        keeps this reference estimator distinct from the Baseline drift filter stage.
         """
         self._baseline_slot.addWidget(widget)
 
@@ -4575,31 +4628,52 @@ class DetectionPanel(QWidget):
                 self._protocol_updating = False
 
     def _refresh_active_filters(self, *_a) -> None:
-        """Keep the active-filters indicator in sync with the enable checkboxes.
+        """Keep stage markers and the actual execution-order summary in sync.
 
-        Marks each enabled stage with a ``● `` prefix on its combo item and lists the
-        enabled stages in the ``Active: …`` summary label (``none`` when all off), so
-        the whole filter chain is visible without paging through the stack. Purely a
-        readout — it rewrites item TEXT (which fires ``currentTextChanged``, not
-        ``currentIndexChanged``), so the shown page and the current selection are left
-        exactly as the user set them."""
-        active: list[str] = []
+        Combo markers stay in editor order, while :func:`chain_description` supplies
+        the summary in the kernel's execution order. Thus the visible recipe cannot
+        silently diverge when a stage is reordered in the processing implementation.
+        """
         for i, (label, cb) in enumerate(self._filter_specs):
             on = cb.isChecked()
             self.filter_selector.setItemText(i, f"● {label}" if on else label)
-            if on:
-                active.append(label)
-        self.active_filters_label.setText(
-            "Active: " + (", ".join(active) if active else "none"))
+        params = self.params()
+        description = chain_description(params)
+        if self.hp_enabled.isChecked():
+            self.active_filters_label.setText(
+                "Candidate-localization order: "
+                + (description or "raw calibrated signal")
+                + ". Quantitative measurement: same order with high-pass omitted.")
+            self.filter_preview.setText(
+                "show candidate-localization trace on the plot")
+        else:
+            self.active_filters_label.setText(
+                "Active execution order: "
+                + (description or "raw calibrated signal (no stages enabled)"))
+            self.filter_preview.setText("show processed trace on the plot")
+        self._refresh_highpass_measurement_note()
         self._refresh_normalize_units_note()
+
+    def _refresh_highpass_measurement_note(self) -> None:
+        """Keep the classical dual-signal high-pass contract beside the chain."""
+        if not self.hp_enabled.isChecked():
+            self.highpass_measurement_label.setText("")
+            self.highpass_measurement_label.setVisible(False)
+            return
+        self.highpass_measurement_label.setText(
+            "HIGH-PASS IS FOR CANDIDATE LOCALIZATION ONLY: classical baseline, depth, "
+            "fractional blockade, mean/max amplitude and SNR are measured on the same "
+            "chain with high-pass omitted. Start/end, dwell, rise/fall and ECD "
+            "integration limits still inherit the high-pass-derived boundaries.")
+        self.highpass_measurement_label.setVisible(True)
 
     def _refresh_normalize_units_note(self, *_a) -> None:
         """Show/hide the group-level "this trace is no longer in pA" banner.
 
         The Normalize stage is the only one in the chain that changes the UNIT of the
-        signal the detector measures on, and every readout downstream (depth_pA, the
-        baseline, the exported columns, the Inspector) writes its pA label from the
-        channel's units rather than measuring them. So the disclosure cannot live on the
+        signal the detector measures on, and every current-derived readout downstream
+        (depth_pA, the baseline, pA/pA·s export fields, the Inspector amplitude) writes
+        its label from the channel's units rather than measuring it. So the disclosure cannot live on the
         Normalize page — it has to be visible from whichever page the user is on, for as
         long as the stage is enabled. That is what this label is."""
         if not self.normalize_enabled.isChecked():
@@ -4622,13 +4696,15 @@ class DetectionPanel(QWidget):
             clip = float(self.normalize_clip_sigma.value())
             self.normalize_units_label.setText(
                 f"⚠ NORMALIZE IS ON (model input): the detector measures a "
-                f"DIMENSIONLESS trace. Every depth, baseline and threshold below — and "
-                f"every exported column, which is still labelled pA — is in "
+                f"DIMENSIONLESS trace. Every current-derived depth, baseline and threshold "
+                f"below — and pA/pA·s export fields that retain those labels — is in "
                 f"event-excluded noise sigmas divided by {clip:g}, not picoamps, and is "
                 f"BOUNDED to [−1, +1]. Anything deeper than {clip:g}σ is CLIPPED: two "
                 f"events of different real depth come out identical above that, so a "
                 f"depth histogram, a fit or a subpopulation split across the bound is "
-                f"not measuring what it says.")
+                f"not measuring what it says. Fractional blockade (dI/I0) is invalid "
+                f"because normalization recenters the baseline toward zero; clipping can "
+                f"also change detected boundaries and counts.")
             self.normalize_units_label.setVisible(True)
             return
         unit = {
@@ -4638,8 +4714,10 @@ class DetectionPanel(QWidget):
         }.get(mode, "dimensionless units")
         self.normalize_units_label.setText(
             f"⚠ NORMALIZE IS ON ({mode}): the detector measures a DIMENSIONLESS trace. "
-            f"Every depth, baseline and threshold below — and every exported column, "
-            f"which is still labelled pA — is in {unit}, not picoamps.")
+            f"Current-derived depths, baselines and thresholds below — and pA/pA·s "
+            f"export fields that retain those labels — are in {unit}, not picoamps. "
+            f"Fractional blockade (dI/I0) is invalid because normalization recenters "
+            f"the baseline toward zero.")
         self.normalize_units_label.setVisible(True)
 
     def _on_filter_kind_changed(self, *_a) -> None:
@@ -4660,13 +4738,13 @@ class DetectionPanel(QWidget):
         cutoff = float(self.filter_cutoff_hz.value())
         kind = self.filter_kind_choice()
         order = int(self.filter_order.value())
-        # Guard the COST, not the correctness: the probe is ~40*fs/cutoff samples, so a
-        # very low cutoff at a high rate would freeze the GUI for a readout. Detection is
-        # unaffected (it runs off-thread and measures whatever was asked for).
+        # Guard the COST: the probe is ~40*fs/cutoff samples, so a very low cutoff at a
+        # high rate would freeze the GUI. The kernel applies this same limit to an actual
+        # run; moving the work off-thread must not turn an unsafe allocation into a safe one.
         if filters.rise_time_probe_samples(self._fs, cutoff) > self._MAX_RISE_PROBE_SAMPLES:
             self.rise_time_label.setText(
                 f"rise time: — (cutoff {cutoff:g} Hz is too low to measure live at "
-                f"{self._fs:g} Hz; detection still measures it)")
+                f"{self._fs:g} Hz; this configuration will be refused at run time)")
             return
         try:
             # Measured through the EXACT kind/order/cutoff the user selected — the same
@@ -4796,22 +4874,155 @@ class DetectionPanel(QWidget):
         self.response_cutoff_line.setVisible(False)
         self.response_note.setText(note)
 
+    @staticmethod
+    def _response_state_note(label: str, enabled: bool) -> str:
+        """Plain-language status for the selected stage's design preview."""
+        if enabled:
+            if label == "High-pass":
+                return (
+                    "High-pass is ON for candidate localization only and is omitted "
+                    "from quantitative measurement."
+                )
+            return f"{label} is ON and included in the execution chain."
+        return f"{label} is OFF; this is a design preview only and is not applied."
+
+    def _active_linear_response_stages(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """The enabled chain split into plottable LTI stages and honest omissions.
+
+        Order mirrors :func:`analysis.modules.preprocess_for_detection`, with the
+        detector-owned low-pass last. Magnitude multiplication is commutative, but
+        preserving execution order keeps this recipe useful beside the visible chain
+        description and prevents a future stateful stage from being casually reordered.
+        """
+        stages: list[dict[str, Any]] = []
+        omitted: list[str] = []
+        if self.notch_enabled.isChecked():
+            stages.append({
+                "stage": "notch",
+                "freq_hz": float(self.notch_freq_hz.value()),
+                "q": float(self.notch_q.value()),
+                "harmonics": int(self.notch_harmonics.value()),
+                "freqs": self.notch_lines_choice(),
+            })
+        if self.median_enabled.isChecked():
+            omitted.append("Median (nonlinear rank filter)")
+        if self.hp_enabled.isChecked():
+            stages.append({
+                "stage": "highpass",
+                "cutoff_hz": float(self.hp_cutoff_hz.value()),
+                "order": int(self.hp_order.value()),
+                "kind": self.hp_kind_choice(),
+            })
+        if self.detrend_enabled.isChecked():
+            omitted.append("Baseline drift (signal-dependent estimator)")
+        if self.rmean_enabled.isChecked():
+            stages.append({
+                "stage": "running_mean",
+                "window_s": float(self.rmean_window_s.value()),
+            })
+        if self.savgol_enabled.isChecked():
+            stages.append({
+                "stage": "savgol",
+                "window_s": float(self.savgol_window_s.value()),
+                "polyorder": int(self.savgol_polyorder.value()),
+            })
+        if self.normalize_enabled.isChecked():
+            omitted.append("Normalize (data-dependent affine/nonlinear rescale)")
+        if self.filter_enabled.isChecked():
+            stages.append({
+                "stage": "lowpass",
+                "cutoff_hz": float(self.filter_cutoff_hz.value()),
+                "order": int(self.filter_order.value()),
+                "kind": self.filter_kind_choice(),
+            })
+        return stages, omitted
+
+    def _update_combined_response_plot(self) -> None:
+        """Draw the enabled linear cascade, naming the dual path when HP is on."""
+        stages, omitted = self._active_linear_response_stages()
+        highpass_localization = self.hp_enabled.isChecked()
+        response_scope = (
+            "Candidate-localization" if highpass_localization else "Active-chain")
+        self.response_plot.setTitle(
+            f"{response_scope} response — {len(stages)} linear stage(s) ON")
+        self.response_curve.setPen(pg.mkPen("#E69F00", width=2, style=Qt.SolidLine))
+        self.response_cutoff_line.setVisible(False)
+        if self._fs is None:
+            self._clear_response(
+                f"{response_scope} response needs a channel with a known sample rate.")
+            return
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                f, mag = filters.combined_response(stages, self._fs, n=2048)
+        except Exception as exc:  # noqa: BLE001 — a preview must never crash the panel
+            self._clear_response(f"{response_scope} response unavailable ({exc})")
+            return
+
+        db = filters.response_db(mag)
+        self.response_curve.setData(f, db)
+        self.response_plot.setYRange(max(-80.0, float(np.min(db)) - 3.0),
+                                     max(3.0, float(np.max(db)) + 1.0))
+        if stages:
+            names = " → ".join(str(stage["stage"]).replace("_", " ") for stage in stages)
+            note = (
+                f"{response_scope} linear cascade: {names}. This curve is the "
+                "pointwise product "
+                "on one shared grid and includes the steady-state zero-phase |H|² "
+                "semantics. Finite-record end padding is reported by the relevant stage."
+            )
+        else:
+            note = "No enabled linear stages: the active linear response is unity (0 dB)."
+        if highpass_localization:
+            note += (
+                " This curve includes high-pass for candidate localization. The "
+                "classical event-table measurement cascade omits high-pass; its baseline, depth, "
+                "fractional blockade, mean/max amplitude and SNR come from that companion "
+                "branch, while boundary-dependent timing and ECD limits inherit the "
+                "localized candidates. Every other enabled stage still applies, including "
+                "Normalize when selected."
+            )
+        if omitted:
+            note += (
+                " Not included in |H(f)| because no honest fixed transfer function "
+                "exists: " + "; ".join(omitted) + "."
+            )
+        self.response_note.setText(note)
+
     def _update_response_plot(self, *_a) -> None:
         """Redraw |H(f)| for the selected stage at its current parameters.
 
         Everything numeric here comes from :func:`filters.response`; this method only
-        decides what to draw and what to say about it. The curve is the response AS
-        APPLIED — squared for the zero-phase IIR stages — which is the whole point:
-        the -6 dB-at-the-nominal-cutoff reality becomes something you can see rather
-        than a sentence in a docstring.
+        decides what to draw and what to say about it. The curve shows the selected
+        design's response (squared for zero-phase IIR stages), while the title and note
+        explicitly distinguish an enabled stage from an OFF design preview.
         """
+        if self.response_chain_check.isChecked():
+            self._update_combined_response_plot()
+            return
+
         idx = self.filter_selector.currentIndex()
         label = self._filter_specs[idx][0] if idx < len(self._filter_specs) else ""
+        enabled = bool(
+            idx < len(self._filter_specs) and self._filter_specs[idx][1].isChecked())
+        state = (
+            "ON · candidate localization only"
+            if enabled and label == "High-pass"
+            else "ON · included in execution chain"
+            if enabled else "OFF · design preview only")
+        self.response_plot.setTitle(f"{label} response — {state}")
+        self.response_curve.setPen(pg.mkPen(
+            "#56B4E9" if enabled else "#8b9199", width=2,
+            style=Qt.SolidLine if enabled else Qt.DashLine))
+        state_note = self._response_state_note(label, enabled)
         spec = self._response_args()
         if spec is None:
             if idx == 3:
                 self._clear_response(
-                    "A sliding median is a NON-LINEAR rank filter: it has no transfer "
+                    f"{state_note} A sliding median is a NON-LINEAR rank filter: it has "
+                    "no transfer "
                     "function, so there is no |H(f)| to draw. It deletes spikes shorter "
                     "than about half its window while leaving a square edge intact — that "
                     "behaviour cannot be expressed as a frequency response.")
@@ -4820,21 +5031,22 @@ class DetectionPanel(QWidget):
                 # The thing worth saying about this stage is what it costs, so the
                 # space the curve would have occupied says that instead.
                 self._clear_response(
-                    "Normalize is a single affine rescale of the WHOLE trace — one "
-                    "gain, applied to every frequency alike — so its |H(f)| is a flat "
-                    "line and there is nothing to see. What it does change is the "
-                    "UNIT: the detector then measures a dimensionless trace, and every "
-                    "depth, baseline and exported column downstream is still labelled "
-                    "pA while no longer being in pA.")
+                    f"{state_note} Normalize is data-dependent, and model-input mode "
+                    "also clips, so there is no fixed |H(f)| to draw. It changes the "
+                    "UNIT: the detector then measures a dimensionless trace. "
+                    "Current-derived depth/baseline readouts and pA/pA·s export fields "
+                    "retain their legacy labels while no longer being in physical units; "
+                    "fractional blockade (dI/I0) is invalid after centering.")
             else:
                 self._clear_response(
-                    "Baseline drift removal is an ESTIMATOR (it fits and subtracts a slow "
+                    f"{state_note} Baseline drift removal is an ESTIMATOR (it fits and "
+                    "subtracts a slow "
                     "open-pore envelope), not a linear filter, so it has no single |H(f)|. "
                     "Its effect depends on the trace it is fitted to.")
             return
         if self._fs is None:
             self._clear_response(
-                f"{label}: select a channel with a known sample rate to see its "
+                f"{state_note} Select a channel with a known sample rate to see its "
                 "frequency response.")
             return
 
@@ -4848,7 +5060,7 @@ class DetectionPanel(QWidget):
                 warnings.simplefilter("ignore", RuntimeWarning)
                 f, mag = filters.response(stage, self._fs, **kwargs)
         except Exception as exc:  # noqa: BLE001 — a preview must never crash the panel
-            self._clear_response(f"{label}: response unavailable ({exc})")
+            self._clear_response(f"{state_note} Response unavailable ({exc})")
             return
 
         db = filters.response_db(mag)
@@ -4863,28 +5075,30 @@ class DetectionPanel(QWidget):
             self.response_cutoff_line.setVisible(True)
         else:
             self.response_cutoff_line.setVisible(False)
-        self.response_note.setText(self._response_note_text(stage, kwargs, f, mag))
+        self.response_note.setText(
+            f"{state_note} {self._response_note_text(stage, kwargs, f, mag)}")
 
     def _response_note_text(
         self, stage: str, kwargs: dict[str, Any], f: np.ndarray, mag: np.ndarray
     ) -> str:
-        """The one-line verdict under the curve: what the applied response really does.
+        """The one-line verdict under the curve: what the selected design does.
 
         Only reached from :meth:`_update_response_plot` after it has established that the
         rate is known, so ``self._fs`` is never None here."""
         fs = float(self._fs or 0.0)
         if stage in ("lowpass", "highpass"):
+            stage_label = "Low-pass" if stage == "lowpass" else "High-pass"
             nominal = float(kwargs["cutoff_hz"])
             at_nominal = float(np.interp(nominal, f, filters.response_db(mag)))
             true_corner = filters.response_crossing_hz(f, mag)
             kind = kwargs["kind"]
             zero_phase_note = (
-                "applied once (symmetric kernel)"
+                "single-pass symmetric kernel"
                 if kind in filters.KINDS_WITHOUT_ORDER
                 else "zero-phase, so |H| is SQUARED"
             )
             text = (
-                f"At the nominal {nominal:g} Hz the applied response is "
+                f"{stage_label}: at the nominal {nominal:g} Hz the designed response is "
                 f"{at_nominal:.1f} dB — {zero_phase_note}."
             )
             if true_corner:
@@ -4901,13 +5115,28 @@ class DetectionPanel(QWidget):
             deepest = float(filters.response_db(mag).min())
             narrowest = min(lines) if lines else float(kwargs["freq_hz"])
             spelling = "explicit line list" if explicit else "fundamental + harmonics"
+            settle_s = filters.notch_settle_s(
+                fs, float(kwargs["freq_hz"]), q=float(kwargs["q"]),
+                harmonics=int(kwargs["harmonics"]), freqs=explicit)
+            settle_samples = int(np.ceil(settle_s * fs))
+            cost = (
+                f" Required settling pad: {settle_s:.3g} s "
+                f"({settle_samples:,} samples per side)."
+            )
+            if settle_samples > filters.MAX_NOTCH_PAD_SAMPLES:
+                cost += (
+                    f" UNSAFE on a long trace: this exceeds the "
+                    f"{filters.MAX_NOTCH_PAD_SAMPLES:,}-sample kernel limit and the run "
+                    "will be refused; remove or raise the lowest-frequency line, or "
+                    "lower Q."
+                )
             return (
                 f"Notching {len(lines)} line(s) ({spelling}): "
                 f"{', '.join(f'{x:g}' for x in lines)} Hz, deepest {deepest:.0f} dB. "
                 "Lines at or above Nyquist are skipped. A Q of "
                 f"{float(kwargs['q']):g} at {narrowest:g} Hz is a "
                 f"~{narrowest / float(kwargs['q']):.2g} Hz-wide notch, "
-                "and it rings for roughly the inverse of that at each end of the trace."
+                "and it rings at each end of the trace." + cost
             )
         # The two window smoothers: their -3 dB point is the number that matters, because
         # it is routinely far BELOW the low-pass cutoff and nothing else in the app says so.

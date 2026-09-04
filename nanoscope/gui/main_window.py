@@ -51,6 +51,15 @@ from .analysis_launcher import (
     SURFACE_VDEP,
     AnalysisLauncher,
 )
+from .analysis_explorer import (
+    AnalysisExplorer,
+    PAGE_DISTRIBUTIONS,
+    PAGE_EVENT_WAVEFORMS,
+    PAGE_IV,
+    PAGE_NOISE,
+    PAGE_SUBPOPULATIONS,
+    PAGE_VOLTAGE_SERIES,
+)
 from .analysis_panel import AnalysisPanel
 from .analysis_worker import AnalysisController, BatchDetectController
 from ..core import clock
@@ -637,6 +646,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plots_window = None   # the single, lazily-built PlotsWindow
         self._iv_window = None   # the single, lazily-built IVWindow
         self._vdep_window = None   # the single, lazily-built VDepWindow
+        # One top-level home for the analytical surfaces above/below.  The individual
+        # attributes remain the authoritative page objects for compatibility and for
+        # the v11 workspace adapters; the Explorer only organises their presentation.
+        self._analysis_explorer: AnalysisExplorer | None = None
         self._event_inspector = None   # the single, lazily-built EventInspectorWindow
         self._event_gallery = None     # the single, lazily-built EventGalleryWindow
         #: ``(accept, n_shown, n_events)`` while one of the gallery's "all shown" buttons is
@@ -1076,8 +1089,8 @@ class MainWindow(QtWidgets.QMainWindow):
         act_reset = view_menu.addAction("&Reset zoom")
         act_reset.setShortcut(QtGui.QKeySequence("Ctrl+0"))
         act_reset.setToolTip(
-            "Zoom all the way back out to the full trace (or double-click the plot). "
-            "Home does it too, while the trace itself has focus.")
+            "Zoom all the way back out to the full trace. The Full button below the plot "
+            "does the same; Home also works while the trace itself has focus.")
         act_reset.triggered.connect(self._trace_view.reset_zoom)
         # HOME IS SCOPED TO THE TRACE, NOT TO THE WINDOW.
         #
@@ -1094,8 +1107,8 @@ class MainWindow(QtWidgets.QMainWindow):
         #
         # So the binding lives on the TRACE VIEW with WidgetWithChildrenShortcut: it fires
         # when the thing Home would reset is the thing that has focus, and every item view
-        # keeps the standard "go to the top" key. Ctrl+0 (and the double-click, and Zoom
-        # Back) still reset the zoom from anywhere.
+        # keeps the standard "go to the top" key. Ctrl+0 and the visible Full button still
+        # reset the zoom without taking that key away from tables.
         self._home_reset_shortcut = QtGui.QShortcut(
             QtGui.QKeySequence("Home"), self._trace_view)
         self._home_reset_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
@@ -1132,7 +1145,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_boxzoom.setChecked(True)   # default: drag a box around an event to dive in
         self._act_boxzoom.setToolTip(
             "On: left-drag frames a region and zooms into it (dive inside an event). "
-            "Off: left-drag pans. The mouse wheel always zooms time.")
+            "Off: left-drag pans. The mouse wheel moves the signal vertically; use −/+ "
+            "in the Scan strip to change the time scale.")
         self._act_boxzoom.toggled.connect(self._trace_view.set_drag_mode)
 
         view_menu.addSeparator()
@@ -1319,7 +1333,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_psd = analysis_menu.addAction("Power &spectrum (noise / PSD)…")
         self._act_psd.setToolTip(
             "Open the current-noise power spectrum for a recording's current channel: "
-            "the log-log PSD that separates 1/f (flicker), the thermal/white floor and "
+            "the log-log PSD that separates 1/f (flicker), a mid-log-frequency median "
+            "proxy and "
             "the high-frequency dielectric/capacitance rise, plus band-integrated RMS "
             "noise. Pore quality control on the RAW calibrated trace — no detection needed.")
         self._act_psd.setEnabled(False)
@@ -1697,7 +1712,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reveal_calibration_panel()
         elif stage is Stage.FILTER:
             self._reveal_detection_panel()
-            self._analysis_panel.detection_panel.show_preprocess_tab()
+            self._analysis_panel.detection_panel.show_signal_chain()
         elif stage is Stage.DETECT:
             self._reveal_detection_panel()
             self._analysis_panel.detection_panel.show_detection_tab()
@@ -2891,6 +2906,7 @@ class MainWindow(QtWidgets.QMainWindow):
         step("workflow", self._refresh_workflow_status)         # ...and the chip + strip track
         step("Create segment", self._sync_create_segment_action)  # ...and its gate follows
         step("analysis surfaces", self._sync_analysis_surfaces)   # ...and the six surface gates
+        step("Analysis Explorer", self._refresh_analysis_explorer_header)
         step("Undo", self._sync_undo_actions)   # ...and Edit ▸ Undo names THIS table's last step
 
         if failures:
@@ -3965,17 +3981,30 @@ class MainWindow(QtWidgets.QMainWindow):
                                 "_nanoscope_workspace_accepted_event_ids"):
                     if hasattr(self._subpop_window, sidecar):
                         delattr(self._subpop_window, sidecar)
-            for name in ("_psd_window", "_event_plot_window",
-                         "_iv_window", "_vdep_window"):
+            reset_pages = {
+                "_psd_window": PAGE_NOISE,
+                "_event_plot_window": PAGE_EVENT_WAVEFORMS,
+                "_iv_window": PAGE_IV,
+                "_vdep_window": PAGE_VOLTAGE_SERIES,
+            }
+            for name, page_id in reset_pages.items():
                 window = getattr(self, name, None)
                 if window is None:
                     continue
+                if self._analysis_explorer is not None:
+                    self._analysis_explorer.remove_page(page_id)
                 try:
                     window.hide()
                     window.deleteLater()
                 except RuntimeError:
                     pass
                 setattr(self, name, None)
+            # If the outgoing project had only disposable numerical pages open, do not
+            # leave an empty Analysis Explorer floating over the newly reset workspace.
+            # The shell object is retained and will reopen with the next lazy page.
+            if (self._analysis_explorer is not None
+                    and self._analysis_explorer.page_count() == 0):
+                self._analysis_explorer.close()
             self._drop_subpop_assignment()
             self._subpop_pending = False
             self._subpop_source_recipe_pending = None
@@ -3999,6 +4028,114 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_analysis_open_state()
 
     # -- "this window is already open" indication ------------------------------------------------
+    def _ensure_analysis_explorer(self) -> AnalysisExplorer:
+        """Build the single analytical shell without constructing any analysis page.
+
+        Pages remain lazy because several of their constructors perform real numerical
+        work.  The Explorer is presentation only; every existing page attribute and
+        workspace adapter remains the source of truth.
+        """
+        if self._analysis_explorer is None:
+            self._analysis_explorer = AnalysisExplorer(
+                self,
+                context_provider=self._analysis_explorer_context,
+                status_provider=self._analysis_explorer_status,
+            )
+            self._analysis_explorer.visibilityChanged.connect(
+                lambda _visible: self._sync_analysis_open_state())
+        return self._analysis_explorer
+
+    def _analysis_explorer_context(self) -> str:
+        """Short recording context shared by every Explorer page."""
+        documents = list(self._session.documents())
+        count = len(documents)
+        if (self._current_selection is not None
+                and self._session.has_document(self._current_selection[0])):
+            doc_id, channel = self._current_selection
+            name = self._session.document(doc_id).display_name
+            suffix = f" · {count} recording{'s' if count != 1 else ''} open"
+            return f"{name} · channel {int(channel) + 1}{suffix}"
+        if count:
+            return f"{count} recording{'s' if count != 1 else ''} open · none selected"
+        return "No recordings open"
+
+    @staticmethod
+    def _analysis_page_artifact(page_id: str) -> str | None:
+        return {
+            PAGE_DISTRIBUTIONS: PLOTS_ARTIFACT_ID,
+            PAGE_EVENT_WAVEFORMS: EVENT_PLOTS_ARTIFACT_ID,
+            PAGE_NOISE: PSD_ARTIFACT_ID,
+            PAGE_IV: IV_ARTIFACT_ID,
+            PAGE_VOLTAGE_SERIES: VOLTAGE_DEPENDENCE_ARTIFACT_ID,
+            PAGE_SUBPOPULATIONS: SUBPOPULATION_ARTIFACT_ID,
+        }.get(page_id)
+
+    def _analysis_explorer_status(
+            self, page_id: str, page: QtWidgets.QWidget) -> tuple[str, str]:
+        """Return the visible page's freshness label without recomputing anything."""
+        if page_id == PAGE_DISTRIBUTIONS and bool(getattr(page, "_stale", False)):
+            return "STALE", "stale"
+        artifact_id = self._analysis_page_artifact(page_id)
+        if artifact_id in self._workspace_frozen:
+            return "SAVED SNAPSHOT", "snapshot"
+        if artifact_id in self._workspace_pending:
+            return "SAVED SNAPSHOT", "snapshot"
+
+        if page_id == PAGE_DISTRIBUTIONS:
+            has_data = bool(page.sources())
+        elif page_id in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE):
+            has_data = bool(page.has_data())
+        elif page_id in (PAGE_IV, PAGE_VOLTAGE_SERIES):
+            has_data = bool(page.points())
+        elif page_id == PAGE_SUBPOPULATIONS:
+            has_data = page.report() is not None
+        else:  # pragma: no cover - AnalysisExplorer rejects unknown page ids
+            has_data = False
+        return ("CURRENT", "current") if has_data else ("NO DATA", "empty")
+
+    def _show_analysis_page(
+            self, page_id: str, page: QtWidgets.QWidget, *, refresh=None) -> None:
+        """Put an existing analytical widget in the one Explorer and focus it."""
+        explorer = self._ensure_analysis_explorer()
+        explorer.show_page(
+            page_id, page, refresh=refresh,
+            activate=lambda _id=page_id: self._activate_analysis_page(_id),
+        )
+        self._sync_analysis_open_state()
+
+    def _activate_analysis_page(self, page_id: str) -> None:
+        """Refresh a live page reached directly through the Explorer's tab bar.
+
+        This is deliberately different from the shared explicit Refresh button: a tab
+        switch follows ordinary live session navigation and never replaces a frozen
+        project snapshot.  The callback runs synchronously from ``currentChanged``, before
+        Qt returns to the event loop to paint the newly-selected page.
+        """
+        if self._workspace_installing or self._workspace_navigating or self._restoring:
+            return
+        artifact_id = self._analysis_page_artifact(page_id)
+        if artifact_id in self._workspace_frozen or artifact_id in self._workspace_pending:
+            self._refresh_analysis_explorer_header()
+            return
+        if page_id == PAGE_DISTRIBUTIONS and self._plots_window is not None:
+            self._refresh_plots()
+        elif page_id == PAGE_EVENT_WAVEFORMS and self._event_plot_window is not None:
+            self._refresh_event_plots()
+        elif page_id == PAGE_NOISE and self._psd_window is not None:
+            self._point_psd_at_selection()
+        elif page_id == PAGE_IV and self._iv_window is not None:
+            self._iv_window.refresh()
+        elif page_id == PAGE_VOLTAGE_SERIES and self._vdep_window is not None:
+            self._vdep_window.refresh()
+        elif page_id == PAGE_SUBPOPULATIONS and self._subpop_window is not None:
+            self._sync_subpop_window()
+        self._refresh_analysis_explorer_header()
+
+    def _refresh_analysis_explorer_header(self) -> None:
+        explorer = self._analysis_explorer
+        if explorer is not None:
+            explorer.refresh_header()
+
     def _surface_windows(self) -> dict:
         """Surface id -> its single lazily-built window (``None`` until first opened).
 
@@ -4017,9 +4154,25 @@ class MainWindow(QtWidgets.QMainWindow):
         """Tint the launcher buttons whose window is currently on screen (these windows are
         single instances that re-focus rather than re-open, so 'open' is worth saying)."""
         windows = self._surface_windows()
+        explorer = self._analysis_explorer
+        explorer_pages = {
+            SURFACE_POPULATIONS: PAGE_DISTRIBUTIONS,
+            SURFACE_EVENT_PLOTS: PAGE_EVENT_WAVEFORMS,
+            SURFACE_PSD: PAGE_NOISE,
+            SURFACE_IV: PAGE_IV,
+            SURFACE_VDEP: PAGE_VOLTAGE_SERIES,
+        }
         for sid in SURFACE_ORDER:
             win = windows.get(sid)
-            self._analysis_launcher.set_open(sid, win is not None and win.isVisible())
+            page_id = explorer_pages.get(sid)
+            in_open_explorer = bool(
+                explorer is not None and explorer.isVisible() and page_id is not None
+                and explorer.page(page_id) is win
+                and win is not None
+                and not bool(win.property("nanoscopeAnalysisExplorerClosing"))
+            )
+            self._analysis_launcher.set_open(
+                sid, in_open_explorer or (win is not None and win.isVisible()))
 
     def _watch_surface_window(self, win) -> None:
         """Track a just-built surface window's show/hide so the launcher's open indication stays
@@ -4162,6 +4315,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if (_on_screen(self._vdep_window)
                 and VOLTAGE_DEPENDENCE_ARTIFACT_ID not in self._workspace_frozen):
             self._vdep_window.refresh()     # every open recording's voltage point
+        self._refresh_analysis_explorer_header()
 
     def _reconcile_level_fit(self) -> None:
         """Drop the sub-state levels of every event whose span no longer matches them.
@@ -4474,6 +4628,23 @@ class MainWindow(QtWidgets.QMainWindow):
             # however; checkpoint their latest programmatic refresh and let their existing
             # opener follow the current session when shown again (the Stage-5 contract).
             if event.type() == QtCore.QEvent.Hide and not self._workspace_installing:
+                # A page hidden because another Analysis Explorer tab came forward was
+                # not closed.  In particular, PlotsWindow has NOT run its closeEvent and
+                # has not reset itself, so applying the old standalone-window rule here
+                # would falsely mark an intact page as pending restoration.  An actual
+                # page/shell close is flagged by AnalysisExplorer before the Hide event.
+                tab_switch = (
+                    bool(obj.property("nanoscopeAnalysisExplorerPage"))
+                    and not bool(obj.property("nanoscopeAnalysisExplorerClosing"))
+                )
+                if tab_switch:
+                    artifact_id = self._workspace_window_id(obj)
+                    if artifact_id and self._workspace_has_artifact(artifact_id):
+                        # Preserve the latest live result just as a standalone Hide did,
+                        # but do not mark the intact page pending: unlike closeEvent, a
+                        # tab switch has neither reset nor discarded its widget state.
+                        self._checkpoint_workspace_surface(artifact_id)
+                    return super().eventFilter(obj, event)
                 artifact_id = self._workspace_window_id(obj)
                 if artifact_id and self._workspace_has_artifact(artifact_id):
                     if (artifact_id == PLOTS_ARTIFACT_ID
@@ -4532,28 +4703,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_surface_gate(SURFACE_POPULATIONS)
 
     def _open_plots(self) -> None:
-        """Analysis ▸ Plots… — open (or re-focus) the single standalone PlotsWindow,
-        snapshotting the current event/measurement tables into it. MainWindow stays
-        the only panel-importer: it constructs the window, hands it the sources,
-        and wires Refresh back to a fresh snapshot; the window talks to nothing else."""
+        """Open the Distributions page of the single Analysis Explorer."""
         from .plots_panel import PlotsWindow
 
         if _on_screen(self._plots_window):
-            self._plots_window.raise_()
-            self._plots_window.activateWindow()
+            self._show_analysis_page(
+                PAGE_DISTRIBUTIONS, self._plots_window,
+                refresh=lambda: self._replace_workspace_surface(
+                    PLOTS_ARTIFACT_ID, self._refresh_plots))
             return
         if self._plots_window is None:
             self._plots_window = PlotsWindow(self._session, self)
             self._plots_window.refreshRequested.connect(
                 lambda: self._replace_workspace_surface(
                     PLOTS_ARTIFACT_ID, self._refresh_plots))
+            self._plots_window.eventRowsSelected.connect(
+                self._on_plot_event_rows_selected)
             self._watch_surface_window(self._plots_window)
             self._watch_workspace_surface(PLOTS_ARTIFACT_ID, self._plots_window)
         self._refresh_plots()
         self._restore_workspace_surface(PLOTS_ARTIFACT_ID, self._plots_window)
-        self._plots_window.show()
-        self._plots_window.raise_()
-        self._plots_window.activateWindow()
+        self._show_analysis_page(
+            PAGE_DISTRIBUTIONS, self._plots_window,
+            refresh=lambda: self._replace_workspace_surface(
+                PLOTS_ARTIFACT_ID, self._refresh_plots))
 
     def _refresh_plots(self) -> None:
         """(Re-)push the current snapshot into the open PlotsWindow — the target of
@@ -4571,6 +4744,134 @@ class MainWindow(QtWidgets.QMainWindow):
             self._plots_window.set_active_detection(self.active_detection_key())
             self._plots_window.set_data(self._plots_sources())
 
+    @QtCore.Slot(str, object)
+    def _on_plot_event_rows_selected(self, source_key: str, row_ids: object) -> None:
+        """Link clicked Scatter/PCA points back to their event table and trace span.
+
+        ``PlotsWindow`` emits detector ``event_id`` values (not dataframe labels or plot
+        positions). Cross the window boundary with that stable identity already used by
+        the table, Gallery and Inspector. No curation is changed by this navigation.
+        """
+        from ..analysis.events import EventSet
+
+        plots = self._plots_window
+        if plots is None:
+            return
+        source = next((item for item in plots.sources()
+                       if item.key == str(source_key)), None)
+        if source is None:
+            self.statusBar().showMessage(
+                "That plotted source is no longer available. Refresh the plot and try again.",
+                8000)
+            return
+        if (source.kind != "detection" or source.doc_id is None
+                or source.channel is None or not source.module_id):
+            self.statusBar().showMessage(
+                "Manual-measurement points are not rows in a detector event table.", 7000)
+            return
+        if not self._session.has_document(source.doc_id):
+            self.statusBar().showMessage(
+                "That point belongs to a recording that is no longer open. Refresh the plot.",
+                8000)
+            return
+        result = self._session.results.get(
+            source.doc_id, int(source.channel), str(source.module_id))
+        if result is None or not isinstance(result.payload, EventSet):
+            self.statusBar().showMessage(
+                "That detector result is no longer loaded. Refresh the plot before selecting it.",
+                8000)
+            return
+        # A detector rerun replaces the EventSet but normally starts event_id at zero
+        # again.  Matching only those integers could therefore turn a click on a frozen
+        # saved plot into navigation to a different, newly detected event. PlotSource is
+        # fed the live EventSet frame by reference, so object identity is the exact and
+        # inexpensive generation guard; ordinary in-place curation keeps that identity.
+        if source.df is not result.payload.df:
+            self.statusBar().showMessage(
+                "This plot belongs to an earlier detector run. Refresh it before selecting "
+                "an event.", 9000)
+            return
+
+        try:
+            wanted = tuple(row_ids or ())
+        except TypeError:
+            wanted = ()
+        if not wanted:
+            # Additive clicking can toggle the final point off.  Clear only when the
+            # table is showing this same source; never erase another detector's selection.
+            active = self._analysis_panel.current_detection()
+            if (active is result
+                    or (active is not None and active.doc_id == result.doc_id
+                        and int(active.channel) == int(result.channel)
+                        and active.module_id == result.module_id)):
+                self._analysis_panel._table.view.clearSelection()
+            return
+
+        frame = source.df
+        if "event_id" not in frame.columns:
+            self.statusBar().showMessage(
+                "These plotted rows have no event identifiers to link back to the trace.",
+                8000)
+            return
+        plotted_ids = set(int(value) for value in frame["event_id"].tolist())
+        event_ids: list[int] = []
+        for value in wanted:
+            try:
+                event_id = int(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if event_id in plotted_ids and event_id not in event_ids:
+                event_ids.append(event_id)
+        if not event_ids:
+            self.statusBar().showMessage(
+                "Those plotted events are no longer present. Refresh the plot and try again.",
+                8000)
+            return
+        if "event_id" not in result.payload.df.columns:
+            self.statusBar().showMessage(
+                "The live detector table has no event identifiers to receive this selection.",
+                8000)
+            return
+        live_ids = set(int(value) for value in
+                       result.payload.df["event_id"].tolist())
+        event_ids = list(dict.fromkeys(value for value in event_ids if value in live_ids))
+        if not event_ids:
+            self.statusBar().showMessage(
+                "The selected events were replaced after this plot was drawn. Refresh the plot.",
+                8000)
+            return
+
+        target = (source.doc_id, int(source.channel))
+        if self._current_selection != target:
+            if not self._file_dock.focus_channel(*target):
+                self._on_selection(*target)
+
+        # Selecting the source recording can legitimately choose another stored detector
+        # by default.  Move the existing result selector onto the source that was plotted;
+        # this is its ordinary, non-mutating view-switch path.
+        selector = self._analysis_panel._result_selector
+        result_index = selector.findData(str(source.module_id))
+        if result_index < 0:
+            self.statusBar().showMessage(
+                "The plotted detector is no longer available in the event table. Refresh the plot.",
+                8000)
+            return
+        if selector.currentIndex() != result_index:
+            selector.setCurrentIndex(result_index)
+        else:
+            self._analysis_panel._show_result_choice(result_index)
+
+        # Focus the last clicked/extended event on the trace, then restore the complete
+        # plot selection in the table.  Calling these in the opposite order would let the
+        # single-event focus collapse an intentional multi-point selection.
+        focus_id = int(event_ids[-1])
+        self._analysis_panel.select_event(focus_id)
+        self._analysis_panel._table._restore_selection(event_ids, focus_id)
+        noun = "event" if len(event_ids) == 1 else "events"
+        self.statusBar().showMessage(
+            f"Selected {len(event_ids):,} {noun} from the plot; the event table and trace "
+            f"are focused on event {focus_id}.", 7000)
+
     # -- event-plots window (density / ensemble) -------------------------------------------------
     def _event_plots_ready(self) -> bool:
         """True when the active detection has at least one ACCEPTED event — the gate for
@@ -4584,15 +4885,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_surface_gate(SURFACE_EVENT_PLOTS)
 
     def _open_event_plots(self) -> None:
-        """Analysis ▸ Event plots… — open (or re-focus) the single EventPlotWindow, pushing
-        the active detection's EventSet into it. MainWindow stays the only panel-importer: it
-        builds the window (handing it the Session it pulls the calibrated signal from), pushes
-        the events, and wires Refresh back to a fresh snapshot; the window talks to nothing else."""
+        """Open the Event waveforms page of the single Analysis Explorer."""
         from .event_plot_panel import EventPlotWindow
 
         if _on_screen(self._event_plot_window):
-            self._event_plot_window.raise_()
-            self._event_plot_window.activateWindow()
+            self._show_analysis_page(
+                PAGE_EVENT_WAVEFORMS, self._event_plot_window,
+                refresh=lambda: self._replace_workspace_surface(
+                    EVENT_PLOTS_ARTIFACT_ID, self._refresh_event_plots))
             return
         pending = EVENT_PLOTS_ARTIFACT_ID in self._workspace_pending
         if self._event_plot_window is None:
@@ -4614,9 +4914,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # Its completed numerical view is now project work even before another knob
             # is touched, so checkpoint it and advance recovery like every other result.
             self._on_workspace_changed(EVENT_PLOTS_ARTIFACT_ID)
-        self._event_plot_window.show()
-        self._event_plot_window.raise_()
-        self._event_plot_window.activateWindow()
+        self._show_analysis_page(
+            PAGE_EVENT_WAVEFORMS, self._event_plot_window,
+            refresh=lambda: self._replace_workspace_surface(
+                EVENT_PLOTS_ARTIFACT_ID, self._refresh_event_plots))
 
     def _refresh_event_plots(self) -> None:
         """(Re-)push the active detection (doc/channel + EventSet) into the open EventPlotWindow,
@@ -4673,15 +4974,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_surface_gate(SURFACE_IV)
 
     def _open_iv(self) -> None:
-        """Analysis ▸ I-V / Conductance… — open (or re-focus) the single IVWindow and re-gather
-        its points. MainWindow stays the only panel-importer: it constructs the window (handing it
-        the Session it reads open documents from) and refreshes it; the window talks to nothing
-        else."""
+        """Open the I-V page of the single Analysis Explorer."""
         from .iv_panel import IVWindow
 
         if _on_screen(self._iv_window):
-            self._iv_window.raise_()
-            self._iv_window.activateWindow()
+            self._show_analysis_page(
+                PAGE_IV, self._iv_window,
+                refresh=lambda: self._replace_workspace_surface(
+                    IV_ARTIFACT_ID, self._iv_window.refresh))
             return
         pending = IV_ARTIFACT_ID in self._workspace_pending
         if self._iv_window is None:
@@ -4699,9 +4999,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._iv_window.refresh()
         if not pending and self._iv_window.points():
             self._on_workspace_changed(IV_ARTIFACT_ID)
-        self._iv_window.show()
-        self._iv_window.raise_()
-        self._iv_window.activateWindow()
+        self._show_analysis_page(
+            PAGE_IV, self._iv_window,
+            refresh=lambda: self._replace_workspace_surface(
+                IV_ARTIFACT_ID, self._iv_window.refresh))
 
     # -- voltage-dependence window ---------------------------------------------------------------
     def _vdep_ready_count(self) -> int:
@@ -4739,15 +5040,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_surface_gate(SURFACE_VDEP)
 
     def _open_vdep(self) -> None:
-        """Analysis ▸ Voltage dependence… — open (or re-focus) the single VDepWindow and
-        re-gather its points. MainWindow stays the only panel-importer: it constructs the
-        window (handing it the Session it reads detections from) and refreshes it; the
-        window talks to nothing else."""
+        """Open the Voltage series page of the single Analysis Explorer."""
         from .voltage_dep_panel import VDepWindow
 
         if _on_screen(self._vdep_window):
-            self._vdep_window.raise_()
-            self._vdep_window.activateWindow()
+            self._show_analysis_page(
+                PAGE_VOLTAGE_SERIES, self._vdep_window,
+                refresh=lambda: self._replace_workspace_surface(
+                    VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window.refresh))
             return
         pending = VOLTAGE_DEPENDENCE_ARTIFACT_ID in self._workspace_pending
         if self._vdep_window is None:
@@ -4767,9 +5067,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._vdep_window.refresh()
         if not pending and self._vdep_window.points():
             self._on_workspace_changed(VOLTAGE_DEPENDENCE_ARTIFACT_ID)
-        self._vdep_window.show()
-        self._vdep_window.raise_()
-        self._vdep_window.activateWindow()
+        self._show_analysis_page(
+            PAGE_VOLTAGE_SERIES, self._vdep_window,
+            refresh=lambda: self._replace_workspace_surface(
+                VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window.refresh))
 
     # -- power-spectrum / noise window -----------------------------------------------------------
     def _has_psd_recording(self) -> bool:
@@ -4789,16 +5090,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_surface_gate(SURFACE_PSD)
 
     def _open_psd(self) -> None:
-        """Analysis ▸ Power spectrum (noise / PSD)… — open (or re-focus) the single
-        PSDWindow, pointed at the active recording. MainWindow stays the only
-        panel-importer: it constructs the window (handing it the Session it pulls the
-        calibrated current from), points it at the current selection, and shows it; the
-        window talks to nothing else."""
+        """Open the Noise page of the single Analysis Explorer."""
         from .psd_panel import PSDWindow
 
         if _on_screen(self._psd_window):
-            self._psd_window.raise_()
-            self._psd_window.activateWindow()
+            self._show_analysis_page(
+                PAGE_NOISE, self._psd_window,
+                refresh=lambda: self._replace_workspace_surface(
+                    PSD_ARTIFACT_ID, self._point_psd_at_selection))
             return
         pending = PSD_ARTIFACT_ID in self._workspace_pending
         if self._psd_window is None:
@@ -4813,9 +5112,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._point_psd_at_selection()
             if self._psd_window.has_data():
                 self._on_workspace_changed(PSD_ARTIFACT_ID)
-        self._psd_window.show()
-        self._psd_window.raise_()
-        self._psd_window.activateWindow()
+        self._show_analysis_page(
+            PAGE_NOISE, self._psd_window,
+            refresh=lambda: self._replace_workspace_surface(
+                PSD_ARTIFACT_ID, self._point_psd_at_selection))
 
     def _open_psd_for_selection(self) -> None:
         """Analysis ▸ Power spectrum of the measured region — the CLOCK-SAFE transfer.
@@ -4880,9 +5180,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._psd_window.set_target(doc_id, channel)
         self._psd_window.set_segment(start_s, end_s)
         self._on_workspace_changed(PSD_ARTIFACT_ID)
-        self._psd_window.show()
-        self._psd_window.raise_()
-        self._psd_window.activateWindow()
+        self._show_analysis_page(
+            PAGE_NOISE, self._psd_window,
+            refresh=lambda: self._replace_workspace_surface(
+                PSD_ARTIFACT_ID, self._point_psd_at_selection))
         # The status line states BOTH clocks, so the number the user just saw on the
         # trace and the number now in the Start box are visible together — the one
         # place they were never shown side by side is where the 5.7x error lived.
@@ -6404,9 +6705,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # a colouring that was refused or has already gone (S7-POP3).
         self._sync_subpop_window()
         self._on_workspace_changed(SUBPOPULATION_ARTIFACT_ID)
-        self._subpop_window.show()
-        self._subpop_window.raise_()
-        self._subpop_window.activateWindow()
+        self._show_analysis_page(
+            PAGE_SUBPOPULATIONS, self._subpop_window,
+            refresh=self._run_subpopulations)
 
     def _show_saved_subpop_report(self) -> None:
         """Show the project-owned report snapshot without dispatching an analysis job."""
@@ -6415,8 +6716,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "This project does not contain a saved subpopulation report.", 8000)
             return
         if _on_screen(self._subpop_window):
-            self._subpop_window.raise_()
-            self._subpop_window.activateWindow()
+            self._show_analysis_page(
+                PAGE_SUBPOPULATIONS, self._subpop_window,
+                refresh=self._run_subpopulations)
             return
         win = self._ensure_subpop_window()
         # A window destroyed/reset during a session transition must install from the cache;
@@ -6454,9 +6756,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"Saved subpopulation assignment restored with a caveat: {warning}",
                         12000)
                 self._sync_subpop_window()
-        win.show()
-        win.raise_()
-        win.activateWindow()
+        self._show_analysis_page(
+            PAGE_SUBPOPULATIONS, win, refresh=self._run_subpopulations)
 
     # -- item 13: the report's events, on the trace and in the gallery --------------------------
     def _adopt_subpop_assignment(
@@ -11018,7 +11319,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if callable(getattr(holder, self._STOP_ABORT, None)):
                 protocols.append(self._STOP_ABORT)
-            if isinstance(holder, QtWidgets.QWidget) and holder.isWindow():
+            if (isinstance(holder, QtWidgets.QWidget)
+                    and (holder.isWindow()
+                         or bool(holder.property("nanoscopeAnalysisExplorerPage")))):
                 protocols.append(self._STOP_CLOSE)
         except RuntimeError:      # the C++ object is already gone — nothing to stop
             return []

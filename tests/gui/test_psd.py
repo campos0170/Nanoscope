@@ -111,7 +111,7 @@ def test_total_rms_recovers_the_noise_sigma(window):
 def test_details_pane_reports_the_noise_regimes(window):
     txt = window.details_text()
     assert "Total RMS noise" in txt
-    assert "White floor" in txt
+    assert "Mid-log median proxy" in txt
     assert "1/f exponent" in txt
     assert "Welch: nperseg" in txt
     assert "Nyquist" in txt

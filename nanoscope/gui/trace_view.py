@@ -17,7 +17,8 @@ from ..plot.style import BASELINE_TRACK_INK
 from .axes import ReadableLinearAxis
 
 __all__ = ["PaneSpec", "plan_panes", "effective_kind", "ChannelPane", "TraceView", "Crosshair", "TraceViewBox",
-           "PREVIEW_CHANNEL_NOT_SHOWN", "MAX_X_SPAN_FACTOR", "layer_ink", "FILTER_PREVIEW_HEX"]
+           "PREVIEW_CHANNEL_NOT_SHOWN", "MAX_X_SPAN_FACTOR", "MEASURE_MAX_VIEW_FRACTION",
+           "MEASURE_HANDLE_SIZE_PX", "WHEEL_Y_PAN_FRACTION", "layer_ink", "FILTER_PREVIEW_HEX"]
 
 #: The filter-preview curve's ink. NOT a layer colour and deliberately outside
 #: :data:`~nanoscope.core.layer.LAYER_INKS`: it is a "what this filter would do to the
@@ -34,30 +35,44 @@ FILTER_PREVIEW_HEX = "#e69f00"
 #: *** THE ZOOM-OUT CEILING. *** The widest x-span any pane may show, as a multiple of the
 #: recording's full extent. The y-side has had a floor since v1 (``minYRange`` in
 #: :meth:`ChannelPane.apply_y_policy`) but the x zoom-out direction was completely
-#: unguarded: ~123 held wheel notches (or one trackpad inertia fling) past full extent
-#: drove the visible span to ~6e16 s, at which point pyqtgraph's auto-downsampler
+#: unguarded: repeated scale-out gestures past full extent drove the visible span to
+#: ~6e16 s, at which point pyqtgraph's auto-downsampler
 #: computes a per-bin reshape sized by ``span / dx`` and raises
 #: ``ValueError: Maximum allowed dimension exceeded`` on EVERY repaint — a dead,
 #: non-updating curve with nothing on screen saying why, recoverable only by knowing
-#: Ctrl+0 / double-click reset. 2x the extent keeps the whole recording (plus honest
+#: Ctrl+0 / the Full button. 2x the extent keeps the whole recording (plus honest
 #: empty margin either side) reachable while staying about seven orders of magnitude
 #: under the failure, so a zoom-out storm coasts to a stop instead of crashing the
 #: renderer. Enforced with ``setLimits(maxXRange=...)``, i.e. inside
-#: ``ViewBox.setRange`` itself, so the wheel, right-drag pan-mode scaling and any
-#: programmatic ``setXRange`` all hit the same ceiling — one rule, every zoom path.
+#: ``ViewBox.setRange`` itself, so right-drag pan-mode scaling and any programmatic
+#: ``setXRange`` both hit the same ceiling — one rule, every horizontal zoom path.
 MAX_X_SPAN_FACTOR = 2.0
+
+#: A newly placed manual-annotation mask occupies at most one fifth of the visible
+#: trace. The user may still drag either edge farther afterwards: this is a placement
+#: rule, not a restriction on what can be annotated.
+MEASURE_MAX_VIEW_FRACTION = 0.20
+
+#: Circular grips on the two mask boundaries. Unlike a thicker cosmetic pen, an
+#: InfiniteLine marker expands the real device-pixel mouse hit box too.
+MEASURE_HANDLE_SIZE_PX = 16.0
+
+#: One conventional 120-delta wheel notch translates the waveform by one tenth of the
+#: current pane height. Translation (rather than scaling) preserves amplitude span.
+WHEEL_Y_PAN_FRACTION = 0.10
 
 
 class TraceViewBox(pg.ViewBox):
     """A ViewBox tuned for trace inspection, so the user can get *inside* a millisecond event.
 
-    - Mouse wheel zooms the TIME (x) axis ONLY. Diving into an event is a time operation; letting the
-      wheel also rescale amplitude makes fine zoom feel like it fights back. (Wheel directly over a
-      y-axis still zooms y — pyqtgraph passes axis=1 explicitly there.)
+    - Mouse wheel PANS amplitude vertically without changing either axis span. Wheel up moves the
+      drawn signal up; wheel down moves it down. Horizontal scale belongs to box zoom and the
+      persistent −/+ controls, so an accidental scroll cannot lose the event in time.
     - Mouse mode is RectMode by default: left-drag draws a zoom box, so you frame an event and dive
       straight in — the gesture the coarse navigator strip physically cannot do (~36 ms/pixel).
-      Right-drag still scales, wheel still zooms, and View ▸ Drag mode flips back to panning.
-    - Double-click zooms all the way back out — the instant "that event wasn't it, get me out".
+      Right-drag still scales, and View ▸ Drag mode flips back to panning.
+    - Double-click requests a manual mask centred at that data-x. The Measure panel owns the active
+      annotation target and therefore performs the actual placement.
     """
 
     def __init__(self, *args, on_double_click=None, **kwargs) -> None:
@@ -65,16 +80,37 @@ class TraceViewBox(pg.ViewBox):
         self._on_double_click = on_double_click
 
     def wheelEvent(self, ev, axis=None):  # noqa: N802  (Qt/pyqtgraph signature)
-        if axis is None:
-            axis = 0  # 0 == x-axis -> x-only zoom, using pyqtgraph's own scaling math
-        super().wheelEvent(ev, axis=axis)
+        del axis  # every wheel delivered by the trace is the same vertical-pan gesture
+        if not self.state["mouseEnabled"][1]:
+            ev.ignore()
+            return
+        delta = float(ev.delta())
+        y0, y1 = (float(v) for v in self.viewRange()[1])
+        span = y1 - y0
+        if not np.isfinite(delta) or delta == 0.0 or not np.isfinite(span) or span <= 0.0:
+            ev.ignore()
+            return
+
+        # QGraphics scene-y grows downward. On a normal (non-inverted) data axis, moving the
+        # viewed numerical range DOWN makes a fixed waveform render UP on screen — exactly the
+        # literal gesture requested. Account for the rare inverted-y view so the visual direction
+        # remains stable. Cap one event's fling while retaining smooth fractional trackpad deltas.
+        steps = float(np.clip(delta / 120.0, -4.0, 4.0))
+        visual_sign = 1.0 if self.state.get("yInverted", False) else -1.0
+        shift = visual_sign * span * WHEEL_Y_PAN_FRACTION * steps
+        self._resetTarget()
+        self.translateBy(y=shift)
+        ev.accept()
+        self.sigRangeChangedManually.emit([False, True])
 
     def mouseClickEvent(self, ev):  # noqa: N802  (pyqtgraph MouseClickEvent)
-        # Left double-click -> reset to full extent. pyqtgraph flags double-clicks via ev.double().
+        # Left double-click -> request a mask at the clicked data-x. pyqtgraph flags
+        # double-clicks via ev.double(); the owner decides whether a valid target exists.
         if (self._on_double_click is not None and ev.double()
                 and ev.button() == QtCore.Qt.LeftButton):
+            point = self.mapSceneToView(ev.scenePos())
             ev.accept()
-            self._on_double_click()
+            self._on_double_click(float(point.x()))
             return
         super().mouseClickEvent(ev)
 
@@ -466,6 +502,9 @@ class TraceView(pg.GraphicsLayoutWidget):
     """Renders Layers. Knows about Session and nothing else in gui/."""
 
     sigVisibleRangeChanged = QtCore.Signal(float, float)   # v2 lazy-overlay hook; also drives Navigator
+    # A left double-click on any trace pane, mapped to that pane's data-x. TraceView deliberately
+    # does not know which recording/channel is the annotation target; MeasurePanel owns that fact.
+    sigMeasurePlacementRequested = QtCore.Signal(float)
     sigMeasureChanged = QtCore.Signal(int, int)            # manual-selection edges -> (start_idx, stop_idx)
     # ...and the SETTLED edges: the drag ended (mouse released) or the region was placed
     # programmatically. sigMeasureChanged fires on EVERY intermediate frame of a drag and is
@@ -630,10 +669,10 @@ class TraceView(pg.GraphicsLayoutWidget):
             # notation for the whole axis — each pane gets its own instances, because
             # pyqtgraph axis items are owned by exactly one PlotItem.
             plot = self.addPlot(row=row, col=0,
-                                viewBox=TraceViewBox(on_double_click=self.reset_zoom),
+                                viewBox=TraceViewBox(on_double_click=self._request_measure_placement),
                                 axisItems={"bottom": ReadableLinearAxis(orientation="bottom"),
                                            "left": ReadableLinearAxis(orientation="left")})
-            plot.vb.setMouseMode(self._drag_mode)   # box-zoom (or pan) + x-only wheel
+            plot.vb.setMouseMode(self._drag_mode)   # box-zoom (or pan) + vertical wheel-pan
             # No pyqtgraph context menu on the trace panes — same call the navigator and
             # the subpop embedding already make, and here it is load-bearing: the default
             # menu's Transforms ▸ Log X flips the pane into log mode, where the level
@@ -641,7 +680,7 @@ class TraceView(pg.GraphicsLayoutWidget):
             # again — the exact invisibility it exists to prevent — and Log Y on a
             # negative-current trace blanks the curve outright. Every gesture the menu
             # offered that the app means to support (zoom reset, export, drag mode) has
-            # a first-class home in the View menu / double-click already.
+            # a first-class home in the View menu / Scan strip already.
             plot.setMenuEnabled(False)
             pane = ChannelPane(plot, spec, self.session,
                                baselines=self._subtracted)
@@ -845,6 +884,17 @@ class TraceView(pg.GraphicsLayoutWidget):
         for pane in self._panes:   # fallback (no layers/x-axis): best-effort autorange
             pane.plot.vb.enableAutoRange(x=True, y=True)
             pane.plot.vb.autoRange()
+
+    def _request_measure_placement(self, x: float) -> None:
+        """Relay a trace double-click as a data-x annotation request.
+
+        The view has no concept of the currently selected annotation channel, so it emits rather
+        than placing the region itself. A finite guard keeps malformed synthetic/scene events from
+        arming a mask at NaN or infinity.
+        """
+        x = float(x)
+        if np.isfinite(x):
+            self.sigMeasurePlacementRequested.emit(x)
 
     def set_drag_mode(self, box_zoom: bool) -> None:
         """True -> left-drag draws a zoom box (dive into events); False -> left-drag pans.
@@ -1612,13 +1662,13 @@ class TraceView(pg.GraphicsLayoutWidget):
                     # Seed from what this target actually contributes to the current view, not the
                     # overlay union. This retains the familiar middle-fifth gesture locally.
                     centre = 0.5 * (overlap0 + overlap1)
-                    width = 0.20 * (overlap1 - overlap0)
+                    width = MEASURE_MAX_VIEW_FRACTION * (overlap1 - overlap0)
                 else:
                     # The selected target is wholly off screen. A region on the union view would
                     # map to (n,n); put a target-local seed in its centre instead, at the current
                     # zoom scale when that can fit.
                     centre = 0.5 * (e0 + e1)
-                    width = 0.20 * min(view_span, e1 - e0)
+                    width = MEASURE_MAX_VIEW_FRACTION * min(view_span, e1 - e0)
                 width = min(width, e1 - e0)
                 if width > 0.0:
                     lo = centre - 0.5 * width
@@ -1626,7 +1676,7 @@ class TraceView(pg.GraphicsLayoutWidget):
                     return lo, lo + width
             if view_span > 0:
                 centre = 0.5 * (vlo + vhi)
-                half = 0.10 * view_span
+                half = 0.5 * MEASURE_MAX_VIEW_FRACTION * view_span
                 return (centre - half, centre + half)
         if layer is not None:
             xax = self.session.x_axis(layer.doc_id, layer.time_offset_s)
@@ -1651,9 +1701,14 @@ class TraceView(pg.GraphicsLayoutWidget):
             movable=True,
             brush=pg.mkBrush(33, 150, 243, 40),        # translucent blue — distinct from event spans
             hoverBrush=pg.mkBrush(33, 150, 243, 70),
-            pen=pg.mkPen("#1565C0", width=1),          # the two edges ARE the boundary cursors
-            hoverPen=pg.mkPen("#1E88E5", width=2),
+            pen=pg.mkPen("#1565C0", width=1.5),        # the two edges ARE the boundary cursors
+            hoverPen=pg.mkPen("#1E88E5", width=3),
         )
+        region.setToolTip(
+            "Drag the shaded mask to move it. Drag either circular edge handle to resize it.")
+        for line in region.lines:
+            line.addMarker("o", position=0.5, size=MEASURE_HANDLE_SIZE_PX)
+            line.setToolTip("Drag this handle to resize the annotation mask.")
         region.setZValue(8)                            # above the trace, distinct from the crosshair (20)
         pane.plot.addItem(region, ignoreBounds=True)   # ignoreBounds: never ratchet the y-autorange
         self._measure_region = region

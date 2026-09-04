@@ -62,12 +62,13 @@ it is simply no longer drawn silently.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
-from pyqtgraph.exporters import ImageExporter
 from PySide6 import QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
@@ -77,6 +78,9 @@ from ..core.sources import gain_label
 from ..plot.style import OKABE_ITO
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
+from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
+                          data_write_failure_text, write_live_plot_image,
+                          write_plot_csv)
 
 __all__ = ["VDepWindow"]
 
@@ -267,11 +271,16 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._refresh_btn.setToolTip(
             "Re-gather (V, metric) from every open recording — pick up any detected since.")
         self._refresh_btn.clicked.connect(self._refresh_from_user)
-        self._save_btn = QtWidgets.QPushButton("Save image…")
-        self._save_btn.setToolTip("Export the voltage-dependence plot as a PNG.")
+        self._save_btn = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
+        self._save_btn.setToolTip("Export the voltage-dependence plot as PNG, SVG, or PDF.")
         self._save_btn.clicked.connect(lambda: self.save_image())
+        self._save_data_btn = QtWidgets.QPushButton("Export data (CSV)…")
+        self._save_data_btn.setToolTip(
+            "Export exact plotted points and fitted trend with pooled provenance.")
+        self._save_data_btn.clicked.connect(lambda: self.export_data())
         bar.addWidget(self._refresh_btn)
         bar.addWidget(self._save_btn)
+        bar.addWidget(self._save_data_btn)
         bar.addStretch(1)
         root.addLayout(bar)
 
@@ -1061,7 +1070,7 @@ class VDepWindow(QtWidgets.QMainWindow):
 
     # -- export ----------------------------------------------------------------------------------
     def save_image(self, path: str | None = None) -> Path | None:
-        """Export the current voltage-dependence plot as a PNG (dialog when ``path`` is None).
+        """Export the current voltage-dependence plot as PNG, SVG or PDF by extension.
 
         Returns the written path, or None when the user cancelled OR the write
         failed (a failed write is reported in a dialog, never returned as a path).
@@ -1070,25 +1079,18 @@ class VDepWindow(QtWidgets.QMainWindow):
             chosen = ask_export_path(
                 self, title="Save voltage-dependence image",
                 suggestion="voltage_dependence.png",
-                filters="PNG image (*.png);;All files (*)")   # writes exactly this file
+                filters=IMAGE_FILTERS)   # writes exactly this file
             if chosen is None:
                 return None
             path = str(chosen)
         out = Path(path)
-        # STAGED, like every other export (USER_GUIDE §12). pyqtgraph's ImageExporter
-        # ends in ``QImage.save``, which OPENS AND TRUNCATES its target and reports
-        # failure by RETURNING False — writing ``out`` directly destroyed the previous
-        # export for any format QImage cannot write and then said "The file was not
-        # created". Rendering into a staged sibling costs the user nothing on failure,
-        # which is what lets the message below say so truthfully (EXP3-06).
-        from ..plot.figures import image_write_failure_text, save_plot_image
-
-        exporter = ImageExporter(self._plot)
+        from ..plot.figures import image_write_failure_text
         try:
-            notes = save_plot_image(out, lambda staged: exporter.export(str(staged)))
+            notes = write_live_plot_image(out, self._plot)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
-                self, "Save voltage-dependence image", image_write_failure_text(out, exc))
+                self, "Save voltage-dependence image",
+                image_write_failure_text(out, exc, formats=IMAGE_FORMATS))
             return None
         # What the replace changed about the FILE (symlink followed, hard-linked names
         # left holding the previous contents) — unrecoverable after the fact, so it is
@@ -1097,4 +1099,137 @@ class VDepWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, "Save voltage-dependence image", "\n\n".join(notes))
         self._details.setPlainText(self.details_text() + f"\n\nSaved image → {out.name}")
+        return out
+
+    @staticmethod
+    def _json_default(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, tuple):
+            return list(value)
+        return str(value)
+
+    def _plot_data(self) -> pd.DataFrame:
+        """Exact visible voltage-series points and trend with pooled provenance."""
+        if self._scatter_item is None:
+            return pd.DataFrame()
+
+        metric = self._metric()
+        use_abs = self._abs_v.isChecked()
+        log_y = self._log_y.isChecked()
+        fit = self._fit or {}
+        fit_fields = {
+            "fit_model": fit.get("model", "none"),
+            "fit_params_json": json.dumps(
+                fit.get("params", {}), ensure_ascii=False, default=self._json_default),
+            "fit_r2": fit.get("r2", np.nan),
+            "fit_n": fit.get("n", np.nan),
+            "fit_drop_reason": fit.get("drop_reason", ""),
+        }
+        warnings = (list(self._series.warnings) + list(self._series.duration_warnings)
+                    + [f"{recording}: {warning}"
+                       for recording, warning in self._series.detection_warnings]
+                    + [f"{item.recording}: {item.reason}"
+                       for item in self._series.excluded])
+        common = {
+            "view": "voltage_dependence", "metric": metric,
+            "metric_label": _Y_LABEL.get(metric, metric),
+            "absolute_voltage": use_abs, "log_y": log_y,
+            "accepted_only": self._accepted_only.isChecked(),
+            "applied_fit": self._fit_model(),
+            "warnings_json": json.dumps(warnings, ensure_ascii=False),
+            "details": self.details_text(), **fit_fields,
+            "series_source_doc_ids_json": json.dumps(
+                [point.doc_id for point in self._points if point.doc_id],
+                ensure_ascii=False),
+        }
+        rows: list[dict] = []
+        for point in self._points:
+            x = abs(point.v_volts) if use_abs else point.v_volts
+            finite = np.isfinite(x) and np.isfinite(point.value)
+            positive = point.value > 0 or not log_y
+            if finite and positive:
+                part = "point"
+                warning = self._not_in_fit.get(point.recording, "")
+                xv, yv = float(x), float(point.value)
+            else:
+                part = "excluded_from_view"
+                warning = ("non-positive for log y" if finite and not positive
+                           else "non-finite voltage or metric")
+                xv = float(x) if np.isfinite(x) else np.nan
+                yv = float(point.value) if np.isfinite(point.value) else np.nan
+            rows.append({
+                "part": part,
+                "source_identity_kind": ("document_id" if point.doc_id
+                                         else "recording_label"),
+                "source_identity_available": bool(point.doc_id),
+                "source_doc_id": point.doc_id or None,
+                "source_recording": point.recording, "voltage_V": xv,
+                "metric_value": yv, "voltage_source": point.voltage_source,
+                "analyzed_duration_s": point.analyzed_duration_s,
+                "baseline_fingerprint": point.baseline_fingerprint,
+                "merge_state": point.merge_state,
+                "calibration_fingerprint_json": json.dumps(
+                    point.calibration_fingerprint, ensure_ascii=False,
+                    default=self._json_default),
+                "signal_domain": point.signal_domain,
+                "source_warnings_json": json.dumps(
+                    list(point.detection_warnings), ensure_ascii=False),
+                "warning": warning, "warning_detail": "", **common,
+            })
+
+        for exclusion in self._series.excluded:
+            rows.append({
+                "part": "excluded_from_series",
+                "source_identity_kind": "document_id",
+                "source_identity_available": bool(exclusion.doc_id),
+                "source_doc_id": exclusion.doc_id,
+                "source_recording": exclusion.recording, "voltage_V": np.nan,
+                "metric_value": np.nan, "voltage_source": "",
+                "analyzed_duration_s": np.nan, "baseline_fingerprint": "",
+                "merge_state": "", "calibration_fingerprint_json": "",
+                "signal_domain": "", "source_warnings_json": "[]",
+                "warning": exclusion.reason, "warning_detail": exclusion.detail,
+                **common,
+            })
+
+        if self._fit_item is not None:
+            x, y = self._fit_item.getData()
+            for xv, yv in zip(np.asarray(x), np.asarray(y)):
+                rows.append({
+                    "part": "fit", "source_identity_kind": "",
+                    "source_identity_available": False,
+                    "source_doc_id": None,
+                    "source_recording": "", "voltage_V": float(xv),
+                    "metric_value": float(yv), "voltage_source": "",
+                    "analyzed_duration_s": np.nan, "baseline_fingerprint": "",
+                    "merge_state": "", "calibration_fingerprint_json": "",
+                    "signal_domain": "", "source_warnings_json": "[]",
+                    "warning": "", "warning_detail": "", **common,
+                })
+        return pd.DataFrame(rows)
+
+    def export_data(self, path: str | None = None) -> Path | None:
+        """Export the exact visible voltage-series view and provenance as staged CSV."""
+        if path is None:
+            chosen = ask_export_path(
+                self, title="Export voltage-dependence data",
+                suggestion="voltage_dependence.csv", filters=DATA_FILTERS)
+            if chosen is None:
+                return None
+            path = str(chosen)
+        out = Path(path)
+        try:
+            notes = write_plot_csv(out, self._plot_data())
+        except Exception as exc:  # noqa: BLE001
+            QtWidgets.QMessageBox.warning(
+                self, "Export voltage-dependence data",
+                data_write_failure_text(out, exc))
+            return None
+        if notes:
+            QtWidgets.QMessageBox.information(
+                self, "Export voltage-dependence data", "\n\n".join(notes))
+        self._details.setPlainText(self.details_text() + f"\n\nExported data → {out.name}")
         return out

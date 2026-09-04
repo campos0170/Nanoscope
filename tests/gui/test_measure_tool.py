@@ -27,7 +27,7 @@ import pytest
 from nanoscope.core.document import TraceDocument
 from nanoscope.core.session import Session
 from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, RecordingMeta
-from nanoscope.gui.trace_view import TraceView
+from nanoscope.gui.trace_view import MEASURE_HANDLE_SIZE_PX, TraceView
 
 FS = 50_000.0
 N = 200_000
@@ -113,6 +113,29 @@ def test_seeded_region_lands_inside_the_current_view(session_view):
     assert vx0 <= lo < hi <= vx1
     # ~20% of the view width (middle fifth).
     assert (hi - lo) == pytest.approx(0.20 * (vx1 - vx0), rel=1e-6)
+
+
+def test_measure_edges_have_device_pixel_handles_that_survive_deep_zoom(session_view, qapp):
+    """The edge grips must enlarge the real mouse target, not only thicken the paint."""
+    _session, view, doc_id = session_view
+    view.show()
+    view.set_measure_active(doc_id, 0, True)
+    qapp.processEvents()
+    region = view._measure_region
+    assert region is not None and region.movable is True
+    assert len(region.lines) == 2
+
+    for line in region.lines:
+        assert line.movable is True
+        assert any(size >= MEASURE_HANDLE_SIZE_PX for _path, _position, size in line.markers)
+        assert line.sceneBoundingRect().width() >= 12.0
+
+    lo, hi = region.getRegion()
+    centre = 0.5 * (lo + hi)
+    view.zoom_x_to(centre - 1e-5, centre + 1e-5)
+    qapp.processEvents()
+    for line in region.lines:
+        assert line.sceneBoundingRect().width() >= 12.0
 
 
 # ================================================================================================

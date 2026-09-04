@@ -130,9 +130,8 @@ def test_switching_recordings_feeds_no_closed_window(two, monkeypatch):
         f"(each False is a synchronous recompute nothing on screen shows)")
 
 
-def test_open_windows_are_still_fed_on_every_switch(two, monkeypatch):
-    """CONTROL: the guard skips CLOSED windows only — an open one must follow the
-    selection, or the fix trades a latency defect for a staleness defect."""
+def test_visible_explorer_page_is_fed_and_hidden_page_refreshes_on_activation(two, monkeypatch):
+    """Only the selected tab is on screen; a hidden tab catches up before its next paint."""
     w, a, b = two
     _open_all(w)
     fed = _spies(w, monkeypatch)
@@ -140,9 +139,14 @@ def test_open_windows_are_still_fed_on_every_switch(two, monkeypatch):
     w._on_selection(b, 0)
     w._on_selection(a, 0)
 
-    assert fed["psd"], "the open PSD window must follow the selection"
-    assert all(fed["psd"]), "and every feed must land on a VISIBLE window"
+    # Event plots is the last Explorer page opened by _open_all and therefore the
+    # selected/visible analytical page. PSD is an installed but deliberately hidden tab.
     assert fed["event_plots"] and all(fed["event_plots"])
+    assert fed["psd"] == [], "a hidden tab must not pay a synchronous recompute"
+
+    w._analysis_explorer._tabs.setCurrentWidget(w._psd_window)
+    assert fed["psd"] and all(fed["psd"]), (
+        "activating the PSD tab must refresh it while it is visible")
 
 
 def test_a_reopened_window_is_fed_on_its_way_back_up(two, monkeypatch):
@@ -161,8 +165,16 @@ def test_a_reopened_window_is_fed_on_its_way_back_up(two, monkeypatch):
     assert fed["event_plots"]
     assert fed["inspector"]
     assert fed["gallery"]
-    # ...and the windows are on screen afterwards, showing the CURRENT selection's data.
-    assert w._psd_window.isVisible() and w._event_plot_window.isVisible()
+    # ...and both analytical pages are installed; only the selected tab is on screen.
+    explorer = w._analysis_explorer
+    assert explorer.page("noise") is w._psd_window
+    assert explorer.page("event_waveforms") is w._event_plot_window
+    assert w._event_plot_window.isVisible() and not w._psd_window.isVisible()
+
+    # Direct tab activation is itself a refresh route, so the hidden page cannot be stale.
+    explorer._tabs.setCurrentWidget(w._psd_window)
+    assert w._psd_window.isVisible() and not w._event_plot_window.isVisible()
+    assert fed["psd"] and fed["psd"][-1] is True
 
 
 def test_subpop_views_stay_unconditional(two, monkeypatch):

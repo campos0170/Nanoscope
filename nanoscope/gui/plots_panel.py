@@ -2825,9 +2825,20 @@ class PlotsWindow(QtWidgets.QMainWindow):
     Emits:
         refreshRequested(): the user clicked *Refresh*; the owner should
             re-snapshot the current tables and call :meth:`set_data` again.
+        eventRowsSelected(source_key, row_ids): Scatter/PCA points were clicked;
+            detector sources emit their stable ``event_id`` values; legacy/manual
+            frames without that column emit their dataframe index values.
     """
 
     refreshRequested = Signal()
+    #: A click on one or more points in a Scatter or PCA plot. ``source_key`` is the
+    #: stable key of the :class:`PlotSource` supplied to :meth:`set_data`; ``row_ids``
+    #: contains ``event_id`` for a detector source (dataframe index values only for a
+    #: legacy/manual frame without that column). Filtering and PCA keep those identities
+    #: rather than manufacturing positional row numbers. Dataframe labels alone are not
+    #: sufficient: EventSet explicitly permits duplicate and NaN indices.
+    #: Ctrl/Cmd/Shift-click extends (or toggles) the selection for one source.
+    eventRowsSelected = Signal(str, object)
     #: A project-owned recipe or computed snapshot changed.  MainWindow is the sole
     #: project writer; this signal only tells it that the next save/recovery capture
     #: must include a fresh analytical-workspace artifact.
@@ -3011,6 +3022,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._scatter_fit_item: pg.PlotDataItem | None = None
         self._scatter_fit_items: list[pg.PlotDataItem] = []
         self._message_item: pg.TextItem | None = None
+        #: Clickable point clouds in the current draw, grouped by stable source key.
+        #: Presentation handles only: each pyqtgraph spot carries its exact row identity
+        #: in ``data`` and that is what :attr:`eventRowsSelected` emits.
+        self._event_point_items: dict[str, list[pg.ScatterPlotItem]] = {}
+        self._selected_event_rows: dict[str, list[object]] = {}
 
         #: THE Y QUANTITY THIS WINDOW WAS ASKED FOR AND COULD NOT OFFER. Written only by
         #: the one writer (:meth:`_set_config`) and cleared by any move of the combo the
@@ -3091,6 +3107,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # The column also has to STOP growing when the window does; without this the
         # splitter hands it half of every extra pixel and the plot never gets wider.
         scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self._section_area = scroll
         # NO CODE IN THIS WINDOW SCROLLS THIS COLUMN, so no handle is kept on it. There
         # was one, for exactly one caller: a refused Ctrl+Z at the undo floor used to call
         # `ensureWidgetVisible` on the depth-ceiling sentence at the foot of this column.
@@ -3142,6 +3159,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
             axisItems={"bottom": _DecadeLabelAxis(orientation="bottom"),
                        "left": _DecadeLabelAxis(orientation="left")})
         self._plot_widget.setMinimumSize(420, 320)
+        self._plot_widget.setAccessibleName("Population plot canvas")
+        self._plot_widget.setAccessibleDescription(
+            "Interactive population plot. Scatter and PCA points can be clicked to "
+            "select their source events in the event table and trace; hold Control, "
+            "Command, or Shift to select several points.")
+        self._plot_widget.setToolTip(
+            "Scatter and PCA: click a point to inspect its event. "
+            "Ctrl/Cmd/Shift-click adds or removes points from the selection.")
         self._plot: pg.PlotItem = self._plot_widget.getPlotItem()
         # The grid is NOT set here any more. It used to be hard-coded once, at
         # construction, and never read again -- so the Style group could change every
@@ -3178,20 +3203,60 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._resid_widget.setVisible(False)
         right.addWidget(self._resid_widget)
 
-        details_box = QtWidgets.QGroupBox("Details")
+        # THE SHORT ANSWER BEFORE THE AUDIT TRAIL. The full Details prose is valuable
+        # (and persisted with analytical results), but making it the only result surface
+        # forced a newcomer to scan a monospaced report to find the one outcome and the
+        # one warning that govern the plot. Keep that report intact in ``_details`` and
+        # derive a compact, always-visible reading above it.
+        summary_box = QtWidgets.QFrame()
+        summary_box.setObjectName("populationPlotResultSummary")
+        summary_box.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        summary_box.setAccessibleName("Plot result summary")
+        summary_lay = QtWidgets.QVBoxLayout(summary_box)
+        summary_lay.setContentsMargins(8, 6, 8, 6)
+        summary_lay.setSpacing(2)
+        summary_heading = QtWidgets.QLabel("RESULT")
+        summary_heading.setStyleSheet("font-size: 10px; font-weight: 600;")
+        self._result_summary = QtWidgets.QLabel("No result yet.")
+        self._result_summary.setObjectName("populationPlotResult")
+        self._result_summary.setWordWrap(True)
+        self._result_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._result_summary.setAccessibleName("Result")
+        self._result_warning = QtWidgets.QLabel("")
+        self._result_warning.setObjectName("populationPlotWarning")
+        self._result_warning.setWordWrap(True)
+        self._result_warning.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._result_warning.setStyleSheet(f"color:{_WARN_HEX};")
+        self._result_warning.setAccessibleName("Result warning")
+        self._result_warning.setVisible(False)
+        summary_lay.addWidget(summary_heading)
+        summary_lay.addWidget(self._result_summary)
+        summary_lay.addWidget(self._result_warning)
+        right.addWidget(summary_box)
+
+        details_box = QtWidgets.QGroupBox("Details — methods and provenance")
+        details_box.setCheckable(True)
+        details_box.setChecked(False)
+        details_box.setAccessibleName("Detailed methods and provenance")
         dlay = QtWidgets.QVBoxLayout(details_box)
         dlay.setContentsMargins(6, 6, 6, 6)
         self._details = QtWidgets.QPlainTextEdit()
         self._details.setReadOnly(True)
         self._details.setMaximumHeight(180)
         self._details.setStyleSheet("font-family: Menlo, monospace; font-size: 11px;")
+        self._details.setAccessibleName("Full plot details")
         dlay.addWidget(self._details)
+        self._details_box = details_box
+        self._details.setVisible(False)
+        details_box.setMaximumHeight(30)
+        details_box.toggled.connect(self._set_details_expanded)
         right.addWidget(details_box)
-        # Indices name the widgets in order: plot, residual strip, Details. The plot is
-        # the only one that grows.
+        # Indices name the widgets in order: plot, residual strip, compact result,
+        # Details. The plot is the only one that grows.
         right.setStretchFactor(0, 1)
         right.setStretchFactor(1, 0)
         right.setStretchFactor(2, 0)
+        right.setStretchFactor(3, 0)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -3206,6 +3271,108 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._splitter = splitter
 
         self.setCentralWidget(splitter)
+        self._build_workflow_toolbar()
+
+    def _build_workflow_toolbar(self) -> None:
+        """Persistent section navigation and the two verbs used on every plot.
+
+        The controls remain ordinary widgets (and retain their established public
+        attributes), while this compact strip makes the long column navigable and keeps
+        Plot/Apply and Export reachable when Appearance or Configuration is in view.
+        """
+        bar = QtWidgets.QToolBar("Population plot workflow", self)
+        bar.setObjectName("populationPlotWorkflow")
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        bar.setAccessibleName("Population plot workflow")
+
+        section_label = QtWidgets.QLabel("Section:")
+        section_label.setAccessibleName("Control section")
+        bar.addWidget(section_label)
+        self._section_combo = QtWidgets.QComboBox()
+        self._section_combo.addItems(["Data", "Analysis", "Appearance", "Export"])
+        self._section_combo.setToolTip(
+            "Jump to a section of the controls without searching the full column.")
+        self._section_combo.setAccessibleName("Population plot control section")
+        self._section_combo.setAccessibleDescription(
+            "Choose Data, Analysis, Appearance, or Export to move that controls section "
+            "into view.")
+        self._section_combo.activated.connect(self._show_control_section)
+        bar.addWidget(self._section_combo)
+
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        bar.addWidget(spacer)
+
+        self._run_action = bar.addAction("Plot / Apply")
+        self._run_action.setObjectName("populationPlotRunAction")
+        self._run_action.setToolTip(
+            "Draw the selected plot and apply any pending fit choice (Ctrl+Return).")
+        self._run_action.setShortcut(QtGui.QKeySequence("Ctrl+Return"))
+        self._run_action.triggered.connect(self._run_plot)
+        run_button = bar.widgetForAction(self._run_action)
+        if run_button is not None:
+            run_button.setAccessibleName("Plot or apply pending analysis")
+
+        export_button = QtWidgets.QToolButton()
+        export_button.setObjectName("populationPlotExportMenu")
+        export_button.setText("Export ▾")
+        export_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        export_button.setToolTip(
+            "Export the current image, its numeric data, or a reproducible configuration.")
+        export_button.setAccessibleName("Export population plot")
+        export_menu = QtWidgets.QMenu(export_button)
+        export_menu.addAction("Save image…", lambda: self.save_image())
+        export_menu.addAction("Export plot data…", lambda: self.export_data())
+        export_menu.addAction("Export configuration JSON…", lambda: self.export_config_json())
+        export_button.setMenu(export_menu)
+        self._export_menu = export_menu
+        self._export_menu_btn = export_button
+        bar.addWidget(export_button)
+
+        self._workflow_toolbar = bar
+        self.addToolBar(Qt.TopToolBarArea, bar)
+        # BEGINNER VIEW: source choice plus the selected plot's essential controls.
+        # The advanced analysis, appearance, and export/reuse groups still exist (and
+        # remain fully addressable by the programmatic API), but only one purposeful
+        # section is shown at a time instead of one 2,600 px undifferentiated column.
+        self._show_control_section("Data")
+
+    def _show_control_section(self, section: int | str) -> None:
+        """Show one purposeful controls section and suppress unrelated advanced rows."""
+        if isinstance(section, str):
+            name = section
+        else:
+            name = self._section_combo.itemText(int(section))
+        visible = {
+            # The first-run path: pick rows, choose the figure, press the persistent
+            # Plot / Apply verb. No styling or clustering wall precedes that action.
+            "Data": {self._source_group, self._plot_group},
+            # The plot recipe remains visible beside its dependent feature/cluster
+            # controls; source management is one quick Section pick away.
+            "Analysis": {self._plot_group, self._axis_range_group,
+                         self._features_group, self._cluster_group},
+            "Appearance": {self._style_group},
+            "Export": {self._config_group, self._save_btn, self._save_data_btn},
+        }.get(name)
+        if visible is None:
+            return
+        all_sections = (self._source_group, self._plot_group, self._axis_range_group,
+                        self._features_group, self._cluster_group, self._style_group,
+                        self._config_group, self._save_btn, self._save_data_btn)
+        for widget in all_sections:
+            widget.setVisible(widget in visible)
+        if self._section_combo.currentText() != name:
+            self._section_combo.setCurrentText(name)
+        # Each section begins at the top. Direct scrollbar arithmetic is deliberate:
+        # it happens only after an explicit navigator gesture and avoids focus-follow.
+        self._section_area.verticalScrollBar().setValue(0)
+
+    def _set_details_expanded(self, expanded: bool) -> None:
+        """Collapse the audit trail to its title row while keeping the result visible."""
+        self._details.setVisible(bool(expanded))
+        self._details_box.setMaximumHeight(230 if expanded else 30)
 
     @staticmethod
     def _controls_min_width(scroll: QtWidgets.QScrollArea, controls: QtWidgets.QWidget) -> int:
@@ -3227,15 +3394,26 @@ class PlotsWindow(QtWidgets.QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        root.addWidget(self._build_source_group())
-        root.addWidget(self._build_plot_group())
-        root.addWidget(self._build_axis_range_group())
-        root.addWidget(self._build_features_group())
-        root.addWidget(self._build_cluster_group())
-        root.addWidget(self._build_style_group())
-        root.addWidget(self._build_config_group())
+        # Keep handles for the compact section navigator. The groups themselves and
+        # every child attribute remain unchanged for config/test/API compatibility.
+        self._source_group = self._build_source_group()
+        self._plot_group = self._build_plot_group()
+        self._axis_range_group = self._build_axis_range_group()
+        self._features_group = self._build_features_group()
+        self._cluster_group = self._build_cluster_group()
+        self._style_group = self._build_style_group()
+        self._config_group = self._build_config_group()
+
+        root.addWidget(self._source_group)
+        root.addWidget(self._plot_group)
+        root.addWidget(self._axis_range_group)
+        root.addWidget(self._features_group)
+        root.addWidget(self._cluster_group)
+        root.addWidget(self._style_group)
+        root.addWidget(self._config_group)
 
         self._save_btn = QtWidgets.QPushButton("Save image…")
+        self._save_btn.setAccessibleName("Save plot image")
         self._save_btn.setToolTip(
             "Export the current plot as a picture. The extension chooses the format: "
             "PNG for a slide or a notebook, SVG or PDF for vector art a journal can "
@@ -3249,6 +3427,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # where the user actually decides what the figure is -- exported none of it, so
         # a histogram's bin edges lived only inside a running Qt process.
         self._save_data_btn = QtWidgets.QPushButton("Export plot data…")
+        self._save_data_btn.setAccessibleName("Export numeric plot data")
         self._save_data_btn.setToolTip(
             "Write the numbers behind the plot as a CSV: the bin edges and heights of "
             "a histogram (with the fitted curve), the plotted points of a scatter or "
@@ -3280,6 +3459,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "Every open recording (segments included) that has a stored detection, "
             "plus the manual-measurement table.\n"
             "Double-click a name to retype the legend entry for that source.")
+        self._source_list.setAccessibleName("Plot data sources")
         self._source_list.itemChanged.connect(self._on_source_item_changed)
         self._source_list.currentItemChanged.connect(self._on_source_current_changed)
         lay.addWidget(self._source_list)
@@ -3315,6 +3495,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         self._plot_type_combo = QtWidgets.QComboBox()
         self._plot_type_combo.addItems(list(_PLOT_TYPES))
+        self._plot_type_combo.setAccessibleName("Population plot type")
         self._plot_type_combo.currentTextChanged.connect(self._on_plot_type_changed)
         lay.addWidget(self._plot_type_combo)
 
@@ -3347,6 +3528,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # columns here, then press this. See the block in ``__init__`` for what is
         # gated and what stays live.
         self._plot_btn = QtWidgets.QPushButton("Plot")
+        self._plot_btn.setAccessibleName("Plot or apply pending analysis")
         self._plot_btn.clicked.connect(self._run_plot)
         lay.addWidget(self._plot_btn)
 
@@ -7210,6 +7392,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "Draw the checked sources with the plot type and columns chosen above."
             if not self._plot_armed else
             "Redraw with the current selection.")
+        if hasattr(self, "_run_action"):
+            self._run_action.setText("Plot / Apply ●" if pending else "Plot / Apply")
+            self._run_action.setToolTip(self._plot_btn.toolTip())
         self._plot_state.setVisible(bool(self._stale))
         if self._stale:
             self._plot_state.setText(
@@ -8011,6 +8196,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._fit_items = []
         self._scatter_items = []
         self._scatter_fit_items = []
+        self._event_point_items = {}
+        self._selected_event_rows = {}
         self._message_item = None
         self._limit_region = None
         self._limit_line = None
@@ -8651,6 +8838,115 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _set_details(self, text: str) -> None:
         self._details.setPlainText(text)
+        lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+        self._result_summary.setText(lines[0] if lines else "No result yet.")
+
+        # One actionable warning, not a second copy of the report. Explicit warning
+        # markers win; otherwise take the first line that describes a material omission
+        # or invalidation. The complete wording remains one click away in Details.
+        warning = next((line for line in lines
+                        if line.startswith(("!", "⚠")) or "NOT COMPARABLE" in line.upper()), "")
+        if not warning:
+            markers = (" failed", " unavailable", " dropped", " ignored", " refused",
+                       " exact by construction", " could not", " cannot ",
+                       " not certified")
+            warning = next((line for line in lines
+                            if any(marker in f" {line.lower()}" for marker in markers)), "")
+        if len(warning) > 280:
+            warning = warning[:277].rstrip() + "…"
+        self._result_warning.setText(warning)
+        self._result_warning.setVisible(bool(warning))
+
+    @staticmethod
+    def _same_row_identity(left: object, right: object) -> bool:
+        """Equality for pandas index scalars without leaking array-valued comparisons."""
+        try:
+            equal = left == right
+            return bool(equal) if np.ndim(equal) == 0 else bool(np.all(equal))
+        except (TypeError, ValueError):
+            return left is right
+
+    def _make_event_points_clickable(
+        self, item: pg.ScatterPlotItem, source_key: str, row_ids: Sequence[object],
+    ) -> None:
+        """Attach exact source-row identities to a plotted Scatter/PCA point cloud."""
+        identities = list(row_ids)
+        if len(identities) != len(item.points()):
+            raise RuntimeError("point/event identity count mismatch")
+        # ``setData`` would replace x/y; assigning through the spots preserves their
+        # coordinates and lets ``SpotItem.data()`` be the sole identity seam.
+        for point, row_id in zip(item.points(), identities):
+            point.setData(row_id)
+        item.setCursor(Qt.PointingHandCursor)
+        item.setToolTip(
+            "Click to inspect this event; Ctrl/Cmd/Shift-click to select several.")
+        item.sigClicked.connect(
+            lambda clicked, points, event, key=source_key:
+                self._on_event_points_clicked(key, clicked, points, event))
+        self._event_point_items.setdefault(source_key, []).append(item)
+
+    @staticmethod
+    def _point_identities(src: PlotSource, df: pd.DataFrame,
+                          mask: np.ndarray | None = None) -> list[object]:
+        """Stable identities for plotted rows, in their exact plotted order.
+
+        Detector ``event_id`` is the table/trace navigation key. A dataframe index is
+        only a label and is explicitly allowed to be duplicated or NaN by EventSet, so
+        using it could make one point select another row. Bare/manual frames keep their
+        index because they have no detector event to navigate to.
+        """
+        if src.kind == "detection" and "event_id" in df.columns:
+            values = df["event_id"].to_numpy(copy=False)
+        else:
+            values = df.index.to_numpy(copy=False)
+        if mask is not None:
+            values = values[np.asarray(mask, dtype=bool)]
+        return list(values)
+
+    def _on_event_points_clicked(self, source_key: str, _item: pg.ScatterPlotItem,
+                                 points: Sequence[object], event: object | None) -> None:
+        """Maintain an additive visual selection and emit its exact dataframe rows."""
+        clicked = [point.data() for point in points]
+        if not clicked:
+            return
+        modifiers = (event.modifiers() if event is not None
+                     and hasattr(event, "modifiers") else Qt.NoModifier)
+        additive = bool(modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.ShiftModifier))
+        if additive:
+            # MainWindow can display one detector table at a time. Leaving source A
+            # ringed while emitting only source B would show a selection that was not
+            # represented in the table or signal, so additive selection is deliberately
+            # scoped to one source.
+            self._selected_event_rows = {
+                key: value for key, value in self._selected_event_rows.items()
+                if key == source_key
+            }
+            selected = list(self._selected_event_rows.get(source_key, ()))
+            for row_id in clicked:
+                found = next((i for i, old in enumerate(selected)
+                              if self._same_row_identity(old, row_id)), None)
+                if found is None:
+                    selected.append(row_id)
+                else:
+                    selected.pop(found)
+        else:
+            self._selected_event_rows.clear()
+            selected = clicked
+        self._selected_event_rows[source_key] = selected
+        self._paint_event_point_selection()
+        self.eventRowsSelected.emit(source_key, tuple(selected))
+
+    def _paint_event_point_selection(self) -> None:
+        """Ring selected points without replacing source/cluster colour encodings."""
+        ring = pg.mkPen(_WARN_HEX, width=2)
+        for source_key, items in self._event_point_items.items():
+            selected = self._selected_event_rows.get(source_key, ())
+            for item in items:
+                for point in item.points():
+                    on = any(self._same_row_identity(point.data(), row_id)
+                             for row_id in selected)
+                    point.setPen(ring if on else pg.mkPen(None))
+                    point.setSize(self._style.point_size + 4 if on else self._style.point_size)
 
     def _redraw(self) -> None:
         """Draw the current view, then re-offer its legend rows to the Style group.
@@ -11205,7 +11501,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # write below from re-selecting a column out of a stale list.
             self._repopulate_columns()
             self._empty_list_widget(self._legend_entries)
-            self._details.clear()
+            self._set_details("")
             self._clear_plot()
             # ...and the RUN GATE, which is as much "everything needs to be blank" as
             # the style is: a reopened window that still counted as run would restyle
@@ -11691,7 +11987,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         # Extract each source's plottable points first, so an empty overlay reports
         # itself once rather than half-drawing.
-        series: list[tuple[PlotSource, np.ndarray, np.ndarray, object]] = []
+        series: list[tuple[PlotSource, np.ndarray, np.ndarray, object, list[object]]] = []
         # EVERY DROP DISCLOSED WITH ITS COUNT, in the same voice the histogram and the
         # clustering pane use. This mask silently deleted rows on both grounds -- a
         # non-finite x or y, and (with a log axis up) a non-positive one -- and printed
@@ -11723,7 +12019,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                              f"for {axes}.")
             if not mask.any():
                 continue
-            series.append((src, x[mask], y[mask], df.index[mask]))
+            series.append((src, x[mask], y[mask], df.index[mask],
+                           self._point_identities(src, df, mask)))
         if not series:
             self._message("No points to plot for this pair (check the log-axis toggles).")
             return
@@ -11751,7 +12048,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 "means SOURCE here. Untick all but one source to colour by cluster.")
 
         self._clear_plot()
-        for i, (src, x, y, index) in enumerate(series):
+        for i, (src, x, y, index, identities) in enumerate(series):
             cluster_labels = None
             if by_cluster:
                 cluster_labels = self._cluster_result.labels.reindex(
@@ -11781,6 +12078,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 x=px, y=py, brush=brushes, pen=None, size=self._style.point_size)
             self._plot.addItem(item)
             self._scatter_items.append(item)
+            self._make_event_points_clickable(item, src.key, identities)
             if i == 0:
                 self._scatter_item = item
             if multi:
@@ -11794,7 +12092,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # two pooled clouds). The summary always lands in Details; it also becomes
         # the title unless the user pinned their own.
         titles = []
-        for src, x, y, _index in series:
+        for src, x, y, _index, _identities in series:
             t = self._overlay_scatter_fit(x, y, xcol, ycol, details,
                                           src if multi else None)
             if t:
@@ -12176,6 +12474,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
             x=pc1, y=pc2, brush=brushes, pen=None, size=self._style.point_size)
         self._plot.addItem(self._scatter_item)
         self._scatter_items.append(self._scatter_item)
+        primary = self.primary_source()
+        if primary is not None:
+            identities: list[object] = list(res.kept_index)
+            if primary.kind == "detection" and "event_id" in df.columns:
+                numeric = df.loc[:, list(res.columns)].apply(
+                    pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+                finite = np.all(np.isfinite(numeric), axis=1)
+                candidate = self._point_identities(primary, df, finite)
+                if len(candidate) == len(self._scatter_item.points()):
+                    identities = candidate
+            self._make_event_points_clickable(
+                self._scatter_item, primary.key, identities)
         if self._cluster_result is not None:
             self._legend_clusters(labels)
         self._plot.setLogMode(x=False, y=False)

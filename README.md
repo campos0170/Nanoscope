@@ -42,16 +42,16 @@ automatically (see `nanoscope/bootstrap.py`); no manual `QT_*` environment varia
 | **Load** | ABF (Axon), HDF5, TDMS (LabVIEW), CSV/TXT — a unified reader that reports units and sample rate honestly |
 | **View** | Multi-channel stacked/overlaid panes, an adaptive overview/local-context Navigator, overlapping event-scale Scan controls, box-zoom, and a value crosshair |
 | **Calibrate** | Per-channel gain/offset with a live raw-vs-calibrated readout and a command-voltage check |
-| **Filter** | Low-pass, high-pass, notch, Savitzky-Golay, running-mean, median, and baseline-drift removal |
-| **Detect** | Two-threshold (Schmitt) event detection with automatic polarity and honest gating |
+| **Filter** | Low-pass, high-pass, notch, Savitzky-Golay, running-mean, median, and baseline-drift removal; an orange preview shows the candidate-localization chain |
+| **Detect** | Schmitt and CUSUM classical detection with automatic polarity, plus model-based detection |
 | **Reconcile** | Converge overlapping Schmitt, CUSUM, ML, and hand-added candidates into a separate, provenance-carrying table without changing the source detections |
 | **Characterize** | Per-event dwell, blockade depth, ECD, SNR, rise/fall, sub-state count |
 | **Fit levels** | CUSUM sub-state fitting — per-level amplitude and dwell inside multi-level events |
 | **Measure** | Cursor-based manual event measurement and insertion of detector misses, with a selectable amplitude method + rich statistics |
 | **Label** | Review positives and negatives, apply structured `key=value` labels, curate in bulk, and export CSV/Parquet training regions with provenance |
 | **Inspect** | An event browser: step through events, see each waveform, accept/reject to curate |
-| **Explore** | Histograms, scatter, distribution fits, linear/power-law fits, GMM/k-means clustering, PCA |
-| **Export** | Events & measurements to CSV; publication figures and plot images to PDF/PNG |
+| **Explore** | One Analysis Explorer for histograms, scatter, event waveforms, noise, I-V, voltage series, subpopulations, fits, clustering, and PCA; plot points link back to events |
+| **Export** | Events & measurements to CSV; live plot data to CSV; publication and live figures to PNG/PDF/SVG |
 
 See **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** for a full walkthrough and
 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the design and module map.
@@ -84,6 +84,22 @@ external. The complete contract is documented in
    as shaded spans on the trace.
 4. **Analysis ▸ Event inspector…** to browse and curate events; **Analysis ▸ Plots…** to plot
    dwell/amplitude distributions, scatter, clusters, and fits.
+
+### High-pass and quantitative measurements
+
+For new Schmitt and CUSUM runs, high-pass is a **candidate-localization aid only**. The orange trace
+and combined filter-response plot show that localization branch. After finding candidates,
+NanoScope measures baseline, depth, fractional depth, mean/max deviation and SNR on the otherwise
+identical chain with high-pass omitted. Auto polarity is anchored to that no-high-pass branch; if
+ringing makes the high-pass trace vote the other way, localization is repeated with the physical
+direction.
+
+High-pass can still move candidate boundaries. Start/end, dwell and rise/fall therefore remain
+high-pass-dependent, and ECD uses those inherited integration limits. Results made by an older
+build with high-pass enabled retain their original candidate-only measurements and should be
+re-run. The open-pore **Measure this recording** probe also uses the no-high-pass characterization
+branch. See [Filtering](docs/USER_GUIDE.md#5-filtering) for the full contract. Normalize is a
+separate dimensionless transform and retains the caveat documented there.
 
 ## Detector reconciliation and training labels
 

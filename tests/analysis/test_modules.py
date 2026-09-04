@@ -264,6 +264,27 @@ def test_preprocess_passthrough_when_rate_unknown():
     np.testing.assert_array_equal(out, x)
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_preprocess_refuses_nonfinite_samples_before_a_filter_can_hide_them(bad):
+    """A median can replace one invalid sample with finite neighbours, so integrity
+    is checked at the preprocessing entrance rather than after the chain."""
+    x = np.linspace(-1.0, 1.0, 21)
+    x[10] = bad
+    with pytest.raises(ValueError, match="NaN/Inf before preprocessing"):
+        preprocess_for_detection(
+            x, FS, {"median_enabled": True, "median_window_s": 5 / FS})
+
+
+def test_preprocess_refuses_values_that_overflow_its_float32_domain():
+    with pytest.raises(ValueError, match="float32 processing range"):
+        preprocess_for_detection(np.array([0.0, 1e300]), FS, {})
+
+
+def test_preprocess_refuses_non_vector_input_at_its_boundary():
+    with pytest.raises(ValueError, match="must be 1-D before preprocessing"):
+        preprocess_for_detection(np.zeros((2, 8)), FS, {})
+
+
 def test_preprocess_flattens_drift_when_enabled():
     """The signal the detector actually sees is flatter in the open pore."""
     x, ev = make_drift_trace()
@@ -1013,8 +1034,8 @@ def test_a_notch_line_list_round_trips_through_provenance_as_a_list(context_fact
 #
 # `preprocess_for_detection` stage 7 rescales the whole trace before either detector
 # sees it, and its own docstring states the consequence: "NORMALIZE IS LAST, AND IT
-# TAKES THE PICOAMPS WITH IT ... depth_pA, the baseline, the thresholds and every
-# exported column are still spelled 'pA' while carrying sigmas or span-fractions. The
+# TAKES THE PICOAMPS WITH IT ... depth_pA, the baseline, the thresholds and the
+# current-derived pA/pA·s export fields retain legacy labels while carrying sigmas or span-fractions. The
 # detector cannot detect that, so the disclosure is the panel's job."
 #
 # The panel did its job -- `DetectionPanel._refresh_normalize_units_note` banners for
@@ -1043,6 +1064,8 @@ def test_a_normalized_detection_says_so_in_its_own_warnings(context_factory):
     # ...and it must NOT send the reader to frac_depth, which the affine rescale
     # destroys (measured 872x-1048x; see tests/core/test_signal_domain.py).
     assert "frac_depth" in w and "not reach for frac_depth" in w
+    assert "every exported column" not in w.lower()
+    assert "Index, time, source, review and status" in w
 
 
 def test_an_ordinary_detection_stays_quiet_about_normalize(context_factory):
@@ -1052,6 +1075,22 @@ def test_an_ordinary_detection_stays_quiet_about_normalize(context_factory):
         make_event_trace(), fs=FS,
         params={"k_in": 5.0, "k_out": 2.0, "min_dwell_s": 5e-4}))
     assert not any("Normalize" in w for w in res.warnings)
+
+
+def test_a_highpass_detection_separates_localization_from_measurement(context_factory):
+    """High-pass finds bounds, while physical amplitudes come from the no-HP branch."""
+    res = DetectSchmitt().run(context_factory(
+        make_event_trace(), fs=FS,
+        params={"k_in": 5.0, "k_out": 2.0, "min_dwell_s": 5e-4,
+                "hp_enabled": True, "hp_cutoff_hz": 1.0}))
+    hits = [w for w in res.warnings if "High-pass was ON" in w]
+    assert len(hits) == 1
+    assert "baseline_pA" in hits[0] and "frac_depth" in hits[0]
+    assert "CANDIDATE LOCALIZATION ONLY" in hits[0]
+    assert "measured" in hits[0] and "High-pass omitted" in hits[0]
+    assert "start/end, dwell, rise/fall" in hits[0]
+    assert "candidate locations only" not in hits[0]
+    assert res.payload.provenance["characterization_hp_omitted"] is True
 
 
 def test_both_detectors_disclose_it_because_both_run_the_stage(context_factory):
@@ -1084,6 +1123,7 @@ def test_the_model_input_disclosure_names_the_clip_and_the_bound(context_factory
     w = next(x for x in res.warnings if "Normalize" in x)
     assert "CLIPPED" in w and "12" in w
     assert "monotone" in w
+    assert "move threshold crossings or change the event count" in w
 
 
 def test_the_disclosure_and_the_pooling_rule_name_the_stage_identically():

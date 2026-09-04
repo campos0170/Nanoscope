@@ -718,8 +718,8 @@ def baseline_fingerprint_of(provenance: Mapping[str, Any] | None) -> str:
 #     WHOLE trace onto a dimensionless axis before either detector sees it, and the
 #     detector characterises on that trace. Its own docstring states the consequence
 #     -- "NORMALIZE IS LAST, AND IT TAKES THE PICOAMPS WITH IT ... depth_pA, the
-#     baseline, the thresholds and every exported column are still spelled 'pA' while
-#     carrying sigmas or span-fractions" -- and the only disclosure was a LIVE BANNER
+#     baseline, thresholds and current-derived pA/pA·s export fields retain physical-
+#     unit labels while carrying sigmas or span-fractions" -- and the only disclosure was a LIVE BANNER
 #     in the Detection panel, which does not travel with the table. Overlay a
 #     normalized run on an ordinary one and Plots pooled them onto one ``depth_pA``
 #     axis in silence.

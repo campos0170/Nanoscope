@@ -2,9 +2,9 @@
 
 WHY IT EXISTS
 -------------
-Diving into a blockade is a two-gesture job: frame it (box-zoom / wheel) and then *centre* it.
+Diving into a blockade is a two-gesture job: frame it (box-zoom / +) and then *centre* it.
 The framing gesture almost never lands the event in the middle — you box a little left, or the
-wheel zooms about the mouse — so at 200 µs of visible trace the event you were chasing sits
+zoom is centred a little away from the event — so at 200 µs of visible trace it sits
 half off the pane and there is no cheap way to nudge the view sideways. The Navigator can pan,
 but at ~36 ms/pixel one pixel of drag is 180 screens at that zoom: it is a *where am I* map,
 not a fine control. This bar is the fine control, and it is deliberately the plainest one
@@ -35,7 +35,7 @@ the bar's own round trip.
 
 LAYOUT: THE HEIGHT IS RESERVED, THE BAR IS HIDDEN
 -------------------------------------------------
-The bar must "appear only once zoomed", but wheel-zooming across the full-extent threshold would
+The bar must "appear only once zoomed", but zooming across the full-extent threshold would
 then add/remove a scrollbar's height on every notch: the plot resizes, pyqtgraph re-runs its
 auto-downsampling for the new pixel width, and the trace visibly twitches mid-gesture. So the
 CONTAINER keeps a fixed height forever and only the QScrollBar inside it is shown/hidden. The user
@@ -151,6 +151,10 @@ class PanScrollBar(QtWidgets.QWidget):
         self._zoom_in_button = tool_button(
             "+", "localZoomIn",
             "Zoom in one step (Shift+Up) around the centre.", self.zoom_in)
+        self._full_trace_button = tool_button(
+            "Full", "fullTrace",
+            "Show the complete trace. Ctrl+0 does the same anywhere; Home does it while "
+            "the trace has focus.", self.show_full_trace)
 
         # Reserve the height for good (see the module docstring): show/hide must never reflow
         # the trace. sizeHint can be 0 under some offscreen styles, hence the floor.
@@ -214,6 +218,16 @@ class PanScrollBar(QtWidgets.QWidget):
     def zoom_in(self) -> bool:
         """Halve the visible width around its centre, never below two sample intervals."""
         return self._zoom(1.0 / LOCAL_ZOOM_FACTOR)
+
+    def show_full_trace(self) -> bool:
+        """Restore the complete trace through the same path as View ▸ Reset zoom."""
+        if self._view is None or self._view.anchor_plot() is None:
+            return False
+        extent = self._view.full_x_extent()
+        if extent is None or extent[1] <= extent[0]:
+            return False
+        self._view.reset_zoom()
+        return True
 
     def refresh(self, *_args) -> None:
         """Re-derive extent + visible range from the view and restate the bar. Cheap enough to call
@@ -422,7 +436,7 @@ class PanScrollBar(QtWidgets.QWidget):
 
     @QtCore.Slot(float, float)
     def _view_to_bar(self, xmin: float, xmax: float) -> None:
-        """The view moved (wheel, box zoom, navigator drag, double-click reset, zoom back/forward,
+        """The view moved (box zoom, navigator drag, Full reset, zoom back/forward,
         event-table jump, measurement Go-to — every one of them lands here). Mirror it."""
         if self._syncing:
             return                            # our own pan bouncing back; the Navigator's rule
@@ -471,6 +485,7 @@ class PanScrollBar(QtWidgets.QWidget):
             self._next_button.setEnabled(False)
             self._zoom_out_button.setEnabled(False)
             self._zoom_in_button.setEnabled(False)
+            self._full_trace_button.setEnabled(False)
             return
         e0, e1 = extent
         width = hi - lo
@@ -483,6 +498,16 @@ class PanScrollBar(QtWidgets.QWidget):
         minimum = self._minimum_zoom_width()
         self._zoom_in_button.setEnabled(
             minimum <= 0.0 or width > minimum + max(width, minimum, 1.0) * 1e-14)
+        full_extent = self._view.full_x_extent() if self._view is not None else None
+        if full_extent is None:
+            self._full_trace_button.setEnabled(False)
+        else:
+            f0, f1 = full_extent
+            full_span = f1 - f0
+            full_eps = max(abs(full_span) * FULL_EXTENT_TOL, 1e-12)
+            at_full = (full_span > 0.0 and abs(lo - f0) <= full_eps
+                       and abs(hi - f1) <= full_eps)
+            self._full_trace_button.setEnabled(not at_full)
 
     def _set_view_range(self, x0: float, width: float) -> None:
         """Push [x0, x0+width] onto the view under the loop guard."""

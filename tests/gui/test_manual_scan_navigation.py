@@ -363,15 +363,81 @@ def test_measure_seed_is_target_local_when_overlay_view_is_disjoint(qapp, qtbot,
     view.zoom_x_to(2.0, 4.0)
     qapp.processEvents()
     measure._snap_to_view()
-    _assert_range(view.measure_x_range(), (2.0, 4.0))
-    assert "snapped to the visible view" in measure._status.text().lower()
+    _assert_range(view.measure_x_range(), (2.8, 3.2))
+    assert "middle 20%" in measure._status.text().lower()
     assert "does not overlap" not in measure._status.text().lower()
 
     view.zoom_x_to(8.0, 12.0)
     qapp.processEvents()
     measure._snap_to_view()
-    _assert_range(view.measure_x_range(), (8.0, 10.1))
-    assert "part of the visible view" in measure._status.text().lower()
+    _assert_range(view.measure_x_range(), (8.65, 9.45))
+    assert "visible part" in measure._status.text().lower()
+
+
+def test_trace_double_click_places_a_capped_mask_without_resetting_view(
+        scan_rig, qapp, qtbot):
+    """The old reset gesture is now direct, click-centred annotation placement."""
+    session, doc_id, view, _navigator, _scan = scan_rig
+    from nanoscope.gui.measure_panel import MeasurePanel
+
+    measure = MeasurePanel(session, view)
+    qtbot.addWidget(measure)
+    measure.set_selection(doc_id, 1)
+    view.show()
+    view.zoom_x_to(100.0, 110.0)
+    qapp.processEvents()
+    pane = view.pane_for_layer(f"{doc_id}#1")
+    assert pane is not None
+
+    class _DoubleClick:
+        def __init__(self, scene_pos):
+            self._scene_pos = scene_pos
+            self.accepted = False
+
+        def double(self): return True
+        def button(self): return QtCore.Qt.LeftButton
+        def scenePos(self): return self._scene_pos
+        def accept(self): self.accepted = True
+
+    def double_click_at(x: float) -> _DoubleClick:
+        y0, y1 = pane.plot.vb.viewRange()[1]
+        scene_pos = pane.plot.vb.mapViewToScene(QtCore.QPointF(x, 0.5 * (y0 + y1)))
+        event = _DoubleClick(scene_pos)
+        pane.plot.vb.mouseClickEvent(event)
+        qapp.processEvents()
+        return event
+
+    before = _xrange(view)
+    event = double_click_at(107.0)
+    assert event.accepted is True
+    assert measure.is_active() is True
+    _assert_range(_xrange(view), before)
+    lo, hi = view.measure_x_range()
+    assert hi - lo == pytest.approx(0.20 * (before[1] - before[0]))
+    assert 0.5 * (lo + hi) == pytest.approx(107.0)
+    assert before[0] <= lo < hi <= before[1]
+
+    # Near the left edge the same-size mask clamps wholly into view instead of spilling out.
+    double_click_at(100.1)
+    _assert_range(_xrange(view), before)
+    _assert_range(view.measure_x_range(), (100.0, 102.0))
+
+
+def test_full_button_restores_complete_trace_without_moving_live_mask(scan_rig, qapp):
+    _session, doc_id, view, navigator, scan = scan_rig
+    view.zoom_x_to(100.0, 110.0)
+    view.set_measure_active(doc_id, 1, True)
+    view.set_measure_region(103.0, 104.0)
+    qapp.processEvents()
+    assert scan._full_trace_button.isEnabled() is True
+
+    scan._full_trace_button.click()
+    qapp.processEvents()
+
+    _assert_range(_xrange(view), view.full_x_extent())
+    _assert_range(view.measure_x_range(), (103.0, 104.0))
+    assert navigator._mode_label.text() == "Full recording"
+    assert scan._full_trace_button.isEnabled() is False
 
 
 def test_hidden_aligned_target_uses_the_visible_union_for_both_controllers(

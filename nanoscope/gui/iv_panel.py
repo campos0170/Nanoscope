@@ -33,12 +33,13 @@ cost the nS conductance, not the point.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
-from pyqtgraph.exporters import ImageExporter
 from PySide6 import QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
@@ -77,6 +78,9 @@ _I0_CROSS_REFERENCE = (
 )
 from ..plot.style import OKABE_ITO
 from .export_paths import ask_export_path
+from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
+                          data_write_failure_text, write_live_plot_image,
+                          write_plot_csv)
 
 __all__ = ["IVWindow"]
 
@@ -143,11 +147,16 @@ class IVWindow(QtWidgets.QMainWindow):
         self._refresh_btn.setToolTip(
             "Re-gather (V, I₀) from every open recording — pick up any opened since.")
         self._refresh_btn.clicked.connect(self._refresh_from_user)
-        self._save_btn = QtWidgets.QPushButton("Save image…")
-        self._save_btn.setToolTip("Export the I-V plot as a PNG.")
+        self._save_btn = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
+        self._save_btn.setToolTip("Export the I-V plot as PNG, SVG, or PDF.")
         self._save_btn.clicked.connect(lambda: self.save_image())
+        self._save_data_btn = QtWidgets.QPushButton("Export data (CSV)…")
+        self._save_data_btn.setToolTip(
+            "Export the exact plotted points and fitted line with source/provenance fields.")
+        self._save_data_btn.clicked.connect(lambda: self.export_data())
         bar.addWidget(self._refresh_btn)
         bar.addWidget(self._save_btn)
+        bar.addWidget(self._save_data_btn)
         bar.addStretch(1)
         self._headline = QtWidgets.QLabel("")
         self._headline.setStyleSheet("font-weight:600; font-size:14px;")
@@ -568,7 +577,7 @@ class IVWindow(QtWidgets.QMainWindow):
 
     # -- export ----------------------------------------------------------------------------------
     def save_image(self, path: str | None = None) -> Path | None:
-        """Export the current I-V plot as a PNG (dialog when ``path`` is None).
+        """Export the current I-V plot as PNG, SVG or PDF by extension.
 
         Returns the written path, or None when the user cancelled OR the write
         failed (a failed write is reported in a dialog, never returned as a path).
@@ -576,25 +585,18 @@ class IVWindow(QtWidgets.QMainWindow):
         if path is None:
             chosen = ask_export_path(
                 self, title="Save I-V image", suggestion="iv.png",
-                filters="PNG image (*.png);;All files (*)")   # writes exactly this file
+                filters=IMAGE_FILTERS)   # writes exactly this file
             if chosen is None:
                 return None
             path = str(chosen)
         out = Path(path)
-        # STAGED, like every other export (USER_GUIDE §12). pyqtgraph's ImageExporter
-        # ends in ``QImage.save``, which OPENS AND TRUNCATES its target and reports
-        # failure by RETURNING False — writing ``out`` directly destroyed the previous
-        # export for any format QImage cannot write and then said "The file was not
-        # created". Rendering into a staged sibling costs the user nothing on failure,
-        # which is what lets the message below say so truthfully (EXP3-06).
-        from ..plot.figures import image_write_failure_text, save_plot_image
-
-        exporter = ImageExporter(self._plot)
+        from ..plot.figures import image_write_failure_text
         try:
-            notes = save_plot_image(out, lambda staged: exporter.export(str(staged)))
+            notes = write_live_plot_image(out, self._plot)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
-                self, "Save I-V image", image_write_failure_text(out, exc))
+                self, "Save I-V image",
+                image_write_failure_text(out, exc, formats=IMAGE_FORMATS))
             return None
         # What the replace changed about the FILE (symlink followed, hard-linked names
         # left holding the previous contents) — unrecoverable after the fact, so it is
@@ -603,4 +605,120 @@ class IVWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, "Save I-V image", "\n\n".join(notes))
         self._details.setPlainText(self.details_text() + f"\n\nSaved image → {out.name}")
+        return out
+
+    def _plot_data(self) -> pd.DataFrame:
+        """Exact visible I-V points and line, with source and fit provenance."""
+        if self._scatter_item is None:
+            return pd.DataFrame()
+
+        _v, _i, axis_units, unit_notes, dropped = self._resolve_units(self._points)
+        dropped_ids = {p.doc_id for p in dropped}
+        mixed = len({p.current_units for p in self._points}) != 1
+        warnings = list(unit_notes) + [e.reason for e in self._exclusions]
+        warnings_json = json.dumps(warnings, ensure_ascii=False)
+        details = self.details_text()
+        fit = self._fit
+        fit_fields = {
+            "fit_model": "linear" if fit is not None else "none",
+            "fit_slope": np.nan if fit is None else fit.slope,
+            "fit_intercept": np.nan if fit is None else fit.intercept,
+            "fit_r2": np.nan if fit is None else fit.r2,
+            "fit_n": np.nan if fit is None else fit.n,
+            "fit_conductance_nS": (np.nan if fit is None or fit.conductance_nS is None
+                                    else fit.conductance_nS),
+        }
+        rows: list[dict] = []
+        for point in self._points:
+            if point.doc_id in dropped_ids:
+                reason = next((note for note in unit_notes
+                               if note.startswith(f"{point.label}:")),
+                              "current units cannot be converted to the shared axis")
+                rows.append({
+                    "part": "excluded_from_view", "source_identity_available": True,
+                    "source_doc_id": point.doc_id, "source_label": point.label,
+                    "voltage_V": point.v_volts, "current": np.nan,
+                    "current_axis_units": axis_units, "source_current": point.i_open,
+                    "source_current_units": point.current_units,
+                    "voltage_source": point.voltage_source, "warning": reason,
+                    "warnings_json": warnings_json, "details": details, **fit_fields,
+                })
+                continue
+            current = float(point.i_open)
+            if mixed:
+                factor = iv.current_scale(point.current_units, "nA")
+                if factor is None:
+                    continue
+                current *= factor
+            if not (np.isfinite(point.v_volts) and np.isfinite(current)):
+                rows.append({
+                    "part": "excluded_from_view", "source_identity_available": True,
+                    "source_doc_id": point.doc_id, "source_label": point.label,
+                    "voltage_V": (point.v_volts if np.isfinite(point.v_volts) else np.nan),
+                    "current": current if np.isfinite(current) else np.nan,
+                    "current_axis_units": axis_units, "source_current": point.i_open,
+                    "source_current_units": point.current_units,
+                    "voltage_source": point.voltage_source,
+                    "warning": "non-finite voltage or current",
+                    "warnings_json": warnings_json, "details": details, **fit_fields,
+                })
+                continue
+            rows.append({
+                "part": "point", "source_identity_available": True,
+                "source_doc_id": point.doc_id,
+                "source_label": point.label, "voltage_V": point.v_volts,
+                "current": current, "current_axis_units": axis_units,
+                "source_current": point.i_open,
+                "source_current_units": point.current_units,
+                "voltage_source": point.voltage_source,
+                "warning": "", "warnings_json": warnings_json,
+                "details": details, **fit_fields,
+            })
+
+        # Refusals are explicit rows, not missing recordings a reader has to infer.
+        for exclusion in self._exclusions:
+            rows.append({
+                "part": "excluded", "source_identity_available": True,
+                "source_doc_id": exclusion.doc_id,
+                "source_label": exclusion.label, "voltage_V": np.nan,
+                "current": np.nan, "current_axis_units": axis_units,
+                "source_current": exclusion.i_open,
+                "source_current_units": exclusion.current_units,
+                "voltage_source": "measured", "warning": exclusion.reason,
+                "warnings_json": warnings_json, "details": details, **fit_fields,
+            })
+
+        if self._fit_item is not None:
+            x, y = self._fit_item.getData()
+            for xv, yv in zip(np.asarray(x), np.asarray(y)):
+                rows.append({
+                    "part": "fit", "source_identity_available": False,
+                    "source_doc_id": None, "source_label": None,
+                    "voltage_V": float(xv), "current": float(yv),
+                    "current_axis_units": axis_units, "source_current": np.nan,
+                    "source_current_units": "", "voltage_source": "",
+                    "warning": "", "warnings_json": warnings_json,
+                    "details": details, **fit_fields,
+                })
+        return pd.DataFrame(rows)
+
+    def export_data(self, path: str | None = None) -> Path | None:
+        """Export the exact current I-V view and its provenance as staged CSV."""
+        if path is None:
+            chosen = ask_export_path(
+                self, title="Export I-V data", suggestion="iv.csv", filters=DATA_FILTERS)
+            if chosen is None:
+                return None
+            path = str(chosen)
+        out = Path(path)
+        try:
+            notes = write_plot_csv(out, self._plot_data())
+        except Exception as exc:  # noqa: BLE001 — report and preserve an earlier export
+            QtWidgets.QMessageBox.warning(
+                self, "Export I-V data", data_write_failure_text(out, exc))
+            return None
+        if notes:
+            QtWidgets.QMessageBox.information(
+                self, "Export I-V data", "\n\n".join(notes))
+        self._details.setPlainText(self.details_text() + f"\n\nExported data → {out.name}")
         return out

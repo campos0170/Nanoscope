@@ -58,6 +58,23 @@ def test_highpass_type_combo_offers_exactly_the_kinds_the_kernel_accepts(panel):
     assert panel.hp_kind.count() == len(filters.HP_KINDS)
 
 
+def test_highpass_dual_signal_contract_stays_visible_from_every_stage_page(panel):
+    assert panel.highpass_measurement_label.isHidden()
+    panel.hp_enabled.setChecked(True)
+    assert not panel.highpass_measurement_label.isHidden()
+    message = panel.highpass_measurement_label.text()
+    assert "CANDIDATE LOCALIZATION ONLY" in message
+    lower = message.lower()
+    for metric in ("baseline", "depth", "fractional blockade", "mean/max", "snr"):
+        assert metric in lower
+    for inherited in ("start/end", "dwell", "rise/fall", "ecd"):
+        assert inherited in lower
+    panel.filter_selector.setCurrentIndex(SAVGOL)
+    assert not panel.highpass_measurement_label.isHidden()
+    panel.hp_enabled.setChecked(False)
+    assert panel.highpass_measurement_label.isHidden()
+
+
 def test_defaults_are_exactly_the_previously_hard_coded_values(panel):
     p = panel.params()
     assert p["filter_kind"] == "bessel" and p["filter_order"] == 8
@@ -267,11 +284,12 @@ def test_rise_time_warns_in_the_gui_when_the_cutoff_is_above_fs_over_2p5(panel):
 
 def test_rise_time_refuses_a_probe_too_large_to_measure_live(panel):
     """~40*fs/cutoff samples: at 1 MHz a 1 Hz cutoff is a 40 M-sample step. The readout
-    says so instead of freezing the GUI; detection still measures it off-thread."""
+    says so instead of freezing the GUI; the same unsafe run is refused off-thread."""
     panel.set_recording(1_000_000.0)
     panel.filter_enabled.setChecked(True)
     panel.filter_cutoff_hz.setValue(1.0)
     assert "too low to measure live" in panel.rise_time_label.text()
+    assert "refused at run time" in panel.rise_time_label.text()
 
 
 # ================================================================================================
@@ -321,6 +339,84 @@ def test_response_marks_the_nominal_cutoff_and_states_the_6db_reality(panel):
     note = panel.response_note.text()
     assert "-6.0 dB" in note and "SQUARED" in note
     assert "true -3 dB corner is 7140 Hz" in note
+
+
+@pytest.mark.parametrize(
+    "index, checkbox_attr, label",
+    [(LOWPASS, "filter_enabled", "Low-pass"),
+     (HIGHPASS, "hp_enabled", "High-pass")],
+)
+def test_selected_stage_response_says_when_it_is_only_an_off_design_preview(
+        panel, index, checkbox_attr, label):
+    panel.set_recording(FS)
+    panel.filter_selector.setCurrentIndex(index)
+    checkbox = getattr(panel, checkbox_attr)
+    checkbox.setChecked(False)
+
+    title = panel.response_plot.getPlotItem().titleLabel.text
+    assert label in title and "OFF" in title and "design preview only" in title
+    note = panel.response_note.text()
+    assert note.startswith(f"{label} is OFF")
+    assert "not applied" in note
+    assert f"{label}:" in note
+
+    checkbox.setChecked(True)
+    title = panel.response_plot.getPlotItem().titleLabel.text
+    assert label in title and "ON" in title
+    note = panel.response_note.text()
+    assert note.startswith(f"{label} is ON")
+    assert "not applied" not in note
+    if label == "High-pass":
+        assert "candidate localization only" in title
+        assert "omitted from quantitative measurement" in note
+    else:
+        assert "execution chain" in title
+
+
+def test_combined_response_is_the_product_of_the_enabled_linear_chain(panel):
+    panel.set_recording(FS)
+    panel.hp_enabled.setChecked(True)
+    panel.rmean_enabled.setChecked(True)
+    panel.filter_enabled.setChecked(True)
+    panel.response_chain_check.setChecked(True)
+
+    stages, omitted = panel._active_linear_response_stages()
+    assert omitted == []
+    assert [stage["stage"] for stage in stages] == [
+        "highpass", "running_mean", "lowpass"]
+    f, magnitude = filters.combined_response(stages, FS, n=2048)
+    x, y = panel.response_curve.getData()
+    assert np.allclose(x, np.log10(f))
+    assert np.allclose(y, filters.response_db(magnitude))
+    assert not panel.response_cutoff_line.isVisible()
+    title = panel.response_plot.getPlotItem().titleLabel.text
+    note = panel.response_note.text()
+    assert "Candidate-localization response" in title
+    assert "pointwise product" in note
+    assert "includes high-pass for candidate localization" in note
+    assert "measurement cascade omits high-pass" in note
+
+
+def test_no_highpass_preserves_the_ordinary_active_response_wording(panel):
+    panel.set_recording(FS)
+    panel.filter_enabled.setChecked(True)
+    panel.response_chain_check.setChecked(True)
+
+    title = panel.response_plot.getPlotItem().titleLabel.text
+    assert "Active-chain response" in title
+    assert "Candidate-localization" not in title
+
+
+def test_combined_response_names_enabled_stages_it_cannot_fabricate(panel):
+    panel.set_recording(FS)
+    panel.median_enabled.setChecked(True)
+    panel.response_chain_check.setChecked(True)
+
+    x, y = panel.response_curve.getData()
+    assert x is not None and len(x) > 100
+    assert np.allclose(y, 0.0)  # no enabled LTI stage: identity cascade
+    note = panel.response_note.text()
+    assert "unity" in note and "Median (nonlinear rank filter)" in note
 
 
 def test_median_gets_an_explanation_instead_of_a_fabricated_curve(panel):

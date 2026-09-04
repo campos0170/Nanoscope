@@ -178,10 +178,10 @@ effective level would have swallowed the warning outright and only downward, and
 either side importing the other:
 
 - `AnalysisModule` / `AnalysisContext` — a channel-in, result-out protocol. One `register_all()` at
-  app start wires up both detectors: `analysis/modules.DetectSchmitt` and the runtime-loaded Keras
-  `analysis/ml_modules.MLDetect`. Registration is idempotent (a second test session shares the
-  process-global registry), and importing `ml_modules` only *probes* for TensorFlow rather than
-  importing it, so start-up stays cheap.
+  app start wires up the classical `analysis.modules.DetectSchmitt` and `DetectCusum` modules plus
+  the runtime-loaded Keras `analysis.ml_modules.MLDetect`. Registration is idempotent (a second test
+  session shares the process-global registry), and importing `ml_modules` only *probes* for
+  TensorFlow rather than importing it, so start-up stays cheap.
 - `AnalysisResult` carries a payload (e.g. an `EventSet`) plus a `calibration_fingerprint` for
   staleness detection.
 - `OverlayHint` (int64 sample-index arrays) + an overlay-renderer registry (`gui/overlays.py`) turn
@@ -243,19 +243,24 @@ open_document (io) ──▶ Session.add_document
                           │
    Calibration ◀── calibrated(doc, ch)  (raw × gain + offset, cached, float32)
                           │
-   Filters (analysis.modules.preprocess_for_detection: notch → high-pass → baseline-detrend → savgol → running-mean/median)
+   Shared recipe: notch → median → [high-pass] → baseline-detrend → running-mean → SavGol → Normalize → low-pass
                           │
-   Detection (analysis.detect.detect_events: Schmitt two-threshold; low-pass applied here)
+                          ├─ Candidate-localization branch: includes enabled high-pass
+                          │    └─ Schmitt/CUSUM → candidate start/end spans
                           │
-   Characterization (analysis.characterize → 20-column EventSet, median depth, ECD, rise/fall, n_levels)
+                          └─ Quantitative branch: same recipe with high-pass forced OFF
+                               └─ characterization baseline/noise + characterize(candidate spans)
+                                  → 20-column EventSet (depth, fraction, SNR, ECD, rise/fall, n_levels)
                           │
    ├─ Event table + span overlays + summary (gui.analysis_panel)
    ├─ Event inspector (gui.event_inspector — per-event waveform + curation)
    ├─ Manual measurement (analysis.measure — cursor-selected stats, own schema)
-   └─ Plots + ML (analysis.populations + analysis.stats; gui.plots_panel — hist/scatter/PCA/clustering/fits,
+   └─ Analysis Explorer (gui.analysis_explorer — lazy tab shell, shared context/freshness/refresh)
+      └─ Plots + ML (analysis.populations + analysis.stats; gui.plots_panel — hist/scatter/PCA/clustering/fits,
         MULTI-SOURCE: core.sources.discover_plot_sources offers every open recording/segment with a
         detection, keyed by segment.persistent_key, so two pores overlay with shared bins, a legend
-        and ONE FIT PER SOURCE resolved from that source's own provenance)
+        and ONE FIT PER SOURCE resolved from that source's own provenance; Scatter/PCA points retain
+        source-row identity for MainWindow's event-table + trace navigation)
 ```
 
 ## Analysis core modules
@@ -264,8 +269,9 @@ open_document (io) ──▶ Session.add_document
 |---|---|
 | `analysis/filters.py` | Zero-phase low-pass (Bessel), high-pass, notch, Savitzky-Golay, running-mean, median; MAD noise; rise time; PSD. |
 | `analysis/baseline.py` | `BaselineConfig`; the two-pass masked-median open-pore estimator (kernel imported from `ml_preprocess`), the block-median/percentile/ASLS + PCHIP detrenders, `measured_polarity`, `baseline_health`, `remove_baseline_wander`, and `characterisation_baseline` — THE door. |
-| `analysis/baseline_probe.py` | Measures a recording's own timescales and **proposes** `rough_s`/`base_s` from them. Reports; never applies. |
-| `analysis/detect.py` | Schmitt two-threshold detector; measured polarity; merged-exclusion analyzed-duration. |
+| `analysis/baseline_probe.py` | Measures a recording's own timescales on the no-high-pass characterization trace and **proposes** `rough_s`/`base_s` from them. Reports; never applies. |
+| `analysis/detect.py` | Schmitt two-threshold detector; measured polarity; merged-exclusion analyzed-duration. Candidate-localization kernel; the module adapter owns the high-pass split. |
+| `analysis/detect_cusum.py` | One-sided sequential candidate detector with changepoint onset/exit estimates; the module adapter gives it the same high-pass split and event schema as Schmitt. |
 | `analysis/merge.py` | Post-detection sub-event merge (window-based and selection-based), re-characterizing each merged span through `characterize`; the occupancy floor that refuses a merge whose span would be mostly open pore. Reuses `detect.group_starts_by_gap`, so the gap rule is not re-derived. |
 | `analysis/characterize.py` | Per-event dwell, **median** depth, ECD, SNR, rise/fall, sub-state count → the events DataFrame. |
 | `analysis/events.py` | The frozen 20-column event schema + `EventSet` (accept filtering, pooling that refuses cross-pore). |
@@ -273,6 +279,40 @@ open_document (io) ──▶ Session.add_document
 | `analysis/populations.py` | GMM/k-means clustering (BIC k-selection), PCA, and linear/power-law fits — all scikit-learn/NumPy. |
 | `analysis/measure.py` | Manual-selection statistics (dwell, amplitude by method, skewness, kurtosis, …) + a 28-column measurement schema (`MEASUREMENT_SCHEMA`), separate from the frozen 20-column event schema. |
 | `analysis/truth.py` | Synthetic trace + AAFT surrogate generators used to validate detection (recall/precision) and for null controls. |
+
+### Classical high-pass is a dual-signal adapter contract
+
+`preprocess_for_detection` still builds the candidate signal and the low-level Schmitt/CUSUM
+kernels remain single-signal detectors. The split belongs to `analysis.modules`, at their shared
+adapter boundary:
+
+1. Build the user's complete localization recipe, including high-pass, and let the selected kernel
+   return candidate spans plus its threshold provenance.
+2. Release that recording-sized temporary, reconstruct the recipe through `detection_signal` with
+   only `hp_enabled=False`, and estimate the characterization baseline and MAD noise there.
+3. Call `characterize` on the original spans. `baseline_pA`, `depth_pA`, `frac_depth`,
+   `mean_dev_pA`, `max_dev_pA` and SNR therefore describe the no-high-pass branch. High-pass itself
+   no longer erases the DC reference, although every other configured stage still applies (notably
+   the dimensionless Normalize stage). ECD also uses its
+   samples, but its integration limits — like start/end, dwell and rise/fall — still come from the
+   high-pass-derived candidate span.
+
+Auto polarity is anchored in the characterization domain. The first candidate pass may vote on the
+high-pass trace as an optimization; if that vote disagrees with the no-high-pass physical vote, the
+adapter drops the candidates and repeats localization once with the physical sign. Both votes and
+the retry count remain in provenance. A user override is used on both paths.
+
+New runs stamp `highpass_localization_only` / `characterization_hp_omitted`, preserve candidate
+baseline/noise under `detection_*`, and reserve top-level baseline/noise/polarity for the values in
+the event rows. `detection_signal` treats an old high-pass result without that marker as legacy and
+reconstructs its original high-pass measurement signal. This preserves reproducibility instead of
+silently upgrading old candidate-only amplitudes; the UI warns that those rows must be re-run.
+
+`analysis.conditioning.conditioned_trace` is the localization/orange-preview builder.
+`characterization_trace` delegates to it after disabling only high-pass; the baseline probe uses
+this second door. The selected-stage and combined-response plots describe the localization branch
+when high-pass is enabled. Normalize is intentionally **not** omitted on the quantitative branch:
+its documented dimensionless-output caveat remains in force.
 
 ## The baseline seam — one config, one door, one fingerprint
 
@@ -362,6 +402,11 @@ window — a degenerate `0.01/0.002/1` set beats the shipped parameters on all t
 file. Auto-tuning against them would reproduce the exact failure the seam removes. The defence is
 therefore architectural: a human confirms.
 
+The GUI feeds the probe the whole **characterization trace**: the live conditioning recipe and
+low-pass with high-pass forcibly omitted. This keeps the proposed windows in the same domain used
+for quantitative baseline and amplitude measurement even while the orange localization trace and
+combined response include high-pass.
+
 The probe also may not construct a `BaselineConfig`. Every config it returns is
 `DEFAULT_BASELINE.replace(...)` touching only `rough_s` / `base_s` / `decim`, which makes it
 structurally impossible for a probe to invent a `mask_sigma`, a `dilate_ms` or a `despike_size`, and
@@ -375,7 +420,9 @@ user reads and the numbers the estimator runs come from one function over one ob
 
 Preserved deliberately; changing them silently corrupts the science:
 
-- **Detected (not assumed) polarity**; work in rectified space, never rectify stored data.
+- **Detected (not assumed) polarity**; work in rectified space, never rectify stored data. For a
+  high-pass classical run, Auto polarity is owned by the no-high-pass characterization branch; an
+  opposite vote from high-pass ringing triggers one forced-sign localization retry.
 - **The mask direction is a property of the recording, not of the parameters.**
   `baseline.measured_polarity` votes across a fixed ladder of detrend scales, drops any scale that
   measured nothing (`derive_polarity` returns `+1` when it has no evidence, and that default was
@@ -400,7 +447,9 @@ Preserved deliberately; changing them silently corrupts the science:
   compatibility path. The estimator every depth is now measured against is the two-pass masked
   median — see *The baseline seam* — which interpolates nothing.
 - **Censored-MLE** dwell fit (a naive `expon.fit` is biased long by `t_min`).
-- **Zero-phase** filtering everywhere (event edges must not shift).
+- **Zero-phase** filtering everywhere (no phase delay). This does not promise identical threshold
+  crossings: a filter can reshape an edge, which is why high-pass-derived boundaries, dwell,
+  rise/fall and ECD limits remain explicitly disclosed.
 - Signals stored **float32 contiguous**; time axis **float64**.
 - **A recording has at least one sample.** `n_samples == 0` is refused at `TraceDocument`
   construction — the one door the four readers and every segment pass through — and again in

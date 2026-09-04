@@ -908,6 +908,7 @@ def _gui_modules_reached(module) -> set[str]:
 # for repeatedly (the log axis and the combo setter above are the two most recent). It
 # holds the map and the pyqtgraph call that uses it, defines no class at all, and
 # imports nothing from ``gui``.
+# ``plot_export`` is the shared non-widget seam for exact data and figure exports.
 # ``worker_thread`` joined when the Plots window moved its fit notes off the GUI thread.
 # It is the MANDATED worker-lifetime seam -- THE place a QThread is spun up, retired and
 # (never) terminated, and the run gate that decides whether a background job may start at
@@ -919,8 +920,8 @@ def _gui_modules_reached(module) -> set[str]:
 # had exactly one effect -- a fourth private copy of the eleven lines whose two defects
 # (``terminate()`` on a GIL-holding thread, and a ``disconnect()`` that raised every time)
 # this module was written to delete.
-_NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "combos", "axes", "categorical",
-                          "worker_thread"}
+_NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos", "axes",
+                          "categorical", "worker_thread"}
 
 
 def test_the_non_panel_allowlist_holds_no_panel():
@@ -1064,7 +1065,10 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
     # the day one of them does, it is reviewed here rather than assumed.
     assert _gui_modules_reached(plots_mod) == {
         "export_paths", "combos", "axes", "categorical", "worker_thread"}
-    assert _gui_modules_reached(psd_mod) == {"export_paths", "combos", "axes"}
+    # ``plot_export`` is the shared, non-panel seam for staged PNG/SVG/PDF and
+    # exact-CSV export; reaching it preserves the no-sibling-panel boundary.
+    assert _gui_modules_reached(psd_mod) == {
+        "export_paths", "combos", "axes", "plot_export"}
     # The report window is the third standalone window and is held to the same rule.
     # It has its own allow-list guard in ``test_subpop_gui``; this one is stronger,
     # because ``_gui_modules_reached`` catches every spelling of the import and that

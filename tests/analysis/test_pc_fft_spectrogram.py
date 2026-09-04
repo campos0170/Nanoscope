@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from nanoscope.analysis import psd as psd_module
 from nanoscope.analysis.psd import (
     FFT_MAX_POINTS,
     TARGET_COLUMNS,
@@ -55,6 +56,26 @@ def test_a_bin_centred_sinusoid_reads_its_own_amplitude_under_every_window(windo
     peak = int(np.argmin(np.abs(spec.freqs - k0 * FS / n)))
     assert spec.freqs[peak] == pytest.approx(k0 * FS / n)
     assert spec.mag[peak] == pytest.approx(7.5, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("window", "k0"),
+    (("blackman", 1), ("blackmanharris", 1), ("flattop", 1), ("flattop", 2)),
+)
+@pytest.mark.parametrize("phase", np.linspace(0.0, 2.0 * np.pi, 7, endpoint=False))
+def test_near_dc_bin_amplitude_is_not_phase_biased_by_window_overlap(window, k0, phase):
+    """Blackman-family mirror lobes overlap beside DC; solve them rather than guessing.
+
+    A coherent-gain division alone made the first-bin flattop result range from 2.68 to
+    12.32 for a true 7.5-unit tone depending only on its phase. The plotted amplitude
+    must describe the signal, not where the acquisition happened to begin.
+    """
+    n = 1 << 13
+    x = 7.5 * np.cos(2 * np.pi * k0 * np.arange(n) / n + phase)
+
+    spec = fft_magnitude(x, FS, window=window, max_points=0)
+
+    assert spec.mag[k0 - 1] == pytest.approx(7.5, abs=1e-8)
 
 
 def test_the_dc_pedestal_is_removed_and_the_dc_bin_never_reaches_the_log_axis():
@@ -118,11 +139,31 @@ def test_a_single_nan_is_counted_rather_than_quietly_poisoning_every_bin():
     assert not np.isfinite(spec.mag).any()       # every bin, not just the one
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_a_reduced_poisoned_spectrum_reports_the_problem_without_crashing(bad):
+    """The screen-size envelope must survive the exact failure it is meant to display."""
+    x = _noise(2 * FFT_MAX_POINTS + 2).astype(np.float64)
+    x[0] = bad
+
+    spec = fft_magnitude(x, FS)
+
+    assert spec.reduced is True
+    assert spec.n_nonfinite == 1
+    assert spec.freqs.size <= FFT_MAX_POINTS
+    assert not np.isfinite(spec.mag).any()
+
+
 def test_a_span_too_short_or_a_dead_clock_refuses_instead_of_inventing_a_spectrum():
     with pytest.raises(ValueError, match="at least 2 samples"):
         fft_magnitude(np.array([1.0], dtype=np.float32), FS)
     with pytest.raises(ValueError, match="positive sample rate"):
         fft_magnitude(_noise(1024), 0.0)
+
+
+def test_fft_working_limit_is_checked_before_the_float64_transform(monkeypatch):
+    monkeypatch.setattr(psd_module, "MAX_FFT_INPUT_SAMPLES", 1_000)
+    with pytest.raises(ValueError, match="above the safe.*working limit"):
+        fft_magnitude(_noise(1_001), FS)
 
 
 # ================================================================================================
@@ -143,6 +184,12 @@ def test_the_spectrogram_columns_average_back_to_the_welch_psd():
 
     assert np.array_equal(sg.freqs, freqs_w)
     np.testing.assert_allclose(sg.psd.mean(axis=1), psd_w, rtol=1e-12, atol=0.0)
+
+
+def test_spectrogram_preflights_the_unmerged_grid_not_the_screen_cap(monkeypatch):
+    monkeypatch.setattr(psd_module, "MAX_SPECTROGRAM_CELLS", 1_000)
+    with pytest.raises(ValueError, match="pre-merge PSD cells.*above the safe"):
+        spectrogram_psd(_noise(4_096), FS, nperseg=256, noverlap=128, max_columns=2)
 
 
 def test_a_burst_partway_through_is_visible_here_and_averaged_away_by_welch():
@@ -192,13 +239,46 @@ def test_merging_columns_averages_them_rather_than_dropping_any_of_the_record():
     assert capped.times.size == 78
     np.testing.assert_allclose(capped.psd.mean(axis=1), full.psd.mean(axis=1),
                                rtol=1e-9, atol=0.0)
-    # And with a trailing partial group the columns are still EVERY column — none dropped —
-    # merely weighted differently in the overall mean: 97 groups of 8 and one of 4, so those
-    # last four columns carry 2x their share and the overall mean moves by ~1% (measured max
-    # 1.24%). The per-column values, which are what the image draws, are exact either way.
+    # A non-divisible count is rebinned into equal-width time cells. Boundary source
+    # columns contribute fractionally, so none are dropped, the image remains affine, and
+    # a short trailing group is no longer painted/weighted like a full one.
     odd = spectrogram_psd(x, FS, nperseg=1024, noverlap=512, max_columns=100)
     assert odd.columns_merged == 8 and odd.times.size == 98
-    np.testing.assert_allclose(odd.psd.mean(axis=1), full.psd.mean(axis=1), rtol=3e-2)
+    assert odd.source_columns == full.times.size
+    np.testing.assert_allclose(odd.psd.mean(axis=1), full.psd.mean(axis=1),
+                               rtol=2e-14, atol=0.0)
+    np.testing.assert_allclose(np.diff(odd.times), odd.time_step_s,
+                               rtol=2e-14, atol=1e-15)
+
+
+def test_merged_time_support_uses_the_hop_not_repeated_overlapping_blocks():
+    """An 8-way 50%-overlap pool spans 1024 + 7*512 samples, not 8*1024."""
+    x = _noise(400_000)
+    sg = spectrogram_psd(x, FS, nperseg=1024, noverlap=512, max_columns=100)
+
+    assert sg.columns_merged == 8
+    assert sg.block_duration_s == pytest.approx(1024 / FS)
+    assert sg.hop_s == pytest.approx(512 / FS)
+    assert sg.time_resolution_s == pytest.approx((1024 + 7 * 512) / FS)
+    assert sg.time_resolution_s == pytest.approx(0.09216)
+    assert sg.time_step_s == pytest.approx((sg.source_columns / sg.times.size) * 512 / FS)
+
+
+def test_spectrogram_reports_the_partial_tail_scipy_does_not_analyse():
+    """Requested span and complete-window support are related, but not identical."""
+    n = 10_123
+    nperseg = 1024
+    noverlap = 512
+    hop = nperseg - noverlap
+    sg = spectrogram_psd(
+        _noise(n), FS, nperseg=nperseg, noverlap=noverlap, max_columns=7)
+
+    expected_analysed = nperseg + ((n - nperseg) // hop) * hop
+    assert sg.analyzed_samples == expected_analysed
+    assert sg.uncovered_tail_samples == n - expected_analysed
+    assert 0 <= sg.uncovered_tail_samples < hop
+    # Display rebinning changes columns, never the complete-window support.
+    assert sg.source_columns > sg.times.size
 
 
 def test_the_spectrogram_auto_targets_columns_where_the_welch_auto_targets_averages():

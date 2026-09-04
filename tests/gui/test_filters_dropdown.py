@@ -4,7 +4,7 @@ The pre-detection filter stages (Low-pass, High-pass, Notch, Median, Baseline dr
 Running mean, Savitzky-Golay, Normalize) used to stack as one QGroupBox each. They now
 live in ONE "Signal filters" group: a combo selects which stage's controls are shown, a
 QStackedWidget holds one page per stage, and an active-filters indicator (a ``● `` combo
-marker plus an ``Active: …`` summary label) keeps the whole chain visible.
+marker plus an execution-order summary label) keeps the whole chain visible.
 
 This is a LAYOUT-ONLY consolidation, so the contract is: every filter widget stays alive
 and reachable by attribute; ``params()`` reads every stage regardless of which page is
@@ -27,6 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
+from nanoscope.analysis.conditioning import chain_description
 from nanoscope.gui.panels import DetectionPanel
 
 # (combo index, label, widget attrs that belong on this page, enable-checkbox attr)
@@ -61,11 +62,24 @@ def _base_label(text: str) -> str:
     return text[2:] if text.startswith("● ") else text
 
 
+def _execution_summary(panel: DetectionPanel) -> str:
+    params = panel.params()
+    description = chain_description(params)
+    if panel.hp_enabled.isChecked():
+        return (
+            "Candidate-localization order: "
+            + (description or "raw calibrated signal")
+            + ". Quantitative measurement: same order with high-pass omitted."
+        )
+    return "Active execution order: " + (
+        description or "raw calibrated signal (no stages enabled)")
+
+
 # ================================================================================================
 # Combo lists every filter, default = Low-pass
 # ================================================================================================
 
-def test_combo_lists_all_seven_filters_in_order_default_lowpass(qtbot):
+def test_combo_lists_all_eight_filters_in_order_default_lowpass(qtbot):
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     assert panel.filter_selector.count() == len(EXPECTED_LABELS)
@@ -123,9 +137,23 @@ def test_preview_toggle_is_group_level_visible_on_every_page(qtbot):
     no matter which filter page is raised (it is not tucked onto one page)."""
     panel = DetectionPanel()
     qtbot.addWidget(panel)
-    for idx in range(7):
+    for idx in range(len(EXPECTED_LABELS)):
         panel.filter_selector.setCurrentIndex(idx)
         assert panel.filter_preview.isVisibleTo(panel)
+
+
+def test_highpass_labels_the_orange_preview_as_candidate_localization(qtbot):
+    panel = DetectionPanel()
+    qtbot.addWidget(panel)
+    assert panel.filter_preview.text() == "show processed trace on the plot"
+    panel.set_hp_enabled(True)
+    assert panel.filter_preview.text() == \
+        "show candidate-localization trace on the plot"
+    tip = panel.filter_preview.toolTip()
+    assert "orange trace" in tip
+    assert "without high-pass" in tip
+    panel.set_hp_enabled(False)
+    assert panel.filter_preview.text() == "show processed trace on the plot"
 
 
 # ================================================================================================
@@ -161,7 +189,7 @@ def test_params_identical_no_matter_which_page_is_shown(qtbot):
     panel.filter_selector.setCurrentIndex(0)
     reference = dict(panel.params())
     # Walk through every page; params() must not budge as the shown page changes.
-    for idx in range(7):
+    for idx in range(len(EXPECTED_LABELS)):
         panel.filter_selector.setCurrentIndex(idx)
         assert panel.filter_stack.currentIndex() == idx
         assert panel.params() == reference
@@ -202,7 +230,7 @@ def test_toggling_hidden_filter_via_setter_shows_in_params(qtbot, setter, key, i
     assert not getattr(panel, key).isVisibleTo(panel)
     # ...and the active indicator reflects it live (combo marker + summary label).
     assert panel.filter_selector.itemText(idx) == f"● {label}"
-    assert label in panel.active_filters_label.text()
+    assert panel.active_filters_label.text() == _execution_summary(panel)
 
 
 def test_hidden_filter_param_value_setter_also_lands(qtbot):
@@ -227,24 +255,32 @@ def test_hidden_filter_param_value_setter_also_lands(qtbot):
 def test_active_indicator_starts_at_none(qtbot):
     panel = DetectionPanel()
     qtbot.addWidget(panel)
-    assert panel.active_filters_label.text() == "Active: none"
+    assert panel.active_filters_label.text() == _execution_summary(panel)
     # No item carries a marker while everything is off.
-    for i in range(7):
+    for i in range(len(EXPECTED_LABELS)):
         assert not panel.filter_selector.itemText(i).startswith("● ")
 
 
-def test_active_indicator_lists_enabled_in_combo_order(qtbot):
+def test_active_indicator_uses_the_kernels_execution_order(qtbot):
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     # Enable a scattered subset via a mix of checkbox + setter access.
     panel.set_notch_enabled(True)          # index 2
     panel.filter_enabled.setChecked(True)  # index 0
     panel.set_savgol_enabled(True)         # index 6
-    # Summary lists them in combo order, regardless of the order enabled.
-    assert panel.active_filters_label.text() == "Active: Low-pass, Notch, Savitzky-Golay"
+    # The summary is the actual recipe, not the editor combo's order: low-pass executes
+    # last even though its page is first.
+    summary = panel.active_filters_label.text()
+    assert summary == _execution_summary(panel)
+    assert (
+        summary.index("notch")
+        < summary.index("Savitzky-Golay")
+        < summary.index("low-pass")
+    )
     # And exactly those combo items carry the ● marker.
     marked = [_base_label(panel.filter_selector.itemText(i))
-              for i in range(7) if panel.filter_selector.itemText(i).startswith("● ")]
+              for i in range(len(EXPECTED_LABELS))
+              if panel.filter_selector.itemText(i).startswith("● ")]
     assert marked == ["Low-pass", "Notch", "Savitzky-Golay"]
 
 
@@ -253,13 +289,50 @@ def test_active_indicator_updates_when_a_filter_is_disabled(qtbot):
     qtbot.addWidget(panel)
     panel.set_hp_enabled(True)
     panel.set_median_enabled(True)
-    assert panel.active_filters_label.text() == "Active: High-pass, Median"
+    assert panel.active_filters_label.text() == _execution_summary(panel)
     panel.set_hp_enabled(False)
-    assert panel.active_filters_label.text() == "Active: Median"
+    assert panel.active_filters_label.text() == _execution_summary(panel)
     assert panel.filter_selector.itemText(1) == "High-pass"      # marker cleared
     assert panel.filter_selector.itemText(3) == "● Median"
     panel.set_median_enabled(False)
-    assert panel.active_filters_label.text() == "Active: none"
+    assert panel.active_filters_label.text() == _execution_summary(panel)
+
+
+def test_highpass_active_summary_shows_both_execution_paths(qtbot):
+    panel = DetectionPanel()
+    qtbot.addWidget(panel)
+    panel.set_notch_enabled(True)
+    panel.set_hp_enabled(True)
+    panel.filter_enabled.setChecked(True)
+
+    summary = panel.active_filters_label.text()
+    assert summary.startswith("Candidate-localization order:")
+    assert "high-pass" in summary
+    assert summary.endswith(
+        "Quantitative measurement: same order with high-pass omitted.")
+    assert "notch" in summary and "low-pass" in summary
+
+
+def test_highpass_preview_names_detector_rows_and_manual_processed_signal(qtbot):
+    """The orange branch is not universally the quantitative branch: classical
+    detector rows omit high-pass, while manual Processed-signal measurement does not."""
+    panel = DetectionPanel()
+    qtbot.addWidget(panel)
+    tip = panel.filter_preview.toolTip()
+    assert "classical detector event-table amplitudes" in tip
+    assert "Manual measurement" in tip and "including high-pass" in tip
+
+
+def test_whole_chain_preview_sits_immediately_under_execution_summary(qtbot):
+    panel = DetectionPanel()
+    qtbot.addWidget(panel)
+    layout = panel.active_filters_label.parentWidget().layout()
+    assert (
+        layout.indexOf(panel.filter_preview)
+        == layout.indexOf(panel.active_filters_label) + 1)
+    assert (
+        layout.indexOf(panel.preview_error_label)
+        == layout.indexOf(panel.filter_preview) + 1)
 
 
 def test_active_indicator_does_not_change_shown_page(qtbot):

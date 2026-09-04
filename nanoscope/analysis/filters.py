@@ -22,8 +22,8 @@ user what a parameter choice really does instead of asserting it in a label.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Sequence
-from typing import Callable
+from collections.abc import Mapping, Sequence
+from typing import Any, Callable
 
 import numpy as np
 from scipy import ndimage, signal
@@ -33,7 +33,9 @@ __all__ = [
     "notch_settle_s", "notch_unsettled_s", "notch_frequencies",
     "running_mean", "median_filter", "noise_rms", "psd",
     "normalize", "robust_normalize",
-    "response", "response_db", "response_crossing_hz", "rise_time_probe_samples",
+    "response", "combined_response", "response_db", "response_crossing_hz",
+    "rise_time_probe_samples",
+    "MAX_RISE_TIME_PROBE_SAMPLES", "MAX_NOTCH_PAD_SAMPLES",
     "savgol_window_samples", "running_mean_samples",
     "RESPONSE_STAGES", "KINDS", "HP_KINDS", "KINDS_WITHOUT_ORDER",
     "NORMALIZE_MODES", "MODEL_INPUT_MODE", "NORMALIZE_MODES_ALL",
@@ -88,6 +90,12 @@ _LO, _HI = 0.1, 0.9
 
 # |H| at the -3 dB point.
 _HALF_POWER = 1.0 / np.sqrt(2.0)
+
+# Hard preflight limits shared by the kernel and GUI.  These protect real execution,
+# not merely the live preview: both operations otherwise scale without bound for legal
+# low-frequency settings and can ask SciPy to materialise multi-gigabyte work arrays.
+MAX_RISE_TIME_PROBE_SAMPLES = 2_000_000
+MAX_NOTCH_PAD_SAMPLES = 2_000_000
 
 
 def _validate_cutoff(fs: float, cutoff_hz: float) -> None:
@@ -265,11 +273,18 @@ def measure_rise_time(
     the direction that flatters you.
     """
     _validate_cutoff(fs, cutoff_hz)
-    fn = _filter_fn(fs, cutoff_hz, order, kind)
-
     # Long enough that both the pre-step baseline and the post-step plateau fully
     # settle, and that sosfiltfilt's edge padding never reaches the transition.
     n_side = rise_time_probe_samples(fs, cutoff_hz)
+    if n_side > MAX_RISE_TIME_PROBE_SAMPLES:
+        minimum_mib = (2 * n_side * np.dtype(np.float64).itemsize) / (1024.0**2)
+        raise ValueError(
+            f"rise-time measurement needs {n_side:,} samples on each side of the step "
+            f"({minimum_mib:.0f} MiB for the input alone), above the safe "
+            f"{MAX_RISE_TIME_PROBE_SAMPLES:,}-sample limit. Increase the low-pass "
+            "cutoff, use a lower-rate copy, or inspect the bounded response plot instead."
+        )
+    fn = _filter_fn(fs, cutoff_hz, order, kind)
     step = np.concatenate([np.zeros(n_side), np.ones(n_side)])
     y = fn(step)
 
@@ -305,8 +320,8 @@ def highpass(
     """Zero-phase high-pass a current trace. Cutoff in Hz; units are carried unchanged.
 
     Returns a contiguous ``float32`` array the same length as ``data``. Butterworth by
-    default (a maximally flat pass-band, so the open-pore level it leaves is not
-    rippled); ``kind='bessel'`` is available for a maximally flat group delay. Both run
+    default (a maximally flat pass-band above the cutoff); ``kind='bessel'`` trades
+    some roll-off sharpness for a maximally flat group delay. Both run
     zero-phase (``sosfiltfilt``), so an edge does NOT shift in time.
 
     USE WITH CARE -- A HIGH-PASS DISTORTS SQUARE TRANSLOCATION EVENTS. A blockade is (to
@@ -608,6 +623,14 @@ def notch(
     )
     need_samples = int(np.ceil(need * float(fs)))
     padlen = min(need_samples, max(0, x.size - 1))
+    if padlen > MAX_NOTCH_PAD_SAMPLES:
+        pad_mib = (2 * padlen * np.dtype(np.float64).itemsize) / (1024.0**2)
+        raise ValueError(
+            f"notch settling requires {padlen:,} padding samples per side "
+            f"({pad_mib:.0f} MiB for the two pads alone), above the safe "
+            f"{MAX_NOTCH_PAD_SAMPLES:,}-sample limit. Raise the lowest notch frequency, "
+            "lower Q, shorten/select the line list, or use a lower-rate copy."
+        )
     if padlen < need_samples:
         lines = notch_frequencies(fs, freq_hz, harmonics=harmonics, freqs=freqs)
         warnings.warn(
@@ -1019,6 +1042,28 @@ def psd(
 # check membership and say so rather than plot a curve.
 RESPONSE_STAGES = ("lowpass", "highpass", "notch", "running_mean", "savgol")
 
+# Keys a stage may carry inside :func:`combined_response`.  The grid controls are
+# deliberately chain-level: permitting one stage to bring its own ``n`` or low end
+# would recreate the mismatched-frequency interpolation that the helper exists to
+# prevent.
+_COMBINED_STAGE_KEYS = {
+    "lowpass": frozenset({"cutoff_hz", "order", "kind", "zero_phase"}),
+    "highpass": frozenset({"cutoff_hz", "order", "kind", "zero_phase"}),
+    "notch": frozenset(
+        {"freq_hz", "q", "harmonics", "freqs", "zero_phase"}
+    ),
+    "running_mean": frozenset({"window_s"}),
+    "savgol": frozenset({"window_s", "polyorder"}),
+}
+
+# A geometric grid has constant *fractional* resolution.  Twelve samples across a
+# notch's nominal f/Q bandwidth guarantee that the closest grid point is at most
+# 1/24 bandwidth from its centre; even if no sample lands exactly on the zero, a
+# zero-phase notch is then drawn below about -43 dB.  The cap prevents a typo such
+# as Q=1e9 from silently allocating gigabytes just to make a preview curve.
+_NOTCH_SAMPLES_PER_BANDWIDTH = 12.0
+_MAX_COMBINED_RESPONSE_POINTS = 250_000
+
 # Floor for the dB conversion, so a true zero (the Dirichlet nulls of a box average,
 # the notch centre) plots as a finite trough instead of -inf.
 _DB_FLOOR = -200.0
@@ -1205,6 +1250,330 @@ def response(
     _, h = signal.sosfreqz(sos, worN=f, fs=fs)
     mag = np.abs(h)
     return f, mag**2 if zero_phase else mag
+
+
+def combined_response(
+    stages: Sequence[Mapping[str, Any]],
+    fs: float,
+    *,
+    zero_phase: bool = True,
+    n: int = 512,
+    f_min_hz: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Magnitude response of a cascade of linear filter stages.
+
+    ``stages`` is an ordered sequence of mappings.  Every mapping has a required
+    ``"stage"`` key followed by the same scientific parameters that
+    :func:`response` accepts for that stage, for example::
+
+        combined_response(
+            [
+                {"stage": "notch", "freqs": [60.0, 120.0, 180.0], "q": 30.0},
+                {"stage": "highpass", "cutoff_hz": 2.0},
+                {"stage": "savgol", "window_s": 1e-3, "polyorder": 3},
+                {"stage": "lowpass", "cutoff_hz": 10_000.0},
+            ],
+            fs=250_000.0,
+        )
+
+    Returns one ``(f_hz, magnitude)`` pair for the whole cascade.  Every stage is
+    evaluated directly on THE SAME geometric frequency grid and the magnitudes are
+    multiplied point by point; no independently sampled curves are interpolated.
+    This is exact for a cascade of linear time-invariant stages because transfer
+    functions multiply (their order does not change the magnitude product).
+
+    ``zero_phase`` has exactly the meaning it has in :func:`response`: by default
+    each IIR low/high/notch stage is represented as it is applied by this module --
+    forward and backward, hence ``|H|**2``.  A stage mapping may explicitly override
+    that flag for a mixed or hypothetical chain.  Centred Gaussian, running-mean and
+    Savitzky-Golay kernels are applied once and are unaffected by the flag.
+
+    ``n`` is the requested *minimum* grid size.  A plain 512-point log grid can jump
+    clean over a Q=30 mains notch, so notch-bearing chains automatically increase the
+    point count until there are at least twelve geometric samples across the narrowest
+    nominal ``f/Q`` bandwidth.  The returned grid remains genuinely log-spaced.  An
+    extreme Q/span combination that would need more than 250,000 points is refused
+    with an actionable error instead of silently drawing a false flat response or
+    allocating without bound.
+
+    An empty sequence is the mathematically correct identity cascade and returns a
+    flat magnitude of one.  Median filtering and normalization are not accepted:
+    neither has a linear transfer function whose magnitude can join this product.
+
+    Args:
+        stages: Stage mappings. Supported names are :data:`RESPONSE_STAGES`.
+        fs: Positive, finite sample rate in Hz.
+        zero_phase: Default IIR application semantics for all stage mappings.
+        n: Minimum number of shared log-grid points (at least two).
+        f_min_hz: Optional positive grid lower bound, strictly below Nyquist.
+
+    Raises:
+        ValueError: If the grid controls, a stage mapping, or any stage parameter is
+            invalid, or a truthful notch grid would exceed the safety limit.
+    """
+    try:
+        fs = float(fs)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"fs must be positive and finite, got {fs!r}") from exc
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError(f"fs must be positive and finite, got {fs}")
+    if not isinstance(zero_phase, (bool, np.bool_)):
+        raise ValueError(f"zero_phase must be boolean, got {zero_phase!r}")
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 2:
+        raise ValueError(f"n must be an integer >= 2, got {n!r}")
+    if int(n) > _MAX_COMBINED_RESPONSE_POINTS:
+        raise ValueError(
+            f"n={int(n):,} exceeds the combined-response safety limit of "
+            f"{_MAX_COMBINED_RESPONSE_POINTS:,} points"
+        )
+
+    nyq = fs / 2.0
+    if f_min_hz is not None:
+        original_f_min_hz = f_min_hz
+        try:
+            f_min_hz = float(f_min_hz)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"f_min_hz must be positive, finite, and below Nyquist "
+                f"({nyq:g} Hz), got {original_f_min_hz!r}"
+            ) from exc
+        if not np.isfinite(f_min_hz) or not (0.0 < f_min_hz < nyq):
+            raise ValueError(
+                f"f_min_hz must be positive, finite, and below Nyquist "
+                f"({nyq:g} Hz), got {f_min_hz}"
+            )
+
+    if isinstance(stages, (str, bytes, bytearray, Mapping)):
+        raise ValueError("stages must be a sequence of stage mappings")
+    try:
+        stage_specs = list(stages)
+    except TypeError as exc:
+        raise ValueError("stages must be a sequence of stage mappings") from exc
+
+    prepared: list[tuple[str, dict[str, Any]]] = []
+    anchors: list[float] = []
+    notches: list[tuple[float, tuple[float, ...]]] = []
+
+    def stage_error(index: int, name: object, message: str) -> ValueError:
+        return ValueError(f"stages[{index}] ({name!r}): {message}")
+
+    for index, spec in enumerate(stage_specs):
+        if not isinstance(spec, Mapping):
+            raise ValueError(
+                f"stages[{index}] must be a mapping, got {type(spec).__name__}"
+            )
+        if "stage" not in spec:
+            raise ValueError(f"stages[{index}] is missing required key 'stage'")
+        stage = spec["stage"]
+        if not isinstance(stage, str):
+            raise stage_error(index, stage, "stage name must be a string")
+        if stage not in RESPONSE_STAGES:
+            if stage == "median":
+                raise stage_error(
+                    index,
+                    stage,
+                    "a sliding median is a non-linear rank filter and has NO "
+                    "transfer function",
+                )
+            raise stage_error(index, stage, f"stage must be one of {RESPONSE_STAGES}")
+
+        allowed = _COMBINED_STAGE_KEYS[str(stage)]
+        extra = [key for key in spec if key != "stage" and key not in allowed]
+        if extra:
+            raise stage_error(index, stage, f"unexpected parameter(s): {extra!r}")
+        params = {str(key): value for key, value in spec.items() if key != "stage"}
+
+        if stage in ("lowpass", "highpass"):
+            cutoff = params.get("cutoff_hz")
+            if cutoff is None:
+                raise stage_error(index, stage, "needs cutoff_hz")
+            try:
+                cutoff = float(cutoff)
+                _validate_cutoff(float(fs), cutoff)
+            except (TypeError, ValueError) as exc:
+                raise stage_error(index, stage, str(exc)) from exc
+            params["cutoff_hz"] = cutoff
+            anchors.append(cutoff)
+
+            # Per-stage defaults match the corresponding APPLY kernel.  In
+            # particular highpass defaults to 4-pole Butterworth, not response()'s
+            # low-pass-oriented signature defaults of 8-pole Bessel.
+            if stage == "lowpass":
+                params.setdefault("order", 8)
+                params.setdefault("kind", "bessel")
+                kinds = _KINDS
+            else:
+                params.setdefault("order", 4)
+                params.setdefault("kind", "butter")
+                kinds = _HP_KINDS
+            kind_value = params["kind"]
+            if kind_value not in kinds:
+                raise stage_error(index, stage, f"kind must be one of {kinds}, got {kind_value!r}")
+            if not (stage == "lowpass" and kind_value == "gaussian"):
+                order_value = params["order"]
+                try:
+                    order_is_integer = int(order_value) == order_value
+                except (TypeError, ValueError, OverflowError):
+                    order_is_integer = False
+                if not order_is_integer or int(order_value) < 1:
+                    raise stage_error(
+                        index, stage,
+                        f"order must be a positive integer, got {order_value!r}",
+                    )
+                params["order"] = int(order_value)
+
+        elif stage == "notch":
+            explicit = params.get("freqs")
+            if params.get("freq_hz") is None and explicit is None:
+                raise stage_error(index, stage, "needs freq_hz (or an explicit freqs list)")
+            q_value = params.get("q", 30.0)
+            try:
+                q_value = float(q_value)
+            except (TypeError, ValueError) as exc:
+                raise stage_error(index, stage, f"q must be positive and finite, got {q_value!r}") from exc
+            if not np.isfinite(q_value) or q_value <= 0:
+                raise stage_error(index, stage, f"q must be positive and finite, got {q_value!r}")
+            params["q"] = q_value
+
+            if explicit is not None:
+                # Materialise once: a generator must not be consumed while sizing
+                # the grid and then appear empty when response() evaluates it.
+                try:
+                    explicit = tuple(explicit)
+                except TypeError as exc:
+                    raise stage_error(index, stage, "freqs must be a sequence") from exc
+                try:
+                    lines = tuple(notch_frequencies(float(fs), freqs=explicit))
+                except (TypeError, ValueError) as exc:
+                    raise stage_error(index, stage, str(exc)) from exc
+                params["freqs"] = explicit
+                # Explicit lines override these two OUTRIGHT, including stale or
+                # malformed values in a restored parameter dictionary.
+                params.pop("freq_hz", None)
+                params.pop("harmonics", None)
+            else:
+                freq_value = params["freq_hz"]
+                harmonics_value = params.get("harmonics", 3)
+                try:
+                    harmonics_is_integer = int(harmonics_value) == harmonics_value
+                except (TypeError, ValueError, OverflowError):
+                    harmonics_is_integer = False
+                if not harmonics_is_integer or int(harmonics_value) < 1:
+                    raise stage_error(
+                        index, stage,
+                        f"harmonics must be >= 1, got {harmonics_value!r}",
+                    )
+                try:
+                    freq_value = float(freq_value)
+                    lines = tuple(
+                        notch_frequencies(
+                            float(fs), freq_value, harmonics=int(harmonics_value)
+                        )
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise stage_error(index, stage, str(exc)) from exc
+                params["freq_hz"] = freq_value
+                params["harmonics"] = int(harmonics_value)
+            anchors.append(min(lines))
+            notches.append((q_value, lines))
+
+        elif stage == "running_mean":
+            window = params.get("window_s")
+            if window is None:
+                raise stage_error(index, stage, "needs window_s")
+            try:
+                window = float(window)
+            except (TypeError, ValueError) as exc:
+                raise stage_error(
+                    index, stage, f"window_s must be positive and finite, got {window!r}"
+                ) from exc
+            if not np.isfinite(window) or window <= 0:
+                raise stage_error(
+                    index, stage, f"window_s must be positive and finite, got {window!r}"
+                )
+            params["window_s"] = window
+            anchors.append(1.0 / window)
+
+        else:  # savgol
+            window = params.get("window_s")
+            if window is None:
+                raise stage_error(index, stage, "needs window_s")
+            try:
+                window = float(window)
+            except (TypeError, ValueError) as exc:
+                raise stage_error(
+                    index, stage, f"window_s must be positive and finite, got {window!r}"
+                ) from exc
+            if not np.isfinite(window) or window <= 0:
+                raise stage_error(
+                    index, stage, f"window_s must be positive and finite, got {window!r}"
+                )
+            poly = params.get("polyorder", 3)
+            try:
+                poly_is_integer = int(poly) == poly
+            except (TypeError, ValueError, OverflowError):
+                poly_is_integer = False
+            if not poly_is_integer or int(poly) < 1:
+                raise stage_error(
+                    index, stage, f"polyorder must be a positive integer, got {poly!r}"
+                )
+            params["window_s"] = window
+            params["polyorder"] = int(poly)
+            anchors.append(1.0 / window)
+
+        if "zero_phase" in params:
+            if not isinstance(params["zero_phase"], (bool, np.bool_)):
+                raise stage_error(
+                    index, stage,
+                    f"zero_phase must be boolean, got {params['zero_phase']!r}",
+                )
+            params["zero_phase"] = bool(params["zero_phase"])
+        elif stage in ("lowpass", "highpass", "notch"):
+            params["zero_phase"] = bool(zero_phase)
+        prepared.append((str(stage), params))
+
+    anchor = min(anchors) if anchors else None
+    lo = float(_response_grid(float(fs), 2, anchor, f_min_hz)[0])
+    log_span = float(np.log(nyq / lo))
+    n_effective = int(n)
+    for q_value, lines in notches:
+        if any(lo <= line <= nyq for line in lines):
+            required_points = log_span * q_value * _NOTCH_SAMPLES_PER_BANDWIDTH
+            needed = (
+                _MAX_COMBINED_RESPONSE_POINTS + 1
+                if not np.isfinite(required_points)
+                or required_points >= _MAX_COMBINED_RESPONSE_POINTS
+                else int(np.ceil(required_points)) + 1
+            )
+            n_effective = max(n_effective, needed)
+    if n_effective > _MAX_COMBINED_RESPONSE_POINTS:
+        raise ValueError(
+            "the shared log grid needs "
+            f"{n_effective:,} points to resolve the narrowest notch over "
+            f"{lo:g}-{nyq:g} Hz (limit {_MAX_COMBINED_RESPONSE_POINTS:,}); "
+            "raise f_min_hz, reduce notch Q, or preview a narrower frequency span"
+        )
+
+    shared_f = _response_grid(float(fs), n_effective, anchor, lo)
+    combined = np.ones(shared_f.shape, dtype=np.float64)
+    for index, (stage, params) in enumerate(prepared):
+        try:
+            stage_f, stage_mag = response(
+                stage,
+                float(fs),
+                n=n_effective,
+                f_min_hz=lo,
+                **params,
+            )
+        except (TypeError, ValueError) as exc:  # defensive context for scipy errors
+            raise stage_error(index, stage, str(exc)) from exc
+        if not np.array_equal(stage_f, shared_f):  # pragma: no cover - invariant guard
+            raise RuntimeError(f"stage {index} did not evaluate on the shared frequency grid")
+        if stage_mag.shape != shared_f.shape or not np.all(np.isfinite(stage_mag)):
+            raise RuntimeError(f"stage {index} produced an invalid magnitude response")
+        combined *= stage_mag
+
+    return shared_f, combined
 
 
 def response_db(magnitude: np.ndarray) -> np.ndarray:

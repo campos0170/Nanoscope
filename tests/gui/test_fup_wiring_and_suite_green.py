@@ -263,7 +263,9 @@ def test_the_real_plots_window_worker_is_stopped_by_a_quit(bare_win, qapp):
     win = bare_win
     win._open_plots()
     plots = win._plots_window
-    assert plots is not None and plots.parent() is win
+    assert plots is not None
+    assert win._analysis_explorer.isAncestorOf(plots)
+    assert plots.property("nanoscopeAnalysisExplorerPage") is True
 
     started = threading.Event()
 

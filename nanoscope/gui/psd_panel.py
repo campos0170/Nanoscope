@@ -8,7 +8,8 @@ over a chosen quiet baseline segment, and separates the three noise regimes:
 
 * the low-frequency **1/f (flicker)** power law — its exponent ``alpha`` and 1 Hz
   magnitude are fit and the line is overlaid;
-* the mid-decade **thermal / white floor**;
+* a **mid-log-frequency median proxy** (a heuristic level, not an automatically
+  established white-noise plateau);
 * the high-frequency **dielectric (~f) / capacitance (~f²) rise** toward Nyquist.
 
 It also reports the **band-integrated RMS noise**: a total figure, the default
@@ -52,14 +53,15 @@ to match.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
-from pyqtgraph.exporters import ImageExporter
 from PySide6 import QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
@@ -76,6 +78,15 @@ from ..plot.style import OKABE_ITO
 from .axes import ReadableLogAxis
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
+from .plot_export import (
+    DATA_FILTERS,
+    IMAGE_FILTERS,
+    IMAGE_FORMATS,
+    data_write_failure_text,
+    require_csv_row_budget,
+    write_live_plot_image,
+    write_plot_csv,
+)
 
 __all__ = ["PSDCurve", "PSDWindow", "VIEWS", "VIEW_PSD", "VIEW_FFT", "VIEW_SPECTROGRAM",
            "VIEW_ALLPOINTS"]
@@ -168,10 +179,16 @@ VIEWS: tuple[tuple[str, str], ...] = (
 # psd.default_spectrogram_nperseg).
 _SPEC_NPERSEG_CHOICES = ("512", "1024", "4096", "16384")
 
-#: Columns the spectrogram image is allowed. Above it neighbouring columns are AVERAGED
-#: (never dropped), so every sample of the span is still on some pixel — see
+#: Columns the spectrogram image is allowed. Above it neighbouring *complete source
+#: columns* are AVERAGED (never dropped). SciPy can omit a final partial block shorter
+#: than one hop; the caption/export report that tail explicitly — see
 #: :func:`nanoscope.analysis.psd.spectrogram_psd`.
 _SPEC_MAX_COLUMNS = 900
+
+# The exported grid is exact and long-form (one frequency/time cell per row). Keep
+# that simple representation bounded so a multi-minute, high-resolution view cannot
+# synchronously allocate millions of dataframe rows on the GUI thread.
+MAX_SPECTROGRAM_CSV_ROWS = 250_000
 
 _SPEC_COLORMAPS = ("viridis", "inferno", "magma", "cividis")
 
@@ -408,7 +425,7 @@ def _fmt_q(value: float | None, units: str) -> str:
     that has to read as *unmeasurable*, not as "nan" and above all not as the ``0.0`` it
     used to be — "Total RMS noise: 0 pA" is indistinguishable from a flawless pore.
 
-    Deliberately does NOT name a cause: a NaN white floor can also mean "no positive PSD
+    Deliberately does NOT name a cause: a NaN mid-log proxy can also mean "no positive PSD
     bins", which is not the same thing. The cause is stated once, by the caller, when the
     whole spectrum is non-finite.
 
@@ -699,12 +716,19 @@ class PSDWindow(QtWidgets.QMainWindow):
         root.addWidget(self._build_rms_group())
         root.addWidget(self._build_style_group())
 
-        self._save_btn = QtWidgets.QPushButton("Save image…")
+        self._save_btn = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
         self._save_btn.setToolTip(
-            "Export the view currently on screen as a PNG — the spectrum, the FFT, the "
+            "Export the view currently on screen as PNG, PDF or SVG — the spectrum, the FFT, the "
             "spectrogram or the histogram, whichever is showing.")
         self._save_btn.clicked.connect(lambda: self.save_image())
         root.addWidget(self._save_btn)
+        self._save_data_btn = QtWidgets.QPushButton("Export data (CSV)…")
+        self._save_data_btn.setAccessibleName("Export visible spectrum data as CSV")
+        self._save_data_btn.setToolTip(
+            "Export the exact numeric values behind the view currently on screen, with "
+            "source identity, settings, warnings and provenance.")
+        self._save_data_btn.clicked.connect(lambda: self.export_data())
+        root.addWidget(self._save_data_btn)
         root.addStretch(1)
         return host
 
@@ -1952,7 +1976,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         if not ok:
             out.append(
                 f"CAUTION — comparing absolute noise magnitude across recordings: {why} "
-                f"The SHAPE of each spectrum (α, the white floor's position, the capacitive "
+                f"The SHAPE of each spectrum (α, its mid-log-frequency level, the capacitive "
                 f"rise) is unaffected and is comparable as drawn.")
         return out
 
@@ -1980,7 +2004,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         wf_lo, wf_hi = s["white_floor_band"]
         lines += [
             "",
-            f"White floor:       {_fmt_q(s['white_floor'], _sq_units(u))} "
+            f"Mid-log median proxy: {_fmt_q(s['white_floor'], _sq_units(u))} "
             f"(median {wf_lo:.4g}–{wf_hi:.4g} Hz)",
         ]
         if not np.isfinite(s.get("total_rms", np.nan)):
@@ -2642,7 +2666,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._spec_image.setColorMap(cmap)
 
         t0 = span.i0 / sg.fs                       # RECORDING seconds: the segment spins' clock
-        dt = float(sg.times[1] - sg.times[0]) if sg.times.size > 1 else sg.nperseg / sg.fs
+        dt = float(sg.times[1] - sg.times[0]) if sg.times.size > 1 else sg.time_step_s
         df = float(sg.freqs[1] - sg.freqs[0]) if sg.freqs.size > 1 else sg.fs / 2.0
         self._spec_image.setRect(QRectF(
             t0 + float(sg.times[0]) - dt / 2.0, float(sg.freqs[0]) - df / 2.0,
@@ -2722,14 +2746,34 @@ class PSDWindow(QtWidgets.QMainWindow):
         psd_bins = int(self._freqs.size) if self._freqs is not None else 0
         same_blocks = (self._nperseg_used == sg.nperseg
                        and self._half_block_overlap()
-                       and sg.columns_merged == 1
                        and psd_bins > 0)
+        if sg.columns_merged > 1:
+            pooled = sg.source_columns / max(int(sg.times.size), 1)
+            timing = (
+                f"Each source block is {sg.nperseg:,} samples "
+                f"({sg.block_duration_s * 1e3:.4g} ms) with a "
+                f"{sg.hop_s * 1e3:.4g} ms hop. Each drawn bin pools about "
+                f"{pooled:.3g} source columns; drawn-bin spacing is "
+                f"{sg.time_step_s * 1e3:.4g} ms and nominal contributing support is "
+                f"{sg.time_resolution_s * 1e3:.4g} ms."
+            )
+        else:
+            timing = (
+                f"Each column is one {sg.nperseg:,}-sample block covering "
+                f"{sg.block_duration_s * 1e3:.4g} ms; centres advance by "
+                f"{sg.hop_s * 1e3:.4g} ms."
+            )
         lines = [
             f"{sg.freqs.size:,} frequency bins x {sg.times.size:,} time columns over "
-            f"{t0:.4g}–{t1:.4g} s. One column = {sg.nperseg:,} samples "
-            f"({sg.time_resolution_s * 1e3:.4g} ms); bin spacing "
+            f"{t0:.4g}–{t1:.4g} s. {timing} Frequency spacing is "
             f"{sg.fs / sg.nperseg:.4g} Hz.",
         ]
+        if sg.uncovered_tail_samples:
+            lines.append(
+                f"The final {sg.uncovered_tail_samples:,} requested sample(s) "
+                f"({sg.uncovered_tail_samples / sg.fs * 1e3:.4g} ms) do not fill a "
+                "complete source block and are not represented; all complete source "
+                "columns are retained before display averaging.")
         if same_blocks:
             lines.append(
                 f"Same estimator AND the same blocks as the PSD view ({sg.nperseg:,} "
@@ -2746,23 +2790,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             if not self._half_block_overlap():
                 why.append(f"this view always hops by half a block, that one is set to "
                            f"{self._overlap_spin.value():g}% overlap")
-            if sg.columns_merged > 1:
-                why.append(f"the DRAWN columns are groups of {sg.columns_merged} blocks, and "
-                           f"their unweighted mean is the block mean only when the last "
-                           f"group is full")
-            if self._nperseg_used == sg.nperseg and self._half_block_overlap():
-                # The only thing between them is the merge, so "change the block length"
-                # would send the reader to a combo that is already right.
-                hint = (f"The blocks already match: it is the {sg.columns_merged}-way column "
-                        f"merge that stands between them, so compare on a span short enough "
-                        f"to stay under {_SPEC_MAX_COLUMNS} columns.")
-            else:
-                hint = self._spec_match_hint(sg)
-                if sg.columns_merged > 1:
-                    # Matching the blocks alone would not do it while the DRAWN columns are
-                    # groups: the hint must not promise an agreement the merge can deny.
-                    hint += (f" That also needs the columns unmerged — a span of fewer than "
-                             f"{_SPEC_MAX_COLUMNS} blocks.")
+            hint = self._spec_match_hint(sg)
             lines.append(
                 f"Same estimator as the PSD view (Welch, {self._window_combo.currentText()} "
                 f"taper, per-block detrend) but not the same settings, so averaging these "
@@ -2782,9 +2810,10 @@ class PSDWindow(QtWidgets.QMainWindow):
                 f"square root — in {units}/√Hz.")
         if sg.columns_merged > 1:
             lines.append(
-                f"Time columns were AVERAGED in groups of {sg.columns_merged} to fit "
-                f"{_SPEC_MAX_COLUMNS} on screen — averaged, never dropped, so every sample "
-                f"of the span is still on some pixel.")
+                f"The {sg.source_columns:,} source time columns were AVERAGED into "
+                f"{sg.times.size:,} equal-width drawn bins to fit {_SPEC_MAX_COLUMNS} on "
+                f"screen. Boundary columns are shared fractionally: none are dropped or "
+                f"overweighted, and there is no falsely full-width trailing bin.")
         if levels is not None:
             lines.append(f"Colour spans log₁₀ PSD {levels[0]:.3g} … {levels[1]:.3g} "
                          f"(2nd–99.8th percentile of the drawn bins).")
@@ -2884,7 +2913,7 @@ class PSDWindow(QtWidgets.QMainWindow):
 
     # -- export ----------------------------------------------------------------------------------
     def save_image(self, path: str | None = None) -> Path | None:
-        """Export the VISIBLE view as a PNG (dialog when ``path`` is None).
+        """Export the VISIBLE view as PNG, SVG or PDF by filename extension.
 
         Returns the written path, or None when the user cancelled OR the write
         failed (a failed write is reported in a dialog, never returned as a path).
@@ -2892,7 +2921,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         if path is None:
             chosen = ask_export_path(
                 self, title="Save spectrum image", suggestion="noise_psd.png",
-                filters="PNG image (*.png);;All files (*)")   # writes exactly this file
+                filters=IMAGE_FILTERS)   # writes exactly this file
             if chosen is None:
                 return None
             path = str(chosen)
@@ -2904,19 +2933,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         # folded over the image's left edge with its ticks on top of the frequency axis
         # (measured at 640x480 — the axis showed two labels, "0" and "1000", for a 0-25 kHz
         # range). A spectrogram without a legible colour scale is not a saved spectrogram.
-        if self.current_view() == VIEW_SPECTROGRAM:
-            exporter = ImageExporter(self._spec_widget.scene())
-        else:
-            exporter = ImageExporter(self.active_plot_item())
+        target = (self._spec_widget.scene() if self.current_view() == VIEW_SPECTROGRAM
+                  else self.active_plot_item())
         w, h = self._style.export_w, self._style.export_h
-        params = exporter.parameters()
-        if w > 0 and h > 0:
-            params.param("width").setValue(w, blockSignal=exporter.widthChanged)
-            params.param("height").setValue(h, blockSignal=exporter.heightChanged)
-        elif w > 0:
-            params["width"] = w
-        elif h > 0:
-            params["height"] = h
         out = Path(path)
         # STAGED, like every other export (USER_GUIDE §12). pyqtgraph's ImageExporter
         # ends in ``QImage.save``, which OPENS AND TRUNCATES its target and reports
@@ -2924,13 +2943,14 @@ class PSDWindow(QtWidgets.QMainWindow):
         # export for any format QImage cannot write and then said "The file was not
         # created". Rendering into a staged sibling costs the user nothing on failure,
         # which is what lets the message below say so truthfully (EXP3-06).
-        from ..plot.figures import image_write_failure_text, save_plot_image
+        from ..plot.figures import image_write_failure_text
 
         try:
-            notes = save_plot_image(out, lambda staged: exporter.export(str(staged)))
+            notes = write_live_plot_image(out, target, width=w, height=h)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
-                self, "Save spectrum image", image_write_failure_text(out, exc))
+                self, "Save spectrum image",
+                image_write_failure_text(out, exc, formats=IMAGE_FORMATS))
             return None
         # What the replace changed about the FILE (symlink followed, hard-linked names
         # left holding the previous contents) — unrecoverable after the fact, so it is
@@ -2939,4 +2959,305 @@ class PSDWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, "Save spectrum image", "\n\n".join(notes))
         self._details.setPlainText(self.details_text() + f"\n\nSaved image → {out.name}")
+        return out
+
+    @staticmethod
+    def _json_default(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, tuple):
+            return list(value)
+        return str(value)
+
+    def _source_fields(self, curve: PSDCurve | None = None) -> dict:
+        """Source identity without manufacturing one for an orphaned saved result."""
+        head = curve or (self._curves[0] if self._curves else None)
+        live = self._primary_rec() if curve is None or curve is head else None
+        doc_id = head.doc_id if head is not None else (live or {}).get("doc_id")
+        channel = head.channel if head is not None else (live or {}).get("channel")
+        key = head.key if head is not None else (live or {}).get("key")
+        label = head.label if head is not None else (live or {}).get("label")
+        return {
+            "source_identity_available": bool(doc_id or key),
+            "source_doc_id": doc_id,
+            "source_key": key,
+            "source_channel": channel,
+            "source_label": label,
+            "source_units": head.units if head is not None else self._units,
+        }
+
+    def _export_warnings(self, curve: PSDCurve | None = None) -> list[str]:
+        curves = [curve] if curve is not None else list(self._curves)
+        out = list(getattr(self, "_compute_notes", ()))
+        for source in curves:
+            if source is None:
+                continue
+            if source.note:
+                out.append(source.note)
+            out.extend(str(issue) for issue in source.channel_issues)
+            if source.constant:
+                out.append("The analysed channel is constant; zero spectral power is arithmetic.")
+            if source.underflow:
+                out.append("Spectral power underflowed float64; use the time-domain RMS warning.")
+        return list(dict.fromkeys(out))
+
+    def _export_common(self, view: str, curve: PSDCurve | None = None) -> dict:
+        head = curve or (self._curves[0] if self._curves else None)
+        return {
+            "view": view,
+            **self._source_fields(curve),
+            "sample_rate_hz": (head.fs if head is not None else
+                               getattr({VIEW_FFT: self._fft,
+                                        VIEW_SPECTROGRAM: self._spec}.get(view),
+                                       "fs", np.nan)),
+            "segment_start_sample": head.i0 if head is not None else np.nan,
+            "segment_sample_count": head.n_samples if head is not None else
+                                    getattr({VIEW_FFT: self._fft,
+                                             VIEW_SPECTROGRAM: self._spec}.get(view),
+                                            "n_samples", np.nan),
+            "requested_start_s": self._start_spin.value(),
+            "requested_end_s": self._end_spin.value(),
+            "window": self._window_combo.currentText(),
+            "welch_nperseg": self._nperseg_used or np.nan,
+            "welch_noverlap": self._noverlap_used if self._nperseg_used else np.nan,
+            "welch_segments": self._nseg_used or np.nan,
+            "log_x": self._loglog_check.isChecked() if view in (VIEW_PSD, VIEW_FFT) else False,
+            "log_y": self._loglog_check.isChecked() if view in (VIEW_PSD, VIEW_FFT) else False,
+            "amplitude_spectral_density": self._asd_check.isChecked(),
+            "title_override": self._style.title,
+            "background": self._style.background,
+            "warnings_json": json.dumps(
+                self._export_warnings(curve), ensure_ascii=False,
+                default=self._json_default),
+            "details": self.details_text(),
+            "caption": self.caption_text(view),
+        }
+
+    def _psd_plot_data(self) -> pd.DataFrame:
+        """Every visible overlay/fitted sample in the Welch PSD page."""
+        rows: list[dict] = []
+        asd = self._asd_check.isChecked()
+        for curve in self._curves:
+            if curve.item is None:
+                continue
+            x, y = curve.item.getData()
+            xs, ys = np.asarray(x), np.asarray(y)
+            common = {
+                **self._export_common(VIEW_PSD, curve),
+                "value_kind": "ASD" if asd else "PSD",
+                "display_units": (f"{_unit_or_unknown(curve.units)}/sqrt(Hz)" if asd
+                                  else _sq_units(curve.units)),
+                "curve_colour": (self._style.data_color if curve is self._curves[0]
+                                  else curve.colour),
+                "curve_summary_json": json.dumps(
+                    curve.summary, ensure_ascii=False, default=self._json_default),
+                "nperseg": curve.nperseg, "noverlap": curve.noverlap,
+                "n_segments": curve.nseg, "n_samples": curve.n_samples,
+                "constant_signal": curve.constant,
+                "spectral_underflow": curve.underflow,
+                "time_domain_rms": curve.time_rms,
+            }
+            for index, (frequency, value) in enumerate(zip(xs, ys)):
+                rows.append({
+                    "part": "curve", "point_index": index,
+                    "frequency_hz": float(frequency),
+                    "display_value": float(value),
+                    "psd_value": float(value * value) if asd else float(value),
+                    **common,
+                })
+
+        if rows and self._fit_item is not None and self._curves:
+            x, y = self._fit_item.getData()
+            head = self._curves[0]
+            common = {
+                **self._export_common(VIEW_PSD, head),
+                "value_kind": "ASD_fit" if asd else "PSD_fit",
+                "display_units": (f"{_unit_or_unknown(head.units)}/sqrt(Hz)" if asd
+                                  else _sq_units(head.units)),
+                "curve_colour": self._style.fit_color,
+                "curve_summary_json": json.dumps(
+                    head.summary, ensure_ascii=False, default=self._json_default),
+                "nperseg": head.nperseg, "noverlap": head.noverlap,
+                "n_segments": head.nseg, "n_samples": head.n_samples,
+                "constant_signal": head.constant,
+                "spectral_underflow": head.underflow,
+                "time_domain_rms": head.time_rms,
+            }
+            for index, (frequency, value) in enumerate(zip(np.asarray(x), np.asarray(y))):
+                rows.append({
+                    "part": "flicker_fit", "point_index": index,
+                    "frequency_hz": float(frequency),
+                    "display_value": float(value),
+                    "psd_value": float(value * value) if asd else float(value),
+                    **common,
+                })
+        return pd.DataFrame(rows)
+
+    def _fft_plot_data(self) -> pd.DataFrame:
+        spec = self._fft
+        if spec is None or self._fft_item is None:
+            return pd.DataFrame()
+        x, y = self._fft_item.getData()
+        common = {
+            **self._export_common(VIEW_FFT),
+            "fft_n_samples": spec.n_samples, "fft_raw_bin_count": spec.n_bins,
+            "fft_resolution_hz": spec.df_hz, "fft_window": spec.window,
+            "fft_reduced_to_peak_envelope": spec.reduced,
+            "fft_nonfinite_samples": spec.n_nonfinite,
+            "display_units": _unit_or_unknown(self._units),
+        }
+        return pd.DataFrame([
+            {"part": "fft_curve", "point_index": index,
+             "frequency_hz": float(frequency), "peak_amplitude": float(value), **common}
+            for index, (frequency, value) in enumerate(zip(np.asarray(x), np.asarray(y)))
+        ])
+
+    def _spectrogram_plot_data(self) -> pd.DataFrame:
+        sg = self._spec
+        image = getattr(self._spec_image, "image", None)
+        if sg is None or image is None or not self._spec_image.isVisible():
+            return pd.DataFrame()
+
+        # ``ImageItem`` is stored [time, frequency]. Export that float32 display array
+        # as well as the float64 scientific PSD so the CSV can reproduce both the
+        # picture and any downstream calculation without quantising one into the other.
+        shown = np.asarray(image)
+        n_f, n_t = sg.psd.shape
+        if shown.shape != (n_t, n_f):
+            return pd.DataFrame()  # unknown mapping: refuse instead of inventing one
+        row_count = int(n_f) * int(n_t)
+        require_csv_row_budget(
+            row_count, limit=MAX_SPECTROGRAM_CSV_ROWS,
+            description=(f"spectrogram grid ({n_f:,} frequencies × "
+                         f"{n_t:,} time columns)"),
+            advice=("Shorten the analysed Segment, then export again; the on-screen "
+                    "image and cached analysis remain unchanged."))
+        if not np.isfinite(shown).any():
+            return pd.DataFrame()
+        time_index = np.repeat(np.arange(n_t, dtype=np.int64), n_f)
+        frequency_index = np.tile(np.arange(n_f, dtype=np.int64), n_t)
+        # These are the same analytical centres used to build ``setRect`` in
+        # ``_draw_spectrogram``.  Reusing them is exact and independent of screen
+        # transforms/rounding. An orphaned saved analysis is deliberately drawn from
+        # t=0; the source-identity fields still state that its original i0 is unknown.
+        head = self._curves[0] if self._curves else None
+        display_i0 = head.i0 if head is not None else 0
+        time_centres = np.asarray(sg.times)[time_index]
+        half_time_bin = 0.5 * sg.time_step_s
+        plot_time = (display_i0 / sg.fs) + time_centres
+        plot_frequency = np.asarray(sg.freqs)[frequency_index]
+        levels = self._spec_image.getLevels()
+        lo, hi = ((float(levels[0]), float(levels[1])) if levels is not None
+                  else (np.nan, np.nan))
+        data = pd.DataFrame({
+            "part": "spectrogram_cell",
+            "time_index": time_index,
+            "frequency_index": frequency_index,
+            "time_from_span_start_s": time_centres,
+            "time_bin_start_from_span_s": time_centres - half_time_bin,
+            "time_bin_stop_from_span_s": time_centres + half_time_bin,
+            "plot_time_s": plot_time,
+            "frequency_hz": plot_frequency,
+            "psd_value": np.asarray(sg.psd).T.reshape(-1),
+            "display_log10_psd": shown.reshape(-1),
+        })
+        # Provenance/configuration lives in one explicit row rather than being copied
+        # millions of times on a high-resolution grid.
+        metadata = pd.DataFrame([{
+            "part": "metadata", **self._export_common(VIEW_SPECTROGRAM),
+            "spectrogram_nperseg": sg.nperseg,
+            "spectrogram_noverlap": sg.noverlap,
+            "spectrogram_columns_merged": sg.columns_merged,
+            "spectrogram_source_columns": sg.source_columns,
+            "spectrogram_source_block_duration_s": sg.block_duration_s,
+            "spectrogram_source_hop_s": sg.hop_s,
+            "spectrogram_drawn_time_step_s": sg.time_step_s,
+            "spectrogram_nominal_time_support_s": sg.time_resolution_s,
+            "spectrogram_analyzed_samples": sg.analyzed_samples,
+            "spectrogram_uncovered_tail_samples": sg.uncovered_tail_samples,
+            "spectrogram_uncovered_tail_s": sg.uncovered_tail_samples / sg.fs,
+            "spectrogram_nonfinite_samples": sg.n_nonfinite,
+            "spectrogram_shape_frequency": n_f,
+            "spectrogram_shape_time": n_t,
+            "colormap": self._spec_cmap_combo.currentText(),
+            "colour_level_low_log10_psd": lo,
+            "colour_level_high_log10_psd": hi,
+            "psd_units": _sq_units(self._units),
+        }])
+        return pd.concat([metadata, data], ignore_index=True, sort=False)
+
+    def _histogram_plot_data(self) -> pd.DataFrame:
+        hist = self._hist
+        if hist is None or self._hist_item is None or not hist.counts.size:
+            return pd.DataFrame()
+        common = {
+            **self._export_common(VIEW_ALLPOINTS),
+            "histogram_units": _unit_or_unknown(self._units),
+            "histogram_n_total": hist.n_total,
+            "histogram_n_finite": hist.n_finite,
+            "histogram_n_binned": hist.n_binned,
+            "histogram_n_nonfinite": hist.n_nonfinite,
+            "histogram_n_below": hist.n_below,
+            "histogram_n_above": hist.n_above,
+            "histogram_clipped": hist.clipped,
+            "requested_bins": self._hist_bins_combo.currentText(),
+            "mark_levels": self._hist_levels_check.isChecked(),
+        }
+        rows = [
+            {"part": "histogram_bin", "bin_index": index,
+             "bin_left": float(hist.edges[index]),
+             "bin_right": float(hist.edges[index + 1]),
+             "bin_center": float(hist.centers[index]),
+             "count": int(count), "level_center": np.nan,
+             "level_peak_count": np.nan, "level_occupancy": np.nan, **common}
+            for index, count in enumerate(hist.counts)
+        ]
+        occupancies = _level_occupancy(hist, self._hist_levels)
+        for level, occupancy in zip(self._hist_levels, occupancies):
+            rows.append({
+                "part": "marked_level", "bin_index": np.nan,
+                "bin_left": np.nan, "bin_right": np.nan, "bin_center": np.nan,
+                "count": np.nan, "level_center": float(level["center"]),
+                "level_peak_count": level.get("count", np.nan),
+                "level_occupancy": occupancy, **common,
+            })
+        return pd.DataFrame(rows)
+
+    def _plot_data(self) -> pd.DataFrame:
+        """Exact numeric data behind the currently visible analytical view."""
+        return {
+            VIEW_PSD: self._psd_plot_data,
+            VIEW_FFT: self._fft_plot_data,
+            VIEW_SPECTROGRAM: self._spectrogram_plot_data,
+            VIEW_ALLPOINTS: self._histogram_plot_data,
+        }[self.current_view()]()
+
+    def export_data(self, path: str | None = None) -> Path | None:
+        """Export the current PSD/FFT/spectrogram/histogram view as staged CSV."""
+        view = self.current_view()
+        suggestion = {
+            VIEW_PSD: "noise_psd.csv", VIEW_FFT: "noise_fft.csv",
+            VIEW_SPECTROGRAM: "noise_spectrogram.csv",
+            VIEW_ALLPOINTS: "all_points_histogram.csv",
+        }[view]
+        if path is None:
+            chosen = ask_export_path(
+                self, title="Export spectrum data", suggestion=suggestion,
+                filters=DATA_FILTERS)
+            if chosen is None:
+                return None
+            path = str(chosen)
+        out = Path(path)
+        try:
+            notes = write_plot_csv(out, self._plot_data())
+        except Exception as exc:  # noqa: BLE001 — preserve old export and report it
+            QtWidgets.QMessageBox.warning(
+                self, "Export spectrum data", data_write_failure_text(out, exc))
+            return None
+        if notes:
+            QtWidgets.QMessageBox.information(
+                self, "Export spectrum data", "\n\n".join(notes))
+        self._details.setPlainText(self.details_text() + f"\n\nExported data → {out.name}")
         return out

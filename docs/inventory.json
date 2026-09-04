@@ -165,7 +165,7 @@
         "kind": "menu-action",
         "group": "View",
         "shortcut": "Ctrl+0 window-wide; Home while the trace is focused",
-        "what_it_does": "Zoom all the way back out to the full trace (or double-click the plot). (Verbatim tooltip.)",
+        "what_it_does": "Zoom all the way back out to the full trace. The Full button below the plot does the same; Home also works while the trace itself has focus. (Verbatim tooltip.)",
         "notes": "Home is trace-scoped so it does not steal the normal go-to-first-row action from tables and lists."
       },
       {
@@ -180,7 +180,7 @@
         "label": "Drag draws zoom box",
         "kind": "checkbox",
         "group": "View",
-        "what_it_does": "On: left-drag frames a region and zooms into it (dive inside an event). Off: left-drag pans. The mouse wheel always zooms time. (Verbatim tooltip.)",
+        "what_it_does": "On: left-drag frames a region and zooms into it (dive inside an event). Off: left-drag pans. The mouse wheel moves the signal vertically; use −/+ in the Scan strip to change the time scale. (Verbatim tooltip.)",
         "notes": "Checkable menu item, ON by default. This is a mouse-behaviour switch, not a view change — nothing on screen moves when you toggle it."
       },
       {
@@ -1155,7 +1155,7 @@
   {
     "key": "detection",
     "area": "Detection controls — the DetectionPanel's Preprocess and Detection tabs (nanoscope/gui/panels.py, class DetectionPanel)",
-    "summary": "This is where you turn a raw current trace into a table of translocation events. The Preprocess tab holds an eight-stage signal-conditioning chain (low-pass, high-pass, notch, median despike, baseline-drift removal, running mean, Savitzky-Golay, Normalize) plus a live frequency-response plot and a \"show processed trace\" preview, so you can see exactly what the detector will be looking at. The Detection tab holds the Schmitt-trigger parameters — enter/exit thresholds in units of the trace's own noise, minimum and maximum dwell, merge gap and polarity — and the four run buttons. Everything the Detect button uses comes from these two tabs together (plus the open-pore baseline block at the top of Preprocess); the ML detector tab is a completely separate pipeline and ignores this chain.",
+    "summary": "This is where you turn a raw current trace into a table of translocation events. The Preprocess tab separates Signal chain from Open-pore baseline so neither long form buries the other. Signal chain holds eight conditioning stages (low-pass, high-pass, notch, median despike, baseline-drift removal, running mean, Savitzky-Golay, Normalize), an execution-order summary, a selected or combined frequency-response plot and an orange candidate-localization preview. With high-pass enabled, new Schmitt/CUSUM runs measure event-table amplitudes on the companion chain with high-pass omitted; boundary-dependent values still come from the orange branch. The Detection tab holds thresholds, dwell, merge and polarity controls. The ML detector tab is a separate pipeline and ignores this chain.",
     "opened_by": "Inspector dock (right-hand side) ▸ Analysis tab. The panel's own tab strip then offers Preprocess | Detection | ML detector | Manual measurement. The Detect button is also reachable as Analysis ▸ Run detection (Ctrl+D); the Inspector dock itself can be shown/hidden from the View ▸ panels menu.",
     "gotchas": [
       "Selecting a different recording or channel RE-SEEDS the whole detection form from that target's stored run — anything you had dialled in and not yet run is replaced without a prompt (clicking the same channel again is treated as navigation and changes nothing).",
@@ -1163,7 +1163,7 @@
       "A filter stage stays ACTIVE when its page is hidden — the combo only changes what you are looking at. Check the \"Active: …\" line or the ● markers before running, not the page on screen.",
       "The number in the low-pass cutoff box is not the real corner: zero-phase filtering squares the response, so the applied curve is already about -6 dB there. Read the note under the response plot for the true -3 dB frequency.",
       "A running mean or Savitzky-Golay window can band-limit the trace far harder than the low-pass does, and the rise-time readout does not know about them — compare their -3 dB figures in the response note with the low-pass cutoff.",
-      "The High-pass stage distorts square events (drooped tops, biphasic shapes, shallow depths). For drift, use the Baseline drift stage instead.",
+      "The High-pass stage is candidate-localization only for new Schmitt/CUSUM runs. It can still move start/end, dwell, rise/fall and ECD integration limits; for drift, prefer the Baseline drift stage.",
       "Baseline-drift and median windows that are too long eat the events themselves: the drift window must be much LONGER than the longest event, and the median window much SHORTER than the shortest one.",
       "ASLS's smoothness (lam) is measured in block units, so changing the Baseline drift window changes what the same lam value means — retune it after any window change.",
       "Typing in the filter and detection spin boxes only commits when you finish editing (press Enter or click away); intermediate digits are deliberately ignored so a half-typed \"5000\" does not trigger a full refilter.",
@@ -1179,8 +1179,15 @@
         "label": "Preprocess",
         "kind": "tab",
         "group": "DetectionPanel tab strip",
-        "what_it_does": "Shows the signal-conditioning chain: the open-pore baseline block at the top, then the Signal filters group with all seven filter stages, the frequency-response plot and the processed-trace preview toggle.",
+        "what_it_does": "Shows a Preprocess section selector. Signal chain contains all eight conditioning stages, execution-order and response readouts, and the candidate-localization preview; Open-pore baseline contains the quantitative reference estimator.",
         "notes": "This is the tab that is showing when the app opens. Every page of every tab stays alive, so a filter you enabled here is still applied when you are looking at the Detection tab."
+      },
+      {
+        "label": "Preprocess section:",
+        "kind": "combo",
+        "group": "Preprocess",
+        "what_it_does": "Switches between Signal chain and Open-pore baseline without disabling or resetting either section.",
+        "notes": "Signal chain is selected by default. The workflow rail's Filter step opens it directly; the open-pore baseline action opens the other section directly."
       },
       {
         "label": "Detection",
@@ -1210,11 +1217,11 @@
         "notes": "The eight items, in order, are exactly: Low-pass, High-pass, Notch, Median, Baseline drift, Running mean, Savitzky-Golay, Normalize. An enabled stage's item is rewritten with a \"● \" prefix (e.g. \"● Notch\"). Switching pages does NOT switch stages off — this control only changes what you are looking at."
       },
       {
-        "label": "Active: none",
+        "label": "Active execution order: raw calibrated signal (no stages enabled)",
         "kind": "label",
         "group": "Preprocess ▸ Signal filters",
-        "what_it_does": "Read-only summary of which filter stages are currently switched on, e.g. \"Active: Low-pass, Notch\". Reads \"Active: none\" when every stage is off.",
-        "notes": "This is the only place the whole chain is visible at once; the stage pages show one stage at a time."
+        "what_it_does": "Read-only summary of the actual kernel execution order, not merely the editor order. With high-pass on it reads Candidate-localization order and states that quantitative measurement omits high-pass.",
+        "notes": "This is the only place the whole recipe is visible at once; the stage pages show one stage at a time."
       },
       {
         "label": "enable",
@@ -1255,14 +1262,14 @@
         "label": "enable",
         "kind": "checkbox",
         "group": "Preprocess ▸ Signal filters ▸ High-pass",
-        "what_it_does": "Turns on a zero-phase high-pass that removes DC offset and slow baseline drift.",
-        "notes": "Read the tooltip before using it: \"WARNING: a high-pass DISTORTS square translocation events — it droops the flat top and makes them biphasic, so depths read shallow and phantom opposite-polarity blips appear. Use it for DC/baseline hygiene only, with a cutoff far below the event bandwidth; to flatten drift while keeping event shape, prefer the Baseline drift stage instead.\""
+        "what_it_does": "Turns on a zero-phase high-pass in the classical candidate-localization branch. New Schmitt/CUSUM event-table amplitudes are measured on the companion chain with high-pass omitted.",
+        "notes": "The tooltip states that the orange preview and candidate response include high-pass; baseline, depth, fractional blockade, mean/max amplitude and SNR do not. Start/end, dwell, rise/fall and ECD limits still inherit the filtered boundaries, so keep the cutoff well below the event bandwidth. Manual measurement of Processed signal follows the orange branch."
       },
       {
         "label": "type",
         "kind": "combo",
         "group": "Preprocess ▸ Signal filters ▸ High-pass",
-        "what_it_does": "Chooses the high-pass design: Butterworth (default) or Bessel. Tooltip: \"Butterworth has a maximally flat pass-band, so the open-pore level it leaves is not rippled. Bessel trades that for a flat group delay. (Gaussian is a low-pass kernel and has no high-pass counterpart.)\"",
+        "what_it_does": "Chooses the high-pass design: Butterworth (default) or Bessel. Tooltip: \"Butterworth has a maximally flat pass-band above the cutoff. Bessel trades some roll-off sharpness for a flatter group delay. (Gaussian is a low-pass kernel and has no high-pass counterpart.)\"",
         "notes": "Items in order: Butterworth, Bessel."
       },
       {
@@ -1422,15 +1429,15 @@
         "label": "enable (rescale the whole trace — NOT pA)",
         "kind": "checkbox",
         "group": "Preprocess ▸ Signal filters ▸ Normalize",
-        "what_it_does": "Turns on the one stage in the chain that changes the trace's UNIT. Tooltip: \"Rescale the conditioned trace onto a dimensionless scale. Applied LAST, after every other stage.\\n\\nWARNING: this divides the picoamps out. Depths, baselines, thresholds and exports downstream are still LABELLED pA but are no longer in pA.\"",
-        "notes": "OFF by default, and LAST in the chain — the only defensible position, since the linear stages commute with a rescale while ASLS's smoothness lambda and the detrend percentile are quoted against the signal's own scale and would be silently redefined by normalising ahead of them. While it is on, an amber banner sits at the GROUP level beside the \"Active: …\" summary, not on this page, so the warning cannot go off screen when you page away from it. Everything downstream of detection — depth_pA, the characterisation baseline, every CSV column, the Event Inspector readout, the figure axes — is labelled pA from the channel's units rather than measured, so with this on a \"depth_pA\" of 10 means ten sigma (z-score / robust) or 0.3 of the recording's full span (min–max), not ten picoamps, and nothing downstream can put the picoamps back. Use it to feed a model or to put recordings on a common scale, NOT to measure a conductance. Captured by the named protocols and by a detection's stored params like every other stage."
+        "what_it_does": "Turns on the stage that changes current samples to a dimensionless scale. The tooltip warns that current-derived amplitude/baseline/threshold readouts and pA/pA·s export fields retain legacy labels while no longer carrying physical units, and that centering invalidates fractional blockade (dI/I0).",
+        "notes": "OFF by default and applied LAST. The group-level amber banner remains visible on every stage page. z-score, robust and min–max are data-dependent affine transforms; model input additionally clips to a configured bound and can change event boundaries or counts. Index, time, source, review and status fields keep their ordinary meanings. Use Normalize to feed a model or compare dimensionless recordings, never to measure conductance."
       },
       {
         "label": "mode",
         "kind": "combo",
         "group": "Preprocess ▸ Signal filters ▸ Normalize",
-        "what_it_does": "Which rescale. The three entries are \"z-score  (x − mean) / std\", \"robust z  (x − median) / 1.4826·MAD\" and \"min–max  → [−0.5, +0.5]\".",
-        "notes": "From the tooltip: z-score standardises on the WHOLE trace, events included, so a busy recording inflates the divisor and shrinks every depth in sigma; robust z divides by the same 1.4826·MAD noise sigma the detector thresholds on, so 1.0 means one baseline-noise sigma; min–max is set by two order statistics, so one digitiser glitch rescales the entire recording — despike first. The menu is built from the kernel's own mode list, so it cannot drift from what the filter accepts."
+        "what_it_does": "Which rescale. The four entries are \"z-score  (x − mean) / std\", \"robust z  (x − median) / 1.4826·MAD\", \"min–max  → [−0.5, +0.5]\" and \"model input  (trimmed σ, clipped) → [−1, +1]\".",
+        "notes": "z-score uses the whole trace; robust z uses the detector's 1.4826·MAD noise scale; min–max is sensitive to extreme samples; model input uses a twice-trimmed median/MAD, clips at the configured sigma bound, and divides to [−1,+1]. The menu is built from the kernels' own mode list."
       },
       {
         "label": "frequency / |H| response plot",
@@ -1449,8 +1456,8 @@
         "label": "show processed trace on the plot",
         "kind": "checkbox",
         "group": "Preprocess ▸ Signal filters",
-        "what_it_does": "Overlays the fully preprocessed signal — every enabled stage, then the low-pass — on the main trace view, so you can see the exact waveform the detector will run on.",
-        "notes": "DISABLED until at least one stage is enabled (low-pass, high-pass, notch, median, baseline drift, running mean, Savitzky-Golay or Normalize). It also unticks itself automatically when you switch every stage off, and when you select a different recording or channel."
+        "what_it_does": "Overlays the candidate-localization signal — every enabled stage, then low-pass — on the main trace. With high-pass on, classical detector event-table amplitudes use a companion branch with high-pass omitted.",
+        "notes": "Manual measurement of Processed signal follows this orange trace, including high-pass. The toggle is disabled until at least one stage is enabled and clears when every stage is off or the selected recording/channel changes."
       },
       {
         "label": "processed-trace preview unavailable: …",
@@ -2087,7 +2094,7 @@
       "\"Merge events in selection\" ignores the Window value completely and needs a live Measure region — it will refuse with a status-bar nudge if you have not dragged one.",
       "The Measure toggle switches itself off whenever you change recording or channel, so a Ctrl+M press after switching does nothing until you re-arm it.",
       "Above 200,000 selected samples the live readout is a subsampled preview and min/max/peak-to-peak read \"—\"; with amplitude method min or max, level/amplitude/dI/I₀/SNR blank out too. Saved rows are always exact regardless.",
-      "\"Snap to view\" on a zoomed-out recording selects the entire visible window — millions of samples — which is exactly when the readout goes into preview mode.",
+      "\"Snap to view\" and trace double-click place a mask no wider than 20% of the visible window. This is an initial-placement cap only: either circular edge handle can still be dragged farther for a long event.",
       "Double-clicking a row jumps the trace to that measurement, but double-clicking its \"label\" cell edits the text instead — the two gestures look identical.",
       "\"This recording only\" hides rows from the view but Export CSV still writes every measurement in the table, from every recording.",
       "\"Remove selected\" deletes hand-drawn work nothing can re-derive; it confirms first and Edit ▸ Undo can restore it, but a saved project is your real safety net.",
@@ -2213,15 +2220,15 @@
         "label": "Measure event (cursors)",
         "kind": "button",
         "group": "Manual measurement — cursor tool",
-        "what_it_does": "Show a movable region on the current-channel trace; its two edges are the boundary cursors. Drag them around ONE event to measure it live.",
+        "what_it_does": "Show a movable region on the current-channel trace; its two edges are the boundary cursors. Double-click the trace to place it, drag the shaded body to move it, or drag either circular handle to resize it.",
         "notes": "A TOGGLE (stays pressed), not a one-shot. Disabled when no channel is selected. Turns itself OFF automatically when you switch recording or channel — the region belonged to the old channel's pane. Kept in sync with the checkable Analysis ▸ Measure event menu item, which drives the same toggle and also raises this tab."
       },
       {
         "label": "Snap to view",
         "kind": "button",
         "group": "Manual measurement — cursor tool",
-        "what_it_does": "Set the cursors to span the current visible window, then trim.",
-        "notes": "Turns the Measure toggle on for you. On a fully zoomed-out recording this selects millions of samples, so the readout comes back as a subsampled preview (see the amber \"≈ preview\" line) — zoom in first if you want exact numbers on screen."
+        "what_it_does": "Place a mask over the middle 20% of the visible view, then drag its circular edge handles to fit the event. Double-clicking the trace places it at the click.",
+        "notes": "Turns the Measure toggle on for you. The 20% cap applies to initial placement only; either handle can still be dragged farther for a long event."
       },
       {
         "label": "Snap to selected event",

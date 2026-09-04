@@ -204,15 +204,13 @@ def test_active_summary_lists_normalize(qtbot):
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     panel.set_normalize_enabled(True)
-    assert "Normalize" in panel.active_filters_label.text()
+    assert "normalize zscore" in panel.active_filters_label.text()
     assert panel.filter_selector.itemText(NORMALIZE_INDEX) == "● Normalize"
 
 
 def test_unit_banner_appears_from_any_page_and_names_the_mode(qtbot):
-    """THE DISCLOSURE. Everything downstream of detection is LABELLED pA and writes that
-    label from the channel's units rather than measuring it, so a rescaled detection
-    input makes those labels lie. The banner lives at the group level, not on the
-    Normalize page, precisely so paging away cannot hide it."""
+    """The disclosure names affected current-derived fields without claiming that
+    indices, time, curation and other non-amplitude exports have changed units."""
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     assert not panel.normalize_units_label.isVisibleTo(panel)
@@ -223,6 +221,8 @@ def test_unit_banner_appears_from_any_page_and_names_the_mode(qtbot):
     text = panel.normalize_units_label.text()
     assert "zscore" in text and "pA" in text
     assert "DIMENSIONLESS" in text
+    assert "dI/I0" in text
+    assert "every exported column" not in text.lower()
 
     panel.set_normalize_mode("minmax")
     assert "minmax" in panel.normalize_units_label.text()
@@ -233,13 +233,15 @@ def test_unit_banner_appears_from_any_page_and_names_the_mode(qtbot):
 
 
 def test_response_note_explains_there_is_no_transfer_function(qtbot):
-    """A flat |H(f)| is true and useless; the space says what the stage costs instead."""
+    """The clipped model-input option makes a fixed affine |H(f)| actively false."""
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     panel.set_recording(50_000.0)
     panel.filter_selector.setCurrentIndex(NORMALIZE_INDEX)
     note = panel.response_note.text()
     assert "Normalize" in note and "UNIT" in note
+    assert "no fixed |H(f)|" in note
+    assert "single affine" not in note
     assert panel.response_curve.getData()[0] is None or \
         len(panel.response_curve.getData()[0]) == 0
 
@@ -797,6 +799,7 @@ def test_the_units_banner_names_the_clip_and_the_saturation(qtbot):
     text = panel.normalize_units_label.text()
     assert panel.normalize_units_label.isVisibleTo(panel) or text
     assert "30" in text and "CLIPPED" in text and "BOUNDED" in text
+    assert "boundaries and counts" in text and "dI/I0" in text
 
     panel.normalize_clip_sigma.setValue(10.0)
     assert "10" in panel.normalize_units_label.text()

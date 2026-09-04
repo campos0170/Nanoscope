@@ -4648,8 +4648,17 @@ class _PolarityMemo:
     def put(self, key: tuple[Any, ...], signal: np.ndarray, polarity: int) -> None:
         import weakref
 
+        entries = self._entries
+
+        def discard(dead_ref, *, cache_key=key) -> None:
+            # The callback can run after an id has been recycled and a new entry has
+            # replaced this key. Remove only the entry that still owns THIS weakref.
+            hit = entries.get(cache_key)
+            if hit is not None and hit[0] is dead_ref:
+                entries.pop(cache_key, None)
+
         try:
-            ref = weakref.ref(signal)
+            ref = weakref.ref(signal, discard)
         except TypeError:            # not weak-referenceable -> simply do not cache
             return
         if len(self._entries) >= self._max:
@@ -4838,8 +4847,21 @@ class _BaselineCache:
             result: "BaselineResult") -> None:
         import weakref
 
+        entries = self._entries
+
+        def discard(dead_ref, *, cache_key=key) -> None:
+            # Do not wait for a later lookup or four-entry eviction to release a
+            # whole-recording float64 baseline. Dual-signal detection intentionally
+            # creates short-lived candidate/measurement arrays sequentially; without
+            # this callback their baselines survived the arrays and could retain
+            # hundreds of MiB each. Identity-check the weakref so a recycled id cannot
+            # evict a newer entry that happens to have the same tuple key.
+            hit = entries.get(cache_key)
+            if hit is not None and hit[0] is dead_ref:
+                entries.pop(cache_key, None)
+
         try:
-            ref = weakref.ref(signal)
+            ref = weakref.ref(signal, discard)
         except TypeError:            # not weak-referenceable -> simply do not cache
             return
         if len(self._entries) >= self._max:

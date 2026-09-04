@@ -114,13 +114,54 @@ def test_band_rms_agrees_with_band_support_on_emptiness():
             assert rms > 0.0                        # white noise: every real band has power
 
 
-def test_band_rms_values_are_unchanged_by_the_refactor():
-    """The support extraction is a refactor of band_rms's own clip: the numbers the
-    whole app quotes must be bit-identical to the direct integration."""
+def test_band_rms_matches_direct_integration_when_edges_are_native_bins():
+    """Native-edge bands retain the direct trapezoid arithmetic exactly."""
     from nanoscope.analysis._compat import trapezoid
     freqs, psd = welch_psd(np.random.default_rng(2).normal(0, 2.5, 1 << 16), FS)
-    for lo, hi in [(0.0, FS / 2), (100.0, 1000.0), (9.5, 10.5), (0.0, 1e9)]:
+    for i, j in [(0, freqs.size - 1), (17, 193), (1, 2)]:
+        lo, hi = float(freqs[i]), float(freqs[j])
         clo, chi = max(lo, 0.0), min(hi, float(freqs.max()))
         sel = (freqs >= clo) & (freqs <= chi)
         expect = float(np.sqrt(trapezoid(psd[sel], freqs[sel])))
         assert band_rms(freqs, psd, lo, hi) == expect
+
+
+def test_band_rms_integrates_real_width_between_native_bins():
+    """A narrow valid band is not empty merely because it holds no complete grid bin."""
+    freqs = np.array([0.0, 10.0, 20.0])
+    psd = np.ones(3)
+    assert band_rms(freqs, psd, 1.0, 9.0) == pytest.approx(np.sqrt(8.0))
+    assert band_rms(freqs, psd, 1.0, 19.0) == pytest.approx(np.sqrt(18.0))
+
+
+def test_band_integrals_are_additive_at_non_native_edge():
+    """Interpolating one shared edge cannot create or discard power."""
+    freqs = np.array([0.0, 10.0, 20.0, 30.0])
+    psd = np.array([1.0, 3.0, 2.0, 4.0])
+    split = 13.25
+    whole_variance = band_rms(freqs, psd, 2.5, 27.75) ** 2
+    parts_variance = (
+        band_rms(freqs, psd, 2.5, split) ** 2
+        + band_rms(freqs, psd, split, 27.75) ** 2
+    )
+    assert parts_variance == pytest.approx(whole_variance, rel=1e-14)
+
+
+def test_band_starts_at_first_finite_sample_when_dc_was_dropped():
+    """Interpolation must not invent constant PSD below the represented spectrum."""
+    freqs = np.array([10.0, 20.0])
+    psd = np.ones(2)
+    assert band_support(freqs, 0.0, 20.0) == (10.0, 20.0)
+    assert band_rms(freqs, psd, 0.0, 20.0) == pytest.approx(np.sqrt(10.0))
+
+
+def test_nonfinite_frequency_endpoint_does_not_expand_the_band():
+    freqs = np.array([0.0, 10.0, np.inf])
+    psd = np.ones(3)
+    assert band_support(freqs, 0.0, 100.0) == (0.0, 10.0)
+    assert band_rms(freqs, psd, 0.0, 100.0) == pytest.approx(np.sqrt(10.0))
+
+
+def test_empty_psd_still_checks_that_frequency_and_power_lengths_match():
+    with pytest.raises(ValueError, match="aligned frequency and PSD arrays"):
+        band_rms(np.array([0.0]), np.empty(0), 0.0, 1.0)

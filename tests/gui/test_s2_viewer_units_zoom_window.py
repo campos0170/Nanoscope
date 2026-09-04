@@ -16,7 +16,7 @@ Pinned here:
     without an offset in the new calibration), y-autorange stays off;
   * a SAME-unit gain change keeps the numeric window untouched — exactly what it
     does today (the window is still meaningful in the same unit);
-  * a pane whose y-autorange is still on (wheel-only zoom) is left to refit itself;
+  * a pane whose y-autorange is still on (no manual y framing) is left to refit itself;
   * a constant trace (affine map underdetermined) falls back to re-enabling
     y-autorange — re-derive, never guess.
 

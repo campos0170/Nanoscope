@@ -1925,12 +1925,9 @@ def image_write_failure_text(target: str | Path, exc: BaseException,
 
     Args:
         formats: the extensions THIS panel can actually render, named in the advice.
-            The default is the honest answer for four of the five panels (PSD, I-V,
-            voltage-dependence, event-plot): they go straight to ``ImageExporter`` and
-            PNG really is the way out. The Plots window passes its own three, because
-            it now writes vector SVG (``pg_svg.export_svg``) and vector PDF
-            (:func:`export_plot_pdf`) as well -- and a user sent to PNG from THAT
-            window would be talked out of the two formats a journal asks for.
+            Callers pass the formats offered by their panel. Analysis panels now share
+            PNG, SVG and PDF export; the single-format default remains conservative for
+            older callers that have not declared broader support.
 
             One shared sentence with a per-caller list, rather than a second sentence
             in one panel: five copies of one paragraph is how the defect this function
