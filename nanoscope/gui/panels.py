@@ -3241,6 +3241,13 @@ class DetectionPanel(QWidget):
     def set_model_path(self, path: str | None) -> None:
         """Record the loaded model's PATH (or None to clear) and update the label +
         Run enablement. Emits ``mlModelChanged`` so the owner can re-gate its menu."""
+        # A missing/changed model restored from a project is carried in this sidecar so
+        # unrelated form edits do not erase its audit trail. Any ordinary model selection
+        # or clear replaces that reference. The restore adapter holds the narrow guard
+        # while clearing only the live runtime path.
+        if (not getattr(self, "_nanoscope_preserve_unresolved_model_reference", False)
+                and hasattr(self, "_nanoscope_unresolved_model_reference")):
+            delattr(self, "_nanoscope_unresolved_model_reference")
         self._model_path = str(path) if path else None
         self.ml_model_label.setText(
             os.path.basename(self._model_path) if self._model_path else "none")

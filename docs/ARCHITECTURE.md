@@ -458,7 +458,7 @@ Three decisions in it are load-bearing:
   reopened load's token is by construction a different one. The values `persistent_key` returns are
   exactly what they were before that token existed, so projects written by either build read
   identically.
-- **The version is a RANGE, and every extension is additive.** This build writes `VERSION = 10` and
+- **The version is a RANGE, and every extension is additive.** This build writes `VERSION = 11` and
   reads back to `MIN_READ_VERSION = 1`; older formats are strict subsets. v2 added `segments`, v3
   each result's `params` and `calibration_fingerprint`, v4 each document's `source` fingerprint, v5
   each calibration's `note` — the one field a project could not carry, which is why committing a
@@ -483,7 +483,12 @@ Three decisions in it are load-bearing:
   a segment re-derived on load. v10 added each result's `module_version` and top-level
   `baseline_fingerprint`. This preserves the exact producer version for derived/plugin results and
   the baseline lineage needed by Reconciled snapshots instead of silently substituting the current
-  registry version or dropping provenance on round-trip. Each missing key has a defined reading:
+  registry version or dropping provenance on round-trip. v11 added the versioned `workspace`
+  envelope: ordered, stable-id analytical artifacts with small JSON payloads, Parquet-backed tables,
+  and opaque byte members. It carries population-plot recipes and computed PCA/clustering/report/QC
+  snapshots without serializing Qt or executable Python objects; unknown producer kinds and their
+  extension fields/resources are deliberately retained for a later build or plugin. Each missing key
+  has a defined reading:
   absent `params` is `{}`, an absent
   calibration fingerprint falls back to the restored calibration, an absent `source` reads as
   *unknown* (which raises no warning rather than a false one), an absent `note` means "this file has
@@ -495,13 +500,14 @@ Three decisions in it are load-bearing:
   that project last showed, because a project without a registry was drawing positional colours
   anyway. An absent `module_version` falls back to the currently registered module version for
   legacy projects, and an absent top-level baseline fingerprint falls back to provenance when
-  available. A version above
+  available. An absent `workspace` in a v1–v10 file is an empty analytical workspace; a v11 file
+  must carry a valid workspace envelope. A version above
   `VERSION` is refused with *"needs a newer NanoScope"* rather than half-read.
 - **Additive does not mean an older build may write the file.** Additive-ness governs whether THIS
   build can read OLDER projects; it says nothing about whether older builds can safely read this one,
   and they cannot: a build that predates `fits` accepts the file, ignores the key and the
   `fits/<i>.parquet` members, and DROPS THEM ON ITS NEXT SAVE — silently, because it never knew they
-  were there. That is why every one of v6 / v7 / v8 / v9 / v10 bumps `VERSION` even though each is
+  were there. That is why every one of v6 / v7 / v8 / v9 / v10 / v11 bumps `VERSION` even though each is
   purely additive: the bump converts a silent strip into `ProjectVersionError`'s clean refusal, and costs
   nothing in the other direction, since `MIN_READ_VERSION` is still 1.
 - **`load_project` promises exactly ONE exception type.** It kept that promise for the failures

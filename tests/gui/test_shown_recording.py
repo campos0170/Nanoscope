@@ -438,9 +438,12 @@ def test_a_project_written_before_excluded_existed_still_loads(tmp_path):
     import json
     import zipfile
 
-    from nanoscope.core.project import FORMAT, VERSION, load_project
+    from nanoscope.core.project import FORMAT, load_project
     manifest = {
-        "format": FORMAT, "version": VERSION, "app_version": "0.1.0",
+        # v10 is the last format before the mandatory v11 analytical-workspace
+        # section.  Calling a manifest "old" while stamping today's VERSION makes it
+        # a malformed current file, not a backward-compatibility fixture.
+        "format": FORMAT, "version": 10, "app_version": "0.1.0",
         "documents": [], "calibrations": [],
         "layers": [{"doc_id": "/x/a.dat", "channel": 0, "color": "#4FC3F7",
                     "visible": True, "time_offset_s": 0.0}],

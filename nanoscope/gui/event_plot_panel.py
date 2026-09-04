@@ -84,6 +84,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     """
 
     refreshRequested = Signal()
+    #: A recipe control changed.  The owner persists it in the v11 analytical
+    #: workspace; this window remains deliberately ignorant of project files.
+    workspaceChanged = Signal()
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -92,6 +95,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self.resize(1040, 760)
 
         # Pushed-in source state.
+        self._doc_id: str | None = None
+        self._channel: int | None = None
         self._eventset: EventSet | None = None
         self._signal: np.ndarray | None = None
         self._fs: float | None = None
@@ -99,6 +104,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
         # Live results (kept for tests + save).
         self._density_counts: np.ndarray | None = None
+        # Keep the bin edges with the counts.  A density matrix without its physical
+        # coordinates cannot be rendered faithfully after a project/recovery restore.
+        self._density_x_edges: np.ndarray | None = None
+        self._density_y_edges: np.ndarray | None = None
         self._density_image: pg.ImageItem | None = None
         self._top_marginal_item: pg.BarGraphItem | None = None
         self._right_marginal_item: pg.BarGraphItem | None = None
@@ -281,18 +290,27 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._npoints.valueChanged.connect(self._on_ensemble_changed)
         self._pad.valueChanged.connect(self._on_ensemble_changed)
         self._e_title.textChanged.connect(self._on_ensemble_changed)
+        self._tabs.currentChanged.connect(self._on_view_changed)
         return page
 
     # -- data in ---------------------------------------------------------------------------------
     def set_source(self, doc_id: str | None, channel: int | None,
-                   eventset: EventSet | None) -> None:
+                   eventset: EventSet | None, *, defer_analysis: bool = False) -> None:
         """Install the active detection's events + its calibrated signal, then redraw.
 
         Pass the FULL detection EventSet (the window filters to its ACCEPTED events
         itself, mirroring PlotsWindow). ``None`` / an all-rejected set clears the
         window to its empty state. The calibrated signal is pulled from the Session
         for ``(doc_id, channel)`` -- the same trace the events were detected on.
+
+        ``defer_analysis=True`` is the project-restore path.  It binds the durable
+        source and calibrated trace but deliberately does not call ``density_2d`` or
+        ``event_ensemble``; the workspace adapter installs the frozen numerical
+        arrays immediately afterward and paints them through
+        :meth:`_render_workspace_snapshot`.
         """
+        self._doc_id = None
+        self._channel = None
         self._eventset = None
         self._signal = None
         self._fs = None
@@ -304,10 +322,31 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             except (KeyError, TypeError):
                 ch = None
             if ch is not None and ch.sample_rate_hz:
+                self._doc_id = str(doc_id)
+                self._channel = int(channel)
                 self._eventset = eventset
                 self._signal = np.asarray(ch.data)
                 self._fs = float(ch.sample_rate_hz)
                 self._units = ch.units or "pA"
+        if defer_analysis:
+            # Never leave another project's result available behind a newly bound
+            # source if the artifact later proves malformed.  Clearing Qt items and
+            # cached arrays is presentation bookkeeping, not an analysis redraw.
+            self._density_counts = None
+            self._density_x_edges = None
+            self._density_y_edges = None
+            self._ensemble = None
+            self._density_main.clear()
+            self._density_top.clear()
+            self._density_right.clear()
+            self._ensemble_plot.clear()
+            self._density_image = None
+            self._top_marginal_item = None
+            self._right_marginal_item = None
+            self._events_item = None
+            self._mean_item = None
+            self._median_item = None
+            return
         self._redraw()
 
     def _accepted(self) -> EventSet | None:
@@ -336,10 +375,16 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     def _on_density_changed(self, *_a) -> None:
         if not self._updating:
             self._redraw_density()
+            self.workspaceChanged.emit()
 
     def _on_ensemble_changed(self, *_a) -> None:
         if not self._updating:
             self._redraw_ensemble()
+            self.workspaceChanged.emit()
+
+    def _on_view_changed(self, *_a) -> None:
+        if not self._updating:
+            self.workspaceChanged.emit()
 
     def _on_normalize_toggled(self, on: bool) -> None:
         self._align_combo.setEnabled(not on)   # align only bites in real-time mode
@@ -358,6 +403,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._top_marginal_item = None
         self._right_marginal_item = None
         self._density_counts = None
+        self._density_x_edges = None
+        self._density_y_edges = None
 
         acc = self._accepted()
         if acc is None:
@@ -374,6 +421,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         counts, xe, ye = event_shape.density_2d(
             x, y, xbins=nb, ybins=nb, xlog=logx, ylog=logy)
         self._density_counts = counts
+        self._density_x_edges = np.asarray(xe, dtype=np.float64).copy()
+        self._density_y_edges = np.asarray(ye, dtype=np.float64).copy()
         if counts.sum() == 0:
             self._density_message(
                 "No events fall on these axes.\nCheck the log toggles (non-positive values are "
@@ -527,6 +576,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._logy.setChecked(bool(y))
         self._updating = False
         self._redraw_density()
+        self.workspaceChanged.emit()
 
     def set_bins(self, n: int) -> None:
         self._bins.setValue(int(n))
@@ -548,6 +598,161 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     def density_counts(self) -> np.ndarray | None:
         return None if self._density_counts is None else self._density_counts.copy()
+
+    def density_edges(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """The physical bin edges paired with :meth:`density_counts`.
+
+        Counts alone are ambiguous, especially for logarithmic axes.  Returning owned
+        copies also makes a GUI-thread project snapshot safe to serialize on a worker.
+        """
+        if self._density_x_edges is None or self._density_y_edges is None:
+            return None
+        return self._density_x_edges.copy(), self._density_y_edges.copy()
+
+    def _render_workspace_snapshot(self) -> None:
+        """Draw already-installed density/ensemble arrays without analysis kernels.
+
+        Project restore installs the frozen numerical results directly, then calls this
+        seam.  It must never call ``density_2d`` or ``event_ensemble``: reopening a project
+        displays the saved analysis and only an explicit user refresh computes a new one.
+        """
+        self._render_density_snapshot()
+        self._render_ensemble_snapshot()
+
+    def _render_density_snapshot(self) -> None:
+        self._density_main.clear()
+        self._density_top.clear()
+        self._density_right.clear()
+        self._density_image = None
+        self._top_marginal_item = None
+        self._right_marginal_item = None
+
+        counts = self._density_counts
+        xe = self._density_x_edges
+        ye = self._density_y_edges
+        if counts is None or xe is None or ye is None:
+            self._density_message("No saved density result is available.")
+            return
+        counts = np.asarray(counts, dtype=np.float64)
+        xe = np.asarray(xe, dtype=np.float64)
+        ye = np.asarray(ye, dtype=np.float64)
+        if (counts.ndim != 2 or counts.size == 0 or xe.ndim != 1 or ye.ndim != 1
+                or xe.size != counts.shape[0] + 1 or ye.size != counts.shape[1] + 1):
+            self._density_message("The saved density grid is incomplete or malformed.")
+            return
+        if not np.isfinite(counts).all() or np.any(counts < 0.0):
+            self._density_message("The saved density counts are not finite and non-negative.")
+            return
+        if counts.sum() == 0:
+            self._density_message(
+                "No events fall on these axes.\nCheck the log toggles (non-positive values are "
+                "dropped for a log axis).")
+            return
+
+        logx, logy = self._logx.isChecked(), self._logy.isChecked()
+        try:
+            xe_p = _to_plot(xe, logx)
+            ye_p = _to_plot(ye, logy)
+        except (FloatingPointError, TypeError, ValueError):
+            self._density_message("The saved density axes cannot be rendered.")
+            return
+        if not np.isfinite(xe_p).all() or not np.isfinite(ye_p).all():
+            self._density_message("The saved density axes cannot be rendered.")
+            return
+
+        cmap = _get_colormap(self._cmap_combo.currentText())
+        cmax = float(counts.max())
+        img = pg.ImageItem()
+        img.setImage(counts)
+        img.setRect(QtCore.QRectF(
+            float(xe_p[0]), float(ye_p[0]),
+            float(xe_p[-1] - xe_p[0]), float(ye_p[-1] - ye_p[0])))
+        img.setColorMap(cmap)
+        img.setLevels((0.0, max(cmax, 1.0)))
+        self._density_main.addItem(img)
+        self._density_image = img
+
+        self._colorbar.setColorMap(cmap)
+        self._colorbar.setLevels((0.0, max(cmax, 1.0)))
+        self._colorbar.setImageItem(img)
+
+        brush = _alpha_brush(_BAR_HEX, 150)
+        xc = 0.5 * (xe_p[:-1] + xe_p[1:])
+        yc = 0.5 * (ye_p[:-1] + ye_p[1:])
+        top_bar = pg.BarGraphItem(
+            x=xc, height=counts.sum(axis=1),
+            width=float(np.median(np.diff(xe_p))) * 0.96, brush=brush, pen=None)
+        right_bar = pg.BarGraphItem(
+            y=yc, height=float(np.median(np.diff(ye_p))) * 0.96,
+            width=counts.sum(axis=0), x0=0.0, brush=brush, pen=None)
+        self._density_top.addItem(top_bar)
+        self._density_right.addItem(right_bar)
+        self._top_marginal_item = top_bar
+        self._right_marginal_item = right_bar
+
+        x_id = self._x_combo.currentData()
+        y_id = self._y_combo.currentData()
+        xlabel = self._d_xlabel.text().strip() or (
+            self._metric_label(x_id) + (" (log10)" if logx else ""))
+        ylabel = self._d_ylabel.text().strip() or (
+            self._metric_label(y_id) + (" (log10)" if logy else ""))
+        self._density_main.setLabel("bottom", xlabel)
+        self._density_main.setLabel("left", ylabel)
+        n_events = int(getattr(self, "_nanoscope_workspace_accepted_event_count",
+                               round(float(counts.sum()))))
+        title = self._d_title.text().strip() or (
+            f"{self._metric_label(y_id)} vs {self._metric_label(x_id)}   ·   "
+            f"n = {n_events} events")
+        self._density_main.setTitle(title)
+        self._density_main.autoRange()
+
+    def _render_ensemble_snapshot(self) -> None:
+        self._ensemble_plot.clear()
+        self._events_item = None
+        self._mean_item = None
+        self._median_item = None
+        if self._ensemble is None:
+            self._ensemble_message("No saved event ensemble is available.")
+            return
+        try:
+            T, matrix, mean, median = (np.asarray(value, dtype=np.float64)
+                                       for value in self._ensemble)
+        except (TypeError, ValueError):
+            self._ensemble_message("The saved event ensemble is malformed.")
+            return
+        if (T.ndim != 1 or matrix.ndim != 2 or mean.ndim != 1 or median.ndim != 1
+                or matrix.shape[1] != T.size or mean.size != T.size or median.size != T.size):
+            self._ensemble_message("The saved event ensemble is incomplete or malformed.")
+            return
+        if matrix.shape[0] == 0:
+            self._ensemble_message(
+                "Every accepted event is too close to the trace edge for this padding.")
+            return
+
+        gap = np.array([np.nan])
+        xs = np.concatenate([np.concatenate([T, gap]) for _ in range(matrix.shape[0])])
+        ys = np.concatenate([np.concatenate([row, gap]) for row in matrix])
+        self._events_item = pg.PlotDataItem(
+            x=xs, y=ys, connect="finite", pen=_alpha_pen(_EVENT_HEX, 60, 1))
+        self._ensemble_plot.addItem(self._events_item)
+        self._mean_item = pg.PlotDataItem(x=T, y=mean, pen=pg.mkPen(_MEAN_HEX, width=2.5))
+        self._median_item = pg.PlotDataItem(
+            x=T, y=median, pen=pg.mkPen(_MEDIAN_HEX, width=2.5, style=Qt.DashLine))
+        self._ensemble_plot.addItem(self._mean_item)
+        self._ensemble_plot.addItem(self._median_item)
+
+        normalize = self._normalize.isChecked()
+        self._ensemble_plot.setLabel(
+            "bottom", "Normalized time (dwell)" if normalize else "Time (s)")
+        self._ensemble_plot.setLabel("left", f"Current ({self._units})")
+        n_accepted = int(getattr(self, "_nanoscope_workspace_accepted_event_count",
+                                 matrix.shape[0]))
+        skipped = max(0, n_accepted - matrix.shape[0])
+        auto = (f"Ensemble of {matrix.shape[0]} event(s)"
+                + (f"   ·   {skipped} edge-skipped" if skipped else "")
+                + "   —   mean (solid) + median (dashed)")
+        self._ensemble_plot.setTitle(self._e_title.text().strip() or auto)
+        self._ensemble_plot.autoRange()
 
     def ensemble_traces(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
         return self._ensemble

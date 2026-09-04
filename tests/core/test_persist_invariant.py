@@ -519,8 +519,14 @@ def test_the_project_version_moved_and_old_projects_still_load(tmp_path):
     showed, since a project without one was drawing positional colours anyway), and an older
     build accepts a v9 file, ignores the key and strips every hand-picked colour on its next
     save.
+
+    Moved to 11 for the analytical ``workspace``: ordered, stable-id plot/PCA/GMM/plugin
+    artifacts, whose bulk DataFrame tables and opaque blobs live in archive members rather
+    than manifest JSON. A v1-v10 project has no workspace and still opens as an empty one;
+    a v10 reader must refuse v11 because accepting it would strip the entire workspace on
+    the next save.
     """
-    assert VERSION == 10
+    assert VERSION == 11
     from nanoscope.core.project import MIN_READ_VERSION
     assert MIN_READ_VERSION == 1
 

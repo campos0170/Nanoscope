@@ -56,6 +56,13 @@ automatically (see `nanoscope/bootstrap.py`); no manual `QT_*` environment varia
 See **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** for a full walkthrough and
 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the design and module map.
 
+The current private-beta project format v11 preserves the core session and the analytical
+workspace: recording references, calibration/view state, curated detections, measurements, fits,
+labels, colours, plot recipes, PCA/clustering, subpopulation reports, PSD, density, I-V,
+voltage-dependence, and fingerprinted ML-model references. Raw recordings and model bytes remain
+external. The complete contract is documented in
+**[docs/STAGE_3_ANALYTICAL_PROJECTS.md](docs/STAGE_3_ANALYTICAL_PROJECTS.md)**.
+
 ---
 
 ## Supported formats

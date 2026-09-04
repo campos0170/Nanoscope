@@ -13,6 +13,22 @@ from ..analysis.reconcile import CONSENSUS_CURATION_CONFLICT_COL, CONSENSUS_MODU
 from ..core.history import MAX_BYTES, MAX_DEPTH, EventHistory, MeasurementHistory
 from ..core.identity import same_source, source_of
 from ..core.layer import ColourRegistry, ViewMode
+from ..core.analysis_workspace import (
+    ANALYSIS_PANEL_ARTIFACT_ID,
+    EVENT_PLOTS_ARTIFACT_ID,
+    IV_ARTIFACT_ID,
+    OWNED_ARTIFACT_IDS,
+    PLOTS_ARTIFACT_ID,
+    PSD_ARTIFACT_ID,
+    SUBPOPULATION_ARTIFACT_ID,
+    VOLTAGE_DEPENDENCE_ARTIFACT_ID,
+    artifact_source_recipe,
+    capture_analysis_workspace,
+    resolve_result_recipe,
+    result_recipe,
+    restore_analysis_workspace,
+)
+from ..core.project import AnalyticalWorkspace
 from ..core.project_guard import (
     ProjectDiskStamp,
     ProjectSaveConflict,
@@ -648,6 +664,10 @@ class MainWindow(QtWidgets.QMainWindow):
         #: pending (``_subpop_pending`` is derived from it) and says what the answer will
         #: be about, because those are one fact — see the property below.
         self._subpop_target = None
+        # Exact persistent source/result identity captured while an asynchronous report's
+        # source is unquestionably live.  The report may land after that recording closes;
+        # a launch-local doc_id is never an acceptable fallback in a project artifact.
+        self._subpop_source_recipe_pending: dict[str, Any] | None = None
         #: event_id -> subpopulation id from the last finished report, once it has been pushed
         #: onto the trace and the gallery, plus what it is ABOUT. Held here and not on either
         #: surface because MainWindow is the only thing that has both the report and the
@@ -762,6 +782,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._level_fit_inputs = None
         self._event_plot_window = None   # the single, lazily-built EventPlotWindow
         self._psd_window = None   # the single, lazily-built PSDWindow
+        # Stage 3 analytical state belongs to the PROJECT, not to whichever optional
+        # top-level widget happens to be alive.  Widgets are deliberately lazy and may
+        # blank themselves on close; this cache is therefore the durable in-memory copy.
+        self._analytical_workspace = AnalyticalWorkspace()
+        # Built-in artifacts adopted from a project are installed only when their surface
+        # is opened.  Keeping the ids (rather than opening the windows) is what prevents a
+        # v11 project from producing a wall of plots at load time.
+        self._workspace_pending: set[str] = set()
+        # A restored numerical snapshot is frozen until the user explicitly edits/runs/
+        # refreshes that surface.  Session navigation must not silently recompute it.
+        self._workspace_frozen: set[str] = set()
+        # Adapter restore writes ordinary Qt controls.  Even user-only signals are not a
+        # promise across every Qt widget, so this guard makes installing a project a
+        # reconstruction rather than a new dirty revision.
+        self._workspace_installing = False
+        self._workspace_navigating = False
+        self._workspace_default_analysis = None
         self._workflow_status = None   # last computed PipelineStatus (drives the strip routing)
 
         # Open pipeline state: opening several files is SEQUENTIAL through the one controller.
@@ -1347,6 +1384,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_subpop.setToolTip(self._subpop_tooltip)
         self._act_subpop.setEnabled(False)
         self._act_subpop.triggered.connect(self._run_subpopulations)
+
+        # A saved report is a first-class analytical result, not a side effect of the
+        # window that originally displayed it.  Reopening it must never mean rerunning
+        # the mixture (and a project open must never pop the report window up by itself).
+        self._act_show_saved_subpop = analysis_menu.addAction(
+            "Show saved subpopulation &report…")
+        self._act_show_saved_subpop.setToolTip(
+            "Open the subpopulation report stored in this project without rerunning "
+            "PCA, clustering, the mixture, or bootstrap analysis.")
+        self._act_show_saved_subpop.setEnabled(False)
+        self._act_show_saved_subpop.triggered.connect(self._show_saved_subpop_report)
 
         analysis_menu.addSection("Compare recordings")
         self._act_iv = analysis_menu.addAction("&I-V / Conductance…")
@@ -1989,6 +2037,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_panel.measure_panel.measurementsChanged.connect(
             lambda *_: self._sync_analysis_surfaces())
 
+        # Stage 3: the analysis form is always alive, so wire its durable controls now.
+        # Optional surface windows are wired at construction by
+        # ``_watch_workspace_surface`` instead; creating them here would defeat lazy load.
+        self._wire_analytical_workspace_controls()
+
         self._refresh_workflow_status()   # initial paint (empty session -> Open is current)
         self._sync_create_segment_action()   # initial gate (nothing selected -> disabled)
         self._sync_analysis_surfaces()    # initial gates (empty session -> all six locked)
@@ -2279,6 +2332,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_panel.forget_pending_job()
         self._subpop_signal_pending = None
         self._subpop_accepted_ids_pending = None
+        self._subpop_source_recipe_pending = None
         # ...and the same for the subpopulation run, for the same reason: ``abort()``
         # emits nothing, so a cancelled report would otherwise leave its claim standing.
         self._subpop_pending = False
@@ -2741,6 +2795,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_document(docs[0].doc_id)
 
     def _on_selection(self, doc_id: str, channel: int) -> None:
+        """Retarget the UI while suppressing analysis-form echoes from navigation."""
+        navigating = self._workspace_navigating
+        self._workspace_navigating = True
+        try:
+            self._retarget_selection(doc_id, channel)
+        finally:
+            self._workspace_navigating = navigating
+
+    def _retarget_selection(self, doc_id: str, channel: int) -> None:
         """Point the whole window at ``(doc_id, channel)``. ALL OF IT, OR THE USER IS TOLD.
 
         Picking a recording DISPLAYS it — it does not merely retarget the analysis panels.
@@ -2773,7 +2836,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # AnalysisPanel.set_selection repoints its owned MeasurePanel too (which clears
         # the cursor region when the doc/channel changes), so the region never lingers
         # on a pane the user has navigated away from.
-        step("Analysis", lambda: self._analysis_panel.set_selection(doc_id, channel))
+        step("Analysis", lambda: self._set_analysis_selection_for_navigation(
+            doc_id, channel))
         annotation_target = self._analysis_panel.current_target()
         if annotation_target is None or annotation_target[0] != doc_id:
             # None means this recording has no resolvable current channel. A different document
@@ -2816,10 +2880,14 @@ class MainWindow(QtWidgets.QMainWindow):
         step("Subpopulation views", self._refresh_subpop_views)  # ...which may now be stale
         step("Event plots",
              lambda: self._refresh_event_plots()                # ...as may density / ensemble
-             if _on_screen(self._event_plot_window) else None)
+             if (_on_screen(self._event_plot_window)
+                 and EVENT_PLOTS_ARTIFACT_ID not in self._workspace_frozen)
+             else None)
         step("Noise spectrum",
              lambda: self._point_psd_at_selection()             # ...and the PSD window follows
-             if _on_screen(self._psd_window) else None)
+             if (_on_screen(self._psd_window)
+                 and PSD_ARTIFACT_ID not in self._workspace_frozen)
+             else None)
         step("workflow", self._refresh_workflow_status)         # ...and the chip + strip track
         step("Create segment", self._sync_create_segment_action)  # ...and its gate follows
         step("analysis surfaces", self._sync_analysis_surfaces)   # ...and the six surface gates
@@ -3235,12 +3303,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # frame (a re-run, a merge, a restored snapshot) — which is exactly the case
         # `test_a_level_table_retired_by_a_re_detection_is_not_persisted_at_all` pins.
         fit = self._level_fit
+        # The active table can change because the user selected ANOTHER DETECTOR on the
+        # same channel.  That is navigation, not replacement: ResultStore still owns the
+        # original detector frame and its level fit must remain parked beside it.  A real
+        # re-detection replaces that frame in the store, so identity over all same-target
+        # EventSets distinguishes the two without guessing from the current selection.
+        anchor_still_stored = bool(fit is not None and any(
+            getattr(getattr(result, "payload", None), "df", None)
+            is self._level_fit_frame
+            for result in self._session.results.for_doc(fit.doc_id)
+            if int(getattr(result, "channel", -1)) == int(fit.channel)
+        ))
         if fit is not None and (
                 not self._session.has_document(fit.doc_id)
-                or (det is not None
-                    and fit.doc_id == det.doc_id
-                    and int(fit.channel) == int(det.channel)
-                    and getattr(det.payload, "df", None) is not self._level_fit_frame)):
+                or not anchor_still_stored):
             self._invalidate_level_fit()
         # ...and the mirror of that: ADOPT a level table this window does not yet hold but
         # the session does. That is how a RESTORED fit reaches the UI. Persisting it (v6)
@@ -3449,6 +3525,10 @@ class MainWindow(QtWidgets.QMainWindow):
         recording's detection, or the saved manual measurements."""
         if self._plots_sources():
             return True, ""
+        if self._workspace_has_artifact(PLOTS_ARTIFACT_ID):
+            # A frozen project result remains a readable/exportable result even when its
+            # source recording or event table cannot currently be resolved (AP-16).
+            return True, ""
         if not self._session.documents():
             # Naming the REAL blocker. "Run detection first" with nothing open sends the user
             # to a detector that is itself disabled for want of a recording.
@@ -3464,6 +3544,8 @@ class MainWindow(QtWidgets.QMainWindow):
         accepted), so each gets its own sentence naming the blocker that is actually first."""
         from ..analysis.events import EventSet
 
+        if self._workspace_has_artifact(EVENT_PLOTS_ARTIFACT_ID):
+            return True, ""
         if not self._session.documents():
             return False, ("Open a recording first — the density map and the ensemble are "
                            "built from a detection's events.")
@@ -3485,6 +3567,8 @@ class MainWindow(QtWidgets.QMainWindow):
         sample rate. It reads the RAW calibrated trace, so it never waits on a detection."""
         if self._has_psd_recording():
             return True, ""
+        if self._workspace_has_artifact(PSD_ARTIFACT_ID):
+            return True, ""
         if not self._session.documents():
             return False, ("Open a recording first — the noise spectrum needs a current "
                            "channel with a known sample rate (no detection required).")
@@ -3495,6 +3579,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """I-V / conductance: needs >=1 open recording with a live current channel AND a known
         applied voltage (a live voltage channel, or a voltage recorded in the file's metadata)."""
         if self._has_iv_data():
+            return True, ""
+        if self._workspace_has_artifact(IV_ARTIFACT_ID):
             return True, ""
         if not self._session.documents():
             return False, ("Open a recording first — the I-V fit needs a current channel and "
@@ -3508,6 +3594,8 @@ class MainWindow(QtWidgets.QMainWindow):
         the very number the predicate thresholds, so it can never overstate progress."""
         n = self._vdep_ready_count()
         if n >= 2:
+            return True, ""
+        if self._workspace_has_artifact(VOLTAGE_DEPENDENCE_ARTIFACT_ID):
             return True, ""
         return False, (f"Needs at least 2 detected recordings with a known applied voltage — "
                        f"{n} so far. Open the voltage series and run Analysis ▸ Batch detect.")
@@ -3557,6 +3645,357 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(reason, 6000)
             return
         self._surface_actions()[sid].trigger()
+        self._sync_analysis_open_state()
+
+    # ============================================================================================
+    # Stage 3 analytical workspace — project-owned, lazily installed
+    # ============================================================================================
+
+    def _set_analysis_selection_for_navigation(self, doc_id: str, channel: int) -> None:
+        """Retarget the live form without turning navigation into a project edit.
+
+        ``AnalysisPanel.set_selection`` legitimately seeds controls from the stored result
+        on the new target, and those public setters emit the same aggregate signals as a
+        person's edits.  The File Manager selection itself is navigation (AP-13), so guard
+        only this synchronous seed.  Detector/result combo changes made by the user still
+        arrive outside the guard and remain durable workspace edits.
+        """
+        installing = self._workspace_installing
+        self._workspace_installing = True
+        try:
+            self._analysis_panel.set_selection(doc_id, channel)
+        finally:
+            self._workspace_installing = installing
+
+    def _wire_analytical_workspace_controls(self) -> None:
+        """Route every always-live analysis-form edit into the v11 workspace cache.
+
+        These connections intentionally live in MainWindow.  The child panels describe
+        analysis and emit intent; only MainWindow owns project dirty/recovery revisions.
+        Programmatic replay during restore is suppressed by ``_workspace_installing`` and
+        ``_restoring``, so opening a project cannot manufacture an unsaved revision.
+        """
+        changed = lambda *_: self._on_workspace_changed(ANALYSIS_PANEL_ARTIFACT_ID)
+        detection = self._analysis_panel.detection_panel
+        baseline = self._analysis_panel.baseline_panel
+        measure = self._analysis_panel.measure_panel
+        stats = getattr(self._analysis_panel, "_stats", None)
+
+        detection.paramsChanged.connect(changed)
+        detection.mlModelChanged.connect(changed)
+        detection.previewFilterToggled.connect(changed)
+        baseline.paramsChanged.connect(changed)
+        baseline.showBaselineToggled.connect(changed)
+        baseline.subtractBaselineToggled.connect(changed)
+        measure.measureActiveChanged.connect(changed)
+
+        # The remaining fields are deliberately exposed through the analysis adapter but
+        # do not have one aggregate project-state signal of their own.
+        for widget, signal_name in (
+                (getattr(detection, "mode_tabs", None), "currentChanged"),
+                (getattr(measure, "_method_combo", None), "currentTextChanged"),
+                (getattr(measure, "_basis_combo", None), "currentIndexChanged"),
+                (getattr(measure, "_scope_check", None), "clicked"),
+                (getattr(measure, "_markers_check", None), "clicked"),
+                (getattr(self._analysis_panel.merge_controls, "window_ms", None),
+                 "valueChanged"),
+                (getattr(stats, "n_components_dwell", None), "valueChanged"),
+                (getattr(stats, "n_components_depth", None), "valueChanged"),
+                (getattr(stats, "use_efficiency", None), "clicked"),
+                (getattr(stats, "use_filter_limited", None), "clicked")):
+            signal = getattr(widget, signal_name, None)
+            if signal is not None:
+                signal.connect(changed)
+
+        # Keep one immutable constructor-default recipe so opening a v1-v10 project (which
+        # correctly has no workspace block) cannot inherit the outgoing project's draft.
+        defaults = capture_analysis_workspace(analysis_panel=self._analysis_panel)
+        self._workspace_default_analysis = next(
+            (item for item in defaults.artifacts
+             if item.artifact_id == ANALYSIS_PANEL_ARTIFACT_ID), None)
+
+    @staticmethod
+    def _workspace_kwarg(artifact_id: str) -> str | None:
+        return {
+            PLOTS_ARTIFACT_ID: "plots",
+            SUBPOPULATION_ARTIFACT_ID: "subpopulation",
+            PSD_ARTIFACT_ID: "psd",
+            EVENT_PLOTS_ARTIFACT_ID: "event_plots",
+            IV_ARTIFACT_ID: "iv",
+            VOLTAGE_DEPENDENCE_ARTIFACT_ID: "voltage_dependence",
+            ANALYSIS_PANEL_ARTIFACT_ID: "analysis_panel",
+        }.get(str(artifact_id))
+
+    def _workspace_window_id(self, window) -> str | None:
+        for artifact_id, candidate in (
+                (PLOTS_ARTIFACT_ID, self._plots_window),
+                (SUBPOPULATION_ARTIFACT_ID, self._subpop_window),
+                (PSD_ARTIFACT_ID, self._psd_window),
+                (EVENT_PLOTS_ARTIFACT_ID, self._event_plot_window),
+                (IV_ARTIFACT_ID, self._iv_window),
+                (VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window)):
+            if window is candidate:
+                return artifact_id
+        return None
+
+    def _workspace_surface(self, artifact_id: str):
+        return {
+            PLOTS_ARTIFACT_ID: self._plots_window,
+            SUBPOPULATION_ARTIFACT_ID: self._subpop_window,
+            PSD_ARTIFACT_ID: self._psd_window,
+            EVENT_PLOTS_ARTIFACT_ID: self._event_plot_window,
+            IV_ARTIFACT_ID: self._iv_window,
+            VOLTAGE_DEPENDENCE_ARTIFACT_ID: self._vdep_window,
+            ANALYSIS_PANEL_ARTIFACT_ID: self._analysis_panel,
+        }.get(str(artifact_id))
+
+    def _workspace_artifact(self, artifact_id: str):
+        workspace = self._analytical_workspace
+        return next((item for item in workspace.artifacts
+                     if item.artifact_id == artifact_id), None)
+
+    def _workspace_has_artifact(self, artifact_id: str) -> bool:
+        return self._workspace_artifact(artifact_id) is not None
+
+    def _drop_workspace_artifact(self, artifact_id: str) -> None:
+        """Forget one invalidated built-in result without touching opaque siblings.
+
+        A live surface can cease to have a result when one of its scientific inputs is
+        edited (for example, re-declaring the only current channel as voltage empties the
+        PSD window).  Keeping its last checkpoint would make the corresponding launcher
+        gate claim that a readable saved result still exists.  This is deliberately a
+        single-artifact operation: plugin blocks, ordering, workspace metadata and every
+        other built-in result survive byte-for-byte.
+        """
+        workspace = self._analytical_workspace
+        kept = [item for item in workspace.artifacts
+                if item.artifact_id != str(artifact_id)]
+        if len(kept) == len(workspace.artifacts):
+            return
+        self._analytical_workspace = AnalyticalWorkspace(
+            version=workspace.version,
+            artifacts=kept,
+            extra=workspace.extra,
+        )
+        self._workspace_pending.discard(str(artifact_id))
+        self._workspace_frozen.discard(str(artifact_id))
+        self._sync_saved_subpop_action()
+
+    def _sync_saved_subpop_action(self) -> None:
+        action = getattr(self, "_act_show_saved_subpop", None)
+        if action is not None:
+            action.setEnabled(self._workspace_has_artifact(SUBPOPULATION_ARTIFACT_ID))
+
+    def _watch_workspace_surface(self, artifact_id: str, window) -> None:
+        """Wire one lazily-created surface without making it a project writer."""
+        signal = getattr(window, "workspaceChanged", None)
+        if signal is not None:
+            signal.connect(
+                lambda *_args, _id=artifact_id: self._on_workspace_changed(_id))
+        checkpoint = getattr(window, "workspaceCheckpointRequested", None)
+        if checkpoint is not None:
+            checkpoint.connect(
+                lambda *_args, _id=artifact_id: self._checkpoint_workspace_surface(_id))
+
+        # Subpopulation view state predates the common signal.  Its two choices and
+        # splitter sizes are still durable; user-only combo signals avoid treating adapter
+        # replay as an edit, and the install guard covers splitter replay.
+        if artifact_id == SUBPOPULATION_ARTIFACT_ID:
+            view = window.embedding_view()
+            for combo in (getattr(view, "_embed_combo", None),
+                          getattr(view, "_colour_combo", None)):
+                activated = getattr(combo, "activated", None)
+                if activated is not None:
+                    activated.connect(
+                        lambda *_args: self._on_workspace_changed(
+                            SUBPOPULATION_ARTIFACT_ID))
+            window.splitter().splitterMoved.connect(
+                lambda *_: self._on_workspace_changed(SUBPOPULATION_ARTIFACT_ID))
+            window.figures_splitter().splitterMoved.connect(
+                lambda *_: self._on_workspace_changed(SUBPOPULATION_ARTIFACT_ID))
+
+    def _checkpoint_workspace_surface(
+            self, artifact_id: str, *, capture_frozen: bool = False) -> bool:
+        """Synchronously copy one surface into the project-owned cache.
+
+        ``PlotsWindow.closeEvent`` reaches this seam before deliberately resetting itself.
+        Closing a window is not project data, so the checkpoint itself is silent; every
+        durable control/result already reaches :meth:`_on_workspace_changed`.  A failed
+        checkpoint is different: the cache may now be incomplete, so keep the project
+        visibly dirty and let Save Project retry/report it.
+        """
+        if self._workspace_installing or self._workspace_navigating or self._restoring:
+            return False
+        # An untouched restored snapshot already lives in the cache.  Re-reading its
+        # widget at close could restamp it against a ResultStore that changed underneath
+        # while frozen; the later Hide event merely makes that same artifact pending for
+        # the next lazy install.
+        if artifact_id in self._workspace_frozen and not capture_frozen:
+            return True
+        surface = self._workspace_surface(artifact_id)
+        keyword = self._workspace_kwarg(artifact_id)
+        if surface is None or keyword is None:
+            return False
+        try:
+            self._analytical_workspace = capture_analysis_workspace(
+                self._analytical_workspace, **{keyword: surface})
+        except Exception as exc:  # noqa: BLE001 - the save path retries and reports fully
+            self._mark_dirty()
+            self.statusBar().showMessage(
+                f"Could not checkpoint this analytical view yet: {exc}. "
+                "Save Project will try again.", 12000)
+            return False
+        self._workspace_pending.discard(artifact_id)
+        # Keep an installed project snapshot insulated from session-navigation refreshes
+        # when this was merely a durable style/config edit.  Explicit Refresh routes
+        # through ``_replace_workspace_surface`` and clears the bit *before* computing;
+        # generic ``workspaceChanged`` cannot tell a title colour from a numerical run and
+        # therefore must take the lossless/conservative side of that boundary.
+        self._sync_saved_subpop_action()
+        return True
+
+    def _on_workspace_changed(self, artifact_id: str) -> None:
+        """Checkpoint one durable edit/result and advance the recovery revision."""
+        if not self._checkpoint_workspace_surface(artifact_id, capture_frozen=True):
+            return
+        self._mark_dirty()
+
+    def _capture_analytical_workspace(self) -> AnalyticalWorkspace:
+        """Capture safe live surfaces for Save/Recovery, preserving every carried block.
+
+        Hidden PlotsWindow is intentionally excluded: its close contract blanked the
+        widget after ``_on_workspace_changed`` cached the real result, and gathering every
+        instantiated window here would overwrite that cache with defaults.  A pending
+        block is likewise excluded until successfully installed or explicitly edited, so
+        an unavailable input cannot be converted into an empty artifact by a later save.
+        A frozen restored surface is already represented by that authoritative artifact;
+        leaving it out prevents a changed live ResultStore from silently restamping an old
+        snapshot merely because the user pressed Save while its window was visible.
+        """
+        supplied: dict[str, Any] = {}
+        if ANALYSIS_PANEL_ARTIFACT_ID not in self._workspace_pending:
+            supplied["analysis_panel"] = self._analysis_panel
+        for artifact_id in (
+                PLOTS_ARTIFACT_ID, SUBPOPULATION_ARTIFACT_ID, PSD_ARTIFACT_ID,
+                EVENT_PLOTS_ARTIFACT_ID, IV_ARTIFACT_ID,
+                VOLTAGE_DEPENDENCE_ARTIFACT_ID):
+            window = self._workspace_surface(artifact_id)
+            # A live PSD whose last eligible current channel disappeared has no result
+            # to save.  Its stale checkpoint is removed by ``_refresh_surface_windows``;
+            # do not recreate an empty artifact merely because the still-visible window
+            # is included in a later Save/Recovery gather.  Frozen saved snapshots take
+            # the earlier exclusion branch and remain readable without their source.
+            if (artifact_id == PSD_ARTIFACT_ID and window is not None
+                    and not window.has_data()):
+                continue
+            if (artifact_id not in self._workspace_pending
+                    and artifact_id not in self._workspace_frozen
+                    and _on_screen(window)):
+                supplied[self._workspace_kwarg(artifact_id)] = window
+        self._analytical_workspace = capture_analysis_workspace(
+            self._analytical_workspace, **supplied)
+        self._sync_saved_subpop_action()
+        return self._analytical_workspace
+
+    def _restore_workspace_surface(self, artifact_id: str, surface) -> bool:
+        """Install one pending artifact into an already-built/bound surface, once."""
+        if artifact_id not in self._workspace_pending:
+            return False
+        keyword = self._workspace_kwarg(artifact_id)
+        if keyword is None or self._workspace_artifact(artifact_id) is None:
+            self._workspace_pending.discard(artifact_id)
+            return False
+        self._workspace_installing = True
+        try:
+            report = restore_analysis_workspace(
+                self._analytical_workspace, **{keyword: surface})
+        finally:
+            self._workspace_installing = False
+        restored = artifact_id in report.restored
+        if restored:
+            self._workspace_pending.discard(artifact_id)
+            self._workspace_frozen.add(artifact_id)
+        if report.warnings:
+            sentence = " ".join(str(value) for value in report.warnings)
+            if self._restoring:
+                self._restore_notes.append(sentence)
+            else:
+                self.statusBar().showMessage(
+                    f"Saved analytical view restored with a caveat: {sentence}", 15000)
+        return restored
+
+    def _replace_workspace_surface(self, artifact_id: str, refresh) -> None:
+        """Explicit Refresh: leave frozen mode, recompute, then checkpoint the new result."""
+        self._workspace_pending.discard(artifact_id)
+        self._workspace_frozen.discard(artifact_id)
+        refresh()
+        self._on_workspace_changed(artifact_id)
+
+    def _reset_analytical_workspace(self) -> None:
+        """Drop the outgoing project's analytical state without emitting an edit.
+
+        Plots and the subpopulation report predate the project-owned workspace and have a
+        useful established contract: if the user leaves either visible while opening a
+        project, that same window stays visible and is re-fed at the end of restore.  Keep
+        those two *widget shells* but scrub every source, result and identity sidecar.
+        Numerical inspectors are rebuilt lazily because their private arrays have no
+        comparable blank-state contract.  The caller has already completed the outgoing
+        project's Save/Discard decision, so none of this checkpoints or marks dirty.
+        """
+        self._workspace_installing = True
+        try:
+            if self._plots_window is not None:
+                abort = getattr(self._plots_window, "_abort_note_job", None)
+                if callable(abort):
+                    abort()
+                self._plots_window.reset_state()
+                for sidecar in ("_nanoscope_unresolved_plot_sources",
+                                "_nanoscope_unresolved_plot_results"):
+                    if hasattr(self._plots_window, sidecar):
+                        delattr(self._plots_window, sidecar)
+            if self._subpop_window is not None:
+                self._subpop_window.set_report(None)
+                # These are constructor defaults.  Splitter positions are durable view
+                # state, so an incoming project without a saved report must not inherit
+                # the outgoing project's arrangement.
+                self._subpop_window.splitter().setSizes([620, 800])
+                self._subpop_window.figures_splitter().setSizes([400, 320, 190])
+                for sidecar in ("_nanoscope_workspace_source",
+                                "_nanoscope_workspace_source_result",
+                                "_nanoscope_workspace_accepted_event_ids"):
+                    if hasattr(self._subpop_window, sidecar):
+                        delattr(self._subpop_window, sidecar)
+            for name in ("_psd_window", "_event_plot_window",
+                         "_iv_window", "_vdep_window"):
+                window = getattr(self, name, None)
+                if window is None:
+                    continue
+                try:
+                    window.hide()
+                    window.deleteLater()
+                except RuntimeError:
+                    pass
+                setattr(self, name, None)
+            self._drop_subpop_assignment()
+            self._subpop_pending = False
+            self._subpop_source_recipe_pending = None
+            self._subpop_signal_pending = None
+            self._subpop_accepted_ids_pending = None
+            self._analytical_workspace = AnalyticalWorkspace()
+            self._workspace_pending.clear()
+            self._workspace_frozen.clear()
+
+            # An old project has no analysis-panel artifact.  Replay the constructor
+            # defaults now so its absence means EMPTY, not "whatever the last project
+            # happened to leave in the always-live panel".
+            default = self._workspace_default_analysis
+            if default is not None:
+                restore_analysis_workspace(
+                    AnalyticalWorkspace(artifacts=[default]),
+                    analysis_panel=self._analysis_panel)
+        finally:
+            self._workspace_installing = False
+        self._sync_saved_subpop_action()
         self._sync_analysis_open_state()
 
     # -- "this window is already open" indication ------------------------------------------------
@@ -3668,19 +4107,60 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         self._reconcile_level_fit()         # ...and no DERIVED table outlives it either
         if _on_screen(self._plots_window):
-            self._refresh_plots()           # every open recording's event table
-        if _on_screen(self._event_plot_window):
+            if (PLOTS_ARTIFACT_ID in self._workspace_pending
+                    and not self._restoring):
+                # A retained window first binds the incoming project's durable source
+                # identities, then installs its self-contained numerical/config snapshot.
+                # Restoring earlier (on the first documentOpened) would resolve against a
+                # half-built session and freeze the result before later sources arrive.
+                self._refresh_plots()
+                self._restore_workspace_surface(
+                    PLOTS_ARTIFACT_ID, self._plots_window)
+            elif PLOTS_ARTIFACT_ID not in self._workspace_frozen:
+                self._refresh_plots()       # every open recording's event table
+        if (_on_screen(self._event_plot_window)
+                and EVENT_PLOTS_ARTIFACT_ID not in self._workspace_frozen):
             self._refresh_event_plots()     # the active detection (density / ensemble)
         if _on_screen(self._event_inspector):
             self._refresh_event_inspector() # the active detection's shared frame
         if _on_screen(self._event_gallery):
             self._refresh_event_gallery()
         self._refresh_subpop_views()        # ...and the report's colouring, if it still applies
-        if _on_screen(self._psd_window):
+        if (_on_screen(self._subpop_window)
+                and SUBPOPULATION_ARTIFACT_ID in self._workspace_pending
+                and not self._restoring):
+            restored = self._restore_workspace_surface(
+                SUBPOPULATION_ARTIFACT_ID, self._subpop_window)
+            if restored:
+                # Opening a project creates new Result objects.  Even identical event ids
+                # therefore cannot silently re-adopt an outgoing/in-file assignment onto
+                # this load.  Keep the report readable and require the deliberate saved-
+                # report resolver (or a re-run) to attach its colouring.  A report which
+                # fitted no mixture never had an assignment and remains the honest NONE.
+                artifact = self._workspace_artifact(SUBPOPULATION_ARTIFACT_ID)
+                saved_state = (str(artifact.payload.get("assignment_state") or "none")
+                               if artifact is not None
+                               and isinstance(artifact.payload, Mapping) else "none")
+                self._subpop_absent_reason = (
+                    "This report's assignment was retired when the project was opened; "
+                    "the restored event frame is a new load, so event ids alone cannot "
+                    "reattach it. Re-run Analysis ▸ Event subpopulations to colour "
+                    "the current detection."
+                    if saved_state != self._SUBPOP_NONE else "")
+                self._sync_subpop_window()
+        if (_on_screen(self._psd_window)
+                and PSD_ARTIFACT_ID not in self._workspace_frozen):
             self._point_psd_at_selection()  # the selected recording's spectrum
-        if _on_screen(self._iv_window):
+            if not self._psd_window.has_data():
+                # This is a LIVE result invalidation, not an unavailable source for a
+                # frozen saved snapshot (the latter never enters this branch).  Retire the
+                # stale checkpoint so the menu and the visibly empty window agree.
+                self._drop_workspace_artifact(PSD_ARTIFACT_ID)
+        if (_on_screen(self._iv_window)
+                and IV_ARTIFACT_ID not in self._workspace_frozen):
             self._iv_window.refresh()       # every open recording's I-V point
-        if _on_screen(self._vdep_window):
+        if (_on_screen(self._vdep_window)
+                and VOLTAGE_DEPENDENCE_ARTIFACT_ID not in self._workspace_frozen):
             self._vdep_window.refresh()     # every open recording's voltage point
 
     def _reconcile_level_fit(self) -> None:
@@ -3985,6 +4465,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if event.type() in (QtCore.QEvent.Show, QtCore.QEvent.Hide):
             if any(obj is w for w in self._surface_windows().values() if w is not None):
                 self._sync_analysis_open_state()
+            # A hidden analytical widget is not necessarily the project-owned copy.
+            # PlotsWindow has already emitted/cached its live result and then blanked itself
+            # by the time this Hide arrives, so it always needs a lazy reinstall.  A surface
+            # carrying a restored/frozen snapshot needs the same protection: closing and
+            # reopening it must not become an implicit Refresh against a newly-selected
+            # recording.  Ordinary live PSD/Event/I-V/VDep windows do *not* reset on close,
+            # however; checkpoint their latest programmatic refresh and let their existing
+            # opener follow the current session when shown again (the Stage-5 contract).
+            if event.type() == QtCore.QEvent.Hide and not self._workspace_installing:
+                artifact_id = self._workspace_window_id(obj)
+                if artifact_id and self._workspace_has_artifact(artifact_id):
+                    if (artifact_id == PLOTS_ARTIFACT_ID
+                            or artifact_id in self._workspace_frozen):
+                        self._workspace_pending.add(artifact_id)
+                    else:
+                        self._checkpoint_workspace_surface(artifact_id)
         return super().eventFilter(obj, event)
 
     # -- plots window --------------------------------------------------------------------------
@@ -4042,11 +4538,19 @@ class MainWindow(QtWidgets.QMainWindow):
         and wires Refresh back to a fresh snapshot; the window talks to nothing else."""
         from .plots_panel import PlotsWindow
 
+        if _on_screen(self._plots_window):
+            self._plots_window.raise_()
+            self._plots_window.activateWindow()
+            return
         if self._plots_window is None:
             self._plots_window = PlotsWindow(self._session, self)
-            self._plots_window.refreshRequested.connect(self._refresh_plots)
+            self._plots_window.refreshRequested.connect(
+                lambda: self._replace_workspace_surface(
+                    PLOTS_ARTIFACT_ID, self._refresh_plots))
             self._watch_surface_window(self._plots_window)
+            self._watch_workspace_surface(PLOTS_ARTIFACT_ID, self._plots_window)
         self._refresh_plots()
+        self._restore_workspace_surface(PLOTS_ARTIFACT_ID, self._plots_window)
         self._plots_window.show()
         self._plots_window.raise_()
         self._plots_window.activateWindow()
@@ -4086,11 +4590,30 @@ class MainWindow(QtWidgets.QMainWindow):
         the events, and wires Refresh back to a fresh snapshot; the window talks to nothing else."""
         from .event_plot_panel import EventPlotWindow
 
+        if _on_screen(self._event_plot_window):
+            self._event_plot_window.raise_()
+            self._event_plot_window.activateWindow()
+            return
+        pending = EVENT_PLOTS_ARTIFACT_ID in self._workspace_pending
         if self._event_plot_window is None:
             self._event_plot_window = EventPlotWindow(self._session, self)
-            self._event_plot_window.refreshRequested.connect(self._refresh_event_plots)
+            self._event_plot_window.refreshRequested.connect(
+                lambda: self._replace_workspace_surface(
+                    EVENT_PLOTS_ARTIFACT_ID, self._refresh_event_plots))
             self._watch_surface_window(self._event_plot_window)
-        self._refresh_event_plots()
+            self._watch_workspace_surface(
+                EVENT_PLOTS_ARTIFACT_ID, self._event_plot_window)
+        if pending:
+            self._bind_event_plots_for_restore()
+        else:
+            self._refresh_event_plots()
+        self._restore_workspace_surface(
+            EVENT_PLOTS_ARTIFACT_ID, self._event_plot_window)
+        if not pending and self._event_plot_window.has_data():
+            # Opening this surface performs the deterministic density/ensemble analysis.
+            # Its completed numerical view is now project work even before another knob
+            # is touched, so checkpoint it and advance recovery like every other result.
+            self._on_workspace_changed(EVENT_PLOTS_ARTIFACT_ID)
         self._event_plot_window.show()
         self._event_plot_window.raise_()
         self._event_plot_window.activateWindow()
@@ -4098,15 +4621,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_event_plots(self) -> None:
         """(Re-)push the active detection (doc/channel + EventSet) into the open EventPlotWindow,
         or clear it when the selection has no detection. A no-op until the window is built."""
+        self._feed_event_plots(defer_analysis=False)
+
+    def _bind_event_plots_for_restore(self) -> None:
+        """Bind live source identity before restoring frozen arrays, running no kernel."""
+        self._feed_event_plots(defer_analysis=True)
+
+    def _feed_event_plots(self, *, defer_analysis: bool) -> None:
+        """Install the current event source with either compute or bind-only semantics."""
         if self._event_plot_window is None:
             return
         from ..analysis.events import EventSet
 
         res = self._analysis_panel.current_detection()
         if res is None or not isinstance(res.payload, EventSet):
-            self._event_plot_window.set_source(None, None, None)
+            if defer_analysis:
+                self._event_plot_window.set_source(
+                    None, None, None, defer_analysis=True)
+            else:
+                self._event_plot_window.set_source(None, None, None)
             return
-        self._event_plot_window.set_source(res.doc_id, res.channel, res.payload)
+        if defer_analysis:
+            self._event_plot_window.set_source(
+                res.doc_id, res.channel, res.payload, defer_analysis=True)
+        else:
+            self._event_plot_window.set_source(res.doc_id, res.channel, res.payload)
 
     # -- I-V / conductance window ----------------------------------------------------------------
     def _has_iv_data(self) -> bool:
@@ -4140,10 +4679,26 @@ class MainWindow(QtWidgets.QMainWindow):
         else."""
         from .iv_panel import IVWindow
 
+        if _on_screen(self._iv_window):
+            self._iv_window.raise_()
+            self._iv_window.activateWindow()
+            return
+        pending = IV_ARTIFACT_ID in self._workspace_pending
         if self._iv_window is None:
-            self._iv_window = IVWindow(self._session, self)
+            self._iv_window = (
+                IVWindow(self._session, self, defer_initial_refresh=True)
+                if pending else IVWindow(self._session, self))
             self._watch_surface_window(self._iv_window)
-        self._iv_window.refresh()
+            self._watch_workspace_surface(IV_ARTIFACT_ID, self._iv_window)
+            created = True
+        else:
+            created = False
+        if pending:
+            self._restore_workspace_surface(IV_ARTIFACT_ID, self._iv_window)
+        elif not created:
+            self._iv_window.refresh()
+        if not pending and self._iv_window.points():
+            self._on_workspace_changed(IV_ARTIFACT_ID)
         self._iv_window.show()
         self._iv_window.raise_()
         self._iv_window.activateWindow()
@@ -4190,10 +4745,28 @@ class MainWindow(QtWidgets.QMainWindow):
         window talks to nothing else."""
         from .voltage_dep_panel import VDepWindow
 
+        if _on_screen(self._vdep_window):
+            self._vdep_window.raise_()
+            self._vdep_window.activateWindow()
+            return
+        pending = VOLTAGE_DEPENDENCE_ARTIFACT_ID in self._workspace_pending
         if self._vdep_window is None:
-            self._vdep_window = VDepWindow(self._session, self)
+            self._vdep_window = (
+                VDepWindow(self._session, self, defer_initial_refresh=True)
+                if pending else VDepWindow(self._session, self))
             self._watch_surface_window(self._vdep_window)
-        self._vdep_window.refresh()
+            self._watch_workspace_surface(
+                VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window)
+            created = True
+        else:
+            created = False
+        if pending:
+            self._restore_workspace_surface(
+                VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window)
+        elif not created:
+            self._vdep_window.refresh()
+        if not pending and self._vdep_window.points():
+            self._on_workspace_changed(VOLTAGE_DEPENDENCE_ARTIFACT_ID)
         self._vdep_window.show()
         self._vdep_window.raise_()
         self._vdep_window.activateWindow()
@@ -4223,10 +4796,23 @@ class MainWindow(QtWidgets.QMainWindow):
         window talks to nothing else."""
         from .psd_panel import PSDWindow
 
+        if _on_screen(self._psd_window):
+            self._psd_window.raise_()
+            self._psd_window.activateWindow()
+            return
+        pending = PSD_ARTIFACT_ID in self._workspace_pending
         if self._psd_window is None:
-            self._psd_window = PSDWindow(self._session, self)
+            self._psd_window = (
+                PSDWindow(self._session, self, defer_initial_refresh=True)
+                if pending else PSDWindow(self._session, self))
             self._watch_surface_window(self._psd_window)
-        self._point_psd_at_selection()
+            self._watch_workspace_surface(PSD_ARTIFACT_ID, self._psd_window)
+        if pending:
+            self._restore_workspace_surface(PSD_ARTIFACT_ID, self._psd_window)
+        else:
+            self._point_psd_at_selection()
+            if self._psd_window.has_data():
+                self._on_workspace_changed(PSD_ARTIFACT_ID)
         self._psd_window.show()
         self._psd_window.raise_()
         self._psd_window.activateWindow()
@@ -4282,11 +4868,18 @@ class MainWindow(QtWidgets.QMainWindow):
         i0, i1 = int(bounds[0]), int(bounds[1])
         start_s, end_s = i0 / float(fs), i1 / float(fs)
 
+        # This menu item is an explicit request for a NEW spectrum, unlike merely opening
+        # a saved PSD surface.  It therefore retires the frozen snapshot before any kernel
+        # is allowed to run and checkpoints the replacement below.
+        self._workspace_pending.discard(PSD_ARTIFACT_ID)
+        self._workspace_frozen.discard(PSD_ARTIFACT_ID)
         if self._psd_window is None:
             self._psd_window = PSDWindow(self._session, self)
             self._watch_surface_window(self._psd_window)
+            self._watch_workspace_surface(PSD_ARTIFACT_ID, self._psd_window)
         self._psd_window.set_target(doc_id, channel)
         self._psd_window.set_segment(start_s, end_s)
+        self._on_workspace_changed(PSD_ARTIFACT_ID)
         self._psd_window.show()
         self._psd_window.raise_()
         self._psd_window.activateWindow()
@@ -5630,9 +6223,11 @@ class MainWindow(QtWidgets.QMainWindow):
         raw = np.asarray(chan.data)
         try:
             signal = detection_signal(raw, float(fs), prov)
+            source_recipe = result_recipe(self, res)
         except Exception as exc:  # noqa: BLE001 — reported, never crashes
             QtWidgets.QMessageBox.warning(
-                self, title, f"Could not rebuild the detection's trace:\n{exc}")
+                self, title,
+                f"Could not prepare the detection and its persistent source identity:\n{exc}")
             return
 
         # The analysed duration, never the recorded one and never the last onset: the
@@ -5686,6 +6281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # ``res``, not ``current_detection()`` again: the slow-run confirmation above is a
         # modal that spins the event loop, and the job was built from THIS result.
         self._subpop_target = res
+        self._subpop_source_recipe_pending = source_recipe
         self._subpop_signal_pending = signal
         # THE ROWS THE JOB WAS HANDED, as a set of ids and HERE — the same instant, and the
         # same object, ``report.n_fired`` will count. ``accepted`` is a ``.copy()`` (see
@@ -5731,9 +6327,25 @@ class MainWindow(QtWidgets.QMainWindow):
         # detection this run was launched on, and nothing may re-derive it from the
         # selection (see :meth:`_adopt_subpop_assignment`).
         target, self._subpop_target = self._subpop_target, None
+        source_recipe, self._subpop_source_recipe_pending = (
+            self._subpop_source_recipe_pending, None)
+        # Keep the launch-time accepted set independently of whether live colouring can
+        # still attach.  The recording/result may have closed or been replaced while the
+        # worker ran, but the self-contained report still needs to remember exactly which
+        # rows it analysed (AP-07/AP-16).
+        launch_accepted_ids = self._subpop_accepted_ids_pending
         self._set_progress_visible(False)
         note = self._adopt_subpop_assignment(payload, target)
-        self._open_subpop_window(payload)
+        try:
+            self._open_subpop_window(
+                payload, source_result=target, source_recipe=source_recipe,
+                accepted_event_ids=launch_accepted_ids)
+        finally:
+            # Successful adoption normally consumes both fields.  Refused adoption used
+            # to retain the full conditioned trace (potentially hundreds of MB) and the
+            # accepted-id set indefinitely; the report has now captured the durable part.
+            self._subpop_signal_pending = None
+            self._subpop_accepted_ids_pending = None
         # The headline is still the SINGLE author of what the run found (above). ``note`` is
         # a different fact — whether the report's per-event colouring reached the trace and
         # the gallery at all — and it is said HERE because this is where the run's one
@@ -5750,11 +6362,12 @@ class MainWindow(QtWidgets.QMainWindow):
         drops the claim that a report is on its way, so the next job's answer cannot
         be adopted by :meth:`_on_subpop_finished`."""
         self._subpop_pending = False
+        self._subpop_source_recipe_pending = None
         self._subpop_signal_pending = None    # a full-length array; do not outlive the run
         self._subpop_accepted_ids_pending = None   # ...and neither may the run's own set
 
-    def _open_subpop_window(self, report) -> None:
-        """Open (or re-focus) the single SubpopReportWindow on ``report``."""
+    def _ensure_subpop_window(self):
+        """Build the report view without installing a report or showing a window."""
         from .subpop_window import SubpopReportWindow
 
         if self._subpop_window is None:
@@ -5765,6 +6378,24 @@ class MainWindow(QtWidgets.QMainWindow):
             win.galleryRequested.connect(self._open_gallery_on_subpops)
             win.traceRequested.connect(self._colour_trace_by_subpops)
             self._subpop_window = win
+            self._watch_surface_window(win)
+            self._watch_workspace_surface(SUBPOPULATION_ARTIFACT_ID, win)
+        return self._subpop_window
+
+    def _open_subpop_window(
+            self, report, *, source_result=None, source_recipe=None,
+            accepted_event_ids=None) -> None:
+        """Open a newly completed report and checkpoint it as a durable result."""
+        self._workspace_pending.discard(SUBPOPULATION_ARTIFACT_ID)
+        self._workspace_frozen.discard(SUBPOPULATION_ARTIFACT_ID)
+        self._ensure_subpop_window()
+        # The adapter turns this live result into a persistent source/result recipe.  It
+        # never serializes the object itself; keeping it on the widget only bridges the
+        # synchronous capture immediately below.
+        self._subpop_window._nanoscope_workspace_source_result = source_result
+        self._subpop_window._nanoscope_workspace_source = source_recipe
+        self._subpop_window._nanoscope_workspace_accepted_event_ids = (
+            accepted_event_ids)
         self._subpop_window.set_report(
             report, subtitle=f"{report.meta.get('recording') or '(unnamed)'}")
         # ``set_report`` resets the window's live state (a new document, no claim about
@@ -5772,12 +6403,64 @@ class MainWindow(QtWidgets.QMainWindow):
         # push, and it is pushed right away so the two entry buttons never open live over
         # a colouring that was refused or has already gone (S7-POP3).
         self._sync_subpop_window()
+        self._on_workspace_changed(SUBPOPULATION_ARTIFACT_ID)
         self._subpop_window.show()
         self._subpop_window.raise_()
         self._subpop_window.activateWindow()
 
+    def _show_saved_subpop_report(self) -> None:
+        """Show the project-owned report snapshot without dispatching an analysis job."""
+        if not self._workspace_has_artifact(SUBPOPULATION_ARTIFACT_ID):
+            self.statusBar().showMessage(
+                "This project does not contain a saved subpopulation report.", 8000)
+            return
+        if _on_screen(self._subpop_window):
+            self._subpop_window.raise_()
+            self._subpop_window.activateWindow()
+            return
+        win = self._ensure_subpop_window()
+        # A window destroyed/reset during a session transition must install from the cache;
+        # a hidden one is marked pending by eventFilter.  The explicit add here also covers
+        # tests/support callers which adopted a workspace without driving a Hide event.
+        self._workspace_pending.add(SUBPOPULATION_ARTIFACT_ID)
+        restored = self._restore_workspace_surface(SUBPOPULATION_ARTIFACT_ID, win)
+        if restored and win.report() is not None:
+            artifact = self._workspace_artifact(SUBPOPULATION_ARTIFACT_ID)
+            recipe = artifact_source_recipe(artifact) if artifact is not None else None
+            target, warning = resolve_result_recipe(self, recipe or {})
+            if target is None:
+                self._retire_subpop_assignment(
+                    "This saved report remains viewable, but its event colouring was "
+                    f"not attached: {warning or 'its source-result lineage is unavailable'}. "
+                    "Re-run Analysis ▸ Event subpopulations to create a current assignment.")
+            else:
+                # The adapter keeps the accepted ids beside the report.  Feed them through
+                # the existing one-writer adoption path so the live curation note compares
+                # against the exact rows the saved run received, not today's accepted count.
+                saved_ids = getattr(
+                    win, "_nanoscope_workspace_accepted_event_ids", None)
+                self._subpop_accepted_ids_pending = (
+                    None if saved_ids is None
+                    else frozenset(int(value) for value in saved_ids))
+                self._subpop_signal_pending = None  # raw/detrended recordings are not embedded
+                win._nanoscope_workspace_source_result = target
+                note = self._adopt_subpop_assignment(
+                    win.report(), target, require_current_selection=False)
+                self._subpop_accepted_ids_pending = None
+                if note:
+                    self.statusBar().showMessage(note, 10000)
+                elif warning:
+                    self.statusBar().showMessage(
+                        f"Saved subpopulation assignment restored with a caveat: {warning}",
+                        12000)
+                self._sync_subpop_window()
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
     # -- item 13: the report's events, on the trace and in the gallery --------------------------
-    def _adopt_subpop_assignment(self, report, target) -> str:
+    def _adopt_subpop_assignment(
+            self, report, target, *, require_current_selection: bool = True) -> str:
         """Read the per-event subpopulation ids off a finished report and push them out.
 
         ``target`` is the detection the run was LAUNCHED on, handed in by the landing slot
@@ -5850,7 +6533,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # The trace spans and the gallery tiles colour by matching the CURRENT frame's
         # event ids against this map, so pushing it while another recording is selected is
         # the same id-collision, one step later. Same rule the sibling surface keeps.
-        if self._analysis_panel.current_detection() is not target:
+        if (require_current_selection
+                and self._analysis_panel.current_detection() is not target):
             self._subpop_absent_reason = (
                 f"Nothing was coloured on the trace or in the gallery: you moved off "
                 f"“{Path(source_of(target.doc_id)).name}” while the run was in flight. "
@@ -7932,12 +8616,16 @@ class MainWindow(QtWidgets.QMainWindow):
         meas = self._analysis_panel.measure_panel.measurements_df
         measurements = meas if (meas is not None and len(meas)) else None
 
+        # Capture after every legacy table has settled.  The cache merge preserves
+        # unknown/plugin artifacts and pending unresolved built-ins byte-for-byte; only
+        # live, successfully installed surfaces replace the stable id they own.
+        workspace = self._capture_analytical_workspace()
         state = ProjectState(
             documents=documents, segments=segments, calibrations=calibrations, layers=layers,
             view_mode=self._session.view_mode.value, results=results,
             measurements=measurements, fits=fits,
             label_vocabulary=self._label_vocab.to_json(),
-            colours=self._session.colours.to_json())
+            colours=self._session.colours.to_json(), workspace=workspace)
 
         # ...and everything the OPENED project held that the restore could not install,
         # written back verbatim. The live session is the wrong authority on what the project
@@ -8457,6 +9145,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 8000)
         self._open_queue.clear()
         self._active_open = None
+        self._reset_analytical_workspace()
         # The outgoing project's unloadable records belong to the outgoing project.
         self._carried_over = None
         self._batch_skipped = 0
@@ -8510,6 +9199,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._history.set_suspended(True)   # a reconstruction is not an undoable edit
         self._measure_history.set_suspended(True)
         self._restore_state = state
+        workspace = getattr(state, "workspace", None)
+        self._analytical_workspace = (
+            workspace if isinstance(workspace, AnalyticalWorkspace)
+            else AnalyticalWorkspace())
+        self._workspace_pending = {
+            item.artifact_id for item in self._analytical_workspace.artifacts
+            if item.artifact_id in OWNED_ARTIFACT_IDS
+        }
+        self._workspace_frozen.clear()
+        self._sync_saved_subpop_action()
         # Install the registry BEFORE the first document creates a layer. add_layer asks it
         # for the persistent recording/channel key, so every trace and plot starts in the
         # saved ink instead of flashing or retaining a positional colour.
@@ -9017,6 +9716,11 @@ class MainWindow(QtWidgets.QMainWindow):
             except ValueError:
                 pass
             self._select_after_restore(state)
+            # The panel recipe is applied only after documents/results and the final target
+            # exist.  Its setters can emit ordinary widget signals, so this remains inside
+            # both restore guards and can neither launch a job nor create a phantom revision.
+            self._restore_workspace_surface(
+                ANALYSIS_PANEL_ARTIFACT_ID, self._analysis_panel)
 
         # Restore mode ends only HERE — after the restore's own selection has been made.
         # ``_select_after_restore`` drives the File Manager, and selecting a recording now SHOWS
@@ -9037,6 +9741,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._sync_export_action()
         self._sync_plots_action()
+        self._sync_saved_subpop_action()
         # ...and the standalone windows, which a restore changes more completely than any
         # signal does. The per-signal wiring does NOT cover this: `_clear_session` fires
         # `documentClosed` at the START, when the outgoing project's tables are still the
@@ -10155,7 +10860,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._label_vocab.entries:
             return True
         meas = self._analysis_panel.measure_panel.measurements_df
-        return meas is not None and len(meas) > 0
+        if meas is not None and len(meas) > 0:
+            return True
+        # An analytical recipe/result can be the only irreplaceable content in an unnamed
+        # session (for example a carried self-contained subpopulation or PSD snapshot whose
+        # source drive is currently absent).  Workspace-only edits therefore receive the
+        # same Save / Discard / Cancel close guard as event tables and measurements.
+        return bool(self._analytical_workspace.artifacts)
 
     def _visible_project_dirty(self) -> bool:
         """The user-facing unsaved predicate shared by every editing window.

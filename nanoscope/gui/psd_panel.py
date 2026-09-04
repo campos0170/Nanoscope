@@ -55,12 +55,13 @@ from __future__ import annotations
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter
 from PySide6 import QtGui, QtWidgets
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from PySide6.QtCore import QRectF
 
@@ -486,7 +487,16 @@ class PSDWindow(QtWidgets.QMainWindow):
     :meth:`refresh` re-gathers the recording list (picking up any opened since).
     """
 
-    def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
+    workspaceChanged = Signal()
+
+    def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None, *,
+                 defer_initial_refresh: bool = False) -> None:
+        """Build the window, optionally deferring every numerical analysis kernel.
+
+        ``defer_initial_refresh`` is the project-restore path: the source list is still
+        populated so durable identities can resolve, but the workspace adapter installs
+        and paints the saved PSD/FFT/spectrogram/histogram before any recomputation.
+        """
         super().__init__(parent)
         self._session = session
         self.setWindowTitle("NanoScope — Power spectrum (noise / PSD)")
@@ -533,7 +543,10 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._hist_levels: list[dict] = []
 
         self._build_ui()
-        self.refresh()
+        if defer_initial_refresh:
+            self._repopulate(None)
+        else:
+            self.refresh()
 
     # -- construction ----------------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -716,7 +729,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._refresh_btn = QtWidgets.QPushButton("Refresh")
         self._refresh_btn.setToolTip(
             "Re-gather the open recordings (pick up any opened since) and recompute.")
-        self._refresh_btn.clicked.connect(self.refresh)
+        self._refresh_btn.clicked.connect(self._refresh_from_button)
         form.addRow(self._refresh_btn)
         return box
 
@@ -1070,6 +1083,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._reconfigure_for_recording()
         self._recompute()
 
+    def _refresh_from_button(self) -> None:
+        """A deliberate refresh replaces the durable numerical snapshot."""
+        self.refresh()
+        self.workspaceChanged.emit()
+
     def set_target(self, doc_id: str, channel: int) -> None:
         """Point the window at ``(doc_id, channel)`` — the active recording.
 
@@ -1187,6 +1205,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._end_spin.setValue(float(dur))
         self._updating = False
         self._recompute()
+        self.workspaceChanged.emit()
 
     # -- change slots ----------------------------------------------------------------------------
     def _on_recording_changed(self, *_a) -> None:
@@ -1200,36 +1219,45 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._updating = False
         self._reconfigure_for_recording()
         self._recompute()
+        self.workspaceChanged.emit()
 
     def _on_compare_changed(self, *_a) -> None:
         if not self._updating:
             self._recompute()
+            self.workspaceChanged.emit()
 
     def _on_param_changed(self, *_a) -> None:
         if not self._updating:
             self._recompute()
+            self.workspaceChanged.emit()
 
     def _on_display_changed(self, *_a) -> None:
         if not self._updating:
             self._redraw_and_views()
+            self.workspaceChanged.emit()
 
     def _on_rms_changed(self, *_a) -> None:
         if not self._updating:
             self._update_rms_readout()
+            self.workspaceChanged.emit()
 
     def _on_style_changed(self, *_a) -> None:
         self._style.title = self._title_edit.text().strip()
         if not self._updating:
             self._redraw_and_views()
+            self.workspaceChanged.emit()
 
     def _on_style_background(self, text: str) -> None:
         self._style.background = "light" if text == "Light" else "dark"
         if not self._updating:
             self._redraw_and_views()
+            self.workspaceChanged.emit()
 
     def _on_export_size(self, *_a) -> None:
         self._style.export_w = int(self._export_w.value())
         self._style.export_h = int(self._export_h.value())
+        if not self._updating:
+            self.workspaceChanged.emit()
 
     def _pick_data_color(self) -> None:
         self._pick_color("data_color", self._data_swatch)
@@ -1244,6 +1272,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             setattr(self._style, attr, col.name())
             self._paint_swatch(swatch, col.name())
             self._redraw_and_views()
+            self.workspaceChanged.emit()
 
     # -- public setters (owner + tests) ----------------------------------------------------------
     def set_segment(self, start_s: float, end_s: float) -> None:
@@ -2262,6 +2291,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         if self._updating:
             return
         self._refresh_view()
+        self.workspaceChanged.emit()
 
     def _on_view_option_changed(self, *_a) -> None:
         if self._updating:
@@ -2270,6 +2300,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         # bin count must not throw away a spectrogram that took 160 ms to compute.
         self._view_cache.pop(self.current_view(), None)
         self._refresh_view()
+        self.workspaceChanged.emit()
 
     def _sync_view_enablement(self, view: str) -> None:
         """Grey the two Display toggles that do not describe the drawn picture.
@@ -2343,6 +2374,73 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._draw_spectrogram(rec, span, payload)
         else:
             self._draw_allpoints(rec, span, payload)
+
+    def _render_workspace_snapshot(self) -> None:
+        """Draw the installed project snapshot without reading data or running kernels.
+
+        The analytical-workspace adapter installs ``_curves`` and the three auxiliary
+        result objects before calling this method.  Reopening a project must show those
+        exact arrays even when the source recording has moved or is unavailable; only a
+        deliberate Refresh or parameter edit is allowed to compute a replacement.
+        """
+        self._redraw()  # Stored PSD curves only; this path never calls Welch.
+
+        view = self.current_view()
+        index = next((i for i, (key, _) in enumerate(VIEWS) if key == view), 0)
+        self._view_stack.setCurrentIndex(index)
+        self._view_options.setCurrentIndex(index)
+        self._sync_view_enablement(view)
+        if view == VIEW_PSD:
+            return
+
+        head = self._curves[0] if self._curves else None
+        live = self._primary_rec()
+        label = (head.label if head is not None else
+                 str(live.get("label")) if live is not None else "saved analysis")
+        rec = live or {"label": label, "key": head.key if head is not None else ""}
+
+        # The drawing helpers need only units and span metadata when a cached result is
+        # supplied.  ``seg`` is deliberately empty: an accidental kernel call then fails a
+        # focused test instead of silently analysing live/current project data.
+        result = {VIEW_FFT: self._fft, VIEW_SPECTROGRAM: self._spec,
+                  VIEW_ALLPOINTS: self._hist}.get(view)
+        result_fs = float(getattr(result, "fs", 0.0) or 0.0)
+        fs = float(head.fs if head is not None and head.fs else result_fs or self._fs or 1.0)
+        i0 = int(head.i0 if head is not None else 0)
+        n_samples = int(head.n_samples if head is not None else
+                        getattr(result, "n_samples", 0) or 0)
+        span = _Span(
+            chan=SimpleNamespace(units=(head.units if head is not None else self._units)),
+            seg=np.empty(0, dtype=np.float64), fs=fs, i0=i0, i1=i0 + n_samples,
+            note=head.note if head is not None else "")
+
+        if view == VIEW_FFT and isinstance(self._fft, psd_mod.FFTSpectrum):
+            self._draw_fft(rec, span, self._fft)
+        elif view == VIEW_SPECTROGRAM and isinstance(self._spec, psd_mod.Spectrogram):
+            self._draw_spectrogram(rec, span, self._spec)
+        elif view == VIEW_ALLPOINTS and isinstance(self._hist, ap_mod.AllPointsHistogram):
+            saved_levels = list(self._hist_levels)
+            self._draw_allpoints(rec, span, self._hist, restored_levels=saved_levels)
+        else:
+            # Do not call `_clear_views`: it would delete the other saved results and make
+            # an unavailable recording lossy on the next project save.
+            message = "No saved result is available for this view."
+            if view == VIEW_FFT:
+                self._fft_plot.clear()
+                self._fft_item = None
+                self._view_message(self._fft_plot, message)
+                self._captions[VIEW_FFT].setPlainText(message)
+            elif view == VIEW_SPECTROGRAM:
+                self._spec_image.setImage(np.zeros((1, 1), dtype=np.float32), autoLevels=False)
+                self._spec_image.setVisible(False)
+                self._view_message(self._spec_plot, message)
+                self._captions[VIEW_SPECTROGRAM].setPlainText(message)
+            else:
+                self._clear_hist_marks()
+                self._hist_plot.clear()
+                self._hist_item = None
+                self._view_message(self._hist_plot, message)
+                self._captions[VIEW_ALLPOINTS].setPlainText(message)
 
     def _view_signature(self, view: str, rec: dict, span: _Span) -> tuple:
         """Everything a view's KERNEL result depends on — the cache key.
@@ -2697,7 +2795,8 @@ class PSDWindow(QtWidgets.QMainWindow):
         return "\n".join(lines)
 
     # -- (3) all-points histogram -------------------------------------------------------------
-    def _draw_allpoints(self, rec: dict, span: _Span, cached: object | None) -> None:
+    def _draw_allpoints(self, rec: dict, span: _Span, cached: object | None,
+                        *, restored_levels: list[dict] | None = None) -> None:
         """Counts per current level, log count axis — the levels before any detector."""
         hist = cached if isinstance(cached, ap_mod.AllPointsHistogram) else None
         if hist is None:
@@ -2711,8 +2810,13 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._view_cache[VIEW_ALLPOINTS] = (
                 self._view_signature(VIEW_ALLPOINTS, rec, span), hist)
         self._hist = hist
-        self._hist_levels = (ap_mod.level_peaks(hist)
-                             if self._hist_levels_check.isChecked() else [])
+        if restored_levels is not None:
+            # Project restore owns the exact frozen peak report.  Re-running `level_peaks`
+            # here could move markers under a newer algorithm and violates no-auto-run.
+            self._hist_levels = [dict(level) for level in restored_levels]
+        else:
+            self._hist_levels = (ap_mod.level_peaks(hist)
+                                 if self._hist_levels_check.isChecked() else [])
 
         self._clear_hist_marks()
         self._hist_plot.clear()

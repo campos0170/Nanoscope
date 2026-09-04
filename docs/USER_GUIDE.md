@@ -41,6 +41,7 @@ population. This is a *draft* and tracks the app as of the current build.
 11. [Noise spectra (PSD)](#11-noise-spectra-psd)
 11a. [Reopening a project](#11a-reopening-a-project)
 11b. [Recovering unsaved work after a crash](#11b-recovering-unsaved-work-after-a-crash)
+11c. [Complete analytical projects — Stage 3](#11c-complete-analytical-projects--stage-3)
 12. [Exporting](#12-exporting)
 13. [Keyboard shortcuts](#13-keyboard-shortcuts)
 14. [Known limitations & caveats](#14-known-limitations--caveats)
@@ -1318,6 +1319,35 @@ that save was finishing remains unsaved and recoverable. A cancelled or failed s
 Treat recovery as a safety net, not as file management or a backup. Its retention is bounded, it
 does not include undo/redo history, and the private files are not designed for sharing. Save a named
 `.nanoscope` project whenever you reach a point you need to reproduce, move, or archive.
+
+---
+
+## 11c. Complete analytical projects — Stage 3
+
+Project format v11 makes the ordinary `.nanoscope` file a complete analytical project. It saves the
+durable session underneath the analysis windows and the project-owned analytical workspace: live
+analysis-panel configuration, plot/source choices and styling, exact PCA and clustering outputs
+with their preprocessing and random seeds, complete subpopulation reports, PSD and comparison
+analysis, density-figure choices, and the selected ML-model path plus a content fingerprint. Raw
+recordings and model bytes remain external files rather than being copied into the project.
+
+The important distinction is between a **saved result** and a **redrawn view**:
+
+| After a v11 reopen | What happens |
+| --- | --- |
+| PCA, clustering, subpopulation, PSD, I-V and voltage-dependence numbers | Restored from the saved snapshot. NanoScope does not silently run them again. |
+| Histogram bins, scatter/KDE geometry, contours, fitted-line drawing, captions and plot widgets | Redrawn from saved structured data and settings. |
+| A missing or changed recording/model | Named as missing, changed, or stale. The saved result is retained where it can stand alone; no replacement analysis starts automatically. |
+| **Refresh** or **Run…** | Explicitly computes a new result and marks the project unsaved. |
+
+Population Plots preserves a KDE's recipe but does not store its sampled density grid. After a
+reopen it shows **Press Plot to recompute** instead of silently running the KDE. The Event Density
+view does store and restore its frozen count grid and physical bin edges.
+
+Older projects will continue to open with empty defaults for the new analytical blocks. The reverse
+is intentionally refused: an app limited to project v10 must tell you a v11 project needs a newer
+NanoScope instead of opening it and stripping fields on the next save. The full implementation and
+test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS.md).
 
 ---
 

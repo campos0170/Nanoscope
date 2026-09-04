@@ -14,7 +14,7 @@ A ``.nanoscope`` file is a ZIP archive containing:
 
       {
         "format": "nanoscope-project",
-        "version": 1,
+        "version": 11,
         "app_version": "0.1.0",
         "documents":    [{"path": "<abspath>", "loaded_range": [start, stop] | null,
                           "source": {"n_samples", "size", "digest", "mtime_ns"} | null}],
@@ -30,6 +30,15 @@ A ``.nanoscope`` file is a ZIP archive containing:
                           "baseline_fingerprint": "..."|null}],
         "label_vocabulary": [{"key", "value", "hotkey", "note"}],
         "colours":      [{"key", "slot", "ink"?}],   # v9 — the colour identity map
+        "workspace": {                                      # v11 — analytical workspace
+          "version": 1,
+          "artifacts": [{
+            "artifact_id": "stable-id", "kind": "producer.kind",
+            "schema_version": 1, "payload": {...},
+            "tables": {"scores": "workspace/0/tables/0.parquet"},
+            "blobs": {"model": "workspace/0/blobs/0.bin"}
+          }]
+        },
         "fits":         [{"doc_id", "channel", "module_id",
                           "table": "fits/<i>.parquet" | absent,
                           "curve": {"params", "ci", "loglik", "aic", "bic", "n",
@@ -62,6 +71,11 @@ A ``.nanoscope`` file is a ZIP archive containing:
   level frame). Distribution fits have no table and ride in the manifest as ``curve``;
   their density is rebuilt on load rather than stored. See :class:`FitRec`.
 * ``measurements.parquet`` — the manual :class:`MeasurePanel` table, when non-empty.
+* ``workspace/<artifact>/<tables|blobs>/<member>`` — v11 analytical-workspace
+  resources.  Table-shaped results (PCA scores, cluster assignments, and similar
+  plugin outputs) are Parquet members rather than giant JSON arrays; opaque binary
+  resources remain byte-for-byte blobs.  The manifest carries an ordered, stable-id
+  artifact envelope and preserves fields it does not understand.
 
 WHY THIS SHAPE
 --------------
@@ -107,6 +121,9 @@ __all__ = [
     "LayerRec",
     "ResultRec",
     "FitRec",
+    "WORKSPACE_VERSION",
+    "WorkspaceArtifact",
+    "AnalyticalWorkspace",
     "ProjectState",
     "save_project",
     "load_project",
@@ -190,9 +207,19 @@ FORMAT: str = "nanoscope-project"
 # module version (or ``""`` for the unregistered reconciler), which rewrote history.
 # Both fields are optional on read so v1-v9 remain compatible. The version bumps because
 # an older NanoScope would accept and then strip these audit/staleness stamps on re-save.
-VERSION: int = 10
+#
+# v11 ADDS ``workspace``: an ordered collection of stable-id analytical artifacts.  Each
+# artifact has a small JSON payload plus named DataFrame tables and opaque blobs stored as
+# separate ZIP members.  The envelope deliberately accepts unknown kinds and preserves
+# unknown artifact/workspace fields, so a project can pass through a build that does not
+# have the producing plugin without that build stripping the plugin's work.  Missing
+# ``workspace`` remains the empty workspace on v1-v10 reads.  The project version still
+# bumps: a v10 application knows nothing about this section and would silently delete the
+# whole analytical workspace on its next save.
+VERSION: int = 11
 MIN_READ_VERSION: int = 1   # oldest project this build can still read (v1 predates segments)
 MANIFEST_NAME: str = "manifest.json"
+WORKSPACE_VERSION: int = 1
 
 
 class ProjectError(ValueError):
@@ -503,6 +530,51 @@ class FitRec:
 
 
 @dataclass
+class WorkspaceArtifact:
+    """One durable analytical-workspace artifact (project format v11).
+
+    ``artifact_id`` is stable within a project and ``kind`` identifies the producer or
+    consumer (built-in or plugin).  Core persistence deliberately does not keep a registry
+    of allowed kinds: an application without the producer must still be able to load and
+    re-save the artifact without deleting it.  ``schema_version`` belongs to the artifact,
+    independently of both the project and workspace format versions.
+
+    ``payload`` is JSON-shaped configuration/metadata.  Large tabular outputs belong in
+    ``tables`` and are stored as lossless Parquet members; arbitrary binary resources belong
+    in ``blobs`` and are copied byte for byte.  Both mappings are keyed by a logical name
+    chosen by the artifact producer.  The logical name is manifest identity, not a ZIP path.
+
+    ``extra`` contains top-level manifest fields this build does not understand.  They are
+    merged back into the artifact envelope on save.  This is load-bearing forward/plugin
+    compatibility: unknown information is retained, while canonical fields above always win
+    and may never be shadowed by ``extra``.
+    """
+
+    artifact_id: str
+    kind: str
+    schema_version: int = 1
+    payload: Any = field(default_factory=dict)
+    tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    blobs: dict[str, bytes] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AnalyticalWorkspace:
+    """The ordered analytical workspace persisted by project format v11.
+
+    Artifact order is user-visible window/workspace order.  ``extra`` has the same
+    preservation contract as :attr:`WorkspaceArtifact.extra`, but for fields on the
+    workspace object itself.  A v1-v10 project has no workspace member and loads as this
+    class's empty default.
+    """
+
+    version: int = WORKSPACE_VERSION
+    artifacts: list[WorkspaceArtifact] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ProjectState:
     """The whole persisted session, as plain data (DataFrames + dicts + scalars)."""
 
@@ -533,6 +605,10 @@ class ProjectState:
     #: registry object so this module keeps its one job, moving PLAIN DATA in and out of a
     #: file; ``ColourRegistry.from_json`` is the one decoder.
     colours: list[dict[str, Any]] = field(default_factory=list)
+    #: v11. Ordered plot/PCA/GMM/plugin analytical state. Bulk tables and opaque bytes live
+    #: in their own ZIP members rather than inflating ``manifest.json``; see the two value
+    #: classes above. Missing on v1-v10 read means an empty workspace.
+    workspace: AnalyticalWorkspace = field(default_factory=AnalyticalWorkspace)
 
 
 # ================================================================================================
@@ -626,6 +702,225 @@ def _df_to_parquet_bytes(df: pd.DataFrame) -> bytes:
 
 def _parquet_bytes_to_df(blob: bytes) -> pd.DataFrame:
     return pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+
+
+_WORKSPACE_KEYS = frozenset({"version", "artifacts"})
+_ARTIFACT_KEYS = frozenset(
+    {"artifact_id", "kind", "schema_version", "payload", "tables", "blobs"})
+
+
+def _workspace_text(value: Any, what: str) -> str:
+    """A non-empty, printable workspace identifier; raise ``ValueError`` otherwise."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{what} must be a non-empty string without outer whitespace")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{what} contains a control character")
+    return value
+
+
+def _workspace_logical_name(value: Any, what: str) -> str:
+    """Validate a table/blob name which identifies data but is never used as a ZIP path."""
+    name = _workspace_text(value, what)
+    if name in (".", "..") or "/" in name or "\\" in name:
+        raise ValueError(f"{what} must be one logical name, not a path")
+    return name
+
+
+def _workspace_member_name(value: Any, what: str) -> str:
+    """Validate a referenced ZIP member without ever extracting it to the filesystem."""
+    member = _workspace_text(value, what)
+    if member.startswith("/") or "\\" in member:
+        raise ValueError(f"{what} is not a relative ZIP member")
+    parts = member.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"{what} contains an unsafe path component")
+    return member
+
+
+def _workspace_extra(extra: Any, reserved: frozenset[str], what: str) -> dict[str, Any]:
+    """JSON-normalise extension fields, refusing a shadow of a canonical envelope key."""
+    if not isinstance(extra, dict):
+        raise ValueError(f"{what} extra fields must be an object")
+    if any(not isinstance(key, str) for key in extra):
+        raise ValueError(f"{what} extra-field names must be strings")
+    collisions = reserved.intersection(extra)
+    if collisions:
+        raise ValueError(
+            f"{what} extra fields cannot replace canonical key(s): "
+            f"{', '.join(sorted(collisions))}")
+    normal = _json_safe(extra)
+    if not isinstance(normal, dict):  # defensive; _json_safe(dict) is a dict today
+        raise ValueError(f"{what} extra fields must encode as an object")
+    return normal
+
+
+def _write_workspace(zf: zipfile.ZipFile, workspace: AnalyticalWorkspace) -> dict[str, Any]:
+    """Write v11 bulk resources and return the workspace's manifest object.
+
+    Resource paths are generated from ordinals, never from plugin-controlled logical names or
+    artifact ids.  Besides avoiding path traversal and collisions, that keeps the archive shape
+    deterministic while the manifest retains the durable names and ids.
+    """
+    if not isinstance(workspace, AnalyticalWorkspace):
+        raise ValueError("workspace must be an AnalyticalWorkspace")
+    if (not isinstance(workspace.version, int) or isinstance(workspace.version, bool)
+            or workspace.version < 1):
+        raise ValueError("workspace version must be a positive integer")
+    if not isinstance(workspace.artifacts, list):
+        raise ValueError("workspace artifacts must be a list")
+
+    encoded = _workspace_extra(workspace.extra, _WORKSPACE_KEYS, "workspace")
+    encoded["version"] = int(workspace.version)
+    encoded["artifacts"] = artifacts = []
+    artifact_ids: set[str] = set()
+
+    for artifact_index, artifact in enumerate(workspace.artifacts):
+        where = f"workspace artifact {artifact_index}"
+        if not isinstance(artifact, WorkspaceArtifact):
+            raise ValueError(f"{where} must be a WorkspaceArtifact")
+        artifact_id = _workspace_text(artifact.artifact_id, f"{where} artifact_id")
+        if artifact_id in artifact_ids:
+            raise ValueError(f"workspace artifact_id {artifact_id!r} is duplicated")
+        artifact_ids.add(artifact_id)
+        kind = _workspace_text(artifact.kind, f"{where} kind")
+        if (not isinstance(artifact.schema_version, int)
+                or isinstance(artifact.schema_version, bool)
+                or artifact.schema_version < 1):
+            raise ValueError(f"{where} schema_version must be a positive integer")
+        if not isinstance(artifact.tables, dict):
+            raise ValueError(f"{where} tables must be an object")
+        if not isinstance(artifact.blobs, dict):
+            raise ValueError(f"{where} blobs must be an object")
+
+        entry = _workspace_extra(artifact.extra, _ARTIFACT_KEYS, where)
+        entry.update({
+            "artifact_id": artifact_id,
+            "kind": kind,
+            "schema_version": int(artifact.schema_version),
+            "payload": _json_safe(artifact.payload),
+            "tables": {},
+            "blobs": {},
+        })
+        logical_names: set[str] = set()
+
+        for table_index, (raw_name, table) in enumerate(artifact.tables.items()):
+            name = _workspace_logical_name(raw_name, f"{where} table name")
+            if name in logical_names:
+                raise ValueError(f"{where} resource name {name!r} is duplicated")
+            logical_names.add(name)
+            if not isinstance(table, pd.DataFrame):
+                raise ValueError(f"{where} table {name!r} is not a pandas DataFrame")
+            member = f"workspace/{artifact_index}/tables/{table_index}.parquet"
+            zf.writestr(member, _df_to_parquet_bytes(table))
+            entry["tables"][name] = member
+
+        for blob_index, (raw_name, blob) in enumerate(artifact.blobs.items()):
+            name = _workspace_logical_name(raw_name, f"{where} blob name")
+            if name in logical_names:
+                raise ValueError(f"{where} resource name {name!r} is duplicated")
+            logical_names.add(name)
+            if not isinstance(blob, (bytes, bytearray, memoryview)):
+                raise ValueError(f"{where} blob {name!r} is not bytes")
+            member = f"workspace/{artifact_index}/blobs/{blob_index}.bin"
+            zf.writestr(member, bytes(blob))
+            entry["blobs"][name] = member
+
+        artifacts.append(entry)
+
+    return encoded
+
+
+def _read_workspace(zf: zipfile.ZipFile, raw: Any, project_name: str) -> AnalyticalWorkspace:
+    """Decode a v11 workspace, retaining unknown kinds and top-level extension fields."""
+    if not isinstance(raw, dict):
+        raise TypeError("workspace is not an object")
+    version = raw["version"]
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise ValueError("workspace version is not a positive integer")
+    raw_artifacts = raw["artifacts"]
+    if not isinstance(raw_artifacts, list):
+        raise TypeError("workspace artifacts is not a list")
+
+    artifacts: list[WorkspaceArtifact] = []
+    artifact_ids: set[str] = set()
+    resource_members: set[str] = set()
+    for artifact_index, raw_artifact in enumerate(raw_artifacts):
+        where = f"workspace artifact {artifact_index}"
+        if not isinstance(raw_artifact, dict):
+            raise TypeError(f"{where} is not an object")
+        artifact_id = _workspace_text(raw_artifact["artifact_id"], f"{where} artifact_id")
+        if artifact_id in artifact_ids:
+            raise ValueError(f"workspace artifact_id {artifact_id!r} is duplicated")
+        artifact_ids.add(artifact_id)
+        kind = _workspace_text(raw_artifact["kind"], f"{where} kind")
+        schema_version = raw_artifact["schema_version"]
+        if (not isinstance(schema_version, int) or isinstance(schema_version, bool)
+                or schema_version < 1):
+            raise ValueError(f"{where} schema_version is not a positive integer")
+        raw_tables = raw_artifact.get("tables", {})
+        raw_blobs = raw_artifact.get("blobs", {})
+        if not isinstance(raw_tables, dict):
+            raise TypeError(f"{where} tables is not an object")
+        if not isinstance(raw_blobs, dict):
+            raise TypeError(f"{where} blobs is not an object")
+
+        tables: dict[str, pd.DataFrame] = {}
+        blobs: dict[str, bytes] = {}
+        logical_names: set[str] = set()
+        for raw_name, raw_member in raw_tables.items():
+            name = _workspace_logical_name(raw_name, f"{where} table name")
+            if name in logical_names:
+                raise ValueError(f"{where} resource name {name!r} is duplicated")
+            logical_names.add(name)
+            member = _workspace_member_name(raw_member, f"{where} table {name!r} member")
+            if member in resource_members:
+                raise ValueError(f"workspace resource member {member!r} is referenced twice")
+            resource_members.add(member)
+            try:
+                table_blob = zf.read(member)
+            except KeyError:
+                raise ProjectError(
+                    f"{project_name}: workspace table {name!r} for artifact "
+                    f"{artifact_id!r} is missing from the archive.") from None
+            try:
+                tables[name] = _parquet_bytes_to_df(table_blob)
+            except Exception as exc:  # pyarrow exposes several format-specific exception classes
+                raise ProjectError(
+                    f"{project_name}: workspace table {name!r} for artifact "
+                    f"{artifact_id!r} is not readable ({exc}).") from exc
+
+        for raw_name, raw_member in raw_blobs.items():
+            name = _workspace_logical_name(raw_name, f"{where} blob name")
+            if name in logical_names:
+                raise ValueError(f"{where} resource name {name!r} is duplicated")
+            logical_names.add(name)
+            member = _workspace_member_name(raw_member, f"{where} blob {name!r} member")
+            if member in resource_members:
+                raise ValueError(f"workspace resource member {member!r} is referenced twice")
+            resource_members.add(member)
+            try:
+                blobs[name] = zf.read(member)
+            except KeyError:
+                raise ProjectError(
+                    f"{project_name}: workspace blob {name!r} for artifact "
+                    f"{artifact_id!r} is missing from the archive.") from None
+
+        artifacts.append(WorkspaceArtifact(
+            artifact_id=artifact_id,
+            kind=kind,
+            schema_version=int(schema_version),
+            payload=raw_artifact.get("payload", {}),
+            tables=tables,
+            blobs=blobs,
+            extra={key: value for key, value in raw_artifact.items()
+                   if key not in _ARTIFACT_KEYS},
+        ))
+
+    return AnalyticalWorkspace(
+        version=int(version),
+        artifacts=artifacts,
+        extra={key: value for key, value in raw.items() if key not in _WORKSPACE_KEYS},
+    )
 
 
 def _restore_event_extras(df: pd.DataFrame) -> pd.DataFrame:
@@ -848,6 +1143,8 @@ def save_project(path: str | Path, state: ProjectState,
         # is not JSON.
         "colours": _json_safe(list(state.colours or [])),
         "measurements": None,
+        # v11. Filled after its per-artifact Parquet/blob members have been written.
+        "workspace": None,
     }
 
     with _staged_write(path, notes) as fh:
@@ -914,6 +1211,8 @@ def save_project(path: str | Path, state: ProjectState,
                 member = "measurements.parquet"
                 zf.writestr(member, _df_to_parquet_bytes(state.measurements))
                 manifest["measurements"] = member
+
+            manifest["workspace"] = _write_workspace(zf, state.workspace)
 
             zf.writestr(MANIFEST_NAME, json.dumps(manifest, indent=2))
 
@@ -1174,6 +1473,18 @@ def _read_project(path: Path) -> ProjectState:
                     f"{path.name}: measurements table {member!r} is missing from the archive."
                 ) from exc
 
+        # v11. ABSENT, rather than null, is the additive v1-v10 spelling: those projects
+        # had no analytical workspace and therefore restore an empty one. A v11 file that
+        # contains a malformed/null section is different and is refused by the same
+        # one-exception manifest boundary as every older section.
+        workspace = AnalyticalWorkspace()
+        if "workspace" in manifest:
+            with _manifest_section(path.name, "workspace"):
+                workspace = _read_workspace(zf, manifest["workspace"], path.name)
+        elif int(manifest["version"]) >= 11:
+            raise ProjectError(
+                f"{path.name}: the 'workspace' section is missing from {MANIFEST_NAME}.")
+
     with _manifest_section(path.name, "view_mode / app_version"):
         return ProjectState(
             documents=documents,
@@ -1192,4 +1503,5 @@ def _read_project(path: Path) -> ProjectState:
             # `_manifest_section` guard as the rest, so a `colours` that is not even a list
             # still surfaces as ProjectError and not as a bare TypeError).
             colours=[dict(r) for r in (manifest.get("colours") or [])],
+            workspace=workspace,
         )

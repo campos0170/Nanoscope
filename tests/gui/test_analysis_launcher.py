@@ -843,6 +843,7 @@ _ANALYSIS_ACTION_ATTRS = (
     # sample indices so the trace's instrument clock and the panel's recording clock
     # cannot be confused (High-6).
     "_act_psd", "_act_psd_selection", "_act_fit_levels", "_act_subpop",
+    "_act_show_saved_subpop",
     "_act_iv", "_act_vdep",
     "_act_export_events", "_act_export_processed", "_act_export_training", "_act_export_levels",
     "_act_export_density", "_act_density_style", "_act_export_figure",

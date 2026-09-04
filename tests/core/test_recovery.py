@@ -110,12 +110,12 @@ def test_recovery_envelope_and_project_payload_are_independently_versioned(tmp_p
     envelope, payload = _envelope(candidate.path)
     assert envelope["format"] == RECOVERY_FORMAT
     assert envelope["version"] == RECOVERY_VERSION
-    assert envelope["payload"]["version"] == PROJECT_VERSION == 10
+    assert envelope["payload"]["version"] == PROJECT_VERSION == 11
     payload_path = tmp_path / "inner.nanoscope"
     payload_path.write_bytes(payload)
     with zipfile.ZipFile(payload_path) as inner:
         manifest = json.loads(inner.read("manifest.json"))
-    assert manifest["version"] == 10
+    assert manifest["version"] == 11
     assert envelope["metadata"]["session_uuid"] == SID1
     assert envelope["metadata"]["revision"] == 7
     assert envelope["metadata"]["covered_explicit_save_revision"] == 4

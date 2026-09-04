@@ -5,7 +5,22 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ## Unreleased
 
-- No changes yet.
+### Added
+
+- Implemented project-v11 complete analytical projects: resumable plot and source state; frozen
+  PCA, clustering and subpopulation results with preprocessing and seeds; PSD, density, I-V and
+  voltage-dependence snapshots; fingerprinted ML-model references; and live analysis-panel state.
+- Restored analytical snapshots lazily without reopening windows or silently rerunning detectors,
+  solvers, fits or spectrum kernels.
+- Added stable recording/channel/result lineage, missing-source and missing-model carry-through,
+  and opaque future/plugin artifact preservation.
+- Added explicit backward compatibility for v1-v10 projects and refusal by older readers rather
+  than allowing them to strip v11 analytical data.
+
+### Validation
+
+- 8,114 tests passed and 8 corpus/platform tests skipped in the complete Stage 3 regression.
+- App and DMG build verification is intentionally deferred until the next implementation stage.
 
 ## 0.1.0 Beta 1 — 2026-09-03
 

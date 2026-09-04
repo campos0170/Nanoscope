@@ -2828,6 +2828,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
     """
 
     refreshRequested = Signal()
+    #: A project-owned recipe or computed snapshot changed.  MainWindow is the sole
+    #: project writer; this signal only tells it that the next save/recovery capture
+    #: must include a fresh analytical-workspace artifact.
+    workspaceChanged = Signal()
+    #: The window is about to discard its live rendering cache on close.  Unlike
+    #: :attr:`workspaceChanged`, this does *not* mean the durable workspace changed:
+    #: MainWindow uses it to take one synchronous, clean checkpoint before
+    #: :meth:`reset_state` blanks the reusable window.
+    workspaceCheckpointRequested = Signal()
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2841,6 +2850,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._active_detection: tuple | None = None
         self._cluster_result: populations.ClusterResult | None = None
         self._pca_result: populations.PCAResult | None = None
+        #: Non-None only while :meth:`_render_workspace_snapshot` is painting values
+        #: that were already computed and restored from a project.  The ordinary draw
+        #: path is deliberately reused for bars/points/labels, while the numerical
+        #: seams below read these frozen results instead of invoking an optimiser.
+        self._workspace_snapshot_fits: tuple[dict[str, object], dict[str, str]] | None = None
+        self._workspace_snapshot_rendering = False
         self._manual_x: tuple[float, float] | None = None   # user axis pins, data units (None = auto)
         self._manual_y: tuple[float, float] | None = None
         self._updating = False   # suppress redraws during bulk widget updates
@@ -5849,6 +5864,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         if not self._history_live():
             return
+        # Dirty/recovery tracking cannot wait for the undo coalescing timer: a user
+        # may type a title and quit immediately.  The recovery controller coalesces
+        # these revision announcements independently, while the plot's own undo stack
+        # still treats the run of keystrokes as one gesture below.
+        self.workspaceChanged.emit()
         self._history_timer.start(_HISTORY_COALESCE_MS)
         self._sync_config_buttons()
         self._sync_template_selection()
@@ -5927,7 +5947,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._history_timer.stop()
         if not self._ui_ready or self._installing or self._history_suspended:
             return
-        self._history.note(self.config())
+        if self._history.note(self.config()):
+            self.workspaceChanged.emit()
         self._sync_config_buttons()
         self._sync_template_selection()
 
@@ -7836,6 +7857,150 @@ class PlotsWindow(QtWidgets.QMainWindow):
             return None
 
     # -- rendering -------------------------------------------------------------------------------
+    def _render_workspace_snapshot(self) -> None:
+        """Paint restored results without running an analysis kernel.
+
+        Project restore installs the saved :class:`PlotConfig`, PCA/clustering
+        objects and distribution-fit objects before calling this seam.  The normal
+        drawing code remains the authority for bars, points, axes and styling, but
+        its three computational exits are fenced while this method is active:
+
+        * histogram overlays evaluate the already-restored ``FitResult``;
+        * a scatter regression is left pending because no fitted regression result
+          is stored yet; and
+        * KDE is left pending because its sampled density grid is not a saved result.
+
+        PCA and cluster colouring are direct projections of the restored arrays and
+        therefore need no special case.  This method intentionally bypasses
+        :meth:`_armed_redraw`: opening a project is reconstruction, not a Run gesture,
+        undo entry, or dirty notification.
+        """
+        saved_fits = dict(self._fits)
+        saved_columns = dict(self._fit_columns)
+        saved_last = self._last_fit
+        was_updating = self._updating
+        self._workspace_snapshot_fits = (saved_fits, saved_columns)
+        self._workspace_snapshot_rendering = True
+        self._updating = True
+        try:
+            self._redraw()
+            # A restored, successfully painted snapshot is the picture the controls
+            # describe.  Update only the run-gate projection; never history/dirty.
+            self._plot_armed = self._message_item is None
+            self._stale = False
+            self._stale_reason = ""
+            self._sync_fit_apply_buttons()
+            self._sync_run_state()
+        finally:
+            # ``_clear_plot`` correctly retires the previous picture's result maps
+            # during an ordinary draw.  A workspace draw is different: these are the
+            # frozen project values it is *rendering*, so put the complete maps back
+            # (including a fit whose source is temporarily unavailable).
+            self._fits = saved_fits
+            self._fit_columns = saved_columns
+            if saved_last is not None:
+                self._last_fit = saved_last
+            elif saved_fits:
+                primary = next((key for key in self.selected_source_keys()
+                                if key in saved_fits), None)
+                self._last_fit = saved_fits.get(primary)
+            self._updating = was_updating
+            self._workspace_snapshot_rendering = False
+            self._workspace_snapshot_fits = None
+
+    def _overlay_workspace_fit(
+        self, kind: str, col: str, v: np.ndarray, edges: np.ndarray, log_x: bool,
+        src: PlotSource | None = None, colour: str | None = None, who: str = "",
+    ) -> tuple[_FitSummary, list[str]]:
+        """Draw one frozen project fit; do not estimate, test, or bootstrap it.
+
+        ``FitResult.predict`` evaluates the saved parametric density and is the same
+        closure-free reconstruction used by project loading.  Everything that would
+        derive a *new* number from the sample (MLE, component search, KS/rival tests,
+        residual statistics) is deliberately absent here.
+        """
+        snapshot = self._workspace_snapshot_fits
+        if snapshot is None:  # defensive: this helper is only a restore seam
+            raise RuntimeError("no restored fit snapshot is active")
+        fits, columns = snapshot
+        src = src if src is not None else self.primary_source()
+        key = "" if src is None else src.key
+        fit = fits.get(key)
+        if fit is None:
+            raise RuntimeError("the saved fit for this source is unavailable")
+        fitted_column = str(columns.get(key, ""))
+        if fitted_column and fitted_column != col:
+            raise RuntimeError(
+                f"the saved fit belongs to {fitted_column!r}, not the selected {col!r}")
+
+        if log_x:
+            grid = np.geomspace(edges[0], edges[-1], 400)
+            du = float(np.log10(edges[1]) - np.log10(edges[0]))
+            width = grid * np.log(10.0) * du
+        else:
+            grid = np.linspace(edges[0], edges[-1], 400)
+            width = float(edges[1] - edges[0])
+
+        # A Gaussian mixture fitted to an all-negative column is a magnitude model;
+        # the ordinary fitter reflects it onto that column.  Preserve the picture
+        # using only the already-saved parameters.
+        params = dict(getattr(fit, "params", {}) or {})
+        all_negative = bool(v.size) and bool(np.all(np.asarray(v) < 0))
+        at = np.abs(grid) if all_negative and any(
+            str(name).startswith("mu") for name in params) else grid
+        density = np.asarray(fit.predict(at), dtype=np.float64)
+        expected = (int(fit.n) * density * width
+                    * self._fit_scale(edges, width, int(v.size)))
+        pen = (pg.mkPen(colour, width=self._style.line_width + 1, style=Qt.DashLine)
+               if who else self._fit_pen())
+        item = pg.PlotDataItem(x=grid, y=expected, pen=pen)
+        self._plot.addItem(item)
+        self._fit_items.append(item)
+        if self._fit_item is None:
+            self._fit_item = item
+        if self._last_fit is None:
+            self._last_fit = fit
+        if src is not None:
+            self._fits[src.key] = fit
+            self._fit_columns[src.key] = col
+
+        # Match the ordinary headline parameter, but read every value from the saved
+        # fit.  The full on-plot box remains the common formatter and therefore keeps
+        # units, CIs and BIC consistent with a freshly rendered fit.
+        head = {
+            _FIT_EXP: "tau", _FIT_GMM: "mu", _FIT_GAMMA: "k",
+            _FIT_INVGAUSS: "mu", _FIT_EXP_GAMMA: "k",
+        }.get(kind, "")
+        keys = [name for name in params if str(name).partition("_")[0] == head]
+        if not keys and params:
+            head = str(next(iter(params))).partition("_")[0]
+            keys = [name for name in params if str(name).partition("_")[0] == head]
+        param_unit = fit.unit_of(keys[0]) if keys else ""
+        scale, unit = self._display_unit(col, param_unit)
+        shown = ", ".join(f"{float(params[name]) * scale:.4g}" for name in keys)
+        label = _param_symbol(head) if head else "fit"
+        if all_negative and head == "mu":
+            label = f"μ(|{col}|)"
+        unit_text = f" {unit}" if unit else ""
+        summary = f"{label} = {shown}{unit_text}   (n = {int(fit.n)})"
+        full = self._full_fit_summary(fit, col, None)
+        legend_who = self._legend_name(src) if (who and src is not None) else who
+        self._legend_add(item,
+                         f"{legend_who} fit: {summary}".strip() if legend_who
+                         else f"fit: {summary}",
+                         kind="fit", key=key)
+
+        notes = [
+            str(getattr(fit, "model", "saved fit")),
+            (f"BIC = {float(fit.bic):.6g}   AIC = {float(fit.aic):.6g}   "
+             f"(restored snapshot; not recomputed)"),
+        ]
+        ci_line = self._ci_note(fit, col)
+        if ci_line:
+            notes.append(ci_line)
+        notes.extend(str(note) for note in getattr(fit, "meta", {}).get("warnings", ()))
+        return _FitSummary(summary, full, plain=summary), notes
+
     def _clear_plot(self) -> None:
         self._plot.clear()
         self._plot.setTitle(None)
@@ -8536,6 +8701,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
         elif kind == SCATTER:
             self._draw_scatter(drawn)
         elif kind == KDE:
+            if self._workspace_snapshot_rendering:
+                # KDE currently stores its recipe, not the sampled density grid.
+                # Calling scipy's estimator here would make project-open an implicit
+                # analysis run, so leave an explicit pending picture instead.
+                self._message(
+                    "Saved KDE configuration restored. Press Plot to recompute its "
+                    "density contours from the attached source data.")
+                return
             self._draw_kde(drawn)
         else:
             df = self._current_frame()
@@ -9615,6 +9788,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         ``who`` is therefore not a note prefix: it is the SERIES tag, used for the
         legend entry and to pick the overlay pen, and empty means "single series".
         """
+        if self._workspace_snapshot_fits is not None:
+            return self._overlay_workspace_fit(
+                kind, col, v, edges, log_x, src=src, colour=colour, who=who)
         notes: list[str] = []
         k = int(self._applied_fit_k)   # the APPLIED component count, not the spin's
         src = src if src is not None else self.primary_source()
@@ -10884,6 +11060,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         panel survived. Saving it puts the two on the same footing and makes it
         available to the figure export, which reads exactly these keys.
         """
+        # Synchronous by Qt contract.  MainWindow snapshots the live recipe/results
+        # into its project-owned v11 workspace before ``reset_state`` deliberately
+        # blanks this widget, preserving the long-standing blank-on-reopen behavior
+        # without losing the analysis from Save Project.  Closing changes visibility,
+        # not project content, so this is a clean checkpoint request rather than a
+        # ``workspaceChanged`` dirty notification.
+        self.workspaceCheckpointRequested.emit()
         self._note_timer.stop()
         # A coalescing undo step still open belongs to a window that is about to be
         # blanked, and `reset_state` below drops the stack it would have been pushed onto.
@@ -11661,6 +11844,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         ``src`` is passed only for an overlay, and it means the line belongs to THAT
         source alone: with several clouds on screen a single pooled regression would
         describe a population that does not exist."""
+        if self._workspace_snapshot_rendering:
+            if self._applied_scatter_fit != _SFIT_NONE:
+                details.append(
+                    "Scatter-fit configuration restored; press Plot to recompute the "
+                    "regression. No fit was run while opening the project.")
+            return None
         # The APPLIED selection, never the combo's (owner note #12) — see _apply_fit.
         kind = self._applied_scatter_fit
         if kind == _SFIT_NONE:
@@ -12130,6 +12319,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._updating = False
         self._armed_redraw()   # "Run clustering" is a run gesture; it clears the gate too
         self._set_details(self._cluster_summary())
+        # The result itself is durable v11 state even when the controls already had
+        # these values (for example, Run clustering pressed a second time).
+        self.workspaceChanged.emit()
         return res
 
     def run_pca(self) -> populations.PCAResult | None:
@@ -12143,7 +12335,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._set_details("PCA needs at least 2 feature columns selected.")
             return None
         try:
-            res = populations.pca(df, features, n_components=2)
+            # Project v11 records the seed with the PCA snapshot.  Use an explicit
+            # integer here so a deliberate rerun has a reproducible recipe instead of
+            # persisting ``None`` (which delegates randomness to library defaults).
+            res = populations.pca(df, features, n_components=2, random_state=0)
         except (ValueError, RuntimeError) as exc:
             self._set_details(f"PCA failed: {exc}")
             return None
@@ -12154,6 +12349,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._pages.setCurrentIndex(_PLOT_TYPES.index(PCA))
         self._updating = False
         self._armed_redraw()   # "Run PCA" is a run gesture; it clears the gate too
+        self.workspaceChanged.emit()
         return res
 
     def _cluster_summary(self) -> str:

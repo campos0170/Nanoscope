@@ -40,7 +40,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter
 from PySide6 import QtGui, QtWidgets
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from ..analysis import iv, stats
 from ..core.session import Session
@@ -107,7 +107,14 @@ class IVWindow(QtWidgets.QMainWindow):
     another recording and clicking Refresh brings it into the fit.
     """
 
-    def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
+    #: Emitted for the user's explicit refresh only. Programmatic refreshes are
+    #: intentionally silent so MainWindow can keep the derived view current
+    #: without turning that maintenance into an unsaved project edit.
+    workspaceChanged = Signal()
+
+    def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None, *,
+                 defer_initial_refresh: bool = False) -> None:
+        """Build the window; defer gathering/fitting for project restore when requested."""
         super().__init__(parent)
         self._session = session
         self.setWindowTitle("NanoScope — I-V / Conductance")
@@ -121,7 +128,8 @@ class IVWindow(QtWidgets.QMainWindow):
         self._message_item: pg.TextItem | None = None
 
         self._build_ui()
-        self.refresh()
+        if not defer_initial_refresh:
+            self.refresh()
 
     # -- construction ----------------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -134,7 +142,7 @@ class IVWindow(QtWidgets.QMainWindow):
         self._refresh_btn = QtWidgets.QPushButton("Refresh")
         self._refresh_btn.setToolTip(
             "Re-gather (V, I₀) from every open recording — pick up any opened since.")
-        self._refresh_btn.clicked.connect(self.refresh)
+        self._refresh_btn.clicked.connect(self._refresh_from_user)
         self._save_btn = QtWidgets.QPushButton("Save image…")
         self._save_btn.setToolTip("Export the I-V plot as a PNG.")
         self._save_btn.clicked.connect(lambda: self.save_image())
@@ -180,6 +188,58 @@ class IVWindow(QtWidgets.QMainWindow):
         self._points = iv.iv_points(self._session)
         self._exclusions = iv.iv_exclusions(self._session)
         self._redraw()
+
+    def _refresh_from_user(self) -> None:
+        """Refresh from the button, then notify project persistence exactly once."""
+        self.refresh()
+        self.workspaceChanged.emit()
+
+    def _render_workspace_snapshot(self) -> None:
+        """Draw already-restored values without gathering or fitting them again.
+
+        Project restore installs ``_points``, ``_exclusions`` and ``_fit`` plus the
+        exact explanatory text before calling this seam.  Calling :meth:`_redraw`
+        here would silently run ``iv_fit`` again and replace the saved result, so
+        this method performs only the pyqtgraph presentation work and preserves
+        the installed textual snapshot verbatim.
+        """
+        saved_fit = self._fit
+        saved_details = self._details.toPlainText()
+        saved_headline = self._headline.text()
+        try:
+            if not self._points:
+                message = ("No recording has a voltage in declared units."
+                           if self._exclusions else "No usable recordings.")
+                self._message(message)
+                return
+
+            voltage, current, units, _notes, _dropped = self._resolve_units(self._points)
+            finite = np.isfinite(voltage) & np.isfinite(current)
+            voltage, current = voltage[finite], current[finite]
+            if voltage.size == 0:
+                self._message("No finite (V, I₀) points to plot.")
+                return
+
+            self._clear()
+            point_color = QtGui.QColor(_DATA_HEX)
+            point_color.setAlpha(_POINT_ALPHA)
+            self._scatter_item = pg.ScatterPlotItem(
+                x=voltage, y=current, size=11, pen=pg.mkPen("#0d0f12"),
+                brush=pg.mkBrush(point_color))
+            self._plot.addItem(self._scatter_item)
+            self._plot.setLabel("bottom", "Applied voltage (V)")
+            self._plot.setLabel(
+                "left", f"Open-pore current I₀ ({units or 'units unknown'})")
+            self._plot.getViewBox().setToolTip(_I0_CROSS_REFERENCE)
+            if saved_fit is not None:
+                self._draw_fit_line(voltage, saved_fit)
+            self._plot.autoRange()
+        finally:
+            # Rendering helpers normally derive these fields.  During restore they
+            # are authoritative saved values and must survive even an empty plot.
+            self._fit = saved_fit
+            self._details.setPlainText(saved_details)
+            self._headline.setText(saved_headline)
 
     def points(self) -> list[iv.IVPoint]:
         return list(self._points)

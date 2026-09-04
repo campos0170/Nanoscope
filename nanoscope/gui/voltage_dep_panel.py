@@ -69,7 +69,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter
 from PySide6 import QtGui, QtWidgets
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from ..analysis import stats, voltage_dep
 from ..core.session import Session
@@ -171,7 +171,14 @@ class VDepWindow(QtWidgets.QMainWindow):
     another recording and clicking Refresh brings it into the plot.
     """
 
-    def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
+    #: Emitted only for a user's durable workspace edits. Calls to the public
+    #: setters and :meth:`refresh` are deliberately silent so project restore and
+    #: MainWindow's data refreshes do not immediately dirty the project again.
+    workspaceChanged = Signal()
+
+    def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None, *,
+                 defer_initial_refresh: bool = False) -> None:
+        """Build the window; defer gathering/fitting for project restore when requested."""
         super().__init__(parent)
         self._session = session
         self.setWindowTitle("NanoScope — Voltage dependence")
@@ -196,7 +203,8 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._message_item: pg.TextItem | None = None
 
         self._build_ui()
-        self.refresh()
+        if not defer_initial_refresh:
+            self.refresh()
 
     # -- construction ----------------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -230,7 +238,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         # whole recording, an unasked-for exponential is exactly the kind of claim that
         # ends up screenshotted.
         self._fit_apply_btn = QtWidgets.QPushButton("Apply fit")
-        self._fit_apply_btn.clicked.connect(self._apply_fit)
+        self._fit_apply_btn.clicked.connect(self._apply_fit_from_user)
         controls.addWidget(self._fit_apply_btn)
 
         self._abs_v = QtWidgets.QCheckBox("|V|")
@@ -258,7 +266,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._refresh_btn = QtWidgets.QPushButton("Refresh")
         self._refresh_btn.setToolTip(
             "Re-gather (V, metric) from every open recording — pick up any detected since.")
-        self._refresh_btn.clicked.connect(self.refresh)
+        self._refresh_btn.clicked.connect(self._refresh_from_user)
         self._save_btn = QtWidgets.QPushButton("Save image…")
         self._save_btn.setToolTip("Export the voltage-dependence plot as a PNG.")
         self._save_btn.clicked.connect(lambda: self.save_image())
@@ -346,6 +354,14 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._abs_v.toggled.connect(self._redraw)
         self._log_y.toggled.connect(self._redraw)
         self._accepted_only.toggled.connect(self.refresh)
+        # ``activated`` and ``clicked`` are user-only signals; unlike the state
+        # change signals above they do not fire while a saved project is restored
+        # through the public setters.
+        self._metric_combo.activated.connect(self._notify_workspace_changed)
+        self._fit_combo.activated.connect(self._notify_workspace_changed)
+        self._abs_v.clicked.connect(self._notify_workspace_changed)
+        self._log_y.clicked.connect(self._notify_workspace_changed)
+        self._accepted_only.clicked.connect(self._notify_workspace_changed)
         self._sync_fit_apply_btn()
 
     # -- current control state -------------------------------------------------------------------
@@ -380,6 +396,15 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._sync_fit_apply_btn()
         self._redraw()
 
+    def _apply_fit_from_user(self) -> None:
+        """Commit an explicitly requested fit and mark the workspace changed."""
+        self._apply_fit()
+        self.workspaceChanged.emit()
+
+    def _notify_workspace_changed(self, *_args: object) -> None:
+        """Bridge Qt's user-only widget signals to the parameterless API signal."""
+        self.workspaceChanged.emit()
+
     def _sync_fit_apply_btn(self) -> None:
         """Show on the button that the chosen trend is NOT the drawn one."""
         pending = self._fit_combo.currentText() != self._applied_fit
@@ -403,6 +428,72 @@ class VDepWindow(QtWidgets.QMainWindow):
             accepted_only=self._accepted_only.isChecked())
         self._points = list(self._series.points)
         self._redraw()
+
+    def _refresh_from_user(self) -> None:
+        """Refresh from the button and record that explicit workspace action."""
+        self.refresh()
+        self.workspaceChanged.emit()
+
+    def _render_workspace_snapshot(self) -> None:
+        """Draw the installed project snapshot without gathering or refitting it.
+
+        The workspace adapter restores the exact series, fit, drop annotations and
+        explanatory text before invoking this seam.  The ordinary :meth:`_redraw`
+        path intentionally computes a new trend; project restoration must instead
+        render the frozen numerical result and wait for an explicit Refresh before
+        touching the analysis kernels again.
+        """
+        saved_fit = self._fit
+        saved_not_in_fit = dict(self._not_in_fit)
+        saved_details = self._details.toPlainText()
+        saved_headline = self._headline.text()
+        saved_warning = self.warning_text()
+        try:
+            self._fill_table()
+            if not self._points:
+                self._message("No usable recordings.")
+                return
+
+            use_abs = self._abs_v.isChecked()
+            log_y = self._log_y.isChecked()
+            x_values = np.array(
+                [abs(point.v_volts) if use_abs else point.v_volts
+                 for point in self._points], dtype=np.float64)
+            y_values = np.array([point.value for point in self._points], dtype=np.float64)
+            finite = np.isfinite(x_values) & np.isfinite(y_values)
+            if log_y:
+                finite &= y_values > 0
+            x_values, y_values = x_values[finite], y_values[finite]
+            if x_values.size == 0:
+                self._message("No finite points to plot (check the log-y toggle).")
+                return
+
+            self._clear()
+            point_color = QtGui.QColor(_DATA_HEX)
+            point_color.setAlpha(_POINT_ALPHA)
+            self._scatter_item = pg.PlotDataItem(
+                x=x_values, y=y_values, pen=None, symbol="o", symbolSize=11,
+                symbolPen=pg.mkPen("#0d0f12"), symbolBrush=pg.mkBrush(point_color))
+            self._plot.addItem(self._scatter_item)
+            self._plot.setLabel(
+                "bottom", "Applied |voltage| (V)" if use_abs else "Applied voltage (V)")
+            self._plot.setLabel(
+                "left", _Y_LABEL.get(self._metric(), "metric") + (" (log)" if log_y else ""))
+            if saved_fit is not None:
+                self._draw_fit_curve(x_values, saved_fit)
+                self._apply_fit_summary(saved_fit, use_abs)
+            else:
+                self._set_title(self._provenance_segments(self._series), _MSG_HEX)
+            self._plot.setLogMode(x=False, y=log_y)
+            self._plot.autoRange()
+        finally:
+            # The rendering helpers normally derive these.  Here the values in the
+            # project are authoritative and must remain byte-for-byte presentable.
+            self._fit = saved_fit
+            self._not_in_fit = saved_not_in_fit
+            self._details.setPlainText(saved_details)
+            self._headline.setText(saved_headline)
+            self._set_warnings((saved_warning,) if saved_warning else ())
 
     def points(self) -> list[voltage_dep.VDepPoint]:
         return list(self._points)
