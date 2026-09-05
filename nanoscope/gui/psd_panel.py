@@ -78,10 +78,12 @@ from ..plot.style import OKABE_ITO
 from .axes import ReadableLogAxis
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
+from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_export import (
     DATA_FILTERS,
     IMAGE_FILTERS,
     IMAGE_FORMATS,
+    choose_live_plot_export,
     data_write_failure_text,
     require_csv_row_budget,
     write_live_plot_image,
@@ -520,6 +522,10 @@ class PSDWindow(QtWidgets.QMainWindow):
         self.resize(1080, 720)
 
         self._style = PSDStyle()
+        self._appearance = PlotAppearance()
+        # Automatic captions belong to the rendered result, not the current source.
+        # Keep them so clearing a custom title can restyle even an orphan snapshot.
+        self._view_titles: dict[str, str] = {}
         self._updating = False
 
         # Live results (kept for tests + redraws).
@@ -716,7 +722,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         root.addWidget(self._build_rms_group())
         root.addWidget(self._build_style_group())
 
-        self._save_btn = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
+        self._save_btn = QtWidgets.QPushButton("Export current figure…")
         self._save_btn.setToolTip(
             "Export the view currently on screen as PNG, PDF or SVG — the spectrum, the FFT, the "
             "spectrogram or the histogram, whichever is showing.")
@@ -969,17 +975,34 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._bg_combo.setToolTip("Light gives a white canvas with dark ink for publication.")
         form.addRow("Background", self._bg_combo)
 
-        erow = QtWidgets.QHBoxLayout()
         self._export_w = QtWidgets.QSpinBox()
         self._export_h = QtWidgets.QSpinBox()
         for sp in (self._export_w, self._export_h):
             sp.setRange(0, 20000)
             sp.setValue(0)
-            sp.setToolTip("Saved-PNG size in px (0 = native / follow aspect).")
-        erow.addWidget(self._export_w, 1)
-        erow.addWidget(QtWidgets.QLabel("×"))
-        erow.addWidget(self._export_h, 1)
-        form.addRow("Export size", erow)
+            sp.setToolTip("Legacy export dimensions: PNG pixels or PDF points; 0 = native. "
+                          "Export current figure offers physical size and explicit units.")
+        # Keep legacy project/programmatic size fields, but GUI export now owns an
+        # explicit physical-size dialog instead of this format-dependent pair.
+        self._export_w.setParent(box)
+        self._export_h.setParent(box)
+        self._export_w.hide()
+        self._export_h.hide()
+        # The existing palette is retained; shared controls add opt-in typography.
+        self._appearance_widget = PlotAppearanceWidget(
+            self._appearance, include_colors=False, compact=True, include_markers=False)
+        self._appearance_widget.changed.connect(self._on_appearance_changed)
+        appearance_toggle = QtWidgets.QToolButton()
+        appearance_toggle.setText("Typography and line styling")
+        appearance_toggle.setCheckable(True)
+        appearance_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        appearance_toggle.setArrowType(Qt.RightArrow)
+        self._appearance_widget.setVisible(False)
+        appearance_toggle.toggled.connect(self._appearance_widget.setVisible)
+        appearance_toggle.toggled.connect(
+            lambda expanded: appearance_toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow))
+        form.addRow(appearance_toggle)
+        form.addRow(self._appearance_widget)
         return box
 
     def _make_swatch(self, hex_color: str, on_click, tip: str) -> QtWidgets.QPushButton:
@@ -1012,7 +1035,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         # moved since it was last drawn; the per-view options invalidate only their own.
         self._view_combo.currentIndexChanged.connect(self._on_view_changed)
         self._spec_nperseg_combo.currentTextChanged.connect(self._on_view_option_changed)
-        self._spec_cmap_combo.currentTextChanged.connect(self._on_view_option_changed)
+        self._spec_cmap_combo.currentTextChanged.connect(self._on_colormap_changed)
         self._hist_bins_combo.currentTextChanged.connect(self._on_view_option_changed)
         self._hist_clip_check.toggled.connect(self._on_view_option_changed)
         self._hist_levels_check.toggled.connect(self._on_view_option_changed)
@@ -1268,13 +1291,13 @@ class PSDWindow(QtWidgets.QMainWindow):
     def _on_style_changed(self, *_a) -> None:
         self._style.title = self._title_edit.text().strip()
         if not self._updating:
-            self._redraw_and_views()
+            self._restyle_existing_views()
             self.workspaceChanged.emit()
 
     def _on_style_background(self, text: str) -> None:
         self._style.background = "light" if text == "Light" else "dark"
         if not self._updating:
-            self._redraw_and_views()
+            self._restyle_existing_views()
             self.workspaceChanged.emit()
 
     def _on_export_size(self, *_a) -> None:
@@ -1295,8 +1318,87 @@ class PSDWindow(QtWidgets.QMainWindow):
         if col.isValid():
             setattr(self._style, attr, col.name())
             self._paint_swatch(swatch, col.name())
-            self._redraw_and_views()
+            self._restyle_existing_views()
             self.workspaceChanged.emit()
+
+    def _on_colormap_changed(self, *_a) -> None:
+        if self._updating:
+            return
+        cmap = pg.colormap.get(self._spec_cmap_combo.currentText())
+        self._spec_image.setColorMap(cmap)
+        if self._spec_bar is not None:
+            self._spec_bar.setColorMap(cmap)
+        self.workspaceChanged.emit()
+
+    def _restyle_existing_views(self) -> None:
+        """Change only scene appearance; never read a trace or rebuild a result."""
+        self._apply_appearance()
+        views = (
+            (VIEW_PSD, self._plot_widget, self._plot),
+            (VIEW_FFT, self._fft_widget, self._fft_plot),
+            (VIEW_SPECTROGRAM, self._spec_widget, self._spec_plot),
+            (VIEW_ALLPOINTS, self._hist_widget, self._hist_plot),
+        )
+        for key, widget, plot in views:
+            self._apply_view_background(widget, plot)
+            if key in self._view_titles:
+                plot.setTitle(self._style.title or self._view_titles[key],
+                              color=self._fg_hex())
+            for name in ("bottom", "left"):
+                axis = plot.getAxis(name)
+                axis.labelStyle.update(self._label_style())
+                axis._updateLabel()
+        for index, curve in enumerate(self._curves):
+            if curve.item is not None:
+                pen = pg.mkPen(curve.item.opts["pen"])
+                pen.setColor(QtGui.QColor(self._style.data_color if index == 0 else curve.colour))
+                curve.item.setPen(pen)
+        for item, color in ((self._fit_item, self._style.fit_color),
+                            (self._fft_item, self._style.data_color),
+                            (self._hist_item, self._style.data_color)):
+            if item is not None:
+                pen = pg.mkPen(item.opts["pen"])
+                pen.setColor(QtGui.QColor(color))
+                item.setPen(pen)
+        for line in self._hist_marks:
+            pen = pg.mkPen(line.pen)
+            pen.setColor(QtGui.QColor(self._style.fit_color))
+            line.setPen(pen)
+            if line.label is not None:
+                line.label.setColor(self._style.fit_color)
+        for item in (self._message_item, self._spec_msg):
+            if item is not None:
+                item.setColor(self._msg_hex())
+        legend = getattr(self._plot, "legend", None)
+        if legend is not None and legend.isVisible():
+            self._ensure_legend()
+        if self._spec_bar is not None:
+            axis = self._spec_bar.getAxis("right")
+            axis.setPen(pg.mkPen(self._fg_hex()))
+            axis.setTextPen(pg.mkPen(self._fg_hex()))
+            axis.labelStyle.update(self._label_style())
+            axis._updateLabel()
+
+    def _on_appearance_changed(self, state: PlotAppearance) -> None:
+        self._appearance = state
+        if not self._updating:
+            self._restyle_existing_views()
+            self.workspaceChanged.emit()
+
+    def set_appearance_state(self, mapping) -> None:
+        self._appearance = PlotAppearance.from_mapping(mapping)
+        self._appearance_widget.set_state(self._appearance)
+        if not self._updating:
+            self._restyle_existing_views()
+
+    def _apply_appearance(self) -> None:
+        for widget, plot, data, fits in (
+                (self._plot_widget, self._plot, [c.item for c in self._curves], [self._fit_item]),
+                (self._fft_widget, self._fft_plot, [self._fft_item], []),
+                (self._spec_widget, self._spec_plot, [], []),
+                (self._hist_widget, self._hist_plot, [self._hist_item], [])):
+            apply_plot_appearance(plot, self._appearance, plot_widget=widget,
+                                  data_items=data, fit_items=fits)
 
     # -- public setters (owner + tests) ----------------------------------------------------------
     def set_segment(self, start_s: float, end_s: float) -> None:
@@ -1678,6 +1780,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._plot.setLabel("left", left, **self._label_style())
         self._apply_title(self._auto_title())
         self._apply_background()
+        self._restyle_existing_views()
         self._plot.autoRange()
 
         self._fill_details()
@@ -2220,6 +2323,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         return f"{yq} — {shown}"
 
     def _apply_title(self, auto: str | None) -> None:
+        self._view_titles[VIEW_PSD] = auto or ""
         text = self._style.title or auto
         if not text:
             self._plot.setTitle(None)
@@ -2238,6 +2342,7 @@ class PSDWindow(QtWidgets.QMainWindow):
     def _clear_plot(self) -> None:
         self._plot.clear()
         self._plot.setTitle(None)
+        self._view_titles.pop(VIEW_PSD, None)
         self._drop_legend()
         self._curve_item = self._fit_item = self._message_item = None
         self._plot_x = self._plot_y = None
@@ -2350,6 +2455,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._hist_plot.clear()
         self._hist_item = None
         for view in (VIEW_FFT, VIEW_SPECTROGRAM, VIEW_ALLPOINTS):
+            self._view_titles.pop(view, None)
             self._captions[view].setPlainText(message)
 
     def _clear_hist_marks(self) -> None:
@@ -2536,9 +2642,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._fft_plot.setLabel("bottom", "Frequency (Hz)", **self._label_style())
         self._fft_plot.setLabel("left", f"|X(f)| — peak amplitude ({units})",
                                 **self._label_style())
-        self._fft_plot.setTitle(self._style.title or f"FFT — {rec['label']}",
+        self._view_titles[VIEW_FFT] = f"FFT — {rec['label']}"
+        self._fft_plot.setTitle(self._style.title or self._view_titles[VIEW_FFT],
                                 color=self._fg_hex())
         self._fft_plot.showGrid(x=True, y=True, alpha=0.15)
+        self._restyle_existing_views()
         self._fft_plot.autoRange()
         self._captions[VIEW_FFT].setPlainText(self._fft_caption(spec, span))
 
@@ -2650,9 +2758,11 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._spec_plot.setLabel("bottom", "Time (s from the start of this recording)",
                                      **self._label_style())
             self._spec_plot.setLabel("left", "Frequency (Hz)", **self._label_style())
-            self._spec_plot.setTitle(self._style.title or f"Spectrogram — {rec['label']}",
+            self._view_titles[VIEW_SPECTROGRAM] = f"Spectrogram — {rec['label']}"
+            self._spec_plot.setTitle(self._style.title or self._view_titles[VIEW_SPECTROGRAM],
                                      color=self._fg_hex())
             self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(sg, span, None))
+            self._restyle_existing_views()
             return
 
         self._spec_image.setVisible(True)
@@ -2684,8 +2794,10 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._spec_plot.setLabel("bottom", "Time (s from the start of this recording)",
                                  **self._label_style())
         self._spec_plot.setLabel("left", "Frequency (Hz)", **self._label_style())
-        self._spec_plot.setTitle(self._style.title or f"Spectrogram — {rec['label']}",
+        self._view_titles[VIEW_SPECTROGRAM] = f"Spectrogram — {rec['label']}"
+        self._spec_plot.setTitle(self._style.title or self._view_titles[VIEW_SPECTROGRAM],
                                  color=self._fg_hex())
+        self._restyle_existing_views()
         self._spec_plot.autoRange()
         self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(sg, span, (lo, hi)))
 
@@ -2872,9 +2984,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         units = _unit_or_unknown(span.chan.units)
         self._hist_plot.setLabel("bottom", f"Current ({units})", **self._label_style())
         self._hist_plot.setLabel("left", "Samples per bin (log)", **self._label_style())
-        self._hist_plot.setTitle(self._style.title or f"All-points histogram — {rec['label']}",
+        self._view_titles[VIEW_ALLPOINTS] = f"All-points histogram — {rec['label']}"
+        self._hist_plot.setTitle(self._style.title or self._view_titles[VIEW_ALLPOINTS],
                                  color=self._fg_hex())
         self._hist_plot.showGrid(x=True, y=True, alpha=0.15)
+        self._restyle_existing_views()
         self._hist_plot.autoRange()
         self._captions[VIEW_ALLPOINTS].setPlainText(self._hist_caption(hist, span))
 
@@ -2918,13 +3032,6 @@ class PSDWindow(QtWidgets.QMainWindow):
         Returns the written path, or None when the user cancelled OR the write
         failed (a failed write is reported in a dialog, never returned as a path).
         """
-        if path is None:
-            chosen = ask_export_path(
-                self, title="Save spectrum image", suggestion="noise_psd.png",
-                filters=IMAGE_FILTERS)   # writes exactly this file
-            if chosen is None:
-                return None
-            path = str(chosen)
         # The VISIBLE view, not always the PSD: pressing "Save image…" with a spectrogram on
         # screen and receiving a spectrum is the kind of surprise that ends up in a paper.
         #
@@ -2936,6 +3043,20 @@ class PSDWindow(QtWidgets.QMainWindow):
         target = (self._spec_widget.scene() if self.current_view() == VIEW_SPECTROGRAM
                   else self.active_plot_item())
         w, h = self._style.export_w, self._style.export_h
+        export_kwargs = dict(width=w, height=h)
+        if path is None:
+            selection = choose_live_plot_export(
+                self, target, f"noise_{self.current_view()}.png",
+                initial_width=w, initial_height=h)
+            if selection is None:
+                return None
+            chosen, options = selection
+            path = str(chosen)
+            export_kwargs = dict(width=options.width, height=options.height,
+                                 physical_width_mm=options.physical_width_mm,
+                                 physical_height_mm=options.physical_height_mm)
+            if options.extension == ".png" and not options.native:
+                export_kwargs["dpi"] = options.dpi
         out = Path(path)
         # STAGED, like every other export (USER_GUIDE §12). pyqtgraph's ImageExporter
         # ends in ``QImage.save``, which OPENS AND TRUNCATES its target and reports
@@ -2946,7 +3067,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         from ..plot.figures import image_write_failure_text
 
         try:
-            notes = write_live_plot_image(out, target, width=w, height=h)
+            notes = write_live_plot_image(out, target, **export_kwargs)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
                 self, "Save spectrum image",

@@ -153,6 +153,9 @@ from .axes import ReadableLogAxis
 from .categorical import category_brushes, category_colour, category_counts, legend_swatch
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
+from .plot_export import (
+    apply_png_resolution, apply_svg_physical_size, choose_live_plot_export,
+)
 from .worker_thread import (
     DEFAULT_JOIN_MS,
     JOB_NONE,
@@ -2886,6 +2889,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._note_timer.setSingleShot(True)
         self._note_timer.timeout.connect(self._settle_notes)
         self._style = StyleSettings()   # the tunable plot design (title/colour/font/size/export)
+        # Captions belong to the rendered result, which may differ from pending
+        # controls. Presentation edits reuse them without reading/re-fitting data.
+        self._title_presentation: tuple[str | None, str | None, str | None] = (None, None, None)
+        self._axis_auto_labels: dict[str, str] = {}
 
         # -- A2: UNDO/REDO over the configuration -------------------------------------
         #: The stack itself. Re-based onto the real opening config at the foot of this
@@ -3323,7 +3330,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "Export the current image, its numeric data, or a reproducible configuration.")
         export_button.setAccessibleName("Export population plot")
         export_menu = QtWidgets.QMenu(export_button)
-        export_menu.addAction("Save image…", lambda: self.save_image())
+        export_menu.addAction("Export current figure…", lambda: self.save_image())
         export_menu.addAction("Export plot data…", lambda: self.export_data())
         export_menu.addAction("Export configuration JSON…", lambda: self.export_config_json())
         export_button.setMenu(export_menu)
@@ -3412,8 +3419,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         root.addWidget(self._style_group)
         root.addWidget(self._config_group)
 
-        self._save_btn = QtWidgets.QPushButton("Save image…")
-        self._save_btn.setAccessibleName("Save plot image")
+        self._save_btn = QtWidgets.QPushButton("Export current figure…")
+        self._save_btn.setAccessibleName("Export current figure")
         self._save_btn.setToolTip(
             "Export the current plot as a picture. The extension chooses the format: "
             "PNG for a slide or a notebook, SVG or PDF for vector art a journal can "
@@ -4257,7 +4264,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._bg_combo.currentTextChanged.connect(self._on_style_background)
         form.addRow("Background", self._bg_combo)
 
-        erow = QtWidgets.QHBoxLayout()
         self._export_w = QtWidgets.QSpinBox()
         self._export_w.setRange(0, 20000)
         self._export_w.setValue(self._style.export_w)
@@ -4272,10 +4278,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "Saved height in px for the PNG, and in points for the PDF page "
             "(0 = native / follow aspect). SVG ignores both boxes.")
         self._export_h.valueChanged.connect(self._on_style_export_size)
-        erow.addWidget(self._export_w, 1)
-        erow.addWidget(QtWidgets.QLabel("×"))
-        erow.addWidget(self._export_h, 1)
-        form.addRow("Export size", erow)
+        # Old project/programmatic dimensions still round-trip. Interactive export
+        # now presents format, physical units and resolution together in one dialog.
+        self._export_w.setParent(box)
+        self._export_h.setParent(box)
+        self._export_w.hide()
+        self._export_h.hide()
         return box
 
     @staticmethod
@@ -4402,7 +4410,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
     # -- style-change handlers -------------------------------------------------------------------
     def _on_style_title(self, text: str) -> None:
         self._style = _dc_replace(self._style, title=text.strip())
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_font_family(self, index: int) -> None:
         """The Font row moved. What the row CARRIES is committed, not what it says.
@@ -4449,11 +4457,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._font_combo.blockSignals(was_blocked)
         self._style = _dc_replace(
             self._style, font_family="" if family is None else str(family))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_font_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, font_size_pt=int(value))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_point_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, point_size=int(value))
@@ -4466,7 +4474,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def _on_style_background(self, text: str) -> None:
         self._style = _dc_replace(
             self._style, background="light" if text == "Light" else "dark")
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_show_r2(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_r2=bool(on))
@@ -4494,11 +4502,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_x_label(self, text: str) -> None:
         self._style = _dc_replace(self._style, x_label=text.strip())
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_y_label(self, text: str) -> None:
         self._style = _dc_replace(self._style, y_label=text.strip())
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_show_legend(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_legend=bool(on))
@@ -4506,27 +4514,27 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_title_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, title_font_size_pt=int(value))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_axis_label_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, axis_label_font_size_pt=int(value))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_tick_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, tick_font_size_pt=int(value))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_title_bold(self, on: bool) -> None:
         self._style = _dc_replace(self._style, title_bold=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_title_italic(self, on: bool) -> None:
         self._style = _dc_replace(self._style, title_italic=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_grid(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_grid=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_legend_entry_toggled(self, item) -> None:
         """One row of the Legend-entries checklist moved: remember it and restyle.
@@ -4652,7 +4660,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_legend_font_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, legend_font_size_pt=int(value))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_legend_counts(self, on: bool) -> None:
         self._style = _dc_replace(self._style, legend_counts=bool(on))
@@ -4744,10 +4752,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         Sized by :meth:`_axis_label_pt` rather than by the body size — the axis
         captions are the second of the four independent text sizes owner note Q5 asks
         for, and they are the ones a poster usually wants larger than the ticks."""
-        style = {"color": self._fg_hex(), "font-size": f"{self._axis_label_pt()}pt"}
-        if self._style.font_family:
-            style["font-family"] = self._style.font_family
-        return style
+        return {"color": self._fg_hex(), "font-size": f"{self._axis_label_pt()}pt",
+                # AxisItem merges styles; explicitly reset the family when the
+                # user returns to Application default, instead of retaining it.
+                "font-family": self._qfont().family()}
 
     def _apply_grid(self) -> None:
         """Show or hide the gridlines, from the style, on every draw (owner note Q7).
@@ -4822,16 +4830,20 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # The user's override, if any, REPLACES THE TEXT ONLY: the tick scaling above has
         # already run, so a custom label sits over correctly scaled numbers. Overriding
         # both text and scale would let a label say "ms" over ticks showing seconds.
-        override = (self._style.x_label if side == "bottom" else self._style.y_label).strip()
         if is_time and not log:
             axis.setScale(factor)
-            return override or f"{col.removesuffix('_s')} ({name}{clock_tag})"
+            return self._remember_axis_label(side, f"{col.removesuffix('_s')} ({name}{clock_tag})")
         axis.setScale(1.0)
-        if override:
-            return override
         if is_time and log:
-            return f"{col.removesuffix('_s')} ({name}{clock_tag}, log)"
-        return col + (" (log)" if log else "")
+            return self._remember_axis_label(
+                side, f"{col.removesuffix('_s')} ({name}{clock_tag}, log)")
+        return self._remember_axis_label(side, col + (" (log)" if log else ""))
+
+    def _remember_axis_label(self, side: str, auto: str) -> str:
+        """Retain the rendered unit/clock caption, including when it is overridden."""
+        self._axis_auto_labels[side] = auto
+        override = self._style.x_label if side == "bottom" else self._style.y_label
+        return override.strip() or auto
 
     def _axis_clock_tag(self, col: str) -> str:
         """The clock clause a time axis needs, or ``""`` for a duration.
@@ -4876,6 +4888,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         exists to prevent leave the app. The user may retitle the plot; they may not
         retitle away the fact that the two depths were measured under different
         baselines, or that the curve drawn through them does not describe them."""
+        self._title_presentation = (auto, accent, warn)
         text = self._plot_title(auto)
         if warn:
             text = f"{warn}   ·   {text}" if text else warn
@@ -4893,15 +4906,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         color = (_WARN_HEX if warn else
                  accent if (accent and not self._style.title) else self._fg_hex())
         self._plot.setTitle(text, color=color, size=f"{self._title_pt()}pt")
-        # The CSS span carries size and colour only, so family, bold and italic go on
-        # through the item's own QFont. Set whenever ANY of the three is asked for --
-        # the old guard was `if font_family`, which silently made bold conditional on
-        # the user having also picked a family.
-        if self._style.font_family or self._style.title_bold or self._style.title_italic:
-            qf = self._qfont(self._title_pt())
-            qf.setBold(bool(self._style.title_bold))
-            qf.setItalic(bool(self._style.title_italic))
-            self._plot.titleLabel.item.setFont(qf)
+        # Set both positive and negative choices: an in-place restyle must also
+        # remove a formerly selected family, bold weight, or italic slant.
+        qf = self._qfont(self._title_pt())
+        qf.setBold(bool(self._style.title_bold))
+        qf.setItalic(bool(self._style.title_italic))
+        self._plot.titleLabel.item.setFont(qf)
 
     # -- axis range ------------------------------------------------------------------------------
     @staticmethod
@@ -7292,14 +7302,71 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._rebase()
 
     # -- control-change handlers -----------------------------------------------------------------
-    def _changed(self, *_args) -> None:
-        """A COSMETIC control moved: restyle the drawn plot at once.
+    def _presentation_changed(self) -> None:
+        """Restyle existing text/canvas items without reconstructing the result.
 
-        The live half of the run gate. Fonts, colours, the grid, the legend and the
-        axis-range pins all land here and all redraw immediately, because none of them
-        re-reads a row and making the user press Plot to see a colour is the opposite
-        of the complaint that produced the gate. Anything that changes WHICH ROWS or
-        WHICH COLUMNS are drawn goes through :meth:`_mark_stale` instead.
+        Do not consult pending axes, source selections, or fits here. Their run
+        gate still owns when the numerical picture changes, and the cached title
+        warning must remain attached even under a custom title. This path never
+        clears items, sets plot ranges, or touches numerical/deferred-note caches.
+        More structural style edits continue through the existing `_changed` path.
+        """
+        if self._updating:
+            return
+        self._apply_background()
+        self._apply_fonts()
+        if self._plot_armed and self._message_item is None:
+            self._apply_title(*self._title_presentation)
+            for side, auto in self._axis_auto_labels.items():
+                override = self._style.x_label if side == "bottom" else self._style.y_label
+                self._plot.setLabel(side, override.strip() or auto, **self._label_style())
+        elif self._message_item is not None:
+            self._message_item.setColor(self._msg_hex())
+
+        legend = getattr(self._plot, "legend", None)
+        if legend is not None:
+            fg = QtGui.QColor(self._fg_hex())
+            backing = QtGui.QColor(self._bg_spec())
+            backing.setAlpha(200)
+            border = QtGui.QColor(fg)
+            border.setAlpha(90)
+            legend.setLabelTextColor(fg)
+            legend.setBrush(pg.mkBrush(backing))
+            legend.setPen(pg.mkPen(border))
+            pt = int(self._style.legend_font_size_pt) or max(6, self._style.font_size_pt - 3)
+            legend.setLabelTextSize(f"{max(1, pt)}pt")
+        for item, size, colour in (
+                (getattr(self, "_fit_values_item", None), self._style.font_size_pt,
+                 self._style.fit_color),
+                (getattr(self, "_prov_item", None), max(6, self._style.font_size_pt - 2),
+                 self._msg_hex())):
+            if item is not None:
+                item.setText(item.text, size=f"{size}pt", color=colour)
+        if hasattr(self, "_resid"):
+            self._resid_widget.setBackground(self._bg_spec())
+            for side in ("bottom", "left"):
+                axis = self._resid.getAxis(side)
+                axis.setPen(pg.mkPen(self._fg_hex()))
+                axis.setTextPen(pg.mkPen(self._fg_hex()))
+                axis.setStyle(tickFont=self._qfont(self._tick_pt()))
+                axis.setLabel(axis.labelText, **self._label_style())
+            for item in self._resid.items:
+                if isinstance(item, pg.InfiniteLine):
+                    pen = QtGui.QPen(item.pen)
+                    pen.setColor(QtGui.QColor(self._msg_hex()))
+                    item.setPen(pen)
+        # The original history/coalescing hook also records public setter calls
+        # and preserves workspaceChanged without creating a new run gesture.
+        self._history_settle()
+
+    def _changed(self, *_args) -> None:
+        """The remaining structural display controls use the existing redraw path.
+
+        Text, typography, grid and background changes are isolated in
+        :meth:`_presentation_changed`; they do not rebuild this numerical picture.
+        Changes that still need reconstruction (for example legend contents, fit
+        decorations and bin count) retain this path and its history behavior.
+        Source and axis-column proposals keep their separate :meth:`_mark_stale` gate.
 
         With nothing committed yet there is nothing to restyle, so the prompt stays up.
         """
@@ -7863,7 +7930,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         self._style = _dc_replace(self._style, font_family=str(family))
         self._select_font_family(str(family))
-        self._changed()
+        self._presentation_changed()
 
     def set_data_color(self, hex_color: str) -> None:
         self._style = _dc_replace(self._style, data_color=str(hex_color))
@@ -8189,6 +8256,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def _clear_plot(self) -> None:
         self._plot.clear()
         self._plot.setTitle(None)
+        self._title_presentation = (None, None, None)
+        self._axis_auto_labels = {}
         self._drop_legend()
         self._hist_item = self._fit_item = self._scatter_item = None
         self._scatter_fit_item = None
@@ -9682,8 +9751,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # act, Details still names the unit, and silently appending to somebody's typed
         # label would be its own small lie.
         self._plot.setLabel("left",
-                            self._style.y_label.strip()
-                            or self._y_axis_label(col, log_y),
+                            self._remember_axis_label("left", self._y_axis_label(col, log_y)),
                             **self._label_style())
         # THE KS VERDICT RIDES THE WARN CHANNEL, third after the two the title already
         # carries there, and for their reason: `warn` is prepended over a typed title.
@@ -12506,11 +12574,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # Through the same formatter as the title and Details -- an axis label is a
         # printed number too, and "PC1 (nan%)" is the same refusal-shaped hole.
         self._plot.setLabel("bottom",
-                            self._style.x_label.strip() or f"PC1 ({self._evr_pct(evr[0])})",
+                            self._remember_axis_label("bottom", f"PC1 ({self._evr_pct(evr[0])})"),
                             **self._label_style())
         self._plot.setLabel("left",
-                            self._style.y_label.strip()
-                            or (f"PC2 ({self._evr_pct(evr[1])})" if evr.size > 1 else "PC2"),
+                            self._remember_axis_label("left",
+                                f"PC2 ({self._evr_pct(evr[1])})" if evr.size > 1 else "PC2"),
                             **self._label_style())
         # PCA runs on ONE source, so there is nothing pooled to judge -- but that
         # source's own detection caveats belong here as much as anywhere else.
@@ -12725,29 +12793,29 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def save_image(self, path: str | None = None) -> Path | None:
         """Export the current plot as a PNG, an SVG or a PDF, chosen by the extension.
 
-        With ``path`` None a file dialog is shown; returns the written path, or
-        None when the user cancelled OR the write failed (a failed write is
-        reported in a dialog, never returned as a path). The Style group's export
-        width/height pin the output size (0 = native): a width alone lets the
-        height follow the aspect ratio; both set forces exactly that pixel size.
-        They apply to the PNG's pixels and to the PDF's page (1 pt = 1 canvas px);
-        SVG has no size of its own to pin, and is written at the canvas's.
+        With ``path`` None, size/format and destination dialogs are shown; physical
+        dimensions apply to PNG, PDF and SVG. Returns the written path, or None on
+        cancellation/failure (reported in a dialog). Explicit paths preserve the
+        legacy style.export_w/export_h contract: PNG pixels, PDF points, and SVG
+        native viewport. Zero means native; one pinned dimension follows aspect.
 
         Anything that is not ``.svg`` or ``.pdf`` goes to ``ImageExporter``, which is
         what it was before -- so a ``.tif``/``.jpg`` name still works, and a format
         QImage cannot write still fails into ``image_write_failure_text`` with the
         user's previous file untouched.
         """
+        options = None
+        w, h = self._style.export_w, self._style.export_h
         if path is None:
-            chosen = ask_export_path(
-                self, title="Save plot image", suggestion="plot.png",
-                filters=self._IMAGE_FILTERS)   # writes exactly this file
-            if chosen is None:
+            selection = choose_live_plot_export(
+                self, self._plot, "plot.png", initial_width=w, initial_height=h)
+            if selection is None:
                 return None
+            chosen, options = selection
             path = str(chosen)
+            w, h = options.width, options.height
         out = Path(path)
         suffix = out.suffix.lower()
-        w, h = self._style.export_w, self._style.export_h
 
         # STAGED, like every other export the guide describes (§12: "Every export
         # replaces its target the same way a project save does… so a failure leaves
@@ -12790,7 +12858,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # pre-paint pass, 643.7 px with it. Not passing ``refresh=False`` from here
             # is therefore load-bearing, not a default nobody thought about.
             def render(staged):
-                return pg_svg.export_svg(self._plot, staged)
+                result = pg_svg.export_svg(self._plot, staged)
+                if options is not None and not options.native:
+                    apply_svg_physical_size(
+                        staged, width_mm=options.physical_width_mm,
+                        height_mm=options.physical_height_mm)
+                return result
         elif suffix == ".pdf":
             def render(staged):
                 return export_plot_pdf(self._plot, staged, width=w, height=h)
@@ -12811,7 +12884,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 params["height"] = h       # width follows the aspect ratio
 
             def render(staged):
-                return exporter.export(str(staged))
+                result = exporter.export(str(staged))
+                if (result is not False and suffix == ".png"
+                        and options is not None and not options.native):
+                    apply_png_resolution(staged, dpi=options.dpi)
+                return result
 
         try:
             notes = save_plot_image(out, render)

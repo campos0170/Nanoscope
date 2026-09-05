@@ -1370,6 +1370,20 @@ def _psd_record_for_recipe(window: Any, recipe: Mapping[str, Any]) -> tuple[Any 
     return record, note if record is not None else f"resolved PSD source {recipe.get('source_key')!r} is not offered"
 
 
+def _capture_appearance(window: Any) -> dict:
+    """Optional presentation overrides; never part of a numerical recipe."""
+    state = getattr(window, "_appearance", None)
+    encode = getattr(state, "to_dict", None)
+    return encode() if callable(encode) else {}
+
+
+def _restore_appearance(window: Any, payload: Mapping) -> None:
+    restore = getattr(window, "set_appearance_state", None)
+    if callable(restore):
+        value = payload.get("appearance", {})
+        restore(value if isinstance(value, Mapping) else {})
+
+
 def capture_psd(window: Any) -> WorkspaceArtifact:
     resources = _Resources()
     style = window.style()
@@ -1451,6 +1465,7 @@ def capture_psd(window: Any) -> WorkspaceArtifact:
             "histogram_bins": str(_widget_value(window, "_hist_bins_combo", "currentText", "256")),
             "histogram_clip": bool(_widget_value(window, "_hist_clip_check", "isChecked", False)),
             "histogram_levels": bool(_widget_value(window, "_hist_levels_check", "isChecked", True)),
+            "appearance": _capture_appearance(window),
             "style": {
                 "title": str(style.title), "data_color": str(style.data_color),
                 "fit_color": str(style.fit_color), "background": str(style.background),
@@ -1565,6 +1580,7 @@ def restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
         _set_combo_text(window, "_hist_bins_combo", config.get("histogram_bins", "256"))
         _set_checked(window, "_hist_clip_check", config.get("histogram_clip", False))
         _set_checked(window, "_hist_levels_check", config.get("histogram_levels", True))
+        _restore_appearance(window, config)
 
         wanted_compare: set[str] = set()
         unresolved_compare: list[dict[str, Any]] = []
@@ -1754,6 +1770,7 @@ def capture_event_plots(window: Any) -> WorkspaceArtifact:
             "n_points": int(_widget_value(window, "_npoints", "value", 120)),
             "pad_percent": int(_widget_value(window, "_pad", "value", 20)),
             "ensemble_title": str(_widget_value(window, "_e_title", "text", "")),
+            "appearance": _capture_appearance(window),
         },
         "density_counts": _encode(window.density_counts(), resources, "density.counts"),
         "density_edges": _encode(density_edges, resources, "density.edges"),
@@ -1848,6 +1865,7 @@ def restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreRepo
                 np.asarray(density_edges[0]).copy(), np.asarray(density_edges[1]).copy())
         ensemble = _decode(artifact.payload.get("ensemble"), artifact.tables, artifact.blobs)
         window._ensemble = None if ensemble is None else tuple(ensemble)
+        _restore_appearance(window, config)
         render = getattr(window, "_render_workspace_snapshot", None)
         if callable(render):
             render()
@@ -1902,6 +1920,7 @@ def capture_iv(window: Any) -> WorkspaceArtifact:
     payload = {
         "points": points,
         "exclusions": exclusions,
+        "appearance": _capture_appearance(window),
         "fit": _encode(window.fit(), resources, "fit"),
         "details_text": str(window.details_text()),
         "headline": str(_widget_value(window, "_headline", "text", "")),
@@ -1948,6 +1967,7 @@ def restore_iv(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
         window._points = points
         window._exclusions = exclusions
         window._fit = _decode(artifact.payload.get("fit"), artifact.tables, artifact.blobs)
+        _restore_appearance(window, artifact.payload)
         details = getattr(window, "_details", None)
         if details is not None:
             details.setPlainText(str(artifact.payload.get("details_text", "")))
@@ -2045,6 +2065,7 @@ def capture_voltage_dependence(window: Any) -> WorkspaceArtifact:
             "absolute_voltage": bool(_widget_value(window, "_abs_v", "isChecked", False)),
             "log_y": bool(_widget_value(window, "_log_y", "isChecked", False)),
             "accepted_only": bool(_widget_value(window, "_accepted_only", "isChecked", True)),
+            "appearance": _capture_appearance(window),
         },
         "series": series_fields,
         "series_excluded": excluded,
@@ -2138,6 +2159,7 @@ def restore_voltage_dependence(window: Any, artifact: WorkspaceArtifact) -> Rest
         window._fit = _decode(artifact.payload.get("fit"), artifact.tables, artifact.blobs)
         window._not_in_fit = _decode(artifact.payload.get("not_in_fit", {}),
                                      artifact.tables, artifact.blobs)
+        _restore_appearance(window, config)
         details = getattr(window, "_details", None)
         if details is not None:
             details.setPlainText(str(artifact.payload.get("details_text", "")))

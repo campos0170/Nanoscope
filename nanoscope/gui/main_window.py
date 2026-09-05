@@ -1502,11 +1502,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "legend on top of the contours it names, so it is adjustable.")
         self._act_density_style.triggered.connect(self._edit_density_style)
 
-        self._act_export_figure = analysis_menu.addAction("Export &figure…")
+        self._act_export_figure = analysis_menu.addAction("Generate standard report &figures…")
         self._act_export_figure.setToolTip(
-            "Export publication figures (dwell/depth histograms, dwell-vs-depth "
+            "Generate a standard report (dwell/depth histograms, dwell-vs-depth "
             "scatter, trace preview) for the current detection result, each with a "
-            "source-data CSV sidecar.")
+            "source-data CSV sidecar. This does not export your styled Explorer canvas; "
+            "use Export current figure in the Explorer for that.")
         self._act_export_figure.setEnabled(False)
         self._act_export_figure.triggered.connect(self._export_figures)
 
@@ -7889,7 +7890,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # say what will be written. Naming `figures.pdf` — a file this command never writes
         # — while overwriting `{stem}_{name}.{pdf,png,csv}` for every builder was C11.
         base = ask_export_path(
-            self, title="Export figures — choose a base name",
+            self, title="Generate standard report figures — choose a base name",
             suggestion="figures",
             filters="PDF (*.pdf);;PNG (*.png);;All files (*)",
             outputs=lambda p: self._figure_export_paths(p, [n for n, _ in builders]))
@@ -7928,7 +7929,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, "Export figure",
                 "The detection on screen changed while the file dialog was open, so these "
                 "figures would have described an analysis you are no longer looking at.\n\n"
-                "Nothing was written. Press Export figure… again to export the detection "
+                "Nothing was written. Press Generate standard report figures… again to export the detection "
                 "that is current now.")
             return
         stem = base.with_suffix("")

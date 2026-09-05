@@ -96,7 +96,7 @@ SURFACES: tuple[Surface, ...] = (
     Surface(SURFACE_PSD, "Power spectrum", "Noise", "∿"),
     Surface(SURFACE_IV, "I-V / conductance", "I-V", "╱"),
     Surface(SURFACE_VDEP, "V-dependence", "V-dep", "↗"),
-    Surface(SURFACE_FIGURES, "Export figures", "Figures", "↓"),
+    Surface(SURFACE_FIGURES, "Report figures", "Report", "↓"),
     # The seventh, and the only one that CURATES rather than plots. It is here for the
     # reason the other six are: it had no visible affordance at all — item 13 of the
     # ``&Analysis`` menu, no shortcut, and otherwise reachable only from inside another

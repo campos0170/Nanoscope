@@ -7,6 +7,12 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Added
 
+- Shared opt-in plot typography, I-V/voltage-series appearance presets, and project-saved
+  presentation overrides. Title/label/color-map edits in event/noise plots and text/canvas
+  edits in Distributions update existing items without a new analysis or zoom reset.
+- A shared **Export current figure** dialog with PNG/PDF/SVG, native or mm/in sizing,
+  aspect lock, 85/180 mm width presets, and PNG DPI metadata. Standard report generation
+  is labelled separately. Existing explicit-path exports and numerical CSVs are unchanged.
 - Implemented project-v11 complete analytical projects: resumable plot and source state; frozen
   PCA, clustering and subpopulation results with preprocessing and seeds; PSD, density, I-V and
   voltage-dependence snapshots; fingerprinted ML-model references; and live analysis-panel state.

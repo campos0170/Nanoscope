@@ -7,12 +7,18 @@ SVG, PDF and CSV behave identically across those panels.
 from __future__ import annotations
 
 from pathlib import Path
+import math
+import struct
+import zlib
+import xml.dom.minidom as _xml
 
 from PySide6 import QtWidgets
 from pyqtgraph.exporters import ImageExporter
 
 from ..plot import pg_svg
 from ..plot.figures import export_plot_pdf, save_plot_data, save_plot_image
+from .export_paths import ask_export_path
+from .plot_export_options import ExportOptions, choose_export_options, resolve_export_options
 
 IMAGE_FILTERS = (
     "PNG image (*.png);;SVG vector image (*.svg);;"
@@ -22,6 +28,71 @@ DATA_FILTERS = "CSV data (*.csv);;All files (*)"
 IMAGE_FORMATS = (".png", ".svg", ".pdf")
 
 
+def _format_path(path: str | Path, extension: str) -> Path:
+    """Match the chosen format while retaining unrecognised filename suffixes."""
+    out = Path(path)
+    if out.suffix.lower() == extension:
+        return out
+    if out.suffix.lower() in IMAGE_FORMATS:
+        return out.with_suffix(extension)
+    return Path(str(out) + extension)
+
+
+def choose_live_plot_export(parent, item, suggestion: str,
+                            initial_width: int = 0, initial_height: int = 0
+                            ) -> tuple[Path, ExportOptions] | None:
+    """Choose current-figure sizing and then confirm the exact destination file.
+
+    This is for interactive calls only; programmatic ``save_image(path)`` callers
+    retain their existing export behavior without another dialog.
+    """
+    rect = item.sceneRect() if isinstance(item, QtWidgets.QGraphicsScene) else item.sceneBoundingRect()
+    extension = Path(suggestion).suffix.lower()
+    if extension not in IMAGE_FORMATS:
+        extension = ".png"
+    try:
+        options = choose_export_options(
+            parent, rect.size(), initial_format=extension,
+            initial_width=initial_width, initial_height=initial_height)
+    except ValueError as exc:
+        QtWidgets.QMessageBox.warning(parent, "Export current figure", str(exc))
+        return None
+    if options is None:
+        return None
+    labels = {".png": "PNG image", ".pdf": "PDF vector document", ".svg": "SVG vector image"}
+    chosen = ask_export_path(
+        parent, title="Export current figure", suggestion=str(_format_path(suggestion, options.extension)),
+        filters=f"{labels[options.extension]} (*{options.extension})",
+        outputs=lambda path: [_format_path(path, options.extension)])
+    if chosen is None:
+        return None
+    return _format_path(chosen, options.extension), options
+
+
+def apply_svg_physical_size(path: str | Path, *, width_mm: float,
+                            height_mm: float) -> None:
+    """Set a staged SVG's physical viewport without changing its viewBox or paths.
+
+    Call this inside ``save_plot_image``'s render callback, before the staged file
+    replaces the user's destination. Invalid size or SVG content fails safely there.
+    """
+    options = resolve_export_options(
+        (1, 1), extension="svg", native=False, width=width_mm, height=height_mm)
+    staged = Path(path)
+    document = _xml.parseString(staged.read_bytes())
+    try:
+        root = document.documentElement
+        if root.localName != "svg":
+            raise ValueError("The staged vector export is not an SVG document.")
+        if not root.hasAttribute("viewBox"):
+            raise ValueError("The staged SVG has no viewBox; physical sizing cannot be applied safely.")
+        root.setAttribute("width", f"{options.physical_width_mm:.10g}mm")
+        root.setAttribute("height", f"{options.physical_height_mm:.10g}mm")
+        staged.write_bytes(document.toxml(encoding="utf-8"))
+    finally:
+        document.unlink()
+
+
 class PlotDataTooLarge(ValueError):
     """An exact long-form CSV would be large enough to freeze the GUI.
 
@@ -29,6 +100,41 @@ class PlotDataTooLarge(ValueError):
     export path, report its actionable message, and leave both the visible result
     and any previous file untouched.
     """
+
+
+def apply_png_resolution(path: str | Path, *, dpi: float) -> None:
+    """Set staged PNG resolution metadata, leaving every pixel chunk untouched."""
+    if not math.isfinite(dpi) or not 1 <= dpi <= 9600:
+        raise ValueError("PNG resolution must be between 1 and 9600 DPI.")
+    staged = Path(path)
+    source = staged.read_bytes()
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not source.startswith(signature):
+        raise ValueError("The staged raster export is not a PNG image.")
+    ppm = round(dpi / 0.0254)
+    body = b"pHYs" + struct.pack(">IIB", ppm, ppm, 1)
+    resolution = struct.pack(">I", 9) + body + struct.pack(">I", zlib.crc32(body) & 0xffffffff)
+    chunks = [signature]
+    offset = len(signature)
+    ended = inserted = False
+    while offset + 12 <= len(source):
+        size = struct.unpack_from(">I", source, offset)[0]
+        end = offset + size + 12
+        if end > len(source):
+            raise ValueError("The staged PNG contains a truncated chunk.")
+        kind = source[offset + 4:offset + 8]
+        if kind != b"pHYs":
+            chunks.append(source[offset:end])
+        if kind == b"IHDR":
+            chunks.append(resolution)
+            inserted = True
+        offset = end
+        if kind == b"IEND":
+            ended = True
+            break
+    if not inserted or not ended or offset != len(source):
+        raise ValueError("The staged PNG structure is incomplete.")
+    staged.write_bytes(b"".join(chunks))
 
 
 def require_csv_row_budget(row_count: int, *, limit: int, description: str,
@@ -66,11 +172,16 @@ class _SceneItem:
 
 
 def write_live_plot_image(target: str | Path, item, *, width: int = 0,
-                          height: int = 0) -> list[str]:
+                          height: int = 0, physical_width_mm: float | None = None,
+                          physical_height_mm: float | None = None,
+                          dpi: float | None = None) -> list[str]:
     """Write a pyqtgraph item/scene as PNG, SVG or PDF through one staged seam."""
     out = Path(target)
     suffix = out.suffix.lower()
     w, h = int(width), int(height)
+
+    if (physical_width_mm is None) != (physical_height_mm is None):
+        raise ValueError("Both physical width and height are required.")
 
     if suffix == ".svg":
         # A whole GraphicsScene is the correct export target when a colour bar is a
@@ -86,6 +197,14 @@ def write_live_plot_image(target: str | Path, item, *, width: int = 0,
                 return pg_svg.export_svg(item, staged, refresh=False)
         else:
             render = lambda staged: pg_svg.export_svg(item, staged)  # noqa: E731
+        if physical_width_mm is not None:
+            svg_render = render
+
+            def render(staged):
+                result = svg_render(staged)
+                apply_svg_physical_size(
+                    staged, width_mm=physical_width_mm, height_mm=physical_height_mm)
+                return result
     elif suffix == ".pdf":
         pdf_item = _SceneItem(item) if isinstance(item, QtWidgets.QGraphicsScene) else item
         render = lambda staged: export_plot_pdf(  # noqa: E731
@@ -101,6 +220,14 @@ def write_live_plot_image(target: str | Path, item, *, width: int = 0,
         elif h > 0:
             params["height"] = h
         render = lambda staged: exporter.export(str(staged))  # noqa: E731
+        if suffix == ".png" and dpi is not None:
+            png_render = render
+
+            def render(staged):
+                result = png_render(staged)
+                if result is not False:
+                    apply_png_resolution(staged, dpi=dpi)
+                return result
     return save_plot_image(out, render)
 
 

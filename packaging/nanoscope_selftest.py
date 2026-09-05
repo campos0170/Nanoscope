@@ -136,6 +136,16 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
     # Offscreen: this must run over ssh, in CI, and from a plain terminal. The cocoa plugin is
     # proved separately by actually launching the .app.
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    # This harness creates/closes real MainWindows. Keep their settings and
+    # recovery autosaves inside this run's disposable scratch tree, never in the
+    # operator's normal macOS NativeFormat preference domain. This is test-only;
+    # an ordinary application launch continues to use its existing settings.
+    from PySide6 import QtCore
+
+    QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
+    for scope in (QtCore.QSettings.UserScope, QtCore.QSettings.SystemScope):
+        QtCore.QSettings.setPath(QtCore.QSettings.IniFormat, scope, str(tmp / "qsettings"))
+    os.environ["NANOSCOPE_RECOVERY_ROOT"] = str(tmp / "recovery")
     # Handoff between checks (an EventSet built by one, exported by the next). A dict, not an
     # attribute on the function: @check runs each body at DECORATION time, so the function name
     # is not yet bound in this scope while its own body is executing.

@@ -216,7 +216,7 @@ def test_launcher_has_a_button_for_every_analysis_surface(win):
     assert len({id(launcher.surface_button(s)) for s in SURFACE_ORDER}) == 7
     assert [launcher.label(s) for s in SURFACE_ORDER] == [
         "Populations", "Density / ensemble", "Power spectrum",
-        "I-V / conductance", "V-dependence", "Export figures", "Event gallery"]
+        "I-V / conductance", "V-dependence", "Report figures", "Event gallery"]
 
 
 def test_the_event_gallery_is_one_of_the_launcher_surfaces(win, tmp_path):

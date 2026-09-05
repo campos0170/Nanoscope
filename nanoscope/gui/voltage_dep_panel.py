@@ -78,8 +78,10 @@ from ..core.sources import gain_label
 from ..plot.style import OKABE_ITO
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
+from .inspector_widgets import Disclosure
+from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
-                          data_write_failure_text, write_live_plot_image,
+                          choose_live_plot_export, data_write_failure_text, write_live_plot_image,
                           write_plot_csv)
 
 __all__ = ["VDepWindow"]
@@ -205,6 +207,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._scatter_item: pg.PlotDataItem | None = None
         self._fit_item: pg.PlotDataItem | None = None
         self._message_item: pg.TextItem | None = None
+        self._appearance = PlotAppearance()
 
         self._build_ui()
         if not defer_initial_refresh:
@@ -271,7 +274,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._refresh_btn.setToolTip(
             "Re-gather (V, metric) from every open recording — pick up any detected since.")
         self._refresh_btn.clicked.connect(self._refresh_from_user)
-        self._save_btn = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
+        self._save_btn = QtWidgets.QPushButton("Export current figure…")
         self._save_btn.setToolTip("Export the voltage-dependence plot as PNG, SVG, or PDF.")
         self._save_btn.clicked.connect(lambda: self.save_image())
         self._save_data_btn = QtWidgets.QPushButton("Export data (CSV)…")
@@ -283,6 +286,11 @@ class VDepWindow(QtWidgets.QMainWindow):
         bar.addWidget(self._save_data_btn)
         bar.addStretch(1)
         root.addLayout(bar)
+
+        self._appearance_widget = PlotAppearanceWidget(self._appearance)
+        self._appearance_widget.changed.connect(self._appearance_from_user)
+        self._appearance_section = Disclosure("Appearance", self._appearance_widget)
+        root.addWidget(self._appearance_section)
 
         # The comparability banner. Above the plot, hidden when there is nothing to
         # say, so its presence alone is the signal.
@@ -372,6 +380,23 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._log_y.clicked.connect(self._notify_workspace_changed)
         self._accepted_only.clicked.connect(self._notify_workspace_changed)
         self._sync_fit_apply_btn()
+
+    def _appearance_from_user(self, state: PlotAppearance) -> None:
+        self._appearance = state
+        self._apply_appearance()
+        self.workspaceChanged.emit()
+
+    def set_appearance_state(self, state) -> None:
+        """Restore graphical overrides silently, without re-gathering or fitting."""
+        self._appearance = (state if isinstance(state, PlotAppearance)
+                            else PlotAppearance.from_mapping(state))
+        self._appearance_widget.set_state(self._appearance)
+        self._apply_appearance()
+
+    def _apply_appearance(self) -> None:
+        apply_plot_appearance(
+            self._plot, self._appearance, plot_widget=self._plot_widget,
+            data_items=(self._scatter_item,), fit_items=(self._fit_item,))
 
     # -- current control state -------------------------------------------------------------------
     def _metric(self) -> str:
@@ -503,6 +528,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             self._details.setPlainText(saved_details)
             self._headline.setText(saved_headline)
             self._set_warnings((saved_warning,) if saved_warning else ())
+            self._apply_appearance()
 
     def points(self) -> list[voltage_dep.VDepPoint]:
         return list(self._points)
@@ -605,6 +631,12 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._fill_table()
 
     def _redraw(self) -> None:
+        try:
+            self._redraw_analysis()
+        finally:
+            self._apply_appearance()
+
+    def _redraw_analysis(self) -> None:
         pts = self._points
         self._not_in_fit = {}      # re-derived below; never carried over from a past fit
         self._fill_table()   # the table shows every gathered point, independent of the fit
@@ -1075,18 +1107,23 @@ class VDepWindow(QtWidgets.QMainWindow):
         Returns the written path, or None when the user cancelled OR the write
         failed (a failed write is reported in a dialog, never returned as a path).
         """
+        export_kwargs = {}
         if path is None:
-            chosen = ask_export_path(
-                self, title="Save voltage-dependence image",
-                suggestion="voltage_dependence.png",
-                filters=IMAGE_FILTERS)   # writes exactly this file
+            chosen = choose_live_plot_export(
+                self, self._plot, suggestion="voltage_dependence.png")
             if chosen is None:
                 return None
-            path = str(chosen)
+            selected_path, options = chosen
+            path = str(selected_path)
+            export_kwargs = dict(width=options.width, height=options.height,
+                                 physical_width_mm=options.physical_width_mm,
+                                 physical_height_mm=options.physical_height_mm)
+            if options.extension == ".png" and not options.native:
+                export_kwargs["dpi"] = options.dpi
         out = Path(path)
         from ..plot.figures import image_write_failure_text
         try:
-            notes = write_live_plot_image(out, self._plot)
+            notes = write_live_plot_image(out, self._plot, **export_kwargs)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
                 self, "Save voltage-dependence image",

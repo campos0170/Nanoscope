@@ -62,7 +62,7 @@ The main window has three regions:
 
 The **analysis launcher** is the Analyze stage spelled out: one button per analysis surface —
 **Populations**, **Density / ensemble**, **Power spectrum**, **I-V / conductance**,
-**V-dependence** and **Export figures**. A button you cannot use yet stays on the row, greyed;
+**V-dependence** and **Report figures**. A button you cannot use yet stays on the row, greyed;
 hover it to read what the surface does and why it is not available, or click it to have the reason
 posted in the status bar. Each button opens exactly what the matching **Analysis** menu item does.
 The interactive surfaces share one **Analysis Explorer** instead of opening a pile of overlapping
@@ -1173,7 +1173,7 @@ Three things happen automatically so the comparison actually means something:
 > absolute-current column (`depth_pA`, `amplitude`, `ecd_pA_s`, …) — under the same **current
 > calibration**? Each failing half is spelled out in **Details**, most fundamental first, and the
 > plot's own title carries `⚠ NOT COMPARABLE across N sources: <columns>` — in the title because the
-> title is the only thing **Save image…** keeps.
+> title is the only thing **Export current figure…** keeps.
 >
 > The advice is reconciled rather than stacked. `frac_depth` (dI/I₀) survives a *gain* disagreement,
 > so it is offered then. But dI/I₀ is `depth_pA / |baseline_pA|`, so a *baseline* disagreement makes
@@ -1217,7 +1217,7 @@ Three things happen automatically so the comparison actually means something:
   correctly report that they are not detector-table rows.
 - **KDE (density)** — 2-D kernel-density contours of any two numeric columns; one contour set per
   ticked source, in that source's colour, on shared axes. It is a **plot type here beside the others**,
-  with the same source overlay, styling and **Save image…** as the rest of the window — not a separate
+  with the same source overlay, styling and **Export current figure…** as the rest of the window — not a separate
   surface. It defaults to the signature axes, `dwell_s` (log x) against `frac_depth`, and a
   **Contours** spinbox sets the lines per source. Each source is contoured against its **own** peak
   density, so a rare population keeps its shape beside an abundant one. It needs at least 5 usable
@@ -1249,17 +1249,21 @@ tool. Clustering runs on the **first ticked** source.
 - **Axis range** — type explicit X/Y limits (data units, converted to log internally on a log axis)
   that persist across redraws; **Auto** releases them. The plot is also mouse zoom/pan-able.
 - **Style** — a custom title, font family + size, data-series and fit colours, marker size, line
-  width, a Dark/Light background (Light = white canvas for publication), and an **export size**.
+  width, and a Dark/Light background (Light = white canvas for publication). Title, axis-label,
+  typography, grid, and background edits update existing items without rebuilding the analysis
+  or resetting manual zoom. Color/marker and fit-decoration changes retain the existing redraw path.
 - **Legend** — a **Show legend** toggle, a **Legend position** (upper right, the default, / upper
   left / lower right / lower left; the legend is drawn over the data, so move it off whichever
   quadrant your points occupy), a legend font size and a **(n = …)** toggle. The legend **labels are
   editable**: double-click a row in the source list and type, and that series is renamed everywhere it
   is named — legend, fit lines, Details and the plot title. The real name is kept underneath, so
   clearing the edit back to empty restores it rather than legending a blank.
-- **Export ▾** keeps the outputs together: **Save image…** writes the live plot as PNG, SVG, or
+- **Export ▾** keeps the outputs together: **Export current figure…** writes the live plot as PNG, SVG, or
   vector PDF; **Export plot data…** writes the exact plotted values as CSV; and **Export
-  configuration JSON…** saves the reproducible plot recipe. The chosen export width/height applies
-  to PNG and PDF; SVG follows the live canvas.
+  configuration JSON…** saves the reproducible plot recipe. Figure export opens a shared format/size
+  dialog first: choose native size or physical dimensions in mm/in, optionally lock the aspect
+  ratio, and set PNG resolution. Physical dimensions apply to all three formats. The 85 mm and
+  180 mm presets are starting widths, not promises of compliance with a particular journal.
 
 ---
 
@@ -1500,7 +1504,7 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   (dwell vs amplitude) with marginal densities: the comparison figure for several molecules or
   several voltages on one pair of axes. Amplitude can be depth in pA or fractional blockade ΔI/I₀,
   which is gain-independent and therefore comparable across recordings.
-- **Analysis ▸ Export figure…** — publication figures (matplotlib) for the current analysis, each as
+- **Analysis ▸ Generate standard report figures…** — standard figures (matplotlib) for the current analysis, each as
   PDF + PNG with a source-data CSV sidecar. **Each figure's three files land together or not at
   all**, so a figure can never disagree with the numbers beside it. So does the export as a whole
   against anything environmental: a permission or disk error while staging, or a failure at the
@@ -1512,9 +1516,23 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   file of that name is already on disk, you are told **which files under this base name are left over
   from an earlier export**, with their dates — including when *every* figure failed, which is the
   case where the most is stale.
-- **Analysis Explorer ▸ Export image (PNG/PDF/SVG)…** — the plot that is actually on
+- **Analysis Explorer ▸ Export current figure…** — the plot that is actually on
   screen, including companion axes such as density marginals and spectrogram colour bars. The
-  Distributions page exposes the same choices from **Export ▾**.
+  Distributions page exposes the same choices from **Export ▾**. This is distinct from the standard
+  report generator above: it keeps your current view and styling. Distributions exports its main
+  axes; its optional residual strip is not included. Physical PNG exports embed resolution metadata,
+  PDF uses a vector page, and SVG records mm dimensions without changing its viewBox. Sizing scales
+  the entire canvas, including text and lines: inspect readability at the final printed size.
+
+**Presentation controls.** I-V and Voltage series now offer a collapsible **Appearance** section
+with opt-in light/dark presets and reset. Noise adds **Typography and line styling** within Style;
+Event waveforms adds **Typography and lines** above the tabs. Shared font/line settings are saved
+with project workspaces and reopening them does not rerun a fit or analysis. Event titles, density
+axis labels and color maps, and Noise titles/palettes also update in place. Existing automatic units,
+source colors and scientific warnings are retained.
+
+The numeric-data export commands remain separate:
+
 - **Analysis Explorer ▸ Export data (CSV)…** — the exact numeric values behind the
   visible plot, rather than a recomputation from its controls. Depending on the page this includes
   histogram bin edges, scatter/event identities, ensemble traces, spectral grids, fitted curves,

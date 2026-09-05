@@ -43,7 +43,8 @@ from ..analysis.events import EventSet
 from ..core.session import Session
 from ..plot.style import OKABE_ITO
 from .export_paths import ask_export_path
-from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
+from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
                           data_write_failure_text, require_csv_row_budget,
                           write_live_plot_image, write_plot_csv)
 
@@ -125,6 +126,11 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._events_item: pg.PlotDataItem | None = None
         self._mean_item: pg.PlotDataItem | None = None
         self._median_item: pg.PlotDataItem | None = None
+        # Automatic titles describe the numerical result currently on screen, not a
+        # newly calculated result. Keep them when editing labels or a saved snapshot.
+        self._density_auto_title = ""
+        self._ensemble_auto_title = ""
+        self._appearance = PlotAppearance()
 
         self._updating = False
         self._build_ui()
@@ -135,7 +141,16 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._tabs = QtWidgets.QTabWidget()
         self._tabs.addTab(self._build_density_page(), DENSITY)
         self._tabs.addTab(self._build_ensemble_page(), ENSEMBLE)
-        self.setCentralWidget(self._tabs)
+        central = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._appearance_widget = PlotAppearanceWidget(
+            self._appearance, include_colors=False, include_markers=False)
+        self._appearance_widget.changed.connect(self._on_appearance_changed)
+        self._appearance_widget.hide()
+        layout.addWidget(self._appearance_widget)
+        layout.addWidget(self._tabs, 1)
+        self.setCentralWidget(central)
 
         # Refresh lives in the toolbar so both views share it.
         bar = QtWidgets.QToolBar()
@@ -145,6 +160,39 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._refresh_btn.setToolTip("Re-snapshot the active detection's accepted events.")
         self._refresh_btn.clicked.connect(self.refreshRequested.emit)
         bar.addWidget(self._refresh_btn)
+        appearance = bar.addAction("Typography and lines")
+        self._appearance_action = appearance
+        appearance.setCheckable(True)
+        appearance.toggled.connect(self._show_appearance)
+        appearance.setToolTip("Style the existing plots without recalculating events.")
+
+    def _show_appearance(self, visible: bool) -> None:
+        self._appearance_widget.setVisible(visible)
+        # The Explorer can be shorter than this standalone window's preferred
+        # size. Keep the axes visible when the optional controls are expanded.
+        for widget, original in ((self._density_glw, 460), (self._ensemble_widget, 420)):
+            widget.setMinimumHeight(240 if visible else original)
+
+    def _on_appearance_changed(self, state: PlotAppearance) -> None:
+        self._appearance = state
+        if not self._updating:
+            self._apply_appearance()
+            self.workspaceChanged.emit()
+
+    def set_appearance_state(self, mapping) -> None:
+        self._appearance = PlotAppearance.from_mapping(mapping)
+        self._appearance_widget.set_state(self._appearance)
+        if not self._updating:
+            self._apply_appearance()
+
+    def _apply_appearance(self) -> None:
+        for plot in (self._density_main, self._density_top, self._density_right):
+            apply_plot_appearance(plot, self._appearance)
+        # Mean and median are summaries, not fits: preserve their individual
+        # colors and solid/dashed identities while sharing typography/line width.
+        apply_plot_appearance(
+            self._ensemble_plot, self._appearance,
+            data_items=(self._events_item, self._mean_item, self._median_item))
 
     def _build_density_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
@@ -203,7 +251,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         row2.addWidget(self._d_xlabel, 1)
         row2.addWidget(QtWidgets.QLabel("Y label"))
         row2.addWidget(self._d_ylabel, 1)
-        self._d_save = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
+        self._d_save = QtWidgets.QPushButton("Export current figure…")
         self._d_save.setToolTip(
             "Export the density map, marginals, and colour bar as PNG, SVG, or PDF.")
         self._d_save.clicked.connect(lambda: self.save_image())
@@ -279,7 +327,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._e_title.setPlaceholderText("title (auto)")
         row2.addWidget(QtWidgets.QLabel("Title"))
         row2.addWidget(self._e_title, 1)
-        self._e_save = QtWidgets.QPushButton("Export image (PNG/PDF/SVG)…")
+        self._e_save = QtWidgets.QPushButton("Export current figure…")
         self._e_save.setToolTip("Export the event ensemble as PNG, SVG, or PDF.")
         self._e_save.clicked.connect(lambda: self.save_image())
         row2.addWidget(self._e_save)
@@ -302,15 +350,15 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._logx.toggled.connect(self._on_density_changed)
         self._logy.toggled.connect(self._on_density_changed)
         self._bins.valueChanged.connect(self._on_density_changed)
-        self._cmap_combo.currentTextChanged.connect(self._on_density_changed)
-        self._d_title.textChanged.connect(self._on_density_changed)
-        self._d_xlabel.textChanged.connect(self._on_density_changed)
-        self._d_ylabel.textChanged.connect(self._on_density_changed)
+        self._cmap_combo.currentTextChanged.connect(self._on_density_colormap_changed)
+        self._d_title.textChanged.connect(self._on_density_labels_changed)
+        self._d_xlabel.textChanged.connect(self._on_density_labels_changed)
+        self._d_ylabel.textChanged.connect(self._on_density_labels_changed)
         self._normalize.toggled.connect(self._on_normalize_toggled)
         self._align_combo.currentTextChanged.connect(self._on_ensemble_changed)
         self._npoints.valueChanged.connect(self._on_ensemble_changed)
         self._pad.valueChanged.connect(self._on_ensemble_changed)
-        self._e_title.textChanged.connect(self._on_ensemble_changed)
+        self._e_title.textChanged.connect(self._on_ensemble_title_changed)
         self._tabs.currentChanged.connect(self._on_view_changed)
         return page
 
@@ -403,6 +451,46 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             self._redraw_ensemble()
             self.workspaceChanged.emit()
 
+    def _on_density_labels_changed(self, *_a) -> None:
+        if not self._updating:
+            self._apply_density_labels()
+            self.workspaceChanged.emit()
+
+    def _on_density_colormap_changed(self, *_a) -> None:
+        if not self._updating:
+            # LUT replacement is presentation only: do not replace image data,
+            # recompute an ECD metric, re-bin events, or disturb the ViewBox range.
+            if self._density_image is not None:
+                cmap = _get_colormap(self._cmap_combo.currentText())
+                self._density_image.setColorMap(cmap)
+                self._colorbar.setColorMap(cmap)
+            self.workspaceChanged.emit()
+
+    def _on_ensemble_title_changed(self, *_a) -> None:
+        if not self._updating:
+            self._apply_ensemble_title()
+            self.workspaceChanged.emit()
+
+    def _apply_density_labels(self) -> None:
+        """Update the existing populated plot; leave empty/error messages intact."""
+        if self._density_image is None:
+            return
+        x_id, y_id = self._x_combo.currentData(), self._y_combo.currentData()
+        xlabel = self._d_xlabel.text().strip() or (
+            self._metric_label(x_id) + (" (log10)" if self._logx.isChecked() else ""))
+        ylabel = self._d_ylabel.text().strip() or (
+            self._metric_label(y_id) + (" (log10)" if self._logy.isChecked() else ""))
+        self._density_main.setLabel("bottom", xlabel)
+        self._density_main.setLabel("left", ylabel)
+        self._density_main.setTitle(self._d_title.text().strip() or self._density_auto_title)
+        self._apply_appearance()
+
+    def _apply_ensemble_title(self) -> None:
+        if self._mean_item is not None:
+            self._ensemble_plot.setTitle(
+                self._e_title.text().strip() or self._ensemble_auto_title)
+            self._apply_appearance()
+
     def _on_view_changed(self, *_a) -> None:
         if not self._updating:
             self.workspaceChanged.emit()
@@ -484,16 +572,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._top_marginal_item = top_bar
         self._right_marginal_item = right_bar
 
-        xlabel = self._d_xlabel.text().strip() or (
-            self._metric_label(x_id) + (" (log10)" if logx else ""))
-        ylabel = self._d_ylabel.text().strip() or (
-            self._metric_label(y_id) + (" (log10)" if logy else ""))
-        self._density_main.setLabel("bottom", xlabel)
-        self._density_main.setLabel("left", ylabel)
-        title = self._d_title.text().strip() or (
+        self._density_auto_title = (
             f"{self._metric_label(y_id)} vs {self._metric_label(x_id)}   ·   "
             f"n = {len(acc.df)} events")
-        self._density_main.setTitle(title)
+        self._apply_density_labels()
         self._density_main.autoRange()
 
     def _density_message(self, text: str) -> None:
@@ -553,10 +635,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         xlabel = "Normalized time (dwell)" if normalize else "Time (s)"
         self._ensemble_plot.setLabel("bottom", xlabel)
         self._ensemble_plot.setLabel("left", f"Current ({self._units})")
-        auto = (f"Ensemble of {matrix.shape[0]} event(s)"
+        self._ensemble_auto_title = (f"Ensemble of {matrix.shape[0]} event(s)"
                 + (f"   ·   {skipped} edge-skipped" if skipped else "")
                 + "   —   mean (solid) + median (dashed)")
-        self._ensemble_plot.setTitle(self._e_title.text().strip() or auto)
+        self._apply_ensemble_title()
         self._ensemble_plot.autoRange()
 
     def _ensemble_message(self, text: str) -> None:
@@ -713,18 +795,12 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
         x_id = self._x_combo.currentData()
         y_id = self._y_combo.currentData()
-        xlabel = self._d_xlabel.text().strip() or (
-            self._metric_label(x_id) + (" (log10)" if logx else ""))
-        ylabel = self._d_ylabel.text().strip() or (
-            self._metric_label(y_id) + (" (log10)" if logy else ""))
-        self._density_main.setLabel("bottom", xlabel)
-        self._density_main.setLabel("left", ylabel)
         n_events = int(getattr(self, "_nanoscope_workspace_accepted_event_count",
                                round(float(counts.sum()))))
-        title = self._d_title.text().strip() or (
+        self._density_auto_title = (
             f"{self._metric_label(y_id)} vs {self._metric_label(x_id)}   ·   "
             f"n = {n_events} events")
-        self._density_main.setTitle(title)
+        self._apply_density_labels()
         self._density_main.autoRange()
 
     def _render_ensemble_snapshot(self) -> None:
@@ -769,10 +845,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         n_accepted = int(getattr(self, "_nanoscope_workspace_accepted_event_count",
                                  matrix.shape[0]))
         skipped = max(0, n_accepted - matrix.shape[0])
-        auto = (f"Ensemble of {matrix.shape[0]} event(s)"
+        self._ensemble_auto_title = (f"Ensemble of {matrix.shape[0]} event(s)"
                 + (f"   ·   {skipped} edge-skipped" if skipped else "")
                 + "   —   mean (solid) + median (dashed)")
-        self._ensemble_plot.setTitle(self._e_title.text().strip() or auto)
+        self._apply_ensemble_title()
         self._ensemble_plot.autoRange()
 
     def ensemble_traces(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
@@ -785,26 +861,31 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     def save_image(self, path: str | None = None) -> Path | None:
         """Export the current view as PNG, SVG or PDF by extension.
 
-        With ``path`` None a file dialog is shown; returns the written path, or
+        With ``path`` None publication size/format and destination dialogs are shown;
+        explicit paths keep the legacy native-size contract. Returns the written path, or
         None when the user cancelled OR the write failed (a failed write is
         reported in a dialog, never returned as a path).
         """
         density = self.current_view() == DENSITY
         default = "event_density.png" if density else "event_ensemble.png"
-        if path is None:
-            chosen = ask_export_path(
-                self, title="Save event-plot image", suggestion=default,
-                filters=IMAGE_FILTERS)   # writes exactly this file
-            if chosen is None:
-                return None
-            path = str(chosen)
-        # The GraphicsLayout root owns the density main plot, both marginals and colour
-        # bar. Exporting only ``_density_main`` silently loses three of those four items.
+        # The GraphicsLayout root owns the map, marginals, and colour bar.
         target = self._density_glw.ci if density else self._ensemble_plot
+        export_kwargs = {}
+        if path is None:
+            selection = choose_live_plot_export(self, target, default)
+            if selection is None:
+                return None
+            chosen, options = selection
+            path = str(chosen)
+            export_kwargs = dict(width=options.width, height=options.height,
+                                 physical_width_mm=options.physical_width_mm,
+                                 physical_height_mm=options.physical_height_mm)
+            if options.extension == ".png" and not options.native:
+                export_kwargs["dpi"] = options.dpi
         out = Path(path)
         from ..plot.figures import image_write_failure_text
         try:
-            notes = write_live_plot_image(out, target)
+            notes = write_live_plot_image(out, target, **export_kwargs)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
                 self, "Save event-plot image",
