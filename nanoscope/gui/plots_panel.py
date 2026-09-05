@@ -12338,10 +12338,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         n_levels = int(self._kde_levels.value())
         total = sum(s[1].size for s in series)
+        # KDE is an analysis surface in its own right, not an export-only preview.
+        # Carry the SAME metric-specific pooling verdict that the histogram and
+        # scatter views show: contours over different baseline windows are useful for
+        # exploration, but must never export with an unqualified title or Details pane.
+        verdict = self._comparability(xcol, ycol)
         # ...and here, for the reason `_draw_scatter` states at the same line: the
         # refusal belongs to the configuration, not to the histogram page.
         details = [f"KDE {ycol} vs {xcol}   n = {total}",
                    *self._incoming_notes(), *drops]
+        details.extend(self._column_notes([xcol, ycol]))
+        details.extend(verdict.warnings)
+        details.extend(self._detection_notes())
         # THE CONTOURS' OWN UNIT, for the histogram's reason (S6-03): a level IS a density,
         # and a density with no unit is a number nobody can check. Two things this page gets
         # wrong quietly and this line says out loud. (1) The axes are re-scaled for display
@@ -12400,7 +12408,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
                             **self._label_style())
         self._plot.setLabel("left", self._axis_label_for("left", ycol, log_y),
                             **self._label_style())
-        self._apply_title(f"KDE {ycol} vs {xcol}")
+        self._apply_title(
+            f"KDE {ycol} vs {xcol}",
+            warn=self._warn_headline(self._stale_headline([xcol, ycol]),
+                                     verdict.headline))
         self._apply_background()
         self._apply_fonts()
         # The isocurves are drawn directly in (log-)axis coordinates, so the view is

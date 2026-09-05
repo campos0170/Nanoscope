@@ -242,6 +242,17 @@ def test_a_dwell_vs_dwell_scatter_stays_quiet(window):
     assert "NOT COMPARABLE" not in window.details_text()
 
 
+def test_the_kde_surface_carries_the_baseline_verdict_too(window):
+    """KDE contours must not export a clean title over incomparable columns."""
+    _two_windows(window)
+    window.set_plot_type("KDE (density)")
+    window.set_kde_columns("dwell_s", "frac_depth")
+
+    text = window.details_text()
+    assert "NOT COMPARABLE" in text and FP_500 in text and FP_600 in text
+    assert "NOT COMPARABLE" in _title(window)
+
+
 # ==================================================================================
 # 2. the misdirection — the gain guard must stop naming frac_depth
 # ==================================================================================

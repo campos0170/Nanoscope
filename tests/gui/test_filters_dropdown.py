@@ -298,6 +298,31 @@ def test_active_indicator_updates_when_a_filter_is_disabled(qtbot):
     assert panel.active_filters_label.text() == _execution_summary(panel)
 
 
+def test_active_indicator_refreshes_after_an_enabled_stages_parameters_change(qtbot):
+    """The summary is a recipe, so it must follow the method it actually runs.
+
+    Regression for the fresh apo-ferritin detrending run: enabling the default
+    ``block_median`` stage refreshed the label, but changing the combo to
+    ``masked_median`` only changed the stored/run parameters.  The label then kept
+    saying ``block_median`` over a detection whose provenance said
+    ``masked_median``.
+    """
+    panel = DetectionPanel()
+    qtbot.addWidget(panel)
+    panel.detrend_enabled.setChecked(True)
+    assert "block_median" in panel.active_filters_label.text()
+
+    assert panel.set_detrend_method("masked_median") is None
+    assert panel.params()["detrend_method"] == "masked_median"
+    assert panel.active_filters_label.text() == _execution_summary(panel)
+    assert "masked_median" in panel.active_filters_label.text()
+
+    panel.filter_enabled.setChecked(True)
+    panel.filter_cutoff_hz.setValue(7_500.0)
+    assert panel.active_filters_label.text() == _execution_summary(panel)
+    assert "7500 Hz" in panel.active_filters_label.text()
+
+
 def test_highpass_active_summary_shows_both_execution_paths(qtbot):
     panel = DetectionPanel()
     qtbot.addWidget(panel)

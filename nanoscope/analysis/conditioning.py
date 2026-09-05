@@ -112,7 +112,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..core.atomic_write import staged_path
+from ..core.atomic_write import staged_path, staged_write_set
 from . import filters
 from .modules import (
     DETREND_PARAM_KEYS,
@@ -124,12 +124,18 @@ from .modules import (
 )
 
 __all__ = [
+    "BASELINE_CORRECTION_MODES",
+    "BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME",
+    "BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY",
     "BASIS_PROCESSED",
     "BASIS_RAW",
     "BASIS_UNKNOWN",
     "CONDITIONING_PARAM_KEYS",
     "SIGNAL_BASIS_COLUMN",
     "SIGNAL_BASIS_TIP",
+    "baseline_correction_export_paths",
+    "baseline_correction_mode_label",
+    "baseline_correction_provenance",
     "basis_label",
     "chain_description",
     "characterization_trace",
@@ -139,6 +145,7 @@ __all__ = [
     "ensure_signal_basis_column",
     "processed_trace_export_paths",
     "processed_trace_provenance",
+    "write_baseline_correction",
     "write_processed_trace",
 ]
 
@@ -393,6 +400,57 @@ def ensure_signal_basis_column(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # the export
 # ---------------------------------------------------------------------------
+#: ``raw - fitted_baseline``.  This is a zero-centred inspection residual only: it
+#: must never be described as a detector or processed-trace input.
+BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY = "zero_centered_display"
+
+#: A baseline-drift correction which retains a representative open-pore offset.  This
+#: is the form that can be used by the signal-processing chain at runtime.
+BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME = "retained_offset_runtime"
+
+#: The two contracts for a baseline-correction export.  They look similar in a plot,
+#: but differ in what zero means and whether downstream analysis may use the array.
+BASELINE_CORRECTION_MODES: frozenset[str] = frozenset({
+    BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY,
+    BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME,
+})
+
+_BASELINE_CORRECTION_MODE_INFO: dict[str, tuple[str, str, str]] = {
+    BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY: (
+        "Inspect at zero — visual only",
+        "baseline_display_residual",
+        "Zero-centred visual residual (display only; it is not used for detection, "
+        "measurement, or the processed-trace export).",
+    ),
+    BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME: (
+        "Correct drift — retain representative open-pore offset",
+        "baseline_runtime_corrected",
+        "Retained-offset runtime correction (the representative open-pore level is "
+        "kept, so this form can be used by signal processing and detection).",
+    ),
+}
+
+
+def _baseline_correction_mode(mode: str) -> str:
+    """Validate and return one baseline-correction mode.
+
+    The names are deliberately data-facing rather than UI-facing.  A sidecar can
+    outlive a translated button label, but it must always say whether zero means an
+    inspection residual or a retained open-pore current.
+    """
+    value = str(mode)
+    if value not in BASELINE_CORRECTION_MODES:
+        choices = ", ".join(sorted(BASELINE_CORRECTION_MODES))
+        raise ValueError(
+            f"unknown baseline correction mode {mode!r}; expected one of {choices}")
+    return value
+
+
+def baseline_correction_mode_label(mode: str) -> str:
+    """The short user-facing label for a baseline-correction export mode."""
+    return _BASELINE_CORRECTION_MODE_INFO[_baseline_correction_mode(mode)][0]
+
+
 def processed_trace_export_paths(path: str | Path) -> tuple[Path, ...]:
     """Every file :func:`write_processed_trace` writes for ``path``, in write order.
 
@@ -579,4 +637,378 @@ def write_processed_trace(
         # write read as an unstaged one and failed the build. Keep the receiver a bare name.
         staged.write_text(json.dumps(prov, indent=2, sort_keys=False) + "\n",
                           encoding="utf-8")
+    return {"data": data_path, "meta": meta_path}
+
+
+# ---------------------------------------------------------------------------
+# baseline-correction comparison export
+# ---------------------------------------------------------------------------
+def baseline_correction_export_paths(path: str | Path) -> tuple[Path, ...]:
+    """Every file :func:`write_baseline_correction` writes for ``path``.
+
+    The comparison CSV and its provenance sidecar form one result.  In particular,
+    a visual residual beside a sidecar that calls it a retained-offset runtime trace
+    is a false scientific record, not a harmless partial export.  Callers therefore
+    use this helper when asking which files may be overwritten.
+    """
+    p = Path(path)
+    data = p.with_suffix(".csv") if p.suffix == "" else p
+    return (data, data.with_suffix(".meta.json"))
+
+
+def _baseline_export_rate(fs: float) -> float:
+    """A real positive sample rate for a baseline-comparison export."""
+    try:
+        rate = float(fs)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"sample rate must be a positive finite number, got {fs!r}") from exc
+    if not np.isfinite(rate) or rate <= 0:
+        raise ValueError(f"sample rate must be a positive finite number, got {fs!r}")
+    return rate
+
+
+def _baseline_export_index(value: int, *, name: str) -> int:
+    """An integral, non-negative recording index for export provenance."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+    try:
+        index = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}") from exc
+    if index < 0 or index != value:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+    return index
+
+
+def _baseline_export_array(values: np.ndarray, *, name: str) -> np.ndarray:
+    """One finite one-dimensional signal, without needlessly widening float32 data."""
+    arr = np.asarray(values)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be a one-dimensional signal, got shape {arr.shape}")
+    if np.iscomplexobj(arr):
+        raise ValueError(f"{name} must contain real samples, not complex values")
+    if arr.dtype.kind not in "buif":
+        try:
+            arr = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must contain numeric samples") from exc
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} contains a non-finite sample; baseline exports require finite data")
+    return np.ascontiguousarray(arr)
+
+
+def _baseline_fit_params(value: Any, fs: float) -> Any:
+    """A JSON-safe reference-baseline recipe, accepting ``BaselineConfig`` by duck type."""
+    if value is None:
+        return {}
+    to_provenance = getattr(value, "to_provenance", None)
+    if callable(to_provenance):
+        value = to_provenance(fs)
+    return _json_safe(value)
+
+
+def _baseline_runtime_params(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The baseline-drift recipe, never unrelated signal-chain stages.
+
+    A baseline-correction comparison is intentionally computed directly from the
+    calibrated raw trace.  Notch, median, high-pass, smoothing, normalization and
+    the detector low-pass are therefore outside this export even when they happen
+    to be enabled in the live form.  Stamping them into ``runtime_params`` would
+    describe a chain that did not produce the exported samples.
+    """
+    if not value:
+        return {}
+    allowed = frozenset({"polarity", *DETREND_PARAM_KEYS})
+    return _json_safe({key: item for key, item in value.items() if key in allowed})
+
+
+def _baseline_excluded_stages(value: Any) -> list[str]:
+    """Stable, duplicate-free stage names explicitly excluded from the comparison."""
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        items = [str(value)]
+    else:
+        try:
+            items = [str(item) for item in value]
+        except TypeError:
+            items = [str(value)]
+    return list(dict.fromkeys(item for item in items if item))
+
+
+def _baseline_excluded_from_runtime(params: Mapping[str, Any] | None) -> list[str]:
+    """Infer enabled non-drift stages when a wide live form is supplied."""
+    if not params:
+        return []
+    spellings = (
+        ("notch_enabled", "notch"),
+        ("median_enabled", "median"),
+        ("hp_enabled", "high_pass"),
+        ("rmean_enabled", "running_mean"),
+        ("savgol_enabled", "savgol"),
+        ("normalize_enabled", "normalize"),
+    )
+    out = [name for flag, name in spellings if params.get(flag)]
+    if params.get("filter_cutoff_hz") is not None:
+        out.append("low_pass")
+    return out
+
+
+def _baseline_export_warnings(warnings: Any) -> list[str]:
+    """Warnings as portable text instead of runtime warning objects."""
+    if warnings is None:
+        return []
+    if isinstance(warnings, (str, bytes)):
+        return [str(warnings)]
+    try:
+        return [str(warning) for warning in warnings]
+    except TypeError:
+        return [str(warnings)]
+
+
+def _baseline_correction_columns(units: str) -> list[str]:
+    """The fixed comparison-table schema, with the same units spelling as trace export."""
+    suffix = "_" + str(units).replace(" ", "_") if units else ""
+    return [
+        "time_s",
+        "raw_current" + suffix,
+        "fitted_baseline" + suffix,
+        "corrected_current" + suffix,
+    ]
+
+
+def baseline_correction_provenance(
+    *,
+    mode: str,
+    fs: float,
+    n_samples: int,
+    start_idx: int,
+    units: str,
+    baseline_params: Any = None,
+    runtime_params: Mapping[str, Any] | None = None,
+    baseline_source: str = "",
+    comparison_scope: str = "",
+    excluded_runtime_stages: Any = None,
+    warnings: Any = None,
+    recording: str = "",
+    doc_key: str = "",
+    channel: str = "",
+    channel_index: int | None = None,
+    t0_s: float | None = None,
+    span: str = "",
+    cal_gain: float | None = None,
+    cal_offset: float | None = None,
+) -> dict[str, Any]:
+    """The provenance sidecar for a raw/baseline/corrected comparison export.
+
+    ``mode`` is deliberately required.  Both supported outputs subtract a fitted
+    baseline, but they do not mean the same thing: ``zero_centered_display`` is the
+    inspection residual shown at zero and must not be confused with a signal that was
+    processed for detection; ``retained_offset_runtime`` preserves a representative
+    open-pore level and is the form that can enter the runtime signal chain.
+
+    ``baseline_params`` describes how the fitted-baseline column was obtained.  It
+    accepts a plain provenance mapping or an object with ``to_provenance(fs)`` such as
+    :class:`nanoscope.analysis.baseline.BaselineConfig`.  ``runtime_params`` is narrowed
+    to the baseline-drift stage itself: this comparison starts from the calibrated raw
+    trace and does not apply other enabled signal-chain stages.  ``comparison_scope``
+    and ``excluded_runtime_stages`` make that boundary machine-readable as well as
+    visible in the app.
+    """
+    selected_mode = _baseline_correction_mode(mode)
+    rate = _baseline_export_rate(fs)
+    count = _baseline_export_index(n_samples, name="n_samples")
+    first = _baseline_export_index(start_idx, name="start_idx")
+    label, signal_basis, role = _BASELINE_CORRECTION_MODE_INFO[selected_mode]
+    runtime = _baseline_runtime_params(runtime_params)
+    if selected_mode == BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY and runtime:
+        raise ValueError(
+            "runtime_params belong only to retained_offset_runtime; a zero-centred "
+            "display residual must not be stamped as a processing recipe")
+    runtime_active = bool(runtime.get("detrend_enabled")) if (
+        selected_mode == BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME
+    ) else False
+    default_source = (
+        "open_pore_reference"
+        if selected_mode == BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY
+        else "baseline_drift_estimate"
+    )
+    default_scope = (
+        "open_pore_reference_display_only"
+        if selected_mode == BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY
+        else "baseline_drift_stage_only"
+    )
+    excluded = (
+        _baseline_excluded_from_runtime(runtime_params)
+        if excluded_runtime_stages is None and
+        selected_mode == BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME
+        else _baseline_excluded_stages(excluded_runtime_stages)
+    )
+    return {
+        "export": "baseline_correction",
+        "format": "nanoscope-baseline-correction",
+        "version": 1,
+        "app": "nanoscope",
+        "recording": str(recording),
+        "doc_key": str(doc_key),
+        "channel": str(channel),
+        "channel_index": (None if channel_index is None else int(channel_index)),
+        "span": str(span),
+        "start_idx": first,
+        "end_idx": first + count,
+        "n_samples": count,
+        "sample_rate_hz": rate,
+        "units": str(units),
+        "cal_gain": _stamp(cal_gain),
+        "cal_offset": _stamp(cal_offset),
+        "t0_s": _stamp(t0_s),
+        "columns": _baseline_correction_columns(str(units)),
+        "correction_mode": selected_mode,
+        "correction_mode_label": label,
+        "signal_basis": signal_basis,
+        "corrected_signal_role": role,
+        "baseline_source": str(baseline_source or default_source),
+        "baseline_params": _baseline_fit_params(baseline_params, rate),
+        "comparison_scope": str(comparison_scope or default_scope),
+        "excluded_runtime_stages": excluded,
+        # The mode describes the SHAPE of the exported correction.  This separate
+        # stamp records whether that stage was actually enabled in the live signal
+        # chain at export time; a user may inspect/export the retained-offset preview
+        # before opting it into detection.
+        "runtime_correction_active": runtime_active,
+        "runtime_params": runtime,
+        "warnings": _baseline_export_warnings(warnings),
+    }
+
+
+# A bounded write chunk keeps a full-length four-column temporary matrix out of RAM for
+# long recordings.  The three source arrays stay in their native precision; this is only
+# the CSV formatting buffer.
+_BASELINE_EXPORT_CHUNK_SAMPLES = 250_000
+
+
+def _write_baseline_correction_csv(
+    path: Path,
+    raw: np.ndarray,
+    baseline: np.ndarray,
+    corrected: np.ndarray,
+    *,
+    fs: float,
+    start_idx: int,
+    columns: list[str],
+) -> None:
+    """Write the comparison table to an already-staged ``path`` in bounded chunks."""
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(",".join(columns) + "\n")
+        for lo in range(0, raw.size, _BASELINE_EXPORT_CHUNK_SAMPLES):
+            hi = min(raw.size, lo + _BASELINE_EXPORT_CHUNK_SAMPLES)
+            time_s = (np.arange(lo, hi, dtype=np.float64) + float(start_idx)) / fs
+            np.savetxt(
+                handle,
+                np.column_stack((time_s, raw[lo:hi], baseline[lo:hi], corrected[lo:hi])),
+                delimiter=",",
+                fmt=_SAMPLE_FMT,
+            )
+
+
+def write_baseline_correction(
+    path: str | Path,
+    raw: np.ndarray,
+    baseline: np.ndarray,
+    corrected: np.ndarray,
+    fs: float,
+    *,
+    mode: str,
+    units: str = "",
+    start_idx: int = 0,
+    t0_s: float | None = None,
+    baseline_params: Any = None,
+    runtime_params: Mapping[str, Any] | None = None,
+    baseline_source: str = "",
+    comparison_scope: str = "",
+    excluded_runtime_stages: Any = None,
+    warnings: Any = None,
+    recording: str = "",
+    doc_key: str = "",
+    channel: str = "",
+    channel_index: int | None = None,
+    span: str = "",
+    cal_gain: float | None = None,
+    cal_offset: float | None = None,
+) -> dict[str, Path]:
+    """Atomically export raw, fitted-baseline, and corrected samples plus provenance.
+
+    The CSV has ``time_s``, ``raw_current_*``, ``fitted_baseline_*``, and
+    ``corrected_current_*`` columns.  Time is on the recording clock, not a local
+    selection clock.  Its sidecar records which of the two non-interchangeable
+    correction contracts produced the last column:
+
+    * :data:`BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY` — the zero-centred visual
+      residual; it is explicitly display-only.
+    * :data:`BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME` — a retained-offset runtime
+      correction, suitable for the signal-processing chain.
+
+    This writer deliberately receives the three arrays rather than recomputing an
+    estimator.  The caller may have selected either the open-pore reference estimator
+    or the signal-chain drift estimator, and may have additional enabled conditioning
+    stages.  Recomputing a lookalike here would make the table and on-screen result
+    silently diverge.  ``baseline_params`` and ``runtime_params`` therefore preserve
+    the recipe without inventing a second numerical pipeline.
+
+    The CSV and JSON sidecar are staged as one set: if either staging or placement
+    fails, an existing pair remains intact and a new pair does not land half-written.
+    Returns ``{"data": <csv>, "meta": <json>}``.
+    """
+    selected_mode = _baseline_correction_mode(mode)
+    rate = _baseline_export_rate(fs)
+    first = _baseline_export_index(start_idx, name="start_idx")
+    raw_arr = _baseline_export_array(raw, name="raw")
+    baseline_arr = _baseline_export_array(baseline, name="baseline")
+    corrected_arr = _baseline_export_array(corrected, name="corrected")
+    if baseline_arr.shape != raw_arr.shape or corrected_arr.shape != raw_arr.shape:
+        raise ValueError(
+            "raw, baseline, and corrected signals must have identical one-dimensional "
+            f"shapes; got {raw_arr.shape}, {baseline_arr.shape}, and {corrected_arr.shape}")
+
+    data_path, meta_path = baseline_correction_export_paths(path)
+    columns = _baseline_correction_columns(str(units))
+    provenance = baseline_correction_provenance(
+        mode=selected_mode,
+        fs=rate,
+        n_samples=int(raw_arr.size),
+        start_idx=first,
+        units=units,
+        baseline_params=baseline_params,
+        runtime_params=runtime_params,
+        baseline_source=baseline_source,
+        comparison_scope=comparison_scope,
+        excluded_runtime_stages=excluded_runtime_stages,
+        warnings=warnings,
+        recording=recording,
+        doc_key=doc_key,
+        channel=channel,
+        channel_index=channel_index,
+        t0_s=t0_s,
+        span=span,
+        cal_gain=cal_gain,
+        cal_offset=cal_offset,
+    )
+    provenance["data_file"] = data_path.name
+
+    with staged_write_set() as group:
+        staged_data = group.stage(data_path)
+        _write_baseline_correction_csv(
+            staged_data,
+            raw_arr,
+            baseline_arr,
+            corrected_arr,
+            fs=rate,
+            start_idx=first,
+            columns=columns,
+        )
+        staged_meta = group.stage(meta_path)
+        staged_meta.write_text(
+            json.dumps(provenance, indent=2, sort_keys=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
     return {"data": data_path, "meta": meta_path}

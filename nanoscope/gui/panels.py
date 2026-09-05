@@ -2064,6 +2064,15 @@ class DetectionPanel(QWidget):
                    self.rmean_enabled, self.savgol_enabled, self.normalize_enabled):
             cb.toggled.connect(self._emit_params)
 
+        # ``active_filters_label`` is the reader-facing rendering of ``params()``, not
+        # merely of the on/off checkboxes.  A later change to, say, the event-masked
+        # median method must replace the old ``block_median`` wording immediately:
+        # otherwise the visible recipe and the provenance a new detection records
+        # describe different chains.  Listening to the one already-complete form
+        # signal covers every stage parameter (including future ones) without copying
+        # a second, inevitably stale list of widgets here.
+        self.paramsChanged.connect(self._refresh_active_filters)
+
         # ML detector wiring.
         self.ml_load_button.clicked.connect(self.browse_model)
         self.ml_detect_button.clicked.connect(
@@ -3072,6 +3081,25 @@ class DetectionPanel(QWidget):
         """Raise Preprocess and reveal the ordered signal-chain controls."""
         self.show_preprocess_tab()
         self.preprocess_section_selector.setCurrentIndex(0)
+
+    def baseline_drift_method_choices(self) -> tuple[tuple[str, str], ...]:
+        """The stable ``(label, method)`` choices for baseline-drift controls.
+
+        A compact, task-focused workspace may mirror the *selection* of the
+        Baseline drift stage, but it must not grow a second hand-maintained list of
+        kernel methods.  Publishing this immutable tuple keeps that workspace's
+        labels in lockstep with the actual signal-chain combo while leaving this
+        panel the sole owner of the processing parameters.
+        """
+        return tuple(self._DETREND_METHODS)
+
+    def show_baseline_drift(self) -> None:
+        """Raise Preprocess and reveal the Baseline drift stage's advanced controls."""
+        self.show_signal_chain()
+        for index, (label, _check) in enumerate(self._filter_specs):
+            if label == "Baseline drift":
+                self.filter_selector.setCurrentIndex(index)
+                return
 
     def show_open_pore_baseline(self) -> None:
         """Raise Preprocess and reveal the open-pore baseline controls."""

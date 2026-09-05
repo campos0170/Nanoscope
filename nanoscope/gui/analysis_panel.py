@@ -45,12 +45,23 @@ from ..analysis.baseline import (
     FALLBACK_CLAMPED,
     ConstantBaselineWarning,
     adapt_to_length,
+    baseline_subtracted,
+    characterisation_baseline,
     collect_baseline_warnings,
+    estimated_wander,
+    remove_baseline_wander,
 )
 from ..analysis.baseline_probe import BaselineProposal
 from ..analysis.characterize import recharacterize_span
 from ..analysis.detect import gap_window_samples
-from ..analysis.conditioning import characterization_trace, conditioned_trace
+from ..analysis.conditioning import (
+    BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME,
+    BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY,
+    baseline_correction_export_paths,
+    characterization_trace,
+    conditioned_trace,
+    write_baseline_correction,
+)
 from ..analysis.events import EventSet, mark_reviewed
 from ..analysis.merge import (
     MIN_MERGE_OCCUPANCY,
@@ -65,6 +76,7 @@ from ..analysis.modules import (
     detection_params_from_provenance,
     detection_signal,
     detection_signal_key,
+    detrend_method_kwargs,
     fit_depth,
     fit_dwell,
     preprocess_for_detection,
@@ -88,6 +100,8 @@ from ..analysis.reconcile import (
 )
 from ..analysis.scoring import ADDED_COLUMN, ensure_added_column, score_detection
 from ..core.analysis import AnalysisResult, OverlayHint, OverlayKind
+from ..core import clock
+from ..core.segment import persistent_key
 from ..core.session import Session
 from ..core.sources import (
     DETECTION_MODULE_IDS as STORED_DETECTION_MODULE_IDS,
@@ -97,7 +111,9 @@ from ..core.types import ChannelKind
 from ..plot.style import PALETTE
 from .analysis_worker import AnalysisController
 from .baseline_panel import BaselinePanel
+from .baseline_workspace import BaselineCorrectionWorkspace
 from .categorical import category_colour
+from .export_paths import ask_export_path
 from .measure_panel import MeasurePanel
 from .merge_panel import MergePanel
 from .panels import DetectionPanel, EventTable, ScorePanel, StatsPanel, SweepDialog
@@ -178,6 +194,144 @@ _ML_CONFIG_KEYS = (
     "ml_preset", "ml_preprocess", "ml_decode",
     "ml_preset_customized", "ml_preset_deviations",
 )
+
+# The comparison is a reading aid, not a second full-resolution trace viewer.  A few
+# thousand evenly-spaced samples preserve slow baseline shape and event density while
+# keeping a 15 M-sample recording responsive when a worker result crosses back to Qt.
+_BASELINE_WORKSPACE_PREVIEW_POINTS = 6_000
+_BASELINE_WORKSPACE_ZERO = BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY
+_BASELINE_WORKSPACE_RETAINED = BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME
+
+
+def _baseline_workspace_arrays(
+    raw: np.ndarray,
+    fs: float,
+    *,
+    reference_config: Any,
+    reference_source: str,
+    runtime_params: Mapping[str, Any],
+    mode: str,
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...], Mapping[str, Any] | None]:
+    """Return fitted baseline, correction, advisories and actual fit provenance.
+
+    This is deliberately narrower than :func:`conditioned_trace`: the workspace
+    compares one baseline operation at a time.  Its retained-offset branch is the
+    Baseline drift *stage* itself, byte-for-byte in formula with
+    ``remove_baseline_wander``; any other enabled preprocessing stage remains a
+    separate, explicitly named part of the Signal chain.  Collapsing them into this
+    graph would make an orange low-pass or high-pass output look like a baseline
+    correction, which is exactly the ambiguity this workspace exists to remove.
+    """
+    x = np.asarray(raw)
+    polarity_value = runtime_params.get("polarity")
+    polarity = None if polarity_value is None else int(polarity_value)
+    result_warnings: tuple[str, ...] = ()
+    fit_provenance: Mapping[str, Any] | None = None
+    with collect_baseline_warnings() as kernel_warnings:
+        if mode == _BASELINE_WORKSPACE_ZERO:
+            result = characterisation_baseline(
+                x, float(fs), config=reference_config, polarity=polarity,
+                param_source=str(reference_source), health=False, cache=False,
+            )
+            baseline = np.asarray(result.baseline)
+            corrected = baseline_subtracted(x, baseline)
+            # Short recordings can clamp the requested windows or fall back to a
+            # constant fit.  The result, not the form, is the authority on what
+            # actually ran and which advisories belong in an exported record.
+            result_warnings = tuple(str(item) for item in result.warnings if str(item))
+            fit_provenance = result.provenance()
+        elif mode == _BASELINE_WORKSPACE_RETAINED:
+            method = str(runtime_params.get("detrend_method", "block_median"))
+            window_s = float(runtime_params.get("detrend_window_s", 0.5))
+            method_kwargs = detrend_method_kwargs(runtime_params)
+            # The display rail and the retained-offset output are deliberately
+            # obtained through the same two public analysis doors that power the
+            # actual stage.  ``remove_baseline_wander`` also contributes its own
+            # amplified-wander advisory, which a hand-written ``x - b + median(b)``
+            # preview would silently omit.
+            baseline = estimated_wander(
+                x, float(fs), method=method, window_s=window_s,
+                polarity=polarity, **method_kwargs,
+            )
+            corrected = remove_baseline_wander(
+                x, float(fs), method=method, window_s=window_s,
+                polarity=polarity, **method_kwargs,
+            )
+        else:
+            raise ValueError(f"Unknown baseline workspace mode: {mode!r}")
+    warnings = tuple(dict.fromkeys((
+        *result_warnings,
+        *(str(item) for item in kernel_warnings if str(item)),
+    )))
+    return (np.asarray(baseline), np.asarray(corrected), warnings, fit_provenance)
+
+
+_BASELINE_WORKSPACE_OTHER_STAGES: tuple[tuple[str, str], ...] = (
+    ("notch_enabled", "notch"),
+    ("median_enabled", "median"),
+    ("hp_enabled", "high_pass"),
+    ("rmean_enabled", "running_mean"),
+    ("savgol_enabled", "savgol"),
+    ("normalize_enabled", "normalize"),
+)
+
+
+def _baseline_workspace_excluded_stages(params: Mapping[str, Any]) -> tuple[str, ...]:
+    """Enabled processing stages deliberately outside a baseline-only comparison."""
+    stages = [name for flag, name in _BASELINE_WORKSPACE_OTHER_STAGES if params.get(flag)]
+    if params.get("filter_cutoff_hz") is not None:
+        stages.append("low_pass")
+    return tuple(stages)
+
+
+def _baseline_workspace_recipe_signature(
+    *,
+    mode: str,
+    runtime_params: Mapping[str, Any],
+    reference_params: Mapping[str, Any],
+    reference_source: str,
+) -> tuple[Any, ...]:
+    """Immutable signature for every control that can change a job or its label."""
+    if mode == _BASELINE_WORKSPACE_ZERO:
+        recipe = tuple(sorted((str(key), repr(value))
+                              for key, value in reference_params.items()))
+        return (mode, str(reference_source), repr(runtime_params.get("polarity")), recipe)
+    runtime = tuple((key, repr(runtime_params.get(key)))
+                    for key in ("polarity", *DETREND_PARAM_KEYS))
+    return (mode, runtime, _baseline_workspace_excluded_stages(runtime_params))
+
+
+def _baseline_workspace_preview(
+    raw: np.ndarray,
+    baseline: np.ndarray,
+    corrected: np.ndarray,
+    fs: float,
+    *,
+    max_points: int = _BASELINE_WORKSPACE_PREVIEW_POINTS,
+) -> dict[str, np.ndarray]:
+    """Evenly decimate a complete baseline comparison for the small workspace plot."""
+    x = np.asarray(raw)
+    b = np.asarray(baseline)
+    out = np.asarray(corrected)
+    if x.ndim != 1 or b.shape != x.shape or out.shape != x.shape:
+        raise ValueError("baseline workspace arrays must be one-dimensional and equally long")
+    n = int(x.size)
+    if n == 0:
+        return {
+            "time_s": np.empty(0, dtype=np.float64),
+            "raw": np.empty(0, dtype=np.float32),
+            "baseline": np.empty(0, dtype=np.float32),
+            "corrected": np.empty(0, dtype=np.float32),
+        }
+    count = min(n, max(2, int(max_points)))
+    indices = np.arange(n, dtype=np.int64) if count == n else np.linspace(
+        0, n - 1, num=count, dtype=np.int64)
+    return {
+        "time_s": indices.astype(np.float64) / float(fs),
+        "raw": np.asarray(x[indices], dtype=np.float32),
+        "baseline": np.asarray(b[indices], dtype=np.float32),
+        "corrected": np.asarray(out[indices], dtype=np.float32),
+    }
 
 #: *** THE NOTCH-LINE CAP. *** The most notch lines an ML preprocess run may be configured
 #: with through this panel. ``notch_sequential`` runs one zero-phase ``filtfilt`` over the
@@ -623,6 +777,18 @@ class AnalysisPanel(QtWidgets.QWidget):
         #: it does; without this the answer lands on whatever happens to be selected when it
         #: returns.
         self._pending_sel: tuple[str, int] | None = None
+        #: Revision + target + calibration fingerprint + units + complete baseline
+        #: recipe signature captured when the compact
+        #: Baseline Correction comparison was launched.  A baseline fit can take
+        #: long enough for a user to select another recording, recalibrate it, or
+        #: edit the baseline controls; its graph must then be marked stale rather
+        #: than presented as the current answer.
+        self._baseline_workspace_job: tuple[
+            int, tuple[str, int], tuple[float, float], str, tuple[Any, ...]
+        ] | None = None
+        self._baseline_workspace_revision = 0
+        self._baseline_workspace_syncing = False
+        self._baseline_workspace_runtime_signature: tuple[tuple[str, str], ...] | None = None
         #: What an in-flight 'Merge all' will be checked against when it lands:
         #: ``(doc_id, channel, module_id, n_before, window_s, event_ids, geometry,
         #: curation)``. See :meth:`_finish_merge_all`.
@@ -780,7 +946,17 @@ class AnalysisPanel(QtWidgets.QWidget):
         # the only launcher of analysis jobs, while ``panels.py`` imports no sibling
         # gui module and must stay that way. DetectionPanel only HOSTS the page.
         self._baseline = BaselinePanel()
-        self._detection.set_baseline_widget(self._baseline)
+        self._baseline_workspace = BaselineCorrectionWorkspace(
+            self._baseline,
+            method_choices=self._detection.baseline_drift_method_choices(),
+        )
+        self._detection.set_baseline_widget(self._baseline_workspace)
+        # Opening Analysis starts on the baseline workspace rather than leaving its
+        # familiar overlay/residual controls hidden behind the Preprocess-section
+        # switcher.  Signal-chain controls remain one explicit selection away.
+        # This is especially important in a compact Inspector, where an invisible
+        # overlay checkbox is indistinguishable from a feature that no longer exists.
+        self._detection.show_open_pore_baseline()
 
         # Controls up top (scrollable so a small dock still reaches the buttons);
         # the event table gets the remaining vertical space and scrolls natively.
@@ -921,6 +1097,20 @@ class AnalysisPanel(QtWidgets.QWidget):
         # on either box for exactly that reason.
         self._baseline.showBaselineToggled.connect(self._on_baseline_view_changed)
         self._baseline.subtractBaselineToggled.connect(self._on_baseline_view_changed)
+        # The workspace is a presentation/co-ordination layer only.  It emits a
+        # user's intent; the legacy BaselinePanel remains the owner of I0 settings,
+        # DetectionPanel remains the owner of the runtime detrend parameters, and
+        # this AnalysisPanel remains the only launcher of a background calculation.
+        self._baseline_workspace.refreshRequested.connect(self._on_baseline_workspace_refresh)
+        self._baseline_workspace.exportRequested.connect(self._on_baseline_workspace_export)
+        self._baseline_workspace.advancedRequested.connect(
+            self._detection.show_baseline_drift)
+        self._baseline_workspace.runtimeEnabledRequested.connect(
+            self._on_baseline_workspace_runtime_enabled)
+        self._baseline_workspace.runtimeMethodRequested.connect(
+            self._on_baseline_workspace_runtime_method)
+        self._baseline_workspace.modeChanged.connect(self._on_baseline_workspace_mode_changed)
+        self._sync_baseline_workspace()
 
     def _wire_session(self) -> None:
         self._session.resultsChanged.connect(self._on_results_changed)
@@ -985,6 +1175,7 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._measure.set_selection(doc_id, channel)
             self._push_measure_conditioning()
             self._sync_surrogate_readouts()
+            self._sync_baseline_workspace()
             # ...unless the TABLE changed underneath the unchanged target. A project
             # restore installs the saved run into a session already pointed here, and the
             # form has to follow it or the user is shown app defaults over somebody else's
@@ -999,6 +1190,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._clear_marker()
         self._selected_id = None
         self._trace_view.clear_filter_preview()
+        self._baseline_workspace.clear_preview(
+            "Recording changed — refresh the comparison for this trace.")
         # ...and the preview's error line with them. The message names the PREVIOUS
         # recording's numbers ("window_s=60s is longer than the recording (0.5s)"),
         # which is simply false about the recording now arriving — and the preview
@@ -1036,6 +1229,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         # take the previous recording's rail down. Without this a rail ticked on the
         # -600 mV run stayed up over the -1000 mV one, claimed by nothing on screen.
         self._apply_baseline_views()
+        self._sync_baseline_workspace()
 
         # Reflect the preview toggle onto the new pane (usually off after a switch).
         if self._detection.filter_preview.isChecked():
@@ -1564,6 +1758,16 @@ class AnalysisPanel(QtWidgets.QWidget):
         """The owned open-pore baseline controls. Exposed for MainWindow exactly as
         ``measure_panel`` and ``merge_controls`` are — the panel stays the owner."""
         return self._baseline
+
+    @property
+    def baseline_workspace(self) -> BaselineCorrectionWorkspace:
+        """The compact Baseline Correction comparison and export workspace.
+
+        ``baseline_panel`` remains the compatibility/public seam for the established
+        I0 estimator controls.  This separate accessor gives new callers the
+        workspace without inviting them to reach through it for those controls.
+        """
+        return self._baseline_workspace
 
     def trigger_detection(self) -> None:
         """Run with the current form parameters (gating is enforced downstream).
@@ -2298,6 +2502,7 @@ class AnalysisPanel(QtWidgets.QWidget):
     def _on_baseline_view_changed(self, _on: bool) -> None:
         """Either view box moved. Both are redrawn, for the current selection only."""
         self._apply_baseline_views()
+        self._sync_baseline_workspace()
 
     def _apply_baseline_views(self) -> None:
         """Draw what the two boxes on `BaselinePanel` ask for, and nothing else.
@@ -2348,6 +2553,406 @@ class AnalysisPanel(QtWidgets.QWidget):
         if panel.show_baseline():
             self._trace_view.set_baseline_track(doc_id, channel,
                                                 *decimate_track(result.baseline))
+
+    # -- unified baseline-correction workspace --------------------------------------------------
+    def _sync_baseline_workspace(self, params: Mapping[str, Any] | None = None) -> None:
+        """Reflect the two existing baseline contracts in their shared workspace.
+
+        This only copies state *out* of the owner widgets.  In particular, it does
+        not calculate a baseline, enable a filter, or replace a stored detection.
+        The small guard prevents a direct legacy checkbox click from being echoed back
+        as a new workspace mode change.
+        """
+        if not hasattr(self, "_baseline_workspace"):
+            return
+        runtime = dict(params) if params is not None else self._detection.params()
+        self._baseline_workspace_syncing = True
+        try:
+            self._baseline_workspace.sync_runtime(runtime)
+            self._baseline_workspace.sync_display_state(
+                self._baseline.show_baseline(), self._baseline.subtract_baseline())
+        finally:
+            self._baseline_workspace_syncing = False
+
+        # A newly selected/restored form may never emit paramsChanged.  Record its
+        # baseline-specific signature here so the first subsequent drift edit can
+        # still invalidate a preview rather than being mistaken for initialization.
+        self._baseline_workspace_runtime_signature = self._baseline_workspace_signature(runtime)
+
+    @staticmethod
+    def _baseline_workspace_signature(params: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+        """The subset of a Detection form capable of changing drift comparison bytes."""
+        return tuple((key, repr(params.get(key))) for key in ("polarity", *DETREND_PARAM_KEYS))
+
+    def _baseline_workspace_current_recipe_signature(self) -> tuple[Any, ...]:
+        """The currently displayed controls in the same form captured by a job."""
+        return _baseline_workspace_recipe_signature(
+            mode=self._baseline_workspace.output_mode(),
+            runtime_params=self._detection.params(),
+            reference_params=self._baseline.params(),
+            reference_source=self._baseline.param_source(),
+        )
+
+    def _mark_baseline_workspace_runtime_change(self, params: Mapping[str, Any]) -> None:
+        """Invalidate a comparison only when its own runtime recipe moved."""
+        signature = self._baseline_workspace_signature(params)
+        old, self._baseline_workspace_runtime_signature = (
+            self._baseline_workspace_runtime_signature, signature)
+        if old is not None and old != signature:
+            self._baseline_workspace.mark_preview_stale(
+                "Baseline-drift settings changed — refresh the comparison before relying on it.")
+
+    def _on_baseline_workspace_mode_changed(self, mode: str) -> None:
+        """Make the explicit workspace output choice visible on the main trace too."""
+        if self._baseline_workspace_syncing:
+            return
+        if mode == _BASELINE_WORKSPACE_ZERO:
+            show, subtract = True, True
+        elif mode == _BASELINE_WORKSPACE_RETAINED:
+            # The retained-offset comparison is a signal-chain result, not an
+            # alternative zeroed TraceView mode.  Leaving an old zero-residual view
+            # under it would make the two plots tell different stories.
+            show, subtract = False, False
+        else:
+            self._baseline_workspace.set_status(
+                f"Unknown baseline output mode {mode!r}; no display state changed.",
+                warning=True)
+            return
+
+        # The legacy checks still own what TraceView draws.  Block their individual
+        # signals so one deliberate mode choice performs one redraw rather than an
+        # intermediate residual/rail state followed by the final one.
+        blockers = (QtCore.QSignalBlocker(self._baseline.show_track),
+                    QtCore.QSignalBlocker(self._baseline.subtract_view))
+        try:
+            self._baseline.show_track.setChecked(show)
+            self._baseline.subtract_view.setChecked(subtract)
+        finally:
+            del blockers
+        self._apply_baseline_views()
+        self._sync_baseline_workspace()
+        self._baseline_workspace.mark_preview_stale(
+            "Output mode changed — refresh the comparison to calculate this mode.")
+
+    def _on_baseline_workspace_runtime_enabled(self, enabled: bool) -> None:
+        """Proxy the explicit runtime opt-in to DetectionPanel, its sole owner."""
+        self._detection.set_params({"detrend_enabled": bool(enabled)})
+        self._sync_baseline_workspace()
+        self._baseline_workspace.mark_preview_stale(
+            "Runtime correction changed — refresh the comparison before relying on it.")
+
+    def _on_baseline_workspace_runtime_method(self, method: str) -> None:
+        """Proxy the estimator selection without duplicating DetectionPanel validation."""
+        complaint = self._detection.set_detrend_method(str(method))
+        self._sync_baseline_workspace()
+        if complaint:
+            self._baseline_workspace.set_status(complaint, warning=True)
+            return
+        self._baseline_workspace.mark_preview_stale(
+            "Baseline-drift method changed — refresh the comparison before relying on it.")
+
+    def _baseline_workspace_target(
+        self,
+    ) -> tuple[tuple[str, int], Any, float, str, tuple[float, float]] | None:
+        """Resolve an honest current/rate/calibration snapshot for a workspace job."""
+        if self._sel is None:
+            self._baseline_workspace.clear_preview("Select a current recording first.")
+            return None
+        doc_id, channel = self._sel
+        if not self._session.has_document(doc_id):
+            self._baseline_workspace.clear_preview("That recording is no longer open.")
+            return None
+        runnable, reason = self._gate_for(doc_id, channel)
+        if not runnable:
+            self._baseline_workspace.clear_preview(reason)
+            return None
+        chan = self._session.calibrated(doc_id, channel)
+        if chan.sample_rate_hz is None:
+            # Defensive duplication of the gate: a caller cannot produce a
+            # seconds-based baseline just because a stale gate happened to say yes.
+            self._baseline_workspace.clear_preview(
+                "Sample rate unknown — a baseline in seconds cannot be calculated.")
+            return None
+        fingerprint = tuple(self._session.calibration(doc_id, channel).fingerprint())
+        return ((doc_id, channel), chan, float(chan.sample_rate_hz),
+                self._selection_units(), fingerprint)
+
+    @staticmethod
+    def _baseline_workspace_note(mode: str, runtime_enabled: bool,
+                                 other_stages: bool, warnings: tuple[str, ...]) -> str:
+        """One honest, compact status sentence for a completed comparison."""
+        if mode == _BASELINE_WORKSPACE_ZERO:
+            text = ("Visual residual only — it is not used for detection or the "
+                    "processed-trace export.")
+        else:
+            text = (
+                "Runtime Baseline drift is enabled for detection and processed export."
+                if runtime_enabled else
+                "Preview only — enable runtime correction to use it for detection or export.")
+            if other_stages:
+                text += " Other enabled Signal chain stages are not included here."
+        if warnings:
+            text += " Advisory: " + " ".join(warnings)
+        return text
+
+    def _on_baseline_workspace_refresh(self) -> None:
+        """Calculate the selected baseline comparison off the GUI thread."""
+        target_info = self._baseline_workspace_target()
+        if target_info is None:
+            return
+        target, chan, fs, units, fingerprint = target_info
+        mode = self._baseline_workspace.output_mode()
+        if mode not in (_BASELINE_WORKSPACE_ZERO, _BASELINE_WORKSPACE_RETAINED):
+            self._baseline_workspace.clear_preview("Choose a baseline output mode first.")
+            return
+        params = dict(self._detection.params())
+        reference_config = self._baseline.config()
+        reference_source = self._baseline.param_source()
+        reference_params = dict(self._baseline.params())
+        recipe_signature = _baseline_workspace_recipe_signature(
+            mode=mode, runtime_params=params, reference_params=reference_params,
+            reference_source=reference_source)
+        # Calibrated channel arrays are immutable snapshots in the session; making a
+        # contiguous view avoids a needless full-recording allocation while the worker
+        # reads exactly the calibration/fingerprint captured above.
+        raw = np.ascontiguousarray(np.asarray(chan.data))
+        runtime_enabled = bool(params.get("detrend_enabled"))
+        excluded_stages = _baseline_workspace_excluded_stages(params)
+        other_stages = bool(excluded_stages)
+
+        self._baseline_workspace_revision += 1
+        revision = self._baseline_workspace_revision
+
+        def job() -> dict[str, Any]:
+            baseline, corrected, warnings, _fit_provenance = _baseline_workspace_arrays(
+                raw, fs, reference_config=reference_config,
+                reference_source=reference_source, runtime_params=params, mode=mode)
+            return {
+                "revision": revision,
+                "mode": mode,
+                "preview": _baseline_workspace_preview(raw, baseline, corrected, fs),
+                "units": units,
+                "runtime_enabled": runtime_enabled,
+                "other_stages": other_stages,
+                "warnings": warnings,
+            }
+
+        self._baseline_workspace.set_busy(True)
+        if self._controller.run_callable(job, label="baseline_correction_preview"):
+            self._pending, self._pending_sel = "baseline_workspace_preview", target
+            self._baseline_workspace_job = (
+                revision, target, fingerprint, units, recipe_signature)
+            return
+        self._baseline_workspace.set_busy(False)
+        self._baseline_workspace.set_status(
+            "The comparison could not start because another analysis is running.",
+            warning=True)
+
+    def _on_baseline_workspace_export(self) -> None:
+        """Handle the workspace button; the public method keeps tests/menu callers simple."""
+        self.export_baseline_correction()
+
+    def export_baseline_correction(self, path: str | Path | None = None) -> bool:
+        """Export raw, fitted baseline and selected correction as one atomic CSV set.
+
+        The baseline is always fitted over the entire recording, and so is the
+        exported array.  Slicing a cursor selection first would change a global
+        baseline fit near the selection edges; a smaller selection can still be made
+        after export in the user's analysis tool, with the fitted baseline retained
+        beside it.  Calculation and writing run through the shared analysis controller
+        so a multi-million sample CSV never freezes the inspector.
+        """
+        target_info = self._baseline_workspace_target()
+        if target_info is None:
+            return False
+        target, chan, fs, units, fingerprint = target_info
+        mode = self._baseline_workspace.output_mode()
+        if mode not in (_BASELINE_WORKSPACE_ZERO, _BASELINE_WORKSPACE_RETAINED):
+            self._baseline_workspace.set_status(
+                "Choose a baseline output mode before exporting.", warning=True)
+            return False
+        doc_id, channel = target
+        doc = self._session.document(doc_id)
+        if path is None:
+            chosen = ask_export_path(
+                self, title="Export baseline correction",
+                suggestion=f"{Path(doc.display_name).stem}_baseline_correction.csv",
+                filters="CSV (*.csv);;All files (*)",
+                outputs=baseline_correction_export_paths)
+            if chosen is None:
+                return False
+            path = chosen
+
+        params = dict(self._detection.params())
+        reference_config = self._baseline.config()
+        reference_source = self._baseline.param_source()
+        reference_params = dict(self._baseline.params())
+        excluded_stages = _baseline_workspace_excluded_stages(params)
+        recipe_signature = _baseline_workspace_recipe_signature(
+            mode=mode, runtime_params=params, reference_params=reference_params,
+            reference_source=reference_source)
+        fitted_recipe: Mapping[str, Any] | None
+        fitted_source: str
+        runtime_recipe: Mapping[str, Any] | None
+        if mode == _BASELINE_WORKSPACE_ZERO:
+            # The worker replaces this launch-time form snapshot with the actual
+            # BaselineResult provenance.  That records any short-trace clamp or
+            # fallback instead of claiming the requested windows ran unchanged.
+            fitted_recipe = reference_params
+            fitted_source = reference_source
+            # A visual residual must never be stamped with a processing recipe.
+            runtime_recipe = None
+        else:
+            # Here the fitted rail comes from the signal-chain drift estimator, not
+            # from the separate open-pore reference form.  Only the drift-stage
+            # recipe is stamped: other enabled stages are explicitly listed as
+            # excluded because they did not produce these arrays.
+            fitted_recipe = {
+                "baseline_estimator": "signal_chain_baseline_drift",
+                "polarity": params.get("polarity"),
+                **{key: params.get(key) for key in DETREND_PARAM_KEYS if key in params},
+            }
+            fitted_source = "baseline_drift_estimate"
+            runtime_recipe = {
+                key: params.get(key)
+                for key in ("polarity", *DETREND_PARAM_KEYS)
+                if key in params
+            }
+        raw = np.ascontiguousarray(np.asarray(chan.data))
+        channel_name = doc.meta.channels[channel].name
+        cal_gain, cal_offset = fingerprint
+        out_path = Path(path)
+        self._baseline_workspace_revision += 1
+        revision = self._baseline_workspace_revision
+
+        def job() -> dict[str, Any]:
+            baseline, corrected, warnings, actual_fit_provenance = _baseline_workspace_arrays(
+                raw, fs, reference_config=reference_config,
+                reference_source=reference_source, runtime_params=params, mode=mode)
+            written_fit_recipe = (
+                actual_fit_provenance
+                if mode == _BASELINE_WORKSPACE_ZERO and actual_fit_provenance is not None
+                else fitted_recipe
+            )
+            out = write_baseline_correction(
+                out_path, raw, baseline, corrected, fs, mode=mode, units=units,
+                start_idx=0, t0_s=clock.instrument_origin_s(doc.meta),
+                baseline_params=written_fit_recipe, runtime_params=runtime_recipe,
+                baseline_source=fitted_source, warnings=warnings,
+                comparison_scope=(
+                    "open_pore_reference_display_only"
+                    if mode == _BASELINE_WORKSPACE_ZERO
+                    else "baseline_drift_stage_only"),
+                excluded_runtime_stages=(
+                    () if mode == _BASELINE_WORKSPACE_ZERO else excluded_stages),
+                recording=doc.display_name, doc_key=persistent_key(doc),
+                channel=channel_name, channel_index=int(channel),
+                span="whole recording (baseline fitted on whole recording)",
+                cal_gain=cal_gain, cal_offset=cal_offset)
+            return {
+                "revision": revision,
+                "out": out,
+                "mode": mode,
+                "n_samples": int(raw.size),
+            }
+
+        self._baseline_workspace.set_busy(True)
+        if self._controller.run_callable(job, label="baseline_correction_export"):
+            self._pending, self._pending_sel = "baseline_workspace_export", target
+            self._baseline_workspace_job = (
+                revision, target, fingerprint, units, recipe_signature)
+            return True
+        self._baseline_workspace.set_busy(False)
+        self._baseline_workspace.set_status(
+            "The export could not start because another analysis is running.", warning=True)
+        return False
+
+    def _finish_baseline_workspace_export(
+        self, obj: object, target: tuple[str, int] | None
+    ) -> None:
+        """Report an export without pretending it belongs to a later selection."""
+        job, self._baseline_workspace_job = self._baseline_workspace_job, None
+        self._baseline_workspace.set_busy(False)
+        if not isinstance(obj, Mapping) or job is None:
+            self._baseline_workspace.set_status(
+                "Baseline correction export returned an unexpected result.", warning=True)
+            return
+        out = obj.get("out")
+        if not isinstance(out, Mapping) or "data" not in out or "meta" not in out:
+            self._baseline_workspace.set_status(
+                "Baseline correction export did not produce its CSV and sidecar.", warning=True)
+            return
+        data, meta = Path(out["data"]), Path(out["meta"])
+        message = (
+            f"Wrote {int(obj.get('n_samples', 0)):,} baseline-correction samples to "
+            f"{data.name}, with provenance in {meta.name}.")
+        _revision, launched_target, launched_fp, launched_units, launched_recipe = job
+        snapshot_matches = (
+            target == launched_target and self._sel == launched_target and
+            self._session.has_document(launched_target[0]) and
+            tuple(self._session.calibration(*launched_target).fingerprint()) == tuple(launched_fp))
+        if snapshot_matches:
+            settings_match = (
+                self._selection_units() == launched_units and
+                self._baseline_workspace_current_recipe_signature() == launched_recipe)
+            if settings_match:
+                self._baseline_workspace.set_status(message)
+            else:
+                # The file is valid and its sidecar records the launch-time recipe.
+                # Say explicitly that the controls now describe a different output,
+                # rather than allowing a late completion to look current.
+                self._baseline_workspace.set_status(
+                    message + " It uses the settings captured when export started; "
+                    "the current baseline settings changed while it ran.",
+                    warning=True)
+        else:
+            # The file is still valid — its sidecar names the launch-time calibration
+            # snapshot — but do not overwrite the new target's workspace status with a
+            # completion that it did not request.
+            self.runRefused.emit(message + " It belongs to the recording/calibration snapshot at launch.")
+
+    def _finish_baseline_workspace_preview(
+        self, obj: object, target: tuple[str, int] | None
+    ) -> None:
+        """Install a completed compact comparison only on its original snapshot."""
+        job, self._baseline_workspace_job = self._baseline_workspace_job, None
+        self._baseline_workspace.set_busy(False)
+        if not isinstance(obj, Mapping) or job is None:
+            self._baseline_workspace.mark_preview_stale(
+                "The comparison returned an unexpected result; refresh it again.")
+            return
+        revision, launched_target, launched_fp, launched_units, launched_recipe = job
+        if (target != launched_target or self._sel != launched_target or
+                int(obj.get("revision", -1)) != revision or
+                not self._session.has_document(launched_target[0])):
+            self._baseline_workspace.mark_preview_stale(
+                "The recording changed while this comparison ran; refresh it for the current view.")
+            return
+        current_fp = tuple(self._session.calibration(*launched_target).fingerprint())
+        if tuple(current_fp) != tuple(launched_fp):
+            self._baseline_workspace.mark_preview_stale(
+                "Calibration changed while this comparison ran; refresh it before using it.")
+            return
+        if (self._selection_units() != launched_units or
+                self._baseline_workspace_current_recipe_signature() != launched_recipe):
+            self._baseline_workspace.mark_preview_stale(
+                "Baseline settings changed while this comparison ran; refresh it for "
+                "the controls now on screen.")
+            return
+        preview = obj.get("preview")
+        if not isinstance(preview, Mapping):
+            self._baseline_workspace.mark_preview_stale(
+                "The comparison did not contain plottable samples; refresh it again.")
+            return
+        warnings = tuple(str(item) for item in obj.get("warnings", ()) if str(item))
+        mode = str(obj.get("mode", ""))
+        self._baseline_workspace.set_preview(
+            np.asarray(preview.get("time_s", ())), np.asarray(preview.get("raw", ())),
+            np.asarray(preview.get("baseline", ())), np.asarray(preview.get("corrected", ())),
+            units=str(obj.get("units", "")), mode=mode,
+            message=self._baseline_workspace_note(
+                mode, bool(obj.get("runtime_enabled")), bool(obj.get("other_stages")), warnings),
+        )
 
     def _on_probe_requested(self) -> None:
         """Measure this recording's timescales off-thread and offer a proposal.
@@ -2654,7 +3259,11 @@ class AnalysisPanel(QtWidgets.QWidget):
         # re-attach to it on its next open and present a stale eta(t) / FDR as fresh.
         if target is not None and not self._session.has_document(target[0]):
             target = None
-        if pending == "probe":
+        if pending == "baseline_workspace_preview":
+            self._finish_baseline_workspace_preview(obj, target)
+        elif pending == "baseline_workspace_export":
+            self._finish_baseline_workspace_export(obj, target)
+        elif pending == "probe":
             # A probe belongs to the recording it was measured on. The user is free to
             # select another one while it runs, and a proposal that landed on the wrong
             # file would be applied to it with a confirming click -- the same class of
@@ -2743,6 +3352,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         # a busy widget that never comes back is indistinguishable from a hang, and
         # the panel refuses a second probe while it thinks one is in flight.
         self._baseline.set_busy(False)
+        if pending in ("baseline_workspace_preview", "baseline_workspace_export"):
+            self._baseline_workspace_job = None
+            self._baseline_workspace.set_busy(False)
+            self._baseline_workspace.set_status(
+                "Baseline correction could not finish; no comparison or export was applied.",
+                warning=True)
 
     def _on_controller_cancelled(self) -> None:
         self.forget_pending_job()
@@ -2767,6 +3382,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         # Same reason as in :meth:`_on_controller_failed`: an abandoned probe must
         # release the button, or Cancel leaves it saying "Measuring…" indefinitely.
         self._baseline.set_busy(False)
+        self._baseline_workspace_job = None
+        if hasattr(self, "_baseline_workspace"):
+            self._baseline_workspace.set_busy(False)
 
     def _show_sweep(self, sweep_df) -> None:
         try:
@@ -4202,6 +4820,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         # about what the numbers are computed from, not about what is drawn, so a chain
         # the user ticked with "show processed trace" OFF still has to reach it.
         self._push_measure_conditioning()
+        self._mark_baseline_workspace_runtime_change(params)
+        self._sync_baseline_workspace(params)
         # Recompute the preview if it is live and ANY stage is still on; clear when the
         # low-pass AND every pre-detection filter (notch / high-pass / detrend / savgol)
         # are off.
@@ -4660,6 +5280,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         # the calibrated signal.
         if self._detection.filter_preview.isChecked():
             self._update_filter_preview()
+        self._baseline_workspace.mark_preview_stale(
+            "Calibration changed — refresh the baseline comparison before relying on it.")
+        self._sync_baseline_workspace()
 
     def _on_baseline_params_changed(self, _params: dict[str, Any]) -> None:
         """The user edited (or applied a proposal to) the open-pore estimator.
@@ -4673,6 +5296,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         if res is not None:
             self._check_staleness(res)
         self._remember_baseline_mark()
+        self._baseline_workspace.mark_preview_stale(
+            "Open-pore baseline settings changed — refresh the comparison before relying on it.")
 
     def _clear_baseline_notice(self) -> None:
         """Drop the baseline panel's REFUSED notice when the panel is repointed.
@@ -4937,6 +5562,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._clear_baseline_notice()
         self._baseline.set_recording(None, _NOTHING_SELECTED)
         self._baseline.set_gate(False, "Select a CURRENT channel to measure its baseline.")
+        self._sync_baseline_workspace()
         self._clear_results()
 
 
