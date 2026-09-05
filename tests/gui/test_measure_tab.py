@@ -61,7 +61,7 @@ from nanoscope.gui.workflow_status import Stage
 FS = 100_000.0
 N = 100_000
 
-TAB_TITLES = ["Preprocess", "Detection", "ML detector", "Manual measurement"]
+TAB_TITLES = ["Preprocess", "Detection", "ML", "Measure"]
 MEASURE_TAB_INDEX = 3
 
 # Five clean 30 pA-deep squares the detector finds at a 1 ms dwell floor...
@@ -215,7 +215,8 @@ def test_manual_measurement_is_the_fourth_mode_tab(window):
     tabs = _mode_tabs(window)
     assert tabs.count() == 4
     assert [tabs.tabText(i) for i in range(4)] == TAB_TITLES
-    assert tabs.tabText(MEASURE_TAB_INDEX) == "Manual measurement"
+    assert tabs.tabText(MEASURE_TAB_INDEX) == "Measure"
+    assert "Manual measurement" in tabs.tabToolTip(MEASURE_TAB_INDEX)
     assert tabs.widget(MEASURE_TAB_INDEX) is _measure_page(window)
 
 
@@ -320,9 +321,9 @@ def test_the_measure_page_imposes_no_width_floor(window):
     assert (_measure_page(window).minimumSizeHint().width()
             < _mode_tabs(window).minimumSizeHint().width()), (
         "the measure page must not be what sets the tab widget's floor")
-    # ...and the ancestor that DOES clamp it reports a tiny minimum, as it must.
-    clamp = next(w for w in _ancestors(_mode_tabs(window), window._analysis_panel)
-                 if isinstance(w, QtWidgets.QScrollArea))
+    # Navigation stays outside the scroller; the per-page viewport now clamps
+    # content width without making the mode selector disappear while scrolling.
+    clamp = window._analysis_panel.detection_panel.page_scrolls[_measure_page(window)]
     assert clamp.widgetResizable()
     assert clamp.minimumSizeHint().width() <= _SMALL_ENOUGH_TO_SHRINK
 
@@ -748,7 +749,9 @@ def test_panels_module_still_imports_no_sibling_gui_panel():
             elif node.level == 0 and name.startswith("nanoscope.gui."):
                 reached.add(name.split(".")[2])
 
-    assert reached == set(), f"panels.py must import no sibling gui module; got {reached}"
+    # Pure layout helpers are shared; numerical/interactive sibling panels still
+    # belong to their existing owners and must not be constructed from panels.py.
+    assert reached <= {'inspector_widgets'}, f"panels.py imported a sibling panel: {reached}"
     # ...and the checker above really would catch the import it is standing guard over.
     guarded = ast.parse("from .measure_panel import MeasurePanel")
     assert any(isinstance(n, ast.ImportFrom) and n.level == 1

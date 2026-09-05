@@ -348,16 +348,16 @@ def test_highpass_preview_names_detector_rows_and_manual_processed_signal(qtbot)
     assert "Manual measurement" in tip and "including high-pass" in tip
 
 
-def test_whole_chain_preview_sits_immediately_under_execution_summary(qtbot):
+def test_whole_chain_preview_is_pinned_and_errors_stay_with_execution_summary(qtbot):
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     layout = panel.active_filters_label.parentWidget().layout()
-    assert (
-        layout.indexOf(panel.filter_preview)
-        == layout.indexOf(panel.active_filters_label) + 1)
+    # The existing checkbox is pinned above vertical scrolling; the summary and
+    # error still describe the same live chain on the settings page.
+    assert panel.page_actions[panel._preprocess_page].isAncestorOf(panel.filter_preview)
     assert (
         layout.indexOf(panel.preview_error_label)
-        == layout.indexOf(panel.filter_preview) + 1)
+        == layout.indexOf(panel.active_filters_label) + 1)
 
 
 def test_active_indicator_does_not_change_shown_page(qtbot):

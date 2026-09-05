@@ -1064,7 +1064,9 @@ class MeasurePanel(QtWidgets.QWidget):
         root.addWidget(title)
 
         # -- the cursor toggle + snap conveniences ------------------------
-        tools = QtWidgets.QHBoxLayout()
+        self.action_widget = QtWidgets.QWidget()
+        tools = QtWidgets.QGridLayout(self.action_widget)
+        tools.setContentsMargins(0, 0, 0, 0)
         self._toggle = QtWidgets.QPushButton("Measure event (cursors)")
         self._toggle.setCheckable(True)
         self._toggle.setToolTip(
@@ -1085,12 +1087,13 @@ class MeasurePanel(QtWidgets.QWidget):
             "Remove the live cursor mask. This never deletes a saved measurement or event.")
         self._clear_mask_btn.setEnabled(False)
         self._clear_mask_btn.clicked.connect(self.clear_mask)
-        tools.addWidget(self._toggle)
-        tools.addWidget(self._snap_view_btn)
-        tools.addWidget(self._snap_event_btn)
-        tools.addWidget(self._clear_mask_btn)
-        tools.addStretch(1)
-        root.addLayout(tools)
+        tools.addWidget(self._toggle, 0, 0, 1, 2)
+        tools.addWidget(self._snap_view_btn, 1, 0)
+        tools.addWidget(self._snap_event_btn, 1, 1)
+        tools.addWidget(self._clear_mask_btn, 2, 0, 1, 2)
+        tools.setColumnStretch(0, 1)
+        tools.setColumnStretch(1, 1)
+        root.addWidget(self.action_widget)
 
         # -- mark the current cursor selection as an event the DETECTOR missed --
         # A distinct action (own row) because it feeds the DETECTION event set, not the
@@ -1261,13 +1264,14 @@ class MeasurePanel(QtWidgets.QWidget):
         self._export_processed_button.clicked.connect(lambda: self.export_processed_trace())
         btn_grid.addWidget(self._add_button, 0, 0)
         btn_grid.addWidget(self._remove_button, 0, 1)
-        btn_grid.addWidget(self._export_button, 0, 2)
+        btn_grid.addWidget(self._export_button, 2, 0)
         btn_grid.addWidget(self._goto_button, 1, 0)
         btn_grid.addWidget(self._update_button, 1, 1)
-        btn_grid.addWidget(self._scope_check, 1, 2)
-        btn_grid.addWidget(self._markers_check, 2, 0)
-        btn_grid.addWidget(self._export_processed_button, 3, 0, 1, 3)
-        btn_grid.setColumnStretch(3, 1)
+        btn_grid.addWidget(self._scope_check, 3, 0)
+        btn_grid.addWidget(self._markers_check, 3, 1)
+        btn_grid.addWidget(self._export_processed_button, 2, 1)
+        btn_grid.setColumnStretch(0, 1)
+        btn_grid.setColumnStretch(1, 1)
         root.addLayout(btn_grid)
         self._sync_processed_export()
 

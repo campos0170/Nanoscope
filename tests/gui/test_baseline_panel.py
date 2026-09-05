@@ -214,16 +214,27 @@ def test_the_two_window_tooltips_state_the_constraint_that_sizes_them(panel):
     assert "521" in panel.rough_s.toolTip(), "cite the measurement, not an opinion"
 
 
-def test_the_button_row_is_scrolled_so_it_cannot_floor_the_docks_width(panel):
-    """An un-scrolled QHBoxLayout of QPushButtons inside a dock silently floors that
-    dock's minimum width -- ``QDockAreaLayout`` refuses to drag a separator past it,
-    and the signal viewer can then never be made wider. This app has been bitten
-    twice; the measure tool's three-button row had a hard 438 px floor."""
-    areas = panel.findChildren(QtWidgets.QScrollArea)
-    assert areas, "the action row must live inside a QScrollArea"
-    hosts = [a for a in areas if panel.probe_button in a.findChildren(QtWidgets.QPushButton)]
-    assert hosts, "the buttons are not inside the scroll area"
-    assert panel.minimumSizeHint().width() < 300, panel.minimumSizeHint().width()
+def test_page_scrolling_bounds_the_form_without_obscuring_its_actions(qapp, qtbot):
+    """The page now owns scrolling, not separate horizontal rows for each control.
+
+    Keep the dock-width contract and verify all three action faces fit at a normal
+    inspector width. Full-window dock resizing is covered in test_window_layout.
+    """
+    from nanoscope.gui.inspector_widgets import InspectorScrollArea
+
+    panel = BaselinePanel()
+    area = InspectorScrollArea(panel)
+    qtbot.addWidget(area)
+    area.resize(460, 700)
+    area.show()
+    QtWidgets.QApplication.processEvents()
+    assert area.minimumSizeHint().width() < 300
+    assert area.horizontalScrollBar().maximum() == 0
+    for button in (panel.probe_button, panel.apply_button, panel.reset_button):
+        area.ensureWidgetVisible(button)
+        QtWidgets.QApplication.processEvents()
+        assert button.visibleRegion().boundingRect().width() >= button.width() - 2
+        assert button.visibleRegion().boundingRect().height() >= button.height() - 2
 
 
 # ===========================================================================

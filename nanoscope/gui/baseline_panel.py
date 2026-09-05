@@ -52,10 +52,9 @@ THE UX RULES THIS CODEBASE ALREADY PAID FOR
   the form holds those numbers that they were accepted over a failed check. See
   :meth:`BaselinePanel._recompute_condemnation` for why this is a two-step and not a
   refusal.
-* **The button row is inside a** :class:`QScrollArea`. An un-scrolled ``QHBoxLayout``
-  of ``QPushButton`` s inside a dock silently floors that dock's minimum width, and
-  the signal viewer can then never be dragged wider -- this app has been bitten
-  twice, most recently by the measure tool's 438 px button row.
+* **The inspector page owns scrolling.** Actions use a two-row grid, so individual
+  button scrollbars cannot obscure them. The containing bounded page scroll keeps
+  this form's minimum width from becoming a minimum width for the entire dock.
 
 Signals:
     probeRequested(): "Measure this recording" clicked and nothing blocks it.
@@ -174,50 +173,6 @@ _ROUGH_RANGE = (0.002, 60.0)
 _BASE_RANGE = (0.001, 30.0)
 
 
-def _scroll_row(row: QtWidgets.QLayout) -> QtWidgets.QScrollArea:
-    """Put a horizontal button row behind a horizontal scrollbar.
-
-    Load-bearing, not cosmetic: a dock's ``minimumSize`` is the max of its contents'
-    layout minima, and ``QDockAreaLayout`` refuses to drag a separator past it, so an
-    un-scrolled button row permanently floors the whole dock's width.
-    """
-    host = QtWidgets.QWidget()
-    host.setLayout(row)
-    area = QtWidgets.QScrollArea()
-    area.setWidget(host)
-    area.setWidgetResizable(True)
-    area.setFrameShape(QtWidgets.QFrame.NoFrame)
-    area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-    area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-    area.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
-    area.setFixedHeight(host.sizeHint().height() + 4)
-    return area
-
-
-def _checkbox_row(box: QtWidgets.QCheckBox) -> QtWidgets.QScrollArea:
-    """One checkbox behind its own horizontal scroll, for the SAME dock-floor reason.
-
-    A `QCheckBox` cannot word-wrap, so its ``minimumSizeHint`` is its whole label —
-    and a panel's minimum is the max of its children's. Measured: adding the two view
-    boxes with their full sentences took `BaselinePanel.minimumSizeHint().width()`
-    from 236 to 332 px, which is a 332 px floor under the entire Inspector dock that
-    ``QDockAreaLayout`` will not let the owner drag past. The suite has a standing test
-    for exactly this (``test_the_button_row_is_scrolled_so_it_cannot_floor_the_docks_width``,
-    where the number is 300) because the app has been bitten twice already.
-
-    ONE BOX PER ROW, never both in one. Two in a row is 524 px of label, so at the
-    dock's real width the second would sit past the right edge behind a scrollbar
-    nothing advertises — which is how three named buttons on this very tab became
-    invisible. Alone, each row is 214 and 310 px against a viewport measured at 476 px
-    in the owner's own 1512x900 window: no scrollbar appears, and the floor is gone.
-    """
-    row = QtWidgets.QHBoxLayout()
-    row.setContentsMargins(0, 0, 0, 0)
-    row.addWidget(box)
-    row.addStretch(1)
-    return _scroll_row(row)
-
-
 class BaselinePanel(QtWidgets.QGroupBox):
     """Rough / base window spins, a measured proposal, and the health block.
 
@@ -246,7 +201,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
     subtractBaselineToggled = QtCore.Signal(bool)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__("Open-pore baseline", parent)
+        super().__init__("Event reference · open-pore baseline", parent)
         self.setToolTip(
             "How the open-pore current I0(t) is estimated. Every event's depth is "
             "measured against it, so these two windows decide the depth column. "
@@ -337,8 +292,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
             "stored result says whether anyone ever looked at this recording.")
         root.addWidget(self.source_label)
 
-        # -- actions (scrolled; see _scroll_row) -----------------------------
-        row = QtWidgets.QHBoxLayout()
+        # -- actions: one primary row and two secondary buttons --------------
+        row = QtWidgets.QGridLayout()
         row.setContentsMargins(0, 0, 0, 0)
         self.probe_button = QtWidgets.QPushButton("Measure this recording")
         self.probe_button.setToolTip(
@@ -359,10 +314,17 @@ class BaselinePanel(QtWidgets.QGroupBox):
             f"Return to the app default ({DEFAULT_BASELINE.rough_s:g} s / "
             f"{DEFAULT_BASELINE.base_s:g} s). A defensible floor for an unseen "
             f"recording, and provably wrong for some -- measure instead where you can.")
-        for b in (self.probe_button, self.apply_button, self.reset_button):
-            row.addWidget(b)
-        row.addStretch(1)
-        root.addWidget(_scroll_row(row))
+        row.addWidget(self.probe_button, 0, 0, 1, 2)
+        row.addWidget(self.apply_button, 1, 0)
+        row.addWidget(self.reset_button, 1, 1)
+        row.setColumnStretch(0, 1)
+        row.setColumnStretch(1, 1)
+        root.addLayout(row)
+        self.display_group = QtWidgets.QGroupBox('Trace display')
+        display_layout = QtWidgets.QVBoxLayout(self.display_group)
+        display_layout.setContentsMargins(8, 6, 8, 8)
+        display_layout.setSpacing(4)
+        root.addWidget(self.display_group)
 
         # -- SEEING IT (owner: "processing should be visible rather than occurring
         #    entirely in the background") ------------------------------------------
@@ -393,10 +355,10 @@ class BaselinePanel(QtWidgets.QGroupBox):
             "windows above, at the detection's polarity), not a redrawing of it. "
             "Measured cost on the 15 s -1000 mV apo recording: 70 ms, which is why "
             "this is a checkbox and not a button.")
-        root.addWidget(_checkbox_row(self.show_track))
+        display_layout.addWidget(self.show_track)
 
         self.subtract_view = QtWidgets.QCheckBox(
-            "Subtract it — show the signal minus its baseline")
+            "Subtract baseline (display only)")
         self.subtract_view.setToolTip(
             "Redraw the trace as signal minus baseline, centred on zero, with the "
             "y axis relabelled 'Δ vs baseline' for as long as it is on. Two things "
@@ -405,7 +367,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
             "-1000 pA, say) can finally be read on ONE y axis. It is a DRAWING, not a "
             "measurement -- no depth, no column and no export changes, because nothing "
             "is measured from a curve.")
-        root.addWidget(_checkbox_row(self.subtract_view))
+        display_layout.addWidget(self.subtract_view)
 
         # THE TWO THINGS CALLED "BASELINE", ten pixels apart, told apart on screen at
         # last. This group's estimator sets every depth_pA; "Signal filters ▸ Baseline
@@ -416,7 +378,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         # baseline he is looking at, and the answer belongs beside the boxes rather than
         # in a tooltip nobody hovers. Static: it is a caption, not a state.
         self.which_baseline_label = QtWidgets.QLabel(
-            "Draws the open-pore I₀ above — not the “Baseline drift” filter stage.")
+            "This open-pore reference is used to measure event depth.")
         self.which_baseline_label.setWordWrap(True)
         self.which_baseline_label.setStyleSheet("color:#8a939c;")
         self.which_baseline_label.setToolTip(

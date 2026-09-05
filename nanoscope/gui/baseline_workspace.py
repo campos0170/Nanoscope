@@ -22,6 +22,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
 from ..plot.style import BASELINE_TRACK_INK, PALETTE
+from .inspector_widgets import Disclosure
 
 __all__ = [
     "BaselineCorrectionWorkspace",
@@ -40,22 +41,6 @@ _WARN_CSS = f"color:{PALETTE['warn']};"
 _BUSY_CSS = "color:#56B4E9;"
 _RAW_INK = PALETTE["data"]
 _CORRECTED_INK = PALETTE["accent"]
-
-
-def _scroll_button_row(layout: QtWidgets.QHBoxLayout) -> QtWidgets.QScrollArea:
-    """Keep a wide action row from imposing a permanent dock-width floor."""
-    host = QtWidgets.QWidget()
-    host.setLayout(layout)
-    area = QtWidgets.QScrollArea()
-    area.setWidget(host)
-    area.setWidgetResizable(True)
-    area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-    area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-    area.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
-                       QtWidgets.QSizePolicy.Policy.Fixed)
-    area.setFixedHeight(host.sizeHint().height() + 4)
-    return area
 
 
 def _caption(text: str = "") -> QtWidgets.QLabel:
@@ -128,6 +113,8 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         self._preview_raw: np.ndarray | None = None
         self._preview_baseline: np.ndarray | None = None
         self._preview_corrected: np.ndarray | None = None
+        self._expanded_dialog = None
+        self._expanded_status = None
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -139,8 +126,11 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         # without scrolling through the new comparison workspace in the Inspector.
         # QLayout handles reparenting here.
         root.addWidget(self.baseline_panel)
+        if hasattr(self.baseline_panel, 'display_group'):
+            root.addWidget(self.baseline_panel.display_group)
         root.addWidget(self._build_contract_box(method_choices))
-        root.addWidget(self._build_actions())
+        self.action_widget = self._build_actions()
+        root.addWidget(self.action_widget)
         root.addWidget(self._build_preview_box())
 
         self.output_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
@@ -156,7 +146,7 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
     def _build_contract_box(
         self, method_choices: Iterable[tuple[str, str]]
     ) -> QtWidgets.QGroupBox:
-        box = QtWidgets.QGroupBox("Baseline correction")
+        box = QtWidgets.QGroupBox("Detection input · drift correction")
         box.setToolTip(
             "Open-pore baseline estimates the reference used for event depth; "
             "baseline drift correction is a runtime signal-chain transformation.")
@@ -168,7 +158,6 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         # sums label + combo minima and would floor the Inspector dock at ~400 px.
         # A narrow dock should show an ordinary horizontal scrollbar only where one
         # is genuinely needed, not permanently steal width from the signal viewer.
-        layout.addWidget(QtWidgets.QLabel("Comparison output"))
         self.output_mode_combo = QtWidgets.QComboBox()
         self.output_mode_combo.addItem("Inspect at zero — visual only", DISPLAY_ZERO)
         self.output_mode_combo.addItem("Correct drift — retain open-pore offset",
@@ -177,27 +166,27 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
             "Choose what the comparison's lower panel means. Inspect at zero is a "
             "display residual only. Correct drift keeps a representative open-pore "
             "offset and is the contract used by the signal-chain operation.")
-        layout.addWidget(self.output_mode_combo)
-
         self.contract_label = _caption()
         self.contract_label.setObjectName("baselineCorrectionContract")
-        layout.addWidget(self.contract_label)
 
         self.display_state_label = _caption()
         self.display_state_label.setObjectName("baselineDisplayState")
         self.display_state_label.setToolTip(
             "The state of the main trace, separate because trace display does not "
             "change detector input or processed-trace export.")
-        layout.addWidget(self.display_state_label)
+        if hasattr(self.baseline_panel, 'display_group'):
+            self.baseline_panel.display_group.layout().addWidget(self.display_state_label)
+        else:
+            layout.addWidget(self.display_state_label)
 
-        self.runtime_enabled = QtWidgets.QCheckBox("Enable runtime correction")
+        self.runtime_enabled = QtWidgets.QCheckBox("Apply drift correction")
         self.runtime_enabled.setToolTip(
             "Apply signal-chain baseline-drift correction before detection and when "
             "exporting the processed trace. It retains a representative open-pore "
             "offset; it does not use the zero-centred display residual.")
         layout.addWidget(self.runtime_enabled)
 
-        layout.addWidget(QtWidgets.QLabel("Runtime method"))
+        layout.addWidget(QtWidgets.QLabel("Correction method"))
         self.runtime_method = QtWidgets.QComboBox()
         self.runtime_method.setToolTip(
             "Estimator used by signal-chain drift correction. Advanced settings "
@@ -209,10 +198,11 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         layout.addWidget(self.runtime_method)
 
         self.runtime_note = _caption(
-            "When enabled, detection and processed export use the retained-offset "
-            "drift correction. It is separate from the open-pore reference below; "
-            "the ordinary Median filter is a despiker, not a baseline correction.")
+            "Retains an open-pore offset. The event reference and display settings "
+            "remain separate; the ordinary Median filter removes spikes.")
         layout.addWidget(self.runtime_note)
+        self.input_state_label = _caption()
+        layout.addWidget(self.input_state_label)
         return box
 
     def _build_preview_box(self) -> QtWidgets.QGroupBox:
@@ -223,6 +213,13 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(box)
         layout.setContentsMargins(8, 6, 8, 8)
         layout.setSpacing(4)
+        self._preview_layout = layout
+        layout.addWidget(QtWidgets.QLabel('Comparison output'))
+        layout.addWidget(self.output_mode_combo)
+        layout.addWidget(self.contract_label)
+        self._expanded_placeholder = _caption('Comparison is open in a separate window.')
+        self._expanded_placeholder.hide()
+        layout.addWidget(self._expanded_placeholder)
 
         self.preview = pg.GraphicsLayoutWidget()
         self.preview.setObjectName("baselineComparisonPreview")
@@ -265,10 +262,15 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
             "Choose a current recording, then refresh the comparison.")
         self.preview_status.setObjectName("baselinePreviewStatus")
         layout.addWidget(self.preview_status)
+        secondary = QtWidgets.QGridLayout()
+        secondary.addWidget(self.export_button, 0, 0)
+        secondary.addWidget(self.expand_button, 1, 0)
+        layout.addLayout(secondary)
         return box
 
-    def _build_actions(self) -> QtWidgets.QScrollArea:
-        actions = QtWidgets.QHBoxLayout()
+    def _build_actions(self) -> QtWidgets.QWidget:
+        host = QtWidgets.QWidget()
+        actions = QtWidgets.QVBoxLayout(host)
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(6)
         self.refresh_button = QtWidgets.QPushButton("Refresh comparison")
@@ -283,10 +285,56 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         self.advanced_button.setToolTip(
             "Open the baseline-drift page in Signal chain for runtime windows and "
             "method-specific controls.")
-        for button in (self.refresh_button, self.export_button, self.advanced_button):
-            actions.addWidget(button)
-        actions.addStretch(1)
-        return _scroll_button_row(actions)
+        actions.addWidget(self.refresh_button)
+        # The existing Advanced action reveals the authoritative signal-chain
+        # controls. It never creates a second owner for these parameters.
+        advanced_host = QtWidgets.QWidget()
+        advanced_layout = QtWidgets.QVBoxLayout(advanced_host)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        runtime_layout = self.runtime_note.parentWidget().layout()
+        runtime_layout.removeWidget(self.runtime_note)
+        advanced_layout.addWidget(self.runtime_note)
+        self.runtime_details = Disclosure('Correction details', advanced_host)
+        runtime_layout.addWidget(self.advanced_button)
+        runtime_layout.addWidget(self.runtime_details)
+        self.expand_button = QtWidgets.QPushButton('Expand comparison…')
+        self.expand_button.clicked.connect(self.expand_comparison)
+        return host
+
+    def expand_comparison(self) -> None:
+        """Enlarge the existing plots, preserving their arrays and live updates."""
+        if self._expanded_dialog is not None:
+            self._expanded_dialog.show()
+            self._expanded_dialog.raise_()
+            self._expanded_dialog.activateWindow()
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Baseline comparison')
+        dialog.resize(960, 720)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        self._preview_layout.removeWidget(self.preview)
+        self._expanded_placeholder.show()
+        layout.addWidget(self.preview, 1)
+        self._expanded_status = _caption(self.preview_status.text())
+        self._expanded_status.setStyleSheet(self.preview_status.styleSheet())
+        layout.addWidget(self._expanded_status)
+        close = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        close.rejected.connect(dialog.close)
+        layout.addWidget(close)
+        self._expanded_dialog = dialog
+        dialog.finished.connect(self._restore_compact_comparison)
+        dialog.show()
+
+    def _restore_compact_comparison(self, _result=0) -> None:
+        dialog = self._expanded_dialog
+        if dialog is None:
+            return
+        dialog.layout().removeWidget(self.preview)
+        self._preview_layout.insertWidget(4, self.preview)
+        self._expanded_placeholder.hide()
+        self._expanded_dialog = None
+        self._expanded_status = None
+        dialog.deleteLater()
 
     # -- state exposed to the owner -------------------------------------------------------------
     def output_mode(self) -> str:
@@ -506,6 +554,9 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
 
     # -- rendering helpers ----------------------------------------------------------------------
     def _refresh_contract_text(self) -> None:
+        self.input_state_label.setText(
+            'Drift correction is ON for detection and processed export.' if self._runtime_enabled
+            else 'Drift correction is OFF. Other enabled signal-chain stages still apply.')
         if self.output_mode() == DISPLAY_ZERO:
             self.contract_label.setText(
                 "Inspect at zero subtracts a fitted open-pore reference for a clearer "
@@ -531,6 +582,9 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
     def _set_preview_status(self, text: str, css: str) -> None:
         self.preview_status.setText(text)
         self.preview_status.setStyleSheet(css)
+        if self._expanded_status is not None:
+            self._expanded_status.setText(text)
+            self._expanded_status.setStyleSheet(css)
 
     @staticmethod
     def _as_vector(value: Any, name: str) -> np.ndarray:

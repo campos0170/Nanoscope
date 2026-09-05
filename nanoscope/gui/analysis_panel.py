@@ -958,74 +958,71 @@ class AnalysisPanel(QtWidgets.QWidget):
         # overlay checkbox is indistinguishable from a feature that no longer exists.
         self._detection.show_open_pore_baseline()
 
-        # Controls up top (scrollable so a small dock still reaches the buttons);
-        # the event table gets the remaining vertical space and scrolls natively.
-        controls = QtWidgets.QWidget()
-        clay = QtWidgets.QVBoxLayout(controls)
-        clay.setContentsMargins(0, 0, 0, 0)
-        clay.addWidget(self._detection)
-        clay.addWidget(self._stats)
-        clay.addWidget(self._score)
-        controls_scroll = _scroll_wrap(controls)
+        # Settings have their own bounded scrollers and persistent mode/actions.
+        # Results are an independent surface, so interpretation is never buried
+        # under whichever settings page happens to be active.
+        self._results_present = False
+        self._results_host = QtWidgets.QWidget()
+        results_layout = QtWidgets.QVBoxLayout(self._results_host)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.setSpacing(4)
+        self.results_toggle = QtWidgets.QToolButton()
+        self.results_toggle.setText("Results")
+        self.results_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.results_toggle.setCheckable(True)
+        self.results_toggle.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.results_toggle.setStyleSheet("QToolButton { text-align: left; padding: 4px; font-weight:600; }")
+        results_layout.addWidget(self.results_toggle)
+        self._results_empty = QtWidgets.QLabel("Run detection to see events, summaries and quality scores.")
+        self._results_empty.setWordWrap(True)
+        self._results_empty.setStyleSheet("color:#8b9199;")
+        results_layout.addWidget(self._results_empty)
+        self._result_notice = QtWidgets.QLabel()
+        self._result_notice.setWordWrap(True)
+        self._result_notice.setOpenExternalLinks(False)
+        self._result_notice.linkActivated.connect(lambda _link: self.show_result_summary())
+        self._result_notice.hide()
+        results_layout.addWidget(self._result_notice)
+        self.results_tabs = QtWidgets.QTabWidget()
+        self.results_tabs.setMinimumSize(0, 0)
+        self.results_tabs.setElideMode(QtCore.Qt.ElideRight)
+        results_layout.addWidget(self.results_tabs, 1)
 
-        # THE MERGE CONTROLS DO NOT LIVE IN THAT COLUMN. Measured on the shipped default
-        # layout — a fresh QSettings profile, MainWindow at the owner's 1512x900, Inspector
-        # 460 px — the controls column is a 420x511 viewport onto 836x2508 of content, and
-        # ``MergePanel`` was its LAST child: "Merge all" sat at x=745..825, y=2440..2465,
-        # i.e. 1997 px below the fold AND 405 px right of it. Reaching the only batch merge
-        # in the application meant dragging the horizontal scrollbar to 393/416 and the
-        # vertical one to its end at the same time; nothing of it was on screen otherwise,
-        # and there is no menu item or shortcut for it. That is not a merge panel a user
-        # finds. (The width came from a sibling three tabs away — a preset combo sized to a
-        # 115-character item stretched the whole column to 836 px — so no edit inside
-        # ``merge_panel.py`` could have brought it back on screen either.)
-        #
-        # It goes with the EVENT TABLE instead, which is the thing it edits: a fixed strip
-        # directly above the table, outside the deep scroll, at a screen position that does
-        # not move. Measured after: 421x95 at y=0 of its own pane, "Merge all" fully inside
-        # the viewport, both scrollbar maxima 0.
-        #
-        # THE WRAP IS LOAD-BEARING, for the same reason ``measure_scroll`` above is. Taken
-        # out of the scrolled column, ``MergePanel``'s own 252 px layout minimum (an
-        # un-shrinkable "Merge events in selection" button) would become a floor under this
-        # panel, the Analysis page, the tab widget and finally ``QDockWidget::minimumSize``
-        # — the bound ``QDockAreaLayout`` will not drag a separator past — and the Inspector
-        # would stop shrinking below ~270 px. Wrapped, it demands nothing and simply scrolls
-        # if the dock is dragged narrower than it.
-        #
-        # THE HEIGHT IS PINNED AND THE SCROLLBAR'S ROOM IS RESERVED. ``_pin_scroll_height``
-        # gives the strip its natural height plus the height of a horizontal scrollbar that
-        # is not there yet, as ONE quantity: it is both the area's maximum and (via a
-        # trailing spacer of exactly that height, appended to this layout) the sizeHint the
-        # pane's QVBoxLayout grants. So dragging the dock narrow enough to need that
-        # scrollbar spends the reserved space instead of re-flowing the group — a button
-        # never moves out from under the pointer. There is deliberately no ``addStretch``
-        # here: a stretch contributes 0 to the sizeHint, which is exactly how the room came
-        # to be reserved on paper and never granted (see the helper's docstring).
+        events_page = QtWidgets.QWidget()
+        event_layout = QtWidgets.QVBoxLayout(events_page)
+        event_layout.setContentsMargins(0, 0, 0, 0)
+        event_layout.setSpacing(4)
         merge_host = QtWidgets.QWidget()
-        mlay = QtWidgets.QVBoxLayout(merge_host)
-        mlay.setContentsMargins(0, 0, 0, 0)
-        mlay.setSpacing(0)
-        mlay.addWidget(self._merge)
+        merge_layout = QtWidgets.QVBoxLayout(merge_host)
+        merge_layout.setContentsMargins(0, 0, 0, 0)
+        merge_layout.addWidget(self._merge)
+        from .inspector_widgets import Disclosure, InspectorScrollArea
         merge_scroll = _scroll_wrap(merge_host)
         _pin_scroll_height(merge_scroll, merge_host)
-
-        # The event table STAYS below the tabs: it is the shared result surface every
-        # detector — Schmitt, ML, and a hand-marked missed event — feeds. The merge strip
-        # rides with it, above it, in the same splitter pane.
-        results = QtWidgets.QWidget()
-        rlay = QtWidgets.QVBoxLayout(results)
-        rlay.setContentsMargins(0, 0, 0, 0)
-        rlay.setSpacing(6)
-        rlay.addWidget(merge_scroll)
-        rlay.addWidget(self._table, 1)
-
-        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        split.addWidget(controls_scroll)
-        split.addWidget(results)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        root.addWidget(split, 1)
+        merge_scroll.setMinimumHeight(merge_scroll.maximumHeight())
+        self.merge_details = Disclosure('Merge sub-events', merge_scroll)
+        event_layout.addWidget(self.merge_details)
+        # Keep the stored-result selector beside the table even when the optional
+        # merge controls are folded. These remain the original live widgets.
+        for label in self._merge.findChildren(QtWidgets.QLabel):
+            if label.text() == 'Table':
+                label.hide()
+        self._table.column_toolbar.insertWidget(0, QtWidgets.QLabel('Table'))
+        self._table.column_toolbar.insertWidget(1, self._result_selector, 1)
+        event_layout.addWidget(self._table, 1)
+        self.results_tabs.addTab(events_page, "Events")
+        self.results_tabs.addTab(InspectorScrollArea(self._stats), "Summary")
+        self.results_tabs.addTab(InspectorScrollArea(self._stats.fits_page), "Fits")
+        self.results_tabs.addTab(InspectorScrollArea(self._score), "Quality")
+        self._results_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self._results_splitter.setChildrenCollapsible(False)
+        self._results_splitter.addWidget(self._detection)
+        self._results_splitter.addWidget(self._results_host)
+        self._results_splitter.setStretchFactor(0, 3)
+        self._results_splitter.setStretchFactor(1, 2)
+        root.addWidget(self._results_splitter, 1)
+        self.results_toggle.toggled.connect(self._set_results_expanded)
+        self._sync_results_presence(False)
 
         # -- panel signals ---------------------------------------------------------------------
         self._detection.detectRequested.connect(self._on_detect_requested)
@@ -3435,6 +3432,41 @@ class AnalysisPanel(QtWidgets.QWidget):
         elif module_id in ("fit.dwell", "fit.depth"):
             self._refresh_fit_text()
 
+    def _set_results_expanded(self, expanded: bool) -> None:
+        """Change only result-panel geometry; every result/control remains alive."""
+        expanded = bool(expanded and self._results_present)
+        self.results_toggle.setArrowType(
+            QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+        self.results_tabs.setVisible(expanded)
+        self._results_empty.setVisible(not self._results_present)
+        if expanded:
+            self._results_host.setMaximumHeight(16777215)
+            total = max(600, sum(self._results_splitter.sizes()))
+            self._results_splitter.setSizes([int(total * .55), int(total * .45)])
+        else:
+            self._results_host.setMaximumHeight(self._results_host.sizeHint().height())
+
+    def _sync_results_presence(self, present: bool, count: int = 0) -> None:
+        changed = self._results_present != present
+        self._results_present = present
+        self.results_toggle.setEnabled(present)
+        self.results_toggle.setText(f'Results · {count} events' if present else 'Results')
+        if not present:
+            self._result_notice.hide()
+        if changed or not present:
+            self.results_toggle.setChecked(present)
+            self._set_results_expanded(present)
+        elif not self.results_toggle.isChecked():
+            self._set_results_expanded(False)
+
+    def show_result_summary(self) -> None:
+        """Reveal the existing summary/fit controls without rerunning analysis."""
+        if self._results_present:
+            self.results_toggle.setChecked(True)
+            self.results_tabs.setCurrentIndex(1)
+            if not self._stats.warnings_label.isHidden():
+                self.results_tabs.widget(1).ensureWidgetVisible(self._stats.warnings_label)
+
     def _show_result(self, res: AnalysisResult) -> None:
         events = res.payload
         if not isinstance(events, EventSet):
@@ -3474,6 +3506,13 @@ class AnalysisPanel(QtWidgets.QWidget):
         # so the reason to keep the push here is what a warning is ABOUT, not what is
         # reachable from there. An earlier version of this comment claimed the latter.)
         self._stats.set_warnings(res.warnings)
+        self._result_notice.setText(
+            f'<a style="color:#ffb454" href="summary">'
+            f'Analysis warnings ({len(res.warnings)}) — review Summary</a>'
+            if res.warnings else '')
+        self._result_notice.setToolTip('\n\n'.join(str(item) for item in res.warnings))
+        self._result_notice.setVisible(bool(res.warnings))
+        self._sync_results_presence(True, len(events.df))
         prov = events.provenance or {}
         # Pushed on EVERY result, present or absent (see `_show_polarity_evidence`) —
         # a detection whose provenance recorded no measurement is not a reason to keep
@@ -5492,6 +5531,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         means "do not judge", so with the last document closed they still described it.
         """
         self._table.set_events(_empty_events())
+        self._sync_results_presence(False)
         self._table.set_stale_columns(())
         # WHICH CLOCK the (now empty) table's t-columns are labelled on. `_show_result`
         # pushes this on every result for exactly this reason: the offset is a property

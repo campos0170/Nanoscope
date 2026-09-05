@@ -45,7 +45,7 @@ from nanoscope.gui.workflow_status import Stage
 FS = 50_000.0
 N = 20_000
 
-TAB_TITLES = ["Preprocess", "Detection", "ML detector", "Manual measurement"]
+TAB_TITLES = ["Preprocess", "Detection", "ML", "Measure"]
 
 # The three groups of widget attributes, keyed by the tab page they must live on.
 PREPROCESS_ATTRS = [
@@ -201,11 +201,12 @@ def test_the_measure_page_is_an_empty_container_until_an_owner_fills_it(qtbot):
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     assert panel.mode_tabs.widget(3) is panel._measure_page
-    assert panel._measure_page.layout().count() == 0
+    assert panel._measure_actions.layout().count() == 0
+    assert panel._measure_page not in panel.page_scrolls
 
     installed = QWidget()
     panel.set_measure_widget(installed)
-    assert installed.parentWidget() is panel._measure_page
+    assert panel.page_scrolls[panel._measure_page].widget() is installed
     assert panel.mode_tabs.count() == 4          # installed INTO the page, not as a 5th tab
     assert [panel.mode_tabs.tabText(i) for i in range(4)] == TAB_TITLES
 

@@ -39,6 +39,8 @@ never a signed feature.
 
 from __future__ import annotations
 
+import json
+
 import os
 import re
 import warnings
@@ -96,6 +98,8 @@ from PySide6.QtWidgets import (
 )
 
 import pyqtgraph as pg
+
+from .inspector_widgets import Disclosure, InspectorScrollArea, PinnedActions, host_layout
 
 from ..core import clock
 from ..analysis import events as events_mod
@@ -352,33 +356,71 @@ class _ElidingCheckBox(QCheckBox):
         QStylePainter(self).drawControl(QStyle.ControlElement.CE_CheckBox, opt)
 
 
-class _CurrentPageStackedWidget(QStackedWidget):
-    """A stack whose vertical size follows the page the user can actually see.
+class _CurrentPageStackedWidget(QWidget):
+    """Stack-compatible layout whose hidden pages consume no vertical space.
 
-    Qt's stock ``QStackedWidget`` reports the maximum size hint of every page. That is
-    useful for a fixed dialog, but inside the Inspector's scroll area it made the short
-    Open-pore baseline subsection reserve the full Signal-chain height and leave a large
-    blank region below its controls. Width remains the stack-wide maximum so subsection
-    switches do not make the narrow dock jitter horizontally.
+    QStackedLayout's height-for-width calculation includes inactive long captions.
+    A normal box layout excludes hidden pages, including their height-for-width,
+    while the small public stack API keeps navigation independent of parameter state.
     """
+
+    currentChanged = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.currentChanged.connect(lambda _index: self.updateGeometry())
+        self._pages = []
+        self._current = -1
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-    def sizeHint(self) -> QSize:  # noqa: D102 - Qt override
-        overall = super().sizeHint()
-        page = self.currentWidget()
-        if page is None:
-            return overall
-        return QSize(overall.width(), page.sizeHint().height())
+    def addWidget(self, widget) -> int:  # noqa: N802
+        self._pages.append(widget)
+        self.layout().addWidget(widget)
+        widget.hide()
+        if self._current < 0:
+            self.setCurrentIndex(0)
+        return len(self._pages) - 1
 
-    def minimumSizeHint(self) -> QSize:  # noqa: D102 - Qt override
-        overall = super().minimumSizeHint()
-        page = self.currentWidget()
-        if page is None:
-            return overall
-        return QSize(overall.width(), page.minimumSizeHint().height())
+    def count(self) -> int:
+        return len(self._pages)
+
+    def widget(self, index: int):
+        return self._pages[index] if 0 <= index < self.count() else None
+
+    def currentIndex(self) -> int:  # noqa: N802
+        return self._current
+
+    def currentWidget(self):  # noqa: N802
+        return self.widget(self._current)
+
+    def setCurrentWidget(self, widget) -> None:  # noqa: N802
+        if widget in self._pages:
+            self.setCurrentIndex(self._pages.index(widget))
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802
+        if index == self._current or not 0 <= index < self.count():
+            return
+        if self.currentWidget() is not None:
+            self.currentWidget().hide()
+        self._current = index
+        self.currentWidget().show()
+        self.layout().invalidate()
+        self.updateGeometry()
+        self.currentChanged.emit(index)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        current = self.currentWidget()
+        if current is None:
+            return QSize(0, 0)
+        return QSize(max(p.sizeHint().width() for p in self._pages), current.sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        current = self.currentWidget()
+        if current is None:
+            return QSize(0, 0)
+        return QSize(max(p.minimumSizeHint().width() for p in self._pages),
+                     current.minimumSizeHint().height())
 
 
 class DetectionPanel(QWidget):
@@ -804,6 +846,8 @@ class DetectionPanel(QWidget):
         self.hp_cutoff_hz.setSuffix(" Hz")
         self.hp_cutoff_hz.setKeyboardTracking(False)
         _hp_warning = (
+            "High-pass filtering removes slow drift/DC and distorts square-event shapes "
+            "on the candidate-localization trace. "
             "Used by classical Schmitt/CUSUM for CANDIDATE LOCALIZATION only. The "
             "orange preview and candidate-response plot include it; quantitative "
             "baseline, depth, fractional blockade, mean/max amplitude and SNR are "
@@ -1584,7 +1628,7 @@ class DetectionPanel(QWidget):
 
         # The two detectors' PRIVATE thresholds, on a sub-stack. Everything below the
         # stack (dwell limits, merge gap, range, polarity) is shared and appears once.
-        self.detector_stack = QStackedWidget()
+        self.detector_stack = _CurrentPageStackedWidget()
 
         schmitt_page = QWidget()
         schmitt_form = QFormLayout(schmitt_page)
@@ -2116,6 +2160,129 @@ class DetectionPanel(QWidget):
         self._refresh_active_filters()   # initial combo markers + summary (all off)
         self._on_filter_kind_changed()   # Gaussian has no order -> gate the spin
         self._update_response_plot()     # initial curve (no fs yet -> the "select a channel" note)
+        self._organize_inspector_pages()
+
+    def _organize_inspector_pages(self) -> None:
+        """Pin navigation/actions; move only the settings into independent scrollers.
+
+        Every original parameter widget stays alive and connected. Disclosure and
+        page changes cannot apply presets, toggle filters, or emit parameter edits.
+        """
+        self.setMinimumSize(0, 0)
+        root = self.layout()
+        root.setContentsMargins(0, 0, 0, 0)
+        # The old trailing stretch competed with the active page for space.
+        for i in reversed(range(root.count())):
+            if root.itemAt(i).spacerItem() is not None:
+                root.takeAt(i)
+        root.removeWidget(self._gate_host)
+        root.addWidget(self._gate_host)
+        self._gate_host.setVisible(not self._gate_label.isHidden())
+        root.setStretch(root.indexOf(self.mode_tabs), 1)
+        self.mode_tabs.setTabText(2, 'ML')
+        self.mode_tabs.setTabText(3, 'Measure')
+        self.mode_tabs.setTabToolTip(2, 'Machine-learning detection and its model preprocessing')
+        self.mode_tabs.setTabToolTip(3, 'Manual measurement with trace cursors')
+        self.mode_tabs.setElideMode(Qt.ElideRight)
+        self.mode_tabs.setMinimumSize(0, 0)
+        self.page_scrolls = {}
+        self.page_actions = {}
+        for page in (self._preprocess_page, self._detection_page, self._ml_page, self._measure_page):
+            old_layout = page.layout()
+            # Measure is filled by AnalysisPanel after construction.
+            if page is self._measure_page:
+                self._measure_actions = QWidget()
+                self._measure_actions.setLayout(QVBoxLayout())
+                self._measure_actions.layout().setContentsMargins(0, 0, 0, 0)
+                self._measure_action_scroll = PinnedActions(self._measure_actions)
+                old_layout.addWidget(self._measure_action_scroll)
+                continue
+            content = host_layout(old_layout)
+            old_layout.setAlignment(Qt.AlignTop)
+            for i in reversed(range(old_layout.count())):
+                if old_layout.itemAt(i).spacerItem() is not None:
+                    old_layout.takeAt(i)
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(4, 4, 4, 4)
+            layout.setSpacing(6)
+            actions = QWidget()
+            action_layout = QVBoxLayout(actions)
+            action_layout.setContentsMargins(0, 0, 0, 0)
+            action_layout.setSpacing(4)
+            action_scroll = PinnedActions(actions)
+            layout.addWidget(action_scroll)
+            self.page_actions[page] = actions
+            if page is self._preprocess_page:
+                # Keep the subsection selector beside the persistent navigation.
+                item = old_layout.takeAt(0)
+                action_layout.addLayout(item.layout())
+                self._preprocess_actions = _CurrentPageStackedWidget()
+                chain_actions = QWidget()
+                chain_layout = QVBoxLayout(chain_actions)
+                chain_layout.setContentsMargins(0, 0, 0, 0)
+                chain_layout.addWidget(self.filter_preview)
+                baseline_actions = QWidget()
+                baseline_actions.setLayout(QVBoxLayout())
+                baseline_actions.layout().setContentsMargins(0, 0, 0, 0)
+                self._baseline_actions_layout = baseline_actions.layout()
+                self._preprocess_actions.addWidget(chain_actions)
+                self._preprocess_actions.addWidget(baseline_actions)
+                self.preprocess_section_selector.currentIndexChanged.connect(
+                    self._preprocess_actions.setCurrentIndex)
+                self._preprocess_actions.setCurrentIndex(self.preprocess_section_selector.currentIndex())
+                action_layout.addWidget(self._preprocess_actions)
+            elif page is self._detection_page:
+                item = old_layout.takeAt(0)  # the existing 2x2 action grid
+                action_layout.addLayout(item.layout())
+                # Advanced options retain their exact objects, values and signals.
+                advanced = QWidget()
+                form = QFormLayout(advanced)
+                form.setContentsMargins(0, 0, 0, 0)
+                form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+                for control in (self.max_dwell_s, self.merge_gap_ms):
+                    source = control.parentWidget().layout()
+                    row = source.takeRow(control)
+                    form.addRow(row.labelItem.widget(), row.fieldItem.widget())
+                polarity_box = self.polarity_override.parentWidget()
+                old_layout.removeWidget(polarity_box)
+                form.addRow(polarity_box)
+                self.detection_advanced = Disclosure('Advanced detection settings', advanced)
+                old_layout.addWidget(self.detection_advanced)
+                self.detection_advanced_summary = QLabel()
+                self.detection_advanced_summary.setWordWrap(True)
+                self.detection_advanced_summary.setStyleSheet('color:#8b9199;')
+                old_layout.addWidget(self.detection_advanced_summary)
+                self.paramsChanged.connect(self._refresh_detection_advanced_summary)
+                self._refresh_detection_advanced_summary()
+            else:
+                # Run always stays in view; the model gate stays next to its action.
+                source = self.ml_detect_button.parentWidget().layout()
+                source.takeRow(self.ml_detect_button)
+                source.takeRow(self._ml_gate_host)
+                action_layout.addWidget(self.ml_detect_button)
+                action_layout.addWidget(self._ml_gate_host)
+                # Decoding is a specialist form. Keep the model/preset and its
+                # pipeline warnings outside the disclosure.
+                decode = next((old_layout.itemAt(i).widget() for i in range(old_layout.count())
+                               if isinstance(old_layout.itemAt(i).widget(), QGroupBox)
+                               and 'decod' in old_layout.itemAt(i).widget().title().lower()), None)
+                if decode is not None:
+                    old_layout.removeWidget(decode)
+                    self.ml_advanced = Disclosure('Advanced ML decoding', decode)
+                    old_layout.addWidget(self.ml_advanced)
+            for form in content.findChildren(QFormLayout):
+                form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            old_layout.addStretch(1)
+            action_scroll._sync_height()
+            scroll = InspectorScrollArea(content)
+            layout.addWidget(scroll, 1)
+            self.page_scrolls[page] = scroll
+
+    def _refresh_detection_advanced_summary(self, *_args) -> None:
+        self.detection_advanced_summary.setText(
+            f'Max dwell: {self.max_dwell_s.value():g} s (0 = off) · '
+            f'Merge gap: {self.merge_gap_ms.value():g} ms (0 = off) · '
+            f'Polarity: {self.polarity_override.currentText()}')
 
     # -- ML tab: the model's OWN preprocessing + decode ---------------------
     # These two groups are the ML detector's whole signal chain. They exist because a
@@ -3137,7 +3304,19 @@ class DetectionPanel(QWidget):
         into ``QDockWidget::minimumSize()``, which is the bound the Inspector dock cannot be
         dragged past.
         """
-        self._measure_layout.addWidget(widget)
+        # A caller may pass the older scroll wrapper; preserve the live panel and
+        # provide the same bounded viewport used by the other modes.
+        from PySide6.QtWidgets import QScrollArea
+        panel = widget.takeWidget() if isinstance(widget, QScrollArea) else widget
+        if panel is not widget:
+            widget.deleteLater()
+        actions = getattr(panel, 'action_widget', None)
+        if actions is not None:
+            self._measure_actions.layout().addWidget(actions)
+            self._measure_action_scroll._sync_height()
+        scroll = InspectorScrollArea(panel)
+        self._measure_layout.addWidget(scroll, 1)
+        self.page_scrolls[self._measure_page] = scroll
 
     def set_baseline_widget(self, widget: QWidget) -> None:
         """Install the owner's controls in the Open-pore baseline subsection.
@@ -3147,6 +3326,11 @@ class DetectionPanel(QWidget):
         keeps this reference estimator distinct from the Baseline drift filter stage.
         """
         self._baseline_slot.addWidget(widget)
+        actions = getattr(widget, 'action_widget', None)
+        if actions is not None:
+            self._baseline_actions_layout.addWidget(actions)
+            for scroll in self._preprocess_page.findChildren(PinnedActions):
+                scroll._sync_height()
 
     def set_recording(self, fs: float | None) -> None:
         """Tell the panel the sampling rate so the rise-time readout is real.
@@ -3237,6 +3421,7 @@ class DetectionPanel(QWidget):
             btn.setEnabled(bool(runnable))
         self._gate_label.setText("" if runnable else reason)
         self._gate_label.setVisible(bool(reason) and not runnable)
+        self._gate_host.setVisible(bool(reason) and not runnable)
 
     # -- ML detector ------------------------------------------------------
     def browse_model(self) -> None:
@@ -3534,6 +3719,7 @@ class DetectionPanel(QWidget):
             msg = ""
         self.ml_gate_label.setText(msg)
         self.ml_gate_label.setVisible(bool(msg))
+        self._ml_gate_host.setVisible(bool(msg))
 
     def set_polarity_evidence(self, evidence: dict[str, Any]) -> None:
         """Show the measured polarity evidence from ``detect_polarity`` (carried in
@@ -5426,7 +5612,11 @@ class StatsPanel(QWidget):
         fit_form.addRow("", self.filter_limited_label)
         fit_form.addRow(self.fit_button)
         fit_form.addRow("", self._fit_gate_label)
-        root.addWidget(fit_box)
+        self.fits_page = QWidget()
+        fits_layout = QVBoxLayout(self.fits_page)
+        fits_layout.setContentsMargins(0, 0, 0, 0)
+        fits_layout.addWidget(fit_box)
+        root.addWidget(self.fits_page)
         self.set_detection_present(False)
 
         # -- results text -------------------------------------------------
@@ -5437,7 +5627,7 @@ class StatsPanel(QWidget):
         mono.setFamily("monospace")
         self.results.setFont(mono)
         self.results.setPlaceholderText("Fit results appear here.")
-        root.addWidget(self.results, 1)
+        fits_layout.addWidget(self.results, 1)
 
         self.fit_button.clicked.connect(
             lambda: self.fitRequested.emit(
@@ -7111,9 +7301,34 @@ class EventTable(QWidget):
     inspectRequested = Signal(int)
     galleryRequested = Signal(int)
 
+    _COLUMN_SETTINGS_KEY = 'inspector/event_columns_v1'
+    _SCIENTIFIC_ORDER = ('accepted', 't_start_s', 'dwell_s', 'depth_pA',
+                         'frac_depth', 'flag', 'baseline_pA', 'snr',
+                         'filter_limited', 'event_id')
+    _DEFAULT_HIDDEN = frozenset(('start_idx', 'end_idx'))
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+        self._applying_columns = False
+        try:
+            saved = json.loads(str(QSettings().value(self._COLUMN_SETTINGS_KEY, '{}')))
+            self._column_preferences = saved if isinstance(saved, dict) else {}
+        except (ValueError, TypeError):
+            self._column_preferences = {}
+        toolbar = QHBoxLayout()
+        self.column_toolbar = toolbar
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.addStretch(1)
+        self.columns_button = QPushButton('Columns…')
+        self.columns_button.setToolTip('Choose visible columns. Drag column headers to reorder; the view is remembered.')
+        self.columns_menu = QMenu(self.columns_button)
+        self.columns_menu.aboutToShow.connect(self._build_columns_menu)
+        self.columns_button.setMenu(self.columns_menu)
+        toolbar.addWidget(self.columns_button)
+        root.addLayout(toolbar)
 
         # THE CONSTANT COLUMNS, SAID ONCE. See :meth:`_demote_constant_columns` — this
         # is where their single value goes so that demoting them loses nothing.
@@ -7167,6 +7382,8 @@ class EventTable(QWidget):
         self._proxy = _VectorSortProxy(self)
         self._proxy.setSourceModel(self._model)
         self.view.setModel(self._proxy)
+        self.view.horizontalHeader().setSectionsMovable(True)
+        self.view.horizontalHeader().sectionMoved.connect(self._save_column_preferences)
 
         root.addWidget(self.view)
 
@@ -7252,10 +7469,70 @@ class EventTable(QWidget):
             # survives this re-feed is the owner's call (it survives an undo and a merge,
             # and dies with a new detection), not this widget's.
             self._refusals = _RefusalLedger()
-        self._model.set_df(df)
-        self._autosize_columns()
-        self._demote_constant_columns(df)
+        self._applying_columns = True
+        try:
+            self._model.set_df(df)
+            self._autosize_columns()
+            self._demote_constant_columns(df)
+            self._apply_column_preferences()
+        finally:
+            self._applying_columns = False
         self._sync_refusal_note()
+
+    def _apply_column_preferences(self) -> None:
+        """Change header order/visibility only; the source schema is untouched."""
+        columns = list(self._model.df.columns)
+        preferred = self._column_preferences.get('order', list(self._SCIENTIFIC_ORDER))
+        if not isinstance(preferred, list):
+            preferred = list(self._SCIENTIFIC_ORDER)
+        order = list(dict.fromkeys(name for name in preferred if name in columns))
+        order.extend(name for name in columns if name not in order)
+        hidden = self._column_preferences.get('hidden', list(self._DEFAULT_HIDDEN))
+        if not isinstance(hidden, list):
+            hidden = list(self._DEFAULT_HIDDEN)
+        header = self.view.horizontalHeader()
+        self._applying_columns = True
+        try:
+            for visual, name in enumerate(order):
+                logical = columns.index(name)
+                header.moveSection(header.visualIndex(logical), visual)
+                self.view.setColumnHidden(logical, name in hidden)
+        finally:
+            self._applying_columns = False
+
+    def _save_column_preferences(self, *_args) -> None:
+        if self._applying_columns or self._model.df.empty and not len(self._model.df.columns):
+            return
+        columns = list(self._model.df.columns)
+        header = self.view.horizontalHeader()
+        if header.count() != len(columns):
+            return
+        order = [columns[header.logicalIndex(i)] for i in range(header.count())]
+        hidden = [name for i, name in enumerate(columns) if self.view.isColumnHidden(i)]
+        self._column_preferences = {'order': order, 'hidden': hidden}
+        QSettings().setValue(self._COLUMN_SETTINGS_KEY, json.dumps(self._column_preferences))
+
+    def set_column_visible(self, name: str, visible: bool) -> None:
+        columns = list(self._model.df.columns)
+        if name in columns:
+            self.view.setColumnHidden(columns.index(name), not visible)
+            self._save_column_preferences()
+
+    def reset_column_view(self) -> None:
+        self._column_preferences = {}
+        QSettings().remove(self._COLUMN_SETTINGS_KEY)
+        self._apply_column_preferences()
+
+    def _build_columns_menu(self) -> None:
+        self.columns_menu.clear()
+        reset = self.columns_menu.addAction('Restore scientific column order')
+        reset.triggered.connect(self.reset_column_view)
+        self.columns_menu.addSeparator()
+        for i, name in enumerate(self._model.df.columns):
+            action = self.columns_menu.addAction(str(name))
+            action.setCheckable(True)
+            action.setChecked(not self.view.isColumnHidden(i))
+            action.toggled.connect(lambda checked, column=name: self.set_column_visible(column, checked))
 
     #: How many rows :meth:`_autosize_columns` measures — spread over the WHOLE frame,
     #: so a wide value in the tail still widens its column (Qt's own pass read only the
@@ -7341,8 +7618,8 @@ class EventTable(QWidget):
                 continue
             logical = cols.index(name)
             visual = header.visualIndex(logical)
-            if visual >= 0 and visual != header.count() - 1:
-                header.moveSection(visual, header.count() - 1)
+            # The scientific default / remembered header layout owns ordering.
+            # This method now only presents the constant identity values once.
             value = "" if not len(series) else str(series.iloc[0] or "")
             # An EMPTY constant carries nothing to state. It is still demoted (a blank
             # full-width string column is the worst of both) but it earns no caption:
