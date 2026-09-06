@@ -156,10 +156,11 @@ def test_state_validation_and_widget_restore(qtbot):
     widget.set_state(state)
     assert widget.state() == state
     assert changes == []
-    assert widget.background.isHidden()
+    assert not widget.background.isHidden()
+    assert not widget.preset.isHidden()
+    assert widget.data_color.isHidden() and widget.fit_color.isHidden()
     assert widget.data_color.isHidden()
     assert widget.fit_color.isHidden()
-    assert widget.preset.isHidden()
 
 
 def test_compact_widget_fits_narrow_sidebar(qtbot):

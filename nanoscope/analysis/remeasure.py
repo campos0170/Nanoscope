@@ -469,14 +469,21 @@ def curation_snapshot(df: pd.DataFrame) -> pd.DataFrame:
     ``review`` joins the snapshot when the frame has it -- see
     :func:`_late_curation_columns`. Marking an event reviewed is a curation gesture and
     is lost by the install unless the "before" picture contains it.
+
+    Optional amplitude fields also join when present. Unlike a review, a late
+    amplitude measurement cannot be carried onto a changed baseline: the install
+    detects that edit and refuses its stale answer.
     """
     cols = [c for c in _late_curation_columns(df)]
+    from .event_amplitude import AMPLITUDE_COLUMNS
+
+    cols.extend(c for c in AMPLITUDE_COLUMNS if c in df.columns)
     return df[["event_id", *cols]].copy(deep=True)
 
 
 def merge_guard_snapshot(df: pd.DataFrame) -> pd.DataFrame:
-    """The curation a MERGE cannot carry, keyed by ``event_id``: ``accepted`` and
-    ``flag``, never ``review``.
+    """The curation a MERGE cannot carry, keyed by ``event_id``: ``accepted``,
+    ``flag`` and optional amplitude choices, never ``review``.
 
     :func:`curation_snapshot` answers "what will the re-measure install have to carry
     forward", and it widened to include ``review`` for exactly that reason. A second
@@ -497,8 +504,16 @@ def merge_guard_snapshot(df: pd.DataFrame) -> pd.DataFrame:
     every fragment was), so a late review click is re-answered by the merge rather
     than overwritten by a stale copy of itself, and losing a click is a smaller,
     louder failure than losing the merge.
+
+    Amplitude choices cannot describe the merged span automatically, so a new or
+    revised choice during a pending merge must also make the install refuse.
     """
     cols = [c for c in CURATION_COLUMNS if c in df.columns]
+    # A late amplitude edit is a curator's measurement, and cannot be mapped
+    # honestly onto rows a pending merge is about to collapse.
+    from .event_amplitude import AMPLITUDE_COLUMNS
+
+    cols.extend(c for c in AMPLITUDE_COLUMNS if c in df.columns)
     return df[["event_id", *cols]].copy(deep=True)
 
 
@@ -647,6 +662,25 @@ def merge_late_curation(
             "merged, added or re-detected), so this answer describes rows that no "
             "longer exist."
         )
+
+    # An amplitude edit made after dispatch used the old measurement context.
+    # Carrying it into a new baseline (or overwriting it) would both be wrong.
+    # Leave the live table intact and ask the user to run again instead.
+    from .event_amplitude import AMPLITUDE_COLUMNS
+
+    for col in AMPLITUDE_COLUMNS:
+        if col not in live.columns and col not in before.columns:
+            continue
+        a = (live[col].to_numpy(dtype=object) if col in live.columns
+             else np.full(len(live), pd.NA, dtype=object))
+        b = (before[col].to_numpy(dtype=object) if col in before.columns
+             else np.full(len(before), pd.NA, dtype=object))
+        if any(_curated_differently(x, y) for x, y in zip(a, b)):
+            raise ValueError(
+                "an event amplitude was edited while the re-measure was running; "
+                "the live amplitude curation was kept. Run the re-measure again "
+                "to use the current table."
+            )
 
     cols = _late_curation_columns(live, before, out)
 
@@ -908,6 +942,26 @@ def remeasure_events(
     out_df = out_df.astype({c: df[c].dtype for c in columns})[columns]
 
     _restore_set_wide_rise_fall(out_df, sig, base, fs, pol, order)
+
+    # The optional amplitude is a separately curated measurement. A different
+    # baseline definition invalidates it even when the scalar baseline happens
+    # to coincide; unchanged definitions invalidate only rows actually changed.
+    from .event_amplitude import AMPLITUDE_COLUMNS, invalidate_event_amplitudes
+
+    if any(col in out_df.columns for col in AMPLITUDE_COLUMNS):
+        if old_prov.get("baseline_fingerprint") != new_prov_block.get("baseline_fingerprint"):
+            invalidate_event_amplitudes(out_df, reason="baseline_remeasured")
+        else:
+            changed_amplitude_context = np.zeros(len(df), dtype=bool)
+            for col in REMEASURED_COLUMNS:
+                if col in df.columns and col in out_df.columns:
+                    changed_amplitude_context |= np.array([
+                        _curated_differently(x, y)
+                        for x, y in zip(df[col].to_numpy(), out_df[col].to_numpy())
+                    ], dtype=bool)
+            invalidate_event_amplitudes(
+                out_df, rows=np.flatnonzero(changed_amplitude_context),
+                reason="event_remeasured")
 
     _assert_geometry_held(df, out_df)
 

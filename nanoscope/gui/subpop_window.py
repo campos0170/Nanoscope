@@ -10,10 +10,9 @@ every caveat every stage raised.
 THE CAVEATS ARE NOT AN APPENDIX. On the owner's own data the bootstrap intervals
 carry the label-switching signature and are not calibrated; the BIC disagrees with
 the cross-validation about K; below a few hundred events the mixture is fitting
-more parameters than it has events. A window that showed the population table and
-put the warnings behind a disclosure would be presenting numbers this pipeline
-already knows are not measurements. So the count is on the header, the text is one
-scrollable document, and Export writes the warnings into the sidecar too.
+more parameters than it has events. The warning count and a persistent caveat
+summary stay beside the figures in every workflow section. Full details expand
+without recomputing; the report and export retain every caveat verbatim.
 
 THE FIGURES (items 6-7 and the substance of item 13)
 ====================================================
@@ -36,15 +35,9 @@ Two views, because the scientific question is two questions:
 * :class:`WaveformOverlayView` — item 13's median waveforms on one axis, in the
   same colours, so a subpopulation's identity is one ink everywhere in the window.
 
-THEY SIT BESIDE THE TEXT, NOT IN A TAB. A tabbed layout would put four tidy
-coloured blobs on the tab the reader opens and the reasons they may not be four
-things on a tab they do not, which is exactly the figure this pipeline should not
-produce. So the window is a splitter: the whole report document on one side, the
-figures on the other, and sharing the figures' own splitter — as a third pane, not
-as a strip bolted underneath — a caveat box that repeats every warning verbatim.
-The picture and the reasons to distrust it are on screen at the same time, at every
-window size, and the sizes below are the measured floors that make "at every window
-size" true rather than aspirational.
+The figures remain on screen while the workflow switches controls. Analysis shows
+the full report beside them; Appearance and Export free that space for their own
+controls. The caveat summary is never a separate tab or a hidden workflow section.
 
 UMAP IS SURFACED ONLY IF THE RUN COMPUTED IT, and never turned on from here.
 ``random_state`` forces it single-threaded but the result is still not
@@ -56,7 +49,7 @@ Deliberately NOT a panel:
 
 * it owns no session state and reads nothing — ``main_window`` hands it a finished
   :class:`~nanoscope.analysis.subpop_report.SubpopReport` and takes it away again;
-  it persists nothing, so there is no QSettings key here to restore stale;
+  its appearance-only overrides can be persisted independently of the report;
 * it imports Qt, pyqtgraph, the app's palette (:mod:`nanoscope.plot.style`, which
   every window already asks for its ink by role) and ONE shared gui leaf
   (:mod:`.categorical`, the single categorical colour map, which imports no gui
@@ -86,11 +79,16 @@ is, and neither writes the assignment onto the events frame.
 
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..plot.style import PALETTE
+from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_workflow import PlotWorkflowBar, WarningSummary, bounded_controls, control_group
 from .categorical import (
     add_category_scatter,
     category_colour,
@@ -133,7 +131,7 @@ _DEFAULT_SIZE = (1600, 980)
 #: refuses the size instead. The width went 760 -> 900 with the legend column: at
 #: 760 the data rectangle was 197 px wide beside a 164 px legend, i.e. the legend
 #: took 45 % of the figure. Measured at this floor: data 276x110, aspect 2.51.
-_MIN_SIZE = (900, 620)
+_MIN_SIZE = (900, 480)  # the scrollable body retains each figure's independent floor
 #: Initial splitter split: the text gets the width its widest table needs, the
 #: figures get the rest. The user can drag it anywhere, including all the way over.
 _SPLIT = (620, 800)
@@ -339,9 +337,43 @@ def _mono_font() -> QtGui.QFont:
     return font
 
 
+class _FigureCaption(QtWidgets.QLabel):
+    """Bounded standing context; the full text also travels in report details.
+
+    A width-dependent wrapped QLabel can demand more space than the splitter
+    allocated and overlap a plot that correctly retained its minimum height.
+    Keep one visible line with an explicit ellipsis, never clipped prose.
+    """
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self.setText(text)
+        self.setFixedHeight(self.fontMetrics().lineSpacing() + 3)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(0, self.height())
+
+    def setText(self, text):
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self.setAccessibleDescription(self._full_text)
+        self._fit_text()
+
+    def text(self):
+        return self._full_text
+
+    def _fit_text(self):
+        QtWidgets.QLabel.setText(self, self.fontMetrics().elidedText(
+            self._full_text, QtCore.Qt.ElideRight, max(1, self.width())))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_text()
+
+
 def _caption(text: str = "") -> QtWidgets.QLabel:
-    lab = QtWidgets.QLabel(text)
-    lab.setWordWrap(True)
+    lab = _FigureCaption(text)
     lab.setStyleSheet(_CAPTION_CSS)
     lab.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
     return lab
@@ -513,7 +545,9 @@ class EmbeddingScatterView(QtWidgets.QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
 
-        row = QtWidgets.QHBoxLayout()
+        self._selector_controls = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(self._selector_controls)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         row.addWidget(QtWidgets.QLabel("Embedding"))
         self._embed_combo = QtWidgets.QComboBox()
@@ -531,7 +565,7 @@ class EmbeddingScatterView(QtWidgets.QWidget):
             "the honest test of whether the classes are there.")
         self._colour_combo.currentTextChanged.connect(self._redraw)
         row.addWidget(self._colour_combo, 1)
-        root.addLayout(row)
+        root.addWidget(self._selector_controls)
 
         self._plot = _plot_widget("embedding 1 (arb. units)", "embedding 2 (arb. units)")
         self._legend = _legend(self._plot)
@@ -550,8 +584,7 @@ class EmbeddingScatterView(QtWidgets.QWidget):
         root.addWidget(self._caption)
         self._honesty = _caption(_EMBED_HONESTY)
         root.addWidget(self._honesty)
-        self._umap_note = QtWidgets.QLabel()
-        self._umap_note.setWordWrap(True)
+        self._umap_note = _FigureCaption()
         self._umap_note.setStyleSheet(_NOTE_CSS)
         root.addWidget(self._umap_note)
 
@@ -899,6 +932,9 @@ class WaveformOverlayView(QtWidgets.QWidget):
                 self._series.append((str(col), colour.name(), int(counts.get(col, 0))))
                 continue
             curve = pg.PlotDataItem(x=T, y=y, pen=pg.mkPen(colour, width=_WAVE_WIDTH))
+            # Export must identify the curve actually drawn, not zip it against
+            # _series (which also records all-NaN, deliberately undrawn classes).
+            curve._nanoscope_waveform_series = (str(col), int(counts.get(col, 0)))
             pi.addItem(curve)
             n = int(counts.get(col, 0))
             self._legend.addItem(curve, f"subpop {cid}  (n = {n})")
@@ -964,6 +1000,8 @@ class SubpopReportWindow(QtWidgets.QWidget):
     """
 
     exportRequested = QtCore.Signal()
+    analyzeRequested = QtCore.Signal()
+    workspaceChanged = QtCore.Signal()
     #: "Show me these events." Both are ANNOUNCEMENTS, like Export: this window does not
     #: know what a gallery or a trace pane is, and ``main_window`` is the sole wirer.
     galleryRequested = QtCore.Signal()
@@ -999,10 +1037,34 @@ class SubpopReportWindow(QtWidgets.QWidget):
                   avail.y() + max(_SCREEN_MARGIN + _FRAME_ALLOWANCE[1],
                                   (avail.height() - size.height()) // 2))
         self._report = None
+        self._appearance = PlotAppearance()
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
+        self._workflow = PlotWorkflowBar(
+            actions=(("Analyze…", self.analyzeRequested.emit),),
+            exports=(("Export report and tables…", self.exportRequested.emit),
+                     ("Copy report", self._copy)))
+        root.addWidget(self._workflow)
+        self._data_section = control_group(
+            "Data", "These figures show the stored subpopulation report. Analyze… opens the "
+            "existing analysis settings; section and appearance changes never recompute the report.")
+        root.addWidget(self._data_section)
+        appearance_host = QtWidgets.QWidget()
+        appearance_layout = QtWidgets.QVBoxLayout(appearance_host)
+        appearance_layout.setContentsMargins(0, 0, 0, 0)
+        self._appearance_widget = PlotAppearanceWidget(
+            self._appearance, include_colors=False, compact=True, multi_view_labels=True)
+        self._appearance_widget.changed.connect(self._appearance_from_user)
+        appearance_layout.addWidget(self._appearance_widget)
+        categorical_note = QtWidgets.QLabel(
+            "Class colours stay linked to the report, event gallery and trace. Global recolouring "
+            "is unavailable here; typography, background, line width, markers and legends remain editable.")
+        categorical_note.setWordWrap(True)
+        appearance_layout.addWidget(categorical_note)
+        self._appearance_section = bounded_controls(appearance_host)
+        root.addWidget(self._appearance_section)
 
         self._header = QtWidgets.QLabel(self._empty_header())
         self._header.setWordWrap(True)
@@ -1047,9 +1109,8 @@ class SubpopReportWindow(QtWidgets.QWidget):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
             | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard)
 
-        # A SPLITTER AND NOT A TAB WIDGET. See the module docstring: the figures and
-        # the reasons not to believe them have to be on screen together, and a tab
-        # is a place to put the second one where it is not.
+        # The figures and persistent caveat summary share a splitter. The full
+        # report document is visible in Analysis; section switches are presentation.
         self._split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self._split.setChildrenCollapsible(False)
         self._split.addWidget(self._text)
@@ -1057,7 +1118,27 @@ class SubpopReportWindow(QtWidgets.QWidget):
         self._split.setStretchFactor(0, 1)
         self._split.setStretchFactor(1, 1)
         self._split.setSizes(list(_SPLIT))
-        root.addWidget(self._split, 1)
+        # Keep the workflow and warning summary outside the scrollable body.
+        # Embedded in the Explorer, available height is smaller than a standalone
+        # window. Scroll existing report/figure panes instead of growing the app
+        # past the screen or compressing the scientific figures and captions.
+        self._standing_caveats = QtWidgets.QWidget()
+        standing = QtWidgets.QHBoxLayout(self._standing_caveats)
+        standing.setContentsMargins(0, 0, 0, 0)
+        standing.addWidget(self._caveat_summary.summary, 1)
+        standing.addWidget(self._caveat_summary.toggle)
+        root.addWidget(self._standing_caveats)
+        self._body_scroll = QtWidgets.QScrollArea()
+        self._body_scroll.setWidgetResizable(True)
+        self._body_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._body_scroll.setMinimumHeight(140)
+        self._body_host = QtWidgets.QWidget()
+        body = QtWidgets.QVBoxLayout(self._body_host)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(self._appearance_section)
+        body.addWidget(self._split, 1)
+        self._body_scroll.setWidget(self._body_host)
+        root.addWidget(self._body_scroll, 1)
 
         buttons = QtWidgets.QHBoxLayout()
         buttons.setSpacing(6)
@@ -1132,6 +1213,20 @@ class SubpopReportWindow(QtWidgets.QWidget):
         root.addWidget(self._live_note)
         root.addLayout(buttons)
 
+        self._workflow.set_sections({
+            "Data": (self._data_section, self._gallery_btn, self._trace_btn),
+            "Analysis": (self._text, self._embed_view._selector_controls),
+            "Appearance": (self._appearance_section,),
+            "Export": (self._copy_btn, self._export_btn),
+        })
+        self._embed_view._embed_combo.currentTextChanged.connect(self._appearance_after_view_change)
+        self._embed_view._colour_combo.currentTextChanged.connect(self._appearance_after_view_change)
+        self._workflow.sectionChanged.connect(self._workflow_section_changed)
+        self._caveat_summary.toggle.toggled.connect(self._disclose_figure_details)
+        self._standing_caveats.hide()
+        self._caveat_box.hide()
+        self._ensure_figure_minima()
+
         self._sync_buttons()
 
     def _build_figures(self) -> QtWidgets.QWidget:
@@ -1148,26 +1243,16 @@ class SubpopReportWindow(QtWidgets.QWidget):
         figures.addWidget(self._embed_view)
         figures.addWidget(self._wave_view)
 
-        # THE CAVEAT STRIP IS NOT COLLAPSIBLE AND HAS NO TAB. It is the second half
-        # of every figure above it.
+        # The summary never disappears; every original caveat remains in Full details.
         self._caveat_box = QtWidgets.QGroupBox("Caveats")
         box = QtWidgets.QVBoxLayout(self._caveat_box)
         box.setContentsMargins(6, 6, 6, 6)
-        self._caveats = QtWidgets.QPlainTextEdit()
-        self._caveats.setReadOnly(True)
-        self._caveats.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
-        self._caveats.setMinimumHeight(_MIN_CAVEAT_H)
-        box.addWidget(self._caveats)
+        self._caveat_summary = WarningSummary(title="Exploratory figure caveats", maximum_height=190)
+        self._caveats = self._caveat_summary.details
+        box.addWidget(self._caveat_summary)
 
-        # IT IS A PANE OF THE SAME SPLITTER AS THE FIGURES, and that is the whole
-        # design in one line. As a fixed-height widget below the splitter it took
-        # the SAME ~226 px at every window size, so shrinking the window came out of
-        # the pictures alone and the scatter reached a twelve-pixel data rectangle
-        # while the caveats sat unchanged. Sharing the splitter makes the three
-        # panes trade proportionally, and `setChildrenCollapsible(False)` plus the
-        # minimum height above mean the strip can be made bigger, made smaller, and
-        # never dragged to nothing. There is still no tab and no disclosure arrow:
-        # the reader cannot put the warnings away, only resize them.
+        # Share available height with the figures; opening Full details never adds
+        # an unbounded warning wall above the plot or removes any warning text.
         figures.addWidget(self._caveat_box)
         figures.setStretchFactor(0, 3)   # the embedding grows first
         figures.setStretchFactor(1, 2)
@@ -1193,6 +1278,8 @@ class SubpopReportWindow(QtWidgets.QWidget):
         self._wave_view.set_report(report)
         self._caveats.setPlainText(self._caveat_text(report))
         self._caveat_box.setTitle(self._caveat_title(report))
+        self._refresh_figure_details()
+        self._apply_appearance()
         # A new document makes no claim about any assignment: the owner pushes the
         # truth about THIS report's map right after installing it. Until then the
         # entry buttons are dead, never live over a colouring that may not exist.
@@ -1205,6 +1292,105 @@ class SubpopReportWindow(QtWidgets.QWidget):
     def report(self):
         """The installed :class:`SubpopReport`, or ``None``."""
         return self._report
+
+    def _appearance_from_user(self, state: PlotAppearance) -> None:
+        self.set_appearance_state(state)
+        self.workspaceChanged.emit()
+
+    def _appearance_after_view_change(self, *_args) -> None:
+        self._refresh_figure_details()
+        self._apply_appearance()
+        self.workspaceChanged.emit()
+
+    def _ensure_figure_minima(self, *_args) -> None:
+        # QSplitter can allocate less than a wrapped layout's minimumSizeHint.
+        # An explicit floor stops its captions from overlapping the plot's own
+        # independently enforced minimum; section switches only affect chrome.
+        for view in (self._embed_view, self._wave_view):
+            view.setMinimumHeight(view.layout().minimumSize().height())
+        caveat_height = (self._caveat_box.layout().minimumSize().height() + 28
+                         if not self._caveat_box.isHidden() else 0)
+        figure_height = (self._embed_view.minimumHeight() + self._wave_view.minimumHeight()
+                         + caveat_height + (2 if caveat_height else 1) * self._figures.handleWidth())
+        self._figures.setMinimumHeight(figure_height)
+        self._split.setMinimumHeight(figure_height)
+        self._body_host.layout().invalidate()
+        self._body_host.setMinimumHeight(self._body_host.layout().minimumSize().height())
+
+    def _workflow_section_changed(self, *_args) -> None:
+        self._ensure_figure_minima()
+        self._body_scroll.verticalScrollBar().setValue(0)
+
+    def _disclose_figure_details(self, expanded: bool) -> None:
+        self._caveat_box.setVisible(expanded and self._report is not None)
+        self._ensure_figure_minima()
+        if expanded:
+            QtCore.QTimer.singleShot(0, self._scroll_figure_details_into_view)
+
+    def _scroll_figure_details_into_view(self) -> None:
+        if self._caveat_summary.toggle.isChecked():
+            self._body_scroll.ensureWidgetVisible(self._caveat_box, 0, 8)
+
+    def _refresh_figure_details(self) -> None:
+        report = self._report
+        full = self._caveat_text(report)
+        if report is not None:
+            full += "\nFigure context (full captions)\n\n" + "\n\n".join(
+                text for text in (self._embed_view.caption(), self._embed_view._honesty.text(),
+                                  self._embed_view._umap_note.text(), self._wave_view.caption())
+                if text)
+        self._caveat_summary.set_warnings(
+            [_COLOUR_CAVEAT, *(report.warnings or ())] if report is not None else (),
+            full_text=full)
+        self._standing_caveats.setVisible(report is not None)
+        self._caveat_box.setVisible(report is not None and self._caveat_summary.toggle.isChecked())
+        self._ensure_figure_minima()
+
+    def set_appearance_state(self, state) -> None:
+        parsed = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
+        # Class colours are categorical identities shared with the trace/gallery.
+        self._appearance = replace(parsed, data_color=None, fit_color=None)
+        self._appearance_widget.set_state(self._appearance)
+        self._apply_appearance()
+
+    def appearance_state(self) -> dict:
+        return self._appearance.to_dict()
+
+    def _apply_appearance(self) -> None:
+        for view in (self._embed_view, self._wave_view):
+            plot = view._plot.getPlotItem()
+            items = [item for item in plot.items
+                     if isinstance(item, (pg.PlotDataItem, pg.ScatterPlotItem))]
+            apply_plot_appearance(plot, self._appearance, plot_widget=view._plot,
+                                  data_items=items, title_prefix="⚠ Exploratory · ")
+
+    def figure_export_items(self):
+        """Ordered figures; both belong to this report and travel with its caveats."""
+        return (self._embed_view._plot.getPlotItem(), self._wave_view._plot.getPlotItem())
+
+    def figure_export_target(self):
+        return self._embed_view._plot.getPlotItem()
+
+    def _plot_data(self) -> pd.DataFrame:
+        """Exactly drawn embedding/waveform samples, with figure identity and caveats."""
+        rows = []
+        x, y, labels = self._embed_view.drawn()
+        common = {"embedding": self._embed_view.embedding(),
+                  "colour_mode": self._embed_view.colour_mode(),
+                  "warnings_json": json.dumps(self._report.warnings if self._report else []),
+                  "figure_caveats": self.caveats()}
+        for i, (xv, yv, label) in enumerate(zip(x, y, labels)):
+            rows.append({"part": "embedding", "point_index": i, "x": xv, "y": yv,
+                         "class_id": label, **common})
+        curves = [item for item in self._wave_view._plot.getPlotItem().items
+                  if isinstance(item, pg.PlotDataItem)]
+        for curve in curves:
+            column, n_events = curve._nanoscope_waveform_series
+            times, values = curve.getData()
+            for i, (xv, yv) in enumerate(zip(times, values)):
+                rows.append({"part": "waveform", "point_index": i, "x": xv, "y": yv,
+                             "series": column, "n_events": n_events, **common})
+        return pd.DataFrame(rows)
 
     def text(self) -> str:
         """Exactly what is rendered — the tests read this, not the report object."""
@@ -1437,6 +1623,7 @@ class SubpopReportWindow(QtWidgets.QWidget):
 
     def _sync_buttons(self) -> None:
         live = self._report is not None
+        self._workflow.export_button.setEnabled(live)
         self._export_btn.setEnabled(live)
         self._copy_btn.setEnabled(live)
         # The two entry points need MORE than a report: they act on the ASSIGNMENT the

@@ -44,7 +44,7 @@ def test_compact_workflow_keeps_navigation_run_and_export_reachable(qapp, qtbot)
     assert w._run_action.text() == "Plot / Apply"
     assert w._export_menu_btn.isVisible()
     assert [action.text() for action in w._export_menu.actions()] == [
-        "Save image…", "Export plot data…", "Export configuration JSON…"]
+        "Export current figure…", "Export plot data…", "Export configuration JSON…"]
 
     # The persistent strip does not replace the established, resizable controls column.
     assert isinstance(w.centralWidget(), QtWidgets.QSplitter)

@@ -1833,6 +1833,7 @@ class AnalysisPanel(QtWidgets.QWidget):
             "n_added": 0,
             "n_notes": 0,
             "n_reviewed": 0,
+            "n_amplitude_curated": 0,
         }
         if len(df) == 0:
             return out
@@ -1854,6 +1855,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         if REVIEW_COL in df.columns:
             reviewed = (df[REVIEW_COL].astype("string") == REVIEW_DONE).fillna(False)
             out["n_reviewed"] = int(reviewed.sum())
+        if "amplitude_method" in df.columns:
+            choices = df["amplitude_method"].astype("string").fillna("").str.strip()
+            out["n_amplitude_curated"] = int(choices.ne("").sum())
         return out
 
     @staticmethod
@@ -1932,6 +1936,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         n_added = work["n_added"]
         n_notes = work["n_notes"]
         n_reviewed = work["n_reviewed"]
+        n_amplitudes = work["n_amplitude_curated"]
         if not any(work.values()):
             return True
 
@@ -1948,6 +1953,8 @@ class AnalysisPanel(QtWidgets.QWidget):
                 f"{n_notes} event{'s' if n_notes != 1 else ''} with labels/notes")
         if n_reviewed:
             parts.append(_plural(n_reviewed, "reviewed event"))
+        if n_amplitudes:
+            parts.append(_plural(n_amplitudes, "saved amplitude choice"))
         stake = " and ".join(parts)
         reconciling = module_id == CONSENSUS_MODULE_ID
         box = QtWidgets.QMessageBox(self)

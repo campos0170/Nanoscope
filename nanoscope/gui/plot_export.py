@@ -7,16 +7,18 @@ SVG, PDF and CSV behave identically across those panels.
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 import math
 import struct
 import zlib
 import xml.dom.minidom as _xml
 
-from PySide6 import QtWidgets
+from PySide6 import QtGui, QtWidgets
 from pyqtgraph.exporters import ImageExporter
 
 from ..plot import pg_svg
 from ..plot.figures import export_plot_pdf, save_plot_data, save_plot_image
+from ..core.atomic_write import staged_write
 from .export_paths import ask_export_path
 from .plot_export_options import ExportOptions, choose_export_options, resolve_export_options
 
@@ -39,7 +41,7 @@ def _format_path(path: str | Path, extension: str) -> Path:
 
 
 def choose_live_plot_export(parent, item, suggestion: str,
-                            initial_width: int = 0, initial_height: int = 0
+                            initial_width: int = 0, initial_height: int = 0, *, residual_item=None
                             ) -> tuple[Path, ExportOptions] | None:
     """Choose current-figure sizing and then confirm the exact destination file.
 
@@ -51,14 +53,53 @@ def choose_live_plot_export(parent, item, suggestion: str,
     if extension not in IMAGE_FORMATS:
         extension = ".png"
     try:
+        import pandas as pd
+        from .figure_bundle import capture_figure_snapshot, figure_native_size
+
+        # A sizing-only caller may hand us a plain QGraphicsItem before it has a
+        # view. Preview is optional; its absence must not break format/destination
+        # choice or the established cancellation contract.
+        main_snapshot = residual_snapshot = None
+        has_scene = (isinstance(item, QtWidgets.QGraphicsScene)
+                     or callable(getattr(item, "scene", None)) and item.scene() is not None)
+        if has_scene:
+            points = pg_svg.count_vector_points(
+                _SceneItem(item) if isinstance(item, QtWidgets.QGraphicsScene) else item)
+            if residual_item is not None:
+                points += pg_svg.count_vector_points(residual_item)
+            if points >= pg_svg.SVG_POINT_WARN_THRESHOLD:
+                answer = QtWidgets.QMessageBox.question(
+                    parent, "Prepare frozen export preview",
+                    f"This figure draws {points:,} individual markers. Preparing its frozen "
+                    "PNG and vector versions may take a while. All markers are retained, "
+                    "and the exported picture will match this frozen preview even if a "
+                    "background analysis finishes while the dialogs are open. Continue?",
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
+                    QtWidgets.QMessageBox.StandardButton.Cancel)
+                if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return None
+            main_snapshot = capture_figure_snapshot(item, data=pd.DataFrame())
+            residual_snapshot = (capture_figure_snapshot(
+                item, data=pd.DataFrame(), residual_item=residual_item, include_residual=True)
+                if residual_item is not None else None)
+        preview = (QtGui.QImage.fromData(main_snapshot.png_bytes) if main_snapshot is not None else None)
+        residual_preview = (QtGui.QImage.fromData(residual_snapshot.png_bytes)
+                            if residual_snapshot is not None else None)
+        residual_size = (figure_native_size(
+            item, residual_item=residual_item, include_residual=True)
+            if residual_item is not None else None)
         options = choose_export_options(
             parent, rect.size(), initial_format=extension,
-            initial_width=initial_width, initial_height=initial_height)
-    except ValueError as exc:
+            initial_width=initial_width, initial_height=initial_height,
+            preview_image=preview, residual_preview_image=residual_preview,
+            residual_native_size=residual_size)
+    except (ValueError, TypeError, AttributeError, RuntimeError, OSError) as exc:
         QtWidgets.QMessageBox.warning(parent, "Export current figure", str(exc))
         return None
     if options is None:
         return None
+    options = replace(options, frozen_snapshot=(residual_snapshot if options.include_residual
+                                                 else main_snapshot))
     labels = {".png": "PNG image", ".pdf": "PDF vector document", ".svg": "SVG vector image"}
     chosen = ask_export_path(
         parent, title="Export current figure", suggestion=str(_format_path(suggestion, options.extension)),
@@ -88,7 +129,8 @@ def apply_svg_physical_size(path: str | Path, *, width_mm: float,
             raise ValueError("The staged SVG has no viewBox; physical sizing cannot be applied safely.")
         root.setAttribute("width", f"{options.physical_width_mm:.10g}mm")
         root.setAttribute("height", f"{options.physical_height_mm:.10g}mm")
-        staged.write_bytes(document.toxml(encoding="utf-8"))
+        with staged_write(staged) as stream:
+            stream.write(document.toxml(encoding="utf-8"))
     finally:
         document.unlink()
 
@@ -134,7 +176,8 @@ def apply_png_resolution(path: str | Path, *, dpi: float) -> None:
             break
     if not inserted or not ended or offset != len(source):
         raise ValueError("The staged PNG structure is incomplete.")
-    staged.write_bytes(b"".join(chunks))
+    with staged_write(staged) as stream:
+        stream.write(b"".join(chunks))
 
 
 def require_csv_row_budget(row_count: int, *, limit: int, description: str,
@@ -174,7 +217,8 @@ class _SceneItem:
 def write_live_plot_image(target: str | Path, item, *, width: int = 0,
                           height: int = 0, physical_width_mm: float | None = None,
                           physical_height_mm: float | None = None,
-                          dpi: float | None = None) -> list[str]:
+                          dpi: float | None = None, residual_item=None,
+                          include_residual: bool = False, frozen_snapshot=None) -> list[str]:
     """Write a pyqtgraph item/scene as PNG, SVG or PDF through one staged seam."""
     out = Path(target)
     suffix = out.suffix.lower()
@@ -182,6 +226,42 @@ def write_live_plot_image(target: str | Path, item, *, width: int = 0,
 
     if (physical_width_mm is None) != (physical_height_mm is None):
         raise ValueError("Both physical width and height are required.")
+    if frozen_snapshot is not None:
+        from .figure_bundle import write_frozen_figure_image
+
+        options = ExportOptions(suffix, w, h, physical_width_mm, physical_height_mm,
+                                300 if dpi is None else dpi, include_residual)
+        return write_frozen_figure_image(out, frozen_snapshot, options)
+
+    if include_residual:
+        from .figure_bundle import (capture_figure_render, capture_figure_picture,
+                                    figure_native_size, render_frozen_picture)
+
+        if suffix == ".svg":
+            _png, svg, native_w, native_h = capture_figure_render(
+                item, residual_item=residual_item, include_residual=True)
+            picture = None
+        else:
+            # PNG/PDF must not pay SVG's per-point serialization cost. Record
+            # the same vector scene directly, including the existing residual.
+            native_w, native_h = figure_native_size(
+                item, residual_item=residual_item, include_residual=True)
+            picture = capture_figure_picture(item, residual_item=residual_item, include_residual=True)
+            svg = None
+
+        def render(staged):
+            if suffix == ".svg":
+                with staged_write(staged) as stream:
+                    stream.write(svg)
+                if physical_width_mm is not None:
+                    apply_svg_physical_size(staged, width_mm=physical_width_mm,
+                                            height_mm=physical_height_mm)
+            else:
+                render_frozen_picture(picture, staged, width=w, height=h,
+                                      native_size=(native_w, native_h))
+                if suffix == ".png" and dpi is not None:
+                    apply_png_resolution(staged, dpi=dpi)
+        return save_plot_image(out, render)
 
     if suffix == ".svg":
         # A whole GraphicsScene is the correct export target when a colour bar is a

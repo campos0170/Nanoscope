@@ -197,6 +197,18 @@ _CLOCK_COLUMNS = frozenset({"t_start_s", "t_end_s"})
 
 #: Per-column explanations for the columns whose NAME is not the whole story.
 _COLUMN_TIPS = {
+    "depth_pA": (
+        "Median depth: the median polarity-adjusted excursion from the analysis "
+        "baseline over the whole detected event. This original measurement is not "
+        "replaced when you choose another amplitude estimator in Curate."),
+    "amplitude_pA": (
+        "Selected amplitude: the optional measurement explicitly applied in Curate. "
+        "Read amplitude_method, amplitude_units and amplitude_status with this value; "
+        "the legacy column suffix does not override the recorded signal units."),
+    "amplitude_method": "The estimator used for the selected amplitude, not for depth_pA.",
+    "amplitude_status": (
+        "current: measured for these event bounds and processing. stale: retained "
+        "for audit after its inputs changed; reapply the measurement before using it."),
     "frac_depth": (
         "depth_pA / |baseline_pA| — the depth as a fraction of the open-pore current "
         "it was measured against.\n\n"
@@ -6649,6 +6661,9 @@ class _EventTableModel(QAbstractTableModel):
         fresh run would measure them.
         """
         cols = tuple(str(n) for n in names)
+        if "depth_pA" in cols and "amplitude_pA" in self._df:
+            cols = tuple(dict.fromkeys((*cols, "amplitude_pA", "amplitude_level_pA",
+                                        "amplitude_baseline_pA")))
         if cols == self._stale_columns and tooltip == self._stale_tip:
             return
         self._stale_columns = cols
@@ -6686,7 +6701,8 @@ class _EventTableModel(QAbstractTableModel):
             # thing lost to a colour-blind reader, a screenshot, or a printed figure,
             # and this badge is the only thing distinguishing a number that is right
             # from one that is 15x wrong.
-            text = f"{name} ⚠" if stale else name
+            label = "median depth (depth_pA)" if name == "depth_pA" else name
+            text = f"{label} ⚠" if stale else label
             # ...and the same rule for the CLOCK. `t_start_s` is seconds from the start
             # of the recording; the trace x-axis beside it is seconds on the instrument
             # clock, and both used to be spelled "s". The header is the only place a
@@ -6760,6 +6776,13 @@ class _EventTableModel(QAbstractTableModel):
                 return self._stale_tip or _STALE_COLUMN_TIP
             if role == Qt.ForegroundRole:
                 return QBrush(QColor("#ffd479"))
+        if colname.startswith("amplitude_") and "amplitude_status" in self._columns:
+            status = str(self._df.iat[row, self._columns.index("amplitude_status")])
+            if status == "stale":
+                if role == Qt.ToolTipRole:
+                    return _COLUMN_TIPS["amplitude_status"]
+                if role == Qt.ForegroundRole:
+                    return QBrush(QColor("#ffd479"))
         return None
 
     def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:
@@ -6996,6 +7019,7 @@ class _EventTableModel(QAbstractTableModel):
         (Accept all / Reject all rewrote the entire ``accepted`` column), where a per-cell signal
         storm would be wasteful."""
         self.beginResetModel()
+        self._columns = list(self._df.columns)
         self.endResetModel()
 
 
@@ -7303,9 +7327,13 @@ class EventTable(QWidget):
 
     _COLUMN_SETTINGS_KEY = 'inspector/event_columns_v1'
     _SCIENTIFIC_ORDER = ('accepted', 't_start_s', 'dwell_s', 'depth_pA',
+                         'amplitude_pA', 'amplitude_method', 'amplitude_status',
                          'frac_depth', 'flag', 'baseline_pA', 'snr',
                          'filter_limited', 'event_id')
-    _DEFAULT_HIDDEN = frozenset(('start_idx', 'end_idx'))
+    _DEFAULT_HIDDEN = frozenset((
+        'start_idx', 'end_idx', 'amplitude_level_pA', 'amplitude_baseline_pA',
+        'amplitude_start_idx', 'amplitude_end_idx', 'amplitude_units',
+        'amplitude_provenance_json'))
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -7486,10 +7514,21 @@ class EventTable(QWidget):
         if not isinstance(preferred, list):
             preferred = list(self._SCIENTIFIC_ORDER)
         order = list(dict.fromkeys(name for name in preferred if name in columns))
+        # Optional measurements materialize only after the first explicit Apply.
+        # Insert only NEW fields beside depth; do not rearrange a saved custom view.
+        amplitude_columns = ('amplitude_pA', 'amplitude_method', 'amplitude_status')
+        anchor = order.index('depth_pA') + 1 if 'depth_pA' in order else len(order)
+        for name in amplitude_columns:
+            if name in columns and name not in order:
+                order.insert(anchor, name)
+                anchor += 1
         order.extend(name for name in columns if name not in order)
         hidden = self._column_preferences.get('hidden', list(self._DEFAULT_HIDDEN))
         if not isinstance(hidden, list):
             hidden = list(self._DEFAULT_HIDDEN)
+        # An old preference cannot express visibility for fields that did not exist.
+        known = set(preferred)
+        hidden = set(hidden) | {c for c in self._DEFAULT_HIDDEN if c not in known}
         header = self.view.horizontalHeader()
         self._applying_columns = True
         try:
@@ -7679,6 +7718,9 @@ class EventTable(QWidget):
         """Repaint the row carrying ``event_id`` after its cells changed in the shared df (an Event
         Inspector mask edit rewrote the bounds + stats). A no-op when no row matches."""
         df = self._model.df
+        if list(df.columns) != self._model._columns:
+            self.refresh_all()
+            return
         if "event_id" not in df.columns:
             return
         matches = np.nonzero(df["event_id"].to_numpy(dtype=np.int64) == int(event_id))[0]
@@ -7690,7 +7732,23 @@ class EventTable(QWidget):
     def refresh_all(self) -> None:
         """Reset the model so every cell repaints from the shared df — for a bulk curation change
         (Accept all / Reject all), so every checkbox reflects the rewritten ``accepted`` column."""
-        self._model.refresh_all()
+        keep_ids, current_id = self.selected_event_ids(), self._current_event_id()
+        old_columns = list(self._model._columns)
+        widths = {name: self.view.columnWidth(i) for i, name in enumerate(old_columns)}
+        schema_changed = old_columns != list(self._model.df.columns)
+        self._applying_columns = True
+        try:
+            self._model.refresh_all()
+            if schema_changed:
+                self._autosize_columns()
+                self._demote_constant_columns(self._model.df)
+                self._apply_column_preferences()
+                for name, width in widths.items():
+                    if name in self._model._columns:
+                        self.view.setColumnWidth(self._model._columns.index(name), width)
+            self._restore_selection(keep_ids, current_id)
+        finally:
+            self._applying_columns = False
         # ...and the note repaints WITH the table: a bulk gesture elsewhere may have
         # recorded refusals on the shared ledger, or retired remembered rows.
         self._sync_refusal_note()

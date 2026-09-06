@@ -30,6 +30,7 @@ around them.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -41,9 +42,12 @@ from PySide6.QtCore import Qt, Signal
 from ..analysis import event_shape
 from ..analysis.events import EventSet
 from ..core.session import Session
+from ..core.sources import amplitude_comparability, amplitude_units_label
 from ..plot.style import OKABE_ITO
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_workflow import (WarningSummary, bounded_controls, control_group,
+                            ensure_item_legend, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
                           data_write_failure_text, require_csv_row_budget,
                           write_live_plot_image, write_plot_csv)
@@ -51,7 +55,8 @@ from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
 __all__ = ["EventPlotWindow"]
 
 # View labels (also the QTabWidget page order).
-DENSITY = "Density"
+DENSITY = "Density"  # stable workspace key; the visible label is deliberately more precise
+DENSITY_LABEL = "Event-count heatmap"
 ENSEMBLE = "Ensemble"
 
 # Metric ids (X/Y choices for the density map). ``ecd`` is computed on demand.
@@ -59,11 +64,13 @@ _M_DWELL = "dwell_s"
 _M_DEPTH = "depth_pA"
 _M_FRAC = "frac_depth"
 _M_ECD = "ecd"
+_M_AMPLITUDE = "amplitude_pA"
 _METRICS: tuple[tuple[str, str], ...] = (
     (_M_DWELL, "Dwell (s)"),
-    (_M_DEPTH, "Depth"),
+    (_M_DEPTH, "Median depth"),
     (_M_FRAC, "dI/I₀"),
     (_M_ECD, "ECD (charge deficit)"),
+    (_M_AMPLITUDE, "Selected amplitude (Curate)"),
 )
 
 # Long-form keeps every visible sample and its event identity easy to understand,
@@ -129,6 +136,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         # Automatic titles describe the numerical result currently on screen, not a
         # newly calculated result. Keep them when editing labels or a saved snapshot.
         self._density_auto_title = ""
+        self._amplitude_warnings: tuple[str, ...] = ()
+        self._amplitude_snapshot_units = "units unstated"
+        self._amplitude_frozen_snapshot = False
         self._ensemble_auto_title = ""
         self._appearance = PlotAppearance()
 
@@ -139,23 +149,30 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     # -- construction ----------------------------------------------------------------------------
     def _build_ui(self) -> None:
         self._tabs = QtWidgets.QTabWidget()
-        self._tabs.addTab(self._build_density_page(), DENSITY)
+        self._tabs.addTab(self._build_density_page(), DENSITY_LABEL)
         self._tabs.addTab(self._build_ensemble_page(), ENSEMBLE)
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         self._appearance_widget = PlotAppearanceWidget(
-            self._appearance, include_colors=False, include_markers=False)
+            self._appearance, include_colors=True, include_markers=False,
+            multi_view_labels=True)
         self._appearance_widget.changed.connect(self._on_appearance_changed)
-        self._appearance_widget.hide()
-        layout.addWidget(self._appearance_widget)
+        self._appearance_section = bounded_controls(self._appearance_widget)
+        layout.addWidget(self._appearance_section)
+        self._data_section = control_group(
+            "Data", "Uses the active detection’s accepted events. Analyze / refresh updates "
+            "this snapshot. The Event-count heatmap bins actual event counts; it is not a "
+            "smoothed kernel-density estimate (KDE). Ensemble displays aligned event traces.")
+        layout.addWidget(self._data_section)
         layout.addWidget(self._tabs, 1)
         self.setCentralWidget(central)
 
         # Refresh lives in the toolbar so both views share it.
         bar = QtWidgets.QToolBar()
+        bar.setParent(self)
+        self._legacy_toolbar = bar
         bar.setMovable(False)
-        self.addToolBar(bar)
         self._refresh_btn = QtWidgets.QPushButton("Refresh")
         self._refresh_btn.setToolTip("Re-snapshot the active detection's accepted events.")
         self._refresh_btn.clicked.connect(self.refreshRequested.emit)
@@ -165,9 +182,18 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         appearance.setCheckable(True)
         appearance.toggled.connect(self._show_appearance)
         appearance.setToolTip("Style the existing plots without recalculating events.")
+        self._workflow = install_plot_workflow(
+            self, sections={"Data": (self._data_section,),
+                            "Analysis": (self._density_analysis_controls, self._ensemble_analysis_controls),
+                            "Appearance": (self._appearance_section, self._density_palette),
+                            "Export": (self._density_export_controls, self._ensemble_export_controls)},
+            actions=(("Analyze / refresh", self.refreshRequested.emit),),
+            exports=(("Export current figure…", lambda: self.save_image()),
+                     ("Export data (CSV)…", lambda: self.export_data())))
+        bar.hide()  # legacy programmatic toggle remains available; workflow owns visible chrome
 
     def _show_appearance(self, visible: bool) -> None:
-        self._appearance_widget.setVisible(visible)
+        self._workflow.set_section("Appearance" if visible else "Data")
         # The Explorer can be shorter than this standalone window's preferred
         # size. Keep the axes visible when the optional controls are expanded.
         for widget, original in ((self._density_glw, 460), (self._ensemble_widget, 420)):
@@ -185,14 +211,33 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         if not self._updating:
             self._apply_appearance()
 
+    def appearance_state(self) -> dict:
+        return self._appearance.to_dict()
+
     def _apply_appearance(self) -> None:
-        for plot in (self._density_main, self._density_top, self._density_right):
-            apply_plot_appearance(plot, self._appearance)
+        apply_plot_appearance(self._density_main, self._appearance, plot_widget=self._density_glw,
+                              title_prefix="⚠ CHECK SELECTED AMPLITUDES · "
+                              if self._amplitude_warnings else "")
+        marginal = replace(self._appearance, title=None, x_label=None, y_label=None)
+        for plot, item in ((self._density_top, self._top_marginal_item),
+                           (self._density_right, self._right_marginal_item)):
+            apply_plot_appearance(plot, marginal, data_items=(item,))
         # Mean and median are summaries, not fits: preserve their individual
         # colors and solid/dashed identities while sharing typography/line width.
+        ensure_item_legend(self._ensemble_plot, ((self._events_item, "Events"),
+                          (self._mean_item, "Mean"), (self._median_item, "Median")))
+        self._appearance_widget.set_legend_available(self.current_view() == ENSEMBLE)
+        self._appearance_widget.data_color.setToolTip(
+            "Colour of the marginal count curves and individual ensemble traces. "
+            "The heatmap uses its separate colormap control.")
+        self._appearance_widget.fit_color.setEnabled(self.current_view() == ENSEMBLE)
+        self._appearance_widget.fit_color.setToolTip(
+            "Colour of the mean and median summary curves; these are not fitted models."
+            if self.current_view() == ENSEMBLE else
+            "The event-count heatmap has no fitted curve. Its colours use the colormap control.")
         apply_plot_appearance(
-            self._ensemble_plot, self._appearance,
-            data_items=(self._events_item, self._mean_item, self._median_item))
+            self._ensemble_plot, self._appearance, plot_widget=self._ensemble_widget,
+            data_items=(self._events_item,), fit_items=(self._mean_item, self._median_item))
 
     def _build_density_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
@@ -200,7 +245,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        row1 = QtWidgets.QHBoxLayout()
+        self._density_analysis_controls = QtWidgets.QWidget()
+        row1 = QtWidgets.QHBoxLayout(self._density_analysis_controls)
+        row1.setContentsMargins(0, 0, 0, 0)
         row1.addWidget(QtWidgets.QLabel("X"))
         self._x_combo = QtWidgets.QComboBox()
         self._y_combo = QtWidgets.QComboBox()
@@ -230,27 +277,31 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._bins.setToolTip("Number of bins along each axis.")
         row1.addWidget(self._bins)
 
-        row1.addWidget(QtWidgets.QLabel("Colormap"))
+        self._density_palette = QtWidgets.QWidget()
+        palette = QtWidgets.QHBoxLayout(self._density_palette)
+        palette.setContentsMargins(0, 0, 0, 0)
+        palette.addWidget(QtWidgets.QLabel("Event-count heatmap colormap"))
         self._cmap_combo = QtWidgets.QComboBox()
         self._cmap_combo.addItems(_COLORMAPS)
         self._cmap_combo.setToolTip("Sequential colour map for the density (perceptually uniform).")
-        row1.addWidget(self._cmap_combo)
+        palette.addWidget(self._cmap_combo)
+        palette.addStretch(1)
         row1.addStretch(1)
-        root.addLayout(row1)
+        root.addWidget(self._density_analysis_controls)
+        root.addWidget(self._density_palette)
 
-        row2 = QtWidgets.QHBoxLayout()
+        self._density_export_controls = QtWidgets.QWidget()
+        row2 = QtWidgets.QHBoxLayout(self._density_export_controls)
+        row2.setContentsMargins(0, 0, 0, 0)
         self._d_title = QtWidgets.QLineEdit()
         self._d_title.setPlaceholderText("title (auto)")
         self._d_xlabel = QtWidgets.QLineEdit()
         self._d_xlabel.setPlaceholderText("x label (auto)")
         self._d_ylabel = QtWidgets.QLineEdit()
         self._d_ylabel.setPlaceholderText("y label (auto)")
-        row2.addWidget(QtWidgets.QLabel("Title"))
-        row2.addWidget(self._d_title, 1)
-        row2.addWidget(QtWidgets.QLabel("X label"))
-        row2.addWidget(self._d_xlabel, 1)
-        row2.addWidget(QtWidgets.QLabel("Y label"))
-        row2.addWidget(self._d_ylabel, 1)
+        for legacy in (self._d_title, self._d_xlabel, self._d_ylabel):
+            legacy.setParent(self)
+            legacy.hide()  # shared Appearance labels supersede these legacy config controls
         self._d_save = QtWidgets.QPushButton("Export current figure…")
         self._d_save.setToolTip(
             "Export the density map, marginals, and colour bar as PNG, SVG, or PDF.")
@@ -261,7 +312,11 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             "Export exact density bin edges/counts and source-event identities.")
         self._d_data.clicked.connect(lambda: self.export_data())
         row2.addWidget(self._d_data)
-        root.addLayout(row2)
+        root.addWidget(self._density_export_controls)
+
+        self._amplitude_warning_summary = WarningSummary(title="Selected amplitude warnings")
+        self._amplitude_warning_label = self._amplitude_warning_summary
+        root.addWidget(self._amplitude_warning_summary)
 
         # The density scene: top marginal + main image + right marginal + colour bar.
         self._density_glw = pg.GraphicsLayoutWidget()
@@ -269,7 +324,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._density_top = self._density_glw.addPlot(row=0, col=0)
         self._density_main = self._density_glw.addPlot(row=1, col=0)
         self._density_right = self._density_glw.addPlot(row=1, col=1)
-        self._colorbar = pg.ColorBarItem(values=(0, 1), colorMap=_get_colormap("viridis"))
+        self._colorbar = pg.ColorBarItem(values=(0, 1), colorMap=_get_colormap("viridis"), label="Event count")
         self._density_glw.addItem(self._colorbar, row=1, col=2)
 
         self._density_main.showGrid(x=True, y=True, alpha=0.15)
@@ -291,7 +346,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        row1 = QtWidgets.QHBoxLayout()
+        self._ensemble_analysis_controls = QtWidgets.QWidget()
+        row1 = QtWidgets.QHBoxLayout(self._ensemble_analysis_controls)
+        row1.setContentsMargins(0, 0, 0, 0)
         self._normalize = QtWidgets.QCheckBox("Normalize time")
         self._normalize.setChecked(True)
         self._normalize.setToolTip(
@@ -320,13 +377,15 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._pad.setToolTip("Pre/post padding as a percentage of each event's dwell.")
         row1.addWidget(self._pad)
         row1.addStretch(1)
-        root.addLayout(row1)
+        root.addWidget(self._ensemble_analysis_controls)
 
-        row2 = QtWidgets.QHBoxLayout()
+        self._ensemble_export_controls = QtWidgets.QWidget()
+        row2 = QtWidgets.QHBoxLayout(self._ensemble_export_controls)
+        row2.setContentsMargins(0, 0, 0, 0)
         self._e_title = QtWidgets.QLineEdit()
         self._e_title.setPlaceholderText("title (auto)")
-        row2.addWidget(QtWidgets.QLabel("Title"))
-        row2.addWidget(self._e_title, 1)
+        self._e_title.setParent(self)
+        self._e_title.hide()
         self._e_save = QtWidgets.QPushButton("Export current figure…")
         self._e_save.setToolTip("Export the event ensemble as PNG, SVG, or PDF.")
         self._e_save.clicked.connect(lambda: self.save_image())
@@ -336,7 +395,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             "Export individual resampled traces, mean, median, and event identities.")
         self._e_data.clicked.connect(lambda: self.export_data())
         row2.addWidget(self._e_data)
-        root.addLayout(row2)
+        root.addWidget(self._ensemble_export_controls)
 
         self._ensemble_widget = pg.PlotWidget()
         self._ensemble_widget.setMinimumSize(560, 420)
@@ -397,6 +456,14 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                 self._signal = np.asarray(ch.data)
                 self._fs = float(ch.sample_rate_hz)
                 self._units = ch.units or "pA"
+        for combo in (self._x_combo, self._y_combo):
+            index = combo.findData(_M_AMPLITUDE)
+            item = combo.model().item(index)
+            available = self._eventset is not None and _M_AMPLITUDE in self._eventset.df
+            item.setEnabled(available)
+            item.setToolTip("Selected amplitude applied in Curate; use consistent methods and "
+                            "interval scopes and review stale-value warnings before pooling."
+                            if available else "Apply an amplitude measurement in Curate to enable this metric.")
         if defer_analysis:
             # Never leave another project's result available behind a newly bound
             # source if the artifact later proves malformed.  Clearing Qt items and
@@ -430,12 +497,17 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         """The chosen metric's per-event array from the ACCEPTED events (+ signal for ECD)."""
         if metric_id == _M_ECD:
             return event_shape.charge_deficit(self._signal, self._fs, acc)
+        if metric_id == _M_AMPLITUDE and metric_id not in acc.df:
+            return np.full(len(acc.df), np.nan, dtype=np.float64)
         return acc.df[metric_id].to_numpy(dtype=np.float64)
 
     def _metric_label(self, metric_id: str) -> str:
         base = dict(_METRICS)[metric_id]
         if metric_id == _M_DEPTH:
-            return f"Depth ({self._units})"
+            return f"Median depth ({self._units})"
+        if metric_id == _M_AMPLITUDE:
+            # Units travel with the computed bins, never a newly bound live table.
+            return f"Selected amplitude ({self._amplitude_snapshot_units})"
         if metric_id == _M_ECD:
             return f"ECD ({self._units}·s)"
         return base
@@ -482,8 +554,17 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             self._metric_label(y_id) + (" (log10)" if self._logy.isChecked() else ""))
         self._density_main.setLabel("bottom", xlabel)
         self._density_main.setLabel("left", ylabel)
-        self._density_main.setTitle(self._d_title.text().strip() or self._density_auto_title)
+        title = self._d_title.text().strip() or self._density_auto_title
+        if self._amplitude_warnings:
+            title = "⚠ CHECK SELECTED AMPLITUDES · " + title
+        self._density_main.setTitle(title)
+        self._show_amplitude_warnings()
         self._apply_appearance()
+
+    def _show_amplitude_warnings(self) -> None:
+        self._density_glw.setToolTip("\n\n".join(self._amplitude_warnings))
+        self._amplitude_warning_label.setText("\n".join(self._amplitude_warnings))
+        self._amplitude_warning_summary.set_warnings(self._amplitude_warnings)
 
     def _apply_ensemble_title(self) -> None:
         if self._mean_item is not None:
@@ -493,6 +574,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     def _on_view_changed(self, *_a) -> None:
         if not self._updating:
+            self._apply_appearance()
             self.workspaceChanged.emit()
 
     def _on_normalize_toggled(self, on: bool) -> None:
@@ -505,6 +587,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     # -- density ---------------------------------------------------------------------------------
     def _redraw_density(self) -> None:
+        self._amplitude_frozen_snapshot = False
+        self._amplitude_warnings = ()
+        self._amplitude_warning_label.hide()
+        self._amplitude_warning_summary.set_warnings(())
         self._density_main.clear()
         self._density_top.clear()
         self._density_right.clear()
@@ -523,6 +609,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
         x_id = self._x_combo.currentData()
         y_id = self._y_combo.currentData()
+        if _M_AMPLITUDE in (x_id, y_id):
+            self._amplitude_warnings = amplitude_comparability([("Accepted events", acc.df)])
+            self._amplitude_snapshot_units = amplitude_units_label([acc.df])
+            self._show_amplitude_warnings()
         logx, logy = self._logx.isChecked(), self._logy.isChecked()
         x = self._metric_values(x_id, acc)
         y = self._metric_values(y_id, acc)
@@ -575,6 +665,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._density_auto_title = (
             f"{self._metric_label(y_id)} vs {self._metric_label(x_id)}   ·   "
             f"n = {len(acc.df)} events")
+        if _M_AMPLITUDE in (x_id, y_id):
+            self._density_auto_title = (
+                f"{self._metric_label(y_id)} vs {self._metric_label(x_id)}   ·   "
+                f"n = {int(counts.sum())} of {len(acc.df)} accepted events")
         self._apply_density_labels()
         self._density_main.autoRange()
 
@@ -653,9 +747,11 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     # -- public accessors (owner + tests) --------------------------------------------------------
     def current_view(self) -> str:
-        return self._tabs.tabText(self._tabs.currentIndex())
+        return DENSITY if self._tabs.currentIndex() == 0 else ENSEMBLE
 
     def set_view(self, name: str) -> None:
+        if name == DENSITY:
+            name = DENSITY_LABEL
         for i in range(self._tabs.count()):
             if self._tabs.tabText(i) == name:
                 self._tabs.setCurrentIndex(i)
@@ -719,6 +815,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         seam.  It must never call ``density_2d`` or ``event_ensemble``: reopening a project
         displays the saved analysis and only an explicit user refresh computes a new one.
         """
+        self._amplitude_frozen_snapshot = _M_AMPLITUDE in (
+            self._x_combo.currentData(), self._y_combo.currentData())
         self._render_density_snapshot()
         self._render_ensemble_snapshot()
 
@@ -797,9 +895,13 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         y_id = self._y_combo.currentData()
         n_events = int(getattr(self, "_nanoscope_workspace_accepted_event_count",
                                round(float(counts.sum()))))
+        drawn_count = int(round(float(counts.sum())))
+        count_text = (f"{drawn_count} of {n_events} accepted events"
+                      if _M_AMPLITUDE in (x_id, y_id) and drawn_count != n_events
+                      else f"{n_events} events")
         self._density_auto_title = (
             f"{self._metric_label(y_id)} vs {self._metric_label(x_id)}   ·   "
-            f"n = {n_events} events")
+            f"n = {count_text}")
         self._apply_density_labels()
         self._density_main.autoRange()
 
@@ -869,7 +971,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         density = self.current_view() == DENSITY
         default = "event_density.png" if density else "event_ensemble.png"
         # The GraphicsLayout root owns the map, marginals, and colour bar.
-        target = self._density_glw.ci if density else self._ensemble_plot
+        target = self.figure_export_target()
         export_kwargs = {}
         if path is None:
             selection = choose_live_plot_export(self, target, default)
@@ -880,6 +982,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             export_kwargs = dict(width=options.width, height=options.height,
                                  physical_width_mm=options.physical_width_mm,
                                  physical_height_mm=options.physical_height_mm)
+            if options.frozen_snapshot is not None:
+                export_kwargs["frozen_snapshot"] = options.frozen_snapshot
             if options.extension == ".png" and not options.native:
                 export_kwargs["dpi"] = options.dpi
         out = Path(path)
@@ -898,6 +1002,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, "Save event-plot image", "\n\n".join(notes))
         return out
+
+    def figure_export_target(self):
+        return self._density_glw.ci if self.current_view() == DENSITY else self._ensemble_plot
 
     @staticmethod
     def _json_default(value):
@@ -935,6 +1042,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             "title": self._d_title.text(), "x_label": self._d_xlabel.text(),
             "y_label": self._d_ylabel.text(),
         }
+        if _M_AMPLITUDE in (x_id, y_id):
+            common["amplitude_warnings_json"] = json.dumps(self._amplitude_warnings)
+            common["amplitude_units"] = self._amplitude_snapshot_units
         rows: list[dict] = []
         for i in range(counts.shape[0]):
             for j in range(counts.shape[1]):
@@ -953,6 +1063,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         # behind it when the live EventSet is available; a restored orphan snapshot simply
         # leaves them absent rather than inventing positional ids.
         acc = self._accepted()
+        if _M_AMPLITUDE in (x_id, y_id) and self._amplitude_frozen_snapshot:
+            # Frozen bins do not prove that a rebound source still has the same
+            # per-event choices. Export those bins without attaching today's rows.
+            acc = None
         if acc is not None:
             x = self._metric_values(x_id, acc)
             y = self._metric_values(y_id, acc)
@@ -967,8 +1081,13 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                           else [None] * len(acc.df))
             pore_ids = (acc.df["pore_id"].tolist() if "pore_id" in acc.df
                         else [None] * len(acc.df))
-            for row_id, event_id, recording, pore_id, xv, yv, kept in zip(
-                    acc.df.index, event_ids, recordings, pore_ids, x, y, keep):
+            for pos, (row_id, event_id, recording, pore_id, xv, yv, kept) in enumerate(zip(
+                    acc.df.index, event_ids, recordings, pore_ids, x, y, keep)):
+                amplitude_audit = {}
+                if _M_AMPLITUDE in (x_id, y_id):
+                    from ..analysis.event_amplitude import AMPLITUDE_COLUMNS
+                    amplitude_audit = {"event_" + c: acc.df.iloc[pos][c]
+                                       for c in AMPLITUDE_COLUMNS if c in acc.df}
                 rows.append({
                     "part": "source_event", "x_bin": np.nan, "y_bin": np.nan,
                     "x_left": np.nan, "x_right": np.nan, "y_left": np.nan,
@@ -979,7 +1098,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                     "event_id": event_id, "event_recording": recording,
                     "event_pore_id": pore_id,
                     "x_value": xv, "y_value": yv,
-                    "included_in_view": bool(kept), **common,
+                    "included_in_view": bool(kept), **common, **amplitude_audit,
                 })
         return pd.DataFrame(rows)
 

@@ -92,7 +92,7 @@ SURFACES: tuple[Surface, ...] = (
     # "Populations" has no honest abbreviation, so it does not get one — the short density
     # exists to save the width the OTHER six can spare, not to mangle every label.
     Surface(SURFACE_POPULATIONS, "Populations", "Populations", "◉"),
-    Surface(SURFACE_EVENT_PLOTS, "Density / ensemble", "Density", "▦"),
+    Surface(SURFACE_EVENT_PLOTS, "Count heatmap / ensemble", "Count map", "▦"),
     Surface(SURFACE_PSD, "Power spectrum", "Noise", "∿"),
     Surface(SURFACE_IV, "I-V / conductance", "I-V", "╱"),
     Surface(SURFACE_VDEP, "V-dependence", "V-dep", "↗"),

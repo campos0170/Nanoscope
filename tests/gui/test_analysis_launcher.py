@@ -215,7 +215,7 @@ def test_launcher_has_a_button_for_every_analysis_surface(win):
     # ...each a clickable control of its own, not one painted banner.
     assert len({id(launcher.surface_button(s)) for s in SURFACE_ORDER}) == 7
     assert [launcher.label(s) for s in SURFACE_ORDER] == [
-        "Populations", "Density / ensemble", "Power spectrum",
+        "Populations", "Count heatmap / ensemble", "Power spectrum",
         "I-V / conductance", "V-dependence", "Report figures", "Event gallery"]
 
 
@@ -709,11 +709,11 @@ def test_launcher_degrades_instead_of_forcing_the_window_wider(win, detached_lau
 
     launcher.resize(launcher.width_for(DENSITY_FULL), launcher.height())
     assert launcher.density() == DENSITY_FULL
-    assert launcher.shown_text(SURFACE_EVENT_PLOTS) == "Density / ensemble"
+    assert launcher.shown_text(SURFACE_EVENT_PLOTS) == "Count heatmap / ensemble"
 
     launcher.resize(launcher.width_for(DENSITY_SHORT), launcher.height())
     assert launcher.density() == DENSITY_SHORT
-    assert launcher.shown_text(SURFACE_EVENT_PLOTS) == "Density"
+    assert launcher.shown_text(SURFACE_EVENT_PLOTS) == "Count map"
     assert launcher.shown_text(SURFACE_POPULATIONS) == "Populations"   # no honest abbreviation
 
     launcher.resize(launcher.width_for(DENSITY_MINIMAL), launcher.height())
@@ -843,7 +843,7 @@ _ANALYSIS_ACTION_ATTRS = (
     # sample indices so the trace's instrument clock and the panel's recording clock
     # cannot be confused (High-6).
     "_act_psd", "_act_psd_selection", "_act_fit_levels", "_act_subpop",
-    "_act_show_saved_subpop",
+    "_act_show_saved_subpop", "_act_figure_library", "_act_distribution_summaries",
     "_act_iv", "_act_vdep",
     "_act_export_events", "_act_export_processed", "_act_export_training", "_act_export_levels",
     "_act_export_density", "_act_density_style", "_act_export_figure",

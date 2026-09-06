@@ -402,7 +402,7 @@ def test_the_registry_is_what_actually_wires_the_refresher(detected, qtbot):
         "resultsChanged": (doc_id, "detect.schmitt"), "documentOpened": (doc_id,),
         "documentClosed": (doc_id,), "calibrationChanged": (doc_id, channel),
         "eventAcceptanceChanged": (0, True), "eventFlagChanged": (0, ""),
-        "eventEdited": (0,),
+        "eventEdited": (0,), "amplitudeEdited": (0,),
     }
     for role, names in mutating.items():
         for name in names:

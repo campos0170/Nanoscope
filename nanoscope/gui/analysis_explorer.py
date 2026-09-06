@@ -21,6 +21,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 __all__ = [
     "AnalysisExplorer",
     "PAGE_DISTRIBUTIONS",
+    "PAGE_DISTRIBUTION_SUMMARIES",
     "PAGE_EVENT_WAVEFORMS",
     "PAGE_NOISE",
     "PAGE_IV",
@@ -30,6 +31,7 @@ __all__ = [
 
 
 PAGE_DISTRIBUTIONS: Final = "distributions"
+PAGE_DISTRIBUTION_SUMMARIES: Final = "distribution_summaries"
 PAGE_EVENT_WAVEFORMS: Final = "event_waveforms"
 PAGE_NOISE: Final = "noise"
 PAGE_IV: Final = "iv"
@@ -38,6 +40,7 @@ PAGE_SUBPOPULATIONS: Final = "subpopulations"
 
 _PAGE_LABELS: Final[dict[str, str]] = {
     PAGE_DISTRIBUTIONS: "Distributions",
+    PAGE_DISTRIBUTION_SUMMARIES: "Distribution summaries",
     PAGE_EVENT_WAVEFORMS: "Event waveforms",
     PAGE_NOISE: "Noise",
     PAGE_IV: "I-V",
@@ -63,6 +66,9 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
     """
 
     visibilityChanged = QtCore.Signal(bool)
+    saveFigureRequested = QtCore.Signal(str)
+    saveBundleRequested = QtCore.Signal(str)
+    figureLibraryRequested = QtCore.Signal()
 
     def __init__(
         self,
@@ -91,6 +97,23 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(7)
         root.addWidget(self._build_header())
+        figure_row = QtWidgets.QHBoxLayout()
+        self._save_figure_btn = QtWidgets.QPushButton("Save to Figure Library…")
+        self._save_figure_btn.setToolTip(
+            "Save a named, frozen picture with exact plotted data, analysis settings and provenance in this project.")
+        self._save_bundle_btn = QtWidgets.QPushButton("Save figure bundle…")
+        self._save_bundle_btn.setToolTip(
+            "Export the current picture, plotted numbers, configuration and provenance together as one ZIP file.")
+        self._figure_library_btn = QtWidgets.QPushButton("Figure Library")
+        self._save_figure_btn.clicked.connect(
+            lambda: self.saveFigureRequested.emit(self.current_page_id() or ""))
+        self._save_bundle_btn.clicked.connect(
+            lambda: self.saveBundleRequested.emit(self.current_page_id() or ""))
+        self._figure_library_btn.clicked.connect(self.figureLibraryRequested)
+        for button in (self._save_figure_btn, self._save_bundle_btn, self._figure_library_btn):
+            figure_row.addWidget(button)
+        figure_row.addStretch(1)
+        root.addLayout(figure_row)
 
         self._tabs = QtWidgets.QTabWidget()
         self._tabs.setDocumentMode(True)
@@ -301,6 +324,8 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         self._set_status(str(text), str(state))
         enabled = self._refreshers.get(page_id or "") is not None
         self._refresh_btn.setEnabled(enabled)
+        self._save_figure_btn.setEnabled(page is not None and state != "empty")
+        self._save_bundle_btn.setEnabled(page is not None and state != "empty")
 
     def _set_status(self, text: str, state: str) -> None:
         state = state if state in _STATUS_STYLES else "empty"

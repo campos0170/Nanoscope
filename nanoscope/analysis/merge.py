@@ -509,6 +509,12 @@ def _merged_row(
             row[col] = bool(series.to_numpy(dtype=bool).any())
         else:
             row[col] = series.iloc[0]
+    # A whole-event/plateau amplitude belongs to its original span. Keep the
+    # historical method/provenance but never publish the first fragment's value
+    # as a measurement of the newly merged event.
+    from .event_amplitude import invalidate_event_amplitudes
+
+    invalidate_event_amplitudes(row, reason="events_merged")
     return row[columns]
 
 

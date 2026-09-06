@@ -234,7 +234,7 @@ def test_a_non_time_log_axis_resets_the_display_factor(apo700):
     assert _axis(apo700).display_factor == pytest.approx(1e3)
     apo700.set_histogram_column("depth_pA")
     assert _axis(apo700).display_factor == pytest.approx(1.0)
-    assert _axis(apo700).labelText == "depth_pA (log)"
+    assert _axis(apo700).labelText == "Median depth (depth_pA) (log)"
 
 
 # ================================================================================================

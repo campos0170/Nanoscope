@@ -396,6 +396,24 @@ def describe_change(before: pd.DataFrame | None, after: pd.DataFrame) -> str:
     if _n_rows_differing(ba, aa, _MEASURED):
         return "Re-measure depths"
 
+    # Optional amplitude choices are curation, not replacements for depth_pA.
+    # The first choice creates columns, so compare absence as an unrecorded cell.
+    from ..analysis.event_amplitude import AMPLITUDE_COLUMNS
+
+    amplitude_changed = np.zeros(len(ba), dtype=bool)
+    for col in AMPLITUDE_COLUMNS:
+        if col not in ba.columns and col not in aa.columns:
+            continue
+        left = ba[col] if col in ba.columns else pd.Series([pd.NA] * len(ba))
+        right = aa[col] if col in aa.columns else pd.Series([pd.NA] * len(aa))
+        left = left.astype(object).where(left.notna(), pd.NA)
+        right = right.astype(object).where(right.notna(), pd.NA)
+        amplitude_changed |= ~_column_equal(left, right)
+    n_amplitudes = int(amplitude_changed.sum())
+    if n_amplitudes:
+        return ("Edit event amplitude" if n_amplitudes == 1
+                else f"Edit {n_amplitudes} event amplitudes")
+
     changed = _n_rows_differing(ba, aa, _CURATION)
     if changed:
         if "accepted" in aa.columns and changed == n0 and n0 > 1:
@@ -491,7 +509,8 @@ def _hand_curation(df: pd.DataFrame) -> dict[str, int]:
     """
     from ..analysis.events import DERIVED_FLAGS, flag_tokens, is_automatic_rejection
 
-    out = {"n_hand_rejected": 0, "n_notes": 0, "n_added": 0}
+    out = {"n_hand_rejected": 0, "n_notes": 0, "n_added": 0,
+           "n_amplitude_curated": 0}
     if len(df) == 0:
         return out
     if "flag" in df.columns:
@@ -523,6 +542,9 @@ def _hand_curation(df: pd.DataFrame) -> dict[str, int]:
     out["n_hand_rejected"] = int((~accepted & ~derived_only).sum())
     if "added" in df.columns:
         out["n_added"] = int(df["added"].to_numpy(dtype=bool).sum())
+    if "amplitude_method" in df.columns:
+        choices = df["amplitude_method"].astype("string").fillna("").str.strip()
+        out["n_amplitude_curated"] = int(choices.ne("").sum())
     return out
 
 
@@ -547,10 +569,10 @@ def _curation_was_reset(before: pd.DataFrame, after: pd.DataFrame) -> bool:
     reads as a curation edit and that made C14's loss invisible.
     """
     b = _hand_curation(before)
-    if not (b["n_hand_rejected"] or b["n_notes"] or b["n_added"]):
+    if not any(b.values()):
         return False
     a = _hand_curation(after)
-    return not (a["n_hand_rejected"] or a["n_notes"] or a["n_added"])
+    return not any(a.values())
 
 
 def _params_moved_outside_baseline(before: AnalysisResult, after: AnalysisResult) -> bool:
@@ -872,6 +894,11 @@ class EventHistory(QObject):
                 text = "Edit events"
         else:
             text = describe_change(prior.payload.df, res.payload.df)
+            if (text.startswith("Edit ") and "amplitude" in text
+                    and replaced and _looks_like_remeasure(prior, res)):
+                # A new baseline can leave every detector scalar identical while
+                # invalidating optional choices; name the operation, not its symptom.
+                text = "Re-measure depths"
             if text == "Re-measure depths" and not _looks_like_remeasure(prior, res):
                 text = "Re-run detection"
         self._undo.append(_Entry(key, prior, text, _sizeof(prior)))

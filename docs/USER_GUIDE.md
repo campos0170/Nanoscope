@@ -724,7 +724,8 @@ Each detected event is characterized into a row of the event table. Key columns:
 | Column | Meaning |
 |---|---|
 | `dwell_s` | Duration = `(end − start) / fs`. |
-| `depth_pA` | Blockade depth = the **median** in-event deviation from baseline (median, not max — max is biased by dwell). |
+| `depth_pA` | Original blockade depth = the **median** signed in-event deviation from the samplewise baseline. Includes the full detected interval, including transitions; this definition is unchanged. |
+| `amplitude_pA` | Optional, explicitly selected amplitude; its method, interval, units and audit record are saved separately. See §9. No one estimator is appropriate for every event shape. |
 | `frac_depth` | `depth / |baseline|`, i.e. ΔI/I₀. **Values above 1 are a real message, not a scaling error** — see below. |
 | `ecd_pA_s` | Equivalent charge deficit (integral of the deviation). |
 | `max_dev_pA` | Peak deviation (honest for spikes; *not* used as the depth). |
@@ -855,9 +856,11 @@ Manual measurements are kept as their own list, separate from the auto-detected 
 
 **Analysis ▸ Event inspector…** opens a window for stepping through detected events one at a time.
 
-- **Waveform.** The raw current around the current event, with the event region shaded, the baseline
-  and in-event level lines drawn, and a readout of dwell, depth, ΔI/I₀, SNR, rise/fall, level count,
-  and filter-limited flag.
+- **Waveform.** The current around the event in the recorded **measurement domain**, replaying
+  conditioning and low-pass filtering where recorded. The event region is shaded; the baseline
+  and equivalent amplitude level use that same domain. The readout distinguishes original median
+  depth from an optional selected amplitude, alongside dwell, ΔI/I₀, SNR, rise/fall, level count,
+  and filter-limited flag. Normalized traces are labelled dimensionless, not pA.
 - **Navigate.** Prev / Next, an "Event *i* of *N*" index, and a filter (All / Accepted / Rejected).
   Keyboard: **←/→** move, **A/R** accept/reject, **Space** toggles.
 - **Context.** A `Context:` combo sets how much recording is *loaded* either side of the event —
@@ -875,6 +878,68 @@ Manual measurements are kept as their own list, separate from the auto-detected 
   has unsaved changes. Press **Save Project** (use its arrow for **Save Project As…**), **Ctrl/⌘+S**,
   or **Ctrl/⌘+Shift+S**. These controls use the same guarded project writer as the main File menu;
   cancelling or failing a save leaves the unsaved warning in place.
+
+### Choosing an amplitude and editing the red level
+
+An amplitude is a measurement choice, not a universal description of every analyte. The original
+`depth_pA` remains the median over the complete detected interval. The **Amplitude** controls in
+the Curate event inspector save a separate `amplitude_pA`; they never overwrite `depth_pA`,
+ΔI/I₀ (`frac_depth`), SNR, event boundaries, acceptance decisions or fitted states.
+
+1. Open the event inspector and navigate to the event. Check the waveform, event boundaries,
+   measurement units and baseline reference before choosing an estimator.
+2. Choose the method from **Amplitude**:
+
+   | Method | What it measures |
+   |---|---|
+   | Median depth (whole event) | Median of signed, samplewise baseline deviations over the full event. |
+   | Mean depth (whole event) | Mean of those deviations; includes transitions and all occupied states. |
+   | Peak excursion (whole event) | Largest signed deviation in the interval. Sensitive to noise, sampling and filtering; not automatically a better estimate. |
+   | Histogram mode (whole event) | Centre of the most populated deviation bin. Bin-dependent; may represent the most occupied state, not the deepest state. |
+   | Median / Mean of selected interval or state | The chosen statistic over only the explicit interval. No transition trimming is performed automatically. |
+   | Manual level | A user-specified equivalent current level, converted to amplitude against the whole-event mean baseline. This is an annotated choice, not a fitted result. |
+
+3. For a selected interval, type the absolute sample bounds or drag the **purple** interval
+   handles. Start is inclusive and stop is exclusive. These controls do not move the event mask.
+   **Use fitted state** copies the bounds of an already fitted state; it does not rerun a fit or
+   use a fitted height as the amplitude. Adjusting those bounds makes it an ordinary selected
+   interval again.
+4. Press **Apply** to save the choice for this event. The readout and red level update together.
+   For manual adjustment, check **Edit red level**, then drag the red horizontal line and release
+   to save, or type an **Equivalent level** and press **Apply**. Moving the line across the
+   baseline in the wrong event-polarity direction is refused. Switching methods or events locks
+   dragging again; choosing Manual level alone does not unlock it.
+5. Use **Reset amplitude** to clear only the optional choice and return the line to the stored
+   median-depth equivalent. **Edit ▸ Undo (Ctrl/⌘Z)** reverses an amplitude change or reset.
+
+For event polarity `p` (+1 for upward, −1 for downward events), the horizontal line is
+`mean baseline over the measurement interval + p × selected amplitude`. With baseline drift,
+this is an **equivalent horizontal reference**, not a fitted plateau or the pointwise baseline.
+For legacy results without reproducible baseline provenance, the saved event baseline is used
+as an explicitly labelled constant reference. If the measurement signal cannot be reconstructed,
+quantitative line editing is disabled; it does not silently measure another signal.
+
+**Apply to all…** is available for whole-event median, mean, peak and mode. Its confirmation
+states that it replaces existing optional choices, including manual choices and rejected rows.
+All rows must validate before any are written, and one Undo restores the previous choices.
+
+Save the project to retain the choices. Event-table CSVs also carry `amplitude_method`, selected
+sample bounds, `amplitude_units`, the equivalent level and baseline, `amplitude_status`, and
+`amplitude_provenance_json` (processing, baseline and calibration references). The `_pA` suffix
+is a column identifier; consult `amplitude_units` for normalized measurements. Mask resizing,
+merging and re-measurement that change the reference invalidate affected optional numbers and
+retain their audit history as **stale**. Reapply or reset them deliberately. Re-detection replaces
+the event table and warns about losing these choices; Undo can restore the prior table.
+
+In plotting controls, choose **Selected amplitude** / `amplitude_pA` to use the new measurement.
+Existing depth plots continue to use median `depth_pA`. Missing/stale optional amplitudes do not
+fall back to median depth. Warnings flag incomplete coverage and mixed methods, intervals, units
+or processing references—even within one recording. Selected intervals or manual levels do not
+establish that every event represents the same physical state; assess that before pooling.
+None of these methods deconvolves filtering or recovers an unresolved event's unfiltered height.
+Density plot-data exports include the per-event amplitude audit while the live source is being
+plotted. A restored frozen amplitude map exports its saved bins and units without attaching
+possibly changed live event choices; use the saved event-table CSV for the per-event audit.
 
 ---
 
@@ -902,6 +967,10 @@ were stored.
   boundaries, and every accept/reject and hand-written flag survives — including ones you make
   while it is running. A calibration change is different: its banner offers **Re-run**, which
   re-detects, and the current curation does not survive that.
+
+Optional selected amplitudes are not silently reinterpreted under the new baseline: affected
+values become stale and must be reapplied. If an amplitude choice is edited while re-measurement
+is running, the late result is refused rather than overwriting that edit.
 
 Old projects always open. They are marked, badged, and otherwise fully readable, plottable and
 exportable.
@@ -947,10 +1016,12 @@ configurations are not poolable either; carry the configuration with the number,
 
 **Edit ▸ Undo (Ctrl/⌘Z)** walks the event table on screen back through every change made to it in
 this session, and the menu names the step it will undo — *"Undo Re-run detection"*, *"Undo Merge
-events"*, *"Undo Resize event mask"*, *"Undo Accept all events"*. **Redo** is Ctrl+Shift+Z / ⇧⌘Z.
+events"*, *"Undo Resize event mask"*, *"Undo Edit event amplitude"*, *"Undo Accept all events"*.
+**Redo** is Ctrl+Shift+Z / ⇧⌘Z.
 Everything that can change an event table is covered: a re-detection, a merge, an accept/reject, a
 batch Accept-all / Reject-all, a mask resize in the Event Inspector, a hand-added missed event and
-a re-measure. An undo restores the table **exactly** — the accept/reject decisions, any flag token
+a re-measure, and amplitude choices, red-level edits and resets. An undo restores the table
+**exactly** — the accept/reject decisions, optional amplitude audit fields, any flag token
 you typed, and the hand-added markers.
 
 **And any edit that reaches the table by a path nobody announced.** That is deliberate, and it is
@@ -1248,10 +1319,11 @@ tool. Clustering runs on the **first ticked** source.
   read in the axis unit too. **Axis range** below is the exception: it is in data units.
 - **Axis range** — type explicit X/Y limits (data units, converted to log internally on a log axis)
   that persist across redraws; **Auto** releases them. The plot is also mouse zoom/pan-able.
-- **Style** — a custom title, font family + size, data-series and fit colours, marker size, line
-  width, and a Dark/Light background (Light = white canvas for publication). Title, axis-label,
-  typography, grid, and background edits update existing items without rebuilding the analysis
-  or resetting manual zoom. Color/marker and fit-decoration changes retain the existing redraw path.
+- **Appearance** — a custom title and axis labels, font family + size, data-series and fit colours,
+  marker size, line width, grid and background. These controls, legend edits and fit-decoration
+  toggles update the existing picture without recalculating bins, KDE, PCA or fits, collecting
+  source data, or resetting manual zoom. Appearance-only Undo/Redo has the same guarantee.
+  Pending analytical changes stay pending until **Plot / Apply** or **Apply fit**.
 - **Legend** — a **Show legend** toggle, a **Legend position** (upper right, the default, / upper
   left / lower right / lower left; the legend is drawn over the data, so move it off whichever
   quadrant your points occupy), a legend font size and a **(n = …)** toggle. The legend **labels are
@@ -1262,8 +1334,171 @@ tool. Clustering runs on the **first ticked** source.
   vector PDF; **Export plot data…** writes the exact plotted values as CSV; and **Export
   configuration JSON…** saves the reproducible plot recipe. Figure export opens a shared format/size
   dialog first: choose native size or physical dimensions in mm/in, optionally lock the aspect
-  ratio, and set PNG resolution. Physical dimensions apply to all three formats. The 85 mm and
+  ratio, and set PNG resolution. A frozen graphical preview shows the current figure. If a residual
+  panel is displayed, explicitly tick **Include residual panel** to place it beneath the fitted
+  plot; it is excluded by default. Physical dimensions apply to all three formats. The 85 mm and
   180 mm presets are starting widths, not promises of compliance with a particular journal.
+
+### A consistent plotting workflow
+
+All analytical pages use **Data → Analysis → Appearance → Export**. The section selector only
+changes which controls are visible; it does not change their values or run an analysis. The
+primary **Analyze**, **Plot / Apply** or **Apply fit** action stays reachable independently of
+appearance controls. Where a report consumes an already-computed result, its Data/Analysis
+sections explain the source and route an explicit new run to the existing analysis dialog.
+
+The shared Appearance controls include typography, titles/axis labels, canvas/grid, colours,
+line width, marker size and legend visibility/size. Controls that do not apply to the current
+plot are disabled with an explanation. Category-coloured plots retain category identity;
+heatmap colour scales have their own palette controls. Use **Save appearance preset…** to reuse
+your style across plot types. Presets are local application preferences and contain appearance
+only—not recordings, event filters, bins, axis scaling, fitting choices or detector settings.
+Reset restores that plot's existing defaults. Appearance used by a figure is saved in its project.
+
+Warnings remain beside the figure as a short summary and count. Expand **Full details** (or
+**Details — methods and provenance** in Distributions) for the complete warnings and audit text.
+An **Event-count heatmap** displays counts in two-dimensional bins; **KDE probability density**
+is a smoothed density estimate. They are different quantities, not interchangeable names for the
+same plot. Counts, probability-per-bin and density retain their existing numerical definitions.
+
+### Figure Library
+
+Use **Analysis Explorer ▸ Save to Figure Library…** to name and freeze the current figure.
+The library is separate from the Event Gallery: it stores figures, not curated event selections.
+**Save Project** writes the library into the `.nanoscope` project, including:
+
+- A named thumbnail and full PNG/vector SVG picture of the saved view.
+- Exact plotted data, source-recording identities, analysis settings, appearance and provenance.
+- The associated analytical tables and resources, including saved fitted or derived results.
+
+Open **Analysis ▸ Figure Library…** without opening any analytical page. Selecting a thumbnail
+does not rerun analysis, even if the recording is missing. **Duplicate** makes an independent
+entry; **Rename** changes only its name. **Export saved figure…** offers the same publication
+sizing/preview for PNG, SVG and PDF. **Save figure bundle…** exports its complete frozen data and
+configuration; **Reveal file** selects its most recent exported file in Finder. These actions do
+not overwrite another library entry or replace its saved numbers with live results.
+
+Each entry has a source-status label:
+
+- **Current:** its recorded source/calibration/result lineage still matches. The picture continues
+  to use its *saved* analysis settings and appearance, not any new settings on another open plot.
+- **Outdated:** source data, curation, parameters or calibration changed, or the plot was already
+  stale when captured. The old picture and numbers remain intact.
+- **Saved snapshot:** source lineage is unavailable or was not verified at capture. This is not a
+  claim that a missing recording has been checked. Restored analytical snapshots are captured
+  conservatively in this state.
+
+Status is checked when the library opens, when project edits occur while it is visible, or with
+**Check status**. Source checks combine a content hash of the immutable loaded samples (cached
+once per load without copying the recording), the existing bounded on-disk fingerprint, and
+result/metadata checks. No detection, baseline estimation or fitting is run. Appearance edits do not make
+scientific source lineage outdated. A snapshot taken with pending controls records those controls
+separately from the visible numerical result; Distributions also records its applied plot recipe.
+
+### Multi-panel composition
+
+First save the individual plots to the Figure Library. In **Analysis ▸ Figure Library…**, choose
+**Compose multi-panel figure…**. Check 2–12 figures, edit their panel labels (up to 32 characters),
+and use **Move up / Move down** to arrange them in reading order. Choose 1–4 columns. **Update
+preview** builds a frozen composition; changing the selection, labels or layout invalidates that
+preview until you update it again. **Save to Figure Library** creates a new entry and does not
+modify any component figure. Save the project to retain it.
+
+**Share X range / Share Y range** uses the union of the saved view ranges on detached copies of
+compatible Cartesian plots. It does not stretch an independently scaled picture and call that a
+shared axis, and it does not change live zoom ranges, observations or fitted parameters. Matching
+axis labels, units, scale, linear/log mode, direction and tick formatting are required. NanoScope's
+built-in readable axes retain their exact notation and unit conversion, including linear and
+logarithmic dwell axes displayed in milliseconds and the PSD's power-of-ten labels. Some plots
+cannot be replayed faithfully with new ranges—such as heatmaps, unknown/custom axis formatters or ticks, error bars,
+annotations, per-point palettes or visible legends. Those figures still compose with their
+original independent axes. Compatible simple I–V, Population Scatter and PSD plots can share
+ranges. Uniform point styling is retained; differing point styles are not flattened.
+Older snapshots without a Cartesian model also use independent axes. A shared-axis refusal is a
+reason to keep independent axes, not to remove scientific annotations needed to interpret a plot.
+Save a new Figure Library snapshot to capture the extended unit-aware model. Older NanoScope
+versions refuse to replay this newer model, while retaining its frozen picture and independent-axis composition.
+
+Export the composition through the usual Library publication controls (PNG, SVG, PDF, mm/inches
+and DPI). A composition's bundle stores a panel index at the top level; each panel's **original,
+exact** numerical tables, configuration, provenance and rendering resources remain under its
+`panels/panel_NNN/` folder. No concatenation or rescaling changes the original numbers. Compositions
+are labeled **Saved snapshot** rather than claiming that all component analyses were refreshed.
+
+To revise an existing composition, select it in the Library and choose **Revise composition…**.
+The composer restores its panel order, labels, column count and shared-range choices. Reorder or
+uncheck panels, edit labels, change the layout and select **Update preview**. A revision can retain
+1–12 panels. **Save as new figure** creates a separate Library entry; the selected composition and
+all original panels remain unchanged. Changing layout after preview disables saving until a new
+preview is generated. Cancel saves nothing.
+
+Revision uses the **embedded original snapshots**, not today's similarly named figures or live
+analyses. It therefore works even if separate source figures and recordings are unavailable.
+Nested compositions stay intact as single panels; they are not automatically flattened. Changing
+shared-range choices starts again from the original saved ranges, avoiding repeated rescaling.
+Revision lineage is retained in the project and portable figure bundle. Save Project to keep both
+versions. A project switch during editing cancels the save, even if the incoming project contains
+identical figures; ordinary background checkpoints do not cancel it. Unsupported composition
+versions or damaged panel resources block revision without replacing the stored figure.
+
+### Lasso selection in Scatter and PCA
+
+In the **Distributions** page, generate a Scatter or PCA plot, then enable **Lasso select** in the
+toolbar. Drag an outline inside the plotting area and release to select the enclosed displayed
+events. Selection uses event identifiers, not point positions or table row numbers; it follows the
+displayed logarithmic coordinates when applicable. Ctrl/Cmd/Shift toggles the enclosed events in
+the selection. A plain outline around no points clears the current plot selection.
+
+The detector event table shows one source at a time. If the outline contains points from several
+sources, a dialog lists their names and counts so you can choose one; Cancel leaves selection
+unchanged. Manual-measurement points can be highlighted but are not detector event-table rows.
+Esc or right-click cancels the gesture and returns to pan/zoom. A redraw or canvas change cancels
+an unfinished outline. The temporary outline is not included in figure exports. Selecting events
+does **not** accept/reject them, change their masks, remeasure amplitudes or run an analysis.
+
+### Optional distribution summaries
+
+Open **Analysis ▸ Distribution summaries…** to compare existing measurements without changing
+the established histogram, fitting or detection workflows. This page is opt-in: opening it, changing
+its controls or returning to its tab does not calculate a new result.
+
+1. In **Data**, check the desired sources. Each stays a separate distribution; values are not pooled.
+   **Accepted events only** is on by default. Choose dwell time, median depth, fractional depth or
+   the explicitly selected amplitude. Values keep their recorded units and measurement domain.
+2. In **Analysis**, choose a summary and press **Generate**:
+   - **ECDF:** the unweighted fraction of finite observations less than or equal to each value,
+     `F(x) = count(X ≤ x) / n`. Repeated values share one right-continuous jump.
+   - **Empirical survival (uncensored):** `P(X > x) = count(X > x) / n`. This is **not Kaplan–Meier**:
+     it makes no censoring, detection-efficiency or missed-event correction and must not be
+     interpreted as a censoring-corrected lifetime analysis.
+   - **Box:** Q1, median and Q3 use linear-interpolated quantiles. Whiskers reach the outermost
+     observations inside the 1.5-IQR fences; circles retain observations outside those fences.
+   - **Violin:** Gaussian KDE with Scott bandwidth. The grid control changes where density is
+     evaluated, not the bandwidth rule. The shape is drawn only across the observed range;
+     omitted tails are not renormalized. Each source has the same peak display width, regardless
+     of its event count. For fewer than three observations or constant data, observed values are
+     shown without inventing a violin. Large inputs are refused rather than silently subsampled.
+3. Read the counts and **Full details**. Non-finite or nonnumeric measurements are excluded and
+   counted, not imputed. Missing acceptance flags, sparse data, differing calibration/baseline/
+   normalization and incompatible selected-amplitude choices are disclosed. In particular, the
+   stored `depth_pA` column can describe a normalized signal rather than literal picoamps.
+   Boolean, complex and typed date/time measurements are refused, as are integer measurements
+   beyond ±2⁵³; they are not silently converted or rounded. Long display names are abbreviated
+   in plot labels, with complete names retained in details and exported numerical provenance.
+4. Use **Appearance** to style the committed graphics without recomputing the summary or resetting
+   zoom. Data/Analysis edits leave the previous result visible and marked as unapplied until Generate.
+5. Export the committed picture or plotted-coordinate CSV. Save to the Figure Library to retain
+   source observations, summary values, draw coordinates, method settings and provenance together.
+   Project reopening paints the stored coordinates; it does not rerun ECDF, quantiles or KDE.
+
+These are descriptive summaries of the observations that were actually recorded and selected.
+They do not change baseline removal, event detection, amplitude estimation, existing fit defaults,
+calibration or previous numerical exports.
+
+Method references: [SciPy ECDF / empirical survival](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ecdf.html),
+[NumPy linear quantiles](https://numpy.org/doc/stable/reference/generated/numpy.quantile.html),
+[SciPy Gaussian KDE / Scott bandwidth](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.gaussian_kde.html),
+and [Matplotlib's 1.5-IQR box-plot convention](https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.boxplot.html).
 
 ---
 
@@ -1520,16 +1755,36 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   screen, including companion axes such as density marginals and spectrogram colour bars. The
   Distributions page exposes the same choices from **Export ▾**. This is distinct from the standard
   report generator above: it keeps your current view and styling. Distributions exports its main
-  axes; its optional residual strip is not included. Physical PNG exports embed resolution metadata,
+  axes by default; explicitly enable **Include residual panel** in the preview dialog to include
+  the displayed residual strip. Physical PNG exports embed resolution metadata,
   PDF uses a vector page, and SVG records mm dimensions without changing its viewBox. Sizing scales
   the entire canvas, including text and lines: inspect readability at the final printed size.
 
-**Presentation controls.** I-V and Voltage series now offer a collapsible **Appearance** section
-with opt-in light/dark presets and reset. Noise adds **Typography and line styling** within Style;
-Event waveforms adds **Typography and lines** above the tabs. Shared font/line settings are saved
-with project workspaces and reopening them does not rerun a fit or analysis. Event titles, density
-axis labels and color maps, and Noise titles/palettes also update in place. Existing automatic units,
-source colors and scientific warnings are retained.
+- **Analysis Explorer ▸ Save figure bundle…** — one atomic ZIP containing the current PNG and
+  vector SVG, `data.csv` (17-digit numerical precision), lossless `data.parquet` (including dtypes,
+  missing values and index), `config.json`, `provenance.json` and a checksummed `manifest.json`.
+  Ordinary numerical Parquet columns remain native numbers. Heterogeneous object fields (such as
+  integer event IDs mixed with empty summary cells) use explicitly tagged scalars identified by
+  the `nanoscope.figure_table_codec` Parquet schema metadata; NanoScope reconstructs their exact
+  types. Python users can use `nanoscope.core.figure_tables.decode_figure_table` on the Parquet
+  bytes to restore tagged fields without starting the GUI. The CSV remains directly readable.
+  A checksummed `rendering/figure.qpic` preserves the
+  frozen vector drawing commands for faithful PNG/PDF rendering, including clipping and backgrounds.
+  Additional analytical tables/resources referenced by the configuration are included. Nothing
+  is recomputed. Bundles are self-contained exports, not raw-recording archives or project files;
+  use `.nanoscope` to resume work. The Figure Library can export the same bundle from a saved
+  snapshot, without live recordings. Residual inclusion is explicit when capturing a live figure;
+  a saved figure keeps the panels captured with it.
+
+**Presentation controls.** Every analytical page exposes the shared **Appearance** section with
+opt-in built-in and reusable user presets. Shared settings are saved with project workspaces;
+style edits and reopening saved figures do not rerun fits or analyses. Existing automatic units,
+source/category colours and full scientific warnings are retained. Publication previews are scaled
+to fit the dialog, not displayed at physical screen size. Interactive exports freeze their picture
+before showing the preview, so a background result finishing during the dialogs cannot change the
+approved image. Large marker plots may take time to prepare their vector snapshot; a warning allows
+you to cancel without dropping points. Inspect the exported figure at its final
+printed size; journal-specific requirements are still your responsibility.
 
 The numeric-data export commands remain separate:
 

@@ -79,6 +79,7 @@ from .axes import ReadableLogAxis
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_workflow import WarningSummary, control_group, install_plot_workflow
 from .plot_export import (
     DATA_FILTERS,
     IMAGE_FILTERS,
@@ -606,11 +607,15 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._view_stack.addWidget(self._page(VIEW_SPECTROGRAM, self._build_spec_plot()))
         self._view_stack.addWidget(self._page(VIEW_ALLPOINTS, self._build_hist_plot()))
         right.addWidget(self._view_stack)
+        self._warning_summary = WarningSummary(title="Noise warnings")
+        right.addWidget(self._warning_summary)
 
         # The title names WHICH span and WHICH estimator these numbers came from, because
         # three of the four views are something else on screen above it and a box labelled
         # only "Noise details" beside a histogram reads as the histogram's numbers.
         details_box = QtWidgets.QGroupBox("Noise details — Welch PSD of the same span")
+        details_box.setCheckable(True)
+        details_box.setChecked(False)
         dlay = QtWidgets.QVBoxLayout(details_box)
         dlay.setContentsMargins(6, 6, 6, 6)
         self._details = QtWidgets.QPlainTextEdit()
@@ -620,6 +625,12 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._details.setMaximumHeight(260)
         self._details.setStyleSheet("font-family: Menlo, monospace; font-size: 11px;")
         dlay.addWidget(self._details)
+        self._details.hide()
+        details_box.setMaximumHeight(32)
+        details_box.toggled.connect(lambda expanded: (
+            self._details.setVisible(expanded),
+            details_box.setMaximumHeight(290 if expanded else 32)))
+        self._details.textChanged.connect(self._refresh_warning_summary)
         right.addWidget(details_box)
         right.setStretchFactor(0, 1)
         right.setStretchFactor(1, 0)
@@ -631,6 +642,19 @@ class PSDWindow(QtWidgets.QMainWindow):
         # Wire every change signal AFTER the controls exist, so building them never
         # triggers a recompute mid-construction (the established panel pattern).
         self._wire_signals()
+        self._workflow = install_plot_workflow(
+            self, sections={"Data": (self._recording_group, self._view_group, self._segment_group),
+                            "Analysis": (self._welch_group, self._display_group, self._rms_group),
+                            "Appearance": (self._style_group,),
+                            "Export": (self._export_info, self._save_btn, self._save_data_btn)},
+            actions=(("Analyze / refresh", self._refresh_from_button),),
+            exports=(("Export current figure…", lambda: self.save_image()),
+                     ("Export data (CSV)…", lambda: self.export_data())))
+        self._refresh_btn.hide()
+
+    def _refresh_warning_summary(self) -> None:
+        warnings = self._export_warnings() + self._comparison_cautions()
+        self._warning_summary.set_warnings(tuple(dict.fromkeys(warnings)))
 
     # -- the four view pages ---------------------------------------------------------------------
     def _page(self, view: str, plot: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -714,13 +738,17 @@ class PSDWindow(QtWidgets.QMainWindow):
         root = QtWidgets.QVBoxLayout(host)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
-        root.addWidget(self._build_recording_group())
-        root.addWidget(self._build_view_group())
-        root.addWidget(self._build_segment_group())
-        root.addWidget(self._build_welch_group())
-        root.addWidget(self._build_display_group())
-        root.addWidget(self._build_rms_group())
-        root.addWidget(self._build_style_group())
+        for name, builder in (("recording", self._build_recording_group),
+                              ("view", self._build_view_group), ("segment", self._build_segment_group),
+                              ("welch", self._build_welch_group), ("display", self._build_display_group),
+                              ("rms", self._build_rms_group), ("style", self._build_style_group)):
+            group = builder()
+            setattr(self, f"_{name}_group", group)
+            root.addWidget(group)
+        self._export_info = control_group(
+            "Export", "Export the view currently on screen. Image sizing and format are "
+            "chosen in the export dialog; CSV preserves the numerical data and provenance.")
+        root.addWidget(self._export_info)
 
         self._save_btn = QtWidgets.QPushButton("Export current figure…")
         self._save_btn.setToolTip(
@@ -848,8 +876,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._spec_cmap_combo.setToolTip(
             "Colour map for log₁₀ power. All four are perceptually uniform, so equal "
             "colour steps are equal power steps.")
-        return self._options_page([("Time resolution", self._spec_nperseg_combo),
-                                   ("Colour map", self._spec_cmap_combo)])
+        return self._options_page([("Time resolution", self._spec_nperseg_combo)])
 
     def _hist_options_page(self) -> QtWidgets.QWidget:
         self._hist_bins_combo = QtWidgets.QComboBox()
@@ -990,18 +1017,12 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._export_h.hide()
         # The existing palette is retained; shared controls add opt-in typography.
         self._appearance_widget = PlotAppearanceWidget(
-            self._appearance, include_colors=False, compact=True, include_markers=False)
+            self._appearance, include_colors=True, compact=True, include_markers=False,
+            multi_view_labels=True)
         self._appearance_widget.changed.connect(self._on_appearance_changed)
-        appearance_toggle = QtWidgets.QToolButton()
-        appearance_toggle.setText("Typography and line styling")
-        appearance_toggle.setCheckable(True)
-        appearance_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        appearance_toggle.setArrowType(Qt.RightArrow)
-        self._appearance_widget.setVisible(False)
-        appearance_toggle.toggled.connect(self._appearance_widget.setVisible)
-        appearance_toggle.toggled.connect(
-            lambda expanded: appearance_toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow))
-        form.addRow(appearance_toggle)
+        for legacy in (self._title_edit, self._data_swatch, self._fit_swatch, self._bg_combo):
+            form.setRowVisible(legacy, False)
+        form.addRow("Spectrogram colormap", self._spec_cmap_combo)
         form.addRow(self._appearance_widget)
         return box
 
@@ -1332,7 +1353,6 @@ class PSDWindow(QtWidgets.QMainWindow):
 
     def _restyle_existing_views(self) -> None:
         """Change only scene appearance; never read a trace or rebuild a result."""
-        self._apply_appearance()
         views = (
             (VIEW_PSD, self._plot_widget, self._plot),
             (VIEW_FFT, self._fft_widget, self._fft_plot),
@@ -1378,6 +1398,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             axis.setTextPen(pg.mkPen(self._fg_hex()))
             axis.labelStyle.update(self._label_style())
             axis._updateLabel()
+        self._apply_appearance()  # shared overrides win after legacy per-view presentation
 
     def _on_appearance_changed(self, state: PlotAppearance) -> None:
         self._appearance = state
@@ -1391,14 +1412,47 @@ class PSDWindow(QtWidgets.QMainWindow):
         if not self._updating:
             self._restyle_existing_views()
 
+    def appearance_state(self) -> dict:
+        return self._appearance.to_dict()
+
     def _apply_appearance(self) -> None:
+        view = self.current_view()
+        self._appearance_widget.set_legend_available(
+            getattr(self.active_plot_item(), "legend", None) is not None)
+        self._appearance_widget.data_color.setEnabled(view != VIEW_SPECTROGRAM)
+        self._spec_cmap_combo.setEnabled(view == VIEW_SPECTROGRAM)
+        self._appearance_widget.data_color.setToolTip(
+            "Colour of the plotted data curves." if view != VIEW_SPECTROGRAM else
+            "A spectrogram uses its colormap, not a single data colour.")
+        has_fit_ink = ((view == VIEW_PSD and self._fit_item is not None) or
+                       (view == VIEW_ALLPOINTS and bool(self._hist_marks)))
+        self._appearance_widget.fit_color.setEnabled(has_fit_ink)
+        self._appearance_widget.fit_color.setToolTip(
+            "Colour of the applied 1/f trend or marked histogram levels." if has_fit_ink else
+            "This view has no fitted curve or marked level to colour.")
         for widget, plot, data, fits in (
                 (self._plot_widget, self._plot, [c.item for c in self._curves], [self._fit_item]),
                 (self._fft_widget, self._fft_plot, [self._fft_item], []),
                 (self._spec_widget, self._spec_plot, [], []),
                 (self._hist_widget, self._hist_plot, [self._hist_item], [])):
             apply_plot_appearance(plot, self._appearance, plot_widget=widget,
-                                  data_items=data, fit_items=fits)
+                                  data_items=data, fit_items=fits,
+                                  title_prefix="⚠ Noise warnings · "
+                                  if self._warning_summary.full_text() else "")
+        # Level positions and occupancies are scientific results; only their ink
+        # changes here. InfiniteLine is not a PlotDataItem handled by the helper.
+        for line in self._hist_marks:
+            original = getattr(line, "_nanoscope_appearance_pen", None)
+            if original is None:
+                original = pg.mkPen(line.pen)
+                line._nanoscope_appearance_pen = original
+            pen = pg.mkPen(original)
+            pen.setColor(QtGui.QColor(self._appearance.fit_color or self._style.fit_color))
+            if self._appearance.line_width is not None:
+                pen.setWidthF(self._appearance.line_width)
+            line.setPen(pen)
+            if line.label is not None:
+                line.label.setColor(pen.color())
 
     # -- public setters (owner + tests) ----------------------------------------------------------
     def set_segment(self, start_s: float, end_s: float) -> None:
@@ -2420,6 +2474,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         if self._updating:
             return
         self._refresh_view()
+        self._apply_appearance()
         self.workspaceChanged.emit()
 
     def _on_view_option_changed(self, *_a) -> None:
@@ -3040,8 +3095,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         # folded over the image's left edge with its ticks on top of the frequency axis
         # (measured at 640x480 — the axis showed two labels, "0" and "1000", for a 0-25 kHz
         # range). A spectrogram without a legible colour scale is not a saved spectrogram.
-        target = (self._spec_widget.scene() if self.current_view() == VIEW_SPECTROGRAM
-                  else self.active_plot_item())
+        target = self.figure_export_target()
         w, h = self._style.export_w, self._style.export_h
         export_kwargs = dict(width=w, height=h)
         if path is None:
@@ -3055,6 +3109,8 @@ class PSDWindow(QtWidgets.QMainWindow):
             export_kwargs = dict(width=options.width, height=options.height,
                                  physical_width_mm=options.physical_width_mm,
                                  physical_height_mm=options.physical_height_mm)
+            if options.frozen_snapshot is not None:
+                export_kwargs["frozen_snapshot"] = options.frozen_snapshot
             if options.extension == ".png" and not options.native:
                 export_kwargs["dpi"] = options.dpi
         out = Path(path)
@@ -3081,6 +3137,10 @@ class PSDWindow(QtWidgets.QMainWindow):
                 self, "Save spectrum image", "\n\n".join(notes))
         self._details.setPlainText(self.details_text() + f"\n\nSaved image → {out.name}")
         return out
+
+    def figure_export_target(self):
+        return (self._spec_widget.scene() if self.current_view() == VIEW_SPECTROGRAM
+                else self.active_plot_item())
 
     @staticmethod
     def _json_default(value):

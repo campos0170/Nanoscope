@@ -504,7 +504,7 @@ def _relative_sibling_imports(module) -> list[str]:
 #:
 #: It is an ALLOW-LIST and not a predicate on purpose: the next relative import added
 #: here fails this test and has to argue for itself in the same place.
-_ALLOWED_SIBLING_IMPORTS = ["categorical"]
+_ALLOWED_SIBLING_IMPORTS = ["plot_appearance", "plot_workflow", "categorical"]
 
 
 def test_the_report_window_imports_only_the_shared_leaf():

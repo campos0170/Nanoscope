@@ -78,8 +78,9 @@ from ..core.sources import gain_label
 from ..plot.style import OKABE_ITO
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
-from .inspector_widgets import Disclosure
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_workflow import (WarningSummary, bounded_controls, control_group,
+                            ensure_item_legend, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
                           choose_live_plot_export, data_write_failure_text, write_live_plot_image,
                           write_plot_csv)
@@ -222,7 +223,9 @@ class VDepWindow(QtWidgets.QMainWindow):
 
         # Controls row: metric + fit + axis toggles. Items are added BEFORE the
         # change signals are connected so building the combos never triggers a redraw.
-        controls = QtWidgets.QHBoxLayout()
+        self._analysis_section = QtWidgets.QWidget()
+        controls = QtWidgets.QHBoxLayout(self._analysis_section)
+        controls.setContentsMargins(0, 0, 0, 0)
         controls.addWidget(QtWidgets.QLabel("Metric"))
         self._metric_combo = QtWidgets.QComboBox()
         self._metric_combo.addItems([lbl for lbl, _ in _METRIC_LABELS])
@@ -266,7 +269,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._headline = QtWidgets.QLabel("")
         self._headline.setStyleSheet("font-weight:600; font-size:14px;")
         controls.addWidget(self._headline)
-        root.addLayout(controls)
+        root.addWidget(self._analysis_section)
 
         # Buttons row.
         bar = QtWidgets.QHBoxLayout()
@@ -289,8 +292,21 @@ class VDepWindow(QtWidgets.QMainWindow):
 
         self._appearance_widget = PlotAppearanceWidget(self._appearance)
         self._appearance_widget.changed.connect(self._appearance_from_user)
-        self._appearance_section = Disclosure("Appearance", self._appearance_widget)
+        self._appearance_section = bounded_controls(self._appearance_widget)
         root.addWidget(self._appearance_section)
+        self._data_section = control_group(
+            "Data", "Summarizes the detected events in each open recording against voltage. "
+            "Analyze / refresh updates the points. Choose the metric and fit in Analysis.")
+        self._data_section.layout().addWidget(self._accepted_only)
+        self._export_section = QtWidgets.QWidget()
+        export_layout = QtWidgets.QHBoxLayout(self._export_section)
+        export_layout.addWidget(self._save_btn)
+        export_layout.addWidget(self._save_data_btn)
+        export_layout.addStretch(1)
+        root.addWidget(self._data_section)
+        root.addWidget(self._export_section)
+        root.addWidget(self._headline)
+        self._refresh_btn.hide()
 
         # The comparability banner. Above the plot, hidden when there is nothing to
         # say, so its presence alone is the signal.
@@ -308,15 +324,9 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._warning_label.setTextFormat(Qt.PlainText)
         self._warning_label.setStyleSheet(_WARN_CSS)
         self._warning_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self._warning_scroll = QtWidgets.QScrollArea()
-        self._warning_scroll.setWidget(self._warning_label)
-        self._warning_scroll.setWidgetResizable(True)      # wrap to the viewport width
-        self._warning_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self._warning_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._warning_scroll.setMaximumHeight(_WARN_MAX_H)
-        self._warning_scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
-                                           QtWidgets.QSizePolicy.Maximum)
-        self._warning_scroll.setVisible(False)
+        self._warning_label.setParent(self)
+        self._warning_label.hide()  # retained verbatim for the existing read/export API
+        self._warning_scroll = WarningSummary(title="Comparability warnings", maximum_height=_WARN_MAX_H)
         root.addWidget(self._warning_scroll)
 
         splitter = QtWidgets.QSplitter(Qt.Vertical)
@@ -364,6 +374,13 @@ class VDepWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(1, 0)
         root.addWidget(splitter, 1)
         self.setCentralWidget(central)
+        self._workflow = install_plot_workflow(
+            self, sections={"Data": (self._data_section,), "Analysis": (self._analysis_section,),
+                            "Appearance": (self._appearance_section,), "Export": (self._export_section,)},
+            actions=(("Analyze / refresh", self._refresh_from_user),
+                     ("Apply fit", self._apply_fit_from_user)),
+            exports=(("Export current figure…", lambda: self.save_image()),
+                     ("Export data (CSV)…", lambda: self.export_data())))
 
         # Wire the change signals AFTER construction so populating them never redrew.
         self._metric_combo.currentTextChanged.connect(self.refresh)
@@ -393,10 +410,20 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._appearance_widget.set_state(self._appearance)
         self._apply_appearance()
 
+    def appearance_state(self) -> dict:
+        return self._appearance.to_dict()
+
     def _apply_appearance(self) -> None:
+        ensure_item_legend(self._plot, ((self._scatter_item, "Per recording"),
+                                       (self._fit_item, "Applied trend")))
+        self._appearance_widget.set_legend_available(self._scatter_item is not None)
         apply_plot_appearance(
             self._plot, self._appearance, plot_widget=self._plot_widget,
-            data_items=(self._scatter_item,), fit_items=(self._fit_item,))
+            data_items=(self._scatter_item,), fit_items=(self._fit_item,),
+            title_prefix="⚠ Voltage-series caveats · " if self.warning_text() else "")
+
+    def figure_export_target(self):
+        return self._plot
 
     # -- current control state -------------------------------------------------------------------
     def _metric(self) -> str:
@@ -444,6 +471,10 @@ class VDepWindow(QtWidgets.QMainWindow):
         pending = self._fit_combo.currentText() != self._applied_fit
         self._fit_apply_btn.setEnabled(pending)
         self._fit_apply_btn.setText("Apply fit ●" if pending else "Apply fit")
+        if hasattr(self, "_workflow"):
+            button = self._workflow.primary_actions[1]
+            button.setEnabled(pending)
+            button.setText(self._fit_apply_btn.text())
         self._fit_apply_btn.setToolTip(
             f"Draw “{self._fit_combo.currentText()}” — the plot still shows "
             f"“{self._applied_fit}”." if pending else
@@ -610,8 +641,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         """
         text = "\n\n".join(warnings)
         self._warning_label.setText(text)
-        self._warning_label.setVisible(bool(text))
-        self._warning_scroll.setVisible(bool(text))
+        self._warning_scroll.set_warnings(tuple(warnings))
 
     def _message(self, text: str) -> None:
         self._clear()
@@ -1118,6 +1148,8 @@ class VDepWindow(QtWidgets.QMainWindow):
             export_kwargs = dict(width=options.width, height=options.height,
                                  physical_width_mm=options.physical_width_mm,
                                  physical_height_mm=options.physical_height_mm)
+            if options.frozen_snapshot is not None:
+                export_kwargs["frozen_snapshot"] = options.frozen_snapshot
             if options.extension == ".png" and not options.native:
                 export_kwargs["dpi"] = options.dpi
         out = Path(path)

@@ -43,6 +43,7 @@ from .segment import persistent_key
 __all__ = [
     "ANALYSIS_PANEL_ARTIFACT_ID",
     "EVENT_PLOTS_ARTIFACT_ID",
+    "DISTRIBUTION_SUMMARIES_ARTIFACT_ID",
     "IV_ARTIFACT_ID",
     "OWNED_ARTIFACT_IDS",
     "PLOTS_ARTIFACT_ID",
@@ -54,6 +55,7 @@ __all__ = [
     "capture_analysis_panel",
     "capture_analysis_workspace",
     "capture_event_plots",
+    "capture_distribution_summaries",
     "capture_iv",
     "capture_model_reference",
     "capture_plots",
@@ -69,6 +71,7 @@ __all__ = [
     "restore_analysis_panel",
     "restore_analysis_workspace",
     "restore_event_plots",
+    "restore_distribution_summaries",
     "restore_iv",
     "restore_plots",
     "restore_psd",
@@ -80,6 +83,7 @@ __all__ = [
 # Stable built-in identities.  A producer replaces only its own id; plugin/unknown
 # artifacts retain their position and bytes when the workspace is captured again.
 PLOTS_ARTIFACT_ID = "builtin.plots"
+DISTRIBUTION_SUMMARIES_ARTIFACT_ID = "builtin.distribution-summaries"
 SUBPOPULATION_ARTIFACT_ID = "builtin.subpopulation"
 PSD_ARTIFACT_ID = "builtin.psd"
 EVENT_PLOTS_ARTIFACT_ID = "builtin.event-plots"
@@ -89,6 +93,7 @@ ANALYSIS_PANEL_ARTIFACT_ID = "builtin.analysis-panel"
 
 _KINDS = {
     PLOTS_ARTIFACT_ID: "nanoscope.plots",
+    DISTRIBUTION_SUMMARIES_ARTIFACT_ID: "nanoscope.distribution-summaries",
     SUBPOPULATION_ARTIFACT_ID: "nanoscope.subpopulation-report",
     PSD_ARTIFACT_ID: "nanoscope.psd",
     EVENT_PLOTS_ARTIFACT_ID: "nanoscope.event-plots",
@@ -1300,6 +1305,7 @@ def capture_subpopulation(window: Any) -> WorkspaceArtifact:
         "assignment_state": str(assignment[0]),
         "assignment_reason": str(assignment[1]),
         "curation_note": str(window.curation_note()),
+        "appearance": _capture_appearance(window),
     }
     return _artifact(SUBPOPULATION_ARTIFACT_ID, payload, resources)
 
@@ -1335,6 +1341,7 @@ def restore_subpopulation(window: Any, artifact: WorkspaceArtifact) -> RestoreRe
         window.set_assignment_state(str(payload.get("assignment_state") or "none"),
                                     str(payload.get("assignment_reason") or ""))
         window.set_curation_note(str(payload.get("curation_note") or ""))
+        _restore_appearance(window, payload)
     except Exception as exc:
         return RestoreReport(skipped=(SUBPOPULATION_ARTIFACT_ID,),
                              warnings=(f"could not restore subpopulation report: {exc}",))
@@ -1738,14 +1745,16 @@ def restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
 def capture_event_plots(window: Any) -> WorkspaceArtifact:
     resources = _Resources()
     source = _event_window_source_recipe(window)
-    if source is None:
+    amplitude_snapshot = bool(getattr(window, "_amplitude_frozen_snapshot", False))
+    if source is None or amplitude_snapshot:
         carried = getattr(window, "_nanoscope_workspace_event_source", None)
-        source = _clone_plain(dict(carried)) if isinstance(carried, Mapping) else None
+        if isinstance(carried, Mapping):
+            source = _clone_plain(dict(carried))
     edge_getter = getattr(window, "density_edges", None)
     density_edges = edge_getter() if callable(edge_getter) else None
     accepted_count = getattr(window, "_nanoscope_workspace_accepted_event_count", None)
     eventset = getattr(window, "_eventset", None)
-    if eventset is not None:
+    if eventset is not None and not amplitude_snapshot:
         try:
             accepted_count = int(len(eventset.accepted.df))
         except (AttributeError, TypeError, ValueError):
@@ -1773,6 +1782,8 @@ def capture_event_plots(window: Any) -> WorkspaceArtifact:
             "appearance": _capture_appearance(window),
         },
         "density_counts": _encode(window.density_counts(), resources, "density.counts"),
+        "amplitude_warnings": list(getattr(window, "_amplitude_warnings", ())),
+        "amplitude_snapshot_units": str(getattr(window, "_amplitude_snapshot_units", "")),
         "density_edges": _encode(density_edges, resources, "density.edges"),
         "ensemble": _encode(window.ensemble_traces(), resources, "ensemble"),
     }
@@ -1825,7 +1836,11 @@ def restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreRepo
         _set_text(window, "_d_ylabel", config.get("density_y_label", ""))
         _set_text(window, "_e_title", config.get("ensemble_title", ""))
         tabs = getattr(window, "_tabs", None)
-        _select_tab_by_text(tabs, str(config.get("view", "Density")))
+        set_view = getattr(window, "set_view", None)
+        if callable(set_view):
+            _blocked(tabs, lambda: set_view(str(config.get("view", "Density"))))
+        else:
+            _select_tab_by_text(tabs, str(config.get("view", "Density")))
         # Numerical state is installed verbatim.  Rebinding a source or pressing Refresh is
         # the explicit operation which is allowed to run histogram/ensemble kernels again.
         source = artifact.payload.get("source")
@@ -1852,6 +1867,10 @@ def restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreRepo
                         "the frozen plot remains labelled by its saved source recipe")
         window._density_counts = _decode(artifact.payload.get("density_counts"),
                                          artifact.tables, artifact.blobs)
+        amplitude_warnings = artifact.payload.get("amplitude_warnings", [])
+        window._amplitude_warnings = tuple(str(w) for w in amplitude_warnings) if isinstance(
+            amplitude_warnings, (tuple, list)) else ()
+        window._amplitude_snapshot_units = str(artifact.payload.get("amplitude_snapshot_units", ""))
         window._units = str(artifact.payload.get("units", getattr(window, "_units", "")))
         accepted_count = artifact.payload.get("accepted_event_count")
         if accepted_count is not None:
@@ -2435,10 +2454,58 @@ def _clone_plain(value: Any) -> Any:
     return value
 
 
+def capture_distribution_summaries(window: Any) -> WorkspaceArtifact:
+    """Persist draft controls and committed summary coordinates, never rerun kernels."""
+    from .figure_tables import encode_figure_table
+
+    payload, tables = window.snapshot_state()
+    if not isinstance(payload, Mapping) or not isinstance(tables, Mapping):
+        raise ValueError("Distribution summary state must contain a payload and tables.")
+    if any(not isinstance(name, str) or not isinstance(frame, pd.DataFrame)
+           for name, frame in tables.items()):
+        raise ValueError("Distribution summary resources must be named DataFrames.")
+    payload = _clone_plain(dict(payload))
+    payload["table_resources"] = {name: f"table_{index}.parquet" for index, name in enumerate(tables)}
+    # Opaque Parquet resources preserve mixed scalar values and missing sentinels
+    # in observations excluded from the summary. The project container's ordinary
+    # table codec and every existing analytical artifact remain unchanged.
+    return WorkspaceArtifact(
+        artifact_id=DISTRIBUTION_SUMMARIES_ARTIFACT_ID,
+        kind=_KINDS[DISTRIBUTION_SUMMARIES_ARTIFACT_ID], schema_version=_SCHEMA_VERSION,
+        payload=payload,
+        blobs={payload["table_resources"][name]: encode_figure_table(frame)
+               for name, frame in tables.items()})
+
+
+def restore_distribution_summaries(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
+    from .figure_tables import decode_figure_table
+
+    ok, reason = _artifact_ok(artifact, DISTRIBUTION_SUMMARIES_ARTIFACT_ID)
+    if not ok:
+        return RestoreReport(skipped=(DISTRIBUTION_SUMMARIES_ARTIFACT_ID,), warnings=(reason,))
+    try:
+        payload = _clone_plain(artifact.payload)
+        resources = payload.pop("table_resources", {})
+        if (not isinstance(resources, Mapping) or any(
+                not isinstance(name, str) or not isinstance(blob, str) or blob not in artifact.blobs
+                for name, blob in resources.items())):
+            raise ValueError("Distribution summary table resources are missing or malformed.")
+        tables = {name: frame.copy(deep=True) for name, frame in artifact.tables.items()}
+        if set(resources).intersection(tables):
+            raise ValueError("Distribution summary tables have duplicate resource names.")
+        tables.update({name: decode_figure_table(artifact.blobs[blob]) for name, blob in resources.items()})
+        window.restore_state(payload, tables)
+    except (KeyError, TypeError, ValueError) as exc:
+        return RestoreReport(skipped=(DISTRIBUTION_SUMMARIES_ARTIFACT_ID,),
+                             warnings=(f"Distribution summary snapshot could not be restored: {exc}",))
+    return RestoreReport(restored=(DISTRIBUTION_SUMMARIES_ARTIFACT_ID,))
+
+
 def capture_analysis_workspace(
     existing: AnalyticalWorkspace | None = None,
     *,
     plots: Any = None,
+    distribution_summaries: Any = None,
     subpopulation: Any = None,
     psd: Any = None,
     event_plots: Any = None,
@@ -2455,6 +2522,7 @@ def capture_analysis_workspace(
 
     captures = (
         (PLOTS_ARTIFACT_ID, plots, capture_plots),
+        (DISTRIBUTION_SUMMARIES_ARTIFACT_ID, distribution_summaries, capture_distribution_summaries),
         (SUBPOPULATION_ARTIFACT_ID, subpopulation, capture_subpopulation),
         (PSD_ARTIFACT_ID, psd, capture_psd),
         (EVENT_PLOTS_ARTIFACT_ID, event_plots, capture_event_plots),
@@ -2498,6 +2566,7 @@ def restore_analysis_workspace(
     workspace: AnalyticalWorkspace,
     *,
     plots: Any = None,
+    distribution_summaries: Any = None,
     subpopulation: Any = None,
     psd: Any = None,
     event_plots: Any = None,
@@ -2509,6 +2578,7 @@ def restore_analysis_workspace(
 
     surfaces = {
         PLOTS_ARTIFACT_ID: (plots, restore_plots),
+        DISTRIBUTION_SUMMARIES_ARTIFACT_ID: (distribution_summaries, restore_distribution_summaries),
         SUBPOPULATION_ARTIFACT_ID: (subpopulation, restore_subpopulation),
         PSD_ARTIFACT_ID: (psd, restore_psd),
         EVENT_PLOTS_ARTIFACT_ID: (event_plots, restore_event_plots),

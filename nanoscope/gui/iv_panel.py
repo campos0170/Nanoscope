@@ -78,8 +78,9 @@ _I0_CROSS_REFERENCE = (
 )
 from ..plot.style import OKABE_ITO
 from .export_paths import ask_export_path
-from .inspector_widgets import Disclosure
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_workflow import (WarningSummary, bounded_controls, control_group,
+                            ensure_item_legend, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
                           choose_live_plot_export, data_write_failure_text, write_live_plot_image,
                           write_plot_csv)
@@ -168,8 +169,25 @@ class IVWindow(QtWidgets.QMainWindow):
 
         self._appearance_widget = PlotAppearanceWidget(self._appearance)
         self._appearance_widget.changed.connect(self._appearance_from_user)
-        self._appearance_section = Disclosure("Appearance", self._appearance_widget)
+        self._appearance_section = bounded_controls(self._appearance_widget)
         root.addWidget(self._appearance_section)
+        self._data_section = control_group(
+            "Data", "Uses the open recordings and their measured voltages. Analyze / refresh "
+            "gathers the open-pore current and updates the existing I-V fit.")
+        self._analysis_section = control_group(
+            "Analysis", "The I-V fit uses the existing open-pore estimator and valid voltage "
+            "points. Analyze / refresh explicitly recomputes it; appearance never refits.")
+        self._export_section = QtWidgets.QWidget()
+        exports = QtWidgets.QHBoxLayout(self._export_section)
+        exports.addWidget(self._save_btn)
+        exports.addWidget(self._save_data_btn)
+        exports.addStretch(1)
+        root.addWidget(self._data_section)
+        root.addWidget(self._analysis_section)
+        root.addWidget(self._export_section)
+        self._refresh_btn.hide()
+        self._warning_summary = WarningSummary(title="I-V caveats")
+        root.addWidget(self._warning_summary)
 
         splitter = QtWidgets.QSplitter()
         splitter.setOrientation(Qt.Vertical)
@@ -180,6 +198,8 @@ class IVWindow(QtWidgets.QMainWindow):
         splitter.addWidget(self._plot_widget)
 
         details_box = QtWidgets.QGroupBox("Fit details")
+        details_box.setCheckable(True)
+        details_box.setChecked(False)
         dlay = QtWidgets.QVBoxLayout(details_box)
         dlay.setContentsMargins(6, 6, 6, 6)
         self._details = QtWidgets.QPlainTextEdit()
@@ -187,12 +207,23 @@ class IVWindow(QtWidgets.QMainWindow):
         self._details.setMaximumHeight(180)
         self._details.setStyleSheet("font-family: Menlo, monospace; font-size: 11px;")
         dlay.addWidget(self._details)
+        self._details.hide()
+        details_box.setMaximumHeight(32)
+        details_box.toggled.connect(lambda expanded: (
+            self._details.setVisible(expanded),
+            details_box.setMaximumHeight(240 if expanded else 32)))
         splitter.addWidget(details_box)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         root.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
+        self._workflow = install_plot_workflow(
+            self, sections={"Data": (self._data_section,), "Analysis": (self._analysis_section,),
+                            "Appearance": (self._appearance_section,), "Export": (self._export_section,)},
+            actions=(("Analyze / refresh", self._refresh_from_user),),
+            exports=(("Export current figure…", lambda: self.save_image()),
+                     ("Export data (CSV)…", lambda: self.export_data())))
 
     def _appearance_from_user(self, state: PlotAppearance) -> None:
         self._appearance = state
@@ -206,10 +237,20 @@ class IVWindow(QtWidgets.QMainWindow):
         self._appearance_widget.set_state(self._appearance)
         self._apply_appearance()
 
+    def appearance_state(self) -> dict:
+        return self._appearance.to_dict()
+
     def _apply_appearance(self) -> None:
+        ensure_item_legend(self._plot, ((self._scatter_item, "Open-pore current"),
+                                       (self._fit_item, "I-V fit")))
+        self._appearance_widget.set_legend_available(self._scatter_item is not None)
         apply_plot_appearance(
             self._plot, self._appearance, plot_widget=self._plot_widget,
-            data_items=(self._scatter_item,), fit_items=(self._fit_item,))
+            data_items=(self._scatter_item,), fit_items=(self._fit_item,),
+            title_prefix="⚠ I-V caveats · " if self._warning_summary.full_text() else "")
+
+    def figure_export_target(self):
+        return self._plot
 
     # -- data ------------------------------------------------------------------------------------
     def refresh(self) -> None:
@@ -337,6 +378,7 @@ class IVWindow(QtWidgets.QMainWindow):
 
     # -- rendering -------------------------------------------------------------------------------
     def _clear(self) -> None:
+        self._warning_summary.set_warnings(())
         self._plot.clear()
         self._plot.setTitle(None)
         self._scatter_item = self._fit_item = self._message_item = None
@@ -606,6 +648,12 @@ class IVWindow(QtWidgets.QMainWindow):
             details.append("")
             details.extend(notes)
         self._details.setPlainText("\n".join(details))
+        caveats = list(notes) + [self._exclusion_line(e) for e in self._exclusions]
+        if self._fit is not None:
+            dof = stats.r2_dof_caveat(self._fit.n, _IV_FIT_PARAMS, model="line", noun="recording")
+            if dof:
+                caveats.append(dof)
+        self._warning_summary.set_warnings(caveats)
 
     # -- export ----------------------------------------------------------------------------------
     def save_image(self, path: str | None = None) -> Path | None:
@@ -624,6 +672,8 @@ class IVWindow(QtWidgets.QMainWindow):
             export_kwargs = dict(width=options.width, height=options.height,
                                  physical_width_mm=options.physical_width_mm,
                                  physical_height_mm=options.physical_height_mm)
+            if options.frozen_snapshot is not None:
+                export_kwargs["frozen_snapshot"] = options.frozen_snapshot
             if options.extension == ".png" and not options.native:
                 export_kwargs["dpi"] = options.dpi
         out = Path(path)

@@ -6,10 +6,10 @@ contract; physical SVG dimensions travel separately so its viewBox stays unchang
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import math
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 
 MAX_RASTER_EDGE = 32_768
@@ -33,6 +33,11 @@ class ExportOptions:
     physical_width_mm: float | None = None
     physical_height_mm: float | None = None
     dpi: int = DEFAULT_DPI
+    include_residual: bool = False
+    # Transient interactive-only image, excluded from settings/equality. The
+    # chooser freezes it before showing a preview; an asynchronous analysis
+    # cannot silently change the picture after the user approves that preview.
+    frozen_snapshot: object | None = field(default=None, compare=False, repr=False)
 
     @property
     def native(self) -> bool:
@@ -119,11 +124,17 @@ class ExportOptionsDialog(QtWidgets.QDialog):
     """Compact, side-effect-free publication sizing dialog for the current figure."""
 
     def __init__(self, parent=None, native_size=(800, 600), initial_format="png",
-                 initial_width=0, initial_height=0) -> None:
+                 initial_width=0, initial_height=0, *, preview_image=None,
+                 residual_preview_image=None, residual_native_size=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export current figure")
         self.setMinimumWidth(420)
         self._native_size = _native_dimensions(native_size)
+        self._main_native_size = self._native_size
+        self._residual_native_size = (_native_dimensions(residual_native_size)
+                                      if residual_native_size is not None else None)
+        self._preview_image = preview_image
+        self._residual_preview_image = residual_preview_image
         self._aspect = self._native_size[0] / self._native_size[1]
         if not math.isfinite(self._aspect) or self._aspect <= 0:
             raise ValueError("The plot aspect ratio must be finite and positive.")
@@ -140,6 +151,23 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             "These choices do not change the analysis or its numerical results.")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
+
+        self.preview_label = QtWidgets.QLabel()
+        self.preview_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setFixedHeight(230)
+        self.preview_label.setAccessibleName("Frozen publication figure preview")
+        self.preview_label.setStyleSheet("QLabel { background: #e7e7e7; border: 1px solid #b7b7b7; }")
+        self.preview_label.setVisible(preview_image is not None)
+        layout.addWidget(self.preview_label)
+        self.preview_note = QtWidgets.QLabel("Frozen preview · scaled to fit, not physical screen size")
+        self.preview_note.setWordWrap(True)
+        self.preview_note.setVisible(preview_image is not None)
+        layout.addWidget(self.preview_note)
+        self.residual_check = QtWidgets.QCheckBox("Include residual panel below the main plot")
+        self.residual_check.setToolTip(
+            "Explicitly include the existing residual plot. This does not fit or recompute residuals.")
+        self.residual_check.setVisible(self._residual_native_size is not None)
+        layout.addWidget(self.residual_check)
 
         form = QtWidgets.QFormLayout()
         self.format_combo = QtWidgets.QComboBox()
@@ -239,8 +267,50 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         self.height_spin.valueChanged.connect(self._change_height)
         self.aspect_check.toggled.connect(self._change_aspect)
         self.dpi_spin.valueChanged.connect(self._refresh)
+        self.residual_check.toggled.connect(self._change_residual)
         self._set_dimension_controls()
         self._refresh()
+        if preview_image is not None:
+            # Word-wrapped labels report a smaller minimum than their actual
+            # height-for-width. Reserve the complete initial layout; otherwise
+            # QDialog's compact default can overlap the preview and its caption.
+            self.setMinimumHeight(self.sizeHint().height())
+
+    def _change_residual(self, checked: bool) -> None:
+        self._native_size = (self._residual_native_size if checked and self._residual_native_size
+                             else self._main_native_size)
+        self._aspect = self._native_size[0] / self._native_size[1]
+        if self.aspect_check.isChecked():
+            self._height_mm = self._width_mm / self._aspect
+            self._set_dimension_controls()
+        self._refresh()
+
+    def _refresh_preview(self, options: ExportOptions) -> None:
+        image = (self._residual_preview_image if options.include_residual
+                 else self._preview_image)
+        if not isinstance(image, QtGui.QImage) or image.isNull():
+            return
+        ratio = (self._native_size[0] / self._native_size[1] if options.native else
+                 options.physical_width_mm / options.physical_height_mm)
+        width, height = 380.0, 210.0
+        if width / height > ratio:
+            width = height * ratio
+        else:
+            height = width / ratio
+        canvas = QtGui.QImage(max(1, round(width)), max(1, round(height)),
+                              QtGui.QImage.Format.Format_ARGB32)
+        canvas.fill(QtCore.Qt.GlobalColor.white)
+        painter = QtGui.QPainter(canvas)
+        try:
+            scaled = image.scaled(canvas.size(), QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                                  QtCore.Qt.TransformationMode.SmoothTransformation)
+            painter.drawImage((canvas.width() - scaled.width()) // 2,
+                              (canvas.height() - scaled.height()) // 2, scaled)
+        finally:
+            painter.end()
+        # The fixed preview slot reserves the largest scaled canvas plus padding;
+        # changing an export size cannot overlap the note below it.
+        self.preview_label.setPixmap(QtGui.QPixmap.fromImage(canvas))
 
     def _set_dimension_controls(self) -> None:
         self._updating = True
@@ -300,10 +370,12 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
     def options(self) -> ExportOptions:
         """Return validated choices without accepting the dialog or writing a file."""
-        return resolve_export_options(
+        options = resolve_export_options(
             self._native_size, extension=self.format_combo.currentData(),
             native=self.size_combo.currentData(), width=self._width_mm,
             height=self._height_mm, units="mm", dpi=self.dpi_spin.value())
+        return replace(options, include_residual=bool(
+            self._residual_native_size is not None and self.residual_check.isChecked()))
 
     def _refresh(self, *_args) -> None:
         native = self.size_combo.currentData()
@@ -342,6 +414,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
                 summary += (f"Output: {options.width:,} × {options.height:,} points (72 pt/in). "
                             "Vector geometry remains scalable; DPI is not applied.")
         self.summary_label.setText(summary)
+        self._refresh_preview(options)
 
     def accept(self) -> None:
         try:
@@ -353,10 +426,13 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
 
 def choose_export_options(parent, native_size, initial_format="png",
-                          initial_width=0, initial_height=0) -> ExportOptions | None:
+                          initial_width=0, initial_height=0, *, preview_image=None,
+                          residual_preview_image=None, residual_native_size=None) -> ExportOptions | None:
     """Ask for figure presentation options, or return ``None`` when cancelled."""
     dialog = ExportOptionsDialog(parent, native_size, initial_format,
-                                 initial_width, initial_height)
+                                 initial_width, initial_height, preview_image=preview_image,
+                                 residual_preview_image=residual_preview_image,
+                                 residual_native_size=residual_native_size)
     if dialog.exec() != QtWidgets.QDialog.Accepted:
         return None
     return dialog._selected_options

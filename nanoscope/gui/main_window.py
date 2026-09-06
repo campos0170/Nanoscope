@@ -15,6 +15,7 @@ from ..core.identity import same_source, source_of
 from ..core.layer import ColourRegistry, ViewMode
 from ..core.analysis_workspace import (
     ANALYSIS_PANEL_ARTIFACT_ID,
+    DISTRIBUTION_SUMMARIES_ARTIFACT_ID,
     EVENT_PLOTS_ARTIFACT_ID,
     IV_ARTIFACT_ID,
     OWNED_ARTIFACT_IDS,
@@ -54,6 +55,7 @@ from .analysis_launcher import (
 from .analysis_explorer import (
     AnalysisExplorer,
     PAGE_DISTRIBUTIONS,
+    PAGE_DISTRIBUTION_SUMMARIES,
     PAGE_EVENT_WAVEFORMS,
     PAGE_IV,
     PAGE_NOISE,
@@ -197,7 +199,7 @@ SURFACE_MUTATION_SIGNALS: dict[str, tuple[str, ...]] = {
     # Accept-all / Reject-all rewrite the whole accepted column; a mask drag moves a span
     # and every measured column with it; a label write changes the ``flag`` token set that
     # a per-label split is grouped by.
-    "event_inspector": ("curationBatchChanged", "eventEdited", "labelsChanged"),
+    "event_inspector": ("curationBatchChanged", "eventEdited", "amplitudeEdited", "labelsChanged"),
     "event_gallery": ("curationBatchChanged", "labelsChanged"),
 }
 
@@ -644,12 +646,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # front of the window where the user pressed Save.
         self._project_save_requester: QtWidgets.QWidget | None = None
         self._plots_window = None   # the single, lazily-built PlotsWindow
+        self._distribution_summary_window = None
         self._iv_window = None   # the single, lazily-built IVWindow
         self._vdep_window = None   # the single, lazily-built VDepWindow
         # One top-level home for the analytical surfaces above/below.  The individual
         # attributes remain the authoritative page objects for compatibility and for
         # the v11 workspace adapters; the Explorer only organises their presentation.
         self._analysis_explorer: AnalysisExplorer | None = None
+        self._figure_library = None
         self._event_inspector = None   # the single, lazily-built EventInspectorWindow
         self._event_gallery = None     # the single, lazily-built EventGalleryWindow
         #: ``(accept, n_shown, n_events)`` while one of the gallery's "all shown" buttons is
@@ -799,6 +803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # top-level widget happens to be alive.  Widgets are deliberately lazy and may
         # blank themselves on close; this cache is therefore the durable in-memory copy.
         self._analytical_workspace = AnalyticalWorkspace()
+        self._figure_project_epoch = 0  # Lifecycle identity, unchanged by ordinary checkpoints.
         # Built-in artifacts adopted from a project are installed only when their surface
         # is opened.  Keeping the ids (rather than opening the windows) is what prevents a
         # v11 project from producing a wall of plots at load time.
@@ -1266,6 +1271,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_plots.setEnabled(False)
         self._act_plots.triggered.connect(self._open_plots)
 
+        self._act_distribution_summaries = analysis_menu.addAction("Distribution summaries…")
+        self._act_distribution_summaries.setToolTip(
+            "Optional ECDF, empirical survival, box and violin plots of event measurements. "
+            "Choose sources and explicitly generate a summary; existing analyses are unchanged.")
+        self._act_distribution_summaries.triggered.connect(self._open_distribution_summaries)
+
         self._act_event_plots = analysis_menu.addAction("Event &plots (density / ensemble)…")
         self._act_event_plots.setToolTip(
             "The signature translocation plots for the current detection: the 2-D "
@@ -1510,6 +1521,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "use Export current figure in the Explorer for that.")
         self._act_export_figure.setEnabled(False)
         self._act_export_figure.triggered.connect(self._export_figures)
+
+        self._act_figure_library = analysis_menu.addAction("Figure &Library…")
+        self._act_figure_library.setToolTip(
+            "Named figure snapshots saved in this project, separate from the Event Gallery.")
+        self._act_figure_library.triggered.connect(self._open_figure_library)
 
         # Every launcher surface's gate (Plots, density/ensemble, PSD, I-V, V-dependence and
         # the figure export) is re-derived through the ONE shared path, so opening the menu and
@@ -2533,6 +2549,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "n_added": 0,
                 "n_notes": 0,
                 "n_reviewed": 0,
+                "n_amplitude_curated": 0,
             }
             docs_with_stake = 0
             for (doc_id, ch, _name) in targets:
@@ -2552,6 +2569,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ("n_added", "hand-added event", "hand-added events"),
                     ("n_notes", "event with labels/notes", "events with labels/notes"),
                     ("n_reviewed", "reviewed event", "reviewed events"),
+                    ("n_amplitude_curated", "amplitude choice", "amplitude choices"),
                 ):
                     n = totals[key]
                     if n:
@@ -3735,6 +3753,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _workspace_kwarg(artifact_id: str) -> str | None:
         return {
             PLOTS_ARTIFACT_ID: "plots",
+            DISTRIBUTION_SUMMARIES_ARTIFACT_ID: "distribution_summaries",
             SUBPOPULATION_ARTIFACT_ID: "subpopulation",
             PSD_ARTIFACT_ID: "psd",
             EVENT_PLOTS_ARTIFACT_ID: "event_plots",
@@ -3746,6 +3765,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _workspace_window_id(self, window) -> str | None:
         for artifact_id, candidate in (
                 (PLOTS_ARTIFACT_ID, self._plots_window),
+                (DISTRIBUTION_SUMMARIES_ARTIFACT_ID, self._distribution_summary_window),
                 (SUBPOPULATION_ARTIFACT_ID, self._subpop_window),
                 (PSD_ARTIFACT_ID, self._psd_window),
                 (EVENT_PLOTS_ARTIFACT_ID, self._event_plot_window),
@@ -3758,6 +3778,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _workspace_surface(self, artifact_id: str):
         return {
             PLOTS_ARTIFACT_ID: self._plots_window,
+            DISTRIBUTION_SUMMARIES_ARTIFACT_ID: self._distribution_summary_window,
             SUBPOPULATION_ARTIFACT_ID: self._subpop_window,
             PSD_ARTIFACT_ID: self._psd_window,
             EVENT_PLOTS_ARTIFACT_ID: self._event_plot_window,
@@ -3894,6 +3915,7 @@ class MainWindow(QtWidgets.QMainWindow):
             supplied["analysis_panel"] = self._analysis_panel
         for artifact_id in (
                 PLOTS_ARTIFACT_ID, SUBPOPULATION_ARTIFACT_ID, PSD_ARTIFACT_ID,
+                DISTRIBUTION_SUMMARIES_ARTIFACT_ID,
                 EVENT_PLOTS_ARTIFACT_ID, IV_ARTIFACT_ID,
                 VOLTAGE_DEPENDENCE_ARTIFACT_ID):
             window = self._workspace_surface(artifact_id)
@@ -3959,6 +3981,7 @@ class MainWindow(QtWidgets.QMainWindow):
         comparable blank-state contract.  The caller has already completed the outgoing
         project's Save/Discard decision, so none of this checkpoints or marks dirty.
         """
+        self._figure_project_epoch += 1
         self._workspace_installing = True
         try:
             if self._plots_window is not None:
@@ -3983,6 +4006,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if hasattr(self._subpop_window, sidecar):
                         delattr(self._subpop_window, sidecar)
             reset_pages = {
+                "_distribution_summary_window": PAGE_DISTRIBUTION_SUMMARIES,
                 "_psd_window": PAGE_NOISE,
                 "_event_plot_window": PAGE_EVENT_WAVEFORMS,
                 "_iv_window": PAGE_IV,
@@ -4012,6 +4036,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._subpop_signal_pending = None
             self._subpop_accepted_ids_pending = None
             self._analytical_workspace = AnalyticalWorkspace()
+            if self._figure_library is not None:
+                self._figure_library.refresh()
             self._workspace_pending.clear()
             self._workspace_frozen.clear()
 
@@ -4044,6 +4070,9 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self._analysis_explorer.visibilityChanged.connect(
                 lambda _visible: self._sync_analysis_open_state())
+            self._analysis_explorer.saveFigureRequested.connect(self._save_analysis_figure)
+            self._analysis_explorer.saveBundleRequested.connect(self._export_analysis_bundle)
+            self._analysis_explorer.figureLibraryRequested.connect(self._open_figure_library)
         return self._analysis_explorer
 
     def _analysis_explorer_context(self) -> str:
@@ -4060,10 +4089,237 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"{count} recording{'s' if count != 1 else ''} open · none selected"
         return "No recordings open"
 
+    # -- project Figure Library (not the Event Gallery) ------------------------------------
+    def _figure_entries(self):
+        from ..core.figure_library import figures
+        return figures(self._analytical_workspace)
+
+    def _figure_status(self, entry):
+        from ..core.figure_library import figure_status, source_state
+        try:
+            live = source_state(self, entry.payload.get("source_recipes", []))
+        except (AttributeError, KeyError, TypeError, ValueError, OSError):
+            live = None
+        return figure_status(entry, live)
+
+    def _append_figure(self, entry) -> None:
+        self._analytical_workspace.artifacts.append(entry)
+
+    def _open_figure_library(self) -> None:
+        from .figure_library import FigureLibrary
+        if self._figure_library is None:
+            self._figure_library = FigureLibrary(
+                self, entries=self._figure_entries, status=self._figure_status,
+                append=self._append_figure, project_token=lambda: self._figure_project_epoch)
+            self._figure_library.changed.connect(self._mark_dirty)
+        self._figure_library.show()
+        self._figure_library.raise_()
+        self._figure_library.activateWindow()
+
+    def _figure_page(self, page_id: str):
+        artifact_id = self._analysis_page_artifact(page_id)
+        page = self._workspace_surface(artifact_id) if artifact_id else None
+        if page is None:
+            raise ValueError("Open an analytical figure before saving it.")
+        return artifact_id, page
+
+    def _figure_capture_options(self, page_id: str, *, ask_name: bool):
+        """Name/residual inclusion only: no analysis controls or live view mutation."""
+        _artifact_id, page = self._figure_page(page_id)
+        residual_getter = getattr(page, "figure_residual_target", None)
+        residual = residual_getter() if callable(residual_getter) else None
+        if not ask_name and residual is None:
+            return "Figure", False
+        dialog = QtWidgets.QDialog(self._analysis_explorer or self)
+        dialog.setWindowTitle("Save figure snapshot" if ask_name else "Figure bundle")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        name = QtWidgets.QLineEdit(str(page_id).replace("_", " ").title())
+        if ask_name:
+            name.setMaxLength(200)
+            layout.addWidget(QtWidgets.QLabel("Figure name:"))
+            layout.addWidget(name)
+        include = QtWidgets.QCheckBox("Include the displayed residual panel")
+        include.setToolTip("Copies the existing residuals without fitting or recomputing them.")
+        include.setVisible(residual is not None)
+        layout.addWidget(include)
+        note = QtWidgets.QLabel(
+            "Saves the visible picture and exact plotted numbers. Pending analysis changes "
+            "are recorded separately; this does not apply them.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if ask_name:
+            buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Save).setEnabled(bool(name.text().strip()))
+            name.textChanged.connect(lambda text: buttons.button(
+                QtWidgets.QDialogButtonBox.StandardButton.Save).setEnabled(bool(text.strip())))
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return None
+        return name.text().strip(), include.isChecked()
+
+    def _capture_figure(self, page_id: str, *, include_residual: bool = False):
+        """Copy one visible result. No checkpoint, navigation, fitting or replotting."""
+        from ..core.figure_library import source_recipes, source_state
+        from .figure_bundle import capture_figure_snapshot, encode_figure_table
+
+        artifact_id, page = self._figure_page(page_id)
+        keyword = self._workspace_kwarg(artifact_id)
+        captured = capture_analysis_workspace(**{keyword: page})
+        analysis = next(a for a in captured.artifacts if a.artifact_id == artifact_id)
+        bindings = getattr(page, "figure_source_recipes", None)
+        if callable(bindings):
+            analysis.payload["figure_sources"] = bindings()
+        getter = getattr(page, "figure_export_target", None)
+        ordered = getattr(page, "figure_export_items", None)
+        residual_getter = getattr(page, "figure_residual_target", None)
+        residual = residual_getter() if callable(residual_getter) else None
+        components = ["current figure"]
+        report_companion = False
+        if callable(ordered):
+            items = list(ordered())
+            if not items or len(items) > 2:
+                raise ValueError("This figure does not expose a supported frozen canvas.")
+            target = items[0]
+            if len(items) == 2:
+                residual = items[1]
+                include_residual = True
+                components = ["embedding", "waveform overlay"]
+                report_companion = True
+        elif callable(getter):
+            target = getter()
+        else:
+            raise ValueError("This view does not yet expose a figure export target.")
+        data = page._plot_data()
+        if data.empty:
+            raise ValueError("There are no plotted numerical values to save.")
+        _label, capture_status = self._analysis_explorer_status(page_id, page)
+        recipes = source_recipes(analysis)
+        live = source_state(self, recipes) if capture_status == "current" else None
+        names = []
+        for recipe in recipes:
+            label = str(recipe.get("source_key") or "")
+            channel = recipe.get("channel")
+            if channel is not None:
+                label += f" · channel {int(channel) + 1}"
+            if label and label not in names:
+                names.append(label)
+        source_label = "; ".join(names) or "Saved analytical source (see provenance)"
+        resources = {}
+        table_names = {}
+        for index, (key, frame) in enumerate(analysis.tables.items()):
+            filename = f"analysis_tables/table_{index}.parquet"
+            resources[filename] = encode_figure_table(frame)
+            table_names[key] = filename
+        blob_names = {}
+        for index, (key, value) in enumerate(analysis.blobs.items()):
+            extension = ".parquet" if str(key).endswith(".parquet") else ".bin"
+            filename = f"analysis_blobs/blob_{index}{extension}"
+            resources[filename] = bytes(value)
+            blob_names[key] = filename
+        if not include_residual:
+            # Optional exact Cartesian replay enables true shared axes on detached
+            # copies. Unsupported graphics remain usable as frozen composition panels.
+            from .figure_composition import capture_cartesian_model
+            model = capture_cartesian_model(target)
+            if model is not None:
+                resources["rendering/cartesian.json"] = model
+        applied_getter = getattr(page, "figure_applied_config", None)
+        applied = applied_getter() if callable(applied_getter) else None
+        if applied is not None:
+            # The plot API provides JSON-shaped applied settings, never live objects.
+            applied_config = applied
+        else:
+            applied_config = None
+        snapshot = capture_figure_snapshot(
+            target, data=data,
+            config={"analysis_kind": analysis.kind, "schema_version": analysis.schema_version,
+                    "workspace_state": analysis.payload,
+                    "applied_settings": applied_config,
+                    "state_contract": "workspace_state includes current controls; data and saved picture describe the visible result",
+                    "tables": table_names, "blobs": blob_names},
+            provenance={"source": source_label, "source_recipes": recipes,
+                        "capture_status": capture_status, "components": components,
+                        "analysis_recomputed": False, "source_state": live},
+            residual_item=residual, include_residual=include_residual,
+            additional_resources=resources)
+        if report_companion:
+            # Reuse the two-canvas renderer, but never call a waveform a residual
+            # in the durable manifest. Its true panel identities are in provenance.
+            from dataclasses import replace
+            snapshot = replace(snapshot, includes_residual=False)
+        return analysis, snapshot, source_label, live, capture_status
+
+    def _save_analysis_figure(self, page_id: str, name: str | None = None, *,
+                              include_residual: bool = False):
+        from ..core.figure_library import make_figure
+        try:
+            if name is None:
+                selected = self._figure_capture_options(page_id, ask_name=True)
+                if selected is None:
+                    return None
+                name, include_residual = selected
+            analysis, snapshot, source_label, live, status = self._capture_figure(
+                page_id, include_residual=include_residual)
+            metadata, blobs = snapshot.to_storage()
+            entry = make_figure(
+                name=name, page_id=page_id, source_label=source_label, analysis=analysis,
+                snapshot_metadata=metadata, snapshot_blobs=blobs, live_state=live,
+                capture_status=status)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self._analysis_explorer or self,
+                                          "Save figure snapshot", str(exc))
+            return None
+        self._append_figure(entry)
+        self._mark_dirty()
+        self._open_figure_library()
+        self._figure_library.refresh(entry.artifact_id)
+        self.statusBar().showMessage("Figure saved in this project. Save Project to persist it to disk.", 10000)
+        return entry
+
+    def _export_analysis_bundle(self, page_id: str, path: str | Path | None = None, *,
+                                include_residual: bool = False):
+        from .export_paths import ask_export_path
+        from .figure_bundle import write_figure_bundle
+        from ..core.atomic_write import take_identity_notes
+        parent = self._analysis_explorer or self
+        try:
+            if path is None:
+                selected = self._figure_capture_options(page_id, ask_name=False)
+                if selected is None:
+                    return None
+                _name, include_residual = selected
+                path = ask_export_path(
+                    parent, title="Save figure bundle", suggestion=f"{page_id}_figure.zip",
+                    filters="Figure bundle (*.zip)",
+                    outputs=lambda chosen: [chosen if chosen.suffix else chosen.with_suffix(".zip")])
+                if path is None:
+                    return None
+            out = Path(path)
+            if not out.suffix:
+                out = out.with_suffix(".zip")
+            if out.suffix.lower() != ".zip":
+                raise ValueError("Choose a .zip filename for the figure bundle.")
+            _analysis, snapshot, _source, _live, _status = self._capture_figure(
+                page_id, include_residual=include_residual)
+            write_figure_bundle(out, snapshot)
+            notes = take_identity_notes(out)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(parent, "Save figure bundle", str(exc))
+            return None
+        if notes:
+            QtWidgets.QMessageBox.information(parent, "Save figure bundle", "\n\n".join(notes))
+        self.statusBar().showMessage(f"Saved figure bundle → {out}", 10000)
+        return out
+
     @staticmethod
     def _analysis_page_artifact(page_id: str) -> str | None:
         return {
             PAGE_DISTRIBUTIONS: PLOTS_ARTIFACT_ID,
+            PAGE_DISTRIBUTION_SUMMARIES: DISTRIBUTION_SUMMARIES_ARTIFACT_ID,
             PAGE_EVENT_WAVEFORMS: EVENT_PLOTS_ARTIFACT_ID,
             PAGE_NOISE: PSD_ARTIFACT_ID,
             PAGE_IV: IV_ARTIFACT_ID,
@@ -4074,7 +4330,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _analysis_explorer_status(
             self, page_id: str, page: QtWidgets.QWidget) -> tuple[str, str]:
         """Return the visible page's freshness label without recomputing anything."""
-        if page_id == PAGE_DISTRIBUTIONS and bool(getattr(page, "_stale", False)):
+        if page_id in (PAGE_DISTRIBUTIONS, PAGE_DISTRIBUTION_SUMMARIES) and bool(getattr(page, "_stale", False)):
             return "STALE", "stale"
         artifact_id = self._analysis_page_artifact(page_id)
         if artifact_id in self._workspace_frozen:
@@ -4084,6 +4340,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if page_id == PAGE_DISTRIBUTIONS:
             has_data = bool(page.sources())
+        elif page_id == PAGE_DISTRIBUTION_SUMMARIES:
+            has_data = page.has_data()
         elif page_id in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE):
             has_data = bool(page.has_data())
         elif page_id in (PAGE_IV, PAGE_VOLTAGE_SERIES):
@@ -4120,6 +4378,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if page_id == PAGE_DISTRIBUTIONS and self._plots_window is not None:
             self._refresh_plots()
+        elif page_id == PAGE_DISTRIBUTION_SUMMARIES and self._distribution_summary_window is not None:
+            self._offer_distribution_sources()
         elif page_id == PAGE_EVENT_WAVEFORMS and self._event_plot_window is not None:
             self._refresh_event_plots()
         elif page_id == PAGE_NOISE and self._psd_window is not None:
@@ -4260,6 +4520,10 @@ class MainWindow(QtWidgets.QMainWindow):
         re-fed: it is a derived table that describes spans, and a mask drag moves them.
         """
         self._reconcile_level_fit()         # ...and no DERIVED table outlives it either
+        if (_on_screen(self._distribution_summary_window)
+                and DISTRIBUTION_SUMMARIES_ARTIFACT_ID not in self._workspace_frozen
+                and DISTRIBUTION_SUMMARIES_ARTIFACT_ID not in self._workspace_pending):
+            self._offer_distribution_sources()
         if _on_screen(self._plots_window):
             if (PLOTS_ARTIFACT_ID in self._workspace_pending
                     and not self._restoring):
@@ -4703,6 +4967,56 @@ class MainWindow(QtWidgets.QMainWindow):
         surface gate so the action and the launcher button read the same predicate once."""
         self._apply_surface_gate(SURFACE_POPULATIONS)
 
+    def _open_distribution_summaries(self) -> None:
+        """Optional new statistics are lazy and run only through explicit Generate."""
+        from .distribution_summary_panel import DistributionSummaryWindow
+
+        if self._distribution_summary_window is None:
+            page = self._distribution_summary_window = DistributionSummaryWindow(self._session, self)
+            page.refreshRequested.connect(self._prepare_distribution_summary)
+            self._watch_surface_window(page)
+            self._watch_workspace_surface(DISTRIBUTION_SUMMARIES_ARTIFACT_ID, page)
+        page = self._distribution_summary_window
+        if DISTRIBUTION_SUMMARIES_ARTIFACT_ID not in self._workspace_frozen:
+            self._offer_distribution_sources()
+        self._restore_workspace_surface(DISTRIBUTION_SUMMARIES_ARTIFACT_ID, page)
+        self._show_analysis_page(
+            PAGE_DISTRIBUTION_SUMMARIES, page, refresh=self._generate_distribution_summary)
+
+    def _generate_distribution_summary(self) -> None:
+        page = self._distribution_summary_window
+        if page is None:
+            return
+        self._prepare_distribution_summary()
+        try:
+            page.analyze()
+        except (TypeError, ValueError, OverflowError) as exc:
+            QtWidgets.QMessageBox.warning(page, "Generate distribution summary", str(exc))
+
+    def _prepare_distribution_summary(self) -> None:
+        """Generate intent leaves frozen mode before binding today's event tables."""
+        self._workspace_pending.discard(DISTRIBUTION_SUMMARIES_ARTIFACT_ID)
+        self._workspace_frozen.discard(DISTRIBUTION_SUMMARIES_ARTIFACT_ID)
+        page = self._distribution_summary_window
+        if page is not None and page.has_data():
+            # A failed explicit generation must not relabel an old, frozen result
+            # CURRENT just because today's offered bindings happened to be unchanged.
+            page._stale = True
+            page._update_status()
+        self._offer_distribution_sources()
+        self._refresh_analysis_explorer_header()
+
+    def _offer_distribution_sources(self) -> None:
+        """Passive rebinding is not a project edit and must not overwrite pending state."""
+        if self._distribution_summary_window is None:
+            return
+        installing = self._workspace_installing
+        self._workspace_installing = True
+        try:
+            self._distribution_summary_window.set_sources(self._plots_sources())
+        finally:
+            self._workspace_installing = installing
+
     def _open_plots(self) -> None:
         """Open the Distributions page of the single Analysis Explorer."""
         from .plots_panel import PlotsWindow
@@ -4816,13 +5130,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         plotted_ids = set(int(value) for value in frame["event_id"].tolist())
         event_ids: list[int] = []
+        selected_ids: set[int] = set()
         for value in wanted:
             try:
                 event_id = int(value)
             except (TypeError, ValueError, OverflowError):
                 continue
-            if event_id in plotted_ids and event_id not in event_ids:
+            if event_id in plotted_ids and event_id not in selected_ids:
                 event_ids.append(event_id)
+                selected_ids.add(event_id)
         if not event_ids:
             self.statusBar().showMessage(
                 "Those plotted events are no longer present. Refresh the plot and try again.",
@@ -5247,6 +5563,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # true. It re-runs the drop itself before splicing, so it does not depend on
             # which of these two slots Qt happens to call first.
             insp.eventEdited.connect(self._refit_levels_for_event)
+            # Optional amplitude curation does NOT change boundaries or trigger a
+            # fitted-state recomputation. Repaint the new columns and checkpoint once.
+            insp.amplitudeEdited.connect(lambda *_: self._analysis_panel.resync_curation())
+            insp.amplitudeEdited.connect(lambda *_: self._checkpoint_current())
             insp.curationBatchChanged.connect(self._checkpoint_batch_curation)
             # Batch curation (Accept all / Reject all) changes the accepted count without a
             # per-event signal, so the chip + strip must also refresh off it — and it is
@@ -6675,6 +6995,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._subpop_window is None:
             win = SubpopReportWindow(self)
             win.exportRequested.connect(self._export_subpop_report)
+            win.analyzeRequested.connect(self._run_subpopulations)
             # The report window announces "show me these events"; the routing is here,
             # because it is the only object holding the report AND both surfaces.
             win.galleryRequested.connect(self._open_gallery_on_subpops)
@@ -10032,6 +10353,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # (the open pipeline, the dirty marker) is equally right to stay suppressed until the
         # restored project is fully on screen.
         self._restoring = False
+        if self._figure_library is not None:
+            self._figure_library.schedule_refresh()
         # A restore rebuilds every table from disk. Those are reconstructions, not edits:
         # an undo stack that offered to walk back through them would offer to destroy the
         # project the user just opened. The suspension is lifted here, with the restored
@@ -11109,6 +11432,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._session_revision += 1
         self._dirty = True
+        if self._figure_library is not None:
+            self._figure_library.schedule_refresh()
         self._update_title()
         controller = self._recovery_controller
         if controller is not None:

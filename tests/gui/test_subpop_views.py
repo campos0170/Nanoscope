@@ -492,8 +492,9 @@ def test_the_strip_is_on_screen_beside_the_figures_without_any_interaction(windo
     window.show()
     qtbot.waitExposed(window)
     box = window._caveat_box
-    assert box.isVisible()
-    assert box.height() > 0 and box.width() > 0
+    assert window._standing_caveats.isVisible()
+    assert window._caveat_summary.summary.isVisible()
+    assert box.isHidden(), "full details are disclosed while their summary stays visible"
     figures_pane = window.splitter().widget(1)
     assert box.isAncestorOf(window._caveats)
     assert figures_pane.isAncestorOf(box), "the strip belongs to the figure column"
@@ -518,8 +519,11 @@ def test_the_caveats_are_a_pane_of_the_figures_splitter_not_a_fixed_strip(window
     assert fig.count() == 3
     assert fig.widget(2) is window._caveat_box
     assert not fig.childrenCollapsible(), "the reader may resize it, never remove it"
-    assert window._caveats.maximumHeight() >= 10_000, (
-        "a maximum height would re-freeze the pane the splitter is meant to trade")
+    assert window._caveat_summary.summary.isVisibleTo(window)
+    assert window._caveats.isHidden(), "full details are disclosed without losing the standing summary"
+    assert window._caveats.maximumHeight() <= 260, "expanded details must remain bounded"
+    window._caveat_summary.toggle.setChecked(True)
+    assert window._caveats.toPlainText() == window.caveats()
 
 
 @pytest.mark.parametrize("size", [(1440, 980), (1100, 760), (900, 700)])
@@ -542,15 +546,15 @@ def test_neither_figure_collapses_to_a_strip_at_any_usable_window_size(window, q
         assert rect.height() >= 60, f"{name} data rect is {rect.width()}x{rect.height()}"
         assert rect.width() / max(rect.height(), 1) < 9.0, (
             f"{name} is drawn at {rect.width() / max(rect.height(), 1):.1f}:1")
-    assert window._caveat_box.isVisible()
-    assert window._caveat_box.height() > 0
+    assert window._standing_caveats.isVisible()
+    assert window._standing_caveats.height() > 0
     window.close()
 
 
 def test_the_window_refuses_to_be_dragged_smaller_than_its_figures_need(window):
-    """The old floor (520, 320) predated the figures and was the size at which the
-    scatter collapsed. Qt refuses it now rather than drawing a strip."""
-    assert window.minimumHeight() >= 600
+    """The scrollable body keeps plot floors without forcing the whole page to
+    grow beyond the Explorer. The surrounding controls still need a usable floor."""
+    assert window.minimumHeight() >= 480
     window.resize(400, 300)
     assert window.height() >= window.minimumHeight()
 

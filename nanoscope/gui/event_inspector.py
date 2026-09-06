@@ -1,10 +1,10 @@
 """The Event Inspector / Browser: step through detected events one at a time.
 
 A standalone top-level window (opened from ``Analysis ▸ Event inspector…``) that
-shows ONE event's raw waveform at a time — the padded slice of the calibrated
-current channel around ``[start_idx, end_idx]``, with the event region shaded, a
-baseline line at the row's ``baseline_pA`` and a robust LEVEL line at the median
-of the raw in-event samples — and lets the user curate (accept / reject) it.
+shows ONE event's measurement waveform at a time — the recorded conditioning of
+the calibrated current around ``[start_idx, end_idx)``. The baseline and equivalent
+amplitude level share that domain. Opt-in amplitude curation is stored separately
+from the detector's median ``depth_pA``; browsing never changes either measurement.
 
 It is fed the CURRENT detection by :class:`~nanoscope.gui.main_window.MainWindow`
 via :meth:`set_events`, which installs a REFERENCE to the very same
@@ -22,6 +22,8 @@ Signals:
     acceptanceChanged(int, bool): the user curated an event (event_id, accepted).
     eventEdited(int): the user resized an event's mask (event_id); its bounds + stats
         were rewritten on the shared df, so the owner refreshes table + overlays + summary.
+    amplitudeEdited(int): only optional amplitude columns changed (event_id, or -1
+        for a batch); refresh/save/undo without changing masks or refitting states.
     curationBatchChanged(): Accept all / Reject all rewrote the whole ``accepted`` column;
         the owner resets the table + overlays + summary from the df.
     acceptanceRefused(int): an accept was refused (the event's id, or -1 for a
@@ -43,6 +45,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
 from ..analysis.characterize import recharacterize_span
+from ..analysis.event_amplitude import amplitude_is_current, invalidate_event_amplitudes
 from ..analysis.events import (
     AUTOMATIC_REJECTION_FLAGS,
     flag_tokens,
@@ -57,6 +60,7 @@ from ..analysis.reconcile import CONSENSUS_MODULE_ID, clear_curation_conflicts
 from ..core.session import Session
 from .overlays import STEP_LEVEL_HEX
 from .trace_view import ChannelPane
+from .event_amplitude_controls import EventAmplitudeControls
 
 __all__ = ["EventInspectorWindow"]
 
@@ -106,11 +110,11 @@ _PAD_SAMPLES_FALLBACK = 200  # rate-unknown (legacy-TDMS): the axis is samples, 
 _WINDOW_SLACK = 2
 
 # -- colours (kept local so the window does not couple to the plots-panel palette) ---------------
-_CURVE_HEX = "#4C9BE6"       # the raw waveform
+_CURVE_HEX = "#4C9BE6"       # the measurement-domain waveform
 _REGION_HEX = "#FFB74D"      # the shaded event region (matches the trace span overlays)
 _REGION_ALPHA = 55
 _BASELINE_HEX = "#9AA2AB"    # the local open-pore baseline_pA line
-_LEVEL_HEX = "#D55E00"       # the robust in-event median (the "level")
+_LEVEL_HEX = "#D55E00"       # the chosen amplitude's equivalent horizontal level
 #: The FITTED sub-state levels. ONE name for the ink, shared with the main trace's step overlay
 #: (:data:`~nanoscope.gui.overlays.STEP_LEVEL_HEX`): this used to be a locally spelled ``#009E73``
 #: and the trace a different hex, which is how the two surfaces drifted apart about what a level
@@ -601,7 +605,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
     """Browse + curate detected events one at a time.
 
     Fed the current detection via :meth:`set_events` (a REFERENCE to the shared
-    events ``.df``, never a copy), it renders the current event's raw waveform,
+    events ``.df``, never a copy), it renders the current event's measurement waveform,
     navigates within a filtered subset (All / Accepted only / Rejected only) and
     curates the shared ``accepted`` column in place — announcing every decision so
     the owner can mirror it onto the table, overlays, summary and exports.
@@ -639,6 +643,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
     traceRequested = Signal(int)             # show this event in the main trace (event_id)
     acceptanceChanged = Signal(int, bool)    # the user curated an event (id, accepted)
     eventEdited = Signal(int)                # the user resized an event's mask (event_id)
+    amplitudeEdited = Signal(int)            # optional amplitude only; -1 means batch; NEVER refit
     curationBatchChanged = Signal()          # Accept all / Reject all rewrote 'accepted'
     mergeWithNextRequested = Signal(int)     # stitch this event to the following one(s) (event_id)
     labelsChanged = Signal()                 # a label was written on the shared frame
@@ -956,6 +961,9 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._level_note.setVisible(False)
         root.addWidget(self._level_note)
 
+        self._amplitude = EventAmplitudeControls(self)
+        root.addWidget(self._amplitude)
+
         # -- the waveform plot ----------------------------------------------------------------
         self._plot_widget = pg.PlotWidget()
         self._plot_widget.setMinimumSize(480, 300)
@@ -982,15 +990,18 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._baseline_line = pg.InfiniteLine(
             angle=0, movable=False,
             pen=pg.mkPen(_BASELINE_HEX, width=1, style=Qt.DashLine),
-            label="baseline", labelOpts={"color": _BASELINE_HEX, "position": 0.04})
+            label="baseline", labelOpts={"color": _BASELINE_HEX, "position": 0.02,
+                                         "anchors": [(0, 0), (0, 1)]})
         self._baseline_line.setZValue(10)
         self._plot.addItem(self._baseline_line, ignoreBounds=True)
         self._level_line = pg.InfiniteLine(
             angle=0, movable=False,
             pen=pg.mkPen(_LEVEL_HEX, width=1, style=Qt.DashLine),
-            label="level", labelOpts={"color": _LEVEL_HEX, "position": 0.96})
+            label="level", labelOpts={"color": _LEVEL_HEX, "position": 0.98,
+                                      "anchors": [(1, 0), (1, 1)]})
         self._level_line.setZValue(10)
         self._plot.addItem(self._level_line, ignoreBounds=True)
+        self._amplitude.install_plot_items()
 
         # -- per-event stat readout -----------------------------------------------------------
         readout_box = QtWidgets.QGroupBox("Event")
@@ -1133,6 +1144,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         if row is not None and self._df is not None:
             self._refresh_readout(row)
             self._plot.setTitle(self._event_title(self._df.iloc[row]))
+            self._render_event(row, preserve_view=True)
 
     def stale_columns(self) -> tuple[str, ...]:
         return self._stale_columns
@@ -1538,6 +1550,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._level_note.setVisible(bool(note))
 
     def _resolve_units(self) -> str:
+        if (self._provenance or {}).get("normalize_enabled"):
+            return "dimensionless"
         if self._doc_id is None or self._channel is None:
             return ""
         try:
@@ -2082,6 +2096,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             # keep the bounds honest anyway (dwell/depth stay whatever they were).
             self._df.iat[row, scol] = int(new_start)
             self._df.iat[row, ecol] = int(new_end)
+        invalidate_event_amplitudes(self._df, [row], reason="event boundaries changed")
         self._render_event(row)             # redraw region / baseline / level at the new bounds
         self._refresh_readout(row)
         self._sync_revert_control()         # the row may now BE the detector's own span
@@ -2350,14 +2365,15 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         if emit:
             self.eventSelected.emit(int(event_id))
 
-    def _render_event(self, row: int) -> None:
-        """Draw the padded raw waveform around event ``row`` with its region/baseline/level."""
+    def _render_event(self, row: int, *, preserve_view: bool = False) -> None:
+        """Draw the measurement trace and explicitly named equivalent amplitude level."""
         if self._df is None or self._doc_id is None or self._channel is None:
             return
         if not self._session.has_document(self._doc_id):
             self._show_empty("The recording for this detection was closed.")
             return
         r = self._df.iloc[row]
+        previous_view = self._plot.getViewBox().viewRange() if preserve_view else None
         start_idx = int(r["start_idx"])
         end_idx = int(r["end_idx"])
 
@@ -2412,26 +2428,58 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             self._syncing = False
         self._region.setVisible(True)
 
-        # Baseline line at the row's baseline_pA (a magnitude in the channel's own units).
+        # The default line expresses the STORED median depth. Optional amplitude is
+        # separate and never overwrites that number. Both are in the measurement domain.
         baseline = float(r["baseline_pA"])
-        if not np.isfinite(baseline):
-            win = data[lo:hi]
-            baseline = float(np.nanmedian(win)) if win.size else 0.0
-        self._baseline_line.setPos(baseline)
-        self._set_line_visible(self._baseline_line, True)
-
-        # Level line = median of the RAW in-event samples (robust; avoids polarity confusion).
-        ev_lo = int(np.clip(start_idx, 0, n))
-        ev_hi = int(np.clip(end_idx, 0, n))
-        in_event = data[ev_lo:ev_hi]
-        level = float(np.median(in_event)) if in_event.size else baseline
-        self._level_line.setPos(level)
-        self._set_line_visible(self._level_line, True)
+        try:
+            context = self._amplitude.context(r)
+            self._amplitude._error = ""
+            level = baseline + context.polarity * float(r["depth_pA"])
+            label = "median-depth level"
+            if amplitude_is_current(r) and not self._stale_columns:
+                baseline = float(r["amplitude_baseline_pA"])
+                level = float(r["amplitude_level_pA"])
+                label = str(r["amplitude_method"]).replace("_", " ") + " level"
+            valid = np.isfinite(baseline) and np.isfinite(level) and not self._stale_columns
+            self._amplitude._updating = True
+            try:
+                self._baseline_line.setPos(baseline)
+                self._level_line.setPos(level)
+                self._baseline_line.label.setFormat("mean baseline reference")
+                self._level_line.label.setFormat(label)
+            finally:
+                self._amplitude._updating = False
+            self._set_line_visible(self._baseline_line, bool(valid))
+            self._set_line_visible(self._level_line, bool(valid))
+        except (ValueError, TypeError, OverflowError) as exc:
+            self._amplitude._error = str(exc)
+            self._set_line_visible(self._baseline_line, False)
+            self._set_line_visible(self._level_line, False)
+        self._amplitude.sync(r)
 
         # Frame the loaded window in x; y autoranges to the slice (annotations are ignoreBounds).
         self._plot.setTitle(self._event_title(r))
-        self._plot.enableAutoRange(y=True)
-        self._frame(float(xs[0]), float(xs[-1]))
+        if previous_view is None:
+            self._plot.enableAutoRange(y=True)
+            self._frame(float(xs[0]), float(xs[-1]))
+        else:
+            self._framing = True
+            try:
+                self._plot.setRange(xRange=previous_view[0], yRange=previous_view[1], padding=0)
+            finally:
+                self._framing = False
+        if amplitude_is_current(r) and self._level_line.isVisible():
+            # A typed manual level can lie outside the waveform's range. Keep x
+            # and any in-view zoom unchanged, but do not hide the saved reference.
+            view = self._plot.getViewBox()
+            view.updateAutoRange()
+            ymin, ymax = view.viewRange()[1]
+            low = min(float(r["amplitude_level_pA"]), float(r["amplitude_baseline_pA"]))
+            high = max(float(r["amplitude_level_pA"]), float(r["amplitude_baseline_pA"]))
+            if low < ymin or high > ymax:
+                span = max(ymax - ymin, high - low, np.finfo(float).eps)
+                self._plot.setYRange(min(ymin, low - 0.05 * span),
+                                     max(ymax, high + 0.05 * span), padding=0)
 
     def _draw_window(self, lo: int, hi: int) -> np.ndarray | None:
         """Load samples ``[lo, hi)`` into the curve and redraw everything keyed to the WINDOW.
@@ -2450,7 +2498,14 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             return None
         if not self._session.has_document(self._doc_id):
             return None
-        data = np.asarray(self._session.calibrated(self._doc_id, self._channel).data)
+        try:
+            data = self._amplitude.measurement_signal()
+            self._plot.setLabel("left", "Measurement current", units=self._units)
+        except (ValueError, TypeError, OverflowError):
+            # Browsing remains available when an old recipe cannot be replayed, but
+            # quantitative lines/editing are hidden by _render_event's explicit refusal.
+            data = np.asarray(self._session.calibrated(self._doc_id, self._channel).data)
+            self._plot.setLabel("left", "Raw channel — measurement unavailable")
         xvals = self._session.x_axis(self._doc_id).values
         n = int(min(data.size, xvals.size))
         lo = int(np.clip(lo, 0, n))
@@ -2571,13 +2626,16 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         parts = [
             f"Event {int(r['event_id'])}",
             f"dwell {_fmt_num(dwell_us, ' µs', 4)}{self._stale('dwell_s')}",
-            f"depth {_fmt_num(r['depth_pA'], units, 4)}{self._stale('depth_pA')}",
+            f"median depth {_fmt_num(r['depth_pA'], units, 4)}{self._stale('depth_pA')}",
             # ⚠>1 = the current magnitude GREW; see analysis.events.frac_depth_note.
             f"dI/I0 {_fmt_num(r['frac_depth'], '', 3)}{frac_depth_flag(r['frac_depth'])}"
             f"{self._stale('frac_depth')}",
         ]
         if bool(r["filter_limited"]):
             parts.append("filter-limited")
+        if amplitude_is_current(r):
+            parts.append(f"amplitude {_fmt_num(r['amplitude_pA'], ' ' + str(r['amplitude_units']), 4)} "
+                         f"({r['amplitude_method']})" + (" ⚠" if self._stale_columns else ""))
         return "   ·   ".join(parts)
 
     def _refresh_readout(self, row: int) -> None:
@@ -2604,7 +2662,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             f"accepted:        {'yes' if bool(r['accepted']) else 'no'}",
             f"dwell:           {_fmt_num(float(r['dwell_s']) * 1e6, ' µs', 5)}"
             f"   ({_fmt_num(r['dwell_s'], ' s', 4)}){stale('dwell_s')}",
-            f"depth:           {_fmt_num(r['depth_pA'], units, 5)}{stale('depth_pA')}",
+            f"median depth:    {_fmt_num(r['depth_pA'], units, 5)}{stale('depth_pA')}",
             f"dI/I0:           {_fmt_num(r['frac_depth'], '', 4)}"
             f"{frac_depth_flag(r['frac_depth'])}{stale('frac_depth')}",
             f"SNR:             {_fmt_num(r['snr'], '', 3)}{stale('snr')}",
@@ -2615,6 +2673,10 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             *( [f"labels:          {_labels}"] if _labels else [] ),
             f"baseline:        {_fmt_num(r['baseline_pA'], units, 5)}{stale('baseline_pA')}",
         ]
+        if amplitude_is_current(r):
+            lines.append(f"amplitude:       {_fmt_num(r['amplitude_pA'], ' ' + str(r['amplitude_units']), 5)} "
+                         f"({r['amplitude_method']}; separate from depth/dI/I0/SNR)"
+                         + (" ⚠" if self._stale_columns else ""))
         lines.extend(self._level_lines(ev_id, units))
         self._readout.setText("\n".join(lines))
 
@@ -2951,6 +3013,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # ...and the missing-levels sentence with them, so it follows the browsed event on
         # every navigation rather than sitting where the last mask edit left it.
         self._sync_level_note()
+        row = self._row_for_id(self._current_id)
+        self._amplitude.sync(self._df.iloc[row] if row is not None and self._df is not None else None)
 
     def _pan_view(self, frac: float) -> None:
         """Scroll ``frac`` of a window along the RECORDING (owner note #8). The mask region,

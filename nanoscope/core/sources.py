@@ -85,6 +85,8 @@ denominator at ~0 (measured, 872x-1048x; see :data:`_SIGNAL_DOMAIN_FREE_COLUMNS`
 
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
@@ -113,6 +115,8 @@ __all__ = [
     "PooledItem",
     "SourceVerdict",
     "baseline_fingerprint_of",
+    "amplitude_comparability",
+    "amplitude_units_label",
     "column_depends_on_baseline",
     "column_depends_on_gain",
     "column_depends_on_signal_domain",
@@ -571,8 +575,96 @@ _BASELINE_FREE_COLUMNS: frozenset[str] = frozenset({
 #: ratio), which survive a gain disagreement (but not a baseline one).
 ABSOLUTE_CURRENT_COLUMNS: tuple[str, ...] = (
     "baseline_pA", "depth_pA", "ecd_pA_s", "max_dev_pA", "mean_dev_pA",
-    "amplitude", "rms",
+    "amplitude", "amplitude_pA", "rms",
 )
+
+
+def amplitude_units_label(frames: Iterable[Any]) -> str:
+    """Recorded units of finite selected amplitudes; never infer pA from the key."""
+    units: set[str] = set()
+    for df in frames:
+        if df is None or "amplitude_pA" not in df:
+            continue
+        for row in df.to_dict("records"):
+            try:
+                if not math.isfinite(float(row.get("amplitude_pA"))):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            value = str(row.get("amplitude_units", "")).strip()
+            units.add(value if value and value not in {"nan", "None"} else "unstated units")
+    return next(iter(units)) if len(units) == 1 else ("mixed units" if units else "units unstated")
+
+
+def amplitude_comparability(frames: Iterable[tuple[str, Any]]) -> tuple[str, ...]:
+    """Warn about optional amplitudes, including mixed estimators WITHIN one source.
+
+    This is a disclosure, not a filter: all stored rows and values remain intact.
+    Callers pass only the rows actually being drawn (e.g. accepted-only). Missing
+    amplitudes are disclosed too, because a partially curated table must not appear
+    to summarize every event merely because its finite values can be plotted.
+    """
+    from ..analysis.event_amplitude import amplitude_is_current
+
+    groups: set[tuple[str, ...]] = set()
+    warnings: list[str] = []
+    for label, df in frames:
+        if df is None or not len(df):
+            continue
+        stale = missing = unaudited = 0
+        for row in df.to_dict("records"):
+            status = str(row.get("amplitude_status", ""))
+            if status == "stale":
+                stale += 1
+            try:
+                finite = math.isfinite(float(row.get("amplitude_pA")))
+            except (TypeError, ValueError):
+                finite = False
+            if not finite:
+                missing += 1
+                continue
+            if status != "stale" and (status != "current" or not amplitude_is_current(row)):
+                stale += 1
+            try:
+                audit = json.loads(row.get("amplitude_provenance_json", ""))
+                if not isinstance(audit, dict):
+                    raise ValueError("invalid amplitude audit")
+                method = str(row.get("amplitude_method", ""))
+                units = str(row.get("amplitude_units", ""))
+                scope = audit.get("interval_scope")
+                identity = audit.get("signal_identity")
+                if (not method or not units or scope not in {"whole_event", "selected_interval"}
+                        or not isinstance(identity, dict)
+                        or not {"signal_domain", "baseline_source", "detection_signal_key",
+                                "baseline_fingerprint", "calibration_fingerprint",
+                                "sample_rate_hz"}.issubset(identity)):
+                    raise ValueError("missing amplitude audit")
+                groups.add((method, str(scope), units, str(audit.get("baseline_reference", "")),
+                            json.dumps(identity.get("signal_domain"), sort_keys=True),
+                            json.dumps(identity.get("baseline_source"), sort_keys=True),
+                            json.dumps(identity.get("detection_signal_key"), sort_keys=True),
+                            json.dumps(identity.get("baseline_fingerprint"), sort_keys=True),
+                            json.dumps(identity.get("calibration_fingerprint"), sort_keys=True),
+                            json.dumps(identity.get("sample_rate_hz"), sort_keys=True)))
+            except (TypeError, ValueError):
+                unaudited += 1
+        if missing:
+            warnings.append(f"{label}: {missing} events have no selected amplitude; "
+                            "only finite amplitude values contribute to this plot.")
+        if stale:
+            warnings.append(f"{label}: {stale} selected amplitudes are stale or unverified. "
+                            "Reapply amplitude in Curate before interpreting this plot.")
+        if unaudited:
+            warnings.append(f"{label}: {unaudited} selected amplitudes lack valid method/scope/unit "
+                            "provenance; comparability cannot be established.")
+    if len(groups) > 1:
+        warnings.append("Selected amplitudes are NOT COMPARABLE: mixed estimators, interval scopes, "
+                        "units or measurement signal/baseline definitions. Select a consistent "
+                        "measurement method and scope before pooling or fitting them.")
+    if any(group[1] == "selected_interval" or group[0] == "manual" for group in groups):
+        warnings.append("Intervals/states or manual levels were chosen per event. Matching method "
+                        "names do not establish that they represent the same physical state.")
+    return tuple(warnings)
 
 
 def column_depends_on_baseline(column: str) -> bool:
@@ -1184,10 +1276,9 @@ class SourceVerdict(NamedTuple):
         columns: The columns asked about, in the order given.
         pool: The whole :class:`PoolVerdict` over the drawn sources -- baseline,
             merge AND gain.
-        warnings: Every reason these columns must not be pooled, most fundamental
-            first (merge, then baseline, then signal domain, then gain). Empty when
-            they may be. Identical to ``pool.warnings``: this object adds a headline,
-            not a verdict.
+        warnings: Pooling caveats, most fundamental first (merge, baseline, signal
+            domain, gain), followed by optional amplitude audit/coverage warnings.
+            Unlike ``pool.warnings``, these can describe within-source choices too.
         headline: A one-line verdict for a plot TITLE -- the surface a saved PNG
             keeps. ``""`` exactly when ``warnings`` is empty.
     """
@@ -1205,6 +1296,8 @@ class SourceVerdict(NamedTuple):
 def source_comparability(
     sources: Sequence[PlotSource],
     columns: Sequence[str],
+    *,
+    frames: Sequence[Any] | None = None,
 ) -> SourceVerdict:
     """May these Plots sources be pooled for these columns? The ONE verdict.
 
@@ -1238,6 +1331,8 @@ def source_comparability(
     gain_cols = tuple(c for c in cols if column_depends_on_gain(c))
     domain_cols = tuple(c for c in cols if column_depends_on_signal_domain(c))
 
+    if frames is not None and len(frames) != len(sources):
+        raise ValueError("A plotted frame is required for each source")
     # The pool is judged over EVERY drawn source, the manual table included: a
     # hand-measured depth was measured against whatever the hand picked, which is
     # not the detector's window either. The GAIN half still skips it -- and says so
@@ -1267,6 +1362,10 @@ def source_comparability(
         alternatives=_PLOTS_ALTERNATIVES,
     )
 
+    amplitude_warnings = (amplitude_comparability(
+        [(src.label, df) for src, df in zip(sources, frames)]
+        if frames is not None else [(src.label, src.df) for src in sources])
+        if "amplitude_pA" in cols else ())
     headline = ""
     if pool.warnings:
         # Which columns to NAME. When only the gain fired, the baseline-dependent
@@ -1278,8 +1377,10 @@ def source_comparability(
         gain_only = len(pool.gain_warnings) == len(pool.warnings)
         blocked = gain_cols if gain_only else (base_cols or domain_cols)
         headline = f"⚠ NOT COMPARABLE across {len(sources)} sources: {', '.join(blocked or cols)}"
+    if amplitude_warnings:
+        headline = ((headline + " · ") if headline else "") + "⚠ CHECK SELECTED AMPLITUDES"
     return SourceVerdict(columns=cols, pool=pool,
-                         warnings=pool.warnings, headline=headline)
+                         warnings=pool.warnings + amplitude_warnings, headline=headline)
 
 
 def disambiguate_labels(entries: list[dict]) -> None:

@@ -136,6 +136,8 @@ from ..core.session import Session
 from ..core.sources import (
     PlotSource,
     SourceVerdict,
+    amplitude_comparability,
+    amplitude_units_label,
     disambiguate_labels,
     source_colour,
     source_comparability,
@@ -153,6 +155,8 @@ from .axes import ReadableLogAxis
 from .categorical import category_brushes, category_colour, category_counts, legend_swatch
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
+from .plot_appearance import PlotAppearance, PlotAppearanceWidget
+from .plot_lasso import PlotLasso, RowIdentityIndex, toggled_rows, unique_rows
 from .plot_export import (
     apply_png_resolution, apply_svg_physical_size, choose_live_plot_export,
 )
@@ -2518,6 +2522,14 @@ class _FitSummary(str):
         return obj
 
 
+class _LegendText(str):
+    """Keep the committed count separate from its optional presentation."""
+    def __new__(cls, text, name, count):
+        result = super().__new__(cls, text)
+        result.name, result.count = str(name), count
+        return result
+
+
 def _narrow_combo(combo: QtWidgets.QComboBox, chars: int = _COMBO_CHARS) -> None:
     """Stop a combo from sizing the whole controls column to its longest item.
 
@@ -2594,6 +2606,9 @@ def _numeric_columns(df: pd.DataFrame | None) -> list[str]:
         return []
     out: list[str] = []
     for c in df.columns:
+        if str(c).startswith("amplitude_") and c != "amplitude_pA":
+            # Audit coordinates/reference levels are not alternate event amplitudes.
+            continue
         s = df[c]
         if pd.api.types.is_bool_dtype(s) or not pd.api.types.is_numeric_dtype(s):
             continue
@@ -3034,6 +3049,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         #: in ``data`` and that is what :attr:`eventRowsSelected` emits.
         self._event_point_items: dict[str, list[pg.ScatterPlotItem]] = {}
         self._selected_event_rows: dict[str, list[object]] = {}
+        self._lasso_generation = 0
 
         #: THE Y QUANTITY THIS WINDOW WAS ASKED FOR AND COULD NOT OFFER. Written only by
         #: the one writer (:meth:`_set_config`) and cleared by any move of the combo the
@@ -3173,8 +3189,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "Command, or Shift to select several points.")
         self._plot_widget.setToolTip(
             "Scatter and PCA: click a point to inspect its event. "
-            "Ctrl/Cmd/Shift-click adds or removes points from the selection.")
+            "Ctrl/Cmd/Shift-click adds or removes points from the selection. "
+            "Enable Lasso select in the toolbar to select an outlined region.")
         self._plot: pg.PlotItem = self._plot_widget.getPlotItem()
+        self._lasso = PlotLasso(self._plot_widget, self)
+        self._lasso.completed.connect(self._on_lasso_completed)
+        self._lasso.enabledChanged.connect(self._on_lasso_mode_changed)
+        self._lasso.cancelled.connect(lambda message: self.statusBar().showMessage(message, 7000))
         # The grid is NOT set here any more. It used to be hard-coded once, at
         # construction, and never read again -- so the Style group could change every
         # other thing about the canvas and not this (owner note Q7). It is applied on
@@ -3321,6 +3342,21 @@ class PlotsWindow(QtWidgets.QMainWindow):
         run_button = bar.widgetForAction(self._run_action)
         if run_button is not None:
             run_button.setAccessibleName("Plot or apply pending analysis")
+
+        self._lasso_action = bar.addAction("Lasso select")
+        self._lasso_action.setObjectName("populationPlotLassoSelect")
+        self._lasso_action.setCheckable(True)
+        self._lasso_action.setEnabled(False)
+        self._lasso_action.setToolTip(
+            "Switch between pan/zoom and region selection on Scatter/PCA. "
+            "Drag a closed outline; Ctrl/Cmd/Shift toggles its events. "
+            "Esc or right-click cancels and returns to pan/zoom. "
+            "If several sources are enclosed, choose one source to inspect. "
+            "Selection never accepts/rejects events or reruns analysis.")
+        self._lasso_action.toggled.connect(self._lasso.set_enabled)
+        self._selection_mode_label = QtWidgets.QLabel("Mode: Pan/zoom")
+        self._selection_mode_label.setObjectName("populationPlotInteractionMode")
+        self.statusBar().addPermanentWidget(self._selection_mode_label)
 
         export_button = QtWidgets.QToolButton()
         export_button.setObjectName("populationPlotExportMenu")
@@ -3753,6 +3789,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         page = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(page)
         form.setContentsMargins(0, 4, 0, 0)
+        self._kde_quantity_note = QtWidgets.QLabel(
+            "KDE probability density — smoothed contours, not event-count bins. "
+            "Log axes express density per decade; Details records the full units.")
+        self._kde_quantity_note.setWordWrap(True)
+        form.addRow(self._kde_quantity_note)
 
         self._kde_x = QtWidgets.QComboBox()
         self._kde_x.currentTextChanged.connect(
@@ -3933,6 +3974,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         groups use)."""
         box = QtWidgets.QGroupBox("Style")
         form = QtWidgets.QFormLayout(box)
+        self._appearance_widget = PlotAppearanceWidget(compact=True)
+        self._appearance_widget.changed.connect(self._appearance_from_user)
+        form.addRow(self._appearance_widget)
 
         self._title_edit = QtWidgets.QLineEdit()
         self._title_edit.setPlaceholderText("auto")
@@ -4226,9 +4270,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "A second axis under the plot showing (observed − expected) / √expected per "
             "bin, sharing the x axis, plus the reduced χ² that is the sum of their "
             "squares.\nA run of same-sign bars is the finding — KS gives one number for "
-            "the whole curve and cannot say WHERE it misses.\nOn screen only: "
-            "Save image… exports the main axes, so the χ² is also written into Details "
-            "and into the on-plot values box.")
+            "the whole curve and cannot say WHERE it misses.\n"
+            "Export current figure… offers an explicit option to include the visible "
+            "residual panel. The χ² can also appear in the on-plot values box.")
         self._residual_check.setChecked(self._style.show_residuals)
         self._residual_check.toggled.connect(self._on_style_residuals)
         form.addRow("", self._residual_check)
@@ -4284,6 +4328,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._export_h.setParent(box)
         self._export_w.hide()
         self._export_h.hide()
+        # Keep legacy controls as the compatibility layer for saved configurations
+        # and programmatic clients, but offer each basic field only once on screen.
+        # Population-specific fit ornaments, title weight, and legend entries stay
+        # below the common controls; they do not exist on every analytical view.
+        for widget in (self._title_edit, self._x_label_edit, self._y_label_edit,
+                       self._legend_check, self._legend_font_size, self._font_combo,
+                       self._title_size, self._axis_label_size, self._tick_size,
+                       self._grid_check, self._data_swatch, self._fit_swatch,
+                       self._point_size, self._line_width, self._bg_combo):
+            form.setRowVisible(widget, False)
         return box
 
     @staticmethod
@@ -4465,11 +4519,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_point_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, point_size=int(value))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_line_width(self, value: int) -> None:
         self._style = _dc_replace(self._style, line_width=int(value))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_background(self, text: str) -> None:
         self._style = _dc_replace(
@@ -4478,27 +4532,27 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_show_r2(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_r2=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_show_gof(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_gof=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_ci_band(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_ci_band=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_residuals(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_residuals=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_provenance(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_provenance=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_fit_values(self, on: bool) -> None:
         self._style = _dc_replace(self._style, fit_values_on_plot=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_x_label(self, text: str) -> None:
         self._style = _dc_replace(self._style, x_label=text.strip())
@@ -4510,7 +4564,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_show_legend(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_legend=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_title_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, title_font_size_pt=int(value))
@@ -4555,7 +4609,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if not entry_id:
             return
         self._style = self._style.with_legend_include(str(entry_id), checked)
-        self._changed()
+        self._presentation_changed()
         # THE HISTORY HOOK, BY HAND. `_wire_history`'s walk deliberately skips
         # `itemChanged` (see the note there), so this handler calls the hook itself, in
         # the position -- after the change is applied -- the generic connection held.
@@ -4610,6 +4664,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
         finally:
             widget.blockSignals(blocked)
         widget.setEnabled(bool(self._legend_offered) and self._style.show_legend)
+        if hasattr(self, "_appearance_widget"):
+            self._appearance_widget.set_legend_available(bool(self._legend_offered))
+            markers = bool(getattr(self, "_scatter_items", []))
+            self._appearance_widget.marker_size.setEnabled(markers)
+            self._appearance_widget.marker_size.setToolTip(
+                "Size of the existing scatter/PCA markers." if markers else
+                "The current figure has no scatter/PCA markers.")
+        if hasattr(self, "_lasso_action"):
+            available = bool(self._event_point_items) and self._message_item is None
+            self._lasso_action.setEnabled(available)
+            if not available:
+                self._lasso.set_enabled(False)
 
     def _write_legend_row(self, item, entry_id: str, label: str) -> None:
         """Put one offered entry onto an EXISTING row, touching only what differs.
@@ -4664,7 +4730,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_legend_counts(self, on: bool) -> None:
         self._style = _dc_replace(self._style, legend_counts=bool(on))
-        self._changed()
+        self._presentation_changed()
 
     def _on_style_export_size(self, *_args) -> None:
         # Export size only affects save_image; no redraw needed.
@@ -4687,7 +4753,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # frozen-copy spelling has to be by name too -- `replace` takes kwargs.
             self._style = _dc_replace(self._style, **{attr: hex_color})
             self._paint_swatch(swatch, hex_color)
-            self._changed()
+            self._presentation_changed()
 
     # -- style helpers (colours / fonts / theme applied at each render site) ---------------------
     def _qfont(self, pt: int | None = None) -> QtGui.QFont:
@@ -4837,7 +4903,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if is_time and log:
             return self._remember_axis_label(
                 side, f"{col.removesuffix('_s')} ({name}{clock_tag}, log)")
-        return self._remember_axis_label(side, col + (" (log)" if log else ""))
+        label = col
+        if col == "depth_pA":
+            label = "Median depth (depth_pA)"
+        elif col == "amplitude_pA":
+            units = amplitude_units_label(df for _src, df in self._drawn_frames())
+            label = f"Selected amplitude ({units})"
+        return self._remember_axis_label(side, label + (" (log)" if log else ""))
 
     def _remember_axis_label(self, side: str, auto: str) -> str:
         """Retain the rendered unit/clock caption, including when it is overridden."""
@@ -6227,7 +6299,20 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # origin it descends from came back with it (`_ConfigHistory.undo`), so
             # the import disclosures are decided by that origin, not re-decided here
             # (S7-FIX1: an undo that lands on the imported state keeps its sentences).
-            self._set_config(self._installable(cfg), draw=armed, own=True)
+            current = self.config()
+            if _dc_replace(cfg, style=current.style) == current:
+                # Undoing ink does not commit unrelated pending source/axis/fit settings.
+                prior = self._updating
+                self._updating = True
+                try:
+                    self._style = cfg.style
+                    self._apply_style_widgets(cfg.style)
+                    self._sync_source_row_labels()
+                finally:
+                    self._updating = prior
+                self._presentation_changed()
+            else:
+                self._set_config(self._installable(cfg), draw=armed, own=True)
             if not armed:
                 self._show_plot_prompt()
         finally:
@@ -7062,6 +7147,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         never load-bearing."""
         if self._updating:
             return
+        previous_labels = self._style.label_overrides
         try:
             key, text_now = item.data(Qt.UserRole), item.text()
         except RuntimeError:
@@ -7124,11 +7210,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # TICK changes the rows that are drawn, so it makes the plot stale; a RENAME is
         # legend text, which is as cosmetic as a colour and redraws live. One Qt signal
         # carries both, so the checked set is compared with the one the last draw used.
-        if tuple(self.selected_source_keys()) != self._checked_snapshot:
+        if self._style.label_overrides != previous_labels:
+            self._presentation_changed()
+        elif tuple(self.selected_source_keys()) != self._checked_snapshot:
             self._on_sources_changed(draw=False)
             self._mark_stale("the data selection")
         else:
-            self._changed()
+            self._presentation_changed()
         # THE HISTORY HOOK, BY HAND -- see `_on_legend_entry_toggled`.
         self._history_touch()
 
@@ -7264,6 +7352,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
                           self._kde_x, self._kde_y):
                 combo.clear()
                 combo.addItems(cols)
+                for i, name in enumerate(cols):
+                    if name in {"depth_pA", "amplitude_pA"}:
+                        combo.setItemData(i, (
+                            "Original whole-event median depth; unchanged by Curate amplitude choices."
+                            if name == "depth_pA" else
+                            "Selected amplitude applied in Curate. Recorded units: "
+                            + amplitude_units_label(src.df for src in selected)
+                            + ". Review method, interval scope and stale-value warnings before pooling."),
+                            QtCore.Qt.ToolTipRole)
 
             self._features.clear()
             for c in cols:
@@ -7302,17 +7399,277 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._rebase()
 
     # -- control-change handlers -----------------------------------------------------------------
+    _APPEARANCE_FIELDS = {
+        "title": "title", "x_label": "x_label", "y_label": "y_label",
+        "font_family": "font_family", "title_size": "title_font_size_pt",
+        "axis_size": "axis_label_font_size_pt", "tick_size": "tick_font_size_pt",
+        "grid": "show_grid", "background": "background", "data_color": "data_color",
+        "fit_color": "fit_color", "line_width": "line_width", "marker_size": "point_size",
+        "legend_visible": "show_legend", "legend_size": "legend_font_size_pt",
+    }
+
+    def appearance_state(self) -> dict:
+        """Appearance-only bridge; no sources, axes scales, bins or fit settings."""
+        return {key: getattr(self._style, field) for key, field in self._APPEARANCE_FIELDS.items()
+                if getattr(self._style, field) not in (None, "")
+                and not (key.endswith("size") and getattr(self._style, field) == 0)}
+
+    def set_appearance_state(self, mapping) -> None:
+        """Restore only appearance, silently and without committing pending analysis."""
+        state = mapping if isinstance(mapping, PlotAppearance) else PlotAppearance.from_mapping(mapping)
+        defaults = StyleSettings()
+        values = {}
+        for key, field in self._APPEARANCE_FIELDS.items():
+            value = getattr(state, key)
+            value = getattr(defaults, field) if value is None else value
+            if isinstance(getattr(defaults, field), int) and not isinstance(value, bool):
+                value = int(round(value))
+                if field in ("line_width", "point_size"):
+                    value = max(1, value)
+            values[field] = value
+        prior = self._updating
+        self._updating = True
+        try:
+            self._style = _dc_replace(self._style, **values)
+            self._apply_style_widgets(self._style)
+            self._appearance_widget.set_state(state)
+        finally:
+            self._updating = prior
+        if not prior:
+            suspended = self._history_suspended
+            self._history_suspended = True
+            try:
+                self._presentation_changed()
+            finally:
+                self._history_suspended = suspended
+
+    def _appearance_from_user(self, state: PlotAppearance) -> None:
+        if self._updating:
+            return
+        self.set_appearance_state(state)
+        self._history_settle()
+
+    def figure_export_target(self):
+        return self._plot
+
+    def figure_residual_target(self):
+        return self._resid if not self._resid_widget.isHidden() else None
+
+    def figure_applied_config(self) -> dict:
+        """Shown scientific settings, with current presentation, not pending drafts."""
+        applied = getattr(self, "_figure_applied_config", None)
+        return {} if applied is None else plot_config_to_json(
+            _dc_replace(applied, style=self._style))
+
+    def figure_source_recipes(self) -> list[dict]:
+        """Durable sources of the shown numbers, never pending source checkboxes."""
+        return copy.deepcopy(list(getattr(self, "_figure_sources", {}).values()))
+
+    def _cache_figure_source(self, source: PlotSource) -> None:
+        """Stamp each source once, only when a genuine draw adds its data items."""
+        if source.key not in self._figure_sources:
+            from ..core.analysis_workspace import _plot_source_recipe
+            self._figure_sources[source.key] = _plot_source_recipe(self, source)
+
+    def _restyle_committed_items(self) -> None:
+        """Style graphical objects, preserving category colors and selected rings."""
+        objects = [*self._plot.items, *self._resid.items,
+                   *(entry[0] for entry in getattr(self, "_presentation_legend", {}).values())]
+        for item in dict.fromkeys(objects):
+            role = getattr(item, "_presentation_role", None)
+            if role is None:
+                continue
+            colour = (self._style.data_color if role == "data" else
+                      self._style.fit_color if role == "fit" else None)
+            if isinstance(item, pg.ScatterPlotItem):
+                item.setSize(self._style.point_size)
+                if colour:
+                    tint = QtGui.QColor(colour)
+                    tint.setAlpha(_POINT_ALPHA)
+                    item.setBrush(pg.mkBrush(tint))
+            elif isinstance(item, pg.FillBetweenItem):
+                if colour:
+                    tint = QtGui.QColor(colour)
+                    tint.setAlpha(60)
+                    item.setBrush(pg.mkBrush(tint))
+            elif isinstance(item, (pg.PlotDataItem, pg.IsocurveItem)):
+                existing = item.opts.get("pen") if isinstance(item, pg.PlotDataItem) else item.pen
+                if existing is not None:
+                    pen = pg.mkPen(existing)
+                    if colour:
+                        pen.setColor(QtGui.QColor(colour))
+                    pen.setWidthF(self._style.line_width + getattr(item, "_presentation_width_extra", 0))
+                    item.setPen(pen)
+                if isinstance(item, pg.PlotDataItem) and colour and item.opts.get("fillBrush") is not None:
+                    brush = pg.mkBrush(item.opts["fillBrush"])
+                    tint = QtGui.QColor(colour)
+                    tint.setAlpha(brush.color().alpha())
+                    item.setFillBrush(pg.mkBrush(tint))
+                if isinstance(item, pg.PlotDataItem) and item.opts.get("symbol") is not None:
+                    item.setSymbolSize(max(4, self._style.point_size - 2))
+                    if colour:
+                        item.setSymbolBrush(pg.mkBrush(colour))
+        self._paint_event_point_selection()
+
+    def _committed_legend_names(self) -> dict:
+        sources = getattr(self, "_presentation_sources", ())
+        entries = [{"label": self._style.label_overrides.get(key, label) or label,
+                    "channel_name": label, "is_segment": segment}
+                   for key, label, segment in sources]
+        disambiguate_labels(entries)
+        return {source[0]: entry["label"] for source, entry in zip(sources, entries)}
+
+    def _restyle_committed_legend(self) -> None:
+        entries = getattr(self, "_presentation_legend", {})
+        names = self._committed_legend_names()
+        self._drop_legend()
+        for entry_id, (item, original, kind, key) in entries.items():
+            label = str(original)
+            if isinstance(original, _LegendText):
+                name = names.get(key, original.name) if kind == "series" else original.name
+                label = str(self._legend_entry(name, original.count))
+            elif kind == "series":
+                label = names.get(key, label)
+            elif kind == "fit":
+                variants = getattr(item, "_presentation_fit_summaries", None)
+                if variants is not None:
+                    label = f"{names.get(key, '')} fit: {variants[self._style.show_r2]}".strip()
+                elif " fit:" in label and key in names:
+                    label = names[key] + " fit:" + label.split(" fit:", 1)[1]
+            self._legend_offered[entry_id] = label
+            if self._style.show_legend and self._legend_included(entry_id):
+                self._ensure_legend().addItem(item, self._elide_legend(label))
+        self._sync_legend_entry_list()
+        self._appearance_widget.set_legend_available(bool(entries))
+        self._refresh_committed_legend_disclosure(names)
+
+    def _refresh_committed_legend_disclosure(self, names) -> None:
+        """Rename disclosure from the shown source identities, never pending inputs."""
+        groups = {}
+        for key, label, _segment in getattr(self, "_presentation_sources", ()):
+            shown = self._style.label_overrides.get(key, label) or label
+            groups.setdefault(shown, []).append((key, label))
+        notes = []
+        for label, sources in groups.items():
+            if len(sources) < 2:
+                continue
+            which = ", ".join(original for _key, original in sources)
+            apart = ", ".join(f"“{names[key]}”" for key, _original in sources)
+            notes.append(
+                f"LEGEND: {len(sources)} of the drawn sources are both called “{label}” "
+                f"({which}), so the legend and any saved image name them {apart} "
+                "— two curves under one name cannot be read. Retype one of them in "
+                "the Sources list to name them apart.")
+        old = self.details_text()
+        lines = [line for line in old.splitlines() if not line.startswith("LEGEND:")]
+        updated = "\n".join([*lines, *notes])
+        if updated != old:
+            self._set_details(updated)
+
+    def _set_presentation_annotation(self, attribute, lines, visible, *, bottom=False):
+        item = getattr(self, attribute, None)
+        text = "<br>".join(_html.escape(str(line)) for line in lines if str(line).strip())
+        if not visible or not text:
+            if item is not None:
+                item.setParentItem(None)
+                scene = item.scene()
+                if scene is not None:
+                    scene.removeItem(item)
+                setattr(self, attribute, None)
+            return
+        colour = self._msg_hex() if bottom else self._style.fit_color
+        size = max(6, self._style.font_size_pt - 2) if bottom else self._style.font_size_pt
+        if item is None:
+            item = pg.LabelItem(justify="left")
+            item.setParentItem(self._plot.vb)
+            item.anchor(itemPos=(0, 1 if bottom else 0), parentPos=(0, 1 if bottom else 0),
+                        offset=(8, -6) if bottom else (10, 8))
+            item.setZValue(30)
+            setattr(self, attribute, item)
+        item.setText(text, color=colour, size=f"{size}pt")
+
+    def _restyle_committed_decorations(self) -> None:
+        names = self._committed_legend_names()
+        aliases = {label: names[key] for key, label, _segment in
+                   getattr(self, "_presentation_sources", ())}
+        lines = getattr(self, "_presentation_fit_lines", [])
+        variants = getattr(self, "_presentation_full_variants", [])
+        if variants:
+            key = (self._style.show_gof, self._style.show_residuals)
+            lines = [(f"{aliases.get(who, who)}: " if who else "") + text[key]
+                     for who, text in variants]
+        scatter = getattr(self, "_presentation_scatter_variants", [])
+        if scatter:
+            lines = [(f"{aliases.get(who, who)}: " if who else "") + text[self._style.show_r2]
+                     for who, text in scatter]
+            _auto, accent, warning = self._title_presentation
+            self._apply_title("   |   ".join(lines), accent=accent, warn=warning)
+        self._set_presentation_annotation("_fit_values_item", lines, self._style.fit_values_on_plot)
+        provenance = getattr(self, "_presentation_provenance", [])
+        keyed = getattr(self, "_presentation_provenance_by_source", [])
+        if keyed:
+            multi = len(getattr(self, "_presentation_sources", ())) > 1
+            provenance = [(f"{names.get(key, key)}: " if multi else "") + text
+                          for key, text in keyed]
+        self._set_presentation_annotation("_prov_item", provenance,
+                                          self._style.show_provenance, bottom=True)
+        if self._style.show_ci_band and not self._band_items:
+            for grid, lo, hi, colour, _note, role in getattr(self, "_presentation_bands", []):
+                self._add_cached_band(grid, lo, hi, colour, role)
+        for item in self._band_items:
+            item.setVisible(self._style.show_ci_band)
+        residual = getattr(self, "_presentation_residual", None)
+        if self._style.show_residuals and residual is not None and not self._resid.items:
+            self._render_cached_residual(*residual)
+        self._resid_widget.setVisible(bool(self._style.show_residuals and residual is not None))
+        # The first opt-in uses precomputed geometry, but must still carry its
+        # original statistical qualifications into the full methods record.
+        notes = []
+        if self._style.show_ci_band:
+            notes.extend(entry[4] for entry in getattr(self, "_presentation_bands", []))
+        if self._style.show_residuals:
+            notes.append(getattr(self, "_presentation_residual_note", ""))
+        details = self.details_text()
+        additions = [note for note in dict.fromkeys(notes) if note and note not in details]
+        if additions:
+            self._set_details("\n".join([details, *additions]))
+
     def _presentation_changed(self) -> None:
+        if self._updating:
+            return
+        view = self._plot.getViewBox()
+        ranges = [list(pair) for pair in view.viewRange()]
+        auto = list(view.autoRangeEnabled())
+        view.disableAutoRange()
+        try:
+            self._apply_presentation_changes()
+        finally:
+            view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
+            for axis, enabled in enumerate(auto):
+                if enabled:
+                    view.enableAutoRange(axis=axis, enable=enabled)
+
+    def _apply_presentation_changes(self) -> None:
         """Restyle existing text/canvas items without reconstructing the result.
 
         Do not consult pending axes, source selections, or fits here. Their run
         gate still owns when the numerical picture changes, and the cached title
         warning must remain attached even under a custom title. This path never
         clears items, sets plot ranges, or touches numerical/deferred-note caches.
-        More structural style edits continue through the existing `_changed` path.
+        Fit decorations consume cached geometry prepared at the genuine draw.
         """
         if self._updating:
             return
+        if hasattr(self, "_appearance_widget"):
+            self._updating = True
+            try:
+                self._appearance_widget.set_state(self.appearance_state())
+            finally:
+                self._updating = False
+        if self._plot_armed and self._message_item is None:
+            self._restyle_committed_legend()
+            self._restyle_committed_decorations()
+        self._restyle_committed_items()
         self._apply_background()
         self._apply_fonts()
         if self._plot_armed and self._message_item is None:
@@ -7360,12 +7717,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._history_settle()
 
     def _changed(self, *_args) -> None:
-        """The remaining structural display controls use the existing redraw path.
+        """Numerical/display geometry controls use the existing redraw path.
 
         Text, typography, grid and background changes are isolated in
         :meth:`_presentation_changed`; they do not rebuild this numerical picture.
-        Changes that still need reconstruction (for example legend contents, fit
-        decorations and bin count) retain this path and its history behavior.
+        Changes that need reconstruction (for example bin count) retain this path
+        and its history behavior. All appearance controls use cached items instead.
         Source and axis-column proposals keep their separate :meth:`_mark_stale` gate.
 
         With nothing committed yet there is nothing to restyle, so the prompt stays up.
@@ -7935,12 +8292,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def set_data_color(self, hex_color: str) -> None:
         self._style = _dc_replace(self._style, data_color=str(hex_color))
         self._paint_swatch(self._data_swatch, str(hex_color))
-        self._changed()
+        self._presentation_changed()
 
     def set_fit_color(self, hex_color: str) -> None:
         self._style = _dc_replace(self._style, fit_color=str(hex_color))
         self._paint_swatch(self._fit_swatch, str(hex_color))
-        self._changed()
+        self._presentation_changed()
 
     def set_point_size(self, n: int) -> None:
         self._point_size.setValue(int(n))
@@ -8254,6 +8611,23 @@ class PlotsWindow(QtWidgets.QMainWindow):
         return _FitSummary(summary, full, plain=summary), notes
 
     def _clear_plot(self) -> None:
+        self._lasso_generation += 1
+        if hasattr(self, "_lasso"):
+            self._lasso.cancel("Lasso cancelled because the plotted result changed.")
+            self._lasso.set_enabled(False)
+        self._figure_sources = {}
+        self._presentation_legend = {}
+        self._presentation_sources = ()
+        self._presentation_fit_lines = []
+        self._presentation_full_variants = []
+        self._presentation_scatter_variants = []
+        self._presentation_provenance = []
+        self._presentation_provenance_by_source = []
+        self._presentation_bands = []
+        self._presentation_residual = None
+        self._presentation_residual_note = ""
+        self._presentation_residual_ready = False
+        self._figure_applied_config = None
         self._plot.clear()
         self._plot.setTitle(None)
         self._title_presentation = (None, None, None)
@@ -8303,6 +8677,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         the top-right), so it stays put under pan/zoom/log and lands in the saved
         image — which Details, where these numbers otherwise live, does not. One line
         per fitted source, in the fit colour, at the style's font size."""
+        self._presentation_fit_lines = list(lines)
         if not self._style.fit_values_on_plot or not lines:
             return
         text = "<br>".join(_html.escape(str(l)) for l in lines if str(l).strip())
@@ -8417,7 +8792,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         keeps, and with two rows typed to "Apo" it read "Apo: manual measurement table"
         twice under a legend that had just told the two apart (A1-N2).
         """
-        if not self._style.show_provenance or self._message_item is not None:
+        if self._message_item is not None:
             return
         drawn = self._drawn_frames()
         multi = len(drawn) > 1
@@ -8426,7 +8801,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
             line = self._provenance_line(src)
             if not line:
                 continue
+            self._presentation_provenance_by_source.append((src.key, line))
             lines.append(f"{self._legend_name(src)}: {line}" if multi else line)
+        self._presentation_provenance = list(lines)
+        if not self._style.show_provenance:
+            return
         if not lines:
             return
         text = "<br>".join(_html.escape(l) for l in lines)
@@ -8447,7 +8826,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._resid.clear()
         self._resid_widget.setVisible(False)
 
-    def _draw_ci_band(self, fit, grid: np.ndarray, at: np.ndarray, scale, colour) -> str:
+    def _draw_ci_band(self, fit, grid: np.ndarray, at: np.ndarray, scale, colour,
+                      role="fit") -> str:
         """Shade the bootstrap's 95% pointwise band around the drawn fit curve.
 
         ``""`` when there is nothing to draw, which is the common case and is NOT an
@@ -8467,6 +8847,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
             return ""
         lo = np.asarray(band["lo"], dtype=np.float64) * scale
         hi = np.asarray(band["hi"], dtype=np.float64) * scale
+        self._presentation_bands.append((grid.copy(), lo.copy(), hi.copy(), colour,
+                                         str(band["note"]), role))
+        if not self._style.show_ci_band:
+            return ""
+        self._add_cached_band(grid, lo, hi, colour, role)
+        return str(band["note"])
+
+    def _add_cached_band(self, grid, lo, hi, colour, role="fit") -> None:
+        """Materialize graphical ornaments from an already computed interval."""
         pen = pg.mkPen(QtGui.QColor(colour), width=1, style=Qt.DotLine)
         c = QtGui.QColor(colour)
         c.setAlpha(60)      # readable over the bars without hiding them
@@ -8474,12 +8863,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         bot = pg.PlotDataItem(x=grid, y=lo, pen=pen)
         fill = pg.FillBetweenItem(top, bot, brush=pg.mkBrush(c))
         for it in (top, bot, fill):
-            self._plot.addItem(it)
+            it._presentation_role = role
+            it._presentation_band = True
+            self._plot.addItem(it, ignoreBounds=True)
         # NOT a legend row. The band is an attribute of the fit curve that is already
         # legended, and a second entry for one object is the note-Q2 complaint the legend
         # checklist exists to fix.
         self._band_items.extend([top, bot, fill])
-        return str(band["note"])
 
     def _draw_residual_strip(self, fit, sample, edges: np.ndarray,
                              log_x: bool) -> tuple[str, str]:
@@ -8503,17 +8893,33 @@ class PlotsWindow(QtWidgets.QMainWindow):
         except (ValueError, RuntimeError, TypeError, ZeroDivisionError,
                 FloatingPointError):
             return "", ""
+        self._presentation_residual = (res, bool(log_x))
+        self._presentation_residual_note = str(res["note"])
+        self._presentation_residual_ready = True
+        short = ("" if res["reduced_chi2"] is None
+                 else f"χ²/dof = {float(res['reduced_chi2']):.2f} (approx. dof)")
+        if not self._style.show_residuals:
+            return "", short
+        self._render_cached_residual(res, log_x)
+        return str(res["note"]), short
+
+    def _render_cached_residual(self, res, log_x) -> None:
+        """Draw existing binned residuals; no sample or fit is re-evaluated."""
         r = np.asarray(res["residual"], dtype=np.float64)
         x = np.asarray(res["centers"], dtype=np.float64)
         colour = QtGui.QColor(self._style.fit_color)
         # Stems, not a connected line: each residual belongs to ONE bin and joining them
         # draws a curve through numbers that have no order beyond their bins.
         for xi, ri in zip(x, r):
-            self._resid.addItem(pg.PlotDataItem(x=[xi, xi], y=[0.0, float(ri)],
-                                                pen=pg.mkPen(colour, width=2)))
-        self._resid.addItem(pg.PlotDataItem(
+            stem = pg.PlotDataItem(x=[xi, xi], y=[0.0, float(ri)],
+                                  pen=pg.mkPen(colour, width=self._style.line_width))
+            stem._presentation_role = "fit"
+            self._resid.addItem(stem)
+        points = pg.PlotDataItem(
             x=x, y=r, pen=None, symbol="o", symbolSize=max(4, self._style.point_size - 2),
-            symbolBrush=pg.mkBrush(colour), symbolPen=None))
+            symbolBrush=pg.mkBrush(colour), symbolPen=None)
+        points._presentation_role = "fit"
+        self._resid.addItem(points)
         # ±2 is where a standardised residual stops being ordinary counting noise; the
         # guides are what turn "a tall bar" into "a tall bar for this many counts".
         for level, style in ((0.0, Qt.SolidLine), (2.0, Qt.DashLine), (-2.0, Qt.DashLine)):
@@ -8531,9 +8937,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._resid_widget.setVisible(True)
         # "approx." is not decoration: the dof came from an unbinned MLE, and a bare
         # "χ²/dof = 1.3" on an exported figure is read as the textbook quantity.
-        short = ("" if res["reduced_chi2"] is None
-                 else f"χ²/dof = {float(res['reduced_chi2']):.2f} (approx. dof)")
-        return str(res["note"]), short
 
     def _drop_legend(self) -> None:
         """Empty the legend and hide it.
@@ -8675,7 +9078,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         self._style = _dc_replace(self._style, legend_pos=None)
         self._sync_legend_reset_button()
-        self._changed()
+        self._presentation_changed()
 
     def _sync_legend_reset_button(self) -> None:
         """Enable Reset only when there is something to reset -- the button doubles as
@@ -8796,9 +9199,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         must be defeatable: silently welding "  (n = 986)" onto a label the user has
         just RETYPED overrides the edit they made in the same breath as honouring it.
         """
-        if n is None or not self._style.legend_counts:
-            return label
-        return f"{label}  (n = {n})"
+        text = label if n is None or not self._style.legend_counts else f"{label}  (n = {n})"
+        return _LegendText(text, label, n)
 
     @staticmethod
     def _legend_id(kind: str, key: str = "") -> str:
@@ -8830,6 +9232,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         user needs control over which icons to add to the legend."
         """
         entry_id = self._legend_id(kind, key)
+        self._presentation_legend[entry_id] = (item, label, kind, key)
         self._legend_offered[entry_id] = label
         # The one gate for "Show legend" (owner request): every entry flows through
         # here, so unticking the box empties the next draw's legend everywhere at once.
@@ -8980,42 +9383,130 @@ class PlotsWindow(QtWidgets.QMainWindow):
             return
         modifiers = (event.modifiers() if event is not None
                      and hasattr(event, "modifiers") else Qt.NoModifier)
+        self._apply_event_row_selection(source_key, clicked, modifiers)
+
+    def _apply_event_row_selection(self, source_key: str, rows: Sequence[object],
+                                    modifiers=Qt.NoModifier) -> None:
+        """The same one-source selection semantics for point clicks and lasso."""
         additive = bool(modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.ShiftModifier))
         if additive:
             # MainWindow can display one detector table at a time. Leaving source A
             # ringed while emitting only source B would show a selection that was not
             # represented in the table or signal, so additive selection is deliberately
             # scoped to one source.
-            self._selected_event_rows = {
-                key: value for key, value in self._selected_event_rows.items()
-                if key == source_key
-            }
-            selected = list(self._selected_event_rows.get(source_key, ()))
-            for row_id in clicked:
-                found = next((i for i, old in enumerate(selected)
-                              if self._same_row_identity(old, row_id)), None)
-                if found is None:
-                    selected.append(row_id)
-                else:
-                    selected.pop(found)
+            selected = toggled_rows(self._selected_event_rows.get(source_key, ()), rows,
+                                     self._same_row_identity)
         else:
-            self._selected_event_rows.clear()
-            selected = clicked
-        self._selected_event_rows[source_key] = selected
+            selected = unique_rows(rows, self._same_row_identity)
+        self._selected_event_rows = {source_key: selected}
         self._paint_event_point_selection()
         self.eventRowsSelected.emit(source_key, tuple(selected))
 
+    def _on_lasso_mode_changed(self, enabled: bool) -> None:
+        if hasattr(self, "_lasso_action"):
+            with QtCore.QSignalBlocker(self._lasso_action):
+                self._lasso_action.setChecked(enabled)
+            self._selection_mode_label.setText(
+                "Mode: Lasso selection" if enabled else "Mode: Pan/zoom")
+        if enabled:
+            self.statusBar().showMessage(
+                "Drag an outline to select events. Ctrl/Cmd/Shift toggles; Esc/right-click cancels. "
+                "No event curation or analysis is changed.", 9000)
+
+    def _lasso_hits(self, polygon: QtGui.QPolygonF) -> dict[str, list[object]]:
+        """Read exact displayed point identities, including already-log-transformed axes."""
+        if len(polygon) < 3:
+            return {}
+        bounds = polygon.boundingRect()
+        if not all(math.isfinite(value) for value in
+                   (bounds.left(), bounds.top(), bounds.right(), bounds.bottom())):
+            return {}
+        hit_bounds = bounds.adjusted(-.5, -.5, .5, .5)
+        path = QtGui.QPainterPath()
+        path.addPolygon(polygon)
+        path.closeSubpath()
+        border = QtGui.QPainterPathStroker()
+        border.setWidth(1.0)
+        boundary = border.createStroke(path)
+        clip = self._plot.getViewBox().sceneBoundingRect()
+        hits = {}
+        for key, items in self._event_point_items.items():
+            rows = []
+            for item in items:
+                if not item.isVisible():
+                    continue
+                for point in item.points():
+                    if not point.isVisible():
+                        continue
+                    position = item.mapToScene(point.pos())
+                    if (math.isfinite(position.x()) and math.isfinite(position.y())
+                            and clip.contains(position)
+                            and hit_bounds.contains(position)
+                            and (path.contains(position) or boundary.contains(position))):
+                        rows.append(point.data())
+            if rows:
+                hits[key] = unique_rows(rows, self._same_row_identity)
+        return hits
+
+    def _choose_lasso_source(self, hits: Mapping[str, Sequence[object]]) -> str | None:
+        """The event table can represent one source, so mixed regions ask explicitly."""
+        keys = list(hits)
+        if len(keys) == 1:
+            return keys[0]
+        names = self._committed_legend_names()
+        labels = [f"{names.get(key, key)} — {len(hits[key]):,} events" for key in keys]
+        label, accepted = QtWidgets.QInputDialog.getItem(
+            self, "Choose lasso source",
+            "The outline contains multiple sources. Select one source for the event table:",
+            labels, 0, False)
+        return keys[labels.index(label)] if accepted and label in labels else None
+
+    def _on_lasso_completed(self, polygon, modifiers=Qt.NoModifier) -> None:
+        generation = self._lasso_generation
+        hits = self._lasso_hits(polygon)
+        if not hits:
+            additive = bool(modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.ShiftModifier))
+            if not additive:
+                old_sources = tuple(self._selected_event_rows)
+                self._selected_event_rows.clear()
+                self._paint_event_point_selection()
+                for key in old_sources:
+                    self.eventRowsSelected.emit(key, ())
+            self.statusBar().showMessage("No plotted events inside the lasso.", 6000)
+            return
+        key = self._choose_lasso_source(hits)
+        if key is None:
+            self.statusBar().showMessage("Lasso selection cancelled; selection is unchanged.", 6000)
+            return
+        if self._lasso_generation != generation:
+            self.statusBar().showMessage(
+                "The plot changed while choosing a source. Draw a new lasso.", 7000)
+            return
+        self._apply_event_row_selection(key, hits[key], modifiers)
+        self.statusBar().showMessage(
+            f"Selected {len(self._selected_event_rows.get(key, ())):,} events from one source. "
+            "Selection only; curation and scientific results are unchanged.", 7000)
+
     def _paint_event_point_selection(self) -> None:
-        """Ring selected points without replacing source/cluster colour encodings."""
-        ring = pg.mkPen(_WARN_HEX, width=2)
+        """Ring inside the existing spot footprint, preserving auto-range padding."""
+        base_size = self._style.point_size
+        ring_width = min(2, base_size)
+        ring = pg.mkPen(_WARN_HEX, width=ring_width)
+        selected_size = base_size - (max(math.ceil(ring_width), 1) - 1)
         for source_key, items in self._event_point_items.items():
-            selected = self._selected_event_rows.get(source_key, ())
+            selected = RowIdentityIndex(self._selected_event_rows.get(source_key, ()),
+                                         self._same_row_identity)
             for item in items:
                 for point in item.points():
-                    on = any(self._same_row_identity(point.data(), row_id)
-                             for row_id in selected)
-                    point.setPen(ring if on else pg.mkPen(None))
-                    point.setSize(self._style.point_size + 4 if on else self._style.point_size)
+                    on = selected.contains(point.data())
+                    # Order matters: pyqtgraph's symbol atlas retains its largest
+                    # footprint. Never transiently grow it when toggling a ring.
+                    if on:
+                        point.setSize(selected_size)
+                        point.setPen(ring)
+                    else:
+                        point.setPen(pg.mkPen(None))
+                        point.setSize(base_size)
 
     def _redraw(self) -> None:
         """Draw the current view, then re-offer its legend rows to the Style group.
@@ -9027,6 +9518,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         try:
             self._redraw_current()
+            if self._message_item is None:
+                self._figure_applied_config = self.config()
         finally:
             # THE DRAW IS WHAT SETTLES WHICH ENTRIES EXIST, so it is where decisions
             # about entries that no longer exist are dropped -- a cluster row unticked
@@ -9084,6 +9577,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # E2, once for every plot type rather than four times. Each branch above ends by
         # having called `_clear_plot`, so the caption is added to a fresh figure and can
         # never survive from the previous one; it declines to draw over a message.
+        self._presentation_sources = tuple((src.key, src.label, bool(src.is_segment))
+                                           for src, _df in drawn)
         self._draw_provenance_caption()
 
     # -- histogram -------------------------------------------------------------------------------
@@ -9570,6 +10065,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 pen=pg.mkPen(pen_colour, width=self._style.line_width))
             self._plot.addItem(item)
             self._hist_items.append(item)
+            self._cache_figure_source(src)
+            item._presentation_role = "category" if multi else "data"
             if i == 0:
                 self._hist_item = item
             # A cluster group's `label` is "cluster 1", not a source name; only a
@@ -9704,6 +10201,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # The pooled verdict FIRST in the note list: whether these rows may be put on
         # one axis at all outranks anything said about the curve drawn through them.
         verdict = self._comparability(col)
+        cluster_warnings = self._cluster_amplitude_warnings() if split else ()
         # ...and, ahead of even that, what is wrong with the COLUMN itself: a
         # superseded calibration means the numbers on this axis are not the numbers a
         # fresh run would produce, which outranks whether they may be pooled.
@@ -9735,6 +10233,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # which drops to "— manual —" on its own now that `_installable` lets the
         # request through.
         notes[:0] = self._incoming_notes() + col_notes + list(verdict.warnings)
+        notes.extend(cluster_warnings)
         notes.extend(self._detection_notes())
 
         self._plot.setLogMode(x=log_x, y=log_y)
@@ -9757,7 +10256,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # carries there, and for their reason: `warn` is prepended over a typed title.
         self._apply_title(title or None, accent=self._style.fit_color,
                           warn=self._warn_headline(self._stale_headline([col]),
-                                                   verdict.headline, ks_warn))
+                                                   verdict.headline, ks_warn,
+                                                   "CHECK SELECTED AMPLITUDES" if cluster_warnings else ""))
         self._apply_background()
         self._apply_fonts()
         self._finalize_view(log_x, log_y)
@@ -9857,7 +10357,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # A single source cannot disagree with anything, and the rule says so
         # itself — no early return here, so there is one code path and one verdict.
         # (A source's OWN detection warnings show regardless: _detection_notes.)
-        return source_comparability([src for src, _df in self._drawn_frames()], columns)
+        drawn = self._drawn_frames()
+        return source_comparability([src for src, _df in drawn], columns,
+                                    frames=[df for _src, df in drawn])
 
     def _detection_notes(self, sources=None) -> list[str]:
         """Every DRAWN detection's own caveats — ``AnalysisResult.warnings``, whole.
@@ -9935,7 +10437,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
             same = (tuple(float(x) for x in stamped) == tuple(float(x) for x in live))
         except (TypeError, ValueError):     # pragma: no cover - malformed stamp
             return ()
-        return () if same else tuple(REMEASURED_COLUMNS)
+        if same:
+            return ()
+        optional = ("amplitude_pA",) if src.df is not None and "amplitude_pA" in src.df else ()
+        return (*REMEASURED_COLUMNS, *optional)
 
     def _clock_offset(self, src: PlotSource | None) -> float | None:
         """``t0_s`` of the recording behind ``src``, or None when there is no clock."""
@@ -10798,6 +11303,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         item = pg.PlotDataItem(x=grid, y=expected, pen=pen)
         self._plot.addItem(item)
         self._fit_items.append(item)
+        item._presentation_role = "category" if who else "fit"
+        item._presentation_width_extra = 1
 
         # -- the two optional pictures of the fit's own quality ------------------------
         # THE SAME y FACTOR THE CURVE USED, extracted rather than recomputed: band and
@@ -10805,10 +11312,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # and one expression they both multiply by is the only way to guarantee it.
         y_scale = float(fit.n) * width * self._fit_scale(edges, width, int(v.size))
         resid_short = ""
-        if self._style.show_ci_band:
-            band_note = self._draw_ci_band(fit, grid, at, y_scale, colour)
-            if band_note:
-                notes.append(band_note)
+        band_note = self._draw_ci_band(fit, grid, at, y_scale, colour,
+                                       role=item._presentation_role)
+        if band_note:
+            notes.append(band_note)
         # ONE STRIP, FOR THE FIRST FITTED SERIES, AND IT SAYS SO. There is one axis under
         # the plot and an overlay has one fit per source; stacking four sources' residuals
         # into it would draw four unlabelled scatters over one another. Drawing nothing at
@@ -10820,10 +11327,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # The reflected-column case (`grid_of`) is skipped for a harder reason: `edges`
         # are then bins of the PLOTTED variable while the fit lives in another, so a
         # residual per bin is not defined without re-binning the sample the fitter saw.
-        if (self._style.show_residuals and grid_of is None
-                and sample_for_gof is not None and self._resid_widget.isHidden()):
+        if (grid_of is None and sample_for_gof is not None
+                and not self._presentation_residual_ready):
             resid_note, resid_short = self._draw_residual_strip(
                 fit, sample_for_gof, edges, log_x)
+            if who and self._presentation_residual_note:
+                self._presentation_residual_note = (
+                    f"RESIDUAL STRIP: {self._legend_name(src)} only — there is one "
+                    "axis under the plot and this overlay has one fit per source. "
+                    + self._presentation_residual_note)
             if resid_note:
                 if who:
                     resid_note = (
@@ -10992,7 +11504,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
                      int(k), kind, col))
         if better:
             notes.append(better)
-        return (_FitSummary(summary, self._full_fit_summary(fit, col, gof, resid_short),
+        original_style = self._style
+        variants = {}
+        try:
+            for show_gof in (False, True):
+                self._style = _dc_replace(original_style, show_gof=show_gof)
+                for show_residuals in (False, True):
+                    variants[(show_gof, show_residuals)] = self._full_fit_summary(
+                        fit, col, gof, resid_short if show_residuals else "")
+        finally:
+            self._style = original_style
+        self._presentation_full_variants.append((who, variants))
+        return (_FitSummary(summary, variants[(self._style.show_gof, self._style.show_residuals)],
                             rejected=ks_rejected, plain=plain_summary),
                 notes)
 
@@ -12146,6 +12669,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 x=px, y=py, brush=brushes, pen=None, size=self._style.point_size)
             self._plot.addItem(item)
             self._scatter_items.append(item)
+            self._cache_figure_source(src)
+            item._presentation_role = "category" if (multi or by_cluster) else "data"
             self._make_event_points_clickable(item, src.key, identities)
             if i == 0:
                 self._scatter_item = item
@@ -12176,6 +12701,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._draw_fit_values(titles)
 
         verdict = self._comparability(xcol, ycol)
+        cluster_warnings = self._cluster_amplitude_warnings() if by_cluster else ()
         details.extend(self._column_notes([xcol, ycol]))
         details.extend(verdict.warnings)
         details.extend(self._detection_notes())
@@ -12187,7 +12713,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                             **self._label_style())
         self._apply_title(title or None, accent=self._style.fit_color,
                           warn=self._warn_headline(self._stale_headline([xcol, ycol]),
-                                                   verdict.headline))
+                                                   verdict.headline,
+                                                   "CHECK SELECTED AMPLITUDES" if cluster_warnings else ""))
         self._apply_background()
         self._apply_fonts()
         self._finalize_view(log_x, log_y)
@@ -12257,6 +12784,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         item = pg.PlotDataItem(x=lx, y=ly, pen=pen)
         self._plot.addItem(item)
         self._scatter_fit_items.append(item)
+        item._presentation_role = "category" if src is not None else "fit"
+        item._presentation_width_extra = 1
         if self._scatter_fit_item is None:
             self._scatter_fit_item = item
 
@@ -12312,6 +12841,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         else:
             head = f"y = {fit.slope * fy / fx:.4g}·x + {fit.intercept * fy:.4g}{unit_txt}"
         summary = "   ".join(p for p in (head, r2_txt, f"(n = {fit.n})") if p)
+        variants = {}
+        for show_r2 in (False, True):
+            printed_r2 = (r2_txt if not np.isfinite(fit.r2) or _dof_tag else
+                          f"R² = {fit.r2:.3f}" if show_r2 else "")
+            variants[show_r2] = "   ".join(p for p in (head, printed_r2, f"(n = {fit.n})") if p)
+        item._presentation_fit_summaries = variants
+        self._presentation_scatter_variants.append((src.label if src is not None else "", variants))
         if src is not None:
             # By the FIGURE's name for the source (`_legend_name`, the one resolver),
             # as the series entry above it is: with two rows typed to "Apo" the
@@ -12455,11 +12991,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
                                "degenerate (zero variance along an axis).")
                 continue
             colour = QtGui.QColor(src.colour if multi else self._style.data_color)
+            self._cache_figure_source(src)
             pen = pg.mkPen(colour, width=self._style.line_width)
             zmax = float(z.max())
             proxy = None
             for lv in np.linspace(0.05 * zmax, 0.95 * zmax, n_levels):
                 curve = pg.IsocurveItem(data=z, level=float(lv), pen=pen)
+                curve._presentation_role = "category" if multi else "data"
                 curve.setTransform(tr)
                 self._plot.addItem(curve, ignoreBounds=False)
                 proxy = proxy or curve
@@ -12468,6 +13006,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             if multi and proxy is not None:
                 # The legend needs an item with a pen; the first contour serves.
                 sample = pg.PlotDataItem(pen=pen)
+                sample._presentation_role = "category"
                 self._legend_add(sample, self._legend_name(src),
                                  kind="series", key=src.key)
 
@@ -12553,8 +13092,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
             x=pc1, y=pc2, brush=brushes, pen=None, size=self._style.point_size)
         self._plot.addItem(self._scatter_item)
         self._scatter_items.append(self._scatter_item)
+        self._scatter_item._presentation_role = "category" if self._cluster_result is not None else "data"
         primary = self.primary_source()
         if primary is not None:
+            self._cache_figure_source(primary)
             identities: list[object] = list(res.kept_index)
             if primary.kind == "detection" and "event_id" in df.columns:
                 numeric = df.loc[:, list(res.columns)].apply(
@@ -12580,15 +13121,21 @@ class PlotsWindow(QtWidgets.QMainWindow):
                             self._remember_axis_label("left",
                                 f"PC2 ({self._evr_pct(evr[1])})" if evr.size > 1 else "PC2"),
                             **self._label_style())
-        # PCA runs on ONE source, so there is nothing pooled to judge -- but that
-        # source's own detection caveats belong here as much as anywhere else.
+        # Even one source can mix optional amplitude estimators across its rows.
         primary = self.primary_source()
         one = [primary] if primary is not None else []
+        amplitude_columns = list(res.columns)
+        if self._cluster_result is not None:
+            amplitude_columns.extend(self._cluster_result.columns)
+        amplitude_warnings = (amplitude_comparability([("PCA / clustering features", df)])
+                              if "amplitude_pA" in amplitude_columns else ())
+        details.extend(amplitude_warnings)
         details.extend(self._column_notes(list(res.columns), one))
         details.extend(self._detection_notes(one))
         self._apply_title(self._explained_variance_text(res),
                           warn=self._warn_headline(
-                              self._stale_headline(list(res.columns), one)))
+                              self._stale_headline(list(res.columns), one),
+                              "CHECK SELECTED AMPLITUDES" if amplitude_warnings else ""))
         self._apply_background()
         self._apply_fonts()
         self._finalize_view(False, False)
@@ -12607,6 +13154,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # left this panel's alone -- two pictures drifting apart one colour at
             # a time, which is the failure `categorical` exists to prevent.
             swatch = legend_swatch(cid, size=self._style.point_size)
+            swatch._presentation_role = "category"
             name = "dropped (non-finite features)" if cid < 0 else f"cluster {cid}"
             self._legend_add(swatch, self._legend_entry(name, n),
                              kind="cluster", key=str(name))
@@ -12741,6 +13289,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self.workspaceChanged.emit()
         return res
 
+    def _cluster_amplitude_warnings(self) -> tuple[str, ...]:
+        res = self._cluster_result
+        frame = self._current_frame()
+        if res is None or "amplitude_pA" not in res.columns or frame is None:
+            return ()
+        primary = self.primary_source()
+        return (amplitude_comparability([("Clustering features", frame)])
+                + tuple(self._column_notes(["amplitude_pA"], [primary])))
+
     def _cluster_summary(self) -> str:
         res = self._cluster_result
         if res is None:
@@ -12759,6 +13316,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # population. See populations.ClusterResult.warnings.
         for note in getattr(res, "warnings", ()):
             parts.append("! " + str(note))
+        parts.extend("! " + note for note in self._cluster_amplitude_warnings())
         return "\n".join(parts)
 
     # -- export ----------------------------------------------------------------------------------
@@ -12808,7 +13366,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         w, h = self._style.export_w, self._style.export_h
         if path is None:
             selection = choose_live_plot_export(
-                self, self._plot, "plot.png", initial_width=w, initial_height=h)
+                self, self._plot, "plot.png", initial_width=w, initial_height=h,
+                residual_item=self.figure_residual_target())
             if selection is None:
                 return None
             chosen, options = selection
@@ -12834,7 +13393,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         from ..plot.figures import (export_plot_pdf, image_write_failure_text,
                                     save_plot_image)
 
-        if suffix == ".svg":
+        frozen = getattr(options, "frozen_snapshot", None)
+        if frozen is not None:
+            # Do not even construct a live exporter after a modal dialog: a
+            # background result may have changed or replaced this canvas.
+            render = None
+        elif suffix == ".svg":
             # LIMITATION (b) OF THE SVG EXPORTER, SAID OUT LOUD BEFORE THE WAIT, NEVER
             # WORKED AROUND BEHIND THE USER'S BACK. pyqtgraph emits one ``<path>`` per
             # scatter symbol, so the file and the write grow linearly and fast (~528
@@ -12891,7 +13455,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 return result
 
         try:
-            notes = save_plot_image(out, render)
+            if frozen is not None:
+                from .figure_bundle import write_frozen_figure_image
+                notes = write_frozen_figure_image(out, frozen, options)
+            elif options is not None and getattr(options, "include_residual", False):
+                from .plot_export import write_live_plot_image
+                notes = write_live_plot_image(
+                    out, self._plot, width=w, height=h,
+                    residual_item=self.figure_residual_target(), include_residual=True,
+                    physical_width_mm=None if options.native else options.physical_width_mm,
+                    physical_height_mm=None if options.native else options.physical_height_mm,
+                    dpi=None if options.native else options.dpi)
+            else:
+                notes = save_plot_image(out, render)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             # ...naming the three formats THIS window renders. The default of that
             # helper is PNG alone, which is the truth for the four panels that only
@@ -12947,7 +13523,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         series: list[str] = []
         fits: list[str] = []
-        swatches_only = self._plot_type() in (SCATTER, PCA)
+        applied = getattr(self, "_figure_applied_config", None)
+        swatches_only = (applied.identity.plot_type if applied else self._plot_type()) in (SCATTER, PCA)
         for entry_id, label in self._legend_offered.items():
             if entry_id.startswith("fit:"):
                 fits.append(str(label))
@@ -12958,7 +13535,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if not series:
             # The figure's name for each source, not the raw override -- the one
             # resolver every writer that names a source on or beside the figure reads.
-            series = [self._legend_name(src) for src, _df in self._drawn_frames()]
+            series = list(self._committed_legend_names().values())
         return series, fits
 
     def _cluster_of_drawn_points(self) -> np.ndarray | None:
@@ -13033,10 +13610,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         Empty (no rows) when nothing is drawn -- a message, a refusal, an empty frame.
         """
         from ..plot.figures import plot_source_data
+        from types import SimpleNamespace
 
-        identity = self.config().identity
+        applied = getattr(self, "_figure_applied_config", None) or self.config()
+        identity = applied.identity
         kind = identity.plot_type
-        log_x, log_y = self._current_log_state()
+        log_x, log_y = applied.log_state
         if kind == HISTOGRAM:
             # The y axis of a histogram is not a column of the events table; it is what
             # the normalization combo made of the counts, and ``_y_label`` is the same
@@ -13054,7 +13633,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # fixed is also what lets the whole export path stay untouched by S6-03:
             # measured, the exported bars still integrate to 1.0000000000000053 in stored
             # units, in every time unit, before and after.
-            x_name, y_name = identity.x_column or "x", self._y_label()
+            x_name = identity.x_column or "x"
+            y_name = {_NORM_COUNT: "count", _NORM_DENSITY: "density",
+                      _NORM_PROB: "probability"}[applied.histogram.normalization]
         elif kind == PCA:
             x_name, y_name = "PC1", "PC2"
         else:
@@ -13064,7 +13645,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # two identical column names would silently collapse into one in the frame.
             y_name = f"{y_name}_y"
         series, fits = self._export_series_labels()
-        df = plot_source_data(self._plot, x_name=x_name, y_name=y_name,
+        # Confidence bounds are decorations, not additional independently fitted
+        # populations. Exclude them so a visibility toggle cannot invent fit rows.
+        numerical_items = SimpleNamespace(items=[item for item in self._plot.items
+                                                 if not getattr(item, "_presentation_band", False)])
+        df = plot_source_data(numerical_items, x_name=x_name, y_name=y_name,
                               log_x=log_x, log_y=log_y,
                               series_labels=series, fit_labels=fits)
         if kind in (SCATTER, PCA):
