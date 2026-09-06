@@ -136,7 +136,8 @@ def test_the_mark_reaches_the_title_which_is_what_an_exported_image_keeps(qapp, 
     w = _plots(qtbot, session)
     w.set_plot_type("Histogram")
     w.set_histogram_column("depth_pA")
-    assert "⚠ SUPERSEDED CALIBRATION" in _title(w), _title(w)
+    assert "SUPERSEDED CALIBRATION" not in _title(w)
+    assert "SUPERSEDED CALIBRATION" in w.details_text()
 
 
 def test_the_same_seam_marks_the_scatter_and_the_pca(qapp, qtbot, tmp_path):
@@ -147,7 +148,8 @@ def test_the_same_seam_marks_the_scatter_and_the_pca(qapp, qtbot, tmp_path):
     w.set_plot_type("Scatter")
     w.set_scatter_columns("dwell_s", "depth_pA")
     assert "SUPERSEDED CALIBRATION" in w.details_text()
-    assert "⚠ SUPERSEDED CALIBRATION" in _title(w)
+    assert "SUPERSEDED CALIBRATION" not in _title(w)
+    assert "SUPERSEDED CALIBRATION" in w.details_text()
 
     w.set_feature_selection(["depth_pA", "dwell_s", "snr"])
     w.run_pca()

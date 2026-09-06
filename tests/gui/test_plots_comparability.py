@@ -155,7 +155,9 @@ def test_one_common_window_goes_quiet(window):
     window.set_plot_type("Histogram")
     for col in ("frac_depth", "depth_pA"):
         window.set_histogram_column(col)
-        assert "NOT COMPARABLE" not in window.details_text(), col
+        # The former title headline now lives in Details; the unchanged full
+        # diagnostic still distinguishes unknown gain from a baseline mismatch.
+        assert not any("NOT COMPARABLE" in note for note in window._comparability(col).warnings)
 
 
 def test_dwell_stays_quiet_across_the_same_two_sources(window):
@@ -192,7 +194,8 @@ def test_the_transition_columns_are_not_silent_either(window, col):
     text = window.details_text()
     assert "NOT COMPARABLE" in text, f"{col} moves with the baseline; the pane must say so"
     assert FP_500 in text and FP_600 in text
-    assert col in _title(window), "and the title must carry it into the exported PNG"
+    assert "NOT COMPARABLE" not in _title(window)
+    assert col in window.details_text(), "the warning belongs to Details"
 
 
 @pytest.mark.parametrize("col", ["rise_s", "fall_s", "n_levels"])
@@ -250,7 +253,8 @@ def test_the_kde_surface_carries_the_baseline_verdict_too(window):
 
     text = window.details_text()
     assert "NOT COMPARABLE" in text and FP_500 in text and FP_600 in text
-    assert "NOT COMPARABLE" in _title(window)
+    assert "NOT COMPARABLE" not in _title(window)
+    assert "NOT COMPARABLE" in window.details_text()
 
 
 # ==================================================================================
@@ -288,7 +292,8 @@ def test_the_title_carries_the_verdict(window):
     _two_windows(window)
     window.set_plot_type("Histogram")
     window.set_histogram_column("frac_depth")
-    assert "NOT COMPARABLE" in _title(window)
+    assert "NOT COMPARABLE" not in _title(window)
+    assert "NOT COMPARABLE" in window.details_text()
 
 
 def test_a_user_typed_title_cannot_displace_the_verdict(window):
@@ -301,7 +306,8 @@ def test_a_user_typed_title_cannot_displace_the_verdict(window):
     window.set_title("Apoferritin dI/I0, −500 vs −600 mV")
 
     title = _title(window)
-    assert "NOT COMPARABLE" in title
+    assert "NOT COMPARABLE" not in title
+    assert "NOT COMPARABLE" in window.details_text()
     assert "Apoferritin dI/I0" in title, "the user's title is kept, not replaced"
 
 
@@ -314,7 +320,8 @@ def test_the_exported_figure_carries_the_verdict(window, tmp_path):
 
     out = window.save_image(str(tmp_path / "fig3b.png"))
     assert out is not None and out.exists() and out.stat().st_size > 0
-    assert "NOT COMPARABLE" in _title(window)
+    assert "NOT COMPARABLE" not in _title(window)
+    assert "NOT COMPARABLE" in window.details_text()
 
 
 def test_a_comparable_overlay_keeps_a_clean_title(window):
@@ -390,7 +397,8 @@ def test_the_verdict_does_not_outlive_the_plot_that_earned_it(window):
     _two_windows(window)
     window.set_plot_type("Histogram")
     window.set_histogram_column("frac_depth")
-    assert "NOT COMPARABLE" in _title(window)
+    assert "NOT COMPARABLE" not in _title(window)
+    assert "NOT COMPARABLE" in window.details_text()
 
     window.set_histogram_column("dwell_s")
     assert _title(window) == ""
@@ -459,7 +467,8 @@ def test_the_normalized_verdict_reaches_the_title_that_save_image_keeps(window):
     _mixed(window, NORMALIZED)
     window.set_plot_type("Histogram")
     window.set_histogram_column("depth_pA")
-    assert "NOT COMPARABLE" in _title(window)
+    assert "NOT COMPARABLE" not in _title(window)
+    assert "NOT COMPARABLE" in window.details_text()
 
 
 def test_frac_depth_is_guarded_too_which_the_gain_half_would_not_have_done(window):
@@ -474,7 +483,8 @@ def test_frac_depth_is_guarded_too_which_the_gain_half_would_not_have_done(windo
     window.set_histogram_column("frac_depth")
     text = window.details_text()
     assert "NOT COMPARABLE" in text and "Normalize" in text
-    assert "NOT COMPARABLE" in _title(window)
+    assert "NOT COMPARABLE" not in _title(window)
+    assert "NOT COMPARABLE" in window.details_text()
 
 
 def test_the_remedy_refuses_to_send_the_user_to_frac_depth(window):
@@ -506,7 +516,7 @@ def test_two_identically_normalized_runs_are_not_accused_of_disagreeing(window):
     window.set_plot_type("Histogram")
     for col in ("depth_pA", "frac_depth"):
         window.set_histogram_column(col)
-        assert "NOT COMPARABLE" not in window.details_text(), col
+        assert not any("NOT COMPARABLE" in note for note in window._comparability(col).warnings)
 
 
 def test_two_target_units_are_the_same_class_of_bug_and_the_same_rule(window):
@@ -531,7 +541,8 @@ def test_a_recording_that_states_no_units_is_read_as_picoamps(window):
     _mixed(window, {"units": "pA"}, other={})
     window.set_plot_type("Histogram")
     window.set_histogram_column("depth_pA")
-    assert "NOT COMPARABLE" not in window.details_text()
+    assert not any("NOT COMPARABLE" in note
+                   for note in window._comparability("depth_pA").warnings)
 
 
 def test_the_scatter_surface_carries_the_domain_verdict_too(window):

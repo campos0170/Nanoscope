@@ -215,9 +215,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         return self._appearance.to_dict()
 
     def _apply_appearance(self) -> None:
-        apply_plot_appearance(self._density_main, self._appearance, plot_widget=self._density_glw,
-                              title_prefix="⚠ CHECK SELECTED AMPLITUDES · "
-                              if self._amplitude_warnings else "")
+        apply_plot_appearance(self._density_main, self._appearance, plot_widget=self._density_glw)
         marginal = replace(self._appearance, title=None, x_label=None, y_label=None)
         for plot, item in ((self._density_top, self._top_marginal_item),
                            (self._density_right, self._right_marginal_item)):
@@ -555,8 +553,6 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._density_main.setLabel("bottom", xlabel)
         self._density_main.setLabel("left", ylabel)
         title = self._d_title.text().strip() or self._density_auto_title
-        if self._amplitude_warnings:
-            title = "⚠ CHECK SELECTED AMPLITUDES · " + title
         self._density_main.setTitle(title)
         self._show_amplitude_warnings()
         self._apply_appearance()
@@ -674,6 +670,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     def _density_message(self, text: str) -> None:
         self._density_main.setTitle(None)
+        self._density_main.titleLabel.setText("")
         self._density_main.setLabel("bottom", "")
         self._density_main.setLabel("left", "")
         item = pg.TextItem(text, anchor=(0.5, 0.5), color=_MSG_HEX)
@@ -737,6 +734,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     def _ensemble_message(self, text: str) -> None:
         self._ensemble_plot.setTitle(None)
+        self._ensemble_plot.titleLabel.setText("")
         self._ensemble_plot.setLabel("bottom", "")
         self._ensemble_plot.setLabel("left", "")
         item = pg.TextItem(text, anchor=(0.5, 0.5), color=_MSG_HEX)
@@ -746,6 +744,22 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         item.setPos(0.5, 0.5)
 
     # -- public accessors (owner + tests) --------------------------------------------------------
+    def details_text(self) -> str:
+        """Retained view diagnostics and source provenance for figure bundles."""
+        density = self.current_view() == DENSITY
+        plot = self._density_main if density else self._ensemble_plot
+        blocks = [DENSITY_LABEL if density else ENSEMBLE]
+        if plot.titleLabel.text:
+            blocks.append(str(plot.titleLabel.text))
+        blocks.extend(item.textItem.toPlainText() for item in plot.items
+                      if isinstance(item, pg.TextItem))
+        if density:
+            blocks.extend(self._amplitude_warnings)
+        blocks.append("Source provenance\n" + json.dumps(
+            self._export_common("density" if density else "ensemble"),
+            ensure_ascii=False, indent=2, default=self._json_default))
+        return "\n\n".join(block for block in blocks if block)
+
     def current_view(self) -> str:
         return DENSITY if self._tabs.currentIndex() == 0 else ENSEMBLE
 

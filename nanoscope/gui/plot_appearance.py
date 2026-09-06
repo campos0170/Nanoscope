@@ -511,12 +511,17 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
         if foreground:
             title.opts["color"] = foreground
         title.setText(title_prefix + state.title if state.title else defaults["title_text"])
+        # setTitle(None) hides the row. An authored title must make it visible
+        # again; Reset to an empty automatic title must hide it without a gap.
+        title.setVisible(bool(title.text))
         defaults["applied_title_text"] = title.text
         defaults["applied_title_color"] = title.opts.get("color")
         if title.text:
             height = max(30.0, float(title.item.boundingRect().height()) + 6)
             title.setMaximumHeight(height)
             plot.layout.setRowFixedHeight(0, height)
+        else:
+            plot.layout.setRowFixedHeight(0, 0)
         for item in data_items:
             _style_data_item(item, state, state.data_color)
         for item in fit_items:

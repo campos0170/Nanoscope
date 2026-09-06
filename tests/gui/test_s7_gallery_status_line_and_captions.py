@@ -5,7 +5,7 @@ POP5  the depth caption carries the channel's unit, like the dwell caption besid
 POP6  the status line names only the digits the palette ARMS, and an unarmed digit says so.
 POP7  an empty subset reads "0 of 0", never "0–-1 of 0".
 POP1  ``set_stale_columns`` — the seam MainWindow pushes the events table's own badge set
-      through — marks the sorted caption and the status line, and clears with ``()``.
+      through — marks the status line without marking captions, and clears with ``()``.
 """
 
 from __future__ import annotations
@@ -213,7 +213,7 @@ def test_an_unarmed_digit_says_so_on_the_status_line_instead_of_doing_nothing(wi
 _NOTE = "Depth, frac_depth, ECD, mean/max deviation and SNR are stale."
 
 
-def test_set_stale_columns_marks_the_sorted_caption_and_the_status_line_and_clears(wired, qtbot):
+def test_set_stale_columns_warns_in_status_without_changing_caption_numbers(wired, qtbot):
     w, doc_id, gal = wired
     df = _frame(w, doc_id)
     gal.set_sort("Depth (deepest first)")
@@ -221,11 +221,13 @@ def test_set_stale_columns_marks_the_sorted_caption_and_the_status_line_and_clea
     assert not any(c.endswith("⚠") for c in _captions(gal, df))
     assert "⚠" not in gal.status.text()
 
+    clean_caps = _captions(gal, df)
     gal.set_stale_columns(REMEASURED_COLUMNS, _NOTE)
     qtbot.wait(10)
     assert gal.stale_columns() == tuple(REMEASURED_COLUMNS)
     caps = _captions(gal, df)
-    assert all(c.endswith("pA ⚠") for c in caps), caps
+    assert caps == clean_caps
+    assert all(c.endswith("pA") and "⚠" not in c for c in caps), caps
     assert f"⚠ sorted and captioned by stale depth_pA: {_NOTE}" in gal.status.text(), (
         gal.status.text())
 
@@ -238,7 +240,8 @@ def test_set_stale_columns_marks_the_sorted_caption_and_the_status_line_and_clea
 
     gal.set_sort("dI/I0 (deepest first)")
     qtbot.wait(10)
-    assert all(c.endswith(" ⚠") for c in _captions(gal, df)), _captions(gal, df)
+    assert all("⚠" not in c for c in _captions(gal, df)), _captions(gal, df)
+    assert f"⚠ sorted and captioned by stale frac_depth: {_NOTE}" in gal.status.text()
 
     gal.set_stale_columns(())
     qtbot.wait(10)
@@ -250,7 +253,7 @@ def test_the_tuple_the_events_table_badges_is_the_tuple_the_seam_takes(wired, qt
     """The finding's gesture: one knob in the Preprocess tab. The events table derives its
     badge set (``REMEASURED_COLUMNS``) and its banner; pushing exactly those through the
     seam is what the MainWindow wiring does, and the gallery then says the banner's
-    sentence over a badged caption."""
+    sentence while keeping the numerical caption clean."""
     w, doc_id, gal = wired
     df = _frame(w, doc_id)
     ap = w._analysis_panel
@@ -269,5 +272,5 @@ def test_the_tuple_the_events_table_badges_is_the_tuple_the_seam_takes(wired, qt
     gal.set_sort("Depth (deepest first)")
     gal.set_stale_columns(cols, note)
     qtbot.wait(10)
-    assert all(c.endswith("⚠") for c in _captions(gal, df))
+    assert all("⚠" not in c for c in _captions(gal, df))
     assert note in gal.status.text(), gal.status.text()

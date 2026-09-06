@@ -164,9 +164,8 @@ def test_the_event_table_column_says_what_a_value_above_one_means(win, tmp_path)
     assert "ABOVE 1" in tip and "GREW" in tip
 
 
-def test_the_gallery_caption_marks_an_enhancement(win, tmp_path):
-    """The gallery was the single most informative surface of the whole run, and it is
-    where a tile reading "412 · 2.36" becomes "a 236% blockade" in someone's notes."""
+def test_the_gallery_caption_is_clean_and_the_footer_explains_enhancement(win, tmp_path):
+    """Artwork retains the value; its meaning is disclosed outside the tile."""
     from nanoscope.gui.event_gallery import EventGalleryWindow
 
     _open(win, tmp_path)
@@ -175,24 +174,15 @@ def test_the_gallery_caption_marks_an_enhancement(win, tmp_path):
     assert isinstance(gal, EventGalleryWindow)
     gal.sort_box.setCurrentText("dI/I0 (deepest first)")
 
-    def _without_the_stale_badge(caption: str) -> str:
-        """Drop the trailing " ⚠" the caption carries when the SORT COLUMN is stale.
-
-        Sweep-7 (S7-POP1) put the events table's stale badge on this caption too, and
-        this fixture's detection is stale by construction -- ``_open`` hands
-        ``detect_events`` an explicit ``baseline=I0``, so the table's own banner reads
-        "measured with provided -- this table predates the open-pore estimator now in
-        use" and ``frac_depth`` is in the badged set. That is a different mark about a
-        different thing (the number is out of date) from the one under test here (the
-        number is not a blockade fraction), and it lands last, exactly as the inspector
-        prints it: "dI/I0 2.1 ⚠>1 ⚠". This test is about the ">1" mark.
-        """
-        return caption[:-2] if caption.endswith(" ⚠") else caption
-
     row = pd.Series({"event_id": 412, "frac_depth": 2.36, "depth_pA": 90.0, "dwell_s": 0.02})
-    assert _without_the_stale_badge(gal.caption_for(row)).endswith("⚠>1")
+    assert gal.caption_for(row) == "412 · 2.36"
     row_ok = pd.Series({"event_id": 412, "frac_depth": 0.36, "depth_pA": 90.0, "dwell_s": 0.02})
-    assert "⚠" not in _without_the_stale_badge(gal.caption_for(row_ok))
+    assert gal.caption_for(row_ok) == "412 · 0.36"
+    page = gal._df.copy(deep=True)
+    page.loc[page.index[0], "frac_depth"] = 2.36
+    gal.set_events(gal._doc_id, gal._channel, page)
+    assert "dI/I0 > 1" in gal.status.text()
+    assert "not a blockade fraction" in gal.status.text()
 
 
 def test_the_exported_sidecar_carries_the_same_warning_the_summary_shows(win, tmp_path):
@@ -823,15 +813,16 @@ def test_the_sentence_has_one_home_and_the_panel_delegates_to_it():
     assert events_mod.frac_depth_flag(1.0) == ""
 
 
-def test_the_event_inspector_marks_an_enhancement_on_every_event_it_prints(win, tmp_path):
-    """Three read-outs in that panel print dI/I0; all three were bare."""
+def test_the_event_inspector_marks_enhancements_in_details_not_the_title(win, tmp_path):
+    """Event/state readouts retain safeguards; artwork titles remain clean."""
     import inspect
 
     from nanoscope.gui import event_inspector
 
-    src = inspect.getsource(event_inspector)
-    assert src.count("frac_depth_flag(") >= 3, (
-        "an Event Inspector read-out still prints dI/I0 with nothing beside it")
+    cls = event_inspector.EventInspectorWindow
+    assert "frac_depth_flag(" in inspect.getsource(cls._refresh_readout)
+    assert "frac_depth_flag(" in inspect.getsource(cls._level_lines)
+    assert "frac_depth_flag(" not in inspect.getsource(cls._event_title)
 
 
 def test_the_measure_readout_marks_an_enhancement(win, tmp_path):
@@ -849,16 +840,17 @@ def test_the_measure_readout_marks_an_enhancement(win, tmp_path):
 
 
 def test_the_publication_depth_figure_does_not_call_an_enhancement_a_blockade():
-    """The x label is the whole of what a PNG carries. On these recordings the median
-    is 1.81-2.57, and the axis said "blockade depth"."""
+    """A neutral quantity label stays on the figure; its caveat stays in details."""
     import numpy as np
     import pandas as pd
 
-    from nanoscope.plot.figures import depth_histogram
+    from nanoscope.plot.figures import depth_histogram, figure_details
 
     enhanced = pd.DataFrame({"frac_depth": np.linspace(1.8, 3.0, 400)})
     _fig, ax = depth_histogram(enhanced, fit=False)
-    assert "ENHANCEMENT" in ax.get_xlabel(), ax.get_xlabel()
+    assert ax.get_xlabel() == r"$\Delta I / I_0$"
+    assert "ENHANCEMENT" not in ax.get_xlabel()
+    assert any("ABOVE 1" in note for note in figure_details(_fig)["plots"][0]["details"])
 
     blockade = pd.DataFrame({"frac_depth": np.linspace(0.05, 0.6, 400)})
     _fig, ax = depth_histogram(blockade, fit=False)

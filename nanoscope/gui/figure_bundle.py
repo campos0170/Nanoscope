@@ -99,6 +99,14 @@ def _capture_image(item, *, max_edge: int | None = None) -> QtGui.QImage:
 
 
 def _capture_svg(item) -> bytes:
+    # A static Matplotlib canvas retains its own native SVG. QtSvg's SVG Tiny
+    # conversion would lose artist-level clipping, so do not round-trip it.
+    native_svg = getattr(item, "native_figure_svg", None)
+    if callable(native_svg):
+        payload = native_svg()
+        if not isinstance(payload, bytes) or not payload:
+            raise ValueError("The native figure did not provide a vector drawing.")
+        return payload
     # The same pending-paint reconciliation used by all existing SVG exports.
     if isinstance(item, QtWidgets.QGraphicsScene):
         prepare = getattr(item, "prepareForPaint", None)

@@ -34,6 +34,7 @@ def test_every_page_captures_exact_tables_and_project_resources(page, monkeypatc
         if hasattr(panel, name):
             monkeypatch.setattr(panel, name, forbid)
     analysis, snapshot, source, live, status = MainWindow._capture_figure(owner, kind)
+    assert snapshot.provenance()["details"] == panel.details_text()
     pd.testing.assert_frame_equal(snapshot.dataframe(), before, check_exact=True)
     pd.testing.assert_frame_equal(panel._plot_data(), before, check_exact=True)
     for plot, expected in zip(plots, ranges):

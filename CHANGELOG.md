@@ -5,8 +5,23 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ## Unreleased
 
+### Changed
+
+- Keep scientific warnings and fit verdicts in Details/readouts and saved figure
+  provenance, not on plot titles, fit legends or Event Gallery waveform captions.
+  Optional fit statistics, units, curves and numerical exports are unchanged.
+- Standard report PDF/PNG files retain diagnostic context in document/image
+  metadata. New Figure Library captures include full Details text; existing frozen
+  figures and previously generated guides are not rewritten.
+
 ### Added
 
+- Opt-in Comparison figures page: shared-axis per-recording facets, feature-pair matrices with
+  common-bin count histograms, and strip/swarm individual-event plots with optional descriptive
+  boxes. Seaborn renders prepared observations; generation is explicit, source identities and
+  exclusions are retained, and large/crowded inputs are refused instead of silently sampled.
+  Appearance and workspace restore use frozen geometry. Native vector export, publication preview,
+  Figure Library capture and bundles preserve exact tables and provenance; warnings stay in Details.
 - Publication-workflow hardening: revise saved compositions from their embedded original panels,
   restore layout controls, preview and save as a new figure with portable revision lineage. Nested
   panels and absent source entries are supported; project-generation guards prevent modal saves
@@ -59,6 +74,20 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Validation
 
+- Comparison-figure source pass: 571 focused tests passed across rendering, page interaction,
+  workspace persistence, Library capture, native vector/export composition and scientific
+  regressions. All 37 recorded analysis-module hashes are unchanged. Read-only apo-ferritin
+  QA used all 2,104 saved accepted events for the three new views, checked PNG/PDF/SVG exports,
+  and left original event tables and project bytes unchanged. This source pass preceded the
+  packaged comparison release below.
+- 2026-09-06 comparison packaging: rebuilt the Apple Silicon app and replaced both the local
+  and SanDisk DMGs. All 16 applicable in-bundle checks passed, including Seaborn facets, pair
+  matrices, strip/swarm views, source-free restore and twelve PNG/PDF/SVG exports; three optional
+  real-recording/model checks were skipped because no inputs were supplied. All 27 packaging
+  regressions passed. Strict ad-hoc signature verification and both DMG integrity checks passed;
+  the images have matching SHA-256 `3ffe9e901c7032169496b3303b4dc27ebec56e3eb8c0c9c70fad52b79c9a48d6`.
+  All 125 embedded NanoScope modules plus the packaged self-test match current source bytecode,
+  apart from normalized filenames. The installed `/Applications` copy was not replaced in this pass.
 - 2026-09-06 packaging: rebuilt the macOS application and replaced the local and SanDisk
   DMGs. All 15 applicable packaged smoke checks passed; three optional real-recording/model
   checks were skipped because no inputs were supplied. Strict ad-hoc signature verification

@@ -133,7 +133,8 @@ def test_a_typed_title_keeps_the_ks_verdict_ahead_of_the_users_own_text(rejected
     rejected.set_title("Figure 3: apo-ferritin dwell times")
     rejected._redraw()
     title = _title(rejected)
-    assert title.startswith("⚠ " + pp._KS_REJECTED_TAG), title
+    assert "KS REJECTED" not in title
+    assert pp._KS_REJECTED_TAG in rejected.details_text()
     assert "Figure 3: apo-ferritin dwell times" in title, title
 
 
@@ -141,8 +142,8 @@ def test_the_verdict_is_said_once_on_the_automatic_title(rejected):
     """Prepended through ``warn`` AND appended to the summary would read 'KS REJECTED ·
     τ = … — KS REJECTED'; the title takes the plain summary."""
     title = _title(rejected)
-    assert title.count("KS REJECTED") == 1, title
-    assert title.startswith("⚠ " + pp._KS_REJECTED_TAG) and "τ =" in title, title
+    assert "KS REJECTED" not in title
+    assert "τ =" in title
 
 
 def test_a_typed_title_with_the_legend_off_still_exports_the_verdict(rejected, tmp_path):
@@ -158,7 +159,7 @@ def test_a_typed_title_with_the_legend_off_still_exports_the_verdict(rejected, t
     svg = tmp_path / "typed_title_legend_off.svg"
     rejected.save_image(svg)
     texts = _svg_texts(svg)
-    assert any("KS REJECTED" in t for t in texts), texts
+    assert not any("KS REJECTED" in t for t in texts), texts
     assert "DOES NOT DESCRIBE THESE DATA" in rejected.details_text()
 
 
@@ -166,7 +167,7 @@ def test_the_legend_entry_still_carries_the_tag_while_the_legend_is_shown(reject
     """The per-fit tag on the legend entry is kept -- on an overlay it is what says WHICH
     curve was thrown out; only the title's copy moved channels."""
     fit_rows = [t for t in _legend(rejected) if t.startswith("fit:")]
-    assert fit_rows and fit_rows[0].endswith(pp._KS_REJECTED_TAG), fit_rows
+    assert fit_rows and "KS REJECTED" not in fit_rows[0]
 
 
 def test_an_accepted_fit_puts_no_verdict_over_a_typed_title(qapp, qtbot):
@@ -189,9 +190,10 @@ def test_an_overlay_names_the_rejected_source_in_the_title_by_the_figures_own_na
     w._source_list.item(0).setText("Apo")
     w.set_fit("exponential")
     w._redraw()
-    assert _title(w) == f"⚠ {pp._KS_REJECTED_TAG}: Apo", _title(w)
+    assert _title(w) == ""
+    assert f"{pp._KS_REJECTED_TAG}: Apo" in w.details_text()
     rows = {t.split(" fit:")[0]: t for t in _legend(w) if " fit:" in t}
-    assert rows["Apo"].endswith(pp._KS_REJECTED_TAG) and "REJECTED" not in rows["expo"], rows
+    assert all("REJECTED" not in row for row in rows.values())
 
 
 def test_the_verdict_stacks_behind_the_titles_other_headlines_in_one_channel(rejected):
@@ -205,8 +207,8 @@ def test_the_verdict_stacks_behind_the_titles_other_headlines_in_one_channel(rej
 
 def test_the_tooltip_says_the_title_carries_it_over_a_typed_title(rejected):
     tip = rejected._gof_check.toolTip()
-    assert "AHEAD of any title you type" in tip, tip
-    assert "while those are shown" in tip, "the legend entry and the box are conditional"
+    assert "Details" in tip and "provenance" in tip
+    assert "not on the plot" in tip
 
 
 # ================================================================================================

@@ -143,8 +143,9 @@ def test_the_staleness_flip_leaves_the_plot_the_readout_box_and_the_window_where
     assert insp._stale_label.toolTip() == ""
     assert insp._readout.text().count("\n") + 1 == clean_lines, insp._readout.text()
     assert "⚠ " not in insp._readout.text(), "the sentence is a note, not readout lines"
-    depth_line = next(l for l in insp._readout.text().splitlines() if l.startswith("depth:"))
+    depth_line = next(l for l in insp._readout.text().splitlines() if l.startswith("median depth:"))
     assert depth_line.endswith(" ⚠"), depth_line
+    assert "⚠" not in insp._plot.titleLabel.text
 
     # The CLEAR direction (the banner's "Re-measure depths") moved the plot back before.
     _flip(insp, qtbot, (), "")

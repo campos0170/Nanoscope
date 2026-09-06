@@ -126,7 +126,7 @@ def _assert_both_badged(window, gal, insp) -> str:
     assert note
     df = panel.current_detection().payload.df
     assert gal.stale_columns() == cols
-    assert all(c.endswith("⚠") for c in _captions(gal, df)), _captions(gal, df)
+    assert all("⚠" not in c for c in _captions(gal, df)), _captions(gal, df)
     assert note in gal.status.text(), gal.status.text()
     assert insp.stale_columns() == cols
     assert _stale_body(insp) == note, insp._readout.text().splitlines()[:3]
@@ -147,7 +147,7 @@ def _assert_both_clean(window, gal, insp) -> None:
 # the two paths that reach no surface refresh: the knob and the gain edit
 # ================================================================================================
 
-def test_a_preprocess_knob_badges_the_gallery_captions_and_the_inspector_readout(
+def test_a_preprocess_knob_warns_in_gallery_status_and_the_inspector_readout(
         detected, qtbot):
     window, _did, gal, insp = detected
     bl = window._analysis_panel.baseline_panel

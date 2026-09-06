@@ -22,6 +22,7 @@ __all__ = [
     "AnalysisExplorer",
     "PAGE_DISTRIBUTIONS",
     "PAGE_DISTRIBUTION_SUMMARIES",
+    "PAGE_COMPARISON_FIGURES",
     "PAGE_EVENT_WAVEFORMS",
     "PAGE_NOISE",
     "PAGE_IV",
@@ -32,6 +33,7 @@ __all__ = [
 
 PAGE_DISTRIBUTIONS: Final = "distributions"
 PAGE_DISTRIBUTION_SUMMARIES: Final = "distribution_summaries"
+PAGE_COMPARISON_FIGURES: Final = "comparison_figures"
 PAGE_EVENT_WAVEFORMS: Final = "event_waveforms"
 PAGE_NOISE: Final = "noise"
 PAGE_IV: Final = "iv"
@@ -41,6 +43,7 @@ PAGE_SUBPOPULATIONS: Final = "subpopulations"
 _PAGE_LABELS: Final[dict[str, str]] = {
     PAGE_DISTRIBUTIONS: "Distributions",
     PAGE_DISTRIBUTION_SUMMARIES: "Distribution summaries",
+    PAGE_COMPARISON_FIGURES: "Comparison figures",
     PAGE_EVENT_WAVEFORMS: "Event waveforms",
     PAGE_NOISE: "Noise",
     PAGE_IV: "I-V",

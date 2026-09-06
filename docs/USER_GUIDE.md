@@ -1502,6 +1502,51 @@ and [Matplotlib's 1.5-IQR box-plot convention](https://matplotlib.org/stable/api
 
 ---
 
+### Comparison figures: facets, pair matrices and individual events
+
+Open **Analysis ▸ Comparison figures…**. This opt-in page displays measurements already stored
+in event tables; opening it never detects events, recalibrates currents or fits a model.
+
+1. In **Data**, check the recordings to compare and choose the figure type. **Accepted events
+   only** starts enabled. Sources remain separately identified, even when their names or event
+   IDs repeat. Missing sources can still be viewed in a saved snapshot but cannot be regenerated.
+2. In **Analysis**, configure the selected view, then press **Generate**:
+   - **Faceted comparisons:** choose X and Y measurements and the number of columns. One scatter
+     panel is drawn per source with shared numerical axis limits. Optional logarithmic axes
+     exclude nonpositive values explicitly; they do not transform the stored measurements.
+   - **Pair-plot matrix:** select two to five features. Off-diagonal panels show individual-event
+     scatter plots; diagonal panels show separate-source count histograms with common bin edges.
+     There is no KDE, regression, correlation estimate or automatic confidence interval. Missing
+     values are handled separately for each panel, so one missing feature does not remove an
+     event from every other comparison. Axes retain their individual feature labels and units.
+   - **Individual-event overlays:** choose a measurement and **Strip** or **Swarm**. Strip uses
+     deterministic horizontal spreading. Swarm computes a collision-avoiding layout once on
+     Generate. Horizontal position is a display aid, not another measurement. Optional boxes
+     use linear quartiles and 1.5-IQR sample whiskers. All retained observations are drawn,
+     including outliers. Increasing marker size later can create overlap without moving events.
+3. Read **Details — methods and provenance** for selected and excluded counts, calibration and
+   measurement-domain warnings, method settings and complete source names. Warnings are not
+   printed on the figure. The `depth_pA` field is the original median depth; **Selected amplitude**
+   is the separate, explicitly curated amplitude. Neither is recalculated by this page.
+4. Use **Appearance** for typography, background, grid, marker size and line width. Source colours
+   retain recording identity. Styling uses saved geometry; it never recalculates bin counts, box
+   statistics or swarm offsets. Data/Analysis changes remain drafts until Generate. **Fit canvas**,
+   scrolling and dragging magnify/pan the canvas only; exports retain the complete figure.
+5. Use **Export current figure…** for PNG, PDF or SVG and the shared physical-size/preview controls.
+   **Export plotted values CSV…** writes committed drawing values with primitive type, source and
+   measurement labels. Use **Save to Figure Library…** or **Save figure bundle…** to retain source
+   observations, panel exclusions, exact geometry, configuration and full provenance together.
+   Project reopening draws the saved snapshot without requiring the original recordings.
+
+Limits are explicit: at most eight sources and 50,000 selected rows; pair matrices allow 10,000
+selected rows and 250,000 plotted observations. Swarm allows at most 500 rows per source and
+2,000 overall and may refuse a crowded layout. Use Strip for larger sets. Nothing is silently
+subsampled. Figures can be used as frozen panels in compositions; detached shared-axis editing
+is not offered for these already-multi-panel canvases. These comparisons do not change baseline
+removal, detection, calibration, amplitude estimation, fitting defaults or existing numerical exports.
+
+---
+
 ## 11. Noise spectra (PSD)
 
 **Analysis ▸ Power spectrum (noise / PSD)…** opens the **Noise** page of the Analysis Explorer: the

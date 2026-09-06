@@ -8,7 +8,7 @@ for the entry point, through the real ``Analysis ▸ Voltage dependence…`` QAc
 real :class:`MainWindow`.
 
 * VS-03 — a detected recording the series could not place was invisible on every one
-  of those surfaces. It is now on the banner, in the details pane and in the title.
+  of those surfaces. It is now on the banner and in Details; plots omit warning prose.
 * VS-08 — the exponential fit discarded a plotted recording and printed "over 3
   recording(s)" above "n = 2 recording(s)" with nothing between them.
 * VS-02 — an "Event count" trend across unequal analysed durations, with the word
@@ -142,8 +142,8 @@ def test_the_window_names_the_recording_it_could_not_place(qapp, qtbot, tmp_path
     assert "mystery.h5" in details, WHERE
     assert "covers 2 of the 3 open recording(s)" in details, f"{details} {WHERE}"
     assert "519.7" in details, WHERE               # the value, in its honest form
-    # ...and on the surface an exported PNG keeps.
-    assert "NOT in this series" in _title(w), f"{_title(w)} {WHERE}"
+    # The exported figure stays clean; the Details and banner above retain the loss.
+    assert "NOT in this series" not in _title(w), f"{_title(w)} {WHERE}"
 
 
 def test_declaring_the_units_clears_the_disclosure_and_adds_the_point(qapp, qtbot, tmp_path):
@@ -277,8 +277,7 @@ def test_the_event_count_trend_states_the_durations_it_pooled(qapp, qtbot, tmp_p
     assert w.fit() is not None, WHERE                 # still fitted, never refused
 
     title = _title(w)
-    assert "UNEQUAL analysed durations" in title, f"{title} {WHERE}"
-    assert "4.17×" in title or "4.17x" in title, f"{title} {WHERE}"
+    assert "UNEQUAL analysed durations" not in title, f"{title} {WHERE}"
 
     details = w.details_text()
     assert "COUNTS ACROSS UNEQUAL ANALYSED DURATIONS" in details, f"{details} {WHERE}"
@@ -313,20 +312,21 @@ def test_equal_durations_are_stated_positively_not_warned(qapp, qtbot, tmp_path)
     assert "over 40.000 s each" in _title(w), f"{_title(w)} {WHERE}"
 
 
-def test_the_duration_disclosure_reaches_the_exported_png(qapp, qtbot, tmp_path):
-    """The title is what Save image rasterises, so the caveat leaves the app with it."""
+def test_duration_disclosure_stays_in_details_not_exported_plot(qapp, qtbot, tmp_path):
+    """Save image keeps the clean figure; Details retains the full caveat."""
     w = _window(qtbot, _duration_ladder(tmp_path), metric="n_events", fit="linear")
     out = tmp_path / "vdep.png"
     assert w.save_image(str(out)) is not None, WHERE
     assert out.is_file() and out.stat().st_size > 0, WHERE
-    assert "UNEQUAL analysed durations" in _title(w), WHERE
+    assert "UNEQUAL analysed durations" not in _title(w), WHERE
+    assert "COUNTS ACROSS UNEQUAL ANALYSED DURATIONS" in w.details_text(), WHERE
 
 
 # ================================================================================================
 # 4. VS-05 -- measured against read off a filename
 # ================================================================================================
 
-def test_the_table_and_title_say_where_each_voltage_came_from(qapp, qtbot, tmp_path):
+def test_the_table_and_details_say_where_each_voltage_came_from(qapp, qtbot, tmp_path):
     """THE VS-05 REGRESSION AT THE SURFACE."""
     session = Session()
     a = session.add_document(_measured_doc(tmp_path, raw_mV=-700.0, name="meas.abf",
@@ -337,7 +337,7 @@ def test_the_table_and_title_say_where_each_voltage_came_from(qapp, qtbot, tmp_p
 
     w = _window(qtbot, session, fit="linear")
     assert sorted(_column(w, "V source")) == ["measured", "nominal"], WHERE
-    assert "MIXED voltage sources" in _title(w), f"{_title(w)} {WHERE}"
+    assert "MIXED voltage sources" not in _title(w), f"{_title(w)} {WHERE}"
     details = w.details_text()
     assert "V source:" in details, WHERE
     assert "measured" in details and "nominal" in details, WHERE

@@ -168,15 +168,17 @@ def test_pending_axis_does_not_change_rendered_units_during_a_style_edit(window,
     assert window._hist_col.currentText() == "amplitude"
 
 
-def test_custom_title_cannot_remove_rendered_warning_and_defaults_restore(window, monkeypatch):
+def test_custom_title_keeps_warning_in_details_and_defaults_restore(window, monkeypatch):
     window.set_plot_type("Scatter")
     window.set_scatter_columns("dwell_s", "amplitude")
     window._apply_title("Automatic scientific title", warn="NOT COMPARABLE: baseline mismatch")
+    window._set_details(window.details_text())
     labels = [window._plot.getAxis(side).labelText for side in ("bottom", "left")]
     watchers = _watch_render_and_analysis(window, monkeypatch)
 
     _exercise_text_and_canvas(window)
-    assert "NOT COMPARABLE: baseline mismatch" in window._plot.titleLabel.text
+    assert window._plot.titleLabel.text == "Publication figure"
+    assert "NOT COMPARABLE: baseline mismatch" in window.details_text()
     window.set_title("")
     window._x_label_edit.clear()
     window._y_label_edit.clear()
@@ -186,8 +188,8 @@ def test_custom_title_cannot_remove_rendered_warning_and_defaults_restore(window
 
     for watcher in watchers:
         watcher.assert_not_called()
-    assert window._plot.titleLabel.text == (
-        "NOT COMPARABLE: baseline mismatch   ·   Automatic scientific title")
+    assert window._plot.titleLabel.text == "Automatic scientific title"
+    assert "NOT COMPARABLE: baseline mismatch" in window.details_text()
     assert [window._plot.getAxis(side).labelText for side in ("bottom", "left")] == labels
     assert not window._plot.titleLabel.item.font().bold()
     assert not window._plot.titleLabel.item.font().italic()

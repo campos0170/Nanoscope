@@ -128,7 +128,7 @@ excludes = _QT_EXCLUDES + _LEAF_EXCLUDES + [
     "nbconvert", "nbformat", "qtconsole", "traitlets", "zmq", "tornado", "jedi",
     "sphinx", "numpydoc", "docutils", "setuptools._distutils",
     "torch", "torchvision", "jax", "jaxlib", "cv2", "skimage", "sympy", "numba", "llvmlite",
-    "statsmodels", "seaborn", "plotly", "dask", "xarray", "sqlalchemy", "openpyxl",
+    "statsmodels", "plotly", "dask", "xarray", "sqlalchemy", "openpyxl",
     "xlsxwriter", "tables", "numexpr", "bottleneck", "PIL.ImageQt",
     "tensorflow_estimator", "tensorflow_addons", "tensorflow_datasets", "tensorflow_hub",
     "tensorflow_probability", "tensorflow_metadata", "tf_keras", "tensorboard",

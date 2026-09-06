@@ -2621,21 +2621,19 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             self._draw_window(min(win_lo, lo_needed), max(win_hi, hi_needed))
 
     def _event_title(self, r: pd.Series) -> str:
+        # The waveform title is numerical artwork. Warnings remain in the Event
+        # readout and its fixed-height staleness note, not in captured plots.
         units = f" {self._units}" if self._units else ""
         dwell_us = float(r["dwell_s"]) * 1e6 if np.isfinite(r["dwell_s"]) else float("nan")
         parts = [
             f"Event {int(r['event_id'])}",
-            f"dwell {_fmt_num(dwell_us, ' µs', 4)}{self._stale('dwell_s')}",
-            f"median depth {_fmt_num(r['depth_pA'], units, 4)}{self._stale('depth_pA')}",
-            # ⚠>1 = the current magnitude GREW; see analysis.events.frac_depth_note.
-            f"dI/I0 {_fmt_num(r['frac_depth'], '', 3)}{frac_depth_flag(r['frac_depth'])}"
-            f"{self._stale('frac_depth')}",
+            f"dwell {_fmt_num(dwell_us, ' µs', 4)}",
+            f"median depth {_fmt_num(r['depth_pA'], units, 4)}",
+            f"dI/I0 {_fmt_num(r['frac_depth'], '', 3)}",
         ]
-        if bool(r["filter_limited"]):
-            parts.append("filter-limited")
         if amplitude_is_current(r):
             parts.append(f"amplitude {_fmt_num(r['amplitude_pA'], ' ' + str(r['amplitude_units']), 4)} "
-                         f"({r['amplitude_method']})" + (" ⚠" if self._stale_columns else ""))
+                         f"({r['amplitude_method']})")
         return "   ·   ".join(parts)
 
     def _refresh_readout(self, row: int) -> None:

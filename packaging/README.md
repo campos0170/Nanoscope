@@ -52,7 +52,7 @@ dist/NanoScope.app/Contents/MacOS/NanoScope --self-test \
     ~/some_recording.abf ~/some_model.keras
 ```
 
-18 checks, ~30 s, exit code = number of failures. Both file arguments are optional; the checks
+19 checks, approximately one minute, exit code = number of failures. Both file arguments are optional; the checks
 that need them report `SKIPPED` instead of failing — but pass them when you have them: the ML
 check runs the model over a slice of the REAL recording when a data file is supplied, and falls
 back to synthetic noise (where a detector that finds nothing still looks fine) when it is not.
@@ -61,6 +61,11 @@ The checks are headless (offscreen Qt), and one of them auto-dismisses modal dia
 raises its unsaved-work prompt when the window closes with a document loaded, and a modal inside a
 headless run is a permanent deadlock (`QDialog.exec()` waiting for a click that cannot come). The
 check reports which dialog it answered rather than hanging on it.
+
+The comparison-figure check exercises the packaged Seaborn dependency with facets, a pair matrix,
+strip and swarm observations, source-free snapshot restore and twelve PNG/PDF/SVG exports. It
+also verifies that styling/restoration do not prepare the measurements again and that source
+event tables remain exactly unchanged.
 
 ---
 
@@ -71,7 +76,7 @@ check reports which dialog it answered rather than hanging on it.
 | `build_app.sh` | The one command. Preflight → icon → freeze → verify → sign → DMG. |
 | `NanoScope.spec` | PyInstaller spec: hidden imports, excludes, TOC pruning, `Info.plist`. |
 | `nanoscope_app.py` | Frozen entry point. Redirects stdio to a log, shows a crash dialog, handles `--self-test`. |
-| `nanoscope_selftest.py` | The 16 in-bundle checks. One per way this bundle can break. |
+| `nanoscope_selftest.py` | The 19 in-bundle checks. One per way this bundle can break. |
 | `rthooks/rthook_nanoscope_env.py` | Runtime hook: `MPLBACKEND=Agg`, writable `MPLCONFIGDIR`, TF CPU env. |
 | `qt_prefix_fix.py` | Build-time fix that stops PyInstaller shipping Anaconda's **Qt5** plugins. |
 | `verify_bundle.py` | Post-build integrity checks; run automatically by `build_app.sh`. |

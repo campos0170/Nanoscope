@@ -258,7 +258,7 @@ def test_precomputed_multi_component_fit_is_used_verbatim_not_refit():
 
 
 def test_figure_annotates_what_the_supplied_fit_did_to_the_sample():
-    """A published number has to carry its caveats onto the page."""
+    """Model limits remain labels; full sample-selection caveats remain in details."""
     from nanoscope.analysis.stats import fit_dwell_exponential
 
     events = make_events(400)
@@ -271,9 +271,14 @@ def test_figure_annotates_what_the_supplied_fit_did_to_the_sample():
     blob = " ".join(t.get_text() for t in ax.texts)
     plt.close(fig)
 
-    assert "17 filter-limited event(s) excluded" in blob
-    assert "2*filter_rise_s" in blob
-    assert "right-truncated at" in blob and "modelled" in blob
+    assert "17 filter-limited event(s) excluded" not in blob
+    assert "2*filter_rise_s" not in blob
+    assert r"$t_{min}$" in blob and r"$t_{max}$" in blob
+    details = figures.figure_details(fig)["plots"][0]
+    assert details["fit"]["meta"]["n_excluded_filter_limited"] == 17
+    assert details["fit"]["meta"]["t_min_source"] == "2*filter_rise_s"
+    assert "17 filter-limited event(s) excluded" in details["details"]
+    assert any("right-truncated at" in line for line in details["details"])
 
 
 def test_dwell_histogram_warns_without_min_dwell_provenance():

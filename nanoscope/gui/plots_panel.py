@@ -1182,36 +1182,9 @@ class StyleSettings:
     #: already sets a real ``QFont`` on (the CSS span carries size and colour only).
     title_bold: bool = False
     title_italic: bool = False
-    #: THE FIT-STATISTICS SWITCHES. Two of these were already COMPUTED and printed with
-    #: no way to turn them off, and two are new pictures that must not appear unasked --
-    #: hence the asymmetric defaults, which between them reproduce today's figure exactly.
-    #:
-    #: A SWITCH THAT CAN HIDE A REFUSAL WOULD BE A BUG, not a preference, so neither of
-    #: the first two can. ``show_r2`` and ``show_gof`` govern the FIGURE -- the title, the
-    #: legend entry and the on-plot values box, which is what a paper figure has to be
-    #: able to be clean of -- and Details keeps every sentence that says the number is not
-    #: evidence: an R² with no residual degrees of freedom, an undefined R², and a KS
-    #: verdict that REJECTED the curve. Turning the statistic off is a request to stop
-    #: decorating the picture, never a request to be told a fit is good when it is not.
-    #:
-    #: WHAT ``show_gof`` ACTUALLY GOVERNS, so this paragraph cannot promise more than the
-    #: code does again (S7-JRN2): the KS statistic and the PASSED verdict appear in the
-    #: on-plot values box when ``fit_values_on_plot`` asks for that box, and nowhere else
-    #: on the figure -- a passing fit's title and legend carry the parameter and ``n``
-    #: only. A REJECTED verdict is written into the title and the legend entry
-    #: themselves (:data:`_KS_REJECTED_TAG`) and into the values box, whatever this
-    #: switch and ``fit_values_on_plot`` are set to -- and ONE of those three cannot be
-    #: switched off or typed over: the title takes the verdict through
-    #: :meth:`PlotsWindow._apply_title`'s ``warn`` channel, the one the comparability
-    #: verdict already uses, which is PREPENDED to whatever the title would otherwise
-    #: be, a typed Style ▸ Title included (A1-N1: with the automatic title carrying the
-    #: tag instead, a typed title plus "Show legend" off shipped the owner's rejected
-    #: -600 mV exponential with no verdict anywhere on the saved SVG). The legend entry
-    #: carries it while the legend is shown; the values box while that box is.
-    #: Measured before any of this: at the shipped dwell template's defaults
-    #: (``show_gof`` True, ``fit_values_on_plot`` False) the exported title and legend
-    #: carried "τ = 20.41 ms (n = 275)" for a curve rejected at p = 1.6e-39 and no
-    #: verdict, because the values box -- the only surface the verdict reached -- was off.
+    #: Appearance-only statistics switches. Details always retains the complete
+    #: fit-quality assessment. The optional KS value is numerical artwork only;
+    #: rejection warnings are kept outside the plot and in saved provenance.
     show_r2: bool = True
     show_gof: bool = True
     #: The bootstrap's confidence BAND around the fitted curve. Off: it is a second
@@ -2474,15 +2447,7 @@ def _param_symbol(key: str) -> str:
     return f"{_PARAM_SYMBOLS.get(head, head)}{sep}{tail}"
 
 
-#: What the one-line fit summary -- the legend entry's text and Details' summary line
-#: -- carries after the headline parameter when the KS test has REJECTED the drawn
-#: curve, and what the title's warning headline is built from
-#: (:meth:`PlotsWindow._ks_headline`). SIXTEEN CHARACTERS, measured against
-#: :meth:`PlotsWindow._elide_legend`: a legend entry longer than 34 characters is
-#: middle-elided to its first 17 and last 16, so a tag of 16 survives whole at the end
-#: of "fit: τ = 20.41 ms…KS REJECTED (1%)" where the 17-character "KS REJECTED at 1%"
-#: came out as "…S REJECTED at 1%" on the owner's -600 mV dwell fit. The full statistic
-#: and the full sentence stay in the values box and in Details.
+#: Concise rejection tag for Details and saved diagnostic context, not artwork.
 _KS_REJECTED_TAG = "KS REJECTED (1%)"
 
 
@@ -2500,13 +2465,10 @@ class _FitSummary(str):
     unchanged, including callers outside this module that unpack ``(summary, notes)``.
     The richer form is read off ``.full`` by the one caller that needs it.
 
-    ``rejected`` and ``plain`` are the KS verdict's two halves (A1-N1). The string
-    itself carries :data:`_KS_REJECTED_TAG` when the test threw the curve out -- that
-    is the legend entry's text and Details' summary line. The TITLE does not take the
-    tagged string: it takes ``plain`` (the summary with no tag) as its automatic text
-    and the verdict through :meth:`PlotsWindow._apply_title`'s ``warn`` channel, which
-    is PREPENDED to a typed title rather than displaced by it. ``rejected`` is what the
-    histogram reads to build that headline.
+    ``rejected`` and ``plain`` keep the diagnostic verdict separate from artwork.
+    The string includes the rejection tag for Details; the title and legend use
+    ``plain``. ``full`` contains fitted parameters and optional numerical statistics
+    for the on-plot values box, without warning prose.
     """
 
     full: str = ""
@@ -4219,7 +4181,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         self._fit_values_check = QtWidgets.QCheckBox("Fit values on plot")
         self._fit_values_check.setToolTip(
-            "Write the fitted parameters (τ, μ, KS verdict…) as a text box on the "
+            "Write the fitted parameters (τ, μ, numerical KS statistic…) as a text box on the "
             "figure itself, so a saved image carries its own numbers. The same text "
             "always appears in Details below.")
         self._fit_values_check.setChecked(self._style.fit_values_on_plot)
@@ -4241,14 +4203,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._r2_check.toggled.connect(self._on_style_show_r2)
         form.addRow("", self._r2_check)
 
-        self._gof_check = QtWidgets.QCheckBox("KS verdict on figure")
+        self._gof_check = QtWidgets.QCheckBox("KS statistic on figure")
         self._gof_check.setToolTip(
-            "The KS statistic and its verdict in the values box (Fit values on plot), "
-            "beside the fitted parameters.\n"
-            "Off: only for a fit that PASSED. A curve the test REJECTS says so whatever "
-            "this box is set to — in the plot title, AHEAD of any title you type, the "
-            "way the comparability verdict is; in its legend entry and the values box "
-            "while those are shown; all of which Save image… keeps — and in Details.")
+            "Show the numerical KS statistic beside the fitted parameters when "
+            "Fit values on plot is enabled.\n"
+            "The verdict and warnings remain in Details and figure-bundle provenance, "
+            "not on the plot or in Save image artwork. This does not change the fit.")
         self._gof_check.setChecked(self._style.show_gof)
         self._gof_check.toggled.connect(self._on_style_show_gof)
         form.addRow("", self._gof_check)
@@ -4951,19 +4911,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         An automatic accent (the fit vermillion / PCA foreground) is honoured only when the user has
         not typed their own title; an explicit override renders in the neutral foreground colour.
 
-        ``warn`` is the figure's verdict -- the comparability verdict, a superseded
-        calibration, a fit the KS test rejected (:meth:`_ks_headline`) -- and it is
-        NOT part of the override-or-auto choice: it is PREPENDED to whatever the
-        title would otherwise be, the user's own text included. The title is the
-        only thing ``Save image`` keeps — Details is not exported — so a verdict
-        that a typed title could displace would let exactly the figure this guard
-        exists to prevent leave the app. The user may retitle the plot; they may not
-        retitle away the fact that the two depths were measured under different
-        baselines, or that the curve drawn through them does not describe them."""
+        ``warn`` is retained with the committed presentation for Details, but is
+        not artwork. Comparability, calibration and fit verdicts belong in the
+        warning summary, Details and saved provenance, never in the plot title.
+        """
         self._title_presentation = (auto, accent, warn)
         text = self._plot_title(auto)
-        if warn:
-            text = f"{warn}   ·   {text}" if text else warn
         if not text:
             # setTitle(None) only HIDES pyqtgraph's title label -- the previous
             # draw's text stays on the item. Harmless in the exported PNG (a hidden,
@@ -4975,8 +4928,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._plot.setTitle(None)
             self._plot.titleLabel.setText("")
             return
-        color = (_WARN_HEX if warn else
-                 accent if (accent and not self._style.title) else self._fg_hex())
+        color = accent if (accent and not self._style.title) else self._fg_hex()
         self._plot.setTitle(text, color=color, size=f"{self._title_pt()}pt")
         # Set both positive and negative choices: an in-place restyle must also
         # remove a formerly selected family, bold weight, or italic slant.
@@ -7653,8 +7605,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """Restyle existing text/canvas items without reconstructing the result.
 
         Do not consult pending axes, source selections, or fits here. Their run
-        gate still owns when the numerical picture changes, and the cached title
-        warning must remain attached even under a custom title. This path never
+        gate still owns when the numerical picture changes. Cached warnings remain
+        in Details regardless of the authored title. This path never
         clears items, sets plot ranges, or touches numerical/deferred-note caches.
         Fit decorations consume cached geometry prepared at the genuine draw.
         """
@@ -9309,6 +9261,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._set_details("\n".join([text, *self._incoming_notes()]))
 
     def _set_details(self, text: str) -> None:
+        # Keep the short verdict as well as the full explanation outside the
+        # figure. This same Details text is retained by figure-bundle provenance.
+        headline = getattr(self, "_title_presentation", (None, None, None))[2]
+        if headline and headline not in text:
+            text = f"{text}\n\n{headline}"
         self._details.setPlainText(text)
         lines = [line.strip() for line in str(text).splitlines() if line.strip()]
         self._result_summary.setText(lines[0] if lines else "No result yet.")
@@ -10252,8 +10209,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._plot.setLabel("left",
                             self._remember_axis_label("left", self._y_axis_label(col, log_y)),
                             **self._label_style())
-        # THE KS VERDICT RIDES THE WARN CHANNEL, third after the two the title already
-        # carries there, and for their reason: `warn` is prepended over a typed title.
+        # Record the warning separately; _set_details places it outside artwork.
         self._apply_title(title or None, accent=self._style.fit_color,
                           warn=self._warn_headline(self._stale_headline([col]),
                                                    verdict.headline, ks_warn,
@@ -10268,33 +10224,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _ks_headline(rejected: Sequence[str]) -> str:
-        """The title's own mark for a drawn curve the KS test threw out, or ``""``.
+        """A concise rejected-fit headline for Details and the warning summary.
 
-        ON THE TITLE'S WARN CHANNEL, NOT IN ITS AUTOMATIC TEXT (A1-N1). S7-JRN2's
-        first repair appended :data:`_KS_REJECTED_TAG` to the one-line fit summary,
-        which the automatic title and the legend entry both take -- and both are
-        ordinary style controls away from the figure: :meth:`_plot_title` returns the
-        typed Style ▸ Title INSTEAD of the automatic one, and "Show legend" off (or the
-        fit's entry unticked in the legend checklist) removes the legend entry. Measured
-        on the owner's -600 mV events (dwell_s, density, log-x, exponential; KS D =
-        0.3472 against 0.1059): defaults -> title "τ = 5.178 ms (n = 236) — KS REJECTED
-        (1%)"; ``set_title("Figure 3: …")`` -> title "Figure 3: …"; Show legend off ->
-        legend [], values box None (its default), curve still drawn; Save image -> the
-        SVG's text nodes were the typed title, the two axis labels and "below detection
-        limit" -- no REJECT anywhere, while Details still said DOES NOT DESCRIBE. The
-        app already states the rule one method away: :meth:`_apply_title`'s ``warn`` is
-        "PREPENDED to whatever the title would otherwise be, the user's own text
-        included", because the title is the only thing Save image keeps. So the
-        rejection is a third headline on that channel, beside the superseded-calibration
-        mark and the comparability verdict, and the automatic title carries the PLAIN
-        summary (:attr:`_FitSummary.plain`) so the verdict is not said twice on one
-        line. The legend entry and Details keep the tag on the summary itself, per fit
-        -- on an overlay that is the surface that says WHICH curve was thrown out, and
-        the headline names those sources by the figure's own name for them
-        (:meth:`_legend_name`) for the same reason.
-
-        ``rejected`` is one entry per rejected fit: the figure's name for its source on
-        an overlay, ``""`` for the single fit of a one-source (or cluster-split) plot.
+        Entries are source display names, or an empty string for a single fit.
+        This annotation is never added to the plot title or exported artwork.
         """
         if not rejected:
             return ""
@@ -10543,7 +10476,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _warn_headline(*parts: str) -> str | None:
-        """Join the title's warning marks, worst-first, or None when there are none."""
+        """Join diagnostic headlines for Details, worst-first, or None."""
         kept = [p for p in parts if p]
         return "   ·   ".join(kept) if kept else None
 
@@ -10614,16 +10547,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
     ) -> tuple[_FitSummary, list[str]]:
         """Fit ONE source and draw its curve; return (summary, notes).
 
-        TWO SUMMARIES IN ONE RETURN VALUE (see :class:`_FitSummary`), because they have
-        two jobs. The summary itself is the one-liner the plot TITLE and the legend
-        entry take -- the headline parameter and n, sized to sit on one line beside a
-        comparability verdict. Its ``.full`` is what the on-plot values box takes when
-        the Style checkbox asks for it (owner note #13, "once the Fit has been applied,
-        include the numerical values on the plot"): EVERY fitted parameter with its own
-        unit, n, BIC and the KS verdict. The box is what a saved PNG carries INSTEAD of
-        Details, so it has to answer the questions Details would -- the one-liner did
-        not, and the checkbox's tooltip was already promising the KS verdict it never
-        printed.
+        The string summary includes the diagnostic tag for Details; ``.plain`` is
+        the title/legend summary. ``.full`` supplies every fitted parameter with its
+        unit, n, BIC and optional numerical KS statistic for the on-plot values box.
+        Warnings and verdicts remain in Details and saved fit metadata.
 
         The curve is evaluated on a fine grid and scaled to the drawn y quantity by
         the LOCAL linear bin width at each point -- for log bins that is
@@ -11367,36 +11294,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
         unit_txt = f" {uname}" if uname else ""
         shown = ", ".join(f"{val:.4g}" for val in vals)
         summary = f"{names[1]} = {shown}{unit_txt}   (n = {fit.n})"
-        # IS THIS MODEL EVEN RIGHT? Decided HERE, before the one-line summary is handed
-        # to the title and the legend, because those two are the whole of what Save
-        # image exports (S7-JRN2). The verdict used to be drawn only inside the on-plot
-        # values box, which `StyleSettings.fit_values_on_plot` keeps off by default, so
-        # at the app's own defaults on its own shipped dwell template the -600 mV
-        # recording left the app as "τ = 20.41 ms (n = 275)" in the title and
-        # "fit: τ = 20.41 ms (n = 275)" in the legend -- for a curve the app's own KS
-        # test rejects at D = 0.3966 against a 1% critical value of 0.0981
-        # (p = 1.6e-39; the dwell quartiles are 16.61 / 18.14 / 19.48 ms, the drawn
-        # exponential predicts 5.89 / 14.17 / 28.32 ms) -- while `show_gof`'s docstring
-        # and the "KS verdict on figure" tooltip promised the opposite in writing. A
-        # rejected fit now says so on the same line, whatever `show_gof` and
-        # `fit_values_on_plot` are set to; the curve is still drawn (whether to suppress
-        # it is a decision the owner has not made), but it is labelled. The panel used
-        # to state one authoritative number with a tight CI and no goodness-of-fit
-        # statistic beside it while the drawn curve missed the histogram (report
-        # High-3); the verdict costs a millisecond and is attempted on every fit.
-        #
-        # THE TAGGED LINE IS THE LEGEND ENTRY'S AND DETAILS'; THE TITLE TAKES `plain`
-        # AND THE VERDICT THROUGH ITS WARN CHANNEL (A1-N1, `_ks_headline`): a typed
-        # title displaces the automatic text, and this tag with it, while `warn` is
-        # prepended over the user's own text.
+        # Keep the same goodness-of-fit calculation and full verdict in Details.
+        # The title and legend use the untagged parameter summary.
         gof = self._goodness_note(fit, sample_for_gof)
         plain_summary = summary
         ks_rejected = bool(gof) and not gof.get("describes_data")
         if ks_rejected:
             summary = f"{summary} — {_KS_REJECTED_TAG}"
         legend_who = self._legend_name(src) if (who and src is not None) else who
-        self._legend_add(item, f"{legend_who} fit: {summary}".strip() if legend_who
-                         else f"fit: {summary}",
+        self._legend_add(item, f"{legend_who} fit: {plain_summary}".strip() if legend_who
+                         else f"fit: {plain_summary}",
                          kind="fit", key=src.key if src is not None else "")
         notes.append(fit.model)
         notes.append(f"BIC = {fit.bic:.6g}   AIC = {fit.aic:.6g}   components = {k}")
@@ -11532,9 +11439,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         So: every entry of ``fit.params``, each scaled and named through the SAME
         :meth:`_display_unit` rule the title uses (a time parameter in the axis's unit,
-        a dimensionless shape bare), then n, then BIC, then the KS verdict -- which the
-        Style checkbox's own tooltip has been promising ("τ, μ, KS verdict…") while
-        printing none of it.
+        a dimensionless shape bare), then n, BIC and the optional numerical KS
+        statistic. The verdict itself stays in Details, not in the values box.
         """
         parts = []
         for key, value in fit.params.items():
@@ -11544,16 +11450,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         parts.append(f"n = {fit.n}")
         if np.isfinite(float(fit.bic)):
             parts.append(f"BIC = {float(fit.bic):.6g}")
-        # THE SWITCH CANNOT HIDE A REJECTION (StyleSettings.show_gof). Off means "stop
-        # decorating a figure whose fit is fine"; a curve the test threw out says so on
-        # the figure whatever the box is set to, because that sentence is the difference
-        # between a measurement and a decoration.
-        if gof and (self._style.show_gof or not gof.get("describes_data")):
-            # The VERDICT, not the whole sentence: the box sits on the plot and the
-            # sentence is a paragraph. Details still prints it in full.
-            parts.append(f"KS = {float(gof['ks']):.3f} — "
-                         + ("consistent with these data" if gof.get("describes_data")
-                            else "REJECTED at the 1% level"))
+        # The numerical statistic is optional artwork; its interpretation and
+        # rejection warning are always retained in Details and fit metadata.
+        if gof and self._style.show_gof:
+            parts.append(f"KS = {float(gof['ks']):.3f}")
         # The strip's number, on the figure, because the strip itself is not exported.
         if resid_short:
             parts.append(resid_short)

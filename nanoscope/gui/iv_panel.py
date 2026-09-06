@@ -246,8 +246,7 @@ class IVWindow(QtWidgets.QMainWindow):
         self._appearance_widget.set_legend_available(self._scatter_item is not None)
         apply_plot_appearance(
             self._plot, self._appearance, plot_widget=self._plot_widget,
-            data_items=(self._scatter_item,), fit_items=(self._fit_item,),
-            title_prefix="⚠ I-V caveats · " if self._warning_summary.full_text() else "")
+            data_items=(self._scatter_item,), fit_items=(self._fit_item,))
 
     def figure_export_target(self):
         return self._plot
@@ -381,6 +380,7 @@ class IVWindow(QtWidgets.QMainWindow):
         self._warning_summary.set_warnings(())
         self._plot.clear()
         self._plot.setTitle(None)
+        self._plot.titleLabel.setText("")
         self._scatter_item = self._fit_item = self._message_item = None
 
     def _message(self, text: str) -> None:

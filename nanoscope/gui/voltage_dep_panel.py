@@ -419,8 +419,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._appearance_widget.set_legend_available(self._scatter_item is not None)
         apply_plot_appearance(
             self._plot, self._appearance, plot_widget=self._plot_widget,
-            data_items=(self._scatter_item,), fit_items=(self._fit_item,),
-            title_prefix="⚠ Voltage-series caveats · " if self.warning_text() else "")
+            data_items=(self._scatter_item,), fit_items=(self._fit_item,))
 
     def figure_export_target(self):
         return self._plot
@@ -629,6 +628,7 @@ class VDepWindow(QtWidgets.QMainWindow):
     def _clear(self) -> None:
         self._plot.clear()
         self._plot.setTitle(None)
+        self._plot.titleLabel.setText("")
         self._scatter_item = self._fit_item = self._message_item = None
 
     def _set_warnings(self, warnings) -> None:
@@ -784,9 +784,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         elif model != _FIT_NONE:
             details.append("Need >= 2 recordings at different voltages to fit a trend.")
         if self._fit is None:
-            # No fit to hang the provenance off, so the title carries it alone --
-            # an exported PNG of a bare scatter says what it pooled too.
-            self._set_title(self._provenance_segments(series), _MSG_HEX)
+            self._set_title(self._figure_method_segments(series), _MSG_HEX)
 
         self._plot.setLogMode(x=False, y=log_y)
         self._plot.autoRange()
@@ -831,6 +829,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         text = self._wrap_title(segments)
         if not text:
             self._plot.setTitle(None)
+            self._plot.titleLabel.setText("")
             return
         self._plot.setTitle(text, color=colour)
         if "<br>" not in text:
@@ -866,7 +865,12 @@ class VDepWindow(QtWidgets.QMainWindow):
         return "<br>".join(lines)
 
     def _provenance_segments(self, series: voltage_dep.VDepSeries) -> list[str]:
-        """The title's provenance segments, unjoined — see :meth:`_provenance_title`."""
+        """Legacy complete provenance summary, no longer used on the plot canvas.
+
+        Kept for compatibility with callers of ``_provenance_title``. Live plots
+        use ``_figure_method_segments``; Details uses ``_provenance_lines`` plus
+        the full warning blocks, independently of whether a fit is displayed.
+        """
         parts = [self._one_or_mixed(series.merge_groups, "MIXED merge states")]
         if series.depends_on_baseline:
             parts.append(self._one_or_mixed(
@@ -906,22 +910,30 @@ class VDepWindow(QtWidgets.QMainWindow):
             parts.insert(0, "⚠ NOT COMPARABLE")
         return parts
 
-    def _provenance_title(self, series: voltage_dep.VDepSeries) -> str:
-        """The pooled provenance as a title suffix — this is what a saved PNG keeps.
+    @staticmethod
+    def _figure_method_segments(series: voltage_dep.VDepSeries) -> list[str]:
+        """Ordinary shared method labels, without warning prose on the canvas.
 
-        The merge state always (it moves every metric, and moved this window's
-        headline V₀ by 33 % on the owner's ladder), the baseline fingerprint only
-        when the metric is measured against the baseline, and the CALIBRATION only
-        when the metric is an absolute current — a saved ``V₀ = -0.432 V`` over
-        three uncalibrated pores now says ``gain uncalibrated`` on its face.
-
-        A detection caveat is counted here too. It does not make the pool
-        incomparable — it makes one POINT wrong — but a fitted law with a known-biased
-        term in it should not leave the app looking clean.
-
-        Wrapped, so the last segment cannot fall off the right edge of the plot —
-        and therefore off the exported PNG.
+        Complete mixed/uncalibrated/excluded-source qualifications remain in the
+        warning summary, Details and numerical export. Do not remove substrings
+        from user titles or fit labels: those are deliberately authored content.
         """
+        parts = []
+        for groups, prefix, applicable in (
+                (series.merge_groups, "", True),
+                (series.baseline_groups, "baseline ", series.depends_on_baseline),
+                (series.gain_groups, "gain ", series.depends_on_gain)):
+            if applicable and len(groups) == 1:
+                value = str(groups[0][0])
+                if value and value.casefold() not in {"uncalibrated", "unknown", "—"}:
+                    parts.append(prefix + value)
+        if (voltage_dep.depends_on_duration(series.metric)
+                and not series.duration_warnings and len(series.duration_groups) == 1):
+            parts.append(f"over {series.duration_groups[0][0]} each")
+        return parts
+
+    def _provenance_title(self, series: voltage_dep.VDepSeries) -> str:
+        """Legacy wrapped provenance summary; not assigned to live plot titles."""
         return self._wrap_title(self._provenance_segments(series))
 
     def _provenance_lines(self, series: voltage_dep.VDepSeries) -> list[str]:
@@ -1060,7 +1072,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         # The headline number and the title both carry the pooled provenance: the
         # fit is a statement ABOUT those event sets, and it is wrong to read it
         # without knowing which ones.
-        prov = self._provenance_segments(self._series)
+        prov = self._figure_method_segments(self._series)
         warn = "⚠ " if self._series.warnings else ""
         colour = _WARN_HEX if self._series.warnings else _FIT_HEX
         if fit.get("model") == "exponential":

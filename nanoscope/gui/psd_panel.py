@@ -1436,9 +1436,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                 (self._spec_widget, self._spec_plot, [], []),
                 (self._hist_widget, self._hist_plot, [self._hist_item], [])):
             apply_plot_appearance(plot, self._appearance, plot_widget=widget,
-                                  data_items=data, fit_items=fits,
-                                  title_prefix="⚠ Noise warnings · "
-                                  if self._warning_summary.full_text() else "")
+                                  data_items=data, fit_items=fits)
         # Level positions and occupancies are scientific results; only their ink
         # changes here. InfiniteLine is not a PlotDataItem handled by the helper.
         for line in self._hist_marks:
@@ -2381,6 +2379,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         text = self._style.title or auto
         if not text:
             self._plot.setTitle(None)
+            self._plot.titleLabel.setText("")
             return
         self._plot.setTitle(text, color=self._fg_hex())
 
@@ -2396,6 +2395,7 @@ class PSDWindow(QtWidgets.QMainWindow):
     def _clear_plot(self) -> None:
         self._plot.clear()
         self._plot.setTitle(None)
+        self._plot.titleLabel.setText("")
         self._view_titles.pop(VIEW_PSD, None)
         self._drop_legend()
         self._curve_item = self._fit_item = self._message_item = None

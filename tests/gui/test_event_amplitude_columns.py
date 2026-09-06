@@ -104,7 +104,8 @@ def test_population_picker_labels_and_warns_mixed_amplitudes(amplitudes, qtbot):
     window.set_data({"test": events.df}, provenance={"test": dict(events.provenance)})
     window.set_histogram_column("amplitude_pA")
     assert "Selected amplitude" in window._plot.getAxis("bottom").labelText
-    assert "CHECK SELECTED AMPLITUDES" in window._plot.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" not in window._plot.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" in window.details_text()
 
 
 def test_pca_and_cluster_colours_warn_about_amplitude_features(amplitudes, qtbot):
@@ -116,7 +117,8 @@ def test_pca_and_cluster_colours_warn_about_amplitude_features(amplitudes, qtbot
     window.set_data({"test": events.df}, provenance={"test": dict(events.provenance)})
     window.set_feature_selection(["amplitude_pA", "dwell_s"])
     assert window.run_pca() is not None
-    assert "CHECK SELECTED AMPLITUDES" in window._plot.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" not in window._plot.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" in window.details_text()
     window.set_cluster_method("k-means")
     window.set_cluster_k(2)
     assert window.run_clustering() is not None
@@ -125,10 +127,12 @@ def test_pca_and_cluster_colours_warn_about_amplitude_features(amplitudes, qtbot
     window.set_plot_type("Scatter")
     window.set_scatter_columns("depth_pA", "dwell_s")
     window.set_colour_by("Cluster")
-    assert "CHECK SELECTED AMPLITUDES" in window._plot.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" not in window._plot.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" in window.details_text()
     window.set_plot_type("Histogram")
     window.set_histogram_column("depth_pA")
-    assert "CHECK SELECTED AMPLITUDES" in window._plot.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" not in window._plot.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" in window.details_text()
 
 
 def test_density_partial_amplitudes_and_orphan_snapshot_keep_warning_units(amplitudes, qtbot):
@@ -140,7 +144,9 @@ def test_density_partial_amplitudes_and_orphan_snapshot_keep_warning_units(ampli
     window.set_y_metric("amplitude_pA")
     assert "Selected amplitude (pA)" in window._density_main.getAxis("left").labelText
     assert window.density_counts().sum() == len(events.df) - 1
-    assert "CHECK SELECTED AMPLITUDES" in window._density_main.titleLabel.text
+    assert "CHECK SELECTED AMPLITUDES" not in window._density_main.titleLabel.text
+    assert window._amplitude_warnings
+    assert all(warning in window.details_text() for warning in window._amplitude_warnings)
     assert "3 of 4" in window._density_main.titleLabel.text
     live_export = window._density_plot_data()
     source_rows = live_export[live_export.part == "source_event"]
@@ -153,6 +159,8 @@ def test_density_partial_amplitudes_and_orphan_snapshot_keep_warning_units(ampli
     assert not result.skipped
     assert "Selected amplitude (pA)" in orphan._density_main.getAxis("left").labelText
     assert orphan._amplitude_warnings == window._amplitude_warnings
+    assert "CHECK SELECTED AMPLITUDES" not in orphan._density_main.titleLabel.text
+    assert all(warning in orphan.details_text() for warning in orphan._amplitude_warnings)
     assert "3 of 4" in orphan._density_main.titleLabel.text
     exported = orphan._density_plot_data()
     assert set(exported.amplitude_units) == {"pA"}
@@ -191,7 +199,8 @@ def test_superseded_calibration_also_marks_selected_amplitude(amplitudes, qtbot)
         session.documents(), session.results.get,
         calibration_fingerprint=lambda d, c: session.calibration(d, c).fingerprint()))
     window.set_histogram_column("amplitude_pA")
-    assert "SUPERSEDED CALIBRATION" in window._plot.titleLabel.text
+    assert "SUPERSEDED CALIBRATION" not in window._plot.titleLabel.text
+    assert "SUPERSEDED CALIBRATION" in window.details_text()
     assert "amplitude_pA" in window.details_text()
 
 

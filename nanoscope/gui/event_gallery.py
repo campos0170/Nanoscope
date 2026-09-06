@@ -71,7 +71,9 @@ import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
-from ..analysis.events import AUTOMATIC_REJECTION_FLAGS, flag_tokens, mark_reviewed
+from ..analysis.events import (
+    AUTOMATIC_REJECTION_FLAGS, FRAC_DEPTH_ENHANCEMENT, flag_tokens, mark_reviewed,
+)
 from ..analysis.labels import LabelVocabulary, apply_label, clear_labels, label_column
 from ..analysis.reconcile import clear_curation_conflicts
 from ..core.session import Session
@@ -2563,27 +2565,16 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         and never the schema column's suffix: ``depth_pA`` is the frozen column NAME, and
         the events-table header prints it over nA values too.
 
-        THE STALE GLYPH. When the owner has marked the sort column stale
-        (:meth:`set_stale_columns`) the caption carries the same " ⚠" the events-table
-        header does, so the surface the tiles are sorted and read on cannot repeat a badged
-        number unbadged. The sentence itself is on the status line.
+        Captions are numerical artwork. Staleness and above-one fractional-depth
+        warnings remain in the footer, outside the waveform tiles.
         """
         eid = int(r["event_id"])
         sort = self.sort_box.currentText() if hasattr(self, "sort_box") else _SORT_ORDER
-        stale = " ⚠" if _SORT_COLUMNS.get(sort) in self._stale_columns else ""
         if sort == _SORT_DEPTH:
-            return f"{eid} · {r['depth_pA']:.3g}{self._units}{stale}"
+            return f"{eid} · {r['depth_pA']:.3g}{self._units}"
         if sort == _SORT_FRAC:
-            # ...AND THE '>' WHEN IT IS NOT A BLOCKADE FRACTION. dI/I0 above 1 means the
-            # current MAGNITUDE grew during the event; on the owner's apoferritin
-            # recordings 71-86% of the tiles are in that regime, at values of 1.8-2.6. A
-            # caption reading "412 · 2.36" beside a picture of a downward excursion is
-            # exactly how that becomes "a 236% blockade" in someone else's notes. One
-            # glyph, on the surface the events are actually looked at.
-            frac = r["frac_depth"]
-            marker = "" if not np.isfinite(frac) or float(frac) <= 1.0 else " ⚠>1"
-            return f"{eid} · {frac:.3g}{marker}{stale}"
-        return f"{eid} · {_fmt_dwell(float(r['dwell_s']))}{stale}"
+            return f"{eid} · {r['frac_depth']:.3g}"
+        return f"{eid} · {_fmt_dwell(float(r['dwell_s']))}"
 
     # -- selection --------------------------------------------------------------------------------
     def show_event(self, event_id: int) -> None:
@@ -3489,6 +3480,20 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             return f"⚠ sorted and captioned by stale {col}: {note}"
         return f"⚠ {note}"
 
+    def _fraction_note(self) -> str:
+        """Disclose above-one values on this page without marking the tile artwork."""
+        if self._df is None or "frac_depth" not in self._df:
+            return ""
+        rows = self._model.page_df_rows()
+        if not rows:
+            return ""
+        values = self._df.iloc[rows]["frac_depth"].to_numpy(dtype=np.float64)
+        count = int(np.count_nonzero(np.isfinite(values) & (values > FRAC_DEPTH_ENHANCEMENT)))
+        if not count:
+            return ""
+        return (f"⚠ {count} event(s) on this page have dI/I0 > 1: not a blockade fraction. "
+                "Check polarity, the baseline reference and amplifier calibration before interpretation.")
+
     # -- controls ---------------------------------------------------------------------------------
     def set_filter(self, mode: str) -> None:
         if mode in _FILTERS:
@@ -3783,6 +3788,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         stale = self._stale_line()
         if stale:
             bits.append(stale)
+        fraction_note = self._fraction_note()
+        if fraction_note:
+            bits.append(fraction_note)
         # THE DIGIT THAT WROTE NOTHING. See apply_hotkey.
         if self._hotkey_note:
             bits.append(self._hotkey_note)

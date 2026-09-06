@@ -16,6 +16,7 @@ from ..core.layer import ColourRegistry, ViewMode
 from ..core.analysis_workspace import (
     ANALYSIS_PANEL_ARTIFACT_ID,
     DISTRIBUTION_SUMMARIES_ARTIFACT_ID,
+    COMPARISON_FIGURES_ARTIFACT_ID,
     EVENT_PLOTS_ARTIFACT_ID,
     IV_ARTIFACT_ID,
     OWNED_ARTIFACT_IDS,
@@ -56,6 +57,7 @@ from .analysis_explorer import (
     AnalysisExplorer,
     PAGE_DISTRIBUTIONS,
     PAGE_DISTRIBUTION_SUMMARIES,
+    PAGE_COMPARISON_FIGURES,
     PAGE_EVENT_WAVEFORMS,
     PAGE_IV,
     PAGE_NOISE,
@@ -647,6 +649,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._project_save_requester: QtWidgets.QWidget | None = None
         self._plots_window = None   # the single, lazily-built PlotsWindow
         self._distribution_summary_window = None
+        self._comparison_figures_window = None
         self._iv_window = None   # the single, lazily-built IVWindow
         self._vdep_window = None   # the single, lazily-built VDepWindow
         # One top-level home for the analytical surfaces above/below.  The individual
@@ -1276,6 +1279,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "Optional ECDF, empirical survival, box and violin plots of event measurements. "
             "Choose sources and explicitly generate a summary; existing analyses are unchanged.")
         self._act_distribution_summaries.triggered.connect(self._open_distribution_summaries)
+        self._act_comparison_figures = analysis_menu.addAction("Comparison figures…")
+        self._act_comparison_figures.setToolTip(
+            "Generate faceted comparisons, pair-plot matrices and individual-event overlays "
+            "from existing event measurements. Opening this page does not run analysis.")
+        self._act_comparison_figures.triggered.connect(self._open_comparison_figures)
 
         self._act_event_plots = analysis_menu.addAction("Event &plots (density / ensemble)…")
         self._act_event_plots.setToolTip(
@@ -3754,6 +3762,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return {
             PLOTS_ARTIFACT_ID: "plots",
             DISTRIBUTION_SUMMARIES_ARTIFACT_ID: "distribution_summaries",
+            COMPARISON_FIGURES_ARTIFACT_ID: "comparison_figures",
             SUBPOPULATION_ARTIFACT_ID: "subpopulation",
             PSD_ARTIFACT_ID: "psd",
             EVENT_PLOTS_ARTIFACT_ID: "event_plots",
@@ -3766,6 +3775,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for artifact_id, candidate in (
                 (PLOTS_ARTIFACT_ID, self._plots_window),
                 (DISTRIBUTION_SUMMARIES_ARTIFACT_ID, self._distribution_summary_window),
+                (COMPARISON_FIGURES_ARTIFACT_ID, self._comparison_figures_window),
                 (SUBPOPULATION_ARTIFACT_ID, self._subpop_window),
                 (PSD_ARTIFACT_ID, self._psd_window),
                 (EVENT_PLOTS_ARTIFACT_ID, self._event_plot_window),
@@ -3779,6 +3789,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return {
             PLOTS_ARTIFACT_ID: self._plots_window,
             DISTRIBUTION_SUMMARIES_ARTIFACT_ID: self._distribution_summary_window,
+            COMPARISON_FIGURES_ARTIFACT_ID: self._comparison_figures_window,
             SUBPOPULATION_ARTIFACT_ID: self._subpop_window,
             PSD_ARTIFACT_ID: self._psd_window,
             EVENT_PLOTS_ARTIFACT_ID: self._event_plot_window,
@@ -3916,6 +3927,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for artifact_id in (
                 PLOTS_ARTIFACT_ID, SUBPOPULATION_ARTIFACT_ID, PSD_ARTIFACT_ID,
                 DISTRIBUTION_SUMMARIES_ARTIFACT_ID,
+                COMPARISON_FIGURES_ARTIFACT_ID,
                 EVENT_PLOTS_ARTIFACT_ID, IV_ARTIFACT_ID,
                 VOLTAGE_DEPENDENCE_ARTIFACT_ID):
             window = self._workspace_surface(artifact_id)
@@ -4007,6 +4019,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         delattr(self._subpop_window, sidecar)
             reset_pages = {
                 "_distribution_summary_window": PAGE_DISTRIBUTION_SUMMARIES,
+                "_comparison_figures_window": PAGE_COMPARISON_FIGURES,
                 "_psd_window": PAGE_NOISE,
                 "_event_plot_window": PAGE_EVENT_WAVEFORMS,
                 "_iv_window": PAGE_IV,
@@ -4234,6 +4247,8 @@ class MainWindow(QtWidgets.QMainWindow):
             applied_config = applied
         else:
             applied_config = None
+        details_getter = getattr(page, "details_text", None)
+        figure_details = str(details_getter()) if callable(details_getter) else ""
         snapshot = capture_figure_snapshot(
             target, data=data,
             config={"analysis_kind": analysis.kind, "schema_version": analysis.schema_version,
@@ -4243,6 +4258,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "tables": table_names, "blobs": blob_names},
             provenance={"source": source_label, "source_recipes": recipes,
                         "capture_status": capture_status, "components": components,
+                        "details": figure_details,
                         "analysis_recomputed": False, "source_state": live},
             residual_item=residual, include_residual=include_residual,
             additional_resources=resources)
@@ -4320,6 +4336,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return {
             PAGE_DISTRIBUTIONS: PLOTS_ARTIFACT_ID,
             PAGE_DISTRIBUTION_SUMMARIES: DISTRIBUTION_SUMMARIES_ARTIFACT_ID,
+            PAGE_COMPARISON_FIGURES: COMPARISON_FIGURES_ARTIFACT_ID,
             PAGE_EVENT_WAVEFORMS: EVENT_PLOTS_ARTIFACT_ID,
             PAGE_NOISE: PSD_ARTIFACT_ID,
             PAGE_IV: IV_ARTIFACT_ID,
@@ -4330,7 +4347,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _analysis_explorer_status(
             self, page_id: str, page: QtWidgets.QWidget) -> tuple[str, str]:
         """Return the visible page's freshness label without recomputing anything."""
-        if page_id in (PAGE_DISTRIBUTIONS, PAGE_DISTRIBUTION_SUMMARIES) and bool(getattr(page, "_stale", False)):
+        if page_id in (PAGE_DISTRIBUTIONS, PAGE_DISTRIBUTION_SUMMARIES,
+                       PAGE_COMPARISON_FIGURES) and bool(getattr(page, "_stale", False)):
             return "STALE", "stale"
         artifact_id = self._analysis_page_artifact(page_id)
         if artifact_id in self._workspace_frozen:
@@ -4340,7 +4358,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if page_id == PAGE_DISTRIBUTIONS:
             has_data = bool(page.sources())
-        elif page_id == PAGE_DISTRIBUTION_SUMMARIES:
+        elif page_id in (PAGE_DISTRIBUTION_SUMMARIES, PAGE_COMPARISON_FIGURES):
             has_data = page.has_data()
         elif page_id in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE):
             has_data = bool(page.has_data())
@@ -4380,6 +4398,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_plots()
         elif page_id == PAGE_DISTRIBUTION_SUMMARIES and self._distribution_summary_window is not None:
             self._offer_distribution_sources()
+        elif page_id == PAGE_COMPARISON_FIGURES and self._comparison_figures_window is not None:
+            self._offer_comparison_sources()
         elif page_id == PAGE_EVENT_WAVEFORMS and self._event_plot_window is not None:
             self._refresh_event_plots()
         elif page_id == PAGE_NOISE and self._psd_window is not None:
@@ -4524,6 +4544,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 and DISTRIBUTION_SUMMARIES_ARTIFACT_ID not in self._workspace_frozen
                 and DISTRIBUTION_SUMMARIES_ARTIFACT_ID not in self._workspace_pending):
             self._offer_distribution_sources()
+        if (_on_screen(self._comparison_figures_window)
+                and COMPARISON_FIGURES_ARTIFACT_ID not in self._workspace_frozen
+                and COMPARISON_FIGURES_ARTIFACT_ID not in self._workspace_pending):
+            self._offer_comparison_sources()
         if _on_screen(self._plots_window):
             if (PLOTS_ARTIFACT_ID in self._workspace_pending
                     and not self._restoring):
@@ -5014,6 +5038,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self._workspace_installing = True
         try:
             self._distribution_summary_window.set_sources(self._plots_sources())
+        finally:
+            self._workspace_installing = installing
+
+    def _open_comparison_figures(self) -> None:
+        """Open the optional publication comparisons without regenerating a result."""
+        from .comparison_figures_panel import ComparisonFiguresWindow
+
+        if self._comparison_figures_window is None:
+            page = self._comparison_figures_window = ComparisonFiguresWindow(self._session, self)
+            page.refreshRequested.connect(self._prepare_comparison_figures)
+            self._watch_surface_window(page)
+            self._watch_workspace_surface(COMPARISON_FIGURES_ARTIFACT_ID, page)
+        page = self._comparison_figures_window
+        if COMPARISON_FIGURES_ARTIFACT_ID not in self._workspace_frozen:
+            self._offer_comparison_sources()
+        self._restore_workspace_surface(COMPARISON_FIGURES_ARTIFACT_ID, page)
+        self._show_analysis_page(
+            PAGE_COMPARISON_FIGURES, page, refresh=self._generate_comparison_figures)
+
+    def _generate_comparison_figures(self) -> None:
+        page = self._comparison_figures_window
+        if page is None:
+            return
+        self._prepare_comparison_figures()
+        try:
+            page.analyze()
+        except (TypeError, ValueError, OverflowError, ImportError, RuntimeError) as exc:
+            QtWidgets.QMessageBox.warning(page, "Generate comparison figures", str(exc))
+
+    def _prepare_comparison_figures(self) -> None:
+        """Only explicit generation replaces a restored figure with today's inputs."""
+        self._workspace_pending.discard(COMPARISON_FIGURES_ARTIFACT_ID)
+        self._workspace_frozen.discard(COMPARISON_FIGURES_ARTIFACT_ID)
+        page = self._comparison_figures_window
+        if page is not None and page.has_data():
+            # Failed generation must leave the previous picture visibly stale.
+            page._stale = True
+            page._update_status()
+        self._offer_comparison_sources()
+        self._refresh_analysis_explorer_header()
+
+    def _offer_comparison_sources(self) -> None:
+        """Offer current bindings silently, preserving pending saved figure state."""
+        if self._comparison_figures_window is None:
+            return
+        installing = self._workspace_installing
+        self._workspace_installing = True
+        try:
+            self._comparison_figures_window.set_sources(self._plots_sources(), analyze=False)
         finally:
             self._workspace_installing = installing
 

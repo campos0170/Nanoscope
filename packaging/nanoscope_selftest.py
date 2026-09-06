@@ -103,6 +103,78 @@ def _remove_scratch(tmp: Path) -> None:
     print(f"scratch: {len(files)} file(s), {total / 1e6:.1f} MB in {tmp} — {state}")
 
 
+def _comparison_figures_smoke(tmp: Path) -> str:
+    """Exercise the frozen Seaborn path using stored measurements, never detection."""
+    import pandas as pd
+    from PySide6 import QtCore, QtGui, QtWidgets
+
+    from nanoscope.core.sources import PlotSource
+    from nanoscope.gui.comparison_figures_panel import ComparisonFiguresWindow
+    from nanoscope.gui.plot_export import write_live_plot_image
+    from nanoscope.plot import comparison_figures
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    frame = pd.DataFrame({
+        "event_id": [5, 5, 9, 11, 14, 17],
+        "dwell_s": [.001, .002, .003, .004, .005, .006],
+        "depth_pA": [10., 20., 30., 40., 50., 60.],
+        "ecd_pA_s": [.01, .04, .09, .16, .25, .36],
+        "snr": [5., 8., 10., 12., 15., 16.],
+        "accepted": [True, True, False, True, True, True],
+    }, index=[2, 2, 4, 9, 10, 10])
+    sources = [PlotSource(key, label, frame.copy(deep=True), kind="manual", doc_key=key)
+               for key, label in (("smoke-a", "Recording A"), ("smoke-b", "Recording B"))]
+    originals = [source.df.copy(deep=True) for source in sources]
+    signatures = {"png": b"\x89PNG\r\n\x1a\n", "pdf": b"%PDF-", "svg": b"<svg"}
+    outputs = 0
+    for kind, points in (("facets", "strip"), ("pairs", "strip"),
+                         ("events", "strip"), ("events", "swarm")):
+        page, restored = ComparisonFiguresWindow(), ComparisonFiguresWindow()
+        try:
+            page.resize(1000, 740)
+            page.set_sources(sources, selected_keys=[source.key for source in sources])
+            page.set_config({"kind": kind, "points": points,
+                             "features": ["dwell_s", "depth_pA", "ecd_pA_s"]})
+            if not page.analyze() or not page.has_data():
+                raise AssertionError(f"{kind}/{points}: no generated figure")
+            payload, tables = page.snapshot_state()
+            if len(tables["observations"]) != 10:
+                raise AssertionError("Comparison accepted-only selection lost or added rows")
+
+            def no_prepare(*args, **kwargs):
+                raise AssertionError("Snapshot restoration or appearance reran preparation")
+
+            prepare = comparison_figures.prepare_comparison
+            comparison_figures.prepare_comparison = no_prepare
+            try:
+                restored.restore_state(payload, tables)  # No sources offered to this page.
+                restored.set_appearance_state({"title": "Stored comparison", "background": "light"})
+                if not restored.has_data():
+                    raise AssertionError("Source-free comparison snapshot has no figure")
+                for name, expected in tables.items():
+                    pd.testing.assert_frame_equal(restored._tables[name], expected, check_exact=True)
+                for extension, signature in signatures.items():
+                    path = tmp / f"comparison-{kind}-{points}.{extension}"
+                    notes = write_live_plot_image(path, restored.figure_export_target())
+                    data = path.read_bytes()
+                    if notes or len(data) < 1000 or signature not in data[:500]:
+                        raise AssertionError(f"Unusable comparison export: {path.name}; {notes}")
+                    if extension == "png" and QtGui.QImage(str(path)).isNull():
+                        raise AssertionError(f"Unreadable comparison PNG: {path.name}")
+                    outputs += 1
+            finally:
+                comparison_figures.prepare_comparison = prepare
+            for source, original in zip(sources, originals):
+                pd.testing.assert_frame_equal(source.df, original, check_exact=True)
+        finally:
+            for window in (page, restored):
+                window.close()
+                window.deleteLater()
+            QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+            app.processEvents()
+    return f"facets + pairs + strip + swarm; {outputs} PNG/PDF/SVG exports; exact source-free snapshots"
+
+
 def run(argv: list[str]) -> int:
     problems = _argument_problems(argv)
     if problems:
@@ -691,6 +763,10 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
             raise AssertionError(f"PSD: total_rms is not a usable number ({rms!r})")
         return (f"{n_events} events; histogram + {int(evw._density_counts.sum())}-count density "
                 f"+ PSD ({len(psd._psd)} bins, total_rms={rms:.3g}); 3 PNGs written")
+
+    @check("Comparison figures: Seaborn + frozen snapshots + PNG/PDF/SVG")
+    def _comparisons():
+        return _comparison_figures_smoke(tmp)
 
     @check("figure + events CSV export (the paths the owner ships from)")
     def _exports():

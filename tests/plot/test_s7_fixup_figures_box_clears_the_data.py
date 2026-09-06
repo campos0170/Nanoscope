@@ -259,37 +259,27 @@ def test_the_box_font_is_resolved_to_a_file_so_it_cannot_change_at_draw_time():
 # ------------------------------------------------------------------------------------
 # X-SURF-2 — the pointer names something the reader can open
 # ------------------------------------------------------------------------------------
-def test_the_baseline_caveat_does_not_point_at_a_sidecar_the_figure_export_never_writes(tmp_path):
+def test_full_baseline_caveat_is_embedded_with_the_unchanged_figure_family(tmp_path):
+    import json
+    from PIL import Image
+
     ev = _owner_shaped_events()
     fig, ax = figures.dwell_histogram(ev)
     text = "\n".join(t.get_text() for t in ax.texts)
-    assert "open-pore baseline not certified" in text
-    assert "events CSV sidecar" not in text, \
-        "the figure still points at an events CSV that Export figure… does not write"
-
+    assert "certified" not in text.lower()
+    assert "Export events" not in text
     figures.save_figure(fig, tmp_path / "fig_dwell")
-    wrote = sorted(p.name for p in tmp_path.iterdir())
-    assert wrote == ["fig_dwell.csv", "fig_dwell.pdf", "fig_dwell.png"], wrote
-    body = (tmp_path / "fig_dwell.csv").read_text()
-    assert "CERTIFIED" not in body.upper(), \
-        "the CSV beside the figure is its source data; nothing may imply it carries the advisory"
-    assert "Export events" in text, "the pointer must name the command that writes the paragraph"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "fig_dwell.csv", "fig_dwell.pdf", "fig_dwell.png"]
+    assert "CERTIFIED" not in (tmp_path / "fig_dwell.csv").read_text().upper()
+    with Image.open(tmp_path / "fig_dwell.png") as image:
+        details = json.loads(image.info["Description"])
+    assert NOT_CERTIFIED in details["plots"][0]["details"]
 
 
-def test_both_baseline_caveats_point_at_the_same_place():
-    """One spelling of the pointer, so the certified and the counted line cannot drift."""
-    certified = figures._baseline_caveats({"baseline_warnings": [NOT_CERTIFIED]})
-    counted = figures._baseline_caveats({"baseline_warnings": ["drift on this segment"]})
-    assert len(certified) == 1 and len(counted) == 1
-    pointer = getattr(figures, "_ADVISORY_POINTER", "")
-    assert pointer, "the two caveat lines must share one spelling of the pointer"
-    assert certified[0].endswith(pointer)
-    assert counted[0].endswith(pointer)
-    assert "sidecar" not in pointer
-
-
-def test_the_pointer_fits_the_box_without_being_folded():
-    """A folded pointer reads as two half-sentences; it is written under the budget."""
-    line = figures._ADVISORY_POINTER
-    assert len(line) <= figures._BOX_LINE_CHARS
-    assert figures._wrap_line(line) == line
+def test_baseline_only_caveats_do_not_create_a_plot_annotation_box():
+    ev = _owner_shaped_events()
+    for figure in (figures.dwell_histogram, figures.depth_histogram):
+        fig, ax = figure(ev, fit=False)
+        assert _box_of(ax) is None
+        assert NOT_CERTIFIED in figures.figure_details(fig)["plots"][0]["details"]

@@ -1,6 +1,6 @@
 """S7-POP1 (inspector half) — ``EventInspectorWindow.set_stale_columns`` marks every readout
 line that repeats a badged events-table column, carries the banner's sentence, marks the
-plot title, follows navigation, and clears with ``()``.
+readout without marking the plot title, follows navigation, and clears with ``()``.
 
 Measured before it existed: after one knob in the Preprocess tab the events table badged
 nine headers ⚠ and said "Depth, frac_depth, ECD, mean/max deviation and SNR are stale",
@@ -94,26 +94,28 @@ def _lines(insp) -> dict[str, str]:
     return out
 
 
-def test_set_stale_columns_badges_each_affected_line_and_the_title_and_clears(wired, qtbot):
+def test_set_stale_columns_badges_readouts_but_preserves_the_clean_title(wired, qtbot):
     w, doc_id, insp = wired
     assert insp.current_event_id() is not None
     text = insp._readout.text()
     assert "⚠" not in text, text         # 0.3 blockades: no dI/I0>1 glyph to confuse this
     assert "⚠" not in insp._plot.titleLabel.text
+    clean_title = insp._plot.titleLabel.text
 
     insp.set_stale_columns(REMEASURED_COLUMNS, _NOTE)
     qtbot.wait(10)
     assert insp.stale_columns() == tuple(REMEASURED_COLUMNS)
     assert _stale_body(insp) == _NOTE, insp._readout.text().splitlines()[:3]
     got = _lines(insp)
-    for label in ("depth", "dI/I0", "SNR", "rise / fall", "baseline"):
+    for label in ("median depth", "dI/I0", "SNR", "rise / fall", "baseline"):
         assert got[label].endswith(" ⚠"), (label, got[label])
     for label in ("dwell", "accepted", "levels", "filter-limited"):
         assert not got[label].endswith("⚠"), (label, got[label])
     title = insp._plot.titleLabel.text
-    assert "depth" in title and " ⚠" in title, title
-    depth_part = next(p for p in title.split("   ·   ") if p.startswith("depth"))
-    assert depth_part.endswith(" ⚠"), depth_part
+    assert title == clean_title, title
+    assert "median depth" in title and "⚠" not in title, title
+    depth_part = next(p for p in title.split("   ·   ") if p.startswith("median depth"))
+    assert "pA" in depth_part, depth_part
     dwell_part = next(p for p in title.split("   ·   ") if p.startswith("dwell"))
     assert not dwell_part.endswith("⚠"), dwell_part
 
@@ -130,7 +132,7 @@ def test_the_mark_follows_navigation_and_a_subset_of_columns_marks_only_those(wi
     insp.next_event()
     qtbot.wait(10)
     got = _lines(insp)
-    assert got["depth"].endswith(" ⚠") and got["baseline"].endswith(" ⚠"), got
+    assert got["median depth"].endswith(" ⚠") and got["baseline"].endswith(" ⚠"), got
     for label in ("dI/I0", "SNR", "rise / fall", "dwell"):
         assert not got[label].endswith("⚠"), (label, got[label])
     assert _stale_body(insp) == _NOTE
@@ -170,4 +172,4 @@ def test_the_tuple_the_events_table_badges_is_the_tuple_the_seam_takes(wired, qt
     assert _stale_body(insp) == " ".join(note.split())
     assert "⚠ " not in insp._readout.text(), insp._readout.text().splitlines()[:3]
     assert insp.minimumSizeHint().width() <= 1100, insp.minimumSizeHint().width()
-    assert _lines(insp)["depth"].endswith(" ⚠")
+    assert _lines(insp)["median depth"].endswith(" ⚠")

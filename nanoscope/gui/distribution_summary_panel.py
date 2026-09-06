@@ -345,8 +345,6 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             title = "Violin · Scott KDE, observed range, equal peak widths"
         elif kind == "box":
             title = "Box · linear quartiles, 1.5-IQR sample whiskers"
-        if warnings:
-            title = "⚠ Distribution notes · " + title
         snapshot = {"series": series, "primitives": primitives, "warnings": warnings,
                     "title": title, "x_label": label if kind in ("ecdf", "survival") else "Source",
                     "y_label": ("Empirical F(x) = P(X ≤ x)" if kind == "ecdf" else
@@ -428,7 +426,11 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             if primitive["source_key"] not in seen:
                 entries.append((item, primitive["legend"]))
                 seen.add(primitive["source_key"])
-        self._plot.setTitle(self._snapshot.get("title", "Distribution summaries · Generate to begin"))
+        # Older editable snapshots stored a generated warning prefix in this
+        # internal title. Suppress only that prefix for rendering; retain the
+        # snapshot and its warnings, and never filter user appearance titles.
+        title = self._snapshot.get("title", "Distribution summaries · Generate to begin")
+        self._plot.setTitle(title.removeprefix("⚠ Distribution notes · "))
         self._plot.setLabel("bottom", self._snapshot.get("x_label", ""))
         self._plot.setLabel("left", self._snapshot.get("y_label", ""))
         ticks = ([(i, _display_source_label(s["label"], i)) for i, s in enumerate(self._snapshot.get("series", []))]
@@ -472,8 +474,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
 
     def _apply_appearance(self):
         apply_plot_appearance(self._plot, self._appearance, plot_widget=self._plot_widget,
-                              data_items=self._data_items,
-                              title_prefix="⚠ Distribution notes · " if self.warning_text() else "")
+                              data_items=self._data_items)
 
     def appearance_state(self):
         return self._appearance.to_dict()

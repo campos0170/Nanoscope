@@ -53,6 +53,13 @@ from nanoscope.gui.voltage_dep_panel import VDepWindow
 PKG = pathlib.Path(nanoscope.__file__).resolve().parent
 WHERE = f"(nanoscope resolved from {PKG})"
 
+# Exercise multiline export layout using ordinary figure text, not warning prose.
+LONG_FIGURE_TITLE = (
+    "Voltage dependence of the accepted event population in this experiment",
+    "Event amplitude versus applied voltage for the selected recording series",
+    "Shared method description and acquisition conditions for these recordings",
+)
+
 FP_600 = "sha256:ce8ae31f10bd"
 FP_500 = "sha256:b64a75ebdf29"
 FP_700 = "sha256:1a29aabf5fb1"
@@ -164,21 +171,21 @@ def test_median_depth_over_uncalibrated_pores_is_no_longer_silent(qapp, qtbot, t
     assert "median depth" in banner, WHERE
     # ... on every surface the baseline verdict already reaches.
     assert "UNCALIBRATED" in w.details_text(), WHERE
-    assert "gain uncalibrated" in _title(w), f"{_title(w)} {WHERE}"
+    assert "gain uncalibrated" not in _title(w), f"{_title(w)} {WHERE}"
     assert "⚠" in w._headline.text(), WHERE
     # and the fit is still drawn: qualified, never withheld.
     assert w.fit() is not None, WHERE
 
 
-def test_the_saved_title_carries_the_gain(qapp, qtbot, tmp_path):
-    """The title is what leaves the app. ``V₀ = -0.432 V`` left it saying nothing
-    about the units it was fitted in."""
+def test_saved_figure_omits_gain_warning_but_details_retain_it(qapp, qtbot, tmp_path):
+    """Warnings stay in Details; the saved figure retains ordinary method labels."""
     w = _window(qtbot, _ladder(tmp_path, ONE_WINDOW), metric="median_depth", fit="exponential")
     out = tmp_path / "vdep.png"
     assert w.save_image(str(out)) is not None, WHERE
     assert out.is_file() and out.stat().st_size > 0, WHERE
     title = _title(w)
-    assert "gain uncalibrated" in title and "baseline " in title, f"{title} {WHERE}"
+    assert "gain uncalibrated" not in title and "baseline " in title, f"{title} {WHERE}"
+    assert "UNCALIBRATED" in w.details_text(), WHERE
 
 
 @pytest.mark.parametrize("metric", ["median_frac_depth", "median_dwell_s",
@@ -216,7 +223,8 @@ def test_two_different_calibrations_are_named_per_recording(qapp, qtbot, tmp_pat
     gains = {-500.0: (0.1, 0.0), -600.0: (0.2, 0.0), -700.0: (0.1, 0.0)}
     w = _window(qtbot, _ladder(tmp_path, ONE_WINDOW, gains=gains), metric="median_depth")
     assert "do NOT share a current calibration" in w.warning_text(), WHERE
-    assert "MIXED gains (2)" in _title(w), f"{_title(w)} {WHERE}"
+    assert "MIXED gains (2)" not in _title(w), f"{_title(w)} {WHERE}"
+    assert "do NOT share a current calibration" in w.details_text(), WHERE
     assert _table_column(w, "Gain") == [
         "gain 0.1, offset 0", "gain 0.2, offset 0", "gain 0.1, offset 0"], WHERE
 
@@ -283,7 +291,7 @@ def test_a_detection_caveat_reaches_the_voltage_window(qapp, qtbot, tmp_path):
     assert "apo_700.dat" in banner, WHERE
     assert "out of line with the rest" in banner, WHERE
     assert "DETECTION CAVEATS" in w.details_text(), WHERE
-    assert "1 detection caveat(s)" in _title(w), f"{_title(w)} {WHERE}"
+    assert "1 detection caveat(s)" not in _title(w), f"{_title(w)} {WHERE}"
 
 
 def test_a_caveat_is_not_dressed_up_as_an_incomparable_pool(qapp, qtbot, tmp_path):
@@ -360,14 +368,17 @@ def test_the_title_wraps_instead_of_dropping_its_last_segment(qapp, qtbot, tmp_p
 
     session = _ladder(tmp_path, THREE_WINDOWS, warnings={-700.0: (CAVEAT_700,)})
     w = _window(qtbot, session, metric="median_depth", fit="exponential")
+    for segment in ("V₀ = ", "R² = ", "unmerged"):
+        assert segment in _title(w), f"{segment!r} lost from {_title(w)!r} {WHERE}"
+    assert "UNCALIBRATED" in w.details_text() and CAVEAT_700 in w.details_text(), WHERE
+    w._set_title(LONG_FIGURE_TITLE, "#9aa5b1")
     title = _title(w)
     lines = title.split("<br>")
     assert len(lines) > 1, f"the title did not wrap: {title!r} {WHERE}"
     for line in lines:
         assert len(line) <= _TITLE_WRAP + 32, f"{line!r} ({len(line)}) {WHERE}"
     # every segment survived the wrap -- wrapped, not shortened
-    for segment in ("V₀ = ", "R² = ", "NOT COMPARABLE", "unmerged",
-                    "MIXED baselines (3)", "gain uncalibrated", "1 detection caveat(s)"):
+    for segment in LONG_FIGURE_TITLE:
         assert segment in title, f"{segment!r} lost from {title!r} {WHERE}"
     # ... and a title with nothing to qualify stays on one line.
     clean = _window(qtbot, _ladder(tmp_path, ONE_WINDOW), metric="median_dwell_s",
@@ -382,6 +393,7 @@ def test_a_wrapped_title_is_given_the_room_to_be_read(qapp, qtbot, tmp_path):
     V₀ and R² with it."""
     session = _ladder(tmp_path, THREE_WINDOWS, warnings={-700.0: (CAVEAT_700,)})
     w = _window(qtbot, session, metric="median_depth", fit="exponential")
+    w._set_title(LONG_FIGURE_TITLE, "#9aa5b1")
     w.resize(880, 700)
     w.show()
     qtbot.waitExposed(w)
@@ -424,6 +436,7 @@ def test_the_exported_png_really_keeps_the_extra_title_lines(qapp, qtbot, tmp_pa
                       metric="median_depth", fit="exponential")
     plain = _window(qtbot, _ladder(tmp_path, ONE_WINDOW),
                     metric="median_dwell_s", fit="linear")
+    wrapped._set_title(LONG_FIGURE_TITLE, "#9aa5b1")
     a, b = tmp_path / "wrapped.png", tmp_path / "plain.png"
     wrapped.save_image(str(a))
     plain.save_image(str(b))

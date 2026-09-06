@@ -346,13 +346,13 @@ def test_turning_the_KS_verdict_off_cannot_hide_a_REJECTION(qapp, qtbot, show_go
         f"premise: the exponential is REJECTED on a narrow peak -- {gof}")
 
     title = _drawn_title(win)
-    assert "τ =" in title and "KS REJECTED" in title, title
+    assert "τ =" in title and "KS REJECTED" not in title, title
     fit_rows = [t for t in _drawn_legend(win) if t.startswith("fit:")]
-    assert fit_rows and fit_rows[0].endswith("KS REJECTED (1%)"), (
-        fit_rows, "the legend entry is what a reader of the saved image sees")
+    assert fit_rows and "KS REJECTED" not in fit_rows[0]
     if values_box:
         assert win._fit_values_item is not None
-        assert "REJECTED at the 1% level" in win._fit_values_item.text
+        assert "REJECTED" not in win._fit_values_item.text
+        assert ("KS =" in win._fit_values_item.text) is show_gof
     else:
         assert win._fit_values_item is None, "the box is off, and the verdict did not need it"
     assert "DOES NOT DESCRIBE THESE DATA" in win.details_text()
@@ -374,7 +374,8 @@ def test_a_fit_the_test_accepts_carries_no_verdict_in_the_title_or_the_legend(wi
 
     win._style = replace(win._style, fit_values_on_plot=True)
     win._redraw()
-    assert "consistent with these data" in win._fit_values_item.text
+    assert "KS =" in win._fit_values_item.text
+    assert "consistent with these data" not in win._fit_values_item.text
     win._style = replace(win._style, show_gof=False)
     win._redraw()
     assert "KS" not in win._fit_values_item.text, "off means: stop decorating a fine fit"
@@ -389,7 +390,7 @@ def test_the_string_builder_still_carries_the_rejection_whatever_show_gof_says(w
     passed = {"ks": 0.02, "describes_data": True}
     rejected = {"ks": 0.31, "describes_data": False}
     assert "KS" not in win._full_fit_summary(fit, "dwell_s", passed)
-    assert "REJECTED at the 1% level" in win._full_fit_summary(fit, "dwell_s", rejected)
+    assert "KS" not in win._full_fit_summary(fit, "dwell_s", rejected)
 
     win._style = replace(win._style, show_gof=True)
     assert "KS = 0.020" in win._full_fit_summary(fit, "dwell_s", passed)

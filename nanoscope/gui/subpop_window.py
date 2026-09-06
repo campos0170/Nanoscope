@@ -1362,7 +1362,7 @@ class SubpopReportWindow(QtWidgets.QWidget):
             items = [item for item in plot.items
                      if isinstance(item, (pg.PlotDataItem, pg.ScatterPlotItem))]
             apply_plot_appearance(plot, self._appearance, plot_widget=view._plot,
-                                  data_items=items, title_prefix="⚠ Exploratory · ")
+                                  data_items=items)
 
     def figure_export_items(self):
         """Ordered figures; both belong to this report and travel with its caveats."""
@@ -1415,6 +1415,10 @@ class SubpopReportWindow(QtWidgets.QWidget):
     def caveats(self) -> str:
         """The caveat strip that sits under the figures, verbatim."""
         return self._caveats.toPlainText()
+
+    def details_text(self) -> str:
+        """Full figure caveats and captions retained outside the plot canvas."""
+        return self._caveat_summary.full_text()
 
     def splitter(self) -> QtWidgets.QSplitter:
         """The text/figures splitter, so a caller can size it."""

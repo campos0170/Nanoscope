@@ -1,19 +1,7 @@
-"""S7-JRN2 — a distribution fit the app's own KS test REJECTS says so on the figure, in
-the title and the legend entry Save image… exports, whatever ``show_gof`` and
-``fit_values_on_plot`` are set to.
+"""Fit verdicts remain in Details and metadata, never in plot artwork.
 
-THE HOLE. At the app's own defaults on its own shipped "Dwell-time histogram (log-x,
-exponential)" template, the owner's -600 mV recording left the app as title
-"τ = 20.41 ms (n = 275)" and legend "fit: τ = 20.41 ms (n = 275)" -- and nothing else --
-for a curve rejected at D = 0.3966 against a 1% critical value of 0.0981 (p = 1.6e-39;
-dwell quartiles 16.61 / 18.14 / 19.48 ms against the exponential's 5.89 / 14.17 /
-28.32 ms). The verdict was drawn only inside the on-plot values box, which a third
-switch keeps off by default, while ``StyleSettings.show_gof``'s docstring and the
-"KS verdict on figure" tooltip promised the opposite in writing. The test named for the
-guarantee asserted on the string BUILDER and never on what was drawn.
-
-These drive the real window over a narrow peak of the same shape and read the DRAWN
-title, the DRAWN legend entry and the values box.
+These tests retain the same rejected-fit fixtures and statistical premises while
+pinning the requested separation of diagnostics from publication images.
 """
 from __future__ import annotations
 
@@ -102,11 +90,13 @@ def test_a_rejected_fit_says_so_in_the_title_and_the_legend_at_every_setting_of_
     rejected._style = replace(rejected._style, show_gof=show_gof,
                               fit_values_on_plot=values_box)
     rejected._redraw()
-    assert "KS REJECTED" in _title(rejected), _title(rejected)
+    assert "KS REJECTED" not in _title(rejected)
+    assert "KS REJECTED" in rejected.details_text()
     fit_rows = [t for t in _legend(rejected) if t.startswith("fit:")]
-    assert fit_rows and fit_rows[0].endswith(pp._KS_REJECTED_TAG), fit_rows
+    assert fit_rows and "KS REJECTED" not in fit_rows[0]
     if values_box:
-        assert "REJECTED at the 1% level" in rejected._fit_values_item.text
+        assert "REJECTED" not in rejected._fit_values_item.text
+        assert ("KS =" in rejected._fit_values_item.text) is show_gof
     else:
         assert rejected._fit_values_item is None
 
@@ -117,7 +107,8 @@ def test_the_shipped_defaults_are_the_case_that_used_to_ship_a_bare_tau(rejected
     assert StyleSettings().show_gof is True and StyleSettings().fit_values_on_plot is False
     rejected._style = replace(rejected._style, show_gof=True, fit_values_on_plot=False)
     rejected._redraw()
-    assert "τ =" in _title(rejected) and "KS REJECTED" in _title(rejected)
+    assert "τ =" in _title(rejected) and "KS REJECTED" not in _title(rejected)
+    assert "DOES NOT DESCRIBE THESE DATA" in rejected.details_text()
     assert rejected._fit_values_item is None, "the verdict did not need the box"
 
 
@@ -128,15 +119,16 @@ def test_the_verdict_survives_save_image(rejected, tmp_path):
     svg = tmp_path / "rejected.svg"
     rejected.save_image(svg)
     text = svg.read_text(errors="ignore")
-    assert text.count("KS REJECTED") >= 2, "once in the title, once in the legend"
+    assert "KS REJECTED" not in text
+    assert "KS REJECTED" in rejected.details_text()
 
 
 def test_the_tag_survives_the_legends_middle_elision(rejected):
     """A legend entry over 34 characters is middle-elided to its two ends; the tag is
     sized to be one whole end, so "…S REJECTED" cannot happen."""
     fit_rows = [t for t in _legend(rejected) if t.startswith("fit:")]
-    assert fit_rows[0].endswith("…" + pp._KS_REJECTED_TAG) or fit_rows[0].endswith(
-        " — " + pp._KS_REJECTED_TAG), fit_rows
+    assert "REJECTED" not in fit_rows[0]
+    assert "τ" in fit_rows[0]
 
 
 def test_an_overlay_tags_each_rejected_fit_in_its_own_legend_entry(qapp, qtbot):
@@ -150,7 +142,8 @@ def test_an_overlay_tags_each_rejected_fit_in_its_own_legend_entry(qapp, qtbot):
     w._redraw()
     rows = {t.split(" fit:")[0]: t for t in _legend(w) if " fit:" in t}
     assert set(rows) == {"peak", "expo"}, _legend(w)
-    assert rows["peak"].endswith(pp._KS_REJECTED_TAG), rows["peak"]
+    assert "REJECTED" not in rows["peak"]
+    assert f"{pp._KS_REJECTED_TAG}: peak" in w.details_text()
     assert "REJECTED" not in rows["expo"], rows["expo"]
 
 
@@ -166,7 +159,6 @@ def test_a_fit_the_test_accepts_is_not_tagged(qapp, qtbot):
 
 def test_the_tooltip_and_the_docstring_now_name_the_surfaces_the_verdict_reaches(rejected):
     tip = rejected._gof_check.toolTip()
-    assert "title" in tip and "legend" in tip and "Save image" in tip, tip
-    doc = StyleSettings.__doc__ or ""
-    src = open(pp.__file__, encoding="utf-8").read()
-    assert "A REJECTED verdict is written into the title and the legend entry" in src
+    assert "Details" in tip and "provenance" in tip and "Save image" in tip
+    assert "not on the plot" in tip
+    assert rejected._gof_check.text() == "KS statistic on figure"

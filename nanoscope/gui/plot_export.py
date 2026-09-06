@@ -268,7 +268,18 @@ def write_live_plot_image(target: str | Path, item, *, width: int = 0,
         # sibling of the plot.  ``pg_svg.refresh_for_export`` normally reaches the
         # scene through ``item.scene()``; the scene itself has no such owner, so run
         # pyqtgraph's identical pre-paint pass explicitly before exporting it.
-        if isinstance(item, QtWidgets.QGraphicsScene):
+        native_svg = getattr(item, "native_figure_svg", None)
+        if callable(native_svg):
+            # Frozen native artists retain clipping and font outlines without
+            # asking Matplotlib/Seaborn to draw or calculate anything again.
+            payload = native_svg()
+            if not isinstance(payload, bytes) or not payload:
+                raise ValueError("The native figure did not provide a vector drawing.")
+
+            def render(staged):
+                with staged_write(staged) as stream:
+                    stream.write(payload)
+        elif isinstance(item, QtWidgets.QGraphicsScene):
             prepare = getattr(item, "prepareForPaint", None)
 
             def render(staged):

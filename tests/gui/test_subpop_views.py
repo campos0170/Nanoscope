@@ -475,8 +475,11 @@ def test_the_window_has_no_tab_widget(window):
 def test_every_warning_the_run_raised_is_in_the_strip_verbatim(window, report):
     strip = window.caveats()
     assert report.warnings, "the fixture must actually raise some"
+    assert window.details_text() == window._caveat_summary.full_text()
+    assert "Figure context (full captions)" in window.details_text()
     for w in report.warnings:
         assert w in strip, w[:60]
+        assert w in window.details_text(), w[:60]
 
 
 def test_the_strip_also_carries_the_caveat_that_is_about_the_picture(window):

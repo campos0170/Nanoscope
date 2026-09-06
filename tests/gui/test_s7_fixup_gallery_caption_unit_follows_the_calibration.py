@@ -85,7 +85,7 @@ def _frame(w, doc_id):
 
 def _units_of(gal, insp, df, row: int) -> tuple[str, str, str]:
     cap = gal.caption_for(df.iloc[row])
-    line = next(l for l in insp._readout.text().splitlines() if l.startswith("depth"))
+    line = next(l for l in insp._readout.text().splitlines() if l.startswith("median depth"))
     unit_cap = re.search(r"[0-9.]+([a-zA-Z]+)", cap).group(1)
     unit_insp = re.search(r"depth:\s+[-0-9.e+]+\s*([a-zA-Z]+)", line).group(1)
     return cap, unit_cap, unit_insp
@@ -113,7 +113,8 @@ def test_the_depth_caption_and_the_inspector_readout_agree_on_the_unit_after_a_g
     assert unit_cap == unit_insp, (
         f"two windows, two units for event {eid}: tile {cap!r}, inspector {unit_insp}")
     assert gal.stale_columns(), "a gain edit badges the depth on both windows (S7-POP1)"
-    assert cap.endswith("nA ⚠"), cap
+    assert cap.endswith("nA") and "⚠" not in cap, cap
+    assert "stale" in gal.status.text(), gal.status.text()
 
     # ...and back: the caption follows the channel, not the first unit it was fed.
     w._session.set_calibration(doc_id, 0, ChannelCalibration(gain=1.0, target_units="pA"),

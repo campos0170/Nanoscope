@@ -28,6 +28,8 @@ channel's own ``units`` into the axis label instead of hard-coding pA
 
 from __future__ import annotations
 
+import copy
+import json
 import time
 import warnings
 from pathlib import Path
@@ -59,6 +61,7 @@ __all__ = [
     "event_rate_plot",
     "trace_preview",
     "save_figure",
+    "figure_details",
     "save_plot_image",
     "image_write_failure_text",
     "ImageNotRendered",
@@ -72,6 +75,62 @@ __all__ = [
 ]
 
 _DATA_ATTR = "_nanoscope_source_data"
+_DETAILS_ATTR = "_nanoscope_plot_details"
+
+
+def figure_details(fig: Figure) -> dict[str, Any]:
+    """Detached scientific context for Details/export metadata, never plot artwork.
+
+    A figure may contain several report panels, so each panel keeps its own source
+    provenance, fit parameters/diagnostics, and full advisory text. Annotation
+    visibility must not affect this record.
+    """
+    return copy.deepcopy(getattr(fig, _DETAILS_ATTR, {"schema_version": 1, "plots": []}))
+
+
+def _attach_details(fig: Figure, kind: str, prov: dict, *, fit: Any = None,
+                    notes: Sequence[str] = (), **extra: Any) -> None:
+    details = figure_details(fig)
+    fit_data = None if fit is None else {
+        "params": getattr(fit, "params", {}), "ci": getattr(fit, "ci", {}),
+        "n": getattr(fit, "n", None), "meta": getattr(fit, "meta", {}),
+        "warnings": getattr(fit, "warnings", ()),
+    }
+    text: list[str] = []
+    for values in (prov.get("warnings", ()), prov.get("baseline_warnings", ()),
+                   getattr(fit, "warnings", ()), notes):
+        if isinstance(values, str):
+            values = [values]
+        text.extend(str(value) for value in (values or ()) if value is not None and str(value).strip())
+    if fit is not None:
+        text.extend(_fit_caveats(fit))
+        gof = _gof(fit)
+        if gof and gof.get("note"):
+            text.append(str(gof["note"]))
+    details["plots"].append(copy.deepcopy({
+        "kind": kind, "provenance": prov, "fit": fit_data,
+        "details": list(dict.fromkeys(text)), **extra,
+    }))
+    setattr(fig, _DETAILS_ATTR, details)
+
+
+def _details_json(fig: Figure) -> str:
+    """Strict JSON for PDF Subject / PNG Description; source arrays stay untouched."""
+    def normal(value):
+        if isinstance(value, dict):
+            return {str(key): normal(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [normal(item) for item in value]
+        if isinstance(value, np.ndarray):
+            return normal(value.tolist())
+        if isinstance(value, np.generic):
+            return normal(value.item())
+        if isinstance(value, float) and not np.isfinite(value):
+            return None
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+    return json.dumps(normal(figure_details(fig)), ensure_ascii=False, allow_nan=False)
 
 
 # --------------------------------------------------------------------------
@@ -203,7 +262,7 @@ def _stats_module():
     return stats
 
 
-def resolve_t_min(prov: dict, observed_min: float) -> float:
+def resolve_t_min(prov: dict, observed_min: float, *, notes: list[str] | None = None) -> float:
     """The detection limit for a dwell figure, warning when it had to be guessed.
 
     Delegates to :func:`nanoscope.analysis.modules.resolve_t_min` -- the SAME
@@ -219,6 +278,8 @@ def resolve_t_min(prov: dict, observed_min: float) -> float:
         return float(observed_min)
     t_min, _source, note = _resolve(prov, observed_min=float(observed_min))
     if note:
+        if notes is not None:
+            notes.append(str(note))
         warnings.warn(note, RuntimeWarning, stacklevel=3)
     return float(t_min)
 
@@ -254,24 +315,7 @@ def _fit_rejected(fit: Any) -> bool:
 
 
 def _gof_verdict(fit: Any) -> str | None:
-    """The one-line verdict a figure prints for a fit that carries one.
-
-    THE VERDICT GOES ON THE ARTEFACT THAT LEAVES THE APP (S7-JRN3, MISSED-2). Analysis >
-    Export figure... on the owner's -600 mV recording wrote fig_dwell.pdf reading
-    "tau = 20411.6 [17554.2, 25035.2] us / n = 275" for an exponential whose stamped verdict
-    was KS D = 0.3966 against a 1% critical value of 0.0981 (p = 1.6e-39; the sample's
-    quartiles are 16.6/18.1/19.5 ms, the drawn model's 5.9/14.2/28.3 ms), and
-    fig_depth.pdf "mu = 2.363 [2.265, 2.455]" for a single Gaussian drawn through a
-    visibly bimodal histogram (KS 0.2351 vs 0.0981). The Plots window's Details pane said
-    of the same fits "Its parameters should not be reported as measurements" -- and that
-    pane is not exported. The exporter held both verdicts at its single decision point
-    and printed neither.
-
-    Same statistic, same threshold and the same two verdict phrases as the on-screen
-    Plots box (``plots_panel``: "consistent with these data" / "REJECTED at the 1%
-    level"), so the figure a co-author receives and the screen the author read cannot
-    disagree about the fit.
-    """
+    """The existing KS verdict for Details and image metadata, never artwork."""
     gof = _gof(fit)
     if gof is None:
         return None
@@ -323,108 +367,30 @@ def _param_text(symbol: str, val: float, ci: tuple[float, float] | None, *,
                 unit: str = "") -> str:
     """One annotation line for a fitted parameter: ``symbol = value [lo, hi] unit``.
 
-    The single formatter for both histograms, so the "(rejected fit)" label a
-    withheld interval leaves behind is spelled once. ``ci`` is already ``None`` for a
-    rejected fit (see :func:`_param_items`); the label is what tells the reader WHY the
-    bracket they expect after a fitted value is missing.
+    Rejected-fit intervals remain withheld as before; the verdict and original
+    intervals are retained in figure details, not appended to the artwork.
     """
     text = f"{symbol} = {val * scale:{fmt}}"
     if ci is not None:
         text += f" [{ci[0] * scale:{fmt}}, {ci[1] * scale:{fmt}}]"
     text += unit
-    if rejected:
-        text += " (rejected fit)"
     return text
 
 
 def _depth_wording(depth: np.ndarray) -> tuple[str, str]:
-    """``(axis label, median line)`` for a dI/I0 axis -- the SAME guard for every figure.
-
-    ONE HELPER, SO THE TWO FIGURES CANNOT DRIFT (MISSED-1). ``depth_histogram`` relabelled
-    its axis "ENHANCEMENT: median > 1, not a blockade" (report High-5) and
-    ``scatter_dwell_depth``, two functions below it, went on writing "blockade depth
-    dI/I0" on its y axis and "median dI/I0 = 2.524" bare in its box -- over the same 275
-    events, 236 of which (85.8%) have frac_depth > 1: the current magnitude GREW, and the
-    app's own note for that median is "ABOVE 1, so this is not a blockade fraction".
-    The scatter is the canonical nanopore figure, the one most likely to be a paper's
-    Figure 1. Same threshold and same function (``events.frac_depth_note``) as the
-    Summary row, the Event Inspector and the CSV sidecar.
-    """
+    """Quantity label and median summary; warnings are retained separately in details."""
     median = float(np.median(depth))
     enhanced = bool(events_mod.frac_depth_note(median))
-    # The enhancement label is two lines: as one line it is wider than a single-column
-    # figure, and the exported depth PNG clipped its closing parenthesis.
-    label = (r"$\Delta I / I_0$" + "\n(ENHANCEMENT: median > 1, not a blockade)" if enhanced
+    # Do not call an out-of-range excursion a blockade. The explanatory warning
+    # belongs to figure_details, while the axis retains its scientific quantity.
+    label = (r"$\Delta I / I_0$" if enhanced
              else r"blockade depth $\Delta I / I_0$")
     median_line = rf"median $\Delta I / I_0$ = {median:.3f}"
-    if enhanced:
-        median_line += "\n(ENHANCEMENT: > 1, not a blockade)"
     return label, median_line
 
 
-#: Marker the baseline estimator puts in its advisory when it could not tell the open
-#: pore from another conductance level (``analysis.baseline``: "The open pore here is
-#: NOT CERTIFIED, only chosen."). Matched case-insensitively on the stamped text.
-_NOT_CERTIFIED = "NOT CERTIFIED"
-
-
-def _baseline_caveats(prov: dict, baseline_warnings: Sequence[str] = ()) -> list[str]:
-    """The one line a figure prints when its detection's baseline carries an advisory.
-
-    THE ADVISORY REACHES THIS MODULE ALREADY (S7-JRN3, part 2): the detector stamps
-    ``provenance['baseline_warnings']`` on the EventSet, ``_unpack`` hands that dict to
-    every event figure, and the events-CSV export prints the sentence in full -- while
-    the four figures, which describe the same detection, carried none of it. On the
-    owner's -600 mV recording that sentence is "The open pore here is NOT CERTIFIED,
-    only chosen. This recording has TWO conductance levels: the tracked one at -34.6 pA,
-    which holds 90% of the recording, and another at -120.7 pA holding 5% ..." -- i.e.
-    every dI/I0 on the depth and scatter figures may be referenced to the wrong current.
-
-    A figure has room for a line, not a paragraph, so this states the verdict and
-    points at where the paragraph is. ``baseline_warnings`` is a seam for a caller that
-    holds the detection's advisories somewhere other than the EventSet's provenance;
-    the shipped exporter needs nothing beyond ``_unpack``.
-
-    THE POINTER NAMES A FILE THAT HOLDS THE PARAGRAPH (X-SURF-2). The first cut of this
-    line said "see the events CSV sidecar". Analysis > Export figure... writes
-    ``fig_<name>.pdf`` + ``.png`` + ``.csv`` -- and the CSV beside each figure is the
-    figure's own source data (``bin_left_s,bin_right_s,...``), which carries no advisory;
-    no events CSV is written by that command at all. The paragraph lives in the
-    ``<stem>.meta.json`` that Analysis > Export events... writes, a separate command the
-    user may never have run, so a co-author holding the figure bundle followed the pointer
-    to the CSV next to the figure and found nothing. It now names that command and its
-    sidecar. (Adding the paragraph to the figure family itself would change the three-file
-    contract every overwrite prompt and status line is built on, or put a comment line in
-    a CSV that ``read_csv`` would take for data.)
-    """
-    warns = [str(w) for w in (prov.get("baseline_warnings") or ())]
-    warns.extend(str(w) for w in baseline_warnings)
-    warns = [w for w in warns if w.strip()]
-    if not warns:
-        return []
-    if any(_NOT_CERTIFIED in w.upper() for w in warns):
-        return [f"open-pore baseline not certified\n{_ADVISORY_POINTER}"]
-    n = len(warns)
-    return [f"{n} baseline advisor{'y' if n == 1 else 'ies'} on this detection\n"
-            f"{_ADVISORY_POINTER}"]
-
-
-#: Where the full text of a baseline advisory is: the provenance sidecar of the events
-#: export, named by the command that writes it. One spelling, so the two caveat lines
-#: above cannot point at different places. Under :data:`_BOX_LINE_CHARS`.
-_ADVISORY_POINTER = "— full text: Export events… (.meta.json)"
-
-
 def _fit_caveats(fit: Any) -> list[str]:
-    """One-line-each caveats the figure must print next to the fitted parameters.
-
-    A published figure is where these numbers stop being reviewable, so anything
-    that moved the estimate -- a detection floor that was guessed, events dropped
-    from the fit, a modelled right truncation, a floor-biased depth component --
-    is stated ON the figure rather than left in ``FitResult.meta``. The fit's
-    goodness-of-fit verdict (:func:`_gof_verdict`) is the last line: it did not move
-    the estimate, it says whether the estimate is one.
-    """
+    """Complete existing fit caveats for Details and image metadata, not the canvas."""
     meta = dict(getattr(fit, "meta", {}) or {})
     out: list[str] = []
     n_excl = int(meta.get("n_excluded_filter_limited", 0) or 0)
@@ -447,24 +413,14 @@ def _fit_caveats(fit: Any) -> list[str]:
     return out
 
 
-def _unsilenceable(fit: Any, prov: dict) -> list[str]:
-    """The lines ``annotate=False`` may NOT remove: a rejection verdict and a baseline caveat.
-
-    ``annotate=False`` exists for a multi-panel figure whose NUMBERS are stated in a
-    shared caption, where the same tau on every subplot is clutter. A curve the app's
-    own test threw out, or a dI/I0 axis referenced to a baseline the estimator could not
-    certify, is not a number the caption can be trusted to restate -- it is the
-    difference between a measurement and a decoration, and the on-screen Plots box
-    already follows this rule ("THE SWITCH CANNOT HIDE A REJECTION"). So these lines are
-    drawn whatever ``annotate`` says; the fitted values, ``n`` and the fit's own moves
-    still obey it.
-    """
-    out: list[str] = []
-    if _fit_rejected(fit):
-        verdict = _gof_verdict(fit)
-        if verdict:
-            out.append(verdict)
-    out.extend(_baseline_caveats(prov))
+def _fit_support(fit: Any) -> list[str]:
+    """Scientific model support labels, separate from warning/verdict text."""
+    meta = dict(getattr(fit, "meta", {}) or {})
+    out = []
+    if meta.get("t_min") is not None:
+        out.append(rf"$t_{{min}}$ = {float(meta['t_min']) * 1e6:.1f} $\mu$s")
+    if meta.get("t_max") is not None:
+        out.append(rf"$t_{{max}}$ = {float(meta['t_max']) * 1e6:.1f} $\mu$s")
     return out
 
 
@@ -947,18 +903,13 @@ def dwell_histogram(
             pre-computed one whenever the user has already run a fit: `True`
             refits from scratch at n_components=1, so a figure exported after a
             two-component fit would carry a different tau from the one the app
-            displayed. `_fit_caveats` prints what the supplied fit did (its
-            t_min, excluded events, modelled right truncation) on the figure.
+            displayed. Its complete metadata, caveats and verdict remain in
+            :func:`figure_details` and the saved PDF/PNG metadata.
         log_bins: log-spaced bins (default) vs linear.
-        annotate: write the fitted parameters (tau with its interval, n, and the
-            fit's own caveats) onto the axes. On by default -- that is what makes an
-            exported figure carry its own numbers instead of needing the app open
-            beside it. Set False for a panel whose numbers are stated in a shared
-            caption, where the same text on every subplot is clutter. Two lines
-            ignore it (:func:`_unsilenceable`): the verdict of a fit the KS test
-            REJECTED, and the detection's baseline advisory -- neither is a number
-            a caption can be trusted to restate. A rejected fit is drawn with its
-            point value labelled "(rejected fit)" and WITHOUT its interval.
+        annotate: write fitted parameters, n and model-support limits onto the
+            axes. Set False for a shared-caption panel. Warning/verdict text is
+            always confined to figure details; rejected-fit intervals remain
+            withheld without changing the fit or its original confidence bounds.
 
     Returns:
         (fig, ax).
@@ -968,7 +919,9 @@ def dwell_histogram(
     if np.any(dwell <= 0):
         raise ValueError("dwell_s contains non-positive values; a dwell time cannot be <= 0")
 
-    t_min = resolve_t_min(prov, float(dwell.min()))
+    limit_notes: list[str] = []
+    t_min = resolve_t_min(prov, float(dwell.min()), notes=limit_notes)
+    fitted = None
 
     with nanoscope_style():
         fig, ax = _fig_of(ax, figure_size("single"))
@@ -1031,12 +984,10 @@ def dwell_histogram(
                 for _name, val, ci in _param_items(fitted, "tau")
             ]
             texts.append(f"n = {n_fit}")
-            texts.extend(_fit_caveats(fitted))
-            texts.extend(_baseline_caveats(prov))
-            box = texts if annotate else _unsilenceable(fitted, prov)
+            texts.extend(_fit_support(fitted))
+            box = texts if annotate else []
         else:
-            # No fit, so nothing to silence -- only the detection's own caveat.
-            box = _baseline_caveats(prov)
+            box = []
 
         # The user must see what they cannot see.
         left = min(t_min, lo) * 0.5
@@ -1072,6 +1023,8 @@ def dwell_histogram(
             }
         ),
     )
+    _attach_details(fig, "dwell_histogram", prov, fit=fitted, notes=limit_notes,
+                    detection_limit_s=t_min, annotate=bool(annotate))
     return fig, ax
 
 
@@ -1096,9 +1049,8 @@ def depth_histogram(
         fit: True to fit via `analysis.stats.fit_depth_gaussians`, False, or a
             pre-computed FitResult whose `.predict` returns the density.
         n_components: mixture components to fit.
-        annotate: write the fitted means (with their intervals), n and the fit's
-            caveats onto the axes -- see :func:`dwell_histogram`, including what a
-            rejected fit and a baseline advisory do regardless of this flag.
+        annotate: write fitted means (with applicable intervals) and n onto the
+            axes. Full caveats/verdicts remain in figure details and metadata.
 
     Returns:
         (fig, ax).
@@ -1107,6 +1059,7 @@ def depth_histogram(
     depth = _column(df, "frac_depth")
     if n_components < 1:
         raise ValueError(f"n_components must be >= 1, got {n_components}")
+    fitted = None
 
     with nanoscope_style():
         fig, ax = _fig_of(ax, figure_size("single"))
@@ -1139,12 +1092,9 @@ def depth_histogram(
                 ax.axvline(val, color=PALETTE["fit"], lw=0.8, ls=":", zorder=4)
                 texts.append(_param_text(r"$\mu$", val, ci, rejected=rejected, fmt=".3f"))
             texts.append(f"n = {int(getattr(fitted, 'n', 0) or 0) or depth.size}")
-            texts.extend(_fit_caveats(fitted))
-            texts.extend(_baseline_caveats(prov))
-            box = texts if annotate else _unsilenceable(fitted, prov)
+            box = texts if annotate else []
         else:
-            # No fit, so nothing to silence -- only the detection's own caveat.
-            box = _baseline_caveats(prov)
+            box = []
 
         # A FIGURE LEAVES THE APP. If the median of this very histogram is above 1 the
         # x axis is not a blockade depth at all -- the current MAGNITUDE grew -- and a
@@ -1172,6 +1122,9 @@ def depth_histogram(
             }
         ),
     )
+    _attach_details(fig, "depth_histogram", prov, fit=fitted,
+                    notes=[events_mod.frac_depth_note(float(np.median(depth)))],
+                    annotate=bool(annotate))
     return fig, ax
 
 
@@ -1202,9 +1155,8 @@ def scatter_dwell_depth(
             it actually measured -- n, the two medians, and how many of the points
             are filter-limited and therefore lying about their depth. A saved PNG
             that names neither is a picture a reader cannot quote. The median dI/I0
-            and the y axis carry the ENHANCEMENT mark when the median is above 1,
-            from the same helper as :func:`depth_histogram` (:func:`_depth_wording`);
-            the detection's baseline advisory is written whatever this flag says.
+            and the y axis name the measured quantity without calling values above
+            one blockades. Full warnings are retained in figure details/metadata.
 
     Returns:
         (fig, ax) where ax is the main (joint) axes.
@@ -1250,7 +1202,7 @@ def scatter_dwell_depth(
                        alpha=0.10, lw=0, zorder=0)
             ax.scatter(x[limited], depth[limited], s=14, facecolors="none",
                        edgecolors=PALETTE["filter_limited"], linewidths=0.7, zorder=4,
-                       label="filter-limited (depth attenuated)")
+                       label="filter-limited")
             ax.legend(loc="lower right", fontsize=6)
 
         nb = _n_bins(dwell.size)
@@ -1285,12 +1237,10 @@ def scatter_dwell_depth(
                      median_line]
             n_limited = int(np.count_nonzero(limited))
             if n_limited:
-                texts.append(f"{n_limited} filter-limited (depth attenuated)")
-            texts.extend(_baseline_caveats(prov))
+                texts.append(f"filter-limited: {n_limited}")
             box = texts
         else:
-            # This figure fits nothing, so the only unsilenceable line is the baseline's.
-            box = _baseline_caveats(prov)
+            box = []
 
         ax.set_xlabel(r"dwell time ($\mu$s)")
         ax.set_ylabel(y_label)
@@ -1301,6 +1251,11 @@ def scatter_dwell_depth(
         fig,
         pd.DataFrame({"dwell_s": dwell, "frac_depth": depth, "filter_limited": limited}),
     )
+    _attach_details(fig, "scatter_dwell_depth", prov,
+                    notes=[events_mod.frac_depth_note(float(np.median(depth))),
+                           "Filter-limited event depths may be attenuated and dwells biased long."
+                           if limited.any() else ""],
+                    n_filter_limited=int(np.count_nonzero(limited)), annotate=bool(annotate))
     return fig, ax
 
 
@@ -1582,10 +1537,10 @@ def trace_preview(
         n_shown = 0
         # The detection's baseline advisory travels with its events (S7-JRN3 part 2):
         # this figure draws the very baseline the advisory is about.
-        trace_caveats: list[str] = []
+        eprov: dict = {}
+        trace_details: list[str] = []
         if events is not None:
             edf, eprov = _unpack(events)
-            trace_caveats = _baseline_caveats(eprov)
             if len(edf):
                 for c in ("t_start_s", "dwell_s"):
                     if c not in edf.columns:
@@ -1596,14 +1551,14 @@ def trace_preview(
                     # did) paints a band at "0.25" on an axis where 0.25 is the 0.25th
                     # SAMPLE. Nothing is drawn, the count says zero, and the reason is
                     # said out loud instead of being left for the reader to notice.
-                    warnings.warn(
+                    note = (
                         "trace_preview: events were not shaded because this XAxis is in "
                         "samples, not seconds — an event's t_start_s is on the recording "
                         "CLOCK and cannot be placed on a sample axis. Pass a time axis "
-                        "(Session.x_axis on a document with a known sample rate).",
-                        RuntimeWarning,
-                        stacklevel=2,
+                        "(Session.x_axis on a document with a known sample rate)."
                     )
+                    trace_details.append(note)
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
                 else:
                     # THE CONVERSION. ``t_start_s`` is recording-clock (0 = first loaded
                     # sample); this axis is instrument-clock. This is
@@ -1633,9 +1588,7 @@ def trace_preview(
         if title:
             ax.set_title(f"{title}", loc="left")
         ax.legend(loc="lower right", fontsize=6)
-        # Above the axes, not in them: the envelope fills the trace axes edge to edge.
-        setattr(ax, _ANNOTATE_ABOVE_ATTR, True)
-        _annotate(ax, trace_caveats)
+        # The source's baseline advisories are attached as details, never drawn.
 
     source = {"x": t, "current": vals}
     if x_is_time:
@@ -1659,6 +1612,9 @@ def trace_preview(
             shape, np.nan if instrument_origin_s is None else float(instrument_origin_s),
             dtype=float)
     _attach(fig, pd.DataFrame(source))
+    _attach_details(fig, "trace_preview", eprov, notes=trace_details, n_events_shown=n_shown,
+                    x_axis_origin_s=x_start if x_is_time else None,
+                    instrument_origin_s=instrument_origin_s)
     setattr(fig, "_nanoscope_n_events_shown", n_shown)
     # The origin every band on this figure was placed through — None when the axis is
     # samples and no shading was possible. A caller (or a test) can read back WHICH
@@ -1717,7 +1673,12 @@ def figure_output_paths(path: str | Path) -> tuple[Path, ...]:
 
 def save_figure(fig: Figure, path: str | Path, *, data: Any = None,
                 group: StagedSet | None = None) -> dict[str, Path]:
-    """Save a figure as vector PDF + 300 dpi PNG, and write its source data as CSV.
+    """Save PDF + PNG + source CSV, keeping warning/provenance text out of artwork.
+
+    :func:`figure_details` is embedded as JSON in PDF Subject and PNG Description.
+    This preserves the existing three-file overwrite/atomic-write contract and the
+    numerical CSV unchanged while carrying the full scientific context with both
+    image formats. The UI can also consume that detached details record directly.
 
     Writes the family of siblings enumerated by :func:`figure_output_paths`; a GUI
     caller must confirm THAT set, not the single path it was handed.
@@ -1787,7 +1748,8 @@ def save_figure(fig: Figure, path: str | Path, *, data: Any = None,
             f = stem.with_suffix("." + ext)
             assert f in declared
             mine.append(f)
-            fig.savefig(owned.stage(f), dpi=_EXPORT_DPI, bbox_inches="tight")
+            metadata = {"Subject" if ext == "pdf" else "Description": _details_json(fig)}
+            fig.savefig(owned.stage(f), dpi=_EXPORT_DPI, bbox_inches="tight", metadata=metadata)
             out[ext] = f
         if len(df):
             csv = stem.with_suffix(".csv")

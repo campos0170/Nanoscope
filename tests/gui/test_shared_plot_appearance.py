@@ -178,7 +178,8 @@ def test_gui_export_uses_options_but_path_export_is_unchanged(scientific_window,
     module = iv_panel if isinstance(scientific_window, IVWindow) else voltage_dep_panel
     w = scientific_window
     options = SimpleNamespace(width=1024, height=768, physical_width_mm=86,
-                              physical_height_mm=64.5, extension=".png", native=False, dpi=300)
+                              physical_height_mm=64.5, extension=".png", native=False, dpi=300,
+                              frozen_snapshot=None)
     calls = []
     monkeypatch.setattr(module, "choose_live_plot_export",
                         lambda *a, **k: (tmp_path / "figure.png", options))

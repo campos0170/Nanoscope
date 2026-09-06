@@ -163,9 +163,9 @@ def test_window_warns_when_an_amplitude_is_pooled_across_baselines(qapp, qtbot, 
     for fp in (FP_500, FP_600, FP_700):
         assert fp in banner
     assert "Re-detect" in banner
-    # ... and it is also in the details pane and on the title, so an export carries it.
+    # Full caveats remain in Details and outside-canvas warnings, not plot titles.
     assert "NOT COMPARABLE" in w.details_text()
-    assert "MIXED baselines" in _title(w)
+    assert "MIXED baselines" not in _title(w)
     assert "⚠" in w._headline.text()
 
 
@@ -184,11 +184,9 @@ def test_window_within_one_fingerprint_is_quiet_except_about_the_gain(
     carries the identity calibration ``(1.0, 0.0)`` — nobody has calibrated anything, so
     those picoamps are three different raw scales on one axis.
 
-    What is pinned now is the same thing, from the other side: the banner is empty for
-    the ratio and carries the gain caution for the absolute current, and the title —
-    the surface that survives *Save image*, which is how these numbers left the app in
-    the first place — says ``gain uncalibrated`` on its face for the one and not the
-    other. Removing the gain rule empties the banner and the title alike, and this fails.
+    The banner is empty for the ratio and carries the gain caution for the absolute
+    current. Full Details retains that caution, while plots carry ordinary method
+    and result labels rather than automatic warning prose.
     """
     w = _window(qtbot, _ladder(tmp_path, _ONE_FINGERPRINT), metric=metric, fit="linear")
 
@@ -208,9 +206,9 @@ def test_window_within_one_fingerprint_is_quiet_except_about_the_gain(
     assert banner.startswith("CAUTION — comparing median depth across recordings:"), banner
     assert "UNCALIBRATED" in banner
     assert "median dwell" in banner and "median dI/I0" in banner
-    # ...and it reaches the two surfaces an export keeps, not just the banner.
+    # Details retains the warning for reproducible data and figure-bundle exports.
     assert "CAUTION" in w.details_text()
-    assert "gain uncalibrated" in _title(w)
+    assert "gain uncalibrated" not in _title(w)
     assert "⚠" in w._headline.text()
     # The fit is still drawn: the verdict is advisory, never a refusal.
     assert w.fit() is not None
@@ -278,7 +276,7 @@ def test_a_merged_set_pooled_with_an_unmerged_one_warns(qapp, qtbot, tmp_path):
                  duration_s=10.0, fingerprint=FP_600, merged_window_s=window)
     w = _window(qtbot, session, metric="capture_rate_hz", fit="exponential")
     assert "merge state" in w.warning_text()
-    assert "MIXED merge states" in _title(w)
+    assert "MIXED merge states" not in _title(w)
     assert w.fit() is not None                    # still fitted, never withheld
 
 

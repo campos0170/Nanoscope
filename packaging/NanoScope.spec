@@ -169,7 +169,7 @@ excludes = _QT_EXCLUDES + _LEAF_EXCLUDES + [
     # Big scientific packages that live in this conda env but that nanoscope never imports.
     # Without these, a single transitive `import skimage` inside a dependency costs 300 MB.
     "torch", "torchvision", "jax", "jaxlib", "cv2", "skimage", "sympy", "numba", "llvmlite",
-    "statsmodels", "seaborn", "plotly", "dask", "xarray", "sqlalchemy", "openpyxl",
+    "statsmodels", "plotly", "dask", "xarray", "sqlalchemy", "openpyxl",
     "xlsxwriter", "tables", "numexpr", "bottleneck", "PIL.ImageQt",
     # TensorFlow satellites present in the env and NOT used by ml_detect. tf_keras in particular
     # is a second, complete copy of Keras 2 that TF 2.15 will import if it is importable.
