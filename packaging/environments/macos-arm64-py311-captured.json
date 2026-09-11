@@ -1,0 +1,332 @@
+{
+  "architecture": "arm64",
+  "build_tools": {
+    "pillow": "10.2.0",
+    "pyinstaller": "6.21.0",
+    "pyinstaller-hooks-contrib": "2026.6",
+    "setuptools": "80.9.0",
+    "wheel": "0.45.1"
+  },
+  "captured_at_utc": "2026-09-11T13:08:23Z",
+  "compatibility_issues": [
+    "tensorflow-macos requires keras<2.16,>=2.15.0; installed 3.12.0"
+  ],
+  "optional_runtime_absent": [
+    "tensorflow"
+  ],
+  "optional_runtime_present": [
+    "tensorflow-macos",
+    "keras",
+    "numba"
+  ],
+  "packages": {
+    "absl-py": "2.1.0",
+    "astunparse": "1.6.3",
+    "cachetools": "4.2.2",
+    "certifi": "2025.1.31",
+    "charset-normalizer": "3.4.1",
+    "colorama": "0.4.6",
+    "contourpy": "1.2.0",
+    "cycler": "0.11.0",
+    "flatbuffers": "24.3.25",
+    "fonttools": "4.63.0",
+    "gast": "0.6.0",
+    "google-auth": "2.39.0",
+    "google-auth-oauthlib": "1.2.2",
+    "google-pasta": "0.2.0",
+    "grpcio": "1.72.0rc1",
+    "h5py": "3.12.1",
+    "idna": "3.10",
+    "joblib": "1.2.0",
+    "keras": "3.12.0",
+    "kiwisolver": "1.4.4",
+    "libclang": "18.1.1",
+    "llvmlite": "0.42.0",
+    "markdown": "3.4.1",
+    "markdown-it-py": "2.2.0",
+    "markupsafe": "2.1.3",
+    "matplotlib": "3.10.0",
+    "mdurl": "0.1.0",
+    "ml-dtypes": "0.2.0",
+    "namex": "0.0.8",
+    "neo": "0.14.2",
+    "nptdms": "1.9.0",
+    "numba": "0.59.0",
+    "numpy": "1.26.4",
+    "oauthlib": "3.2.2",
+    "opt-einsum": "3.4.0",
+    "optree": "0.13.0",
+    "packaging": "24.2",
+    "pandas": "2.2.3",
+    "pillow": "10.2.0",
+    "protobuf": "4.25.8",
+    "pyarrow": "14.0.2",
+    "pyasn1": "0.4.8",
+    "pyasn1-modules": "0.2.8",
+    "pygments": "2.19.2",
+    "pyparsing": "3.0.9",
+    "pyqtgraph": "0.14.0",
+    "pyside6": "6.11.1",
+    "pyside6-addons": "6.11.1",
+    "pyside6-essentials": "6.11.1",
+    "python-dateutil": "2.9.0.post0",
+    "pytz": "2022.7.1",
+    "quantities": "0.16.2",
+    "requests": "2.32.3",
+    "requests-oauthlib": "2.0.0",
+    "rich": "13.3.5",
+    "rsa": "4.9.1",
+    "scikit-learn": "1.7.0",
+    "scipy": "1.15.1",
+    "seaborn": "0.13.2",
+    "setuptools": "80.9.0",
+    "shiboken6": "6.11.1",
+    "six": "1.17.0",
+    "tensorboard": "2.15.2",
+    "tensorboard-data-server": "0.7.2",
+    "tensorflow-estimator": "2.15.0",
+    "tensorflow-io-gcs-filesystem": "0.37.1",
+    "tensorflow-macos": "2.15.0",
+    "termcolor": "2.5.0",
+    "threadpoolctl": "3.5.0",
+    "typing-extensions": "4.14.0",
+    "tzdata": "2023.3",
+    "urllib3": "1.26.20",
+    "werkzeug": "2.3.7",
+    "wheel": "0.45.1",
+    "wrapt": "1.14.1"
+  },
+  "platform": "Darwin",
+  "platform_release": "25.3.0",
+  "python": "3.11.7",
+  "reproduction_scope": "Captured installed versions for this platform/Python; compatibility notes must be resolved before claiming a clean solver-reproducible environment. No upgrades were performed.",
+  "requirements": {
+    "absl-py": [],
+    "astunparse": [
+      "six",
+      "wheel"
+    ],
+    "cachetools": [],
+    "certifi": [],
+    "charset-normalizer": [],
+    "colorama": [],
+    "contourpy": [
+      "numpy"
+    ],
+    "cycler": [],
+    "flatbuffers": [],
+    "fonttools": [],
+    "gast": [],
+    "google-auth": [
+      "cachetools",
+      "pyasn1-modules",
+      "rsa"
+    ],
+    "google-auth-oauthlib": [
+      "google-auth",
+      "requests-oauthlib"
+    ],
+    "google-pasta": [
+      "six"
+    ],
+    "grpcio": [],
+    "h5py": [
+      "numpy"
+    ],
+    "idna": [],
+    "joblib": [],
+    "keras": [
+      "absl-py",
+      "h5py",
+      "ml-dtypes",
+      "namex",
+      "numpy",
+      "optree",
+      "packaging",
+      "rich"
+    ],
+    "kiwisolver": [],
+    "libclang": [],
+    "llvmlite": [],
+    "markdown": [],
+    "markdown-it-py": [
+      "mdurl"
+    ],
+    "markupsafe": [],
+    "matplotlib": [
+      "contourpy",
+      "cycler",
+      "fonttools",
+      "kiwisolver",
+      "numpy",
+      "packaging",
+      "pillow",
+      "pyparsing",
+      "python-dateutil"
+    ],
+    "mdurl": [],
+    "ml-dtypes": [
+      "numpy"
+    ],
+    "namex": [],
+    "neo": [
+      "numpy",
+      "packaging",
+      "quantities"
+    ],
+    "nptdms": [
+      "numpy"
+    ],
+    "numba": [
+      "llvmlite",
+      "numpy"
+    ],
+    "numpy": [],
+    "oauthlib": [],
+    "opt-einsum": [],
+    "optree": [
+      "typing-extensions"
+    ],
+    "packaging": [],
+    "pandas": [
+      "numpy",
+      "python-dateutil",
+      "pytz",
+      "tzdata"
+    ],
+    "pillow": [],
+    "protobuf": [],
+    "pyarrow": [
+      "numpy"
+    ],
+    "pyasn1": [],
+    "pyasn1-modules": [
+      "pyasn1"
+    ],
+    "pygments": [],
+    "pyparsing": [],
+    "pyqtgraph": [
+      "colorama",
+      "numpy"
+    ],
+    "pyside6": [
+      "pyside6-addons",
+      "pyside6-essentials",
+      "shiboken6"
+    ],
+    "pyside6-addons": [
+      "pyside6-essentials",
+      "shiboken6"
+    ],
+    "pyside6-essentials": [
+      "shiboken6"
+    ],
+    "python-dateutil": [
+      "six"
+    ],
+    "pytz": [],
+    "quantities": [
+      "numpy"
+    ],
+    "requests": [
+      "certifi",
+      "charset-normalizer",
+      "idna",
+      "urllib3"
+    ],
+    "requests-oauthlib": [
+      "oauthlib",
+      "requests"
+    ],
+    "rich": [
+      "markdown-it-py",
+      "pygments"
+    ],
+    "rsa": [
+      "pyasn1"
+    ],
+    "scikit-learn": [
+      "joblib",
+      "numpy",
+      "scipy",
+      "threadpoolctl"
+    ],
+    "scipy": [
+      "numpy"
+    ],
+    "seaborn": [
+      "matplotlib",
+      "numpy",
+      "pandas"
+    ],
+    "setuptools": [],
+    "shiboken6": [],
+    "six": [],
+    "tensorboard": [
+      "absl-py",
+      "google-auth",
+      "google-auth-oauthlib",
+      "grpcio",
+      "markdown",
+      "numpy",
+      "protobuf",
+      "requests",
+      "setuptools",
+      "six",
+      "tensorboard-data-server",
+      "werkzeug"
+    ],
+    "tensorboard-data-server": [],
+    "tensorflow-estimator": [],
+    "tensorflow-io-gcs-filesystem": [],
+    "tensorflow-macos": [
+      "absl-py",
+      "astunparse",
+      "flatbuffers",
+      "gast",
+      "google-pasta",
+      "grpcio",
+      "h5py",
+      "keras",
+      "libclang",
+      "ml-dtypes",
+      "numpy",
+      "opt-einsum",
+      "packaging",
+      "protobuf",
+      "setuptools",
+      "six",
+      "tensorboard",
+      "tensorflow-estimator",
+      "tensorflow-io-gcs-filesystem",
+      "termcolor",
+      "typing-extensions",
+      "wrapt"
+    ],
+    "termcolor": [],
+    "threadpoolctl": [],
+    "typing-extensions": [],
+    "tzdata": [],
+    "urllib3": [],
+    "werkzeug": [
+      "markupsafe"
+    ],
+    "wheel": [],
+    "wrapt": []
+  },
+  "runtime_roots": [
+    "h5py",
+    "matplotlib",
+    "neo",
+    "nptdms",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "pyqtgraph",
+    "pyside6",
+    "scikit-learn",
+    "scipy",
+    "seaborn"
+  ],
+  "schema_version": 1
+}

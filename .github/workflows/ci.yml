@@ -68,3 +68,49 @@ jobs:
         run: >-
           python -m pytest -q -p no:cacheprovider -m "not corpus"
           ${{ matrix.tests }}
+
+  scientific-smoke:
+    name: Scientific behavior and reference-workflow checks
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      NANOSCOPE_RECOVERY_ROOT: ${{ runner.temp }}/nanoscope-scientific-recovery
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install NanoScope and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Preserve resolved dependency inventory
+        run: python -m pip list --format=json > ci-resolved-dependencies.json
+      - name: Run curated scientific and opt-in workflow regressions
+        # Historical platform-specific byte oracles remain in the full manual
+        # analysis shard. No expected scientific hashes are rewritten here.
+        run: >-
+          python -m pytest -q -p no:cacheprovider -m "not corpus"
+          tests/analysis/test_detect.py
+          tests/analysis/test_detect_cusum.py
+          tests/analysis/test_filters.py
+          tests/analysis/test_event_amplitude.py
+          tests/analysis/test_event_amplitude_lifecycle.py
+          tests/analysis/test_dual_signal_classical_detection.py
+          tests/analysis/test_open_pore_reference.py
+          tests/analysis/test_open_pore_reference_integration.py
+          tests/analysis/test_preview_capture.py
+          tests/analysis/test_reference_recipe_hardening.py
+          tests/analysis/test_filter_replay_hardening.py
+          tests/analysis/test_reference_restore_error_contract.py
+          tests/gui/test_open_pore_reference_panel.py
+          tests/gui/test_open_pore_reference_workflow.py
+          tests/gui/test_reference_recipe_restore_safety.py
+          tests/gui/test_inspector_filter_replay_safety.py
+          tests/gui/test_background_levels_and_lazy_batch.py
+          tests/gui/test_display_residual_cache.py
+          tests/gui/test_release_onboarding.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scientific-smoke-resolved-dependencies
+          path: ci-resolved-dependencies.json

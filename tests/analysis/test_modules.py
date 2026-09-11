@@ -608,10 +608,14 @@ def test_detection_signal_leaves_a_provenance_that_describes_nothing_alone():
 
     x = make_event_trace()
     np.testing.assert_array_equal(detection_signal(x, FS, {}), x)
-    np.testing.assert_array_equal(detection_signal(x, None, {"filter_cutoff_hz": 1e4}), x)
-    # A cutoff that cannot be applied is skipped rather than raised through.
-    np.testing.assert_array_equal(
-        detection_signal(x, FS, {"filter_cutoff_hz": FS}), x)
+    np.testing.assert_array_equal(detection_signal(x, None, {}), x)
+    np.testing.assert_array_equal(detection_signal(x, FS, {"filter_cutoff_hz": None}), x)
+    # Intentional safer error contract: an explicitly requested saved filter
+    # that cannot replay must not silently remeasure on an unfiltered signal.
+    with pytest.raises(ValueError, match="saved low-pass"):
+        detection_signal(x, None, {"filter_cutoff_hz": 1e4})
+    with pytest.raises(ValueError, match="saved low-pass"):
+        detection_signal(x, FS, {"filter_cutoff_hz": FS})
 
 
 def test_detection_signal_key_changes_with_every_field_it_reads():

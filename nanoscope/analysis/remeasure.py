@@ -845,6 +845,19 @@ def remeasure_events(
     fs = float(fs)
     cfg = config if config is not None else DEFAULT_BASELINE
 
+    from .baseline import BaselineConfig
+    from .reference_context import reference_change_requires_detection, validate_open_pore_context
+    previous_config = BaselineConfig.reproducible_from(old_prov)
+    if reference_change_requires_detection(previous_config, cfg):
+        raise ValueError(
+            "Changing the user open-pore reference requires fresh detection to recalculate "
+            "noise, Auto polarity and event boundaries. Press Detect with the new reference; "
+            "Re-measure depths does not detect missed events. No existing rows were changed."
+        )
+    if getattr(cfg, "open_pore_reference", None) is not None:
+        validate_open_pore_context({**old_prov, "baseline_config": cfg},
+                                  units=old_prov.get("units"), module_id="detect.schmitt")
+
     _require_same_rate(old_prov, fs)
 
     if progress is not None:
@@ -1214,7 +1227,10 @@ def describe_stored_baseline(prov: Mapping[str, Any] | None) -> str:
     """
     from .baseline import BaselineConfig
 
-    cfg = BaselineConfig.reproducible_from(prov)
+    try:
+        cfg = BaselineConfig.reproducible_from(prov)
+    except (TypeError, ValueError):
+        return "invalid stored user reference (review the recipe before a fresh detection)"
     if cfg is not None:
         return cfg.describe()
     method = prov.get("baseline_method") if prov else None

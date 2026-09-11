@@ -3,6 +3,12 @@
 A complete walkthrough of the application, from opening a recording to exporting a curated event
 population. This is a *draft* and tracks the app as of the current build.
 
+If you know the open-pore current or can identify open-pore intervals, see
+[Recording-specific open-pore references](OPEN_PORE_REFERENCE.md). This optional
+workflow accepts your evidence for one recording/channel, previews candidate events
+without replacing the table, and requires deliberate fresh detection to apply it.
+The Automatic workflow below remains available and unchanged.
+
 > ## Before your first detection — measure the recording
 >
 > Every depth in this app is measured against an **open-pore baseline**, and the window that

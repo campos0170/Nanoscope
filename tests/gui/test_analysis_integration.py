@@ -695,6 +695,7 @@ def test_running_the_action_fits_levels_and_enables_the_export(window, qtbot, tm
     _install(window, _synth_doc(tmp_path))
     _run_detection(window, qtbot)
     window._fit_levels()
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
 
     res = window._level_fit
     assert res is not None and res.module_id == "fit.levels"
@@ -716,6 +717,7 @@ def test_the_fit_reaches_an_open_event_inspector(window, qtbot, tmp_path):
     assert "CUSUM levels" not in insp._readout.text()
 
     window._fit_levels()
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert "CUSUM levels" in insp._readout.text()
 
 
@@ -725,6 +727,7 @@ def test_a_new_detection_drops_the_previous_level_fit(window, qtbot, tmp_path):
     _install(window, _synth_doc(tmp_path))
     _run_detection(window, qtbot)
     window._fit_levels()
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert window._level_fit is not None
 
     _run_detection(window, qtbot)          # a second, different detection
@@ -738,6 +741,7 @@ def test_exported_levels_carry_the_cusum_parameters(window, qtbot, tmp_path, mon
     _install(window, _synth_doc(tmp_path))
     _run_detection(window, qtbot)
     window._fit_levels()
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
 
     target = tmp_path / "levels.csv"
     monkeypatch.setattr("nanoscope.gui.main_window.ask_export_path",
@@ -794,6 +798,7 @@ def test_the_fit_draws_step_segments_on_the_main_trace(window, qtbot, tmp_path):
     assert _step_overlay_items(window) == [], "no fit yet, so no step overlay"
 
     window._fit_levels()
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     items = _step_overlay_items(window)
     assert len(items) == 1, "one batched STEP item, not one per level"
     xs, ys = items[0].getData()
@@ -811,6 +816,7 @@ def test_the_step_overlay_retires_with_the_fit(window, qtbot, tmp_path):
     _install(window, _synth_doc(tmp_path))
     _run_detection(window, qtbot)
     window._fit_levels()
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert len(_step_overlay_items(window)) == 1
 
     _run_detection(window, qtbot)          # drops the fit via _invalidate_level_fit
@@ -823,6 +829,7 @@ def test_the_step_overlay_follows_curation(window, qtbot, tmp_path):
     _install(window, _synth_doc(tmp_path))
     _run_detection(window, qtbot)
     window._fit_levels()
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert len(_step_overlay_items(window)) == 1
 
     panel = window._analysis_panel

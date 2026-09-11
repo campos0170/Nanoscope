@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nanoscope"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Desktop nanopore signal analysis, event curation, and supervised-learning labelling tool."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,6 +31,9 @@ nanoscope = "nanoscope.gui.app:main"
 
 [tool.setuptools.packages.find]
 include = ["nanoscope*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "nanoscope._version.__version__"}
 
 [tool.pytest.ini_options]
 markers = [

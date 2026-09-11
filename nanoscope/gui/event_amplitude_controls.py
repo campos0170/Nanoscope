@@ -166,6 +166,7 @@ class EventAmplitudeControls(QtWidgets.QWidget):
 
     def context(self, row) -> AmplitudeContext:
         owner = self.owner
+        config = self._reference_config()
         current = self.measurement_signal()
         prov = owner._provenance or {}
         fs = owner._sample_rate()
@@ -178,7 +179,6 @@ class EventAmplitudeControls(QtWidgets.QWidget):
             pol = int(np.sign(np.median(current[start:end]) - base_reference))
         if pol not in (-1, 1):
             raise ValueError("A valid event polarity is required.")
-        config = BaselineConfig.reproducible_from(prov)
         baseline_source = "stored_event_reference"
         baseline = base_reference
         if config is not None and fs is not None:
@@ -211,6 +211,29 @@ class EventAmplitudeControls(QtWidgets.QWidget):
                 owner._doc_id, owner._channel).fingerprint()),
         }
         return AmplitudeContext(current, baseline, int(pol), units, audit)
+
+    def _reference_config(self):
+        """Resolve saved reference instructions without guessing a replacement.
+
+        Context callers report failures through the Inspector's existing render
+        guard. Note-only refreshes must handle the same refusal before enabling
+        any manual amplitude write.
+        """
+        prov = self.owner._provenance or {}
+        config = BaselineConfig.reproducible_from(prov)
+        if config is not None and config.open_pore_reference is not None:
+            from ..analysis.reference_context import validate_open_pore_context
+            validate_open_pore_context(
+                {**prov, "baseline_config": config},
+                units=self.owner._units,
+                module_id=self.owner._module_id,
+            )
+            if str(prov.get("units", self.owner._units)).strip() != "pA":
+                raise ValueError(
+                    "The saved open-pore reference is not in pA. Verify its "
+                    "calibration and units before editing event amplitudes."
+                )
+        return config
 
     def _allowed(self) -> bool:
         return (self.owner._df is not None and self.owner._current_id is not None
@@ -281,6 +304,13 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         self.reset_button.setEnabled(bool(has_saved) and self.owner._module_id != CONSENSUS_MODULE_ID)
 
     def _update_note(self, row):
+        config = None
+        if not self._error and not self.owner._stale_columns:
+            try:
+                config = self._reference_config()
+            except (ValueError, TypeError, OverflowError) as exc:
+                self._error = str(exc)
+                self._update_enabled()
         if self._error:
             text = "Amplitude unavailable: " + self._error
         elif self.owner._stale_columns:
@@ -297,7 +327,7 @@ class EventAmplitudeControls(QtWidgets.QWidget):
             text = "No override. Red line = stored median-depth equivalent level; Apply saves a separate amplitude."
         if not self._error and not self.owner._stale_columns:
             text += " A horizontal level uses the interval's mean baseline; it is not a fitted plateau."
-            if BaselineConfig.reproducible_from(self.owner._provenance) is None:
+            if config is None:
                 text += " Legacy reference: the saved event baseline is used as a constant."
         self.note.setText(text)
 

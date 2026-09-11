@@ -933,6 +933,12 @@ def _rebuild_baseline(
         cfg = BaselineConfig.reproducible_from(provenance)
     if cfg is not None:
         try:
+            if getattr(cfg, "open_pore_reference", None) is not None:
+                from .reference_context import validate_open_pore_context
+                recorded = dict(provenance or {})
+                validate_open_pore_context(
+                    {**recorded, "baseline_config": cfg},
+                    units=recorded.get("units"), module_id="detect.schmitt")
             res = characterisation_baseline(
                 sig, float(fs), config=cfg, polarity=int(polarity), health=False,
                 # A whole-recording estimate that REFUSES on one bad sample anywhere
@@ -946,6 +952,10 @@ def _rebuild_baseline(
                 on_nonfinite="interpolate",
             )
         except (ValueError, TypeError):
+            if getattr(cfg, "open_pore_reference", None) is not None:
+                # A user reference is a measurement instruction, not a hint to
+                # replace silently with a different local reference.
+                raise
             # The trace these rows were detected on is not the trace we were handed
             # (a shorter conditioned slice, a non-finite sample far outside the pad,
             # a rate the config cannot run at). Fall through to the local median --

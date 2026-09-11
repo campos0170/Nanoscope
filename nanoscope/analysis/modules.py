@@ -760,6 +760,13 @@ def detection_params_from_provenance(prov: Mapping[str, Any]) -> dict[str, Any]:
     (and the order is ``None`` for the order-less 'gaussian' kind), and a None there means
     "not applicable", not a setting — feeding it back would blank a real widget.
     """
+    if (prov.get("baseline_reference_restore_error")
+            or prov.get("baseline_open_pore_reference") is not None
+            or prov.get("baseline_reference_applied") or prov.get("baseline_estimator_bypassed")):
+        # Validate the full saved instruction before projecting away derived flags.
+        # Otherwise a missing recipe could become an apparently valid Automatic run.
+        from .baseline import BaselineConfig
+        BaselineConfig.reproducible_from(prov)
     base = preprocess_params_from_provenance(prov)
     out: dict[str, Any] = {}
     for key in (*DETECT_PARAM_KEYS, *DETREND_PARAM_KEYS, *FILTER_PARAM_KEYS,
@@ -770,7 +777,7 @@ def detection_params_from_provenance(prov: Mapping[str, Any]) -> dict[str, Any]:
                 # otherwise the "same detection, new calibration" path silently
                 # changes depth_pA by up to 15x and the two results are not
                 # comparable, which is the whole reason the fingerprint exists.
-                *BASELINE_PARAM_KEYS):
+                *BASELINE_PARAM_KEYS, "baseline_open_pore_reference"):
         if key in base:
             out[key] = base[key]
     for key in ("filter_kind", "filter_order"):
@@ -808,9 +815,39 @@ def detection_signal(
     left alone rather than guessed at. Returns contiguous float32.
     """
     arr = np.ascontiguousarray(signal, dtype=np.float32)
+    cutoff = prov.get("filter_cutoff_hz")
     if fs is None:
+        if cutoff is not None:
+            raise ValueError("The saved low-pass filter requires a known sample rate.")
         return arr
     fs_f = float(fs)
+    kind = str(prov.get("filter_kind") or "bessel")
+    order = 8
+    if cutoff is not None:
+        try:
+            cutoff = float(cutoff)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("The saved low-pass cutoff is not a valid frequency.") from exc
+        if not np.isfinite(fs_f) or fs_f <= 0:
+            raise ValueError("The saved low-pass filter requires a finite, positive sample rate.")
+        if not np.isfinite(cutoff) or not (0.0 < cutoff < fs_f / 2.0):
+            raise ValueError("The saved low-pass cutoff must be finite, positive and below Nyquist.")
+        saved_order = prov.get("filter_order")
+        # An omitted/None order is the historical IIR default. Gaussian does
+        # not use order at all. An EXPLICIT invalid IIR order is not permission
+        # to substitute 8 (or truncate a fractional value) during remeasurement.
+        if kind != "gaussian" and saved_order is not None:
+            try:
+                order = int(saved_order)
+                valid_order = (
+                    not isinstance(saved_order, (bool, np.bool_))
+                    and order >= 1
+                    and float(saved_order) == order
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("The saved low-pass IIR order must be a positive integer.") from exc
+            if not valid_order:
+                raise ValueError("The saved low-pass IIR order must be a positive integer.")
     preprocess = preprocess_params_from_provenance(prov)
     # New classical runs use high-pass only to localise candidate boundaries. All
     # post-hoc row rebuilds (merge, mask resize, hand-add) must therefore reconstruct
@@ -824,24 +861,8 @@ def detection_signal(
         preprocess = characterization_params(preprocess)
     arr = preprocess_for_detection(arr, fs_f, preprocess)
 
-    cutoff = prov.get("filter_cutoff_hz")
     if cutoff is None:
         return np.ascontiguousarray(arr, dtype=np.float32)
-    try:
-        cutoff = float(cutoff)
-    except (TypeError, ValueError):
-        return np.ascontiguousarray(arr, dtype=np.float32)
-    if not np.isfinite(cutoff) or not (0.0 < cutoff < fs_f / 2.0):
-        return np.ascontiguousarray(arr, dtype=np.float32)
-
-    kind = str(prov.get("filter_kind") or "bessel")
-    order = prov.get("filter_order")
-    # 'gaussian' has no order and provenance stores None for it; lowpass' own default
-    # stands in when a legacy provenance omits it entirely.
-    try:
-        order = int(order) if order is not None else 8
-    except (TypeError, ValueError):
-        order = 8
     return np.ascontiguousarray(
         lowpass(arr, fs_f, cutoff, order=order, kind=kind), dtype=np.float32
     )
@@ -1201,7 +1222,8 @@ def _build_warnings(prov: dict[str, Any], df: pd.DataFrame) -> tuple[str, ...]:
 
 
 def _resolve_run_baseline(
-    params: Mapping[str, Any], target: tuple[str, int]
+    params: Mapping[str, Any], target: tuple[str, int], *,
+    units: str | None = None, module_id: str | None = None,
 ) -> tuple[Any, str, dict[str, Any]]:
     """``(config, param_source, params_to_record)`` for ONE detector run over ``target``.
 
@@ -1215,6 +1237,8 @@ def _resolve_run_baseline(
     disagree about whose windows these were.
     """
     cfg, source = baseline_config_from_params(params)
+    from .reference_context import validate_open_pore_context
+    validate_open_pore_context(params, units=units, module_id=module_id)
     source = resolve_param_source(params, target, source)
     record = {k: v for k, v in params.items() if k != BATCH_SCOPE_KEY}
     if "baseline_param_source" in record or BATCH_SCOPE_KEY in params:
@@ -1893,7 +1917,7 @@ class DetectSchmitt:
         # characteriser, `truth` and every row rebuild. This module holds no
         # baseline window constant and must never acquire one.
         base_cfg, base_source, params_record = _resolve_run_baseline(
-            ctx.params, (doc_id, channel))
+            ctx.params, (doc_id, channel), units=ch.units, module_id=self.id)
         # LIVENESS FOR THE ONE JOB THAT IS SLOW AT SCALE (GA5-01). On a whole-channel
         # detect of the owner's 606 MB ATP recording this call runs ~30 s, and this
         # method used to report progress only at 0.0 and 1.0 -- the status-bar
@@ -2040,7 +2064,7 @@ class DetectCusum:
 
         ctx.report_progress(0.0, "detecting events (CUSUM)")
         base_cfg, base_source, params_record = _resolve_run_baseline(
-            ctx.params, (doc_id, channel))
+            ctx.params, (doc_id, channel), units=ch.units, module_id=self.id)
 
         # Same progress ladder and same reasoning as DetectSchmitt.run: the
         # characterisation baseline is ~86% of the wall time at scale and has an

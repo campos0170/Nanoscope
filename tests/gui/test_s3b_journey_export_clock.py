@@ -266,11 +266,12 @@ def test_the_training_export_is_wired_to_the_same_seam(win, tmp_path, monkeypatc
     assert meta["label_vocabulary"] == vocabulary.to_json()
 
 
-def test_the_levels_export_is_wired_to_the_same_seam(win, tmp_path, monkeypatch):
+def test_the_levels_export_is_wired_to_the_same_seam(win, qtbot, tmp_path, monkeypatch):
     """A level's ``t_start_s`` is on the event table's clock by construction, so a level
     table joined back to an events CSV inherits whatever the events CSV got wrong."""
     _adopt(win, _doc(tmp_path, t0_s=T0_APO))
     win._fit_levels()
+    qtbot.waitUntil(lambda: not win._analysis_controller.is_busy(), timeout=10000)
     if getattr(win, "_level_fit", None) is None or win._level_fit.payload is None:
         pytest.skip("CUSUM found no sub-states in this synthetic trace")
     win._sync_export_action()

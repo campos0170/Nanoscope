@@ -581,6 +581,12 @@ def detect_events_cusum(
     check_cancelled(cancel)
 
     # -- optional pre-filter -------------------------------------------------
+    if getattr(baseline_config, "open_pore_reference", None) is not None:
+        from .reference_context import validate_open_pore_context
+        validate_open_pore_context({"baseline_config": baseline_config},
+                                  units=units, module_id="detect.cusum")
+        if baseline is not None:
+            raise ValueError("Choose a reproducible open-pore reference or a supplied baseline, not both.")
     filter_rise_s: float | None = None
     work = np.asarray(signal)
     if filter_cutoff_hz is not None:
@@ -629,6 +635,9 @@ def detect_events_cusum(
         base = _as_baseline(baseline, n)
         baseline_method = "provided"
     _check_finite(base, "baseline")
+
+    from .preview_capture import publish_detection_trace
+    publish_detection_trace(cur, base)
 
     resid = cur - base
     noise = float(noise_rms(resid))

@@ -2336,7 +2336,11 @@ class DetectionPanel(QWidget):
         self.paramsChanged.connect(self._refresh_control_level_summary)
         self.mlModelChanged.connect(self._refresh_control_level_summary)
         self.ml_range.currentIndexChanged.connect(self._refresh_control_level_summary)
-        saved = str(QSettings().value(self._CONTROL_LEVEL_SETTINGS_KEY, "advanced"))
+        # A first-use guide choice changes visibility only. Explicit existing
+        # inspector preferences always win; simply opening the guide writes neither.
+        settings = QSettings()
+        saved = str(settings.value(self._CONTROL_LEVEL_SETTINGS_KEY,
+                    settings.value("onboarding/control_level_choice_v1", "advanced")))
         self.set_control_level(saved if saved in {"essential", "advanced"} else "advanced")
 
     def control_level(self) -> str:

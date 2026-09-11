@@ -802,6 +802,7 @@ class MainWindow(QtWidgets.QMainWindow):
         #: put a 644 ms baseline estimate inside a mouse-release handler. Cold means "keep
         #: today's drop, and say so".
         self._level_fit_inputs = None
+        self._level_fit_pending = None
         self._event_plot_window = None   # the single, lazily-built EventPlotWindow
         self._psd_window = None   # the single, lazily-built PSDWindow
         # Stage 3 analytical state belongs to the PROJECT, not to whichever optional
@@ -1547,6 +1548,10 @@ class MainWindow(QtWidgets.QMainWindow):
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction(self._act_first_analysis_guide)
         help_menu.addAction(self._act_analysis_home)
+        help_menu.addSeparator()
+        self._act_about = help_menu.addAction("About NanoScope…")
+        self._act_about.setToolTip("Identify this running build and copy local, path-free diagnostics.")
+        self._act_about.triggered.connect(self._open_build_info)
 
         # Every launcher surface's gate (Plots, density/ensemble, PSD, I-V, V-dependence and
         # the figure export) is re-derived through the ONE shared path, so opening the menu and
@@ -1824,6 +1829,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_controller.finished.connect(self._on_subpop_finished)
         self._analysis_controller.failed.connect(self._on_subpop_stopped)
         self._analysis_controller.cancelled.connect(self._on_subpop_stopped)
+        # Sub-state fitting returns a distinct outcome, never an AnalysisResult,
+        # so only its frozen-source validation slot can install the fitted table.
+        self._analysis_controller.finished.connect(self._on_level_fit_finished)
+        self._analysis_controller.failed.connect(self._on_level_fit_stopped)
+        self._analysis_controller.cancelled.connect(self._on_level_fit_stopped)
 
         # Batch detection: its own controller (see __init__). MainWindow installs the
         # per-recording results on the main thread and drives the status-bar chrome,
@@ -2388,6 +2398,7 @@ class MainWindow(QtWidgets.QMainWindow):
         stopped &= self._analysis_controller.abort_stopped()
         stopped &= self._batch_controller.abort_stopped()
         self._analysis_panel.forget_pending_job()
+        self._level_fit_pending = None
         self._subpop_signal_pending = None
         self._subpop_accepted_ids_pending = None
         self._subpop_source_recipe_pending = None
@@ -2477,6 +2488,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # -- analysis controller chrome --------------------------------------------------------------
     @QtCore.Slot(str)
     def _on_analysis_started(self, module_id: str) -> None:
+        if module_id != "fit.levels":
+            # A different job on the shared controller replaces any detached fit.
+            self._level_fit_pending = None
         self._set_progress_visible(True)
         self._progress.setValue(0)
         # Remembered so a load finishing mid-run can repaint it (_release_load_chrome).
@@ -2535,6 +2549,13 @@ class MainWindow(QtWidgets.QMainWindow):
         current channel / no rate are not targets and are counted as skipped for the
         summary. Delegates the run to :class:`BatchDetectController`; the results are
         installed on the main thread in :meth:`_on_batch_finished`."""
+        if (self._analysis_panel.baseline_panel.reference_mode() != "automatic"
+                or self._analysis_panel.baseline_panel.reference_error()):
+            self.statusBar().showMessage(
+                "Batch detect refused: this open-pore reference belongs to the selected "
+                "recording and channel. Run Detect there, or explicitly choose Automatic reference.",
+                12000)
+            return
         # Asked BEFORE the "re-run all / only missing" question, not after: putting a
         # dialog in front of a run that is going to be refused anyway asks the user to
         # make a decision that cannot be honoured. The controller refuses it again on
@@ -4016,6 +4037,7 @@ class MainWindow(QtWidgets.QMainWindow):
         project's Save/Discard decision, so none of this checkpoints or marks dirty.
         """
         self._figure_project_epoch += 1
+        self._level_fit_pending = None
         self._workspace_installing = True
         try:
             if self._plots_window is not None:
@@ -4165,10 +4187,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, context_provider=self._first_analysis_context,
                 availability_provider=self._first_analysis_availability)
             self._first_analysis_guide.actionRequested.connect(self._first_analysis_action)
+            self._first_analysis_guide.controlLevelRequested.connect(
+                lambda level: self._analysis_panel.detection_panel.set_control_level(level, persist=True))
         self._first_analysis_guide.refresh_context()
         self._first_analysis_guide.show()
         self._first_analysis_guide.raise_()
         self._first_analysis_guide.activateWindow()
+
+    def _open_build_info(self) -> None:
+        from .build_info_dialog import show_build_info
+        show_build_info(self)
 
     def _first_analysis_action(self, route: str) -> None:
         available, reason = self._first_analysis_availability(route)
@@ -6875,13 +6903,14 @@ class MainWindow(QtWidgets.QMainWindow):
         the rest of the table was fitted with, without re-running a 644 ms open-pore estimate
         on the GUI thread. It is dropped with the fit it belongs to.
         """
-        import numpy as np
-
-        from ..analysis.baseline import baseline_config_from_params, characterisation_baseline
-        from ..analysis.cusum import DEFAULT_CUSUM
+        from copy import deepcopy
         from ..analysis.events import EventSet
-        from ..analysis.modules import detection_signal, fit_levels
+        from .analysis_worker import FrozenChannelSource
+        from .level_fit_job import run_level_fit, source_signature
 
+        if self._analysis_controller.is_busy():
+            self._on_run_refused("Another analysis is running. Wait or cancel it before fitting sub-state levels.")
+            return
         res = self._analysis_panel.current_detection()
         if res is None or not isinstance(res.payload, EventSet):
             QtWidgets.QMessageBox.information(
@@ -6901,8 +6930,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Every event in this detection is curated out, so there is nothing to fit.")
             return
 
-        chan = self._session.calibrated(res.doc_id, res.channel)
-        fs = chan.sample_rate_hz
+        doc = self._session.document(res.doc_id)
+        source = FrozenChannelSource.capture(
+            doc, res.channel, self._session.calibration(res.doc_id, res.channel))
+        fs = source.meta.sample_rate_hz
         if not fs:
             QtWidgets.QMessageBox.information(
                 self, "Fit sub-state levels",
@@ -6910,67 +6941,68 @@ class MainWindow(QtWidgets.QMainWindow):
                 "fictional. Set the rate first.")
             return
 
-        try:
-            signal = detection_signal(np.asarray(chan.data), float(fs), prov)
-            # (config, param_source) — the one forward resolver, unpacked exactly as
-            # DetectSchmitt and MLDetect unpack it, so the level fit measures against the
-            # baseline the detection's own parameters describe.
-            base_cfg, base_source = baseline_config_from_params(prov)
-            base = characterisation_baseline(
-                np.asarray(signal, dtype=np.float64), float(fs),
-                config=base_cfg,
-                polarity=prov.get("polarity"),
-                param_source=base_source,
-            )
-            result = fit_levels(
-                accepted, np.asarray(signal, dtype=np.float64), float(fs),
-                doc_id=res.doc_id, channel=res.channel,
-                baseline=np.asarray(base.baseline, dtype=np.float64),
-                polarity=int(prov.get("polarity", 1)),
-                provenance=prov,
-                calibration_fingerprint=self._session.calibration(
-                    res.doc_id, res.channel).fingerprint(),
-                # The stamp must name what THIS result was measured against, which is the
-                # config the line above actually ran -- not prov's recorded fingerprint.
-                # They agree whenever the estimator was rebuilt from the same parameters,
-                # and when they do not, the honest record is the one that is true of these
-                # numbers. That is exactly the comparison AnalysisResult asks callers to
-                # make against the live BaselineConfig.
-                baseline_fingerprint=base.config.fingerprint(float(fs)),
-            )
-        except Exception as exc:  # noqa: BLE001 — a fit failure is reported, never crashes
-            QtWidgets.QMessageBox.warning(
-                self, "Fit sub-state levels", f"Could not fit levels:\n{exc}")
-            return
-
-        self._level_fit = result
-        self._level_fit_frame = events.df     # identity anchor, not a copy
-        # WHAT A RE-FIT OF ONE EVENT NEEDS, cached now because now is when it is all in hand
-        # and on a worker-free code path. Re-deriving it later, inside the mouse-release
-        # handler of a mask drag, would put `characterisation_baseline` (644 ms on the owner's
-        # 2 M-sample recording) on the GUI thread — so the cache is not an optimisation, it is
-        # what makes the automatic re-fit possible at all. `sigma` and `tau` come out of the
-        # RESULT's params rather than being recomputed, so the re-fit provably segments at the
-        # same significance scale as the events it will sit beside (see modules.fit_levels).
-        self._level_fit_inputs = {
-            "doc_id": res.doc_id,
-            "channel": int(res.channel),
-            "fs": float(fs),
-            "baseline": np.asarray(base.baseline, dtype=np.float64),
-            "sigma": result.params.get("sigma_pA"),
-            "tau": result.params.get("tau_samples"),
-            "polarity": int(prov.get("polarity", 1)),
-            "provenance": prov,
-            "config": DEFAULT_CUSUM,
-            # Both staleness stamps, so a spliced group carries the same provenance as the
-            # groups it joins instead of quietly re-deriving a fresher-looking one.
-            "calibration_fingerprint": result.calibration_fingerprint,
-            "baseline_fingerprint": result.baseline_fingerprint,
+        # Copy the small mutable inputs; loaded samples are immutable and shared
+        # through a read-only view. No whole-recording filter or calibration runs
+        # on Qt here. The job sees no Session, window, or changing event frame.
+        token = object()
+        frame_snapshot = events.df.copy(deep=True)
+        accepted_snapshot = accepted.copy(deep=True)
+        provenance = deepcopy(prov)
+        pending = {
+            "token": token, "source": res, "document": doc,
+            "frame": frame_snapshot, "provenance": source_signature(prov),
+            "params": source_signature(dict(res.params or {})),
+            "calibration": source.calibration,
         }
+
+        def job(report):
+            return run_level_fit(
+                source, accepted_snapshot, provenance, doc_id=res.doc_id,
+                channel=res.channel, token=token, report=report)
+
+        if not self._analysis_controller.run_callable(
+                job, label="fit.levels", wants_progress=True):
+            return
+        self._analysis_panel.forget_pending_job()
+        self._level_fit_pending = pending
+        self.statusBar().showMessage(
+            "Fitting sub-state levels in the background. Cancel is safe; existing levels remain unchanged until the fit is validated.", 0)
+
+    def _on_level_fit_stopped(self, *_args) -> None:
+        self._level_fit_pending = None
+
+    @QtCore.Slot(object)
+    def _on_level_fit_finished(self, outcome: object) -> None:
+        from .level_fit_job import LevelFitOutcome, source_signature
+        if not isinstance(outcome, LevelFitOutcome):
+            return
+        pending, self._level_fit_pending = self._level_fit_pending, None
+        if pending is None or outcome.token is not pending["token"]:
+            return
+        res = pending["source"]
+        valid = self._session.has_document(res.doc_id)
+        if valid:
+            valid = (
+                self._session.document(res.doc_id) is pending["document"]
+                and self._session.calibration(res.doc_id, res.channel) == pending["calibration"]
+                and self._session.results.get(res.doc_id, res.channel, res.module_id) is res
+                and res.payload.df.equals(pending["frame"])
+                and source_signature(dict(res.payload.provenance or {})) == pending["provenance"]
+                and source_signature(dict(res.params or {})) == pending["params"]
+            )
+        if not valid:
+            self.statusBar().showMessage(
+                "Sub-state fit discarded: its recording, calibration or source event table changed while it ran. Existing analysis is unchanged; run the fit again.", 12000)
+            return
+        result = outcome.result
+        self._level_fit = result
+        self._level_fit_frame = res.payload.df
+        self._level_fit_inputs = outcome.inputs
         self._session.add_result(result)
         # Both curation surfaces, not just the browser: the gallery draws the same levels
         # as bars on its tiles (see _push_level_fit).
-        self._push_level_fit(result.payload)
+        current = self._analysis_panel.current_detection()
+        self._push_level_fit(result.payload if current is res else None)
         self._act_export_levels.setEnabled(not result.payload.empty)
         # ...and onto the MAIN TRACE, not just the inspector (owner note #18): the panel
         # reads the fit back out of the store and draws the STEP overlay. Explicit call

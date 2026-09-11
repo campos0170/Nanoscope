@@ -27,17 +27,20 @@ from __future__ import annotations
 
 import math
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from PySide6 import QtCore
+import numpy as np
 
 from ..analysis.baseline import BATCH_SCOPE_KEY
 from ..analysis.cancel import OperationCancelled, cancel_scope
 from ..analysis.context import SimpleAnalysisContext
 from ..core.analysis import ANALYSIS_REGISTRY, AnalysisModule, AnalysisResult
 from ..core.document import CalibratedChannel
-from ..core.types import RecordingMeta
+from ..core.calibration import ChannelCalibration
+from ..core.types import RecordingMeta, nonfinite_reason, scan_nonfinite
 from .worker_thread import (
     DEFAULT_JOIN_MS,
     JOB_ANALYSIS,
@@ -56,6 +59,7 @@ __all__ = [
     "BatchOutcome",
     "BatchDetectWorker",
     "BatchDetectController",
+    "FrozenChannelSource",
 ]
 
 #: A module (or any kernel underneath it) observed the cancel token and stopped
@@ -411,6 +415,54 @@ class AnalysisController(QtCore.QObject):
 
 
 @dataclass(frozen=True)
+class FrozenChannelSource:
+    """Immutable load/calibration descriptor; no Session or eager calibrated array.
+
+    The read-only view shares the application's immutable loaded samples. Metadata
+    and calibration are frozen at dispatch, so UI edits cannot change queued jobs.
+    Materialization is deliberately a worker operation, one recording at a time.
+    """
+
+    raw: np.ndarray
+    meta: RecordingMeta
+    channel: int
+    calibration: ChannelCalibration
+
+    @classmethod
+    def capture(cls, document, channel: int, calibration: ChannelCalibration):
+        raw = np.asarray(document.raw(int(channel))).view()
+        raw.setflags(write=False)
+        return cls(raw, deepcopy(document.meta), int(channel), deepcopy(calibration))
+
+    def materialize(self) -> CalibratedChannel:
+        """Use the existing affine kernel, preserving Session's damage disclosure."""
+        from ..analysis.cancel import check_cancelled
+        check_cancelled()
+        cal = self.calibration
+        data = cal.apply(self.raw)
+        info = self.meta.channels[self.channel]
+        issues: tuple[str, ...] = ()
+        if cal.fingerprint() != (1.0, 0.0):
+            # This is the same reporting predicate as Session.calibration_issues,
+            # evaluated here without materializing every queued recording on Qt.
+            raw_bad, _ = scan_nonfinite(self.raw)
+            count, first = scan_nonfinite(data)
+            if count > raw_bad:
+                issues = (
+                    f"channel {self.channel} ({info.name or 'unnamed'}) AFTER calibration "
+                    f"(gain {cal.gain:g}, offset {cal.offset:g}): "
+                    f"{nonfinite_reason(count, int(data.size), first)} The recording as loaded "
+                    f"carried {raw_bad:,} of them; this calibration made the rest, by overflowing "
+                    "float32. Any statistic computed over them — RMS noise, baseline, event depth "
+                    "— is undefined. Lower the gain, or work in the raw units.",
+                )
+        check_cancelled()
+        return CalibratedChannel(
+            info=info, data=data, units=cal.target_units or info.raw_units,
+            sample_rate_hz=self.meta.sample_rate_hz, t0_s=self.meta.t0_s, issues=issues)
+
+
+@dataclass(frozen=True)
 class BatchJob:
     """One pre-resolved detection job: the controller did the Session lookups.
 
@@ -424,9 +476,10 @@ class BatchJob:
     doc_id: str
     channel: int
     label: str
-    channel_data: CalibratedChannel
+    channel_data: CalibratedChannel | None
     meta: RecordingMeta
     params: Mapping[str, Any]
+    source: FrozenChannelSource | None = None
 
 
 @dataclass(frozen=True)
@@ -486,20 +539,28 @@ class BatchDetectWorker(QtCore.QObject):
                         return
                     self.progress.emit(i / n if n else 1.0,
                                        f"recording {i + 1} of {n}: {job.label}")
-                    ctx = SimpleAnalysisContext(
-                        channel=job.channel_data,
-                        meta=job.meta,
-                        params=dict(job.params),
-                        progress_cb=_swallow_progress,   # batch reports per-recording
-                        cancel_flag=self._cancel.is_set,
-                    )
+                    ctx = channel_data = None
                     try:
+                        channel_data = (job.source.materialize() if job.source is not None
+                                        else job.channel_data)
+                        if channel_data is None:
+                            raise ValueError("batch job has no frozen channel source")
+                        ctx = SimpleAnalysisContext(
+                            channel=channel_data, meta=job.meta,
+                            params=deepcopy(dict(job.params)),
+                            progress_cb=_swallow_progress,
+                            cancel_flag=self._cancel.is_set,
+                        )
                         results.append(self._module.run(ctx))
                     except AnalysisCancelled:
                         self.cancelled.emit()
                         return
                     except Exception as exc:  # one bad recording must not sink the batch
                         errors.append((job.label, f"{type(exc).__name__}: {exc}"))
+                    finally:
+                        # Release derived samples before preparing the next recording.
+                        # Results carry event tables, never ownership of this context.
+                        ctx = channel_data = None
             if self._cancel.is_set():
                 self.cancelled.emit()
                 return
@@ -661,13 +722,14 @@ class BatchDetectController(QtCore.QObject):
         if isinstance(module, str):
             module = ANALYSIS_REGISTRY[module]
 
-        base = dict(params or {})
+        base = deepcopy(dict(params or {}))
         jobs: list[BatchJob] = []
         for doc_id, channel in targets:
             doc = self._session.document(doc_id)
-            ch = self._session.calibrated(doc_id, channel)
-            fingerprint = self._session.calibration(doc_id, channel).fingerprint()
-            merged = dict(base)
+            calibration = self._session.calibration(doc_id, channel)
+            source = FrozenChannelSource.capture(doc, channel, calibration)
+            fingerprint = source.calibration.fingerprint()
+            merged = deepcopy(base)
             merged["_calibration_fingerprint"] = tuple(fingerprint)
             merged.setdefault("pore_id", doc.meta.stem_key)
             # A re-batch must not DOWNGRADE a stamp a human chose. See
@@ -678,7 +740,7 @@ class BatchDetectController(QtCore.QObject):
                 merged["baseline_param_source"] = keep
             jobs.append(BatchJob(
                 doc_id=doc_id, channel=int(channel), label=doc.display_name,
-                channel_data=ch, meta=doc.meta, params=merged))
+                channel_data=None, meta=source.meta, params=merged, source=source))
 
         worker = BatchDetectWorker(module, jobs)
         worker.progress.connect(self._on_progress)

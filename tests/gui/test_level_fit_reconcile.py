@@ -135,7 +135,7 @@ def fitted(window, qtbot, tmp_path):
     qtbot.wait(10)
     window._open_event_inspector()
     window._fit_levels()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert window._level_fit is not None and not window._level_fit.payload.empty
     return window, doc_id, df
 
@@ -775,7 +775,7 @@ def test_the_last_surviving_group_comes_back_after_its_own_edit(fitted, qtbot):
     for r in range(1, len(df)):
         df.iat[r, df.columns.get_loc("accepted")] = False
     window._fit_levels()               # re-fit so only event 0 has levels
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert set(window._level_fit.payload["event_id"]) == {int(df["event_id"].iloc[0])}
 
     start, end = int(df.iloc[0]["start_idx"]), int(df.iloc[0]["end_idx"])

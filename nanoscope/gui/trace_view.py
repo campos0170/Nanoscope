@@ -15,6 +15,7 @@ from ..core import clock
 from ..core.types import MIN_Y_SPAN_BY_UNITS, ChannelKind
 from ..plot.style import BASELINE_TRACK_INK
 from .axes import ReadableLinearAxis
+from .display_residual import DisplayResidualCache
 
 __all__ = ["PaneSpec", "plan_panes", "effective_kind", "ChannelPane", "TraceView", "Crosshair", "TraceViewBox",
            "PREVIEW_CHANNEL_NOT_SHOWN", "MAX_X_SPAN_FACTOR", "MEASURE_MAX_VIEW_FRACTION",
@@ -252,7 +253,8 @@ class ChannelPane(QtCore.QObject):
 
     def __init__(self, plot: pg.PlotItem, spec: PaneSpec, session: Session,
                  parent: QtCore.QObject | None = None,
-                 baselines: Mapping[str, np.ndarray] | None = None) -> None:
+                 baselines: Mapping[str, np.ndarray] | None = None,
+                 residual_cache: DisplayResidualCache | None = None) -> None:
         super().__init__(parent)
         self.plot = plot
         self.spec = spec
@@ -266,6 +268,7 @@ class ChannelPane(QtCore.QObject):
         #: y axis still labelled "Δ vs baseline". See `TraceView.set_baseline_subtracted`.
         self._baselines: Mapping[str, np.ndarray] = (
             {} if baselines is None else baselines)
+        self._residual_cache = residual_cache if residual_cache is not None else DisplayResidualCache()
 
         plot.showGrid(x=True, y=True, alpha=0.15)
 
@@ -323,8 +326,7 @@ class ChannelPane(QtCore.QObject):
             # or not anybody asks for a residual. The ARITHMETIC lives there and not
             # here on purpose — a view may not own a definition of what "minus its
             # baseline" means (house rule: kernel in analysis/, thin widget in gui/).
-            from ..analysis.baseline import baseline_subtracted
-            y = baseline_subtracted(y, base)
+            y = self._residual_cache.residual(layer.layer_id, y, base)
         curve.setData(x=xaxis.values, y=y)
 
     def refresh_y_label(self) -> None:
@@ -544,6 +546,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         #: the measure region, the overlays and the filter preview. Empty is the
         #: unchanged app.
         self._subtracted: dict[str, np.ndarray] = {}
+        self._residual_cache = DisplayResidualCache()
         #: ``layer_id -> (overlay_id, idx, ABSOLUTE values, ink)`` for the
         #: estimated-baseline rail on that layer, so a second tick REPLACES the line
         #: instead of stacking a second one on it. Rebuild survival is `add_overlay`'s
@@ -620,6 +623,11 @@ class TraceView(pg.GraphicsLayoutWidget):
         # between two recordings look like a mere channel toggle and hand the incoming recording
         # the outgoing one's zoom window — which, on a shorter recording, is off the end of it.
         doc_ids = self.session.shown_doc_ids()
+        live_layers = {layer.layer_id for layer in self.session.layers()}
+        self._residual_cache.retain(live_layers)
+        for layer_id in tuple(self._subtracted):
+            if layer_id not in live_layers:
+                self._subtracted.pop(layer_id, None)
         prev_x: tuple[float, float] | None = None
         if self._panes and doc_ids == self._prev_doc_ids:
             prev_x = tuple(self._panes[0].plot.vb.viewRange()[0])  # type: ignore[assignment]
@@ -683,7 +691,7 @@ class TraceView(pg.GraphicsLayoutWidget):
             # a first-class home in the View menu / Scan strip already.
             plot.setMenuEnabled(False)
             pane = ChannelPane(plot, spec, self.session,
-                               baselines=self._subtracted)
+                               baselines=self._subtracted, residual_cache=self._residual_cache)
             self._panes.append(pane)
 
             if anchor is None:
@@ -784,6 +792,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         the pane object the caller is holding). Asking the narrower question the exception
         is actually about — did THIS channel's kind stop matching the pane it is sitting
         in? — rebuilds for the override and nothing else."""
+        self._residual_cache.invalidate(f"{doc_id}#{int(channel)}")
         if self._kind_moved(doc_id, channel):
             self.rebuild()
             return
@@ -1339,6 +1348,7 @@ class TraceView(pg.GraphicsLayoutWidget):
                     f"baseline of {b.size} samples cannot be subtracted from a "
                     f"{n}-sample channel ({doc_id}#{channel})")
             self._subtracted[layer_id] = b
+        self._residual_cache.invalidate(layer_id)
         # A STANDING RAIL MOVES WITH THE CURVE IT ANNOTATES. Re-issued from the values as
         # MEASURED, never from the values last drawn, so toggling the mode twice returns
         # the line to exactly where it started instead of subtracting the baseline again.

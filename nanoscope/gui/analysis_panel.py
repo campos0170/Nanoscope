@@ -32,6 +32,7 @@ What it does:
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, NamedTuple
@@ -60,6 +61,7 @@ from ..analysis.conditioning import (
     baseline_correction_export_paths,
     characterization_trace,
     conditioned_trace,
+    conditioning_params,
     write_baseline_correction,
 )
 from ..analysis.events import EventSet, mark_reviewed
@@ -406,11 +408,63 @@ def schmitt_params_from_result(res: AnalysisResult | None) -> dict[str, Any]:
     """
     if res is None:
         return {}
-    if res.params:
-        return dict(res.params)
     events = res.payload
+    params = dict(res.params or {})
+    prov = events.provenance if isinstance(events, EventSet) else {}
+    reference_key = "baseline_open_pore_reference"
+    error_key = "baseline_reference_restore_error"
+    reference_flags = ("baseline_reference_applied", "baseline_estimator_bypassed")
+    if (reference_key in prov or prov.get(error_key)
+            or any(prov.get(key) for key in reference_flags)):
+        # A partial saved params map must not hide what actually measured the
+        # rows. Recover an omitted reference only from VALID provenance; two
+        # explicit recipes must agree. An invalid restore stays a visible draft,
+        # not an exception escaping a Qt slot or a quiet Automatic substitution.
+        from ..analysis.baseline import BaselineConfig, baseline_config_from_params
+        try:
+            stored = BaselineConfig.reproducible_from(prov)
+            stored_reference = getattr(stored, "open_pore_reference", None)
+            if params.get(error_key):
+                raise ValueError(str(params[error_key]))
+            if reference_key in params or isinstance(params.get("baseline_config"), BaselineConfig):
+                explicit, _ = baseline_config_from_params(params)
+                if explicit.open_pore_reference != stored_reference:
+                    raise ValueError("The saved parameters and measurement provenance contain contradictory open-pore references.")
+            if params:
+                if reference_key not in params:
+                    params[reference_key] = prov.get(reference_key)
+                return params
+            return detection_params_from_provenance(prov)
+        except (TypeError, ValueError) as exc:
+            # The non-reference controls still need the legacy projection:
+            # e.g. low-pass-off provenance stores filter_order=None, which is
+            # not an integer widget value, and percentile uses a kernel name.
+            # Remove only the failed reference instruction while projecting,
+            # then restore it below as an explicitly invalid draft.
+            draft = dict(params) if params else detection_params_from_provenance({
+                key: value for key, value in prov.items()
+                if key not in (reference_key, error_key, *reference_flags)})
+            for key in (reference_key, *reference_flags):
+                if key in prov and key not in draft:
+                    draft[key] = prov[key]
+            draft.setdefault(reference_key, None)
+            draft[error_key] = (f"Stored reference cannot be restored: {exc} "
+                                "Review and choose a reference deliberately before detecting; "
+                                "the saved events are unchanged.")
+            return draft
+    if params:
+        return params
     if isinstance(events, EventSet) and events.provenance:
-        return detection_params_from_provenance(events.provenance)
+        try:
+            return detection_params_from_provenance(events.provenance)
+        except (TypeError, ValueError):
+            if (events.provenance.get("baseline_reference_applied")
+                    or events.provenance.get("baseline_estimator_bypassed")
+                    or events.provenance.get("baseline_open_pore_reference") is not None):
+                # Preserve the invalid assertion for the editor/backend to refuse.
+                # Do not project it into an apparently valid Automatic recipe.
+                return dict(events.provenance)
+            raise
     return {}
 
 
@@ -435,6 +489,8 @@ def _baseline_summary_rows(provenance: Mapping[str, Any]) -> dict[str, Any]:
         window = "not recorded"
     else:
         window = f"rough {float(rough):g} s / base {float(base):g} s"
+    if provenance.get("baseline_open_pore_reference") is not None:
+        window = describe_stored_baseline(provenance)
     return {
         "baseline_window": window,
         "baseline_fingerprint": str(fingerprint) if fingerprint else "not recorded",
@@ -761,6 +817,11 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._trace_view = trace_view
 
         self._sel: tuple[str, int] | None = None
+        self._baseline_view_timer = QtCore.QTimer(self)
+        self._baseline_view_timer.setSingleShot(True)
+        self._baseline_view_timer.setInterval(200)
+        self._baseline_view_timer.timeout.connect(self._apply_baseline_views)
+        self._baseline_conditioned_cache = None
         #: The (runnable, reason) last pushed to the owned panels by `_regate`, so a
         #: calibration edit that leaves the gate where it was pushes nothing.
         self._gate_shown: tuple[bool, str] | None = None
@@ -1088,6 +1149,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         # the old one is displayed, with nothing saying so until the next selection
         # change -- the silent 15x the whole migration exists to make impossible.
         self._baseline.paramsChanged.connect(self._on_baseline_params_changed)
+        self._baseline.addReferenceSelectionRequested.connect(self._add_open_pore_selection)
+        self._baseline.referencePreviewRequested.connect(self._on_reference_preview_requested)
         # ...and the two VIEW boxes, which ask for a drawing rather than a measurement.
         # Both land on one slot because the two compose into ONE picture (a subtracted
         # trace with its own rail on it is a flat line at zero), and the panel emits both
@@ -1183,6 +1246,8 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
 
         # Leaving the previous selection: drop its overlays + any live preview.
+        self._baseline_view_timer.stop()
+        self._baseline_conditioned_cache = None
         self._clear_overlays()
         self._clear_marker()
         self._selected_id = None
@@ -1219,8 +1284,11 @@ class AnalysisPanel(QtWidgets.QWidget):
         # 2.0 / 0.5 s over onto it. The gate itself was set by ``_regate`` above; it is
         # re-asserted here because ``set_recording`` is the call that resets the panel.
         self._clear_baseline_notice()
-        self._baseline.set_recording(fs, (doc_id, channel))
+        rate_and_length = self._active_rate_and_length()
+        duration = (rate_and_length[1] / rate_and_length[0]) if rate_and_length else None
+        self._baseline.set_recording(fs, (doc_id, channel), duration_s=duration)
         self._baseline.set_gate(runnable, reason)
+        self._regate()
         # The two view boxes are a STANDING preference and the trace under them just
         # changed: re-apply them to the new selection, and (through the clear inside)
         # take the previous recording's rail down. Without this a rail ticked on the
@@ -1442,6 +1510,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             # would arm a Run button that cannot run. The pipeline is what a stored run
             # can honestly put back, and it is what decides the numbers.
             self._detection.set_ml_params(dict(res.params or {}))
+        if self._sel is not None:
+            self._regate()
+            self._apply_baseline_views()
 
     def _stored_detection(self) -> AnalysisResult | None:
         """The currently-active detection result for the selection (Schmitt or ML), or
@@ -1474,7 +1545,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         if not self._session.has_document(doc_id):
             return False
         runnable, _ = self._gate_for(doc_id, channel)
-        return runnable
+        return runnable and self._open_pore_reference_problem() is None
 
     def can_run_ml(self) -> bool:
         """Whether ML detection can run: the Schmitt channel gate (CURRENT channel,
@@ -1482,6 +1553,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         source of truth for both the panel's Run-ML button and MainWindow's
         Run-ML-detection menu action, so the two never disagree."""
         if not self.can_run():
+            return False
+        if self._baseline.reference_mode() != "automatic":
             return False
         if not ml_detect.TENSORFLOW_AVAILABLE:
             return False
@@ -1529,6 +1602,70 @@ class AnalysisPanel(QtWidgets.QWidget):
         meta = self._session.document(doc_id).meta
         return self._gate(self._session.effective_kind(doc_id, channel),
                           meta.sample_rate_hz, header_kind=meta.channels[channel].kind)
+
+    def _open_pore_reference_problem(self, params=None, *, module_id=None) -> str | None:
+        """One safe refusal for the form, keyboard/menu launch and stored replay."""
+        from ..analysis.reference_context import validate_open_pore_context
+        try:
+            if params is None:
+                problem = self._baseline.reference_error()
+                if problem:
+                    return problem
+                if self._baseline.reference_mode() == "automatic":
+                    return None
+                params = self._form_params()
+            if params.get("baseline_reference_restore_error"):
+                return str(params["baseline_reference_restore_error"])
+            if (params.get("baseline_open_pore_reference") is None and getattr(
+                    params.get("baseline_config"), "open_pore_reference", None) is None
+                    and not params.get("baseline_reference_applied")
+                    and not params.get("baseline_estimator_bypassed")):
+                return None
+            if self._sel is None:
+                return "Select a current recording and channel first."
+            runnable, reason = self._gate_for(*self._sel)
+            if not runnable:
+                return reason
+            channel = self._session.calibrated(*self._sel)
+            validate_open_pore_context(
+                params, units=channel.units,
+                module_id=module_id or str(params.get("detector") or _MODULE_ID))
+        except (ValueError, TypeError, KeyError) as exc:
+            return str(exc)
+        return None
+
+    def _add_open_pore_selection(self) -> None:
+        """Copy the active Measure cursors in SAMPLE coordinates, not plot-clock seconds."""
+        if self._sel is None or self._trace_view.measure_target() != self._sel:
+            self.runRefused.emit("Select an open-pore interval with Measure cursors on this recording first.")
+            return
+        bounds = self._trace_view.measure_bounds()
+        rate = self._active_rate_and_length()
+        if bounds is None or rate is None:
+            self.runRefused.emit("A valid time base and Measure cursor interval are required.")
+            return
+        fs, n = rate
+        start, end = (int(v) for v in bounds)
+        if not 0 <= start < end <= n:
+            self.runRefused.emit("Open-pore interval is outside this recording; it was not clipped or copied.")
+            return
+        if not self._baseline.add_reference_interval(start / fs, end / fs):
+            self.runRefused.emit(self._baseline.reference_error() or
+                                "That interval could not be added; review the reference intervals.")
+
+    def _reference_redetection_needed(self, res: AnalysisResult | None) -> bool:
+        from ..analysis.baseline import BaselineConfig
+        from ..analysis.reference_context import reference_change_requires_detection
+        if res is None or not isinstance(res.payload, EventSet):
+            return False
+        live = self._live_baseline_config()
+        if live is None:
+            return False
+        try:
+            old = BaselineConfig.reproducible_from(res.payload.provenance)
+        except (TypeError, ValueError):
+            return True  # an unrebuildable user recipe cannot be safely re-measured
+        return reference_change_requires_detection(old, live)
 
     @staticmethod
     def _gate(kind: ChannelKind, fs: float | None, *,
@@ -1585,13 +1722,21 @@ class AnalysisPanel(QtWidgets.QWidget):
             f"{meta.path.name}  ·  {info.name}  ·  {self._kind_label(doc_id, channel)}"
             + (f"  ·  {info.raw_units}" if info.raw_units else ""))
         runnable, reason = self._gate_for(doc_id, channel)
+        baseline_runnable, baseline_reason = runnable, reason
+        if runnable:
+            problem = self._open_pore_reference_problem()
+            if problem:
+                runnable, reason = False, problem
         if reassert or (runnable, reason) != self._gate_shown:
             self._detection.set_runnable(runnable, reason)
-            self._detection.set_ml_runnable(runnable, reason)
+            manual_reference = self._baseline.reference_mode() != "automatic"
+            self._detection.set_ml_runnable(
+                runnable and not manual_reference,
+                "User open-pore references currently support Schmitt/CUSUM only." if manual_reference else reason)
             # The baseline probe rides the SAME gate as detection (a CURRENT channel with
             # a known rate), so the two can never disagree about whether this recording
             # can be measured.
-            self._baseline.set_gate(runnable, reason)
+            self._baseline.set_gate(baseline_runnable, baseline_reason)
         self._gate_shown = (runnable, reason)
         # ...and the stale banner's button, which is the one other door into a run on
         # this target. Always, not only when the answer moved: the banner's own gate also
@@ -1642,6 +1787,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         runnable, reason = self._gate_for(doc_id, channel)
         if not runnable:
             return reason
+        if self._reference_redetection_needed(res):
+            return self._open_pore_reference_problem()
         if self._stale.kind != _STALE_CALIBRATION:
             return None
         if self._active_detection == _ML_MODULE_ID:
@@ -1650,7 +1797,8 @@ class AnalysisPanel(QtWidgets.QWidget):
                         "be run again; load a model on the Detection tab's ML page and "
                         "press Run.")
             return None
-        return self._notch_replay_why(self._rerun_params(res))
+        replay = self._rerun_params(res)
+        return self._open_pore_reference_problem(replay) or self._notch_replay_why(replay)
 
     def _sync_stale_action(self, res: AnalysisResult | None = None) -> None:
         """Push the resolver's answer onto the banner's button. ``res`` is the result
@@ -2003,6 +2151,10 @@ class AnalysisPanel(QtWidgets.QWidget):
             # this return was a click that did nothing and said nothing (D2).
             self.runRefused.emit(f"Detection refused — {reason}")
             return False
+        problem = self._open_pore_reference_problem(params)
+        if problem:
+            self.runRefused.emit(f"Detection refused — {problem}")
+            return False
         # The Schmitt half of the notch-line cap (S7-NOTCH1; mirror of `_launch_ml`).
         # The DetectionPanel's box refuses an over-cap or illegal list itself, so
         # ``params()`` can never carry one -- but the stale banner's Re-run replays the
@@ -2230,6 +2382,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         job actually started — see :meth:`_run_detection` for why the bool matters."""
         if self._sel is None:
             return False
+        problem = self._open_pore_reference_problem(full_params, module_id=_ML_MODULE_ID)
+        if problem:
+            self.runRefused.emit(problem)
+            return False
         # The other half of the notch-line cap (see _ML_NOTCH_MAX_LINES and the commit-time
         # guard): EVERY ML start funnels through here — the Run button, the menu action,
         # the stale banner's Re-run replaying a STORED param dict — so a flooded config
@@ -2320,7 +2476,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         The two repairs are not interchangeable and must never be confused: a
         calibration change re-DETECTS (the thresholds were in the old gain, so the
         events themselves are in question, and the table is replaced); a baseline
-        change RE-MEASURES (the events are right, only their amplitudes were read
+        change to legacy automatic windows RE-MEASURES (the events are right, only their amplitudes were read
         against the wrong open-pore reference, and every accept/reject on them has
         to survive). Sending a baseline change down the re-detect path would answer
         it by destroying the owner's curation -- which is exactly what §4.2.3 says
@@ -2343,6 +2499,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         directly), and a modal nobody clicked for would block them. A gesture asks; a
         caller that was told what to do does what it was told.
 
+        A changed explicit user reference is different: it requires fresh residual
+        noise, Auto polarity and candidates, so its baseline banner offers Detect
+        with the live settings and the same curation confirmation as the Detect button.
+
         The banner is NOT dismissed on a cancel: nothing was recomputed, so the warning
         that the depths on screen were read under the old gain is still true -- the same
         invariant `_on_rerun` records for its own early returns.
@@ -2356,6 +2516,9 @@ class AnalysisPanel(QtWidgets.QWidget):
                 if kind == _STALE_RECONCILIATION_SOURCE
                 else _RECONCILED_STALE_REFUSAL
             )
+            return
+        if self._reference_redetection_needed(res):
+            self._on_detect_requested(self._detection.params())
             return
         if kind == _STALE_BASELINE:
             self.remeasure_active_detection()
@@ -2486,6 +2649,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         return {k: v for k, v in out.items() if v is not None}
 
     def _on_sweep_requested(self, params: dict[str, Any]) -> None:
+        if self._refuse_reference_surrogate(params):
+            return
         if self._sel is None:
             return
         build = self._surrogate_builder(params)
@@ -2502,11 +2667,118 @@ class AnalysisPanel(QtWidgets.QWidget):
         if self._controller.run_callable(job, label="sweep_threshold"):
             self._pending, self._pending_sel = "sweep", self._sel
 
+    def _refuse_reference_surrogate(self, params=None) -> bool:
+        explicit = (params or {}).get("baseline_open_pore_reference") is not None or getattr(
+            (params or {}).get("baseline_config"), "open_pore_reference", None) is not None
+        if (not explicit and self._baseline.reference_mode() == "automatic"
+                and not self._baseline.reference_error()):
+            return False
+        self.runRefused.emit(
+            "User reference intervals/current belong to this recording, not randomized "
+            "surrogates. Threshold sweep, null control and recovery studies are not yet "
+            "validated with this reference mode. Return to Automatic explicitly to use them.")
+        return True
+
+    def _on_reference_preview_requested(self) -> None:
+        """Run production detection on a frozen recipe without installing its result."""
+        if self._sel is None or self._baseline.reference_mode() == "automatic":
+            return
+        problem = self._open_pore_reference_problem()
+        if problem:
+            self.runRefused.emit(problem)
+            return
+        target = self._sel
+        runnable, reason = self._gate_for(*target)
+        if not runnable:
+            self.runRefused.emit(reason)
+            return
+        params = deepcopy(self._form_params())
+        problem = self._notch_replay_why(params)
+        if problem:
+            self.runRefused.emit(problem)
+            return
+        chan = self._session.calibrated(*target)
+        meta = self._session.document(target[0]).meta
+        fingerprint = tuple(self._session.calibration(*target).fingerprint())
+        params["pore_id"] = meta.stem_key
+        signature = deepcopy(self._form_params())
+
+        def job():
+            from ..analysis.context import SimpleAnalysisContext
+            from ..analysis.modules import DetectSchmitt, DetectCusum
+            from ..analysis.preview_capture import capture_detection_trace
+            from .open_pore_preview import decimate_reference_trace
+            module = DetectCusum() if params.get("detector") == _CUSUM_MODULE_ID else DetectSchmitt()
+            with capture_detection_trace() as capture:
+                result = module.run(SimpleAnalysisContext(chan, meta, params))
+            conditioned, reference = capture.require_single()
+            events = result.payload
+            fs = float(chan.sample_rate_hz)
+            frame, prov = events.df, events.provenance
+            payload = decimate_reference_trace(
+                np.arange(conditioned.size, dtype=np.float64) / fs,
+                conditioned, reference)
+            payload.update({
+                "event_start_s": frame["start_idx"].to_numpy(dtype=float) / fs,
+                "event_end_s": frame["end_idx"].to_numpy(dtype=float) / fs,
+                "event_level_pA": (frame["baseline_pA"].to_numpy(dtype=float)
+                    + float(prov.get("polarity", -1)) * frame["depth_pA"].to_numpy(dtype=float)),
+                "event_count": len(frame), "polarity": prov.get("polarity"),
+                "noise_pA": prov.get("noise_rms_pA"),
+                "warnings": list(result.warnings),
+                "reference_details": prov.get("baseline_reference_details", {}),
+                "title": f"{meta.path.name} · channel {target[1]} · {module.label}",
+                "settings": signature, "calibration": fingerprint,
+            })
+            return payload  # never AnalysisResult: the common sink must not install a preview
+
+        self._baseline.set_busy(True)
+        if self._controller.run_callable(job, label="open_pore_reference_preview"):
+            self._pending, self._pending_sel = "open_pore_reference_preview", target
+        else:
+            self._baseline.set_busy(False)
+
+    def _finish_reference_preview(self, obj: object, target) -> None:
+        self._baseline.set_busy(False)
+        if (not isinstance(obj, dict) or target is None or target != self._sel
+                or not self._session.has_document(target[0])):
+            self.runRefused.emit("Reference preview discarded: its recording is no longer selected.")
+            return
+        if (obj.get("settings") != self._form_params()
+                or self._open_pore_reference_problem() is not None
+                or tuple(obj.get("calibration", ())) != tuple(
+                    self._session.calibration(*target).fingerprint())):
+            self.runRefused.emit("Reference preview discarded: settings or calibration changed. Preview again.")
+            return
+        from .open_pore_preview import OpenPorePreviewDialog
+        dialog = OpenPorePreviewDialog(obj, parent=self)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        dialog.show()
+
     # -- the baseline probe (off-thread, through the same controller) -----------------------------
     def _on_baseline_view_changed(self, _on: bool) -> None:
         """Either view box moved. Both are redrawn, for the current selection only."""
         self._apply_baseline_views()
         self._sync_baseline_workspace()
+
+    def _schedule_baseline_view_refresh(self) -> None:
+        """Coalesce edits; staleness/gates update immediately, drawings after typing."""
+        if self._sel is None or not (self._baseline.show_baseline() or self._baseline.subtract_baseline()):
+            self._baseline_view_timer.stop()
+            return
+        self._baseline.say_view_problem("Baseline view updating — the previous drawing is still shown.")
+        self._baseline_view_timer.start()
+
+    def _conditioned_for_baseline_view(self, signal, fs, params):
+        """One display-only trace cache, invalidated by recording/calibration/chain."""
+        signature = tuple(sorted((str(k), repr(v)) for k, v in conditioning_params(params).items()))
+        key = (self._sel, float(fs), tuple(self._session.calibration(*self._sel).fingerprint()), signature)
+        cached = self._baseline_conditioned_cache
+        if cached is not None and cached[0] == key and cached[1] is signal:
+            return cached[2]
+        out = conditioned_trace(signal, fs, params)
+        self._baseline_conditioned_cache = (key, signal, out)
+        return out
 
     def _apply_baseline_views(self) -> None:
         """Draw what the two boxes on `BaselinePanel` ask for, and nothing else.
@@ -2516,10 +2788,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         without the clear the first run's rail stays up claimed by nothing on screen.
         One writer, so the trace can only ever show what the boxes currently say.
 
-        ON THE GUI THREAD, DELIBERATELY. The estimate is 70 ms on the owner's 749k-sample
-        recording and ~0.3 s at 3 M (`baseline_track`'s docstring carries the numbers);
-        the probe beside it is 0.56-3.8 s and is correctly off-thread. A worker here
-        would buy nothing and cost a cancellation path.
+        View estimation still runs on the GUI thread. Parameter edits are debounced
+        and reference conditioning is reused; explicit probe/reference-preview jobs
+        remain off-thread. Very large automatic-baseline redraws may still warrant
+        a separate worker after further profiling.
 
         The polarity is PASSED, for the reason the door's docstring gives: derive_polarity
         reads +1 on the owner's own drifting raw traces and moves the baseline by up to
@@ -2528,10 +2800,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         """
         from ..analysis.baseline import characterisation_baseline, decimate_track
 
+        self._baseline_view_timer.stop()
         self._trace_view.clear_baseline_views()
         panel = self._baseline
         panel.say_view_problem("")
         if self._sel is None or not (panel.show_baseline() or panel.subtract_baseline()):
+            self._baseline_conditioned_cache = None
             return
         doc_id, channel = self._sel
         chan = self._session.calibrated(doc_id, channel)
@@ -2543,8 +2817,15 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
         pol = self._detection.params().get("polarity")
         try:
+            config = self._live_baseline_config()
+            signal = np.asarray(chan.data)
+            if panel.reference_mode() != "automatic" or panel.reference_error():
+                problem = self._open_pore_reference_problem()
+                if problem:
+                    raise ValueError(problem)
+                signal = self._conditioned_for_baseline_view(signal, float(fs), self._form_params())
             result = characterisation_baseline(
-                np.asarray(chan.data), float(fs), config=panel.config(),
+                signal, float(fs), config=config,
                 polarity=None if pol is None else int(pol),
                 param_source=panel.param_source(), health=False)
         except Exception as exc:                      # noqa: BLE001
@@ -2659,6 +2940,11 @@ class AnalysisPanel(QtWidgets.QWidget):
         self,
     ) -> tuple[tuple[str, int], Any, float, str, tuple[float, float]] | None:
         """Resolve an honest current/rate/calibration snapshot for a workspace job."""
+        if self._baseline.reference_mode() != "automatic" or self._baseline.reference_error():
+            self._baseline_workspace.clear_preview(
+                "A user open-pore reference is active. Use Preview reference and detection "
+                "in the reference controls; this baseline-correction workspace is a separate workflow.")
+            return None
         if self._sel is None:
             self._baseline_workspace.clear_preview("Select a current recording first.")
             return None
@@ -2982,6 +3268,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         on the owner's own drifting raw traces, and a probe pointed the wrong way
         measures the drift's dwell distribution instead of the events'.
         """
+        if self._baseline.reference_mode() != "automatic" or self._baseline.reference_error():
+            self._baseline.set_busy(False)
+            self.runRefused.emit("Automatic window proposals are not used with a user open-pore reference.")
+            return
         if self._sel is None:
             self._baseline.set_busy(False)
             return
@@ -3166,6 +3456,8 @@ class AnalysisPanel(QtWidgets.QWidget):
             hashlib.blake2b(payload.encode("utf-8"), digest_size=4).digest(), "big")
 
     def _on_null_requested(self, params: dict[str, Any]) -> None:
+        if self._refuse_reference_surrogate(params):
+            return
         if self._sel is None:
             return
         build = self._surrogate_builder(params)
@@ -3189,6 +3481,8 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._pending, self._pending_sel = "null", self._sel
 
     def _on_recovery_requested(self, params: dict[str, Any]) -> None:
+        if self._refuse_reference_surrogate(params):
+            return
         if self._sel is None:
             return
         build = self._surrogate_builder(params)
@@ -3263,7 +3557,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         # re-attach to it on its next open and present a stale eta(t) / FDR as fresh.
         if target is not None and not self._session.has_document(target[0]):
             target = None
-        if pending == "baseline_workspace_preview":
+        if pending == "open_pore_reference_preview":
+            self._finish_reference_preview(obj, target)
+        elif pending == "baseline_workspace_preview":
             self._finish_baseline_workspace_preview(obj, target)
         elif pending == "baseline_workspace_export":
             self._finish_baseline_workspace_export(obj, target)
@@ -4431,6 +4727,8 @@ class AnalysisPanel(QtWidgets.QWidget):
             return self._refuse_baseline_job("no_detection")
         if res.module_id == CONSENSUS_MODULE_ID:
             return self._refuse_baseline_job("reconciled")
+        if self._reference_redetection_needed(res):
+            return self._refuse_baseline_job("reference_redetect")
         signal, fs = self._active_signal(res.payload.provenance)
         if signal is None or fs is None:
             return self._refuse_baseline_job("no_signal")
@@ -4460,6 +4758,8 @@ class AnalysisPanel(QtWidgets.QWidget):
             return self._refuse_baseline_job("no_detection")
         if res.module_id == CONSENSUS_MODULE_ID:
             return self._refuse_baseline_job("reconciled")
+        if self._reference_redetection_needed(res):
+            return self._refuse_baseline_job("reference_redetect")
         signal, fs = self._active_signal(res.payload.provenance)
         if signal is None or fs is None:
             return self._refuse_baseline_job("no_signal")
@@ -4485,6 +4785,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         "no_config": "The open-pore baseline controls are not set — open the "
                      "Preprocess tab and choose (or probe for) a window.",
         "reconciled": _RECONCILED_BASELINE_REFUSAL,
+        "reference_redetect": "The user open-pore reference changed. Preview it, then press Detect "
+                              "to recompute noise, polarity and event candidates. Depth-only "
+                              "re-measurement would leave the old detection in place.",
     }
 
     def _say_baseline(self, token: str, message: str) -> None:
@@ -4868,6 +5171,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._push_measure_conditioning()
         self._mark_baseline_workspace_runtime_change(params)
         self._sync_baseline_workspace(params)
+        if self._sel is not None and (self._baseline.reference_mode() != "automatic"
+                                     or self._baseline.reference_error()):
+            self._regate()
+            self._schedule_baseline_view_refresh()
         # Recompute the preview if it is live and ANY stage is still on; clear when the
         # low-pass AND every pre-detection filter (notch / high-pass / detrend / savgol)
         # are off.
@@ -5083,13 +5390,16 @@ class AnalysisPanel(QtWidgets.QWidget):
         live = self._session.calibration(doc_id, channel).fingerprint()
         reconciled = res.module_id == CONSENSUS_MODULE_ID
         if tuple(res.calibration_fingerprint) != tuple(live):
+            reference_changed = not reconciled and self._reference_redetection_needed(res)
             self._stale.show_message(
                 "Calibration changed since this detection ran — the blockade depths and "
                 "ECDs are computed against the old gain/offset and are now stale."
                 + (" Refresh the source detector results, then reconcile again."
-                   if reconciled else ""),
+                   if reconciled else " The user reference also changed; run detection with the live settings."
+                   if reference_changed else ""),
                 kind=_STALE_CALIBRATION,
-                action_label=("Refresh sources first" if reconciled else "Re-run"))
+                action_label=("Refresh sources first" if reconciled else "Run detection"
+                              if reference_changed else "Re-run"))
             self._sync_stale_action(res)
             # The amplitude columns are stale either way, and badging them is about
             # the NUMBERS, not about which stamp moved.
@@ -5114,13 +5424,18 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._table.set_stale_columns(())
             return
         reason = self._baseline_staleness(res)
+        if not reconciled and self._reference_redetection_needed(res):
+            reason = ("The user open-pore reference changed. The existing event table is unchanged. "
+                      "Preview the reference, then run detection to recompute noise, polarity "
+                      "and candidates. Review any existing curation before replacing it.")
         if reason is not None:
             self._stale.show_message(
                 reason + (" Refresh the source detector results, then reconcile again."
                           if reconciled else ""),
                 kind=_STALE_BASELINE,
                 action_label=("Refresh sources first"
-                              if reconciled else "Re-measure depths"))
+                              if reconciled else "Run detection"
+                              if self._reference_redetection_needed(res) else "Re-measure depths"))
             self._sync_stale_action(res)
             self._table.set_stale_columns(REMEASURED_COLUMNS)
             return
@@ -5256,7 +5571,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         Read through the panel's own resolver so the comparison is against the
         config a fresh run WOULD use, not against a second reading of the form."""
         try:
-            return self._baseline.config()
+            from ..analysis.baseline import baseline_config_from_params
+            return baseline_config_from_params(self._baseline.params())[0]
         except Exception:  # noqa: BLE001 — a half-typed form must not raise a banner
             return None
 
@@ -5326,6 +5642,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         # the calibrated signal.
         if self._detection.filter_preview.isChecked():
             self._update_filter_preview()
+        if self._baseline.reference_mode() != "automatic":
+            self._apply_baseline_views()
         self._baseline_workspace.mark_preview_stale(
             "Calibration changed — refresh the baseline comparison before relying on it.")
         self._sync_baseline_workspace()
@@ -5338,6 +5656,11 @@ class AnalysisPanel(QtWidgets.QWidget):
         first displayed leaves the user looking at depths measured by an estimator
         he has just replaced, with nothing on screen saying so.
         """
+        if self._sel is not None:
+            self._regate()
+        if self._baseline.reference_mode() != "automatic":
+            self._baseline.set_health(None)
+        self._schedule_baseline_view_refresh()
         res = self._stored_detection()
         if res is not None:
             self._check_staleness(res)
@@ -5575,6 +5898,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._sync_result_selector()
 
     def _show_empty(self) -> None:
+        self._baseline_view_timer.stop()
+        self._baseline_conditioned_cache = None
         self._clear_overlays()
         self._clear_marker()
         self._selected_id = None

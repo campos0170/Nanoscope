@@ -2088,9 +2088,32 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         fs = self._sample_rate()
         if fs is not None:
             # Re-measure on the trace the DETECTOR measured on, not the raw channel.
-            self._recharacterize_row(
-                row, self._conditioned(data, float(fs)), float(fs), new_start, new_end
-            )
+            try:
+                conditioned = self._conditioned(data, float(fs))
+            except Exception as exc:  # noqa: BLE001 — fail closed at the user-action boundary
+                # No dataframe, fitted-level or amplitude write has happened. Put
+                # the handles back without replaying the failing filter again;
+                # the existing waveform and view remain available for browsing.
+                xvals = self._session.x_axis(self._doc_id).values
+                self._syncing = True
+                try:
+                    self._region.setRegion((
+                        float(xvals[min(cur_start, len(xvals) - 1)]),
+                        float(xvals[min(cur_end, len(xvals) - 1)]),
+                    ))
+                finally:
+                    self._syncing = False
+                self._refresh_readout(row)
+                self._sync_revert_control()
+                QtWidgets.QMessageBox.warning(
+                    self, "Event bounds unchanged",
+                    "The saved signal conditioning could not be reconstructed. "
+                    "No event bounds, measurements or curation were changed. "
+                    "Correct the saved analysis settings or run detection again.\n\n"
+                    + str(exc),
+                )
+                return
+            self._recharacterize_row(row, conditioned, float(fs), new_start, new_end)
         else:
             # Rate unknown (legacy TDMS): detection cannot have produced dwell-bearing events, but
             # keep the bounds honest anyway (dwell/depth stay whatever they were).
@@ -2313,6 +2336,14 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         and every provenance field :func:`detection_signal` reads, so a re-detection with
         different filtering, a calibration edit or a channel switch all invalidate it."""
         prov = self._provenance or {}
+        cutoff = prov.get("filter_cutoff_hz")
+        if cutoff is not None:
+            try:
+                cutoff = float(cutoff)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("The saved low-pass cutoff is not a valid frequency.") from exc
+            if not np.isfinite(cutoff) or not (0 < cutoff < float(fs) / 2):
+                raise ValueError("The saved low-pass cutoff must be positive and below Nyquist.")
         calib: tuple[float, float] | None = None
         if self._doc_id is not None and self._channel is not None:
             try:
@@ -2323,10 +2354,10 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
                detection_signal_key(prov))
         if self._cond_cache is not None and self._cond_cache[0] == key:
             return self._cond_cache[1]
-        try:
-            out = detection_signal(data, fs, prov)
-        except Exception:  # noqa: BLE001 — a bad stored param must not break an edit
-            out = np.asarray(data)
+        # Only successful reconstructions enter the cache. A replay failure must
+        # reach the mask-edit boundary, never become a raw trace under the saved
+        # filtered measurement's column names.
+        out = detection_signal(data, fs, prov)
         self._cond_cache = (key, out)
         return out
 

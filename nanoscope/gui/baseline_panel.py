@@ -59,11 +59,14 @@ THE UX RULES THIS CODEBASE ALREADY PAID FOR
 Signals:
     probeRequested(): "Measure this recording" clicked and nothing blocks it.
     paramsChanged(dict): a value changed; carries :meth:`params`.
+    addReferenceSelectionRequested(): deliberately copy the trace's time selection.
+    referencePreviewRequested(): preview a valid supplied reference without applying it.
 """
 
 from __future__ import annotations
 
 import html
+import math
 from typing import Any, Mapping
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -81,6 +84,7 @@ from ..analysis.baseline import (
     derive_decim,
 )
 from ..analysis.baseline_probe import BaselineProposal, proposal_summary
+from ..analysis.open_pore_reference import OpenPoreReference
 
 __all__ = ["BaselinePanel"]
 
@@ -173,8 +177,345 @@ _ROUGH_RANGE = (0.002, 60.0)
 _BASE_RANGE = (0.001, 30.0)
 
 
+class _OpenPoreReferenceEditor(QtWidgets.QWidget):
+    """A recording-specific reference form, never a trace reader or estimator.
+
+    Invalid drafts stay visible and serialize as invalid input rather than quietly
+    reverting to Automatic. The owner checks ``error()`` before launching work; the
+    production resolver independently validates the recipe against the recording.
+    """
+
+    changed = QtCore.Signal()
+    selectionRequested = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._loading = False
+        self._confirmed = False
+        self._duration_s: float | None = None
+        self._fs: float | None = None
+        self._restore_error = ""
+        self._invalid_recipe = None
+        self._invalid_reference_flags = {}
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        self.mode = QtWidgets.QComboBox()
+        self.mode.addItem("Automatic (existing estimator)", "automatic")
+        self.mode.addItem("Known open-pore current", "constant")
+        self.mode.addItem("Selected open-pore intervals", "intervals")
+        self.mode.setToolTip(
+            "Choose a reference for this recording only. Automatic keeps the existing "
+            "estimator. The other modes use information you provide, not independently verified.")
+        layout.addWidget(self.mode)
+
+        self.known_box = QtWidgets.QWidget()
+        self.known_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        known = QtWidgets.QFormLayout(self.known_box)
+        known.setContentsMargins(0, 0, 0, 0)
+        known.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        self.current = QtWidgets.QLineEdit()
+        self.current.setPlaceholderText("Signed current, e.g. −120")
+        self.current.setToolTip(
+            "The signed open-pore current in calibrated pA for THIS recording. "
+            "A constant reference is applied to the whole recording; do not enter an absolute magnitude.")
+        known.addRow("Open-pore current (pA)", self.current)
+        layout.addWidget(self.known_box)
+
+        self.intervals_box = QtWidgets.QWidget()
+        self.intervals_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        intervals = QtWidgets.QVBoxLayout(self.intervals_box)
+        intervals.setContentsMargins(0, 0, 0, 0)
+        intervals.setSpacing(4)
+        caption = QtWidgets.QLabel(
+            "Mark intervals known to contain open-pore current, not blocked states. "
+            "Times are seconds from the recording start, not the displayed clock.")
+        caption.setWordWrap(True)
+        caption.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        intervals.addWidget(caption)
+        self.table = QtWidgets.QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Start (s)", "End (s)"])
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setMinimumWidth(0)
+        self.table.setFixedHeight(118)
+        self.table.setToolTip(
+            "Ordered, non-overlapping open-pore intervals relative to this recording's start. "
+            "Start is included and end excluded; each interval needs at least five samples. "
+            "Double-click a time to edit it.")
+        intervals.addWidget(self.table)
+        buttons = QtWidgets.QGridLayout()
+        self.selection_button = QtWidgets.QPushButton("Add current trace selection")
+        self.selection_button.setToolTip(
+            "Copy the highlighted time range from the trace. This does not run detection.")
+        self.add_button = QtWidgets.QPushButton("Add interval")
+        self.add_button.setToolTip("Add a blank interval to enter start and end times by hand.")
+        self.remove_button = QtWidgets.QPushButton("Remove selected")
+        self.remove_button.setToolTip("Remove only the selected rows from this reference form.")
+        buttons.addWidget(self.selection_button, 0, 0, 1, 2)
+        buttons.addWidget(self.add_button, 1, 0)
+        buttons.addWidget(self.remove_button, 1, 1)
+        intervals.addLayout(buttons)
+        self.method = QtWidgets.QComboBox()
+        self.method.addItem("Constant reference (stable recording)", "constant")
+        self.method.addItem("Linear between interval anchors (drift)", "linear")
+        self.method.setToolTip(
+            "Constant uses the pooled median of selected samples. Linear needs at least two "
+            "intervals, interpolates their median levels, and holds the endpoint levels outside "
+            "the anchors. Unobserved drift cannot be verified, particularly across long gaps.")
+        intervals.addWidget(self.method)
+        layout.addWidget(self.intervals_box)
+
+        self.manual_box = QtWidgets.QWidget()
+        self.manual_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        manual = QtWidgets.QVBoxLayout(self.manual_box)
+        manual.setContentsMargins(0, 0, 0, 0)
+        manual.setSpacing(4)
+        self.notes = QtWidgets.QLineEdit()
+        self.notes.setMaxLength(1000)
+        self.notes.setPlaceholderText("Optional source / notes (saved with analysis)")
+        self.notes.setToolTip(
+            "Where this recording-specific information came from, such as an open-pore measurement "
+            "or lab notebook. User-provided information is not independently verified.")
+        manual.addWidget(self.notes)
+        self.notice = QtWidgets.QLabel(
+            "User-provided reference · not independently verified. Preview the baseline, "
+            "then run detection deliberately. Existing measurements do not change while you edit.")
+        self.notice.setWordWrap(True)
+        self.notice.setStyleSheet("color:#8a939c;")
+        manual.addWidget(self.notice)
+        self.preview_button = QtWidgets.QPushButton("Preview reference and detection…")
+        self.preview_button.setToolTip(
+            "Preview the reference and candidate events without replacing stored results. "
+            "Review the preview before explicitly running detection.")
+        manual.addWidget(self.preview_button)
+        self.validation_label = QtWidgets.QLabel()
+        self.validation_label.setWordWrap(True)
+        self.validation_label.setTextFormat(QtCore.Qt.PlainText)
+        self.validation_label.setStyleSheet("color:#ffb454;")
+        layout.addWidget(self.manual_box)
+        layout.addWidget(self.validation_label)
+
+        self.mode.currentIndexChanged.connect(self._edited)
+        self.current.textChanged.connect(self._edited)
+        self.method.currentIndexChanged.connect(self._edited)
+        self.notes.textChanged.connect(self._edited)
+        self.table.cellChanged.connect(self._edited)
+        self.add_button.clicked.connect(self._add_blank)
+        self.remove_button.clicked.connect(self._remove_selected)
+        self.selection_button.clicked.connect(self.selectionRequested)
+        self._refresh()
+
+    def reference_mode(self) -> str:
+        return str(self.mode.currentData())
+
+    @staticmethod
+    def _number(value):
+        try:
+            number = float(str(value).strip().replace("−", "-"))
+        except (ValueError, TypeError):
+            return None
+        return number if math.isfinite(number) else None
+
+    def _intervals(self):
+        return [[self._number(self.table.item(row, col).text())
+                 if self.table.item(row, col) else None for col in range(2)]
+                for row in range(self.table.rowCount())]
+
+    def params(self) -> dict[str, Any]:
+        if self._restore_error:
+            return {"baseline_open_pore_reference": self._invalid_recipe,
+                    **self._invalid_reference_flags}
+        mode = self.reference_mode()
+        if mode == "automatic":
+            return {}
+        recipe = {"version": 1, "mode": mode,
+                  "current_pA": self._number(self.current.text()) if mode == "constant" else None,
+                  "intervals_s": self._intervals() if mode == "intervals" else [],
+                  "interpolation": str(self.method.currentData()) if mode == "intervals" else "constant"}
+        if self.notes.text().strip():
+            recipe["notes"] = self.notes.text().strip()
+        return {"baseline_open_pore_reference": recipe}
+
+    def error(self) -> str:
+        if self._restore_error:
+            return self._restore_error
+        mode = self.reference_mode()
+        if mode == "automatic":
+            return ""
+        if mode == "constant":
+            return ("Enter a finite, signed open-pore current in pA."
+                    if self._number(self.current.text()) is None else "")
+        rows = self._intervals()
+        if not rows:
+            return "Add at least one trustworthy open-pore interval."
+        for row, (start, end) in enumerate(rows, 1):
+            if start is None or end is None or not 0 <= start < end:
+                return f"Interval {row}: enter finite times with 0 ≤ start < end."
+            if self._duration_s is not None and end > self._duration_s:
+                return f"Interval {row} ends beyond this recording ({self._duration_s:g} s)."
+            if self._fs and (math.ceil(math.nextafter(end * self._fs, -math.inf))
+                             - math.ceil(math.nextafter(start * self._fs, -math.inf))) < 5:
+                return f"Interval {row} needs at least five samples."
+        if any(right[0] < left[1] for left, right in zip(rows, rows[1:])):
+            return "Enter open-pore intervals in time order, without overlaps."
+        if self.method.currentData() == "linear" and len(rows) < 2:
+            return "Linear drift reference needs at least two separate open-pore intervals."
+        return ""
+
+    def _refresh(self):
+        mode = self.reference_mode()
+        self.known_box.setVisible(mode == "constant")
+        self.intervals_box.setVisible(mode == "intervals")
+        self.manual_box.setVisible(mode != "automatic")
+        problem = self.error()
+        self.validation_label.setText(problem)
+        self.validation_label.setVisible(bool(problem))
+
+    def _edited(self, *_args):
+        if self._loading:
+            return
+        self._confirmed = True
+        self._restore_error = ""
+        self._invalid_recipe = None
+        self._invalid_reference_flags = {}
+        self._refresh()
+        self.changed.emit()
+
+    def _add_blank(self):
+        self._loading = True
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        for col in range(2):
+            self.table.setItem(row, col, QtWidgets.QTableWidgetItem(""))
+        self._loading = False
+        self._edited()
+        self.table.setCurrentCell(row, 0)
+        self.table.editItem(self.table.item(row, 0))
+
+    def _remove_selected(self):
+        rows = sorted({item.row() for item in self.table.selectedItems()}, reverse=True)
+        if not rows:
+            self.validation_label.setText("Select interval rows to remove first.")
+            self.validation_label.setVisible(True)
+            return
+        self._loading = True
+        for row in rows:
+            self.table.removeRow(row)
+        self._loading = False
+        self._edited()
+
+    def add_interval(self, start_s, end_s) -> bool:
+        start, end = self._number(start_s), self._number(end_s)
+        if start is None or end is None or not 0 <= start < end:
+            self.validation_label.setText("Select a non-empty time range within this recording.")
+            self.validation_label.setVisible(True)
+            return False
+        if self._duration_s is not None and end > self._duration_s:
+            self.validation_label.setText("The selected range extends beyond this recording.")
+            self.validation_label.setVisible(True)
+            return False
+        existing = self._intervals()
+        for a, b in existing:
+            if a is not None and b is not None and max(a, start) < min(b, end):
+                self.validation_label.setText("The selected range overlaps an existing open-pore interval.")
+                self.validation_label.setVisible(True)
+                return False
+        self._loading = True
+        self.mode.setCurrentIndex(self.mode.findData("intervals"))
+        # Inserting trace selections in order is deterministic and preserves their
+        # exact endpoints. Manually entered out-of-order rows remain invalid drafts.
+        row = next((index for index, (a, _) in enumerate(existing)
+                    if a is not None and start < a), self.table.rowCount())
+        self.table.insertRow(row)
+        for col, value in enumerate((start, end)):
+            self.table.setItem(row, col, QtWidgets.QTableWidgetItem(repr(value)))
+        self._loading = False
+        self._edited()
+        return True
+
+    def set_recording(self, fs: float | None, duration_s: float | None):
+        self._fs = float(fs) if fs else None
+        self._duration_s = (float(duration_s) if duration_s is not None
+                            and math.isfinite(float(duration_s)) and duration_s >= 0 else None)
+        self._refresh()
+
+    def reset(self):
+        self._loading = True
+        self.mode.setCurrentIndex(0)
+        self.current.clear()
+        self.notes.clear()
+        self.table.setRowCount(0)
+        self.method.setCurrentIndex(0)
+        self._confirmed = False
+        self._restore_error = ""
+        self._invalid_recipe = None
+        self._invalid_reference_flags = {}
+        self._loading = False
+        self._refresh()
+
+    def set_params(self, params: Mapping[str, Any]):
+        if self._confirmed:
+            return
+        active = {k: params[k] for k in ("baseline_reference_applied", "baseline_estimator_bypassed")
+                  if params.get(k)}
+        if params.get("baseline_reference_restore_error"):
+            self._restore_error = str(params["baseline_reference_restore_error"])
+            self._invalid_recipe = params.get("baseline_open_pore_reference")
+            self._invalid_reference_flags = {
+                **active, "baseline_reference_restore_error": self._restore_error}
+            self._refresh()
+            return
+        if active and params.get("baseline_open_pore_reference") is None:
+            self._restore_error = ("Stored user reference is missing its recipe. Choose a reference "
+                                   "deliberately before detecting; the saved events are unchanged.")
+            self._invalid_recipe = None
+            self._invalid_reference_flags = active
+            self._refresh()
+            return
+        if "baseline_open_pore_reference" not in params:
+            return
+        self._invalid_reference_flags = {}
+        recipe = params["baseline_open_pore_reference"]
+        if recipe is None:
+            self.reset()
+            return
+        try:
+            OpenPoreReference.from_dict(recipe)
+        except (TypeError, ValueError) as exc:
+            self._restore_error = f"Stored reference is invalid or unsupported: {exc}. Review and edit it before detection."
+            self._invalid_recipe = recipe
+        else:
+            self._restore_error = ""
+            self._invalid_recipe = None
+        if not isinstance(recipe, Mapping) or recipe.get("mode") not in {"constant", "intervals"}:
+            self._refresh()
+            return
+        self._loading = True
+        try:
+            self.mode.setCurrentIndex(self.mode.findData(recipe["mode"]))
+            value = recipe.get("current_pA")
+            self.current.setText("" if value is None else str(value))
+            self.notes.setText(str(recipe.get("notes", "")))
+            method_index = self.method.findData(recipe.get("interpolation", "constant"))
+            self.method.setCurrentIndex(max(0, method_index))
+            self.table.setRowCount(0)
+            rows = recipe.get("intervals_s") or ()
+            for values in rows if isinstance(rows, (list, tuple)) else ():
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                for col in range(2):
+                    value = values[col] if isinstance(values, (tuple, list)) and len(values) > col else None
+                    self.table.setItem(row, col, QtWidgets.QTableWidgetItem(
+                        "" if value is None else str(value)))
+        finally:
+            self._loading = False
+        self._refresh()
+
+
 class BaselinePanel(QtWidgets.QGroupBox):
-    """Rough / base window spins, a measured proposal, and the health block.
+    """Automatic estimator and opt-in, recording-specific open-pore reference forms.
 
     Public API:
         params() -> dict                    # the ``baseline_*`` params to run with
@@ -188,10 +529,15 @@ class BaselinePanel(QtWidgets.QGroupBox):
         apply_proposal(override=False)      # the confirmation, callable from a test
         condemned_checks() -> tuple[str]    # what condemns the proposal ON OFFER
         accepted_condemned() -> tuple[str]  # what the FORM's values were accepted over
+        reference_mode() -> str             # automatic / constant / intervals
+        reference_error() -> str            # invalid draft; must block a run
+        add_reference_interval(start,end)   # recording-relative seconds; intent only
     """
 
     probeRequested = QtCore.Signal()
     paramsChanged = QtCore.Signal(dict)
+    addReferenceSelectionRequested = QtCore.Signal()
+    referencePreviewRequested = QtCore.Signal()
     #: The two VIEW requests, carried separately from `paramsChanged` on purpose:
     #: nothing here is a parameter. Neither changes a measurement, neither belongs in
     #: provenance, and a redraw must never be mistaken for a reason to re-run a
@@ -203,10 +549,10 @@ class BaselinePanel(QtWidgets.QGroupBox):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__("Event reference · open-pore baseline", parent)
         self.setToolTip(
-            "How the open-pore current I0(t) is estimated. Every event's depth is "
-            "measured against it, so these two windows decide the depth column. "
-            "They are per-recording: press Measure this recording to have them "
-            "proposed from the data.")
+            "How the recording-specific open-pore current I0(t) is estimated. "
+            "Every event's depth is measured against it. Keep the existing Automatic "
+            "estimator, supply a known signed current, or select trustworthy open-pore "
+            "intervals. User-provided references need review; they are not independently verified.")
 
         self._fs: float | None = None
         #: Which selection the form currently describes; see `set_recording`.
@@ -238,6 +584,14 @@ class BaselinePanel(QtWidgets.QGroupBox):
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 6, 8, 8)
         root.setSpacing(6)
+
+        self.reference_editor = _OpenPoreReferenceEditor(self)
+        root.addWidget(self.reference_editor)
+        self.automatic_controls = QtWidgets.QWidget()
+        automatic_layout = QtWidgets.QVBoxLayout(self.automatic_controls)
+        automatic_layout.setContentsMargins(0, 0, 0, 0)
+        automatic_layout.setSpacing(6)
+        root.addWidget(self.automatic_controls)
 
         # -- the two windows ------------------------------------------------
         form = QtWidgets.QGridLayout()
@@ -281,7 +635,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
             "quality knob. Shown here so the cost is visible.")
         form.addWidget(self.decim_label, 2, 1)
         form.setColumnStretch(2, 1)
-        root.addLayout(form)
+        automatic_layout.addLayout(form)
 
         # -- where these numbers came from ----------------------------------
         self.source_label = QtWidgets.QLabel()
@@ -290,7 +644,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.source_label.setToolTip(
             "Where the values above came from. This travels with the analysis, so a "
             "stored result says whether anyone ever looked at this recording.")
-        root.addWidget(self.source_label)
+        automatic_layout.addWidget(self.source_label)
 
         # -- actions: one primary row and two secondary buttons --------------
         row = QtWidgets.QGridLayout()
@@ -319,7 +673,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         row.addWidget(self.reset_button, 1, 1)
         row.setColumnStretch(0, 1)
         row.setColumnStretch(1, 1)
-        root.addLayout(row)
+        automatic_layout.addLayout(row)
         self.display_group = QtWidgets.QGroupBox('Trace display')
         display_layout = QtWidgets.QVBoxLayout(self.display_group)
         display_layout.setContentsMargins(8, 6, 8, 8)
@@ -506,11 +860,15 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.probe_button.clicked.connect(self._on_probe_clicked)
         self.apply_button.clicked.connect(self._on_apply_clicked)
         self.reset_button.clicked.connect(self._on_reset_clicked)
+        self.reference_editor.changed.connect(self._on_reference_edited)
+        self.reference_editor.selectionRequested.connect(self.addReferenceSelectionRequested)
+        self.reference_editor.preview_button.clicked.connect(self._on_reference_preview_clicked)
 
         self._recouple()      # the two windows constrain each other from the start
         self._refresh_source()
         self._refresh_decim()
         self._restyle_buttons()
+        self._refresh_reference_mode()
 
     # ==================================================================
     # values
@@ -536,17 +894,59 @@ class BaselinePanel(QtWidgets.QGroupBox):
         stamped into provenance -- so a stored result records not just WHICH windows
         measured it but whether a human ever chose them.
 
-        Exactly `BASELINE_PARAM_KEYS`, and deliberately NOT the whole
+        Automatic keeps `BASELINE_PARAM_KEYS` plus the source, deliberately NOT the whole
         ``to_provenance`` block: that also carries ``baseline_fingerprint``, which is
         DERIVED from the parameters (and from ``fs``, which this form does not
         resolve). A derived value in a params dict is a value that can disagree with
         the parameters beside it, and the estimator stamps the real one at run time.
+        Opt-in modes additionally carry the versioned ``baseline_open_pore_reference``
+        recipe. Invalid drafts remain invalid; the owner must check ``reference_error``.
         """
         cfg = self.config()
         prov = cfg.to_provenance()
         out = {k: prov[k] for k in BASELINE_PARAM_KEYS if k in prov}
-        out["baseline_param_source"] = self._source
+        out["baseline_param_source"] = self.param_source()
+        out.update(self.reference_editor.params())
         return out
+
+    def reference_mode(self) -> str:
+        """The per-recording reference mode; Automatic preserves the old contract."""
+        return self.reference_editor.reference_mode()
+
+    def reference_error(self) -> str:
+        """A visible draft error that must block detection, never trigger fallback."""
+        return self.reference_editor.error()
+
+    def add_reference_interval(self, start_s: float, end_s: float) -> bool:
+        """Add a recording-relative trace selection deliberately, without analysing."""
+        return self.reference_editor.add_interval(start_s, end_s)
+
+    def _on_reference_edited(self) -> None:
+        self._refresh_reference_mode()
+        self.paramsChanged.emit(self.params())
+
+    def _on_reference_preview_clicked(self) -> None:
+        if not self._gate_ok:
+            self._post(self._gate_reason)
+        elif self._busy:
+            self._post("Still measuring this recording — one moment.")
+        elif self.reference_mode() == "automatic":
+            self._post("Choose a user-provided reference to preview it here.")
+        elif self.reference_error():
+            self._post(self.reference_error())
+        else:
+            self._post("")
+            self.referencePreviewRequested.emit()
+
+    def _refresh_reference_mode(self) -> None:
+        automatic = self.reference_mode() == "automatic"
+        self.automatic_controls.setVisible(automatic)
+        self.proposal_box.setVisible(automatic and self._proposal is not None)
+        if not automatic:
+            self.run_windows_label.hide()
+        else:
+            self._refresh_run_windows()
+        self._restyle_buttons()
 
     def _set_windows(self, rough: float | None, base: float | None) -> None:
         """Set either window without the form ever passing through an invalid state.
@@ -622,6 +1022,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
         """
         if not params:
             return
+        self.reference_editor.set_params(params)
+        self._refresh_reference_mode()
         if self._source in _CONFIRMED_SOURCES:
             return
         self._set_windows(params.get("baseline_rough_s"), params.get("baseline_base_s"))
@@ -636,6 +1038,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
 
     def param_source(self) -> str:
         """How the values in the form were chosen (one of `PARAM_SOURCES`)."""
+        if self.reference_mode() != "automatic":
+            return "user" if self.reference_editor._confirmed else "restored"
         return self._source
 
     def batch_params(self) -> dict[str, Any]:
@@ -757,7 +1161,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
             f"{base:g} s{contrast}{why}.")
         self.run_windows_label.setVisible(True)
 
-    def set_recording(self, fs: float | None, target: Any = None) -> None:
+    def set_recording(self, fs: float | None, target: Any = None,
+                      duration_s: float | None = None) -> None:
         """The selected recording's sample rate, so the derived decimation is real.
 
         Clears any proposal: a proposal belongs to the recording it was measured on,
@@ -795,6 +1200,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self._fs = float(fs) if fs else None
         if target is not None and target != self._target:
             self._target = target
+            self.reference_editor.reset()
             self._set_windows(DEFAULT_BASELINE.rough_s, DEFAULT_BASELINE.base_s)
             self._source = "default"
             # A mark left standing over ANOTHER recording's numbers is the
@@ -807,6 +1213,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
             self.set_run_windows(None)
         self.set_proposal(None)
         self.set_health(None)
+        self.reference_editor.set_recording(self._fs, duration_s)
+        self._refresh_reference_mode()
         self._refresh_decim()
 
     # ==================================================================
@@ -848,7 +1256,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.reason_label.setText(prefix + proposal.reason)
         self.reason_label.setStyleSheet(
             "color:#c3c9d1;" if proposal.confident else "color:#ffb454;")
-        self.proposal_box.setVisible(True)
+        self.proposal_box.setVisible(self.reference_mode() == "automatic")
         self._restyle_buttons()
 
     def proposal(self) -> BaselineProposal | None:
@@ -890,6 +1298,9 @@ class BaselinePanel(QtWidgets.QGroupBox):
         :attr:`gate_label` and arms the override, so the second call -- click or
         not -- goes through.
         """
+        if self.reference_mode() != "automatic":
+            self._post("Automatic estimator proposals do not apply to a user-provided reference.")
+            return False
         p = self._proposal
         if p is None:
             return False
@@ -1294,6 +1705,9 @@ class BaselinePanel(QtWidgets.QGroupBox):
         """
         if not self._gate_ok:
             return self._gate_reason, "gate"
+        if self.reference_mode() != "automatic":
+            return ("Automatic estimator proposals do not apply to a user-provided "
+                    "reference. Choose Automatic to measure its windows."), "reference"
         if self._busy:
             return "Still measuring this recording — one moment.", "busy"
         if what == "apply" and self._proposal is None:
@@ -1333,6 +1747,10 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.apply_button.setStyleSheet(
             _WARN_BUTTON if armed
             else _OK_BUTTON if not self._blocker("apply") else _DIM_BUTTON)
+        preview_ready = (self._gate_ok and not self._busy
+                         and self.reference_mode() != "automatic" and not self.reference_error())
+        self.reference_editor.preview_button.setStyleSheet(
+            _OK_BUTTON if preview_ready else _DIM_BUTTON)
 
     # ==================================================================
     # internals

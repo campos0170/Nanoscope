@@ -46,6 +46,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "PySide6 is not installed: pip install -e `".[dev]`"" }
     python -c "import nanoscope" 2>$null
     if ($LASTEXITCODE -ne 0) { throw "nanoscope is not importable: run pip install -e . from $Root" }
+    $AppVersion = python (Join-Path $Here "build_identity.py") --version
+    if ($LASTEXITCODE -ne 0) { throw "Unable to read the NanoScope version" }
 
     # --- icon --------------------------------------------------------------------------------
     # Checked in, so this is a no-op on a normal build; regenerated only if it is missing.
@@ -88,7 +90,7 @@ try {
 
     # --- zip ---------------------------------------------------------------------------------
     if (-not $NoZip) {
-        $Zip = "dist\NanoScope-0.1.0-win64.zip"
+        $Zip = "dist\NanoScope-$AppVersion-win64.zip"
         if (Test-Path $Zip) { Remove-Item -Force $Zip }
         Write-Host "-- zipping -> $Zip" -ForegroundColor Cyan
         Compress-Archive -Path "dist\NanoScope\*" -DestinationPath $Zip

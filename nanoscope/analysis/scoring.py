@@ -102,6 +102,11 @@ __all__ = [
 #: parameter reaches the exports the day it is added and cannot be forgotten here.
 BASELINE_CONTRACT_KEYS: tuple[str, ...] = (
     *BASELINE_PARAM_KEYS,
+    "baseline_open_pore_reference",
+    "baseline_reference_applied",
+    "baseline_reference_details",
+    "baseline_estimator_bypassed",
+    "baseline_polarity_role",
     "baseline_fingerprint",
     "baseline_param_source",
     "baseline_polarity",

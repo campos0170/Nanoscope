@@ -131,6 +131,7 @@ holds.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import threading
 import warnings
@@ -146,6 +147,9 @@ from scipy.ndimage import binary_dilation, maximum_filter1d
 from scipy.signal import savgol_filter
 
 from .cancel import check_cancelled
+from .open_pore_reference import (
+    OPEN_PORE_REFERENCE_PARAM_KEY, OpenPoreReference, build_reference,
+)
 
 # THE KERNEL. Imported, never copied -- see the module docstring and
 # ``tests/analysis/test_masked_baseline.py::test_exactly_one_decimated_median_in_the_tree``.
@@ -172,6 +176,8 @@ __all__ = [
     "clear_baseline_cache",
     "repair_nonfinite",
     "BASELINE_PARAM_KEYS",
+    "OPEN_PORE_REFERENCE_PARAM_KEY",
+    "OpenPoreReference",
     "PARAM_SOURCES",
     "FALLBACK_TOO_SHORT",
     "FALLBACK_CLAMPED",
@@ -1222,6 +1228,11 @@ class BaselineConfig:
     window_s: float = 0.5
     despike_size: int = 0
 
+    # Opt-in only. Excluded from _FIELDS so every disabled/legacy fingerprint
+    # and provenance dictionary remains unchanged. Dormant estimator settings
+    # are retained, not applied, while this explicit recipe is active.
+    open_pore_reference: OpenPoreReference | None = None
+
     #: The order the fingerprint hashes, and the order `to_provenance` writes.
     _FIELDS = ("method", "rough_s", "base_s", "decim", "mask_sigma",
                "dilate_ms", "window_s", "despike_size")
@@ -1241,12 +1252,15 @@ class BaselineConfig:
         object.__setattr__(self, "despike_size", int(self.despike_size))
         if self.decim is not None:
             object.__setattr__(self, "decim", int(self.decim))
+        if self.open_pore_reference is not None:
+            object.__setattr__(self, "open_pore_reference",
+                               OpenPoreReference.from_dict(self.open_pore_reference))
 
     # -- resolution ---------------------------------------------------------
     @property
     def is_masked(self) -> bool:
         """True for the two `MASKED_METHODS`, which take rough_s/base_s, not window_s."""
-        return self.method in MASKED_METHODS
+        return self.open_pore_reference is None and self.method in MASKED_METHODS
 
     @property
     def tracking_window_s(self) -> float:
@@ -1322,6 +1336,12 @@ class BaselineConfig:
         """
         cfg = self.resolve(fs) if fs is not None else self
         parts = [f"{name}={getattr(cfg, name)!r}" for name in self._FIELDS]
+        if cfg.open_pore_reference is not None:
+            parts.append("open_pore_reference=" + json.dumps(
+                cfg.open_pore_reference.to_dict(), sort_keys=True,
+                separators=(",", ":"), allow_nan=False))
+            if fs is not None:
+                parts.append(f"reference_fs={float(fs)!r}")
         digest = hashlib.sha256("|".join(parts).encode()).hexdigest()
         return f"sha256:{digest[:12]}"
 
@@ -1333,7 +1353,7 @@ class BaselineConfig:
         string. NEVER a new EventSet column -- the 20-column SCHEMA is frozen.
         """
         cfg = self.resolve(fs) if fs is not None else self
-        return {
+        prov = {
             "baseline_method": cfg.method,
             "baseline_rough_s": float(cfg.rough_s),
             "baseline_base_s": float(cfg.base_s),
@@ -1344,6 +1364,12 @@ class BaselineConfig:
             "baseline_despike_size": int(cfg.despike_size),
             "baseline_fingerprint": cfg.fingerprint(),
         }
+        if cfg.open_pore_reference is not None:
+            prov[OPEN_PORE_REFERENCE_PARAM_KEY] = cfg.open_pore_reference.to_dict()
+            prov["baseline_reference_applied"] = True
+            prov["baseline_estimator_bypassed"] = True
+            prov["baseline_fingerprint"] = cfg.fingerprint(fs)
+        return prov
 
     @classmethod
     def from_provenance(cls, prov: Mapping[str, Any] | None) -> "BaselineConfig":
@@ -1357,8 +1383,21 @@ class BaselineConfig:
         """
         if not prov:
             return DEFAULT_BASELINE
-        method = prov.get("baseline_method")
+        if prov.get("baseline_reference_restore_error"):
+            raise ValueError(str(prov["baseline_reference_restore_error"]))
+        reference = prov.get(OPEN_PORE_REFERENCE_PARAM_KEY)
+        if reference is None and (
+            prov.get("baseline_reference_applied") or prov.get("baseline_estimator_bypassed")
+        ):
+            raise ValueError("active user-reference provenance lacks its recipe; cannot silently restore an automatic baseline")
+        if reference is not None:
+            # Validate first: malformed opt-in provenance must never quietly
+            # restore as the legacy baseline estimator.
+            reference = OpenPoreReference.from_dict(reference)
+        method = prov.get("baseline_method", DEFAULT_BASELINE.method if reference is not None else None)
         if method not in METHODS:
+            if reference is not None:
+                raise ValueError("user-reference provenance has an unknown dormant baseline method")
             # Absent, or a marker rather than an estimator: ``'provided'`` is what
             # `detect_events` stamps when the CALLER handed it a baseline array, and
             # every row written before this change has no key at all. Neither names
@@ -1377,6 +1416,7 @@ class BaselineConfig:
             dilate_ms=float(d.get("baseline_dilate_ms", DEFAULT_BASELINE.dilate_ms)),
             window_s=float(d.get("baseline_window_s", DEFAULT_BASELINE.window_s)),
             despike_size=int(d.get("baseline_despike_size", DEFAULT_BASELINE.despike_size)),
+            open_pore_reference=reference,
         )
 
     @classmethod
@@ -1399,6 +1439,17 @@ class BaselineConfig:
         """
         if not prov:
             return None
+        if prov.get("baseline_reference_restore_error"):
+            raise ValueError(str(prov["baseline_reference_restore_error"]))
+        if prov.get("baseline_reference_applied") or prov.get("baseline_estimator_bypassed"):
+            # A missing/null recipe in an explicitly active saved result is
+            # corruption, not a request to switch back to automatic estimation.
+            cls.from_provenance(prov)
+        if prov.get(OPEN_PORE_REFERENCE_PARAM_KEY) is not None:
+            cfg = cls.from_provenance(prov)
+            if not prov.get("baseline_fingerprint"):
+                raise ValueError("user-reference provenance lacks its baseline fingerprint; cannot silently rebuild with another baseline")
+            return cfg
         if not prov.get("baseline_fingerprint"):
             return None
         if prov.get("baseline_method") not in METHODS:
@@ -1407,6 +1458,8 @@ class BaselineConfig:
 
     def describe(self) -> str:
         """One line for a dialog or a log."""
+        if self.open_pore_reference is not None:
+            return self.open_pore_reference.describe()
         if self.method == "masked_median":
             d = "auto" if self.decim is None else str(self.decim)
             return (f"masked median, rough {self.rough_s * 1e3:g} ms / base "
@@ -3934,6 +3987,7 @@ class BaselineResult:
     #: reason no matter what actually happened, and no consumer could tell a clamped
     #: measurement from an untracked one.
     fallback_token: str = FALLBACK_TOO_SHORT
+    reference_details: dict[str, Any] | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -3964,6 +4018,8 @@ class BaselineResult:
         one place that knows nobody chose it.
         """
         out: list[str] = []
+        if self.reference_details is not None:
+            out.extend(self.reference_details.get("assumptions", ()))
         if self.fallback:
             out.append(self.fallback)
         if self.health is not None:
@@ -4048,6 +4104,9 @@ class BaselineResult:
         )
         prov["baseline_median_pA"] = self.median_pA
         prov["baseline_polarity"] = int(self.polarity)
+        if self.reference_details is not None:
+            prov["baseline_reference_details"] = self.reference_details
+            prov["baseline_polarity_role"] = "not used to construct user reference; 0 means unspecified"
         if self.fallback:
             prov["baseline_fallback"] = str(self.fallback_token)
             prov["baseline_fallback_reason"] = str(self.fallback)
@@ -4101,6 +4160,8 @@ def estimate_baseline_result(
             or an invalid parameter -- each with its own message.
     """
     cfg = DEFAULT_BASELINE if config is None else config
+    if cfg.open_pore_reference is not None:
+        return _reference_baseline_result(current, fs, cfg, polarity, health)
     x = require_finite(current)
     fs = float(fs)
     if not np.isfinite(fs) or fs <= 0:
@@ -4172,6 +4233,31 @@ def estimate_baseline_result(
 BASELINE_PARAM_KEYS: tuple[str, ...] = tuple(
     f"baseline_{name}" for name in BaselineConfig._FIELDS
 )
+
+
+def _reference_baseline_result(
+    signal: np.ndarray, fs: float, cfg: BaselineConfig,
+    polarity: int | None, health: bool,
+) -> BaselineResult:
+    """Direction-independent, explicit reference; no estimator or health probe."""
+    base, details = build_reference(signal, fs, cfg.open_pore_reference)
+    pol = 0 if polarity is None else require_polarity(polarity)
+    h = None
+    if health:
+        checks = tuple(BaselineCheck(
+            name=f"reference_assumption_{i + 1}", level="warn",
+            label="User reference assumption", value=None,
+            threshold="requires user review", message=message,
+        ) for i, message in enumerate(details["assumptions"]))
+        h = BaselineHealth(
+            checks=checks, method="user_open_pore_reference", n_samples=int(base.size),
+            fs=float(fs), polarity=pol, open_pore_level_pA=float(np.median(base)),
+            open_pore_drift_pA=float(np.max(base) - np.min(base)),
+        )
+    return BaselineResult(
+        baseline=base, config=cfg, fs=float(fs), polarity=pol,
+        health=h, reference_details=details,
+    )
 
 #: How the parameters in force were chosen. Stamped as ``baseline_param_source``;
 #: no measurement can recover it afterwards, and the staleness story needs it.
@@ -4414,11 +4500,31 @@ def baseline_config_from_params(
     """
     if not params:
         return DEFAULT_BASELINE, "default"
+    if params.get("baseline_reference_restore_error"):
+        raise ValueError(str(params["baseline_reference_restore_error"]))
+    reference = params.get(OPEN_PORE_REFERENCE_PARAM_KEY)
+    active_reference = bool(
+        params.get("baseline_reference_applied") or params.get("baseline_estimator_bypassed")
+    )
+    if active_reference and reference is None:
+        raise ValueError(
+            "active user-reference parameters lack their recipe; cannot silently "
+            "restore an automatic baseline or substitute an explicit config"
+        )
     explicit = params.get("baseline_config")
     if isinstance(explicit, BaselineConfig):
+        if OPEN_PORE_REFERENCE_PARAM_KEY in params:
+            recipe = None if reference is None else OpenPoreReference.from_dict(reference)
+            if recipe != explicit.open_pore_reference:
+                raise ValueError(
+                    "contradictory open-pore reference in baseline_config and "
+                    "baseline_open_pore_reference; choose one consistent recipe"
+                )
         source = str(params.get("baseline_param_source", "user"))
         return explicit, source if source in PARAM_SOURCES else "user"
     present = [k for k in BASELINE_PARAM_KEYS if k in params]
+    if params.get(OPEN_PORE_REFERENCE_PARAM_KEY) is not None:
+        present.append(OPEN_PORE_REFERENCE_PARAM_KEY)
     if not present:
         return DEFAULT_BASELINE, "default"
     cfg = BaselineConfig.from_provenance(
@@ -4966,6 +5072,20 @@ def characterisation_baseline(
     n = int(orig.size)
     fs_f = float(fs)
     x = orig if orig.dtype == np.float64 else orig.astype(np.float64)
+    if cfg.open_pore_reference is not None:
+        # Before repair, length adaptation and the mask-direction ladder. Even
+        # row rebuilds must not manufacture finite reference anchors from NaNs.
+        require_finite(x, stage="construct a user open-pore reference")
+        pol = 0 if polarity is None else require_polarity(polarity)
+        key = _BaselineCache._key(orig, fs_f, cfg, pol, bool(health), on_nonfinite)
+        if cache:
+            hit = _CACHE.get(key, orig)
+            if hit is not None:
+                return _dc_replace(hit, param_source=src)
+        result = _reference_baseline_result(x, fs_f, cfg, polarity, health)
+        if cache:
+            _CACHE.put(key, orig, result)
+        return _dc_replace(result, param_source=src)
     if on_nonfinite == "interpolate":
         x, _ = repair_nonfinite(x)
 

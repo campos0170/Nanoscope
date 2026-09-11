@@ -42,12 +42,15 @@ HERE = Path(SPECPATH).resolve()  # noqa: F821
 ROOT = HERE.parent
 
 APP_NAME = "NanoScope"
-APP_VERSION = "0.1.0"
 BUNDLE_ID = "org.nanoscope.NanoScope"
 
 # MUST run before Analysis(): otherwise PyInstaller asks Anaconda's qt.conf where Qt lives and
 # ships conda's Qt5 plugins inside this Qt6 app, which fails at launch. See qt_prefix_fix.py.
 sys.path.insert(0, str(HERE))
+from build_identity import write_build_record  # noqa: E402
+
+BUILD_RECORD, BUILD_RECORD_PATH = write_build_record(ROOT)
+APP_VERSION = BUILD_RECORD["version"]
 from qt_prefix_fix import force_pyside6_qt_prefix  # noqa: E402
 
 force_pyside6_qt_prefix()
@@ -89,6 +92,7 @@ hiddenimports = [
 hiddenimports += collect_submodules("keras")
 
 datas = [
+    (str(BUILD_RECORD_PATH), "nanoscope"),
     # importlib.metadata.version("nanoscope") in analysis/detect.py stamps the app version onto
     # every detection result's provenance. Without the dist-info it silently degrades to
     # "unknown" and every exported CSV loses its version stamp.
@@ -326,7 +330,9 @@ app = BUNDLE(
         "CFBundleExecutable": APP_NAME,
         "CFBundleIdentifier": BUNDLE_ID,
         "CFBundleShortVersionString": APP_VERSION,
-        "CFBundleVersion": APP_VERSION,
+        "CFBundleVersion": BUILD_RECORD["bundle_version"],
+        "NanoScopeBuildID": BUILD_RECORD["build_id"],
+        "NanoScopeSourceSHA256": BUILD_RECORD["source_sha256"],
         "CFBundlePackageType": "APPL",
         # NOT the arm64 floor (11.0) — the floor of what this env's wheels were COMPILED against.
         # PySide6 6.11.1 and shiboken6 ship binaries built for 15.0, and below that dyld

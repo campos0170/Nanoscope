@@ -78,6 +78,7 @@ class _StageChip(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName("StageChip")
         self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self._glyph_char = GLYPH_LOCKED
         self._label = ""
         self._optional = False
@@ -108,7 +109,8 @@ class _StageChip(QtWidgets.QFrame):
             f"color:{text_color}; background:transparent; font-weight:{weight};")
         bg = _CURRENT_BG if current else "transparent"
         self.setStyleSheet(
-            f"#StageChip {{ background:{bg}; border:none; border-radius:5px; }}")
+            f"#StageChip {{ background:{bg}; border:1px solid transparent; border-radius:5px; }}"
+            "#StageChip:focus { border:1px solid #4FC3F7; }")
         self.setToolTip(f"{text} — {tooltip}")
         self.setAccessibleName(f"{text}: {tooltip}")
         self._render_text()
@@ -159,6 +161,14 @@ class _StageChip(QtWidgets.QFrame):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space):
+            if not event.isAutoRepeat():
+                self.clicked.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class WorkflowStrip(QtWidgets.QFrame):

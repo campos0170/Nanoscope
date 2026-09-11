@@ -11,7 +11,6 @@
 set -euo pipefail
 
 APP_NAME="NanoScope"
-APP_VERSION="0.1.0"
 PYTHON="${NANOSCOPE_PYTHON:-/opt/anaconda3/bin/python3}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +18,6 @@ ROOT="$(dirname "$HERE")"
 DIST="$ROOT/dist"
 WORK="$ROOT/build"
 APP="$DIST/$APP_NAME.app"
-DMG="$DIST/$APP_NAME-$APP_VERSION-arm64.dmg"
 
 MAKE_DMG=1
 CLEAN_FLAG="--clean"
@@ -37,6 +35,8 @@ say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 say "Preflight"
 [[ "$(uname -m)" == "arm64" ]] || { echo "This build is Apple Silicon only; you are on $(uname -m)." >&2; exit 1; }
 command -v "$PYTHON" >/dev/null || { echo "Python not found at $PYTHON (override with NANOSCOPE_PYTHON=)" >&2; exit 1; }
+APP_VERSION="$("$PYTHON" "$HERE/build_identity.py" --version)"
+DMG="$DIST/$APP_NAME-$APP_VERSION-arm64.dmg"
 "$PYTHON" -c "import PyInstaller" 2>/dev/null || { echo "PyInstaller missing: $PYTHON -m pip install 'pyinstaller>=6.11'" >&2; exit 1; }
 # The spec calls copy_metadata("nanoscope"), which needs the package's dist-info to exist.
 "$PYTHON" -c "import importlib.metadata as m; m.distribution('nanoscope')" 2>/dev/null \

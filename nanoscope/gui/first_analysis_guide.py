@@ -6,6 +6,9 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
+CONTROL_LEVEL_CHOICE_KEY = "onboarding/control_level_choice_v1"
+EXISTING_CONTROL_LEVEL_KEY = "inspector/detection_control_level"
+
 
 @dataclass(frozen=True)
 class GuideStep:
@@ -30,10 +33,18 @@ STEPS = (
         "I understand the time base and have checked the meaning of the current values.",
         (("Show Calibration", "calibration"),)),
     GuideStep("3 · Inspect noise and baseline",
-        "Use Open-pore baseline → Measure this recording and inspect the proposed values and health details. "
-        "Press Use these values only if appropriate, then inspect the updated baseline overlay against quiet "
-        "signal and events. The overlay before applying still uses the previous settings. Understand health "
-        "warnings rather than overriding them by repeated clicks. A health pass does not certify the physical open pore. "
+        "Open Baseline reference and choose a reference for THIS recording. Automatic retains the existing "
+        "estimator: Measure this recording proposes windows; Use these values confirms them. The overlay "
+        "before confirmation still uses the old windows. Known open-pore current accepts a signed current "
+        "in calibrated pA, for example −120 pA, not its positive magnitude. Selected open-pore intervals "
+        "uses trustworthy quiet regions: enter ordered start/end times in seconds from the recording start "
+        "or copy Measure cursors. Use Constant for a stable level or Linear with at least two intervals "
+        "for supported drift; intervening drift and held endpoints remain assumptions. Never copy another "
+        "recording's reference blindly. In either user-reference mode, press Preview reference and detection "
+        "to inspect the baseline, polarity, noise and candidates without changing stored results. Then run "
+        "detection explicitly if appropriate. Changing a user reference needs fresh detection, not merely "
+        "remeasuring old event depths. Warnings stay in Details, not on the plot. A health pass does not "
+        "certify the physical open pore, and user-supplied information is not independently verified. "
         "Noise spectrum is available before detection. The practice trace has four downward rectangular "
         "blockades near 0.8, 1.8, 2.8 and 3.8 s, each 40 ms long and 25 pA deep, with noise and slow drift. "
         "Those are generator settings, not promises about detector output.",
@@ -75,6 +86,7 @@ class FirstAnalysisGuide(QtWidgets.QDialog):
     """Self-paced, modeless guidance. Checkmarks are learning notes, not validation."""
 
     actionRequested = QtCore.Signal(str)
+    controlLevelRequested = QtCore.Signal(str)
 
     def __init__(self, parent=None, *, context_provider=None, availability_provider=None):
         super().__init__(parent)
@@ -96,6 +108,21 @@ class FirstAnalysisGuide(QtWidgets.QDialog):
                                "Checkmarks mean ‘I checked this step’, not scientific certification.")
         note.setWordWrap(True)
         root.addWidget(note)
+        self.first_use_choice = QtWidgets.QGroupBox("Choose your starting control view")
+        choice_layout = QtWidgets.QVBoxLayout(self.first_use_choice)
+        choice_note = QtWidgets.QLabel(
+            "Essential shows the everyday controls; Advanced shows the full toolset. "
+            "This changes visibility only—not filters, thresholds, calibration or results. You can switch later.")
+        choice_note.setWordWrap(True)
+        choice_layout.addWidget(choice_note)
+        choices = QtWidgets.QHBoxLayout()
+        self.essential_choice = QtWidgets.QPushButton("Start with Essential")
+        self.advanced_choice = QtWidgets.QPushButton("Start with Advanced")
+        for button, level in ((self.essential_choice, "essential"), (self.advanced_choice, "advanced")):
+            button.clicked.connect(lambda _checked=False, value=level: self._choose_control_level(value))
+            choices.addWidget(button)
+        choice_layout.addLayout(choices)
+        root.addWidget(self.first_use_choice)
         split = QtWidgets.QSplitter()
         self.steps = QtWidgets.QListWidget()
         self.steps.setAccessibleName("First-analysis steps")
@@ -149,6 +176,9 @@ class FirstAnalysisGuide(QtWidgets.QDialog):
         self.refresh_context()
 
     def refresh_context(self):
+        settings = QtCore.QSettings()
+        self.first_use_choice.setVisible(not settings.contains(EXISTING_CONTROL_LEVEL_KEY)
+                                          and not settings.contains(CONTROL_LEVEL_CHOICE_KEY))
         key, text = self._context_provider() if self._context_provider else (None, "No recording selected")
         if key != self._context_key:
             self._checks = [False] * len(STEPS)
@@ -156,6 +186,15 @@ class FirstAnalysisGuide(QtWidgets.QDialog):
             self._update_step_names()
         self.context.setText(str(text))
         self._show_step(self.steps.currentRow())
+
+    def _choose_control_level(self, level):
+        if level not in {"essential", "advanced"}:
+            raise ValueError("Unknown control level")
+        # This explicit visibility preference is independent of a selected recording.
+        # Existing expert preferences are never changed merely by opening the guide.
+        QtCore.QSettings().setValue(CONTROL_LEVEL_CHOICE_KEY, level)
+        self.controlLevelRequested.emit(level)
+        self.first_use_choice.hide()
 
     def _show_step(self, index):
         if index < 0:

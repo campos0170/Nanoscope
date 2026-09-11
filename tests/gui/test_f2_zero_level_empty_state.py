@@ -115,7 +115,7 @@ def fitted(window, qtbot, tmp_path):
     qtbot.wait(10)
     window._open_event_inspector()
     window._fit_levels()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert window._level_fit is not None and not window._level_fit.payload.empty
     return window, doc_id, df
 
@@ -187,7 +187,7 @@ def test_the_old_prescribed_recovery_provably_does_not_work_for_a_rejected_event
 
     assert window._act_fit_levels.isEnabled(), "the prescribed gesture is not even available"
     window._fit_levels()                      # ...perform it, exactly as the sentence said
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert _levels_for(window._level_fit, ev_id).empty, (
         "re-running the fit DID restore a rejected event's levels — if that is now true, "
         "the accepted_only rule changed and the sentence naming the accept must be revisited")
@@ -242,7 +242,7 @@ def test_re_running_the_fit_on_a_too_short_span_writes_the_row_the_guard_refuses
         window._event_inspector.level_note()
 
     window._fit_levels()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     degenerate = _levels_for(window._level_fit, ev_id)
     assert len(degenerate) == 1 and int(degenerate["n_levels"].iloc[0]) == 1, (
         "the whole-detection fit no longer writes a single degenerate level for a "
@@ -518,7 +518,7 @@ def test_when_the_whole_fit_retires_the_message_names_the_menu_instead_of_the_ma
     for r in range(1, len(df)):
         df.iat[r, df.columns.get_loc("accepted")] = False
     window._fit_levels()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert set(window._level_fit.payload["event_id"]) == {int(df["event_id"].iloc[0])}
 
     start = int(df.iloc[0]["start_idx"])
@@ -564,7 +564,7 @@ def test_an_event_the_fit_never_covered_explains_itself_without_being_told(fitte
     ev1 = int(df["event_id"].iloc[1])
     df.iat[1, df.columns.get_loc("accepted")] = False
     window._fit_levels()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert _levels_for(window._level_fit, ev1).empty
     assert ev1 not in insp._level_gaps, "nothing announced this; it must be derived"
 

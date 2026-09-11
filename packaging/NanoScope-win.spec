@@ -37,9 +37,13 @@ HERE = Path(SPECPATH).resolve()  # noqa: F821
 ROOT = HERE.parent
 
 APP_NAME = "NanoScope"
-APP_VERSION = "0.1.0"
 
 sys.path.insert(0, str(HERE))
+from build_identity import write_build_record, write_windows_version_resource
+
+BUILD_RECORD, BUILD_RECORD_PATH = write_build_record(ROOT)
+APP_VERSION = BUILD_RECORD["version"]
+VERSION_RESOURCE = write_windows_version_resource(BUILD_RECORD, BUILD_RECORD_PATH.parent)
 
 
 # --------------------------------------------------------------------------------------------
@@ -73,6 +77,7 @@ hiddenimports = [
 ]
 
 datas = [
+    (str(BUILD_RECORD_PATH), "nanoscope"),
     # importlib.metadata.version("nanoscope") stamps the app version onto every detection's
     # provenance; without the dist-info every exported CSV loses its version stamp.
     *copy_metadata("nanoscope"),
@@ -260,7 +265,7 @@ exe = EXE(
     console=False,             # windowed; stdout/stderr are redirected by nanoscope_app.py
     disable_windowed_traceback=False,
     icon=str(HERE / "resources" / "NanoScope.ico"),
-    version=str(HERE / "resources" / "win_version_info.txt"),
+    version=str(VERSION_RESOURCE),
 )
 
 coll = COLLECT(
