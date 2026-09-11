@@ -33,4 +33,3 @@ def test_context_gate_refuses_transient_error_before_automatic_fastpath():
 @pytest.mark.parametrize("error", [None, ""])
 def test_inactive_error_marker_does_not_change_default_identity(error):
     assert baseline_config_from_params({ERROR: error}) == (DEFAULT_BASELINE, "default")
-

@@ -89,4 +89,3 @@ def test_valid_preprocessing_plus_lowpass_replays_in_unchanged_order(trace):
 def test_unknown_kind_does_not_fall_back_to_bessel(trace):
     with pytest.raises(ValueError, match="kind"):
         detection_signal(trace, FS, {"filter_cutoff_hz": 2000., "filter_kind": "missing-plugin"})
-
