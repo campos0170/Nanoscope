@@ -400,28 +400,104 @@ def test_no_module_spells_a_flag_token_out_by_hand(token):
     )
 
 
+#: Files in which EVERY direct ``characterize`` call is a detector's own.
+_DETECTOR_FILES = {
+    "nanoscope/analysis/characterize.py",   # defines it
+    "nanoscope/analysis/detect.py",         # the Schmitt detector
+    "nanoscope/analysis/detect_cusum.py",   # the CUSUM detector
+    "nanoscope/analysis/ml_modules.py",     # the ML detector
+}
+
+#: ``file::function`` pairs whose body may call ``characterize`` directly even though
+#: the file as a whole is NOT a detector. Scoped to the one function so the other
+#: ~2,800 lines of the file stay under the guard.
+#:
+#: 2026-09-11: ``_recharacterize_highpass_candidates`` (added 2026-09-04) is the
+#: MEASUREMENT half of the detector adapter's dual-domain high-pass path. It runs
+#: inside the same detection call, right after the candidate detector returns, and
+#: re-measures every candidate span on the equivalent non-high-passed trace over the
+#: WHOLE recording (``clip_bounds=(0, current.size)``), replacing the row measurements
+#: and the top-level baseline/noise/polarity. That is a detector-owned whole-span
+#: rebuild -- the case the docstring below already permits -- not a row rebuilt inside
+#: a padded window, and it goes through ``characterize`` precisely so the automatic
+#: rules and flag/accepted are applied by the one function rather than copied.
+_DETECTOR_OWNED_FUNCTIONS = {
+    "nanoscope/analysis/modules.py::_recharacterize_highpass_candidates",
+}
+
+
+def _calls_by_scope(tree: ast.AST):
+    """Yield ``(call, qualname)`` for every ``ast.Call`` in ``tree``.
+
+    ``qualname`` is the dotted chain of enclosing ``def``/``class`` names of the
+    INNERMOST scope the call sits in (``''`` at module scope), so an allowance for
+    ``f`` does not leak to a closure ``f.<inner>`` or to a sibling."""
+    def visit(node, scope):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                yield from visit(child, scope + (child.name,))
+                continue
+            if isinstance(child, ast.Call):
+                yield child, ".".join(scope)
+            yield from visit(child, scope)
+    yield from visit(tree, ())
+
+
 def test_every_row_rebuild_goes_through_the_one_function():
     """``characterize`` may be called directly only by a DETECTOR (which owns a whole
     analysed span). Anything rebuilding a row inside a padded window must call
     ``recharacterize_span``, or it is a fourth private copy waiting to drift."""
-    allowed = {
-        "nanoscope/analysis/characterize.py",   # defines it
-        "nanoscope/analysis/detect.py",         # the Schmitt detector
-        "nanoscope/analysis/detect_cusum.py",   # the CUSUM detector
-        "nanoscope/analysis/ml_modules.py",     # the ML detector
-    }
     offenders = []
+    seen_scopes = set()
     for path in sorted(_SRC.rglob("*.py")):
         rel = str(path.relative_to(_SRC.parent))
-        if rel in allowed:
+        if rel in _DETECTOR_FILES:
             continue
         tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _called_name(node) == "characterize":
-                offenders.append(f"{rel}:{node.lineno}")
+        for call, scope in _calls_by_scope(tree):
+            if _called_name(call) != "characterize":
+                continue
+            seen_scopes.add(f"{rel}::{scope}")
+            if f"{rel}::{scope}" in _DETECTOR_OWNED_FUNCTIONS:
+                continue
+            offenders.append(f"{rel}:{call.lineno}")
     assert not offenders, (
         f"characterize() is called directly from {offenders}; a row rebuilt outside a "
         "detector must go through recharacterize_span so it cannot forget flag/accepted"
+    )
+    # An allowance that no longer names a live call site is a hole waiting for a
+    # future call to fall through it: retire it with the code it excused.
+    stale = _DETECTOR_OWNED_FUNCTIONS - seen_scopes
+    assert not stale, f"{sorted(stale)} no longer call characterize(); drop the allowance"
+
+
+def test_the_highpass_measurement_pass_rebuilds_rows_over_the_whole_recording():
+    """The property that earns ``_recharacterize_highpass_candidates`` its allowance
+    above: it hands ``characterize`` the WHOLE trace as ``clip_bounds``, so the boundary
+    rule judges recording edges, exactly as a detector does. A padded window would
+    have to translate its bounds, and that is ``recharacterize_span``'s job."""
+    rel = "nanoscope/analysis/modules.py"
+    tree = ast.parse((_SRC.parent / rel).read_text())
+    calls = [
+        call
+        for call, scope in _calls_by_scope(tree)
+        if scope == "_recharacterize_highpass_candidates"
+        and _called_name(call) == "characterize"
+    ]
+    # Exactly ONE call, counted before its keywords are read: a second direct call in
+    # the excused function that simply omitted ``clip_bounds`` would otherwise ride the
+    # allowance unseen (a reviewer's probe found that gap on 2026-09-11).
+    assert len(calls) == 1, (
+        f"{rel}::_recharacterize_highpass_candidates makes {len(calls)} direct "
+        "characterize() calls; the allowance in _DETECTOR_OWNED_FUNCTIONS covers one "
+        "whole-recording rebuild, not a second private copy"
+    )
+    clip_bounds = [
+        ast.unparse(kw.value) for kw in calls[0].keywords if kw.arg == "clip_bounds"
+    ]
+    assert clip_bounds == ["(0, int(current.size))"], (
+        f"{rel}::_recharacterize_highpass_candidates passes clip_bounds={clip_bounds}; "
+        "the allowance in _DETECTOR_OWNED_FUNCTIONS assumes a whole-recording rebuild"
     )
 
 

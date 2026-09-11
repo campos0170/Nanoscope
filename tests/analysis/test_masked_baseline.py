@@ -63,7 +63,29 @@ APO_ABF = pathlib.Path(
 #: md5 of ``ml_preprocess.py`` as shipped. It is a FROZEN CONTRACT: the kernel is
 #: imported from it, never edited, and its own golden digests must never be
 #: "updated". A failure here means someone reached into the kernel.
-_ML_PREPROCESS_MD5 = "4eb0ef79bf2ef26e632836643ff63e34"
+#:
+#: Pinned to the 2026-09-04 revision (commit 3ba94ab), which added input validation
+#: and finite checks ONLY: finite/positive checks on the notch ``q``/``freqs`` and on
+#: the ``MLPreprocessConfig`` fields, exact-int checks on its integer fields, and a
+#: ``require_finite`` after the notch, baseline and despike stages. No arithmetic
+#: changed (an AST census of the two revisions differs in exactly
+#: ``notch_sequential``, ``MLPreprocessConfig.__post_init__`` and
+#: ``apply_ml_preprocess``). Equivalence against the prior revision (8032ec6) was
+#: verified bit-exact on 2026-09-11 with an OLD-vs-CURRENT harness (both modules
+#: loaded side by side; ``np.array_equal`` with dtype and shape): 2,591 comparisons,
+#: 0 differences, covering ``notch_sequential`` (12 freq/q sets incl. lines at and
+#: above Nyquist, float32 and float64 input), ``_decimated_median``,
+#: ``baseline_robust_median``, ``baseline_masked_median``, ``baseline_savgol``,
+#: ``despike_median``, ``apply_ml_preprocess`` for all 10 presets + the
+#: ``apo_legacy`` alias + 13 hand-built configs over all four baseline methods,
+#: ``normalize_global``, ``model_input_normalization``, ``decode_ml_regions`` and
+#: ``gate_regions_by_amplitude``, on a 1e6-sample event train and a 1e6-sample
+#: drifting sinusoid (float32) at 50 kHz and 25 kHz (Savitzky-Golay configs at
+#: 25 kHz on 250k-sample slices) plus 100k/20k-sample traces in both dtypes; the
+#: corpus-marked tests here and in ``test_ml_preprocess.py``
+#: (ferritin_data1/2/3 and the apo -600 mV ABF, 13 tests) passed on the real data.
+#: The contract remains: no numerical edit without re-verification.
+_ML_PREPROCESS_MD5 = "48e364c4264dcef2c25a2fadad9bc4a1"
 
 
 # ===========================================================================

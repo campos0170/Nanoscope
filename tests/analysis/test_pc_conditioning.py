@@ -221,7 +221,13 @@ def test_baseline_probe_uses_the_quantitative_trace_not_the_orange_preview(monke
         _session=SimpleNamespace(calibrated=lambda *_a: SimpleNamespace(
             data=raw, sample_rate_hz=FS)),
         _detection=SimpleNamespace(params=lambda: dict(params)),
-        _baseline=SimpleNamespace(set_busy=lambda *_a: None, set_gate=lambda *_a: None),
+        # 2026-09-11 (commit 51b5964): the real handler now asks the baseline panel for
+        # its open-pore reference before anything else, so the stand-in grew the two
+        # methods with the real BaselinePanel's return types -- a mode str, and "" for
+        # "no draft error". "automatic" is the pre-51b5964 contract this test pins.
+        _baseline=SimpleNamespace(set_busy=lambda *_a: None, set_gate=lambda *_a: None,
+                                  reference_mode=lambda: "automatic",
+                                  reference_error=lambda: ""),
         _controller=ImmediateController(),
         _pending=None,
         _pending_sel=None,
@@ -235,6 +241,68 @@ def test_baseline_probe_uses_the_quantitative_trace_not_the_orange_preview(monke
     assert not np.array_equal(seen["probe_data"], candidate)
     assert seen["polarity"] == -1
     assert seen["label"] == "baseline_probe"
+
+
+@pytest.mark.parametrize("mode, error", [
+    ("constant", ""),                                   # a user reference is in force
+    ("intervals", ""),
+    ("automatic", "Interval ends after the recording."),  # a visible draft error blocks
+])
+def test_baseline_probe_is_refused_under_a_user_open_pore_reference(monkeypatch, mode, error):
+    """A user open-pore reference makes the automatic proposal meaningless, so the handler
+    must refuse BEFORE it touches the recording (2026-09-11, commit 51b5964).
+
+    The refusal is the first statement of the handler: nothing is conditioned, no probe
+    runs, nothing is dispatched to the controller, and the spinner is stopped. A draft
+    error in the reference editor is treated the same way -- it must block, never fall
+    back to the automatic estimator behind the user's back.
+    """
+    from types import SimpleNamespace
+
+    from nanoscope.gui.analysis_panel import AnalysisPanel
+
+    seen: dict[str, object] = {}
+    refused: list[str] = []
+    busy: list[bool] = []
+
+    def characterization_spy(data, fs, live_params):
+        seen["conditioned"] = True
+        return characterization_trace(data, fs, live_params)
+
+    def fake_probe(data, fs, *, polarity):
+        seen["probe"] = True
+        return SimpleNamespace(config=object(), probe=SimpleNamespace(polarity=-1))
+
+    monkeypatch.setattr(
+        "nanoscope.gui.analysis_panel.characterization_trace", characterization_spy)
+    monkeypatch.setattr(
+        "nanoscope.analysis.baseline_probe.probe_and_propose", fake_probe)
+
+    class RecordingController:
+        def run_callable(self, job, *, label):
+            seen["label"] = label
+            return True
+
+    panel = SimpleNamespace(
+        _sel=("doc", 0),
+        _session=SimpleNamespace(calibrated=lambda *_a: SimpleNamespace(
+            data=_trace(), sample_rate_hz=FS)),
+        _detection=SimpleNamespace(params=lambda: {"polarity": -1}),
+        _baseline=SimpleNamespace(set_busy=busy.append, set_gate=lambda *_a: None,
+                                  reference_mode=lambda: mode,
+                                  reference_error=lambda: error),
+        _controller=RecordingController(),
+        _pending=None,
+        _pending_sel=None,
+        runRefused=SimpleNamespace(emit=refused.append),
+    )
+    AnalysisPanel._on_probe_requested(panel)
+
+    assert refused == [
+        "Automatic window proposals are not used with a user open-pore reference."]
+    assert busy == [False]
+    assert seen == {}, f"the refusal must precede any work, but saw {sorted(seen)}"
+    assert panel._pending is None and panel._pending_sel is None
 
 
 # ================================================================================================

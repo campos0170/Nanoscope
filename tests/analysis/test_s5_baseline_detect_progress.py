@@ -18,9 +18,13 @@ mapping the door's 0..1 onto [0.02, 0.88] of the job.
 
 WHAT IS PINNED HERE. Through a real module run: intermediate fractions strictly
 between 0 and 1 exist, the whole sequence is monotone non-decreasing, endpoints are
-still 0.0 and 1.0, and every message still names the job. Plus the channel's own
-contract: no scope installed -> reports are no-ops; out-of-order reports are dropped,
-never delivered backwards.
+still 0.0 and 1.0, and every intermediate message names the stage it is in using the
+module's own status-bar labels -- "detecting candidates (<baseline stage>)" for
+candidate localisation and, on the high-pass split (3ba94ab, 2026-09-04),
+"measuring candidates (<baseline stage>)" for the no-high-pass measurement pass plus
+that path's two bare stage markers. Plus the channel's own contract: no scope
+installed -> reports are no-ops; out-of-order reports are dropped, never delivered
+backwards.
 """
 
 from __future__ import annotations
@@ -37,6 +41,31 @@ from nanoscope.analysis import baseline as B
 from nanoscope.analysis.modules import DetectSchmitt
 
 FS = 250_000.0
+
+# THE STAGE LABELS THE MODULE EMITS, read from `DetectSchmitt.run` and
+# `_run_highpass_dual_path` (nanoscope/analysis/modules.py), not guessed. Commit
+# 3ba94ab (2026-09-04) split the run into a candidate-localisation stage and a
+# no-high-pass measurement stage and relabelled the user-facing status-bar text to
+# match: the historical one-array path (high-pass off) now says
+# "detecting candidates (<baseline stage>)" where it used to say
+# "detecting events (<baseline stage>)". Both stages wrap the baseline door's own
+# stage text in parentheses -- "measuring polarity (i/n)", "estimating baseline
+# (tracking median)", "judging the baseline (pass-1 mask)", "baseline health (...)".
+LOCALISE_PREFIX = "detecting candidates ("
+MEASURE_PREFIX = "measuring candidates ("
+# The high-pass split also emits two bare stage markers of its own between the
+# parenthesised ladders: one opening every measurement pass, one when the
+# characterisation pass finds high-pass ringing reversed an Auto polarity vote and
+# the single localisation retry is about to run.
+HIGHPASS_MARKERS = (
+    "measuring candidates without high-pass",
+    "high-pass ringing reversed Auto polarity; repeating localization",
+)
+
+
+def _names_a_stage(m: str, prefix: str) -> bool:
+    """`prefix` + a NON-EMPTY stage label + the closing paren, nothing less."""
+    return m.startswith(prefix) and m.endswith(")") and len(m) > len(prefix) + 1
 
 
 def _trace(n: int = 3_000_000, seed: int = 1) -> np.ndarray:
@@ -63,11 +92,52 @@ def test_detect_emits_monotone_intermediate_fractions():
     mid = [f for f in fracs if 0.0 < f < 1.0]
     assert len(mid) >= 4, fracs
     assert all(a <= b for a, b in zip(fracs, fracs[1:])), fracs
-    # Every intermediate message still says which job this is (the bar renders the
-    # message as its format string) and names the stage inside it.
+    # Every intermediate message still says which job stage this is (the bar renders
+    # the message as its format string) and names the baseline stage inside it. With
+    # high-pass off this is the historical one-array path, so the ONLY label that can
+    # appear here is the localisation one -- pinned exactly, not as "any string".
+    # [2026-09-11: was `startswith("detecting events (")`; 3ba94ab (2026-09-04)
+    # relabelled the candidate stage, see LOCALISE_PREFIX above.]
     for f, m in seen:
         if 0.0 < f < 1.0:
-            assert m.startswith("detecting events ("), m
+            assert _names_a_stage(m, LOCALISE_PREFIX), m
+
+
+def test_highpass_split_labels_localisation_and_measurement_stages():
+    """3ba94ab (2026-09-04) split the high-pass run into a localisation pass and a
+    no-high-pass measurement pass and gave each its own status-bar label. Pin the
+    whole ladder: same endpoints and monotone carrier as the one-array path, every
+    intermediate message is one of the module's own stage labels, BOTH parenthesised
+    stages appear, and the measurement pass is announced by its bare marker
+    immediately before its first parenthesised stage. A polarity-mismatch retry
+    (which this synthetic trace happens to trigger) may interleave a second
+    localisation ladder; the test tolerates it but does not require it."""
+    ctx = make_context(
+        _trace(1_000_000), fs=FS,
+        params={"min_dwell_s": 5e-4, "hp_enabled": True},
+    )
+    seen: list[tuple[float, str]] = []
+    ctx.progress_cb = lambda f, m="": seen.append((float(f), m))
+
+    res = DetectSchmitt().run(ctx)
+
+    assert len(res.payload.df) > 0
+    fracs = [f for f, _ in seen]
+    assert fracs[0] == 0.0 and fracs[-1] == 1.0
+    assert all(a <= b for a, b in zip(fracs, fracs[1:])), fracs
+    mid = [(f, m) for f, m in seen if 0.0 < f < 1.0]
+    assert len(mid) >= 4, fracs
+    for _, m in mid:
+        assert (
+            _names_a_stage(m, LOCALISE_PREFIX)
+            or _names_a_stage(m, MEASURE_PREFIX)
+            or m in HIGHPASS_MARKERS
+        ), m
+    msgs = [m for _, m in mid]
+    assert msgs[0].startswith(LOCALISE_PREFIX), msgs[0]
+    measure_idx = [i for i, m in enumerate(msgs) if m.startswith(MEASURE_PREFIX)]
+    assert measure_idx, msgs
+    assert msgs[measure_idx[0] - 1] == HIGHPASS_MARKERS[0], msgs[: measure_idx[0] + 1]
 
 
 def test_progress_reports_are_noops_without_a_scope():
