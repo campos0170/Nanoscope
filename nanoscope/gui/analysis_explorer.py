@@ -17,9 +17,12 @@ from collections.abc import Callable
 from typing import Final
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from .analysis_catalog import ANALYSIS_LABELS, PAGE_IDS, PAGE_HOME, STATUS_HELP
+from .analysis_home import AnalysisHome
 
 __all__ = [
     "AnalysisExplorer",
+    "PAGE_HOME",
     "PAGE_DISTRIBUTIONS",
     "PAGE_DISTRIBUTION_SUMMARIES",
     "PAGE_COMPARISON_FIGURES",
@@ -40,22 +43,14 @@ PAGE_IV: Final = "iv"
 PAGE_VOLTAGE_SERIES: Final = "voltage_series"
 PAGE_SUBPOPULATIONS: Final = "subpopulations"
 
-_PAGE_LABELS: Final[dict[str, str]] = {
-    PAGE_DISTRIBUTIONS: "Distributions",
-    PAGE_DISTRIBUTION_SUMMARIES: "Distribution summaries",
-    PAGE_COMPARISON_FIGURES: "Comparison figures",
-    PAGE_EVENT_WAVEFORMS: "Event waveforms",
-    PAGE_NOISE: "Noise",
-    PAGE_IV: "I-V",
-    PAGE_VOLTAGE_SERIES: "Voltage series",
-    PAGE_SUBPOPULATIONS: "Subpopulations",
-}
+_PAGE_LABELS: Final[dict[str, str]] = {key: ANALYSIS_LABELS[key] for key in PAGE_IDS}
 
 _STATUS_STYLES: Final[dict[str, str]] = {
     "current": "color:#79c99e; background:#193126; border:1px solid #315a43;",
     "stale": "color:#ffca78; background:#382a16; border:1px solid #6e5126;",
     "snapshot": "color:#8dccff; background:#172d3d; border:1px solid #315770;",
     "empty": "color:#a7adb5; background:#282c31; border:1px solid #454b52;",
+    "home": "color:#b7d6e8; background:#202c34; border:1px solid #405464;",
 }
 
 
@@ -72,6 +67,7 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
     saveFigureRequested = QtCore.Signal(str)
     saveBundleRequested = QtCore.Signal(str)
     figureLibraryRequested = QtCore.Signal()
+    launchRequested = QtCore.Signal(str)
 
     def __init__(
         self,
@@ -79,6 +75,7 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         *,
         context_provider: Callable[[], str] | None = None,
         status_provider: Callable[[str, QtWidgets.QWidget], tuple[str, str]] | None = None,
+        availability_provider: Callable[[str], tuple[bool, str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("NanoScope — Analysis Explorer")
@@ -87,6 +84,7 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
 
         self._context_provider = context_provider
         self._status_provider = status_provider
+        self._availability_provider = availability_provider
         self._pages: dict[str, QtWidgets.QWidget] = {}
         self._refreshers: dict[str, Callable[[], None] | None] = {}
         self._activators: dict[str, Callable[[], None] | None] = {}
@@ -123,9 +121,13 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         self._tabs.setMovable(False)
         self._tabs.setTabsClosable(False)
         self._tabs.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        self._home = AnalysisHome(availability_provider=availability_provider)
+        self._home.launchRequested.connect(self.launchRequested)
+        self._tabs.addTab(self._home, ANALYSIS_LABELS[PAGE_HOME])
         self._tabs.currentChanged.connect(self._on_tab_activated)
         root.addWidget(self._tabs, 1)
         self.setCentralWidget(central)
+        self.refresh_header()
 
     def _build_header(self) -> QtWidgets.QWidget:
         header = QtWidgets.QFrame()
@@ -137,9 +139,11 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         row.setContentsMargins(10, 6, 8, 6)
         row.setSpacing(9)
 
-        title = QtWidgets.QLabel("Analysis Explorer")
-        title.setStyleSheet("font-size:14px; font-weight:600;")
-        row.addWidget(title)
+        self._home_btn = QtWidgets.QPushButton(ANALYSIS_LABELS[PAGE_HOME])
+        self._home_btn.setObjectName("analysisExplorerHome")
+        self._home_btn.setToolTip("Browse every analysis and its input requirements without running it.")
+        self._home_btn.clicked.connect(self.show_home)
+        row.addWidget(self._home_btn)
 
         self._context_label = QtWidgets.QLabel("No recording selected")
         self._context_label.setObjectName("analysisExplorerContext")
@@ -168,6 +172,21 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         return header
 
     # -- pages -----------------------------------------------------------------------------
+    def show_home(self) -> None:
+        """Navigate to the persistent catalog, without touching any analytical page."""
+        self._programmatic_tab_change = True
+        try:
+            self._tabs.setCurrentWidget(self._home)
+        finally:
+            self._programmatic_tab_change = False
+        self.refresh_header()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def home(self) -> AnalysisHome:
+        return self._home
+
     def add_page(
         self,
         page_id: str,
@@ -266,6 +285,8 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
 
     def current_page_id(self) -> str | None:
         current = self._tabs.currentWidget()
+        if current is self._home:
+            return PAGE_HOME
         return next((key for key, page in self._pages.items() if page is current), None)
 
     def page_ids(self) -> tuple[str, ...]:
@@ -281,6 +302,9 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
     @QtCore.Slot()
     def refresh_current(self) -> None:
         page_id = self.current_page_id()
+        if page_id == PAGE_HOME:
+            self.refresh_header()
+            return
         refresh = self._refreshers.get(page_id or "")
         if refresh is None:
             return
@@ -319,14 +343,22 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         page_id = self.current_page_id()
         page = self._pages.get(page_id or "")
         text, state = ("NO DATA", "empty")
-        if page_id is not None and page is not None and self._status_provider is not None:
+        if page_id == PAGE_HOME:
+            text, state = ("Analysis home", "home")
+            self._home.refresh_availability()
+        elif page_id is not None and page is not None and self._status_provider is not None:
             try:
                 text, state = self._status_provider(page_id, page)
             except RuntimeError:
                 pass
         self._set_status(str(text), str(state))
-        enabled = self._refreshers.get(page_id or "") is not None
+        enabled = page_id == PAGE_HOME or self._refreshers.get(page_id or "") is not None
         self._refresh_btn.setEnabled(enabled)
+        self._refresh_btn.setText("Refresh availability" if page_id == PAGE_HOME else "Refresh current")
+        self._refresh_btn.setToolTip(
+            "Recheck which tools are available. No analytical view is constructed or recomputed."
+            if page_id == PAGE_HOME else
+            "Refresh only the selected analytical view from its current sources. Other tabs are unchanged.")
         self._save_figure_btn.setEnabled(page is not None and state != "empty")
         self._save_bundle_btn.setEnabled(page is not None and state != "empty")
 
@@ -334,10 +366,7 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         state = state if state in _STATUS_STYLES else "empty"
         shown = text.strip().upper() or "NO DATA"
         self._status_label.setText(shown)
-        self._status_label.setToolTip(
-            "Current: this view reflects its live source.\n"
-            "Stale: controls or source data changed after the visible result.\n"
-            "Saved snapshot: a project result is shown without recomputing it.")
+        self._status_label.setToolTip(STATUS_HELP)
         self._status_label.setStyleSheet(
             _STATUS_STYLES[state] +
             " border-radius:8px; padding:2px 7px; font-size:10px; font-weight:700;")

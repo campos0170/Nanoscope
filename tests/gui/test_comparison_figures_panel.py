@@ -170,7 +170,7 @@ def test_incomplete_pair_draft_does_not_block_other_kinds(page, kind):
     assert page.figure_applied_config()["features"] == []
 
 
-def test_source_color_change_is_marked_stale_and_saved_on_generate(page):
+def test_source_color_change_keeps_frozen_snapshot_and_saved_on_generate(page):
     from dataclasses import replace
 
     offered = source()
@@ -179,11 +179,49 @@ def test_source_color_change_is_marked_stale_and_saved_on_generate(page):
     previous = page._snapshot["sources"][0]["color"]
     changed = replace(offered, colour="#ff1234")
     page.set_sources([changed])
-    assert page._stale
+    assert not page._stale  # presentation-only defaults do not invalidate measurements
     assert page._snapshot["sources"][0]["color"] == previous
     page.analyze()
     assert not page._stale
     assert page._snapshot["sources"][0]["color"] == "#ff1234"
+
+
+@pytest.mark.parametrize("kind", ["facets", "pairs", "events"])
+def test_source_appearance_replays_frozen_geometry_and_roundtrips(page, qtbot, monkeypatch, kind):
+    page.set_sources([source()])
+    page.set_config({"kind": kind})
+    page.analyze()
+    page._view.zoom(1.3)
+    before, tables = page.snapshot_state()
+    data = page._plot_data()
+    scale = page._view.transform().m11()
+    forbid_prepare(monkeypatch)
+    page.set_source_appearance_state({"first": {"label": "Apo -700 mV", "color": "#123456"}})
+    assert page._snapshot == before["snapshot"]
+    assert page.figure_applied_config() == before["applied"]
+    assert not page._stale
+    assert page._view.transform().m11() == scale
+    assert_tables_equal(page._tables, tables)
+    pd.testing.assert_frame_equal(page._plot_data(), data, check_exact=True)
+    payload, saved_tables = page.snapshot_state()
+    other = ComparisonFiguresWindow()
+    qtbot.addWidget(other)
+    other.restore_state(payload, saved_tables)
+    assert other.source_appearance_state() == page.source_appearance_state()
+    assert other._source_appearance_editor.source.currentData() == "first"
+    assert "Apo -700 mV" in other.details_text()
+    assert_tables_equal(other._tables, tables)
+
+
+def test_bad_source_appearance_restore_is_transactional(page):
+    page.set_sources([source()])
+    page.analyze()
+    before, tables = page.snapshot_state()
+    payload = deepcopy(before)
+    payload["source_appearance"] = {"first": {"color": "broken"}}
+    with pytest.raises(ValueError):
+        page.restore_state(payload, tables)
+    assert page.snapshot_state()[0] == before
 
 
 def test_csv_export_uses_committed_geometry_not_new_drafts(page, monkeypatch, tmp_path):

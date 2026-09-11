@@ -1,6 +1,6 @@
 """The subpopulation report window — a read-and-export surface, not a panel.
 
-``Analysis > Event subpopulations…`` runs the whole ported pipeline
+``Analysis > Generate Subpopulations…`` runs the whole ported pipeline
 (:mod:`nanoscope.analysis.subpop_report`) off the GUI thread and lands here. What
 the user gets is the report the owner's notebook printed: the gate, the per-scope
 PCA and clusterings, the cross-validated ``(n_PCs, K)`` choice, the population
@@ -87,6 +87,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..plot.style import PALETTE
+from .analysis_catalog import ANALYSIS_LABELS
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_workflow import PlotWorkflowBar, WarningSummary, bounded_controls, control_group
 from .categorical import (
@@ -282,7 +283,7 @@ _COLOUR_CAVEAT = (
     "correspondence, not the colour. Grey is always \"in no class\"."
 )
 
-_NO_REPORT = "No report yet — run Analysis \u25b8 Event subpopulations (GMM)\u2026"
+_NO_REPORT = f"No report yet — run Analysis ▸ Generate {ANALYSIS_LABELS['subpopulations']}…"
 
 #: What ``main_window`` can tell this window about the report's per-event ASSIGNMENT —
 #: the ``event_id -> subpopulation`` map it read off the report and pushed onto the trace
@@ -1010,7 +1011,7 @@ class SubpopReportWindow(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowFlag(QtCore.Qt.WindowType.Window, True)
-        self.setWindowTitle("Event subpopulations")
+        self.setWindowTitle(f"NanoScope — {ANALYSIS_LABELS['subpopulations']}")
         # -- THE OPENING GEOMETRY, ONCE, HERE. --------------------------------------
         # It was ``resize(*_DEFAULT_SIZE)``, unclamped, and on the owner's 1512x900
         # screen that opened a 1600x980 window whose entire button row -- Copy report,
@@ -1434,7 +1435,7 @@ class SubpopReportWindow(QtWidgets.QWidget):
     # -- rendering -----------------------------------------------------------
     @staticmethod
     def _empty_header() -> str:
-        return "No subpopulation report yet — run Analysis ▸ Event subpopulations…"
+        return f"No subpopulation report yet — run Analysis ▸ Generate {ANALYSIS_LABELS['subpopulations']}…"
 
     @staticmethod
     def _caveat_title(report) -> str:

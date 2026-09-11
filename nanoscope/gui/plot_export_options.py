@@ -11,6 +11,8 @@ import math
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from .plot_print_preflight import inspect_print_metrics, readability_enlargement
+
 
 MAX_RASTER_EDGE = 32_768
 MAX_RASTER_PIXELS = 100_000_000
@@ -125,7 +127,8 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
     def __init__(self, parent=None, native_size=(800, 600), initial_format="png",
                  initial_width=0, initial_height=0, *, preview_image=None,
-                 residual_preview_image=None, residual_native_size=None) -> None:
+                 residual_preview_image=None, residual_native_size=None,
+                 preview_svg=None, residual_preview_svg=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export current figure")
         self.setMinimumWidth(420)
@@ -135,6 +138,9 @@ class ExportOptionsDialog(QtWidgets.QDialog):
                                       if residual_native_size is not None else None)
         self._preview_image = preview_image
         self._residual_preview_image = residual_preview_image
+        # Immutable SVGs are inspected once, not on each sizing/target edit.
+        self._print_metrics = inspect_print_metrics(preview_svg)
+        self._residual_print_metrics = inspect_print_metrics(residual_preview_svg)
         self._aspect = self._native_size[0] / self._native_size[1]
         if not math.isfinite(self._aspect) or self._aspect <= 0:
             raise ValueError("The plot aspect ratio must be finite and positive.")
@@ -236,6 +242,56 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             "Check readability at the final printed size.")
         sizing_note.setWordWrap(True)
         layout.addWidget(sizing_note)
+        self.preflight_summary = QtWidgets.QLabel()
+        self.preflight_summary.setWordWrap(True)
+        self.preflight_summary.setAccessibleName("Print readability estimate")
+        layout.addWidget(self.preflight_summary)
+        self.preflight_toggle = QtWidgets.QToolButton()
+        self.preflight_toggle.setText("Print readability details and targets")
+        self.preflight_toggle.setCheckable(True)
+        self.preflight_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.preflight_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        layout.addWidget(self.preflight_toggle)
+        self.preflight_details = QtWidgets.QScrollArea()
+        self.preflight_details.setWidgetResizable(True)
+        self.preflight_details.setMinimumHeight(140)
+        self.preflight_details.setMaximumHeight(190)
+        check_content = QtWidgets.QWidget()
+        self.preflight_details.setWidget(check_content)
+        check_layout = QtWidgets.QVBoxLayout(check_content)
+        check_layout.setContentsMargins(0, 0, 0, 0)
+        targets = QtWidgets.QHBoxLayout()
+        self.text_target_spin = QtWidgets.QDoubleSpinBox()
+        self.text_target_spin.setRange(1, 72)
+        self.text_target_spin.setValue(8)
+        self.text_target_spin.setSuffix(" pt")
+        self.text_target_spin.setAccessibleName("Minimum printed text target")
+        self.line_target_spin = QtWidgets.QDoubleSpinBox()
+        self.line_target_spin.setRange(0.1, 10)
+        self.line_target_spin.setSingleStep(0.1)
+        self.line_target_spin.setValue(0.5)
+        self.line_target_spin.setSuffix(" pt")
+        self.line_target_spin.setAccessibleName("Minimum printed scalable line target")
+        for label, control in (("Text target", self.text_target_spin),
+                               ("Scalable line target", self.line_target_spin)):
+            targets.addWidget(QtWidgets.QLabel(label))
+            targets.addWidget(control)
+        check_layout.addLayout(targets)
+        self.preflight_notes = QtWidgets.QLabel()
+        self.preflight_notes.setWordWrap(True)
+        self.preflight_notes.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        actions = QtWidgets.QVBoxLayout()
+        self.enlarge_button = QtWidgets.QPushButton("Enlarge to measured targets")
+        self.enlarge_button.setToolTip(
+            "Increases width and height together. Does not restyle text at a fixed width, "
+            "change scientific data, or certify unmeasured elements.")
+        self.print_preview_button = QtWidgets.QPushButton("Approximate print-size preview…")
+        actions.addWidget(self.enlarge_button)
+        actions.addWidget(self.print_preview_button)
+        check_layout.addLayout(actions)
+        check_layout.addWidget(self.preflight_notes)
+        self.preflight_details.hide()
+        layout.addWidget(self.preflight_details)
         self.buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Choose destination…")
@@ -268,13 +324,118 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         self.aspect_check.toggled.connect(self._change_aspect)
         self.dpi_spin.valueChanged.connect(self._refresh)
         self.residual_check.toggled.connect(self._change_residual)
+        self.preflight_toggle.toggled.connect(self._toggle_preflight)
+        self.text_target_spin.valueChanged.connect(self._refresh)
+        self.line_target_spin.valueChanged.connect(self._refresh)
+        self.enlarge_button.clicked.connect(self._enlarge_for_print)
+        self.print_preview_button.clicked.connect(self._show_print_preview)
         self._set_dimension_controls()
         self._refresh()
         if preview_image is not None:
             # Word-wrapped labels report a smaller minimum than their actual
             # height-for-width. Reserve the complete initial layout; otherwise
             # QDialog's compact default can overlap the preview and its caption.
-            self.setMinimumHeight(self.sizeHint().height())
+            self.setMinimumHeight(self.sizeHint().height() + 20)
+
+    def _toggle_preflight(self, visible: bool) -> None:
+        # Trade the compact picture for the scrollable audit rather than growing
+        # below a laptop screen or compressing fixed-height controls into overlap.
+        has_preview = isinstance(self._preview_image, QtGui.QImage) and not self._preview_image.isNull()
+        self.preview_label.setVisible(has_preview and not visible)
+        self.preview_note.setVisible(has_preview and not visible)
+        self.preflight_details.setVisible(visible)
+        self.preflight_toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow if visible
+                                           else QtCore.Qt.ArrowType.RightArrow)
+        self.adjustSize()
+
+    def _selected_metrics(self, options):
+        return self._residual_print_metrics if options.include_residual else self._print_metrics
+
+    def _refresh_preflight(self, options: ExportOptions) -> None:
+        metrics = self._selected_metrics(options)
+        image = self._residual_preview_image if options.include_residual else self._preview_image
+        self.print_preview_button.setEnabled(not options.native and isinstance(image, QtGui.QImage)
+                                             and not image.isNull())
+        self.enlarge_button.setEnabled(False)
+        notes = ["Targets are user preferences, not journal requirements. Enlargement changes the "
+                 "physical canvas, not individual fonts at a fixed column width.", *metrics.notes]
+        if options.native:
+            self.preflight_summary.setText("Print check: choose physical dimensions to estimate printed text and lines.")
+        else:
+            text, line = metrics.at_size(options.physical_width_mm, options.physical_height_mm)
+            values = []
+            for label, value, target in (("text", text, self.text_target_spin.value()),
+                                         ("scalable stroke", line, self.line_target_spin.value())):
+                if value is None:
+                    values.append(f"{label}: unmeasured")
+                else:
+                    assessment = "below target" if value + 1e-9 < target else "meets target"
+                    values.append(f"{label}: {value:.2f} pt ({assessment})")
+            self.preflight_summary.setText("Smallest measured estimate · " + "; ".join(values))
+            factor = readability_enlargement(metrics, options.physical_width_mm,
+                                             options.physical_height_mm, self.text_target_spin.value(),
+                                             self.line_target_spin.value())
+            self.enlarge_button.setEnabled(factor > 1.000001)
+            if factor > 1.000001:
+                notes.insert(1, f"Meeting measured targets would enlarge the canvas to "
+                             f"{options.physical_width_mm * factor:.2f} × "
+                             f"{options.physical_height_mm * factor:.2f} mm. "
+                             "For a fixed journal width, cancel and adjust Appearance before capturing again.")
+        self.preflight_notes.setText("\n".join(notes))
+
+    def _enlarge_for_print(self) -> None:
+        options = self.options()
+        if options.native:
+            return
+        factor = readability_enlargement(self._selected_metrics(options), self._width_mm,
+                                         self._height_mm, self.text_target_spin.value(),
+                                         self.line_target_spin.value())
+        self._width_mm *= factor
+        self._height_mm *= factor
+        self._set_custom_preset()
+        self._set_dimension_controls()
+        self._refresh()
+
+    def _show_print_preview(self) -> None:
+        options = self.options()
+        image = self._residual_preview_image if options.include_residual else self._preview_image
+        if options.native or not isinstance(image, QtGui.QImage) or image.isNull():
+            return
+        screen = self.screen()
+        dpi = float(screen.logicalDotsPerInch()) if screen is not None else 96.0
+        if not math.isfinite(dpi) or dpi <= 0:
+            dpi = 96.0
+        width = max(1, round(options.physical_width_mm / 25.4 * dpi))
+        height = max(1, round(options.physical_height_mm / 25.4 * dpi))
+        if max(width, height) > 8192 or width * height > 20_000_000:
+            QtWidgets.QMessageBox.information(self, "Print-size preview",
+                "The requested screen preview exceeds the safe display size. "
+                "Export and inspect the figure in a document viewer.")
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Approximate print-size preview")
+        dialog.resize(800, 620)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        note = QtWidgets.QLabel(
+            f"Requested {options.physical_width_mm:.2f} × {options.physical_height_mm:.2f} mm. "
+            f"Screen approximation using {dpi:.1f} reported logical DPI, not a calibrated ruler. "
+            "Scroll to inspect the whole frozen preview. Raster preview sharpness is not export quality.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        scroll = QtWidgets.QScrollArea()
+        label = QtWidgets.QLabel()
+        label.setFixedSize(width, height)
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("background: white")
+        label.setPixmap(QtGui.QPixmap.fromImage(image.scaled(
+            width, height, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation)))
+        scroll.setWidget(label)
+        layout.addWidget(scroll)
+        close = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.exec()
 
     def _change_residual(self, checked: bool) -> None:
         self._native_size = (self._residual_native_size if checked and self._residual_native_size
@@ -389,6 +550,9 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         except ValueError as exc:
             self.summary_label.setText("Cannot export: " + str(exc))
             self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(False)
+            self.enlarge_button.setEnabled(False)
+            self.print_preview_button.setEnabled(False)
+            self.preflight_summary.setText("Print check unavailable until dimensions are valid.")
             return
         self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(True)
         if options.native:
@@ -414,6 +578,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
                 summary += (f"Output: {options.width:,} × {options.height:,} points (72 pt/in). "
                             "Vector geometry remains scalable; DPI is not applied.")
         self.summary_label.setText(summary)
+        self._refresh_preflight(options)
         self._refresh_preview(options)
 
     def accept(self) -> None:
@@ -427,12 +592,14 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
 def choose_export_options(parent, native_size, initial_format="png",
                           initial_width=0, initial_height=0, *, preview_image=None,
-                          residual_preview_image=None, residual_native_size=None) -> ExportOptions | None:
+                          residual_preview_image=None, residual_native_size=None,
+                          preview_svg=None, residual_preview_svg=None) -> ExportOptions | None:
     """Ask for figure presentation options, or return ``None`` when cancelled."""
     dialog = ExportOptionsDialog(parent, native_size, initial_format,
                                  initial_width, initial_height, preview_image=preview_image,
                                  residual_preview_image=residual_preview_image,
-                                 residual_native_size=residual_native_size)
+                                 residual_native_size=residual_native_size,
+                                 preview_svg=preview_svg, residual_preview_svg=residual_preview_svg)
     if dialog.exec() != QtWidgets.QDialog.Accepted:
         return None
     return dialog._selected_options

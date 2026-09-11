@@ -261,7 +261,7 @@ def test_revision_dialog_restores_layout_and_requires_fresh_preview(composed, qt
 def test_unknown_composition_version_keeps_export_available(composed, qtbot, monkeypatch, tmp_path):
     snapshot = _snapshot(composed)
     config = snapshot.config()
-    config["version"] = 2
+    config["version"] = 3
     future = replace(snapshot, config_json_bytes=json.dumps(config).encode())
     stored = [_entry(future, [])]
     messages = []

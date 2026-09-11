@@ -16,10 +16,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core.analysis_workspace import _plot_source_recipe, fingerprint_frame
 from ..core.sources import amplitude_units_label, signal_domain_of, source_comparability
+from ..core.source_style import validate_source_appearance
+from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget
 from .plot_export import DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export, write_live_plot_image, write_plot_csv
 from .plot_workflow import WarningSummary, bounded_controls, control_group, install_plot_workflow
+from .source_appearance import SourceAppearanceEditor
 
 
 VIEWS = (("facets", "Faceted comparisons"), ("pairs", "Pair-plot matrix"),
@@ -78,7 +81,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
     def __init__(self, session=None, parent=None):
         super().__init__(parent)
         self._session = session
-        self.setWindowTitle("Comparison figures")
+        self.setWindowTitle(f"NanoScope — {ANALYSIS_LABELS['comparison_figures']}")
         self.resize(1100, 800)
         self.setMinimumSize(700, 500)
         self._sources = {}
@@ -91,6 +94,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         self._applied_config = {}
         self._source_recipes = []
         self._appearance = PlotAppearance()
+        self._source_appearance = {}
         self._figure_item = None
         self._fit_pending = False
 
@@ -195,7 +199,13 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         self._appearance_widget.data_color.setToolTip("Comparison figures retain each source's identity colour; a single colour override is not applied.")
         self._appearance_widget.fit_color.setEnabled(False)
         self._appearance_widget.fit_color.setToolTip("Comparison figures do not fit models.")
-        appearance = bounded_controls(self._appearance_widget, maximum_height=235)
+        appearance_content = QtWidgets.QWidget()
+        appearance_layout = QtWidgets.QVBoxLayout(appearance_content)
+        appearance_layout.setContentsMargins(0, 0, 0, 0)
+        self._source_appearance_editor = SourceAppearanceEditor(session=session)
+        appearance_layout.addWidget(self._source_appearance_editor)
+        appearance_layout.addWidget(self._appearance_widget)
+        appearance = bounded_controls(appearance_content, maximum_height=235)
         export = control_group("Export the generated figure", "Export the full publication canvas as PNG, PDF or SVG. "
             "Canvas zoom is only a magnifier. Save to Figure Library keeps observations, plotted geometry, "
             "settings and full Details together. Draft controls never change a saved picture.")
@@ -232,6 +242,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         self._columns.valueChanged.connect(self._draft_changed)
         self._features.itemChanged.connect(self._draft_changed)
         self._appearance_widget.changed.connect(self._appearance_from_user)
+        self._source_appearance_editor.changed.connect(self._source_appearance_from_user)
         self._fit_button.clicked.connect(self.fit_canvas)
         self._zoom_out.clicked.connect(lambda: self._view.zoom(1 / 1.25))
         self._zoom_in.clicked.connect(lambda: self._view.zoom(1.25))
@@ -324,13 +335,14 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
             item.setCheckState(QtCore.Qt.Checked if key in self._selected_keys else QtCore.Qt.Unchecked)
             self._source_list.addItem(item)
         del blocker
+        self._source_appearance_editor.set_sources(self._snapshot.get("sources") or self._sources.values())
 
     def set_sources(self, sources, selected_keys=None, analyze=False):
         sources = list(sources)
         offered = {str(source.key): source for source in sources}
         if len(offered) != len(sources):
             raise ValueError("Comparison sources must have unique identities.")
-        stamps = {key: (fingerprint_frame(source.df), str(source.label), str(source.colour), repr(dict(source.provenance)),
+        stamps = {key: (fingerprint_frame(source.df), repr(dict(source.provenance)),
                         repr(source.calibration_fingerprint), tuple(source.warnings)) for key, source in offered.items()}
         before = tuple((key, self._source_stamps.get(key)) for key in self._selected_keys)
         self._sources = offered
@@ -447,11 +459,12 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         snapshot = deepcopy(snapshot)
         snapshot["warnings"] = list(dict.fromkeys([*snapshot.get("warnings", []), *notes]))
         snapshot["details"] = "\n\n".join(filter(None, [METHODS[config["kind"]], str(snapshot.get("details", "")), *notes]))
-        item = self._make_figure_item(snapshot, tables, self._appearance)
+        item = self._make_figure_item(snapshot, tables, self._appearance, self._source_appearance)
         self._snapshot, self._tables = snapshot, {key: frame.copy(deep=True) for key, frame in tables.items()}
         self._source_recipes = recipes
         self._applied_config = deepcopy(config)
         self._stale = False
+        self._source_appearance_editor.set_sources(snapshot["sources"])
         self._update_method_note()
         self._install_figure_item(item, fit=True)
         self._warnings.set_warnings(self._snapshot["warnings"], full_text=self.details_text())
@@ -460,11 +473,11 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         return True
 
     @staticmethod
-    def _make_figure_item(snapshot, tables, appearance):
+    def _make_figure_item(snapshot, tables, appearance, source_appearance=None):
         from ..plot.comparison_figures import render_comparison
         from .matplotlib_figure_item import MatplotlibFigureItem
 
-        figure = render_comparison(snapshot, tables, appearance)
+        figure = render_comparison(snapshot, tables, appearance, source_appearance=source_appearance)
         try:
             return MatplotlibFigureItem(figure)
         finally:
@@ -531,14 +544,40 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
 
     def set_appearance_state(self, state):
         appearance = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
-        item = self._make_figure_item(self._snapshot, self._tables, appearance) if self._snapshot else None
+        item = self._make_figure_item(self._snapshot, self._tables, appearance, self._source_appearance) if self._snapshot else None
         self._appearance = appearance
         self._appearance_widget.set_state(appearance)
         if item is not None:
             self._install_figure_item(item)
 
     def details_text(self):
-        return str(self._snapshot.get("details", ""))
+        text = str(self._snapshot.get("details", ""))
+        if self._source_appearance:
+            aliases = [f"{key}: {entry}" for key, entry in self._source_appearance.items()]
+            text += "\n\nFigure-local appearance (source identities and measured values unchanged):\n" + "\n".join(aliases)
+        return text
+
+    def source_appearance_state(self):
+        return deepcopy(self._source_appearance)
+
+    def set_source_appearance_state(self, state):
+        overrides = validate_source_appearance(state)
+        item = self._make_figure_item(self._snapshot, self._tables, self._appearance, overrides) if self._snapshot else None
+        self._source_appearance = overrides
+        self._source_appearance_editor.set_state(overrides)
+        if item is not None:
+            self._install_figure_item(item)
+            self._warnings.set_warnings(self._snapshot["warnings"], full_text=self.details_text())
+
+    def _source_appearance_from_user(self, state):
+        previous = self.source_appearance_state()
+        try:
+            self.set_source_appearance_state(state)
+        except (TypeError, ValueError, RuntimeError, ImportError) as exc:
+            self._source_appearance_editor.set_state(previous)
+            QtWidgets.QMessageBox.warning(self, "Style comparison sources", str(exc))
+            return
+        self.workspaceChanged.emit()
 
     def warning_text(self):
         return "\n\n".join(self._snapshot.get("warnings", []))
@@ -580,6 +619,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
     def snapshot_state(self):
         return ({"schema_version": 1, "draft": self.config(), "applied": self.figure_applied_config(),
                  "appearance": self.appearance_state(), "snapshot": deepcopy(self._snapshot),
+                 "source_appearance": self.source_appearance_state(),
                  "source_recipes": self.figure_source_recipes(), "stale": self._stale,
                  "canvas_view": self._view_state()},
                 {key: frame.copy(deep=True) for key, frame in self._tables.items()})
@@ -604,6 +644,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
             raise ValueError("Comparison resources must be named tables.")
         restored = {key: frame.copy(deep=True) for key, frame in tables.items()}
         appearance = PlotAppearance.from_mapping(payload["appearance"])
+        source_appearance = validate_source_appearance(payload.get("source_appearance", {}))
         item = None
         if snapshot:
             self._validate_config(applied)
@@ -612,7 +653,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
                 raise ValueError("Saved comparison sources disagree with the applied settings.")
             if any(applied.get(key) != value for key, value in snapshot["config"].items()):
                 raise ValueError("Saved comparison geometry disagrees with the applied settings.")
-            item = self._make_figure_item(snapshot, restored, appearance)
+            item = self._make_figure_item(snapshot, restored, appearance, source_appearance)
         elif applied or restored:
             raise ValueError("Empty comparison snapshot has unexpected analytical resources.")
         previous = self._loading
@@ -624,6 +665,9 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
             self._update_method_note()
             self._source_recipes = deepcopy(payload["source_recipes"])
             self._appearance = appearance
+            self._source_appearance = source_appearance
+            self._source_appearance_editor.set_state(source_appearance)
+            self._source_appearance_editor.set_sources(snapshot.get("sources") or self._sources.values())
             self._appearance_widget.set_state(appearance)
             self._stale = payload["stale"]
             self._fit_pending = False

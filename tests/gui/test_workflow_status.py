@@ -21,7 +21,7 @@ import nanoscope  # noqa: F401  -> runs bootstrap.py (import-order discipline; s
 
 import pandas as pd
 
-from nanoscope.analysis.events import EventSet, empty_df
+from nanoscope.analysis.events import EventSet, empty_df, mark_reviewed, REVIEW_COL
 from nanoscope.core.analysis import AnalysisResult
 from nanoscope.core.calibration import ChannelCalibration
 from nanoscope.core.document import TraceDocument
@@ -103,7 +103,7 @@ def _st(status: PipelineStatus, stage: Stage):
 # empty session
 # ================================================================================================
 
-def test_empty_session_only_open_is_actionable():
+def test_empty_session_open_and_analysis_home_are_actionable():
     session = Session()
     status = compute_status(session, None, None)
 
@@ -111,10 +111,12 @@ def test_empty_session_only_open_is_actionable():
     assert status.current_stage is Stage.OPEN
     assert _st(status, Stage.OPEN).done is False
     assert _st(status, Stage.OPEN).available is True
-    # nothing downstream is reachable yet
-    for stage in (Stage.CALIBRATE, Stage.FILTER, Stage.DETECT, Stage.CURATE, Stage.ANALYZE):
+    # Data-dependent actions stay locked; the metadata-only home remains reachable.
+    for stage in (Stage.CALIBRATE, Stage.FILTER, Stage.DETECT, Stage.CURATE):
         assert _st(status, stage).available is False
         assert _st(status, stage).done is False
+    assert _st(status, Stage.ANALYZE).available
+    assert "does not run an analysis" in _st(status, Stage.ANALYZE).reason
 
 
 def test_stage_set_is_exactly_the_pipeline_in_order():
@@ -141,7 +143,7 @@ def test_open_current_doc_uncalibrated_advances_to_calibrate(tmp_path):
     assert _st(status, Stage.DETECT).available is True
     assert _st(status, Stage.DETECT).done is False
     assert _st(status, Stage.CURATE).available is False
-    assert _st(status, Stage.ANALYZE).available is False
+    assert _st(status, Stage.ANALYZE).available is True
     assert status.current_stage is Stage.CALIBRATE
     assert _st(status, Stage.CALIBRATE).current is True
 
@@ -213,16 +215,17 @@ def test_storing_a_detection_unlocks_curate_and_analyze(tmp_path):
     assert status.current_stage is Stage.CURATE
 
 
-def test_accepting_an_event_completes_curate_and_lands_on_analyze(tmp_path):
+def test_accepted_mask_without_review_does_not_complete_curate(tmp_path):
     session = Session()
     doc_id = session.add_document(_doc(tmp_path))
     _calibrate(session, doc_id)
     _install_detection(session, doc_id, _eventset([True, False]))
     status = compute_status(session, doc_id, 0)
 
-    assert _st(status, Stage.CURATE).done is True
-    assert status.current_stage is Stage.ANALYZE
-    assert _st(status, Stage.ANALYZE).current is True
+    assert _st(status, Stage.CURATE).done is False
+    assert status.current_stage is Stage.CURATE
+    assert "1 accepted candidate" in _st(status, Stage.CURATE).reason
+    assert "Review status not verified for 2" in _st(status, Stage.CURATE).reason
 
 
 def test_detection_before_calibration_points_back_to_calibrate(tmp_path):
@@ -272,8 +275,8 @@ def test_recording_without_a_current_channel_is_no_channel(tmp_path):
     assert _st(status, Stage.CALIBRATE).available is False
     assert _st(status, Stage.DETECT).available is False
     assert "current channel" in _st(status, Stage.CALIBRATE).reason
-    # nothing in the pipeline is actionable on this recording
-    assert status.current_stage is None
+    # Analysis home can explain which tools are available without running any.
+    assert status.current_stage is Stage.ANALYZE
 
 
 def test_dead_current_channel_is_no_channel(tmp_path):
@@ -289,11 +292,11 @@ def test_dead_current_channel_is_no_channel(tmp_path):
 def test_unknown_doc_id_is_robust(tmp_path):
     session = Session()
     session.add_document(_doc(tmp_path))
-    # A stale/closed doc_id: OPEN is still done (a recording is open), nothing else actionable.
+    # A stale/closed doc_id: data actions are unavailable, metadata-only home remains open.
     status = compute_status(session, "no-such-doc", 0)
     assert status.calibration.state is CalibrationState.NO_CHANNEL
     assert _st(status, Stage.OPEN).done is True
-    assert status.current_stage is None
+    assert status.current_stage is Stage.ANALYZE
 
 
 def test_detection_on_a_different_channel_does_not_count(tmp_path):
@@ -305,3 +308,81 @@ def test_detection_on_a_different_channel_does_not_count(tmp_path):
     status = compute_status(session, doc_id, 0)
     assert _st(status, Stage.DETECT).done is False
     assert _st(status, Stage.CURATE).available is False
+
+
+def test_autoaccepted_unreviewed_candidates_need_review_without_table_mutation(tmp_path):
+    session = Session()
+    doc_id = session.add_document(_doc(tmp_path))
+    _calibrate(session, doc_id)
+    events = _eventset([True, True, False])
+    events.df[REVIEW_COL] = pd.array(["unreviewed"] * 3, dtype="string")
+    before = events.df.copy(deep=True)
+    _install_detection(session, doc_id, events)
+    status = compute_status(session, doc_id, 0)
+    assert not status.stage(Stage.CURATE).done
+    assert "2 accepted candidate" in status.stage(Stage.CURATE).reason
+    assert "human review recorded for 0 of 3" in status.stage(Stage.CURATE).reason
+    assert "3 row(s) are explicitly unreviewed" in status.stage(Stage.CURATE).reason
+    pd.testing.assert_frame_equal(events.df, before, check_exact=True)
+
+
+def test_partial_then_complete_explicit_review_includes_rejections(tmp_path):
+    session = Session()
+    doc_id = session.add_document(_doc(tmp_path))
+    _calibrate(session, doc_id)
+    events = _eventset([True, False])
+    _install_detection(session, doc_id, events)
+    mark_reviewed(events.df, rows=[0])
+    partial = compute_status(session, doc_id, 0)
+    assert not partial.stage(Stage.CURATE).done
+    assert "human review recorded for 1 of 2" in partial.stage(Stage.CURATE).reason
+    mark_reviewed(events.df, rows=[1])
+    before = events.df.copy(deep=True)
+    complete = compute_status(session, doc_id, 0)
+    assert complete.stage(Stage.CURATE).done
+    assert complete.current_stage is Stage.ANALYZE
+    assert "not a validation of molecular identity" in complete.stage(Stage.CURATE).reason
+    pd.testing.assert_frame_equal(events.df, before, check_exact=True)
+
+
+def test_review_normalization_unknown_tokens_and_conflicts_are_conservative(tmp_path):
+    session = Session()
+    doc_id = session.add_document(_doc(tmp_path))
+    _calibrate(session, doc_id)
+    events = _eventset([True, False, True])
+    events.df[REVIEW_COL] = pd.array([" reviewed ", "reviewed", "future-token"], dtype="string")
+    _install_detection(session, doc_id, events)
+    status = compute_status(session, doc_id, 0)
+    assert "human review recorded for 2 of 3" in status.stage(Stage.CURATE).reason
+    assert "Review status not verified for 1" in status.stage(Stage.CURATE).reason
+    events.df[REVIEW_COL] = "reviewed"
+    events.df["consensus_curation_conflict"] = pd.array(["", "accept/reject", pd.NA], dtype="string")
+    status = compute_status(session, doc_id, 0)
+    assert not status.stage(Stage.CURATE).done
+    assert "Resolve 1 conflicting" in status.stage(Stage.CURATE).reason
+
+
+def test_zero_candidate_result_routes_to_recording_checks_not_empty_curation(tmp_path):
+    session = Session()
+    doc_id = session.add_document(_doc(tmp_path))
+    _calibrate(session, doc_id)
+    _install_detection(session, doc_id, _eventset([]))
+    status = compute_status(session, doc_id, 0)
+    assert status.stage(Stage.DETECT).done
+    assert "0 candidate" in status.stage(Stage.DETECT).reason
+    assert not status.stage(Stage.CURATE).available
+    assert not status.stage(Stage.CURATE).done
+    assert status.stage(Stage.ANALYZE).available
+    assert status.current_stage is Stage.ANALYZE
+
+
+def test_gain_change_is_configuration_not_physical_verification(tmp_path):
+    session = Session()
+    doc_id = session.add_document(_doc(tmp_path))
+    default = compute_status(session, doc_id, 0)
+    assert "may be correct" in default.stage(Stage.CALIBRATE).reason
+    _calibrate(session, doc_id)
+    configured = compute_status(session, doc_id, 0)
+    assert configured.calibration.label == "Gain settings entered"
+    assert "not verified" in configured.stage(Stage.CALIBRATE).reason
+    assert "does not verify" in configured.calibration.issue

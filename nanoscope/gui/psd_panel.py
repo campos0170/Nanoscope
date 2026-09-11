@@ -1,6 +1,6 @@
 """The standalone power-spectrum / noise window: the pore quality-control plot.
 
-Opened from ``Analysis ▸ Power spectrum (noise / PSD)…``, this is the GUI face of
+Opened from ``Analysis ▸ Noise spectrum…``, this is the GUI face of
 :mod:`nanoscope.analysis.psd` — the log-log current-noise spectrum every nanopore
 paper uses to grade a pore. It sources the **calibrated current trace directly**
 (PSD is raw-signal characterisation and needs no detection), computes a Welch PSD
@@ -75,6 +75,7 @@ from ..core.segment import SegmentDocument, persistent_key
 from ..core.session import Session
 from ..core.sources import disambiguate_labels, gains_comparable, source_colour
 from ..plot.style import OKABE_ITO
+from .analysis_catalog import ANALYSIS_LABELS
 from .axes import ReadableLogAxis
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
@@ -519,7 +520,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         """
         super().__init__(parent)
         self._session = session
-        self.setWindowTitle("NanoScope — Power spectrum (noise / PSD)")
+        self.setWindowTitle(f"NanoScope — {ANALYSIS_LABELS['noise']}")
         self.resize(1080, 720)
 
         self._style = PSDStyle()

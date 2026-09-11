@@ -81,6 +81,24 @@ def test_long_recording_labels_keep_distinguishing_voltage_suffix():
         assert original["label"] in snapshot["details"]
 
 
+@pytest.mark.parametrize("kind", ["facets", "pairs", "events"])
+def test_render_source_names_and_colors_change_only_presentation(kind):
+    snapshot, tables = prepare(kind)
+    original = deepcopy(snapshot)
+    frozen = {key: table.copy(deep=True) for key, table in tables.items()}
+    figure = comparison.render_comparison(snapshot, tables, source_appearance={
+        "a": {"label": "Apo -500 mV", "color": "#123456"},
+        "b": {"label": "Apo -700 mV", "color": "#654321"}})
+    FigureCanvasAgg(figure).draw()
+    texts = [text.get_text() for text in figure.findobj(Text)]
+    assert "Apo -500 mV" in texts and "Apo -700 mV" in texts
+    assert snapshot == original
+    identical_tables(tables, frozen)
+    colors = [collection.get_facecolors()[0, :3] for axis in figure.axes for collection in axis.collections
+              if len(collection.get_facecolors())]
+    assert any(np.allclose(color, matplotlib.colors.to_rgb("#123456")) for color in colors)
+
+
 def test_pairs_use_panel_specific_finite_and_log_masks_not_complete_case():
     s = source(n=5, dwell_s=[1., 2., np.nan, 4., -1.], depth_pA=[1., np.nan, 3., 4., 5.], snr=[np.nan, 2., 3., 4., 5.])
     snapshot, tables = comparison.prepare_comparison([s], dict(kind="pairs", features=["dwell_s", "depth_pA", "snr"], bins=4, log_x=True))

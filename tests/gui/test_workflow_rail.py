@@ -170,13 +170,14 @@ def test_chip_goes_amber_uncalibrated_then_green_calibrated(win, tmp_path):
     # a current channel at its default gain -> uncalibrated, amber, the loud warning
     assert win._calibration_chip.status().state is CalibrationState.UNCALIBRATED
     assert win._calibration_chip.accent() == AMBER
-    assert "not physical" in win._calibration_chip.text()
+    assert "physical calibration unverified" in win._calibration_chip.text()
 
     # dial in a real gain -> calibrated, green, shows the gain/units detail
     win._session.set_calibration(doc_id, 0, ChannelCalibration(gain=2500.0, target_units="nS"))
     assert win._calibration_chip.status().state is CalibrationState.CALIBRATED
     assert win._calibration_chip.accent() == GREEN
     assert "2500" in win._calibration_chip.text() and "nS" in win._calibration_chip.text()
+    assert "does not verify" in win._calibration_chip.toolTip()
 
 
 def test_chip_no_channel_on_voltage_only_recording(win, tmp_path):
@@ -225,8 +226,11 @@ def test_strip_glyphs_track_open_calibrate_detect_curate_analyze(win, tmp_path):
     assert strip.glyph(Stage.CURATE) == GLYPH_CURRENT
     assert strip.glyph(Stage.ANALYZE) == GLYPH_TODO
 
-    # accept an event THROUGH the panel (the real curation path): CURATE done, ANALYZE current
+    # One acceptance does not complete review of the rest of the table.
     win._analysis_panel.set_event_accepted(0, True)
+    assert strip.glyph(Stage.CURATE) == GLYPH_CURRENT
+    # Explicitly review the remaining rejection through the real curation path.
+    win._analysis_panel.set_event_accepted(1, False)
     assert strip.glyph(Stage.CURATE) == GLYPH_DONE
     assert strip.glyph(Stage.ANALYZE) == GLYPH_CURRENT
 
@@ -266,7 +270,7 @@ def test_strip_tooltips_carry_each_stage_reason(win, tmp_path):
         reason = win._workflow_status.stage(stage).reason
         assert reason and reason in strip.tooltip(stage)
         assert strip.label(stage) in strip.tooltip(stage)
-    assert "Detect events first" in strip.tooltip(Stage.ANALYZE)     # the locked one
+    assert "Open Analysis home" in strip.tooltip(Stage.ANALYZE)
 
 
 def test_strip_filter_is_optional_todo_never_current(win, tmp_path):
@@ -287,7 +291,7 @@ def test_strip_locks_calibrate_and_detect_without_a_current_channel(win, tmp_pat
     assert strip.glyph(Stage.OPEN) == GLYPH_DONE
     assert strip.glyph(Stage.CALIBRATE) == GLYPH_LOCKED
     assert strip.glyph(Stage.DETECT) == GLYPH_LOCKED
-    assert win._workflow_status.current_stage is None
+    assert win._workflow_status.current_stage is Stage.ANALYZE
 
 
 # ================================================================================================
@@ -346,10 +350,10 @@ def test_strip_curate_click_opens_the_event_inspector(win, tmp_path):
 def test_locked_stage_click_posts_its_reason_to_the_status_bar(win, tmp_path):
     doc_id = _install(win, _current_doc(tmp_path))
     win._on_selection(doc_id, 0)                 # a current doc, but no detection yet
-    # ANALYZE is locked (no detection) -> clicking it must explain why, not act.
-    win._workflow_strip.stageActivated.emit(Stage.ANALYZE.value)
+    # CURATE is locked without candidates; Analyze is a metadata-only home entry.
+    win._workflow_strip.stageActivated.emit(Stage.CURATE.value)
     msg = win.statusBar().currentMessage()
-    assert "Detect events first" in msg
+    assert "Detect candidates first" in msg
     # the Event Inspector was NOT opened by the locked click
     assert win._event_inspector is None
 

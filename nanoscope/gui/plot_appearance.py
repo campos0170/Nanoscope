@@ -530,11 +530,15 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
         if legend is not None:
             if "legend" not in defaults:
                 defaults["legend"] = {"visible": legend.isVisible(),
-                                      "size": legend.opts.get("labelTextSize", "9pt")}
+                                      "size": legend.opts.get("labelTextSize", "9pt"),
+                                      "color": legend.opts.get("labelTextColor")}
             original = defaults["legend"]
             legend.setVisible(original["visible"] if state.legend_visible is None else
                               bool(state.legend_visible and legend.items))
             legend.setLabelTextSize(f"{state.legend_size:g}pt" if state.legend_size else original["size"])
+            # Axis text already follows the canvas theme; legend text must do
+            # the same or a white publication preset leaves pale labels on white.
+            legend.setLabelTextColor(foreground or original["color"] or pg.getConfigOption("foreground"))
     finally:
         view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
         for axis, enabled in enumerate(auto):

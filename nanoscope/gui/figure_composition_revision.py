@@ -23,16 +23,26 @@ def extract_composition(snapshot: FigureSnapshot) -> tuple[tuple[FrozenPanel, ..
     snapshot = FigureSnapshot.from_storage(metadata, blobs)
     config = snapshot.config()
     if (not isinstance(config, dict) or config.get("kind") != "figure-composition"
-            or type(config.get("version")) is not int or config["version"] != 1):
-        raise ValueError("This figure is not a supported version-1 composition. Its saved image can still be exported.")
+            or type(config.get("version")) is not int or config["version"] not in (1, 2)):
+        raise ValueError("This figure is not a supported version-1 or version-2 composition. Its saved image can still be exported.")
     panels = config.get("panels")
     labels = config.get("panel_labels")
     if (not isinstance(panels, list) or not 1 <= len(panels) <= 12
             or not isinstance(labels, list) or len(labels) != len(panels)
             or any(not isinstance(label, str) or len(label) > 32 or "\n" in label or "\r" in label for label in labels)
-            or type(config.get("columns")) is not int or not 1 <= config["columns"] <= min(4, len(panels))
+            or type(config.get("columns")) is not int
+            or not 1 <= config["columns"] <= (min(4, len(panels)) if config["version"] == 1 else 4)
             or any(type(config.get(key)) is not bool for key in ("share_x", "share_y"))):
         raise ValueError("The saved composition layout is malformed; nothing has been changed.")
+    layout = {key: config[key] for key in ("columns", "share_x", "share_y", "panel_labels")}
+    if config["version"] == 2:
+        from .figure_composition import validate_publication_layout
+        required = ("panel_spans", "spacing", "label_style", "shared_legend")
+        if any(key not in config for key in required) or type(config["shared_legend"]) is not bool:
+            raise ValueError("The saved version-2 composition layout is malformed; nothing has been changed.")
+        validate_publication_layout(len(panels), config["columns"], config["panel_spans"],
+                                    config["spacing"], config["label_style"])
+        layout.update({key: config[key] for key in required})
     resources = dict(snapshot.additional_resources)
     extracted = []
     for index, panel in enumerate(panels):
@@ -62,4 +72,4 @@ def extract_composition(snapshot: FigureSnapshot) -> tuple[tuple[FrozenPanel, ..
         original = replace(original, additional_resources=tuple(sorted(
             original.additional_resources, key=lambda item: int(child_resources[item[0]].split("_")[1]))))
         extracted.append(FrozenPanel(panel_id, labels[index], original))
-    return tuple(extracted), {key: config[key] for key in ("columns", "share_x", "share_y", "panel_labels")}
+    return tuple(extracted), layout

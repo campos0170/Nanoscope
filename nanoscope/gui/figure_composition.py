@@ -26,6 +26,7 @@ CARTESIAN_RESOURCE = "rendering/cartesian.json"
 PICTURE_RESOURCE = "rendering/figure.qpic"
 MAX_PANELS = 12
 MAX_LABEL_LENGTH = 32
+DEFAULT_LABEL_STYLE = {"family": "Arial", "size_px": 18, "bold": True, "color": "#111111"}
 _NS = "http://www.w3.org/2000/svg"
 _MAX_MODEL_BYTES = 64 * 1024 * 1024
 _MAX_POINTS = 1_000_000
@@ -241,11 +242,122 @@ def _capture_series(item):
     raise ValueError("Only standard line, scatter and bar graphics support shared axes.")
 
 
+def _capture_legend(plot):
+    """Capture standard legends without guessing associations from colors or labels."""
+    legend = plot.legend
+    if legend is None or not _visible(legend):
+        return None
+    from pyqtgraph.graphicsItems.LegendItem import ItemSample
+    if (type(legend) is not pg.LegendItem or legend.sampleType is not ItemSample
+            or not legend.items or legend.size is not None or legend.parentItem() is not plot.vb
+            or any(name in vars(legend) for name in ("paint", "boundingRect"))
+            or not legend.transform().isIdentity() or legend.rotation() or legend.scale() != 1
+            or legend.offset is None):
+        raise ValueError("Only standard, automatically sized legends support detached composition.")
+    if set(legend.childItems()) != {child for pair in legend.items for child in pair}:
+        raise ValueError("Extra legend annotations require frozen composition.")
+    entries = []
+    for sample, label in legend.items:
+        if (type(sample) is not ItemSample or type(label) is not pg.LabelItem
+                or sample.item not in plot.items or label.angle != 0
+                or sample.childItems() or label.childItems() != [label.item] or label.item.childItems()
+                or not _visible(sample) or not _visible(label)
+                or any(not item.transform().isIdentity() or item.rotation() or item.scale() != 1
+                       or item.opacity() != 1 for item in (sample, label, label.item))
+                or any(name in vars(sample) for name in ("paint", "boundingRect"))
+                or not isinstance(label.text, str) or not label.text.strip()
+                or len(label.text) > 500 or any(c in label.text for c in "<>\r\n")
+                or label.opts.get("justify", "left") != "left"):
+            raise ValueError("Customized or ambiguous legend entries require frozen composition.")
+        opts = label.opts
+        entries.append({"series_index": plot.items.index(sample.item), "text": label.text,
+                        "font": _font(label.item.font()),
+                        "color": list(pg.mkColor(opts.get("color") or pg.getConfigOption("foreground")).getRgb()),
+                        "size": opts.get("size", "9pt"), "bold": bool(opts.get("bold", False)),
+                        "italic": bool(opts.get("italic", False))})
+    return {"entries": entries, "offset": list(legend.offset),
+            "anchor": {"item": list(getattr(legend, "_GraphicsWidgetAnchor__itemAnchor")),
+                       "parent": list(getattr(legend, "_GraphicsWidgetAnchor__parentAnchor")),
+                       "offset": list(getattr(legend, "_GraphicsWidgetAnchor__offset"))},
+            "columns": legend.columnCount, "frame": bool(legend.frame),
+            "pen": _pen(legend.opts["pen"]), "brush": _brush(legend.opts["brush"]),
+            "hspace": legend.layout.horizontalSpacing(), "vspace": legend.layout.verticalSpacing(),
+            "margins": list(legend.layout.getContentsMargins()),
+            "opacity": legend.opacity(), "z": legend.zValue()}
+
+
+def _validate_legend(model):
+    legend = model.get("legend")
+    if legend is None:
+        if model["version"] == 3:
+            raise ValueError("Version-3 Cartesian models require a captured legend.")
+        return
+    if model["version"] != 3 or not isinstance(legend, dict):
+        raise ValueError("Captured legends require Cartesian model version 3.")
+    entries = legend.get("entries")
+    if (not isinstance(entries, list) or not 1 <= len(entries) <= 1000
+            or type(legend.get("columns")) is not int or not 1 <= legend["columns"] <= 1000
+            or type(legend.get("frame")) is not bool):
+        raise ValueError("Invalid saved legend layout.")
+    for entry in entries:
+        if (not isinstance(entry, dict) or type(entry.get("series_index")) is not int
+                or not 0 <= entry["series_index"] < len(model["series"])
+                or not isinstance(entry.get("text"), str) or not entry["text"].strip()
+                or len(entry["text"]) > 500 or any(c in entry["text"] for c in "<>\r\n")
+                or not isinstance(entry.get("size"), str)
+                or not re.fullmatch(r"\d+(?:\.\d+)?(?:pt|px)", entry["size"])
+                or not 1 <= float(entry["size"][:-2]) <= 200
+                or not isinstance(entry.get("color"), list) or len(entry["color"]) != 4
+                or any(type(n) is not int or not 0 <= n <= 255 for n in entry["color"])
+                or any(type(entry.get(key)) is not bool for key in ("bold", "italic"))):
+            raise ValueError("Invalid saved legend entry.")
+        _restore_font(entry.get("font"))
+    for key, length in (("offset", 2), ("margins", 4)):
+        if (not isinstance(legend.get(key), list) or len(legend[key]) != length
+                or any(type(n) not in (int, float) or not math.isfinite(n) or abs(n) > 32768
+                       for n in legend[key])):
+            raise ValueError("Invalid saved legend geometry.")
+    anchor = legend.get("anchor")
+    if not isinstance(anchor, dict) or set(anchor) != {"item", "parent", "offset"}:
+        raise ValueError("Invalid saved legend anchor.")
+    for key, values in anchor.items():
+        if (not isinstance(values, list) or len(values) != 2
+                or any(type(n) not in (int, float) or not math.isfinite(n)
+                       or not (-32768 <= n <= 32768 if key == "offset" else 0 <= n <= 1) for n in values)):
+            raise ValueError("Invalid saved legend anchor.")
+    for key in ("hspace", "vspace", "opacity", "z"):
+        if type(legend.get(key)) not in (int, float) or not math.isfinite(legend[key]):
+            raise ValueError("Invalid saved legend style.")
+    if not 0 <= legend["opacity"] <= 1 or any(abs(legend[k]) > 200 for k in ("hspace", "vspace")):
+        raise ValueError("Invalid saved legend spacing or opacity.")
+
+
+def _restore_legend(plot, state, series):
+    legend = plot.addLegend(offset=tuple(state["offset"]), colCount=state["columns"],
+                            frame=state["frame"], pen=_restore_pen(state["pen"]),
+                            brush=_restore_brush(state["brush"]),
+                            horSpacing=state["hspace"], verSpacing=state["vspace"])
+    legend.layout.setContentsMargins(*state["margins"])
+    for entry in state["entries"]:
+        legend.addItem(series[entry["series_index"]], entry["text"])
+        label = legend.items[-1][1]
+        label.item.setFont(_restore_font(entry["font"]))
+        label.setText(entry["text"], color=QtGui.QColor(*entry["color"]), size=entry["size"],
+                      bold=entry["bold"], italic=entry["italic"])
+    legend.setOpacity(state["opacity"])
+    legend.setZValue(state["z"])
+    legend.updateSize()
+    legend.layout.activate()
+    anchor = state["anchor"]
+    legend.anchor(itemPos=tuple(anchor["item"]), parentPos=tuple(anchor["parent"]), offset=tuple(anchor["offset"]))
+    return legend
+
+
 def capture_cartesian_model(item) -> bytes | None:
     """Return a restricted re-renderable model, or None without modifying the item.
 
     Image/density/heatmap panels, extra annotations, custom graphics/transforms,
-    custom ticks, varying per-point palettes and visible legends are deliberately refused.
+    custom ticks, varying per-point palettes and customized legends are deliberately refused.
     Exact built-in readable-axis classes retain their notation and display factor;
     a saved logarithmic millisecond axis never becomes a logarithmic seconds axis.
     Their exact frozen pictures can still be composed without shared axes.
@@ -253,8 +365,7 @@ def capture_cartesian_model(item) -> bytes | None:
     if not isinstance(item, pg.PlotItem):
         return None
     try:
-        if item.legend is not None and _visible(item.legend):
-            return None
+        legend = _capture_legend(item)
         if item.vb.state.get("aspectLocked") is not False:
             return None
         if getattr(item.vb, "_selection_overlay", None) is not None:
@@ -302,11 +413,16 @@ def capture_cartesian_model(item) -> bytes | None:
         # Old readers ignore additional fields; version 2 prevents one from
         # replaying a readable ms-log formatter as a standard seconds axis.
         version = 2 if any(state["formatter"]["kind"] != "standard" for state in axes.values()) else 1
+        if legend is not None:
+            version = 3
         model = {"format": "nanoscope-cartesian-model", "version": version,
                  "canvas": canvas, "ranges": ranges, "axes": axes, "title": title,
                  "background": _brush(scene.views()[0].backgroundBrush()),
                  "inverted": [bool(item.vb.state["xInverted"]), bool(item.vb.state["yInverted"])],
                  "margins": list(item.layout.getContentsMargins()), "series": series}
+        if legend is not None:
+            model["legend"] = legend
+            _validate_legend(model)
         payload = _json(model)
         return payload if len(payload) <= _MAX_MODEL_BYTES else None
     except (TypeError, ValueError, AttributeError, OverflowError):
@@ -322,7 +438,7 @@ def _model(snapshot):
         raise ValueError("Invalid or oversized Cartesian model.")
     model = json.loads(payload)
     if (not isinstance(model, dict) or model.get("format") != "nanoscope-cartesian-model"
-            or type(model.get("version")) is not int or model["version"] not in (1, 2)):
+            or type(model.get("version")) is not int or model["version"] not in (1, 2, 3)):
         raise ValueError("Unsupported Cartesian model format.")
     if not isinstance(model.get("series"), list) or len(model["series"]) > 1000:
         raise ValueError("Invalid Cartesian series count.")
@@ -342,11 +458,12 @@ def _model(snapshot):
                 or type(state.get("scale")) not in (int, float)
                 or not math.isfinite(state["scale"]) or state["scale"] <= 0):
             raise ValueError("Invalid Cartesian axis identity.")
-        if model["version"] == 2 and "formatter" not in state:
+        if model["version"] >= 2 and "formatter" not in state:
             raise ValueError("Version-2 Cartesian axes require an explicit formatter descriptor.")
         formatter = _axis_formatter(state)
         if model["version"] == 1 and formatter["kind"] != "standard":
             raise ValueError("Readable Cartesian axis formatters require model version 2.")
+    _validate_legend(model)
     return model
 
 
@@ -411,6 +528,11 @@ def _populate_clone(widget, model, canvas, ranges):
         if formatter["kind"] != "standard":
             axis.set_display_factor(formatter["display_factor"])
         axis.enableAutoSIPrefix(state["auto_si"])
+        if not state["auto_si"]:
+            # Pyqtgraph's setter can compute an SI factor even while disabling
+            # its label prefix. Never replay that hidden tick multiplier.
+            axis.autoSIPrefixScale = 1.0
+            axis._updateLabel()
         axis.setGrid(state["grid"])
         axis.setVisible(state["visible"])
     title_options = {key: value for key, value in model["title"]["options"].items()
@@ -420,6 +542,7 @@ def _populate_clone(widget, model, canvas, ranges):
     plot.setLogMode(x=model["axes"]["bottom"]["log"], y=model["axes"]["left"]["log"])
     for side, state in model["axes"].items():
         plot.getAxis(side).setLogMode(state["log"])
+    restored_series = []
     for state in model["series"]:
         kind = state["kind"]
         if kind == "line":
@@ -445,6 +568,9 @@ def _populate_clone(widget, model, canvas, ranges):
         data.setVisible(state["visible"])
         data.setOpacity(state["opacity"])
         data.setZValue(state["z"])
+        restored_series.append(data)
+    if model.get("legend") is not None:
+        _restore_legend(plot, model["legend"], restored_series)
     plot.invertX(model["inverted"][0])
     plot.invertY(model["inverted"][1])
     plot.setRange(xRange=ranges[0], yRange=ranges[1], padding=0, disableAutoRange=True)
@@ -456,11 +582,43 @@ def _populate_clone(widget, model, canvas, ranges):
     return widget
 
 
-def _shared_pictures(snapshots, share_x, share_y):
+def _legend_signature(model):
+    legend = model.get("legend")
+    if legend is None:
+        raise ValueError("Every panel needs a newly saved, fully captured standard legend to share it.")
+    entries = []
+    for entry in legend["entries"]:
+        series = dict(model["series"][entry["series_index"]])
+        for key in ("x", "y", "coordinates", "name"):
+            series.pop(key, None)
+        entries.append({**{key: value for key, value in entry.items() if key != "series_index"},
+                        "sample_style": series})
+    return {**{key: value for key, value in legend.items() if key not in ("offset", "anchor", "z", "entries")},
+            "entries": entries}
+
+
+def shared_legend_compatibility(snapshots) -> tuple[bool, str]:
+    """Share only identical label/style mappings, never merge or invent a key."""
+    try:
+        signatures = [_legend_signature(_model(snapshot)) for snapshot in snapshots]
+        if not signatures:
+            return False, "Select at least one saved figure."
+        if any(signature != signatures[0] for signature in signatures[1:]):
+            return False, "Legends have different labels, order, sample styles or typography. Keep individual legends."
+        return True, "Identical captured legend entries will appear once below the panels."
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        return False, str(exc)
+
+
+def _shared_pictures(snapshots, share_x, share_y, shared_legend=False):
     compatible, reason = shared_axes_compatibility(snapshots, share_x, share_y)
     if not compatible:
         raise ValueError(reason)
     models = [_model(snapshot) for snapshot in snapshots]
+    if shared_legend:
+        compatible, reason = shared_legend_compatibility(snapshots)
+        if not compatible:
+            raise ValueError(reason)
     canvas = (max(m["canvas"][0] for m in models), max(m["canvas"][1] for m in models))
     ranges = [[list(pair) for pair in model["ranges"]] for model in models]
     for axis, enabled in enumerate((share_x, share_y)):
@@ -471,16 +629,40 @@ def _shared_pictures(snapshots, share_x, share_y):
                 value[axis] = union[:]
     widgets = []
     try:
+        legend_snapshot = None
+        if shared_legend:
+            legend_widget = _clone_model(models[0], canvas, models[0]["ranges"])
+            widgets.append(legend_widget)
+            # Exporters render all scene items within the target bounds, not
+            # only its descendants. Isolate the legend so curves behind it
+            # cannot leak into the standalone key.
+            legend = legend_widget.getPlotItem().legend
+            legend.opts["offset"] = None
+            legend.setParentItem(None)
+            legend_widget.scene().removeItem(legend)
+            legend_view = pg.GraphicsView()
+            widgets.append(legend_view)
+            legend_view.setBackgroundBrush(_restore_brush(models[0]["background"]))
+            legend_view.scene().addItem(legend)
+            legend.setPos(0, 0)
+            legend.layout.activate()
+            legend_snapshot = capture_figure_snapshot(
+                legend, data=pd.DataFrame(),
+                config={"kind": "shared-legend"}, provenance={"analysis_recomputed": False})
+        panel_widgets = []
         for model, bounds in zip(models, ranges):
-            widgets.append(_clone_model(model, canvas, bounds))
+            detached = {**model, "legend": None} if shared_legend else model
+            widget = _clone_model(detached, canvas, bounds)
+            widgets.append(widget)
+            panel_widgets.append(widget)
         # Identical plot rectangles make the common ranges visually align too.
         for side in ("left", "right", "bottom", "top"):
-            axes = [widget.getPlotItem().getAxis(side) for widget in widgets]
+            axes = [widget.getPlotItem().getAxis(side) for widget in panel_widgets]
             extent = max(axis.width() if side in ("left", "right") else axis.height() for axis in axes)
             for axis in axes:
                 (axis.setWidth if side in ("left", "right") else axis.setHeight)(extent)
         pictures = []
-        for widget, snapshot, bounds in zip(widgets, snapshots, ranges):
+        for widget, snapshot, bounds in zip(panel_widgets, snapshots, ranges):
             # The common fixed axis extents invalidated each detached layout.
             widget.getPlotItem().layout.activate()
             widget.scene().prepareForPaint()
@@ -488,7 +670,7 @@ def _shared_pictures(snapshots, share_x, share_y):
                 widget.getPlotItem(), data=snapshot.dataframe(), config=snapshot.config(),
                 provenance={**snapshot.provenance(), "composition_view_ranges": bounds,
                             "scientific_recomputation": False}))
-        return pictures, ranges
+        return (pictures, ranges, legend_snapshot) if shared_legend else (pictures, ranges)
     finally:
         for widget in widgets:
             widget.close()
@@ -545,7 +727,44 @@ def _png_dimensions(payload):
     return size
 
 
-def compose_figures(snapshots, labels, columns, share_x=False, share_y=False) -> FigureSnapshot:
+def validate_publication_layout(count, columns, panel_spans=None, spacing=20, label_style=None):
+    """Bound layout metadata before allocation. Spans use row-major first-fit packing."""
+    if type(columns) is not int or not 1 <= columns <= 4:
+        raise ValueError("Choose between 1 and 4 columns.")
+    if type(spacing) not in (int, float) or not math.isfinite(spacing) or not 0 <= spacing <= 200:
+        raise ValueError("Panel spacing must be between 0 and 200 native pixels.")
+    spans = [[1, 1] for _ in range(count)] if panel_spans is None else panel_spans
+    if (not isinstance(spans, (tuple, list)) or len(spans) != count
+            or any(not isinstance(span, (tuple, list)) or len(span) != 2
+                   or type(span[0]) is not int or not 1 <= span[0] <= 4
+                   or type(span[1]) is not int or not 1 <= span[1] <= columns for span in spans)):
+        raise ValueError("Give every panel a row span from 1–4 and a column span within the grid width.")
+    style = dict(DEFAULT_LABEL_STYLE) if label_style is None else label_style
+    if (not isinstance(style, dict) or set(style) != set(DEFAULT_LABEL_STYLE)
+            or not isinstance(style["family"], str) or not style["family"].strip()
+            or len(style["family"]) > 100 or any(c in style["family"] for c in "\r\n")
+            or type(style["size_px"]) is not int or not 6 <= style["size_px"] <= 72
+            or type(style["bold"]) is not bool
+            or not isinstance(style["color"], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", style["color"])):
+        raise ValueError("Invalid panel-label typography. Choose a font, 6–72 native pixels and an RGB color.")
+    occupied, positions = set(), []
+    for row_span, column_span in spans:
+        for row in range(4 * count):
+            for col in range(columns - column_span + 1):
+                cells = {(r, c) for r in range(row, row + row_span)
+                         for c in range(col, col + column_span)}
+                if not cells & occupied:
+                    occupied.update(cells)
+                    positions.append((row, col, row_span, column_span))
+                    break
+            else:
+                continue
+            break
+    return [list(span) for span in spans], float(spacing), dict(style), positions
+
+
+def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
+                    panel_spans=None, spacing=20, label_style=None, shared_legend=False) -> FigureSnapshot:
     """Compose 1–12 frozen figures; original resources retain all numerical data.
 
     The top-level table is an explicit panel index. Every panel's exact CSV,
@@ -559,7 +778,13 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False) ->
         raise TypeError("Composition requires saved FigureSnapshot objects.")
     if type(columns) is not int or not 1 <= columns <= 4:
         raise ValueError("Choose between 1 and 4 columns.")
-    columns = min(columns, len(snapshots))
+    advanced_layout = panel_spans is not None or spacing != 20 or label_style is not None or shared_legend
+    if panel_spans is None:
+        columns = min(columns, len(snapshots))
+    spans, gap, label_style, positions = validate_publication_layout(
+        len(snapshots), columns, panel_spans, spacing, label_style)
+    if type(shared_legend) is not bool:
+        raise ValueError("Shared legend must be enabled or disabled explicitly.")
     labels = [chr(65 + i) for i in range(len(snapshots))] if labels is None else list(labels)
     if len(labels) != len(snapshots) or any(
             not isinstance(label, str) or len(label) > MAX_LABEL_LENGTH or "\n" in label or "\r" in label
@@ -577,43 +802,51 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False) ->
     # Refuse oversized compositions before creating detached widgets or images.
     planned_w = max(snapshot.width for snapshot in snapshots)
     planned_h = max(snapshot.height for snapshot in snapshots)
-    if share_x or share_y:
+    if share_x or share_y or shared_legend:
         models = [_model(snapshot) for snapshot in snapshots]
         planned_w = max(model["canvas"][0] for model in models)
         planned_h = max(model["canvas"][1] for model in models)
-    planned_rows = math.ceil(len(snapshots) / columns)
-    planned_width = math.ceil(columns * planned_w + (columns - 1) * 20)
-    planned_height = math.ceil(planned_rows * (planned_h + 32) + (planned_rows - 1) * 20)
+    font = QtGui.QFont(label_style["family"])
+    font.setBold(label_style["bold"])
+    font.setPixelSize(label_style["size_px"])
+    metrics = QtGui.QFontMetricsF(font)
+    header = max(32, math.ceil(metrics.height()) + 12) if any(labels) else 0
+    rows = max(row + row_span for row, _, row_span, _ in positions)
+    planned_width = math.ceil(columns * planned_w + (columns - 1) * gap)
+    planned_height = math.ceil(rows * (planned_h + header) + (rows - 1) * gap)
     if max(planned_width, planned_height) > 32768 or planned_width * planned_height > 100_000_000:
         raise ValueError("The composite exceeds 32,768 pixels per side or 100 megapixels. "
                          "Use fewer or smaller panels.")
     ranges = None
     rendered = snapshots
-    if share_x or share_y:
+    legend_snapshot = None
+    if shared_legend:
+        rendered, ranges, legend_snapshot = _shared_pictures(
+            snapshots, bool(share_x), bool(share_y), shared_legend=True)
+    elif share_x or share_y:
         rendered, ranges = _shared_pictures(snapshots, bool(share_x), bool(share_y))
     cell_w = max(snapshot.width for snapshot in rendered)
     cell_h = max(snapshot.height for snapshot in rendered)
-    gap, header = 20, 32
-    rows = math.ceil(len(snapshots) / columns)
     width = math.ceil(columns * cell_w + (columns - 1) * gap)
     height = math.ceil(rows * (cell_h + header) + (rows - 1) * gap)
+    legend_top = height + gap
+    if legend_snapshot is not None:
+        if legend_snapshot.width > width:
+            raise ValueError("The shared legend is wider than the composition. Widen the grid or shorten source legend labels.")
+        height = math.ceil(legend_top + legend_snapshot.height)
     if (not all(math.isfinite(v) and 0 < v <= 32768 for v in (width, height))
             or width * height > 100_000_000):
         raise ValueError("The composite exceeds 32,768 pixels per side or 100 megapixels. "
                          "Use fewer or smaller panels.")
-    font = QtGui.QFont("Arial", 12)
-    font.setBold(True)
-    font.setPixelSize(18)
-    if any(QtGui.QFontMetricsF(font).horizontalAdvance(label) > cell_w - 12 for label in labels):
+    if any(metrics.horizontalAdvance(label) > span[1] * cell_w + (span[1] - 1) * gap - 12
+           for label, span in zip(labels, spans)):
         raise ValueError("A panel label is too wide for its canvas. Shorten that label.")
-    images = []
     pictures = []
     for snapshot in rendered:
         _png_dimensions(snapshot.png_bytes)
         image = QtGui.QImage.fromData(snapshot.png_bytes)
         if image.isNull():
             raise ValueError("A selected figure has an invalid frozen PNG.")
-        images.append(image)
         pictures.append(_load_picture(snapshot))
     composite = QtGui.QImage(width, height, QtGui.QImage.Format.Format_ARGB32)
     composite.fill(QtCore.Qt.GlobalColor.white)
@@ -624,31 +857,51 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False) ->
     ET.SubElement(svg, f"{{{_NS}}}rect", {"width": str(width), "height": str(height), "fill": "white"})
     try:
         vector.fillRect(QtCore.QRectF(0, 0, width, height), QtCore.Qt.GlobalColor.white)
-        for index, (snapshot, image, panel_picture, label) in enumerate(zip(rendered, images, pictures, labels)):
-            x, top = (index % columns) * (cell_w + gap), (index // columns) * (cell_h + header + gap)
-            scale = min(cell_w / snapshot.width, cell_h / snapshot.height)
+        for index, (snapshot, panel_picture, label) in enumerate(zip(rendered, pictures, labels)):
+            row, col, row_span, col_span = positions[index]
+            x, top = col * (cell_w + gap), row * (cell_h + header + gap)
+            area_w = col_span * cell_w + (col_span - 1) * gap
+            area_h = row_span * (cell_h + header) + (row_span - 1) * gap - header
+            scale = min(area_w / snapshot.width, area_h / snapshot.height)
             panel_w, panel_h = snapshot.width * scale, snapshot.height * scale
-            left, y = x + (cell_w - panel_w) / 2, top + header + (cell_h - panel_h) / 2
+            left, y = x + (area_w - panel_w) / 2, top + header + (area_h - panel_h) / 2
+            label_y = top + (header - metrics.height()) / 2 + metrics.ascent()
             for painter in (raster, vector):
                 painter.setFont(font)
-                painter.setPen(QtGui.QColor("#111111"))
-                painter.drawText(QtCore.QPointF(x + 4, top + 23), label)
-            raster.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-            raster.drawImage(QtCore.QRectF(left, y, panel_w, panel_h), image)
+                painter.setPen(QtGui.QColor(label_style["color"]))
+                painter.drawText(QtCore.QPointF(x + 4, label_y), label)
+            # Replay vector commands for the preview too. Enlarging a spanned
+            # panel must not simply magnify its low-resolution PNG thumbnail.
+            for painter in (raster, vector):
+                painter.save()
+                try:
+                    painter.setClipRect(QtCore.QRectF(left, y, panel_w, panel_h))
+                    painter.translate(left, y)
+                    painter.scale(scale, scale)
+                    if not panel_picture.play(painter):
+                        raise ValueError("A frozen panel could not be replayed.")
+                finally:
+                    painter.restore()
+            panel_id = f"panel_{index + 1:03d}"
+            ET.SubElement(svg, f"{{{_NS}}}text", {"x": str(x + 4), "y": str(label_y),
+                          "font-family": label_style["family"], "font-size": str(label_style["size_px"]),
+                          "font-weight": "bold" if label_style["bold"] else "normal",
+                          "fill": label_style["color"], "id": panel_id + "_label"}).text = label
+            _svg_panel(snapshot.svg_bytes, svg, panel_id, left, y, panel_w, panel_h)
+        if legend_snapshot is not None:
+            left = (width - legend_snapshot.width) / 2
+            legend_rect = QtCore.QRectF(left, legend_top, legend_snapshot.width, legend_snapshot.height)
+            raster.drawImage(legend_rect, QtGui.QImage.fromData(legend_snapshot.png_bytes))
             vector.save()
             try:
-                vector.setClipRect(QtCore.QRectF(left, y, panel_w, panel_h))
-                vector.translate(left, y)
-                vector.scale(scale, scale)
-                if not panel_picture.play(vector):
-                    raise ValueError("A frozen panel could not be replayed.")
+                vector.setClipRect(legend_rect)
+                vector.translate(left, legend_top)
+                if not _load_picture(legend_snapshot).play(vector):
+                    raise ValueError("The captured shared legend could not be replayed.")
             finally:
                 vector.restore()
-            panel_id = f"panel_{index + 1:03d}"
-            ET.SubElement(svg, f"{{{_NS}}}text", {"x": str(x + 4), "y": str(top + 23),
-                          "font-family": "Arial", "font-size": "18", "font-weight": "bold",
-                          "fill": "#111111", "id": panel_id + "_label"}).text = label
-            _svg_panel(snapshot.svg_bytes, svg, panel_id, left, y, panel_w, panel_h)
+            _svg_panel(legend_snapshot.svg_bytes, svg, "shared_legend", left, legend_top,
+                       legend_snapshot.width, legend_snapshot.height)
     finally:
         raster.end()
         vector.end()
@@ -674,12 +927,16 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False) ->
                         "data_csv_resource": prefix + "data.csv",
                         "data_parquet_resource": prefix + "data.parquet"})
     catalog = pd.DataFrame(records)
-    config = {"kind": "figure-composition", "version": 1, "columns": columns,
+    config = {"kind": "figure-composition", "version": 2 if advanced_layout else 1, "columns": columns,
               "panel_labels": labels, "share_x": bool(share_x), "share_y": bool(share_y),
               "view_ranges": ranges, "panels": panels}
+    if advanced_layout:
+        config.update(panel_spans=spans, spacing=gap, label_style=label_style, shared_legend=shared_legend)
     provenance = {"kind": "frozen multi-panel composition", "analysis_recomputed": False,
                   "source_figures_modified": False,
                   "shared_axis_contract": "range unions applied only to detached Cartesian graphics",
+                  "shared_legend_contract": "identical captured label/style mappings shown once below panels"
+                      if shared_legend else "original panel legends retained",
                   "table_contract": "Top-level data is a panel index; every exact original numerical table "
                                     "and snapshot resource is retained under panels/panel_NNN/.",
                   "panel_count": len(snapshots), "panels": [p["source_provenance"] for p in panels]}

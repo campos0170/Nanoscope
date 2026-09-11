@@ -468,6 +468,8 @@ class DetectionPanel(QWidget):
     paramsChanged = Signal(dict)
     previewFilterToggled = Signal(bool)
     mlDetectRequested = Signal(dict)
+    controlLevelChanged = Signal(str)  # presentation only; never paramsChanged
+    _CONTROL_LEVEL_SETTINGS_KEY = "inspector/detection_control_level"
     mlModelChanged = Signal(str)
     notchLinesRefused = Signal(str)
 
@@ -2173,6 +2175,7 @@ class DetectionPanel(QWidget):
         self._on_filter_kind_changed()   # Gaussian has no order -> gate the spin
         self._update_response_plot()     # initial curve (no fs yet -> the "select a channel" note)
         self._organize_inspector_pages()
+        self._install_control_levels()
 
     def _organize_inspector_pages(self) -> None:
         """Pin navigation/actions; move only the settings into independent scrollers.
@@ -2255,9 +2258,8 @@ class DetectionPanel(QWidget):
                     source = control.parentWidget().layout()
                     row = source.takeRow(control)
                     form.addRow(row.labelItem.widget(), row.fieldItem.widget())
-                polarity_box = self.polarity_override.parentWidget()
-                old_layout.removeWidget(polarity_box)
-                form.addRow(polarity_box)
+                # Direction is a primary scientific choice, not an expert-only
+                # detail. Keep its original controls outside the disclosure.
                 self.detection_advanced = Disclosure('Advanced detection settings', advanced)
                 old_layout.addWidget(self.detection_advanced)
                 self.detection_advanced_summary = QLabel()
@@ -2295,6 +2297,125 @@ class DetectionPanel(QWidget):
             f'Max dwell: {self.max_dwell_s.value():g} s (0 = off) · '
             f'Merge gap: {self.merge_gap_ms.value():g} ms (0 = off) · '
             f'Polarity: {self.polarity_override.currentText()}')
+
+    def _install_control_levels(self) -> None:
+        """Add view complexity choices without owning a scientific parameter."""
+        self._control_level = "advanced"
+        self._advanced_disclosure_state = {}
+        self._essential_summary_text = ""
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(4, 0, 4, 0)
+        row.addWidget(QLabel("Controls"))
+        self.control_level_selector = QComboBox()
+        self.control_level_selector.addItem("Essential", "essential")
+        self.control_level_selector.addItem("Advanced", "advanced")
+        self.control_level_selector.setCurrentIndex(1)
+        self.control_level_selector.setAccessibleName("Inspector control level")
+        self.control_level_selector.setToolTip(
+            "Changes visibility only. No filters, thresholds, presets, results or review history are changed.")
+        row.addWidget(self.control_level_selector, 1)
+        self.baseline_reference_button = QPushButton("Baseline reference…")
+        self.baseline_reference_button.setToolTip(
+            "Inspect and confirm the open-pore reference used to measure event amplitudes.")
+        self.baseline_reference_button.clicked.connect(self.show_open_pore_baseline)
+        row.addWidget(self.baseline_reference_button)
+        self.layout().insertWidget(0, bar)
+        self.essential_settings_summary = _FixedLinesNote(3)
+        self.essential_settings_summary.setAccessibleName("Essential view retained settings")
+        self.essential_settings_summary.setStyleSheet("color:#8b9199;")
+        self.layout().insertWidget(1, self.essential_settings_summary)
+        self.advanced_tools_button = QPushButton("Show advanced tools…")
+        self.advanced_tools_button.setToolTip("Reveal threshold sweep, null control, recovery studies, ML and response design.")
+        self.advanced_tools_button.clicked.connect(lambda: self.set_control_level("advanced", persist=True))
+        self.page_actions[self._detection_page].layout().addWidget(self.advanced_tools_button)
+        self.control_level_selector.currentIndexChanged.connect(
+            lambda: self.set_control_level(str(self.control_level_selector.currentData())))
+        self.control_level_selector.activated.connect(
+            lambda: self.set_control_level(str(self.control_level_selector.currentData()), persist=True))
+        self.paramsChanged.connect(self._refresh_control_level_summary)
+        self.mlModelChanged.connect(self._refresh_control_level_summary)
+        self.ml_range.currentIndexChanged.connect(self._refresh_control_level_summary)
+        saved = str(QSettings().value(self._CONTROL_LEVEL_SETTINGS_KEY, "advanced"))
+        self.set_control_level(saved if saved in {"essential", "advanced"} else "advanced")
+
+    def control_level(self) -> str:
+        """Current visibility preference, separate from params()/ml_params()."""
+        return self._control_level
+
+    def set_control_level(self, level: str, *, persist: bool = False) -> None:
+        """Choose Essential/Advanced without changing any scientific widget.
+
+        Programmatic Guide navigation is non-persistent by default. User selection
+        saves only this UI preference. Enabled filters and non-default expert
+        settings remain disclosed; hidden controls are never disabled or reset.
+        """
+        if level not in {"essential", "advanced"}:
+            raise ValueError("Control level must be 'essential' or 'advanced'.")
+        previous = self._control_level
+        if previous != level:
+            disclosures = [self.detection_advanced, *([self.ml_advanced] if hasattr(self, "ml_advanced") else [])]
+            if level == "essential":
+                self._advanced_disclosure_state = {widget: widget.toggle.isChecked() for widget in disclosures}
+                for widget in disclosures:
+                    widget.set_expanded(False)
+            else:
+                for widget, expanded in self._advanced_disclosure_state.items():
+                    widget.set_expanded(expanded)
+            self._control_level = level
+        # Block only this presentation selector. Scientific controls are untouched.
+        was_blocked = self.control_level_selector.blockSignals(True)
+        self.control_level_selector.setCurrentIndex(self.control_level_selector.findData(level))
+        self.control_level_selector.blockSignals(was_blocked)
+        essential = level == "essential"
+        for widget in (self.sweep_button, self.null_button, self.recovery_button,
+                       self.response_hint, self.response_plot, self.response_note,
+                       self.response_chain_check):
+            widget.setVisible(not essential)
+        self.advanced_tools_button.setVisible(essential)
+        self.essential_settings_summary.setVisible(essential)
+        self._refresh_control_level_summary()
+        for actions in self.findChildren(PinnedActions):
+            actions._sync_height()
+        if persist:
+            QSettings().setValue(self._CONTROL_LEVEL_SETTINGS_KEY, level)
+        if previous != level:
+            self.controlLevelChanged.emit(level)
+
+    def _refresh_control_level_summary(self, *_args) -> None:
+        if not hasattr(self, "essential_settings_summary"):
+            return
+        active = [label for label, check in self._filter_specs if check.isChecked()]
+        retained = []
+        if self.max_dwell_s.value() > 0:
+            retained.append(f"max dwell {self.max_dwell_s.value():g} s")
+        if self.merge_gap_ms.value() > 0:
+            retained.append(f"merge {self.merge_gap_ms.value():g} ms")
+        if self.normalize_enabled.isChecked():
+            retained.append("NORMALIZE ON: current-derived values are dimensionless")
+        if self.hp_enabled.isChecked():
+            retained.append("high-pass affects localization and boundaries")
+        ml_configured = bool(self._model_path or self._ml_preset_chosen
+                             or getattr(self, "_nanoscope_unresolved_model_reference", None))
+        if ml_configured:
+            retained.append("ML setup retained (separate model pipeline)")
+        critical = [note for note in retained if note.startswith(("NORMALIZE", "high-pass"))]
+        others = [note for note in retained if note not in critical]
+        text = (("; ".join(critical) + ". " if critical else "")
+                + "Enabled filters: " + (", ".join(active) if active else "none") + ". "
+                + ("Retained settings: " + "; ".join(others) + ". " if others else "")
+                + "Control level changes visibility only. Expert options remain available under Advanced.")
+        self._essential_summary_text = text
+        self.essential_settings_summary.setText(text)
+        # A loaded/customized/unresolved model must not disappear from navigation.
+        # Also keep the current ML page visible when switching views while reading it.
+        ml_visible = (self._control_level == "advanced" or ml_configured
+                      or self.mode_tabs.currentWidget() is self._ml_page)
+        self.mode_tabs.setTabVisible(self.mode_tabs.indexOf(self._ml_page), ml_visible)
+
+    def control_level_summary(self) -> str:
+        """Full unelided disclosure for accessibility, tests and Guide details."""
+        return self._essential_summary_text
 
     # -- ML tab: the model's OWN preprocessing + decode ---------------------
     # These two groups are the ML detector's whole signal chain. They exist because a
@@ -3037,6 +3158,7 @@ class DetectionPanel(QWidget):
     def _on_ml_preset_activated(self) -> None:
         """The user picked a preset by hand — never auto-override it after this."""
         self._ml_preset_chosen = True
+        self._refresh_control_level_summary()
 
     def _on_ml_norm_method_changed(self, *_a) -> None:
         """Gate the two knobs that belong to ONE of the two normalizations.
@@ -3080,6 +3202,7 @@ class DetectionPanel(QWidget):
             return
         self._ml_preset_chosen = True
         self._refresh_ml_preset_status()
+        self._refresh_control_level_summary()
 
     @staticmethod
     def _parse_notch_freqs(text: str) -> tuple[float, ...]:
@@ -3291,6 +3414,8 @@ class DetectionPanel(QWidget):
 
     def show_ml_tab(self) -> None:
         """Raise the ML detector tab."""
+        if hasattr(self, "control_level_selector"):
+            self.set_control_level("advanced")
         self.mode_tabs.setCurrentWidget(self._ml_page)
 
     def show_measure_tab(self) -> None:
@@ -3661,6 +3786,7 @@ class DetectionPanel(QWidget):
         self._refresh_ml_baseline_rows()
         self._refresh_ml_preset_status()
         self._ml_preset_chosen = True
+        self._refresh_control_level_summary()
 
     def _push_ml_preprocess(self, pre: MLPreprocessConfig) -> None:
         """Put one preprocessing config into the widgets. Caller owns ``_ml_loading``."""

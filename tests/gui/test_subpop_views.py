@@ -576,8 +576,8 @@ def test_the_figures_share_the_window_with_the_report_text(window):
 def test_a_window_with_no_report_says_what_it_is_waiting_for(qapp, qtbot):
     w = SubpopReportWindow()
     qtbot.addWidget(w)
-    assert "Event subpopulations" in w.embedding_view().message()
-    assert "Event subpopulations" in w.waveform_view().message()
+    assert "Generate Subpopulations" in w.embedding_view().message()
+    assert "Generate Subpopulations" in w.waveform_view().message()
     assert w.embedding_view().drawn()[0].size == 0
     assert w.waveform_view().series() == []
     assert not w.can_export()

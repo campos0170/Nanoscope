@@ -8,6 +8,8 @@ signal viewer and renders the fixed pipeline
 * ``✓`` done (green) · ``●`` current (accent, emphasised) · ``○`` available-to-do (neutral)
   · ``–`` unavailable (dim);
 * FILTER is shown as an optional ``○`` that never blocks and is never the current step.
+* ANALYZE always opens a metadata-only home. Individual tools retain their own data gates.
+  A CURATE tick means the whole table has recorded human review, not merely automatic acceptance.
 
 Each chip's tooltip carries the stage's reason (what it does / why it is locked). Clicking a
 chip emits :attr:`stageActivated` with the stage id; ``main_window`` routes an available stage

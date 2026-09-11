@@ -1,13 +1,14 @@
 """The calibration chip — a small, clickable status-bar chip that makes the deferred
 current-gain calibration IMPOSSIBLE to forget.
 
-Until a real gain is dialled in, every blockage depth, ECD, conductance and noise
-magnitude the app reports is ~2500x off and silently trusted. This chip renders the
+The source may already carry physical units, or may need an acquisition conversion.
+Changing gain alone verifies neither case. This chip renders the
 :class:`~nanoscope.gui.workflow_status.CalibrationStatus` for the active recording so the
 state is always on screen:
 
-* UNCALIBRATED — amber, ``⚠ Current gain uncalibrated — magnitudes not physical``;
-* CALIBRATED   — green,  ``✓ Gain set: <detail>``;
+* UNCALIBRATED — amber, ``⚠ Default gain — physical calibration unverified``;
+* CALIBRATED   — green, ``✓ Gain set: <detail>`` means settings entered only;
+  the tooltip explicitly requires verification against acquisition settings;
 * DAMAGED      — amber,  ``⚠ Gain set: <detail> — channel non-finite, magnitudes not
   physical``, with ``Session.calibration_issues``' own sentence as the tooltip. The green
   tick was measured being drawn over a channel whose every sample was -inf (gain 1e38 on
@@ -43,15 +44,16 @@ _GREEN_BORDER = "#5c9a63"
 _NEUTRAL_BG = "#2a2f36"
 _NEUTRAL_BORDER = "#3a4048"
 
-_UNCAL_TEXT = "⚠ Current gain uncalibrated — magnitudes not physical"
+_UNCAL_TEXT = "⚠ Default gain — physical calibration unverified"
 
 _TOOLTIPS = {
     CalibrationState.UNCALIBRATED: (
-        "The current-channel gain is still at its default (uncalibrated). Blockage depth, "
-        "ECD, conductance and noise magnitudes are NOT physical until you set the real gain.\n"
-        "Click to open the Calibration panel."),
+        "The current-channel gain is still at its default. This can be appropriate for "
+        "already calibrated input, but NanoScope has not verified the acquisition conversion, "
+        "physical units or open-pore reference.\nClick to review the Calibration panel."),
     CalibrationState.CALIBRATED: (
-        "The current-channel gain has been set, so reported magnitudes are physical.\n"
+        "Non-default gain settings have been entered. This does not verify physical calibration. "
+        "Confirm gain, offset, units and open-pore reference against the acquisition settings.\n"
         "Click to review the calibration."),
     CalibrationState.NO_CHANNEL: (
         "This recording has no live current channel to calibrate."),

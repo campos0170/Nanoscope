@@ -176,7 +176,7 @@ class CalibrationPanel(QtWidgets.QWidget):
         self._treat_as.setToolTip(
             "What this channel IS, to the whole app: which pane it draws in and how it is "
             "grouped with the others, AND which channel the analysis acts on — Run "
-            "detection, Batch detect, Power spectrum and I-V, the calibration chip and the "
+            "detection, Batch detect, Noise spectrum and I-V, the calibration chip and the "
             "workflow strip all follow it. 'current' makes an undeclared channel analysable; "
             "'voltage' on a channel the file calls current switches detection off for it. "
             "Leave it at 'as the file declares' unless the file declared the channel wrongly "

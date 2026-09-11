@@ -284,6 +284,83 @@ def test_actual_vector_and_raster_exports_keep_data_and_zoom(qtbot, tmp_path):
     svg.unlink()
 
 
+def test_print_targets_enlarge_only_canvas_and_never_change_defaults(qtbot):
+    payload = (b'<svg viewBox="0 0 800 400"><text font-size="12">Label</text>'
+               b'<path d="M0 0L100 10" stroke="black" stroke-width="2"/></svg>')
+    dialog = ExportOptionsDialog(native_size=(800, 400), preview_svg=payload)
+    qtbot.addWidget(dialog)
+    assert dialog.options().native
+    assert not dialog.enlarge_button.isEnabled()
+    dialog.preset_combo.setCurrentIndex(1)
+    assert "below target" in dialog.preflight_summary.text()
+    original = dialog.options()
+    dialog.text_target_spin.setValue(9)
+    assert dialog.options() == original
+    dialog.enlarge_button.click()
+    enlarged = dialog.options()
+    assert enlarged.physical_width_mm > original.physical_width_mm
+    assert enlarged.physical_width_mm / enlarged.physical_height_mm == pytest.approx(2)
+    assert dialog._print_metrics.at_size(enlarged.physical_width_mm,
+                                         enlarged.physical_height_mm)[0] == pytest.approx(9)
+    assert not dialog.enlarge_button.isEnabled()
+    assert dialog.preset_combo.currentIndex() == 0
+
+
+def test_residual_preflight_uses_combined_frozen_art(qtbot):
+    main = b'<svg viewBox="0 0 800 400"><text font-size="12">Main</text></svg>'
+    combined = b'<svg viewBox="0 0 800 600"><text font-size="8">Residual</text></svg>'
+    dialog = ExportOptionsDialog(native_size=(800, 400), residual_native_size=(800, 600),
+                                 preview_svg=main, residual_preview_svg=combined)
+    qtbot.addWidget(dialog)
+    dialog.preset_combo.setCurrentIndex(1)
+    assert dialog._selected_metrics(dialog.options()).text_size == 12
+    dialog.residual_check.setChecked(True)
+    assert dialog._selected_metrics(dialog.options()).text_size == 8
+    assert dialog.options().include_residual
+    assert dialog.options().physical_height_mm == pytest.approx(63.75)
+
+
+def test_missing_typography_does_not_claim_print_readability(qtbot):
+    dialog = ExportOptionsDialog(native_size=(800, 400))
+    qtbot.addWidget(dialog)
+    dialog.preset_combo.setCurrentIndex(1)
+    assert "unmeasured" in dialog.preflight_summary.text()
+    assert not dialog.enlarge_button.isEnabled()
+    assert dialog.buttons.button(QtWidgets.QDialogButtonBox.Ok).isEnabled()
+
+
+def test_print_preview_is_qualified_and_does_not_change_options(qtbot, monkeypatch):
+    from PySide6 import QtGui
+    image = QtGui.QImage(800, 400, QtGui.QImage.Format.Format_ARGB32)
+    image.fill(QtCore.Qt.GlobalColor.white)
+    dialog = ExportOptionsDialog(native_size=(800, 400), preview_image=image)
+    qtbot.addWidget(dialog)
+    dialog.preset_combo.setCurrentIndex(1)
+    before = dialog.options()
+    texts = []
+    monkeypatch.setattr(QtWidgets.QDialog, "exec", lambda d: texts.extend(
+        label.text() for label in d.findChildren(QtWidgets.QLabel)) or 0)
+    dialog._show_print_preview()
+    assert any("not a calibrated ruler" in text for text in texts)
+    assert dialog.options() == before
+
+
+def test_preflight_details_fit_laptop_dialog_without_overlapping_preview(qtbot):
+    from PySide6 import QtGui
+    image = QtGui.QImage(800, 400, QtGui.QImage.Format.Format_ARGB32)
+    image.fill(QtCore.Qt.GlobalColor.white)
+    dialog = ExportOptionsDialog(native_size=(800, 400), preview_image=image)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.preflight_toggle.setChecked(True)
+    QtWidgets.QApplication.processEvents()
+    assert not dialog.preview_label.isVisible()
+    assert dialog.preflight_details.isVisible()
+    assert dialog.buttons.geometry().top() > dialog.preflight_details.geometry().bottom()
+    dialog.preflight_toggle.setChecked(False)
+    assert dialog.preview_label.isVisible()
+
+
 def test_event_panel_only_interactive_exports_use_options(qtbot, tmp_path, monkeypatch):
     from nanoscope.core.session import Session
     from nanoscope.gui import event_plot_panel

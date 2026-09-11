@@ -65,6 +65,7 @@ from .analysis_explorer import (
     PAGE_VOLTAGE_SERIES,
 )
 from .analysis_panel import AnalysisPanel
+from .analysis_catalog import ANALYSIS_LABELS, PAGE_HOME
 from .analysis_worker import AnalysisController, BatchDetectController
 from ..core import clock
 from .calibration_panel import CalibrationPanel
@@ -656,6 +657,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # attributes remain the authoritative page objects for compatibility and for
         # the v11 workspace adapters; the Explorer only organises their presentation.
         self._analysis_explorer: AnalysisExplorer | None = None
+        self._first_analysis_guide = None
         self._figure_library = None
         self._event_inspector = None   # the single, lazily-built EventInspectorWindow
         self._event_gallery = None     # the single, lazily-built EventGalleryWindow
@@ -1265,27 +1267,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_compare_baseline.triggered.connect(self._compare_baseline_estimators)
 
         analysis_menu.addSection("Explore this recording")
-        self._act_plots = analysis_menu.addAction("&Plots…")
+        self._act_plots = analysis_menu.addAction(ANALYSIS_LABELS[PAGE_DISTRIBUTIONS] + "…")
         self._act_plots.setToolTip(
             "Explore the detected events and saved manual measurements in a "
-            "standalone plots window: dwell/amplitude histograms with fitted "
+            "Analysis Explorer: dwell/amplitude histograms with fitted "
             "overlays, scatter of any two parameters, GMM/k-means clustering "
             "and PCA of a chosen feature set.")
         self._act_plots.setEnabled(False)
         self._act_plots.triggered.connect(self._open_plots)
 
-        self._act_distribution_summaries = analysis_menu.addAction("Distribution summaries…")
+        self._act_distribution_summaries = analysis_menu.addAction(ANALYSIS_LABELS[PAGE_DISTRIBUTION_SUMMARIES] + "…")
         self._act_distribution_summaries.setToolTip(
             "Optional ECDF, empirical survival, box and violin plots of event measurements. "
             "Choose sources and explicitly generate a summary; existing analyses are unchanged.")
         self._act_distribution_summaries.triggered.connect(self._open_distribution_summaries)
-        self._act_comparison_figures = analysis_menu.addAction("Comparison figures…")
+        self._act_comparison_figures = analysis_menu.addAction(ANALYSIS_LABELS[PAGE_COMPARISON_FIGURES] + "…")
         self._act_comparison_figures.setToolTip(
             "Generate faceted comparisons, pair-plot matrices and individual-event overlays "
             "from existing event measurements. Opening this page does not run analysis.")
         self._act_comparison_figures.triggered.connect(self._open_comparison_figures)
 
-        self._act_event_plots = analysis_menu.addAction("Event &plots (density / ensemble)…")
+        self._act_event_plots = analysis_menu.addAction(ANALYSIS_LABELS[PAGE_EVENT_WAVEFORMS] + "…")
         self._act_event_plots.setToolTip(
             "The signature translocation plots for the current detection: the 2-D "
             "dwell-vs-blockage density map (with ECD / charge-deficit as a metric) and "
@@ -1349,7 +1351,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_mark_missed.setEnabled(False)
         self._act_mark_missed.triggered.connect(self._mark_selection_as_missed)
 
-        self._act_psd = analysis_menu.addAction("Power &spectrum (noise / PSD)…")
+        self._act_psd = analysis_menu.addAction(ANALYSIS_LABELS[PAGE_NOISE] + "…")
         self._act_psd.setToolTip(
             "Open the current-noise power spectrum for a recording's current channel: "
             "the log-log PSD that separates 1/f (flicker), a mid-log-frequency median "
@@ -1375,7 +1377,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # the conversion happens once, here, in code. MainWindow is the sole wirer, so
         # here is where a selection made on one surface is handed to another.
         self._act_psd_selection = analysis_menu.addAction(
-            "Power spectrum of the &measured region")
+            "Noise spectrum of the &measured region")
         self._act_psd_selection.setToolTip(
             "Open the power spectrum over exactly the region the Measure tool is "
             "bracketing on the trace.\n\n"
@@ -1405,7 +1407,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # chosen, that answers a question about the events already on screen rather than
         # changing them. It writes nothing back — no schema column, no curation, no
         # label — so a run costs the user nothing but the minute it takes.
-        self._act_subpop = analysis_menu.addAction("Event s&ubpopulations (GMM)…")
+        self._act_subpop = analysis_menu.addAction("Generate " + ANALYSIS_LABELS[PAGE_SUBPOPULATIONS] + "…")
         self._subpop_tooltip = (
             "Ask whether the accepted events are ONE population or several. Measures 13 "
             "waveform features per event on the trace the detector used, gates on ≥4σ "
@@ -1423,7 +1425,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # window that originally displayed it.  Reopening it must never mean rerunning
         # the mixture (and a project open must never pop the report window up by itself).
         self._act_show_saved_subpop = analysis_menu.addAction(
-            "Show saved subpopulation &report…")
+            "Open saved Subpopulations…")
         self._act_show_saved_subpop.setToolTip(
             "Open the subpopulation report stored in this project without rerunning "
             "PCA, clustering, the mixture, or bootstrap analysis.")
@@ -1431,7 +1433,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_show_saved_subpop.triggered.connect(self._show_saved_subpop_report)
 
         analysis_menu.addSection("Compare recordings")
-        self._act_iv = analysis_menu.addAction("&I-V / Conductance…")
+        self._act_iv = analysis_menu.addAction(ANALYSIS_LABELS[PAGE_IV] + "…")
         self._act_iv.setToolTip(
             "Gather (voltage, open-pore current) from every open recording, fit I vs V, "
             "and report the pore CONDUCTANCE (slope, in nS) with the leak and R². The "
@@ -1521,7 +1523,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "legend on top of the contours it names, so it is adjustable.")
         self._act_density_style.triggered.connect(self._edit_density_style)
 
-        self._act_export_figure = analysis_menu.addAction("Generate standard report &figures…")
+        self._act_export_figure = analysis_menu.addAction("Generate " + ANALYSIS_LABELS["report_figures"] + "…")
         self._act_export_figure.setToolTip(
             "Generate a standard report (dwell/depth histograms, dwell-vs-depth "
             "scatter, trace preview) for the current detection result, each with a "
@@ -1534,6 +1536,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_figure_library.setToolTip(
             "Named figure snapshots saved in this project, separate from the Event Gallery.")
         self._act_figure_library.triggered.connect(self._open_figure_library)
+
+        analysis_menu.addSeparator()
+        self._act_analysis_home = analysis_menu.addAction(ANALYSIS_LABELS[PAGE_HOME] + "…")
+        self._act_analysis_home.setToolTip("Browse every analysis and its requirements without running analysis.")
+        self._act_analysis_home.triggered.connect(self._open_analysis_home)
+        self._act_first_analysis_guide = analysis_menu.addAction(ANALYSIS_LABELS["guided_first_analysis"] + "…")
+        self._act_first_analysis_guide.setToolTip("A self-paced walkthrough with optional synthetic practice data; scientific settings are not changed automatically.")
+        self._act_first_analysis_guide.triggered.connect(self._open_first_analysis_guide)
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction(self._act_first_analysis_guide)
+        help_menu.addAction(self._act_analysis_home)
 
         # Every launcher surface's gate (Plots, density/ensemble, PSD, I-V, V-dependence and
         # the figure export) is re-derived through the ONE shared path, so opening the menu and
@@ -1714,6 +1727,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._workflow_status = status
         self._calibration_chip.set_status(status.calibration)
         self._workflow_strip.set_status(status)
+        guide = self._first_analysis_guide
+        if guide is not None and guide.isVisible():
+            guide.refresh_context()
 
     def _on_stage_activated(self, stage_value: str) -> None:
         """A workflow-strip stage was clicked. Route an AVAILABLE stage to its existing reveal
@@ -1755,7 +1771,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "dwell or depth, sweep a box over the bad ones — use ▤ Event gallery "
                     "on the row above the trace, or Ctrl+G.", 8000)
         elif stage is Stage.ANALYZE:
-            self._open_plots()
+            self._open_analysis_home()
 
     def _reveal_calibration_panel(self) -> None:
         """Raise the Inspector dock and select its Calibration tab (the chip's click target)."""
@@ -1938,6 +1954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session.documentClosed.connect(lambda *_: self._mark_dirty_for_document_set())
         self._session.resultsChanged.connect(lambda *_: self._mark_dirty())
         self._session.calibrationChanged.connect(lambda *_: self._mark_dirty())
+        self._session.sourceAppearanceChanged.connect(lambda *_: self._mark_dirty())
         # Overlay/Stacked is part of ProjectState. Unlike ``layersChanged`` this signal is
         # not emitted by opening, closing or merely selecting a recording: it represents a
         # deliberate view-mode edit (and restore is already protected by ``_restoring``).
@@ -2065,6 +2082,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_launcher.set_tooltips(
             {sid: act.toolTip() for sid, act in self._surface_actions().items()})
         self._analysis_launcher.surfaceActivated.connect(self._on_surface_activated)
+        self._analysis_launcher.homeRequested.connect(self._open_analysis_home)
         # Every signal that can change a surface's gate. The launcher is ALWAYS visible, so
         # unlike the menu (which could re-derive on aboutToShow) it has to track the session
         # live: a document opens/closes, a detection is stored/cleared, an event is curated, a
@@ -3562,6 +3580,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for sid in SURFACE_ORDER:
             self._apply_surface_gate(sid)
         self._sync_analysis_open_state()
+        if self._analysis_explorer is not None:
+            self._analysis_explorer.home().refresh_availability()
+        if self._first_analysis_guide is not None and self._first_analysis_guide.isVisible():
+            self._first_analysis_guide.refresh_context()
 
     def _gate_populations(self) -> tuple[bool, str]:
         """Populations (the Plots window): needs SOME plottable per-event table — any open
@@ -3575,9 +3597,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._session.documents():
             # Naming the REAL blocker. "Run detection first" with nothing open sends the user
             # to a detector that is itself disabled for want of a recording.
-            return False, ("Open a recording first — the populations window plots per-event "
+            return False, ("Open a recording first — Distributions plots per-event "
                            "tables (a detection's events, or a saved manual measurement).")
-        return False, ("Run detection first — the populations window plots per-event tables "
+        return False, ("Run detection first — Distributions plots per-event tables "
                        "(a saved manual measurement counts too).")
 
     def _gate_event_plots(self) -> tuple[bool, str]:
@@ -4068,6 +4090,148 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_analysis_open_state()
 
     # -- "this window is already open" indication ------------------------------------------------
+    def _analysis_home_availability(self, route: str) -> tuple[bool, str]:
+        """Read-only navigation gates; inspecting the catalog never constructs a result."""
+        gates = {
+            PAGE_DISTRIBUTIONS: self._gate_populations,
+            PAGE_EVENT_WAVEFORMS: self._gate_event_plots,
+            PAGE_NOISE: self._gate_psd,
+            PAGE_IV: self._gate_iv,
+            PAGE_VOLTAGE_SERIES: self._gate_vdep,
+            "event_gallery": self._gate_gallery,
+            "report_figures": self._gate_figures,
+        }
+        if route in gates:
+            return gates[route]()
+        if route in (PAGE_DISTRIBUTION_SUMMARIES, PAGE_COMPARISON_FIGURES):
+            return True, "Open the controls; choose eligible source tables before generating a figure."
+        if route == PAGE_SUBPOPULATIONS:
+            return True, "Open an existing report or an empty view. Generate explicitly to run an analysis."
+        if route in (PAGE_HOME, "figure_library", "guided_first_analysis"):
+            return True, ""
+        return False, "Unknown analysis destination."
+
+    def _launch_analysis_route(self, route: str) -> None:
+        available, reason = self._analysis_home_availability(route)
+        if not available:
+            self.statusBar().showMessage(reason, 8000)
+            return
+        actions = {
+            PAGE_HOME: self._open_analysis_home,
+            "guided_first_analysis": self._open_first_analysis_guide,
+            PAGE_DISTRIBUTIONS: self._open_plots,
+            PAGE_DISTRIBUTION_SUMMARIES: self._open_distribution_summaries,
+            PAGE_COMPARISON_FIGURES: self._open_comparison_figures,
+            PAGE_EVENT_WAVEFORMS: self._open_event_plots,
+            PAGE_NOISE: self._open_psd,
+            PAGE_IV: self._open_iv,
+            PAGE_VOLTAGE_SERIES: self._open_vdep,
+            PAGE_SUBPOPULATIONS: self._open_subpopulations_view,
+            "event_gallery": self._open_event_gallery,
+            "figure_library": self._open_figure_library,
+            "report_figures": self._export_figures,
+        }
+        actions[route]()
+
+    def _open_subpopulations_view(self) -> None:
+        """Opening a destination is not permission to run a mixture analysis."""
+        if self._workspace_has_artifact(SUBPOPULATION_ARTIFACT_ID):
+            self._show_saved_subpop_report()
+        else:
+            self._show_analysis_page(PAGE_SUBPOPULATIONS, self._ensure_subpop_window(),
+                                     refresh=self._run_subpopulations)
+
+    def _open_analysis_home(self) -> None:
+        self._ensure_analysis_explorer().show_home()
+
+    def _first_analysis_context(self):
+        return self._workflow_target(), self._analysis_explorer_context()
+
+    def _first_analysis_availability(self, route: str) -> tuple[bool, str]:
+        if route in ("open_recording", "practice", "analysis_current", "save_project"):
+            return True, ""
+        stages = {"calibration": Stage.CALIBRATE, "baseline": Stage.FILTER,
+                  "detection": Stage.DETECT, "essential": Stage.DETECT,
+                  "advanced": Stage.DETECT, "event_inspector": Stage.CURATE}
+        if route in stages:
+            status = compute_status(self._session, *self._workflow_target()).stage(stages[route])
+            return status.available, status.reason
+        return self._analysis_home_availability(route)
+
+    def _open_first_analysis_guide(self) -> None:
+        from .first_analysis_guide import FirstAnalysisGuide
+        if self._first_analysis_guide is None:
+            self._first_analysis_guide = FirstAnalysisGuide(
+                self, context_provider=self._first_analysis_context,
+                availability_provider=self._first_analysis_availability)
+            self._first_analysis_guide.actionRequested.connect(self._first_analysis_action)
+        self._first_analysis_guide.refresh_context()
+        self._first_analysis_guide.show()
+        self._first_analysis_guide.raise_()
+        self._first_analysis_guide.activateWindow()
+
+    def _first_analysis_action(self, route: str) -> None:
+        available, reason = self._first_analysis_availability(route)
+        if not available:
+            self.statusBar().showMessage(reason, 8000)
+            return
+        if route == "open_recording":
+            self._open_dialog()
+        elif route == "practice":
+            self._create_practice_recording()
+        elif route == "calibration":
+            self._reveal_calibration_panel()
+        elif route in ("baseline", "detection", "essential", "advanced"):
+            self._reveal_detection_panel()
+            panel = self._analysis_panel.detection_panel
+            if route == "baseline":
+                panel.show_open_pore_baseline()
+            else:
+                panel.show_detection_tab()
+                if route in ("essential", "advanced"):
+                    panel.set_control_level(route, persist=False)
+        elif route == "event_inspector":
+            self._open_event_inspector()
+        elif route == "analysis_current":
+            if self._analysis_explorer is None:
+                self._open_analysis_home()
+            else:
+                self._analysis_explorer.show()
+                self._analysis_explorer.raise_()
+        elif route == "save_project":
+            self._save_project_from(self._first_analysis_guide or self, save_as=False)
+        else:
+            self._launch_analysis_route(route)
+
+    def _create_practice_recording(self) -> None:
+        from .first_analysis_guide import practice_path, write_practice_recording
+        parent = self._first_analysis_guide or self
+        answer = QtWidgets.QMessageBox.question(
+            parent, "Create synthetic practice recording",
+            "Create synthetic learning data and add it alongside your open recordings? "
+            "This is not experimental data. No analysis settings will be changed. "
+            "The saved filename will include SYNTHETIC.",
+            QtWidgets.QMessageBox.StandardButton.Ok | QtWidgets.QMessageBox.StandardButton.Cancel,
+            QtWidgets.QMessageBox.StandardButton.Cancel)
+        if answer != QtWidgets.QMessageBox.StandardButton.Ok:
+            return
+        chosen = ask_export_path(parent, title="Save synthetic practice recording",
+            suggestion="SYNTHETIC-NanoScope-practice.csv", filters="CSV files (*.csv)",
+            outputs=lambda path: [practice_path(path)])
+        if chosen is None:
+            return
+        target = practice_path(chosen)
+        if any(doc.meta.path.resolve() == target.resolve() for doc in self._session.documents()):
+            QtWidgets.QMessageBox.warning(parent, "Recording is already open",
+                "Choose a new filename. A practice recording cannot replace a file currently open in this project.")
+            return
+        try:
+            target = write_practice_recording(target)
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(parent, "Practice recording could not be saved", str(exc))
+            return
+        self.open_paths([target])
+
     def _ensure_analysis_explorer(self) -> AnalysisExplorer:
         """Build the single analytical shell without constructing any analysis page.
 
@@ -4080,12 +4244,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self,
                 context_provider=self._analysis_explorer_context,
                 status_provider=self._analysis_explorer_status,
+                availability_provider=self._analysis_home_availability,
             )
             self._analysis_explorer.visibilityChanged.connect(
                 lambda _visible: self._sync_analysis_open_state())
             self._analysis_explorer.saveFigureRequested.connect(self._save_analysis_figure)
             self._analysis_explorer.saveBundleRequested.connect(self._export_analysis_bundle)
             self._analysis_explorer.figureLibraryRequested.connect(self._open_figure_library)
+            self._analysis_explorer.launchRequested.connect(self._launch_analysis_route)
         return self._analysis_explorer
 
     def _analysis_explorer_context(self) -> str:
@@ -4586,7 +4752,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._subpop_absent_reason = (
                     "This report's assignment was retired when the project was opened; "
                     "the restored event frame is a new load, so event ids alone cannot "
-                    "reattach it. Re-run Analysis ▸ Event subpopulations to colour "
+                    "reattach it. Re-run Analysis ▸ Generate Subpopulations to colour "
                     "the current detection."
                     if saved_state != self._SUBPOP_NONE else "")
                 self._sync_subpop_window()
@@ -4962,9 +5128,10 @@ class MainWindow(QtWidgets.QMainWindow):
         share a real calibration.
         """
         from ..core.sources import discover_plot_sources
+        from ..core.source_style import display_sources
 
         meas = self._analysis_panel.measure_panel.measurements_df
-        return discover_plot_sources(
+        sources = discover_plot_sources(
             self._session.documents(),
             self._session.results.get,
             manual_df=meas if len(meas) else None,
@@ -4984,6 +5151,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current=self.active_detection_key() or self._current_selection,
             calibration_fingerprint=lambda d, c: self._session.calibration(d, c).fingerprint(),
         )
+        return display_sources(sources, labels=self._session.source_labels)
 
     def _sync_plots_action(self) -> None:
         """The Plots action is live whenever there is SOME plottable data — any open
@@ -5584,7 +5752,7 @@ class MainWindow(QtWidgets.QMainWindow):
             where = (f"{start_s:.4f}–{end_s:.4f} s into the recording "
                      f"(= {start_s + offset:.4f}–{end_s + offset:.4f} s on the trace)")
         self.statusBar().showMessage(
-            f"Power spectrum over {where}, {i1 - i0} samples.", 8000)
+            f"Noise spectrum over {where}, {i1 - i0} samples.", 8000)
 
     def _point_psd_at_selection(self) -> None:
         """Point the open PSD window at the current selection's recording, else just
@@ -6886,7 +7054,7 @@ class MainWindow(QtWidgets.QMainWindow):
             slow_gmm_note,
         )
 
-        title = "Event subpopulations"
+        title = ANALYSIS_LABELS[PAGE_SUBPOPULATIONS]
         res = self._analysis_panel.current_detection()
         if res is None or not isinstance(res.payload, EventSet):
             QtWidgets.QMessageBox.information(
@@ -7129,7 +7297,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._retire_subpop_assignment(
                     "This saved report remains viewable, but its event colouring was "
                     f"not attached: {warning or 'its source-result lineage is unavailable'}. "
-                    "Re-run Analysis ▸ Event subpopulations to create a current assignment.")
+                    "Re-run Analysis ▸ Generate Subpopulations to create a current assignment.")
             else:
                 # The adapter keeps the accepted ids beside the report.  Feed them through
                 # the existing one-writer adoption path so the live curation note compares
@@ -7449,7 +7617,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if key is None or not self._session.has_document(key[0]):
             self._retire_subpop_assignment(
                 "This report's assignment was retired when the recording it was fitted "
-                "on was closed — re-run Analysis ▸ Event subpopulations on the recording "
+                "on was closed — re-run Analysis ▸ Generate Subpopulations on the recording "
                 "you want coloured.")
             return
         stored = self._session.results.get(*key)
@@ -7481,7 +7649,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._retire_subpop_assignment(
                     "This report's assignment was retired when the detection changed (a "
                     "re-detect, a merge, a mask edit, a re-measure, or an undo past the "
-                    "detection) — re-run Analysis ▸ Event subpopulations to colour the "
+                    "detection) — re-run Analysis ▸ Generate Subpopulations to colour the "
                     "events on screen.")
                 return
         # The detection stands. On screen: offer the map (the gallery may simply have
@@ -7572,8 +7740,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"This report describes the {self._detector_display_name(key[2])} "
                     f"detection of {where}; the "
                     f"{self._detector_display_name(res.module_id)} detection is on screen "
-                    f"now, so its colouring is held, not shown. Re-run Analysis ▸ Event "
-                    f"subpopulations to colour the detection on screen; nothing was retired.")
+                    f"now, so its colouring is held, not shown. Re-run Analysis ▸ Generate "
+                    f"Subpopulations to colour the detection on screen; nothing was retired.")
             # A DIFFERENT recording is on screen: the map comes back the moment its own
             # recording is selected again. The dock the user picks it in is titled "File
             # Manager" (X-SURF-12: there is no widget called "Files").
@@ -9321,7 +9489,8 @@ class MainWindow(QtWidgets.QMainWindow):
             view_mode=self._session.view_mode.value, results=results,
             measurements=measurements, fits=fits,
             label_vocabulary=self._label_vocab.to_json(),
-            colours=self._session.colours.to_json(), workspace=workspace)
+            colours=self._session.colours.to_json(),
+            source_labels=self._session.source_labels.to_json(), workspace=workspace)
 
         # ...and everything the OPENED project held that the restore could not install,
         # written back verbatim. The live session is the wrong authority on what the project
@@ -9869,6 +10038,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # object itself is reused across Open Project, so its registry must not carry the
         # outgoing project's identities into the incoming one.
         self._session.colours = ColourRegistry()
+        from ..core.source_style import SourceLabelRegistry
+        self._session.source_labels = SourceLabelRegistry()
         self._project_path = None
         self._project_disk_stamp = None   # no project held -> nothing to conflict with
         self._recovery_suggested_project_path = None
@@ -9910,6 +10081,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # saved ink instead of flashing or retaining a positional colour.
         self._session.colours = ColourRegistry.from_json(
             getattr(state, "colours", None))
+        from ..core.source_style import SourceLabelRegistry
+        self._session.source_labels = SourceLabelRegistry.from_json(getattr(state, "source_labels", None))
         self._restore_ranges = {}
         self._restore_sources = {}
         self._restore_missing = []

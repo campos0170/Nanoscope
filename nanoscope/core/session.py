@@ -21,6 +21,7 @@ from .calibration import (
 from .document import CalibratedChannel, Document, TraceDocument, XAxis
 from .identity import same_source
 from .layer import LAYER_INKS, ColourRegistry, Layer, ViewMode, colour_key
+from .source_style import SourceLabelRegistry, validate_source_appearance
 from .segment import (
     SegmentDocument,
     build_segment_document,
@@ -52,6 +53,7 @@ class Session(QObject):
     viewModeChanged = Signal()
     cursorMoved = Signal(float)               # x in the current axis unit
     resultsChanged = Signal(str, str)         # doc_id, module_id  — v2; never emitted in v1
+    sourceAppearanceChanged = Signal(str)     # persistent PlotSource key; presentation only
 
     def __init__(self, cache_budget_mb: int = CACHE_BUDGET_MB) -> None:
         super().__init__()
@@ -81,6 +83,39 @@ class Session(QObject):
         # :func:`colour_key` and :meth:`add_layer`.  Initialising it here makes the
         # identity rule the normal Session behaviour rather than an optional GUI seam.
         self.colours: ColourRegistry = ColourRegistry()
+        self.source_labels = SourceLabelRegistry()
+
+    def set_source_appearance(self, key: str, *, label: str = "", color: str | None = None,
+                              reset_color: bool = False) -> None:
+        """Set project source defaults without touching analysis inputs/results.
+
+        A blank label clears the alias. ``color=None`` preserves an existing user
+        ink unless ``reset_color=True`` explicitly requests the palette. Detector-specific
+        keys remain detector-specific; only an
+        unsuffixed recording/channel key shares its explicit ink with the trace.
+        """
+        entry = {"label": label, **({"color": color} if color is not None else {})}
+        clean = validate_source_appearance({key: entry}).get(key, {})
+        previous = (self.source_labels.label(key), self.colours.inks.get(key))
+        self.source_labels.set_label(key, clean.get("label", ""))
+        if "color" in clean:
+            self.colours.set_ink(key, clean["color"])
+        elif reset_color:
+            self.colours.clear_ink(key)
+        current = (self.source_labels.label(key), self.colours.inks.get(key))
+        if current == previous:
+            return
+        changed_layer = False
+        for layer in self._layers:
+            doc = self._documents.get(layer.doc_id)
+            if doc is not None and colour_key(persistent_key(doc), layer.channel) == key:
+                ink = self.colours.ink(key, LAYER_INKS)
+                if layer.color != ink:
+                    layer.color = ink
+                    changed_layer = True
+        if changed_layer:
+            self.layersChanged.emit()
+        self.sourceAppearanceChanged.emit(key)
 
     # -- documents -------------------------------------------------------------------------------
     def add_document(self, doc: Document) -> str:

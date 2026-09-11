@@ -1,6 +1,6 @@
 """The standalone I-V / conductance window: the classic pore-characterisation plot.
 
-Opened from ``Analysis ▸ I-V / Conductance…``, this window gathers one
+Opened from ``Analysis ▸ I-V / conductance…``, this window gathers one
 ``(V, I_open)`` point from every open recording that has a current channel and a
 known voltage (:func:`nanoscope.analysis.iv.iv_points`), scatters open-pore
 current against applied voltage, overlays the least-squares I-V line, and reports
@@ -77,6 +77,7 @@ _I0_CROSS_REFERENCE = (
     "table's beside a depth from that table."
 )
 from ..plot.style import OKABE_ITO
+from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
@@ -124,7 +125,7 @@ class IVWindow(QtWidgets.QMainWindow):
         """Build the window; defer gathering/fitting for project restore when requested."""
         super().__init__(parent)
         self._session = session
-        self.setWindowTitle("NanoScope — I-V / Conductance")
+        self.setWindowTitle(f"NanoScope — {ANALYSIS_LABELS['iv']}")
         self.resize(820, 640)
 
         self._points: list[iv.IVPoint] = []

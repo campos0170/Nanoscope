@@ -364,7 +364,7 @@ def test_reconciled_table_disables_and_defensively_refuses_trace_reconstruction(
     win._run_subpopulations()
 
     assert [title for title, _ in messages] == [
-        "Fit sub-state levels", "Event subpopulations"]
+        "Fit sub-state levels", "Subpopulations"]
     assert all("source detector table" in text for _, text in messages)
     assert win._subpop_target is None
 

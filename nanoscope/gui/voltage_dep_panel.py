@@ -76,6 +76,7 @@ from ..analysis import stats, voltage_dep
 from ..core.session import Session
 from ..core.sources import gain_label
 from ..plot.style import OKABE_ITO
+from .analysis_catalog import ANALYSIS_LABELS
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
@@ -188,7 +189,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         """Build the window; defer gathering/fitting for project restore when requested."""
         super().__init__(parent)
         self._session = session
-        self.setWindowTitle("NanoScope — Voltage dependence")
+        self.setWindowTitle(f"NanoScope — {ANALYSIS_LABELS['voltage_series']}")
         self.resize(880, 700)
 
         self._series: voltage_dep.VDepSeries = voltage_dep.vdep_comparability(

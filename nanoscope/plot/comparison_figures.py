@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from nanoscope.analysis.distribution_summary import summarize_distribution
+from nanoscope.core.source_style import compact_source_labels, validate_source_appearance
 from nanoscope.plot.style import OKABE_ITO, nanoscope_style
 
 SCHEMA_VERSION = 1
@@ -236,13 +237,12 @@ def prepare_comparison(sources, config):
         for name in features:
             data[name] = _numbers(frame[name], f"{label}: {name}") if name in frame else np.full(len(frame), np.nan)
         frames.append(pd.DataFrame(data))
-        compact = " ".join(label.split())
-        # Recording names commonly share a long prefix and end in the voltage
-        # or acquisition id that distinguishes them. Preserve both ends.
-        plot_label = f"{i + 1} · " + (compact if len(compact) <= 28 else compact[:14] + "…" + compact[-13:])
-        metadata.append(dict(key=key, label=label, plot_label=plot_label, n=len(frame), missing_columns=missing,
+        metadata.append(dict(key=key, label=label, n=len(frame), missing_columns=missing,
                              color=_source_color(source.get("color"), i)))
         offset += len(frame)
+    display_labels = compact_source_labels(metadata)
+    for source in metadata:
+        source["plot_label"] = display_labels[source["key"]]
     observations = pd.concat(frames, ignore_index=True)
     panels, point_rows, hist_rows, box_rows, notes = [], [], [], [], []
     if cfg["kind"] == "facets":
@@ -604,9 +604,10 @@ def _validate(snapshot, tables):
         _text(note, "Warning", 10_000)
 
 
-def render_comparison(snapshot, tables, appearance=None):
+def render_comparison(snapshot, tables, appearance=None, *, source_appearance=None):
     """Draw frozen geometry only; warnings stay in Details/provenance."""
     validate_comparison(snapshot, tables)
+    source_appearance = validate_source_appearance(source_appearance or {})
     import seaborn as sns
     from matplotlib.figure import Figure
     from matplotlib.lines import Line2D
@@ -619,7 +620,13 @@ def render_comparison(snapshot, tables, appearance=None):
     axis_size, tick_size = state.get("axis_size", 9.), state.get("tick_size", 8.)
     marker_size, line_width = state.get("marker_size", 3.5), state.get("line_width", 1.0)
     layout, cfg = snapshot["layout"], snapshot["config"]
-    colors = {source["key"]: source["color"] for source in snapshot["sources"]}
+    colors = {source["key"]: source_appearance.get(source["key"], {}).get("color", source["color"])
+              for source in snapshot["sources"]}
+    # With no explicit label edit, old snapshots keep their exact saved labels.
+    # A figure-local edit changes drawing only, never the committed geometry.
+    display_labels = ({source["key"]: source["plot_label"] for source in snapshot["sources"]}
+                      if not any("label" in entry for entry in source_appearance.values())
+                      else compact_source_labels(snapshot["sources"], source_appearance))
     # Category colors preserve recording identities across all panels. Shared
     # single-color overrides are intentionally ignored for comparison figures.
     overrides = {"figure.facecolor": background, "axes.facecolor": background,
@@ -664,8 +671,10 @@ def render_comparison(snapshot, tables, appearance=None):
                         ax.plot([x - width, x + width], [level, level], color=color, linewidth=line_width, zorder=3)
             if panel["kind"] == "events":
                 ax.set_xticks(range(len(snapshot["sources"])),
-                              [s["plot_label"] for s in snapshot["sources"]], rotation=25, ha="right")
-            ax.set_title(panel["title"], fontsize=title_size)
+                              [display_labels[s["key"]] for s in snapshot["sources"]], rotation=25, ha="right")
+            panel_title = (display_labels[panel["counts"][0]["source_key"]]
+                           if cfg["kind"] == "facets" else panel["title"])
+            ax.set_title(panel_title, fontsize=title_size)
             # Pair matrices always keep each feature's own unit-bearing label.
             ax.set_xlabel(panel["x_label"] if cfg["kind"] == "pairs" else state.get("x_label", panel["x_label"]), fontsize=axis_size)
             ax.set_ylabel(panel["y_label"] if cfg["kind"] == "pairs" else state.get("y_label", panel["y_label"]), fontsize=axis_size)
@@ -684,7 +693,7 @@ def render_comparison(snapshot, tables, appearance=None):
             figure.suptitle(title, fontsize=title_size)
         if state.get("legend_visible", True) and cfg["kind"] != "facets":
             handles = [Line2D([], [], linestyle="none", marker="o", markersize=marker_size,
-                              color=colors[source["key"]], label=source["plot_label"]) for source in snapshot["sources"]]
+                              color=colors[source["key"]], label=display_labels[source["key"]]) for source in snapshot["sources"]]
             figure.legend(handles=handles, loc="outside lower center", ncols=min(4, len(handles)),
                           fontsize=state.get("legend_size", 8), labelcolor=foreground)
     return figure

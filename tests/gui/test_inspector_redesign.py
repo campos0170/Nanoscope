@@ -177,7 +177,10 @@ def test_column_preferences_preserve_data_schema_and_restore_by_name(qapp, qtbot
     header = table.view.horizontalHeader()
     columns = list(frame.columns)
     order = [columns[header.logicalIndex(i)] for i in range(header.count())]
-    assert order[:6] == list(EventTable._SCIENTIFIC_ORDER[:6])
+    # Optional selected-amplitude fields are not in this legacy detector frame.
+    # Its actual columns must retain scientific order without inventing fields.
+    scientific = [name for name in EventTable._SCIENTIFIC_ORDER if name in columns]
+    assert order[:len(scientific)] == scientific
     table.set_column_visible('start_idx', True)
     table.set_column_visible('snr', False)
     header.moveSection(header.visualIndex(columns.index('depth_pA')), 0)

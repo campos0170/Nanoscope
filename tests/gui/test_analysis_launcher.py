@@ -215,8 +215,8 @@ def test_launcher_has_a_button_for_every_analysis_surface(win):
     # ...each a clickable control of its own, not one painted banner.
     assert len({id(launcher.surface_button(s)) for s in SURFACE_ORDER}) == 7
     assert [launcher.label(s) for s in SURFACE_ORDER] == [
-        "Populations", "Count heatmap / ensemble", "Power spectrum",
-        "I-V / conductance", "V-dependence", "Report figures", "Event gallery"]
+        "Distributions", "Event waveforms", "Noise spectrum",
+        "I-V / conductance", "Voltage dependence", "Report figures", "Event gallery"]
 
 
 def test_the_event_gallery_is_one_of_the_launcher_surfaces(win, tmp_path):
@@ -709,12 +709,12 @@ def test_launcher_degrades_instead_of_forcing_the_window_wider(win, detached_lau
 
     launcher.resize(launcher.width_for(DENSITY_FULL), launcher.height())
     assert launcher.density() == DENSITY_FULL
-    assert launcher.shown_text(SURFACE_EVENT_PLOTS) == "Count heatmap / ensemble"
+    assert launcher.shown_text(SURFACE_EVENT_PLOTS) == "Event waveforms"
 
     launcher.resize(launcher.width_for(DENSITY_SHORT), launcher.height())
     assert launcher.density() == DENSITY_SHORT
-    assert launcher.shown_text(SURFACE_EVENT_PLOTS) == "Count map"
-    assert launcher.shown_text(SURFACE_POPULATIONS) == "Populations"   # no honest abbreviation
+    assert launcher.shown_text(SURFACE_EVENT_PLOTS) == "Waveforms"
+    assert launcher.shown_text(SURFACE_POPULATIONS) == "Distributions"
 
     launcher.resize(launcher.width_for(DENSITY_MINIMAL), launcher.height())
     assert launcher.density() == DENSITY_MINIMAL
@@ -759,7 +759,7 @@ def test_a_real_window_drives_the_ladder_and_never_clips_below_the_minimum(win, 
     win.resize(2200, 900)
     qtbot.wait(50)
     assert launcher.density() == DENSITY_FULL
-    assert launcher.shown_text(SURFACE_VDEP) == "V-dependence"
+    assert launcher.shown_text(SURFACE_VDEP) == "Voltage dependence"
 
     win.resize(600, 700)
     qtbot.wait(50)
@@ -843,10 +843,11 @@ _ANALYSIS_ACTION_ATTRS = (
     # sample indices so the trace's instrument clock and the panel's recording clock
     # cannot be confused (High-6).
     "_act_psd", "_act_psd_selection", "_act_fit_levels", "_act_subpop",
-    "_act_show_saved_subpop", "_act_figure_library", "_act_distribution_summaries",
+    "_act_show_saved_subpop", "_act_figure_library", "_act_distribution_summaries", "_act_comparison_figures",
     "_act_iv", "_act_vdep",
     "_act_export_events", "_act_export_processed", "_act_export_training", "_act_export_levels",
     "_act_export_density", "_act_density_style", "_act_export_figure",
+    "_act_analysis_home", "_act_first_analysis_guide",
 )
 # ``_act_compare_baseline`` is in *Curate*, beside the Event inspector, because it is
 # about the events already on screen -- it changes nothing by itself, it measures what
@@ -955,7 +956,8 @@ def test_analysis_launcher_imports_no_sibling_gui_panel():
     window, no session and no other panel — it announces a click and MainWindow routes it."""
     import nanoscope.gui.analysis_launcher as mod
 
-    assert _canonical_gui_imports(pathlib.Path(mod.__file__).read_text()) == set()
+    # Canonical names are shared static metadata, not a panel or a controller.
+    assert _canonical_gui_imports(pathlib.Path(mod.__file__).read_text()) == {"analysis_catalog"}
 
 
 def test_analysis_launcher_stays_a_pure_view():

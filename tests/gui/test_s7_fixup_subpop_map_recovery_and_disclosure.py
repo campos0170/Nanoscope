@@ -301,7 +301,7 @@ def test_another_detectors_run_holds_the_map_and_says_which_detector_is_on_scree
 
     # ...and the sentence names BOTH detectors and a recovery that exists.
     assert "Schmitt" in reason and "CUSUM" in reason, reason
-    assert "Re-run Analysis ▸ Event subpopulations" in reason, reason
+    assert "Re-run Analysis ▸ Generate Subpopulations" in reason, reason
     assert "nothing was retired" in reason, reason
     assert reason in sw.live_note()
 

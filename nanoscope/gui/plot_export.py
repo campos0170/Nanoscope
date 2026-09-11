@@ -92,7 +92,9 @@ def choose_live_plot_export(parent, item, suggestion: str,
             parent, rect.size(), initial_format=extension,
             initial_width=initial_width, initial_height=initial_height,
             preview_image=preview, residual_preview_image=residual_preview,
-            residual_native_size=residual_size)
+            residual_native_size=residual_size,
+            preview_svg=main_snapshot.svg_bytes if main_snapshot is not None else None,
+            residual_preview_svg=residual_snapshot.svg_bytes if residual_snapshot is not None else None)
     except (ValueError, TypeError, AttributeError, RuntimeError, OSError) as exc:
         QtWidgets.QMessageBox.warning(parent, "Export current figure", str(exc))
         return None

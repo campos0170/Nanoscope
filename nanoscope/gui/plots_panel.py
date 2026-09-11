@@ -2,7 +2,7 @@
 
 This is the GUI face of :mod:`nanoscope.analysis.populations` (the pure, Qt-free
 core, Phase 1) plus the distribution fits in :mod:`nanoscope.analysis.stats`. It
-opens as its own top-level window from ``Analysis ▸ Plots…`` and explores the
+opens from ``Analysis ▸ Distributions…`` and explores the
 per-event tables the app already produces -- a detected
 :class:`~nanoscope.analysis.events.EventSet` ``.df`` and the manual
 :class:`~nanoscope.gui.measure_panel.MeasurePanel` measurements -- without
@@ -151,6 +151,7 @@ from ..core.sources import (
 # "WHERE THE IMPORT GOES" section of nanoscope/plot/pg_svg.py.
 from ..plot import pg_svg
 from ..plot.style import OKABE_ITO, PALETTE
+from .analysis_catalog import ANALYSIS_LABELS
 from .axes import ReadableLogAxis
 from .categorical import category_brushes, category_colour, category_counts, legend_swatch
 from .combos import choose_combo_item
@@ -2832,7 +2833,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._session = session
-        self.setWindowTitle("NanoScope — Population plots")
+        self.setWindowTitle(f"NanoScope — {ANALYSIS_LABELS['distributions']}")
         self.resize(1120, 720)
 
         self._sources: dict[str, PlotSource] = {}    # key -> source, in offer order
@@ -3482,6 +3483,22 @@ class PlotsWindow(QtWidgets.QMainWindow):
         edit_hint.setWordWrap(True)
         edit_hint.setStyleSheet(f"color:{_MSG_HEX};")
         lay.addWidget(edit_hint)
+
+        source_defaults = QtWidgets.QHBoxLayout()
+        self._project_source_label = QtWidgets.QPushButton("Save name as project default")
+        self._project_source_color = QtWidgets.QPushButton("Project source color…")
+        self._project_source_label.setToolTip(
+            "Use the highlighted source's edited legend name for newly generated figures in this project. "
+            "This does not rename the file or change event labels.")
+        self._project_source_color.setToolTip(
+            "Choose the highlighted source's color for newly generated source-colored comparisons. "
+            "The current figure keeps its committed ink until explicit Plot. Single-series, fit and cluster "
+            "colors remain figure-specific.")
+        self._project_source_label.clicked.connect(self._save_project_source_label)
+        self._project_source_color.clicked.connect(self._pick_project_source_color)
+        source_defaults.addWidget(self._project_source_label)
+        source_defaults.addWidget(self._project_source_color)
+        lay.addLayout(source_defaults)
 
         self._accepted_check = QtWidgets.QCheckBox("Use accepted events only")
         self._accepted_check.setChecked(True)
@@ -7176,6 +7193,46 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """Highlighting a row without ticking it does not change the plot; it only
         moves the keyboard focus. Redrawing here would fight the user's tick."""
         return
+
+    def _highlighted_source(self):
+        item = self._source_list.currentItem()
+        return self._sources.get(item.data(Qt.UserRole)) if item is not None else None
+
+    def _save_project_source_label(self):
+        source = self._highlighted_source()
+        setter = getattr(self._session, "set_source_appearance", None)
+        if source is None or not callable(setter):
+            return
+        try:
+            setter(source.key, label=self._legend_label(source))
+        except (TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Project source name", str(exc))
+            return
+        self.statusBar().showMessage(
+            "Source name saved for new figures. Existing saved figures retain their own labels.", 6000)
+
+    def _pick_project_source_color(self):
+        source = self._highlighted_source()
+        setter = getattr(self._session, "set_source_appearance", None)
+        if source is None or not callable(setter):
+            return
+        chosen = QtWidgets.QColorDialog.getColor(QtGui.QColor(source.colour), self, "Project source color")
+        if not chosen.isValid():
+            return
+        labels = getattr(self._session, "source_labels", None)
+        setter(source.key, label=labels.label(source.key) if labels is not None else "", color=chosen.name())
+        # Only the next explicit Plot consumes this source appearance. Cached
+        # bars/points and fitted results remain exactly as they were drawn.
+        self._sources[source.key] = _dc_replace(source, colour=chosen.name())
+        item = self._source_list.currentItem()
+        was, self._updating = self._updating, True
+        try:
+            item.setForeground(QtGui.QBrush(chosen))
+        finally:
+            self._updating = was
+        self.statusBar().showMessage(
+            "Project source color saved. Use Plot/Generate to apply it to a source-colored figure. "
+            "Current numerical results and figure are unchanged.", 8000)
 
     def _on_sources_changed(self, *, draw: bool = True) -> None:
         """Re-sync everything that depends on WHICH sources are checked.

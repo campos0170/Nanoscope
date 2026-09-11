@@ -4,8 +4,8 @@ Two GUI features read everything they draw from here, so their logic is testable
 without a QApplication and can never drift apart:
 
 * the **calibration chip** (status bar) — is the ACTIVE recording's current-channel
-  gain still at its default (uncalibrated, so every depth / ECD / conductance / noise
-  magnitude is silently non-physical), user-set, or is there no current channel at all;
+  conversion at its default, user-set, damaged, or unavailable. Neither an identity
+  gain nor a non-default gain establishes physical calibration;
 * the **workflow strip** (above the signal viewer) — a stepper over the fixed pipeline
   ``Open → Calibrate → Filter → Detect → Curate → Analyze`` telling the user where they
   are and what is unlocked next.
@@ -15,10 +15,10 @@ Design rules honoured here (see ``gui/main_window.py`` for the wiring contract):
 * This module imports ONLY core/analysis value types — never a GUI panel, never Qt at
   runtime. ``Session`` is referenced for typing only (guarded by ``TYPE_CHECKING``), so
   importing this module does not pull in PySide6.
-* "Calibrated" REUSES the calibration model's own user-set-vs-default notion — the exact
+* The legacy "calibrated" state ID REUSES the model's user-set-vs-default notion — the exact
   test ``core.calibration.save_sidecar`` uses to decide whether a channel differs from
   ``CalibrationSet.default_for(info)``. The chip and the sidecar can therefore never
-  disagree about whether a gain was set.
+  disagree about whether settings changed. It is not a scientific verification flag.
 * Detection is read through the ``ResultStore`` (``session.results``), the same access the
   analysis panel uses — this never reimplements detection or touches the frozen 20-column
   EventSet schema.
@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from ..analysis.events import EventSet
+from ..analysis.events import EventSet, REVIEW_COL, REVIEW_DONE, REVIEW_NONE, review_of
 from ..core.calibration import CalibrationSet
 from ..core.sources import DETECTION_MODULE_IDS
 from ..core.types import ChannelKind
@@ -78,8 +78,8 @@ class CalibrationState(Enum):
     """State of the ACTIVE recording's current-channel gain."""
 
     NO_CHANNEL = "no_channel"    # no live current channel to calibrate
-    UNCALIBRATED = "uncalibrated"  # gain still at CalibrationSet.default_for() — magnitudes not physical
-    CALIBRATED = "calibrated"    # user set a non-default gain — magnitudes are physical
+    UNCALIBRATED = "uncalibrated"  # default settings; physical calibration is unverified
+    CALIBRATED = "calibrated"    # compatibility ID: non-default settings, not physical verification
     DAMAGED = "damaged"          # a gain is set but it made the channel non-finite — NOT physical
     # ^^ Measured on IN15 of the owner's 15 s -1000 mV ABF: gain 1e38 previewed finite
     # float64 numbers, Apply committed it, ``apply()`` (float32) turned every one of
@@ -275,7 +275,7 @@ def _is_user_calibrated(session: "Session", doc_id: str, info) -> bool:
     ``core.calibration.save_sidecar`` uses to decide a channel differs from its default: the
     live calibration's (gain, offset) fingerprint OR its target units differ from
     ``CalibrationSet.default_for(info)``. For a current channel the default is identity, so
-    this is true exactly when a real gain has been dialled in."""
+    this reports only whether conversion settings differ, not whether they are correct."""
     cal = session.calibration(doc_id, info.index)
     default = CalibrationSet.default_for(info)
     return not (cal.fingerprint() == default.fingerprint()
@@ -312,8 +312,27 @@ def _detection_eventset(session: "Session", doc_id: str, channel: int) -> EventS
 
 
 def _accepted_count(events: EventSet) -> int:
-    """Number of curated-in (accepted) events — the CURATE 'done' quantity."""
+    """Candidates included by the existing analysis mask, not a human-review count."""
     return int(events.df["accepted"].sum())
+
+
+def _review_progress(events: EventSet) -> tuple[int, int, int, int]:
+    """Read the canonical ledger without creating columns or inferring attention.
+
+    Return explicit reviewed, explicit unreviewed, unknown and unresolved-conflict
+    counts. A detector's accepted mask is deliberately not evidence of a review.
+    Even a legacy human rejection does not prove that every other row was checked.
+    """
+    df = events.df
+    values = df[REVIEW_COL].to_numpy(dtype=object) if REVIEW_COL in df else [None] * len(df)
+    tokens = [review_of({REVIEW_COL: value}) for value in values]
+    reviewed = tokens.count(REVIEW_DONE)
+    unreviewed = tokens.count(REVIEW_NONE)
+    unknown = len(df) - reviewed - unreviewed
+    conflict_col = "consensus_curation_conflict"
+    conflicts = (int(df[conflict_col].astype("string").fillna("").str.strip().ne("").sum())
+                 if conflict_col in df else 0)
+    return reviewed, unreviewed, unknown, conflicts
 
 
 def compute_status(session: "Session", doc_id: str | None, channel: int | None) -> PipelineStatus:
@@ -328,9 +347,9 @@ def compute_status(session: "Session", doc_id: str | None, channel: int | None) 
 
     ``current_stage`` is the earliest AVAILABLE, not-done stage in
     ``Open → Calibrate → Detect → Curate → Analyze`` (the optional FILTER is skipped). It is
-    OPEN on an empty session, advances as the user progresses, is ANALYZE once there is a
-    curated detection (a terminal action, never marked done), and is ``None`` when nothing in
-    the pipeline is actionable (e.g. a recording that has no current channel).
+    OPEN on an empty session, advances as the user progresses, and reaches ANALYZE
+    after recorded review of the whole nonempty detection table. ANALYZE is always
+    an available metadata-only home entry; individual analyses retain their own gates.
     """
     has_doc = doc_id is not None and session.has_document(doc_id)
     any_open = len(session.documents()) >= 1
@@ -374,21 +393,28 @@ def compute_status(session: "Session", doc_id: str | None, channel: int | None) 
         else:
             calibration = CalibrationStatus(
                 state=CalibrationState.CALIBRATED,
-                label="Calibrated",
+                label="Gain settings entered",
                 detail=_calibration_detail(session, doc_id, cur_info),
                 channel=cur_ch,
+                issue=("Non-default gain, offset or units have been entered. This does not verify "
+                       "the amplifier conversion, physical units or open-pore reference. "
+                       "Check these against the acquisition settings before interpreting magnitudes."),
             )
     else:
         calibration = CalibrationStatus(
             state=CalibrationState.UNCALIBRATED,
-            label="Uncalibrated",
+            label="Default gain settings",
             channel=cur_ch,
+            issue=("The current channel still uses its default gain settings. Those settings may be "
+                   "appropriate for already calibrated input, but NanoScope has not verified them. "
+                   "Confirm gain, offset, units and open-pore reference against the acquisition settings."),
         )
 
     # -- detection + curation state -----------------------------------------------------------
     events = _detection_eventset(session, doc_id, cur_ch) if (has_doc and cur_ch is not None) else None
     has_detection = events is not None
     accepted = _accepted_count(events) if events is not None else 0
+    total = len(events.df) if events is not None else 0
 
     has_current = cur_ch is not None
 
@@ -407,15 +433,16 @@ def compute_status(session: "Session", doc_id: str | None, channel: int | None) 
     if has_current:
         cal_done = calibration.state is CalibrationState.CALIBRATED
         if cal_done:
-            cal_reason = "Current gain set — depth, ECD and conductance are physical."
+            cal_reason = ("Gain settings entered; physical calibration is not verified. "
+                          "Confirm gain, offset, units and open-pore reference before interpreting magnitudes.")
         elif calibration.state is CalibrationState.DAMAGED:
             # Not done, still available: the strip's "you are here" lands on CALIBRATE
             # with the damage sentence, which is where the remedy is.
             cal_reason = (f"The current-channel gain ({calibration.detail}) ruined the "
                           f"channel, so nothing measured on it is physical: {calibration.issue}")
         else:
-            cal_reason = ("Set the current-channel gain so blockage depth, ECD and conductance "
-                          "are physical (they are non-physical at the default gain).")
+            cal_reason = ("Review the current-channel gain, offset and units against acquisition settings. "
+                          "Default gain may be correct for calibrated input; physical calibration is not verified.")
         raw[Stage.CALIBRATE] = StageStatus(
             stage=Stage.CALIBRATE, label=_STAGE_LABELS[Stage.CALIBRATE],
             done=cal_done, available=True, reason=cal_reason,
@@ -439,8 +466,9 @@ def compute_status(session: "Session", doc_id: str | None, channel: int | None) 
         raw[Stage.DETECT] = StageStatus(
             stage=Stage.DETECT, label=_STAGE_LABELS[Stage.DETECT],
             done=has_detection, available=True,
-            reason=("Events detected." if has_detection else
-                    "Detect translocation events on the current channel (Schmitt or ML)."),
+            reason=(f"Detection result available: {total} candidate row(s), {accepted} accepted by the analysis mask. "
+                    "Acceptance is not evidence of human review." if has_detection else
+                    "Detect candidate events on the current channel with Schmitt, CUSUM or a compatible ML model."),
         )
     else:
         reason = (_no_current_reason("detect on", no_current_note)
@@ -449,29 +477,38 @@ def compute_status(session: "Session", doc_id: str | None, channel: int | None) 
             stage=Stage.DETECT, label=_STAGE_LABELS[Stage.DETECT],
             done=False, available=False, reason=reason)
 
-    if has_detection:
-        curate_done = accepted >= 1
+    if has_detection and total:
+        reviewed, unreviewed, unknown, conflicts = _review_progress(events)
+        curate_done = reviewed == total and not conflicts
+        review_reason = (f"{accepted} accepted candidate(s) in the analysis mask; "
+                         f"human review recorded for {reviewed} of {total} rows. ")
+        if unreviewed:
+            review_reason += f"{unreviewed} row(s) are explicitly unreviewed. "
+        if unknown:
+            review_reason += f"Review status not verified for {unknown} row(s) with no recognized review record. "
+        if conflicts:
+            review_reason += f"Resolve {conflicts} conflicting curation decision(s). "
+        review_reason += ("Recorded review is complete, not a validation of molecular identity."
+                          if curate_done else "Open the Event inspector to review candidates.")
         raw[Stage.CURATE] = StageStatus(
             stage=Stage.CURATE, label=_STAGE_LABELS[Stage.CURATE],
             done=curate_done, available=True,
-            reason=(f"{accepted} accepted event(s)." if curate_done else
-                    "Review detected events and accept/reject them in the Event inspector "
-                    "(nothing is accepted yet)."),
-        )
-        raw[Stage.ANALYZE] = StageStatus(
-            stage=Stage.ANALYZE, label=_STAGE_LABELS[Stage.ANALYZE],
-            done=False, available=True,
-            reason="Explore the events: plots, density / ensemble, I–V and exports.",
+            reason=review_reason,
         )
     else:
         raw[Stage.CURATE] = StageStatus(
             stage=Stage.CURATE, label=_STAGE_LABELS[Stage.CURATE],
             done=False, available=False,
-            reason="Detect events first, then curate them.")
-        raw[Stage.ANALYZE] = StageStatus(
-            stage=Stage.ANALYZE, label=_STAGE_LABELS[Stage.ANALYZE],
-            done=False, available=False,
-            reason="Detect events first to analyze them.")
+            reason=("The detection contains no candidates to review. Check the trace and detector settings, "
+                    "or open Analyze for recording-level quality checks." if has_detection else
+                    "Detect candidates first, then review them in the Event inspector."))
+    raw[Stage.ANALYZE] = StageStatus(
+        stage=Stage.ANALYZE, label=_STAGE_LABELS[Stage.ANALYZE],
+        done=False, available=True,
+        reason=("Open Analysis home to choose event analyses, recording-level quality checks and exports. "
+                "Opening the home page does not run an analysis. Noise/PSD requires a current channel; "
+                "event analyses require suitable detected or saved results."),
+    )
 
     # -- pick the current stage ---------------------------------------------------------------
     current_stage: Stage | None = None

@@ -412,7 +412,8 @@ class FigureLibrary(QtWidgets.QMainWindow):
             if not bundle:
                 options = choose_export_options(
                     self, (snapshot.width, snapshot.height), initial_format=".svg",
-                    preview_image=_scaled_image(snapshot.png_bytes, QtCore.QSize(1200, 900)))
+                    preview_image=_scaled_image(snapshot.png_bytes, QtCore.QSize(1200, 900)),
+                    preview_svg=snapshot.svg_bytes)
                 if options is None:
                     return None
                 suffix = options.extension

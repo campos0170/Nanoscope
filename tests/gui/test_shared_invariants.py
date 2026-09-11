@@ -181,6 +181,20 @@ def test_neither_axis_carries_an_invented_multiplier(qapp, factory):
     assert "(x" not in ax.labelString(), ax.labelString()
 
 
+@pytest.mark.parametrize("factory", [axes_mod.ReadableLinearAxis, plots_mod._DecadeLabelAxis,
+                                    psd_mod._ReadableAxis])
+def test_disabling_si_prefix_clears_scale_on_an_already_labelled_axis(qapp, factory):
+    ax = factory(orientation="bottom")
+    ax.setLabel("Recorded measurement")
+    ax.enableAutoSIPrefix(True)
+    ax.setRange(0, .01)
+    assert ax.autoSIPrefixScale != 1
+    ax.enableAutoSIPrefix(False)
+    assert ax.autoSIPrefixScale == 1
+    assert ax.labelUnitPrefix == ""
+    assert "(x" not in ax.labelString()
+
+
 def test_a_decade_is_never_dropped_in_favour_of_a_minor_label(qapp):
     """Priority is by label FORM, not emission order.
 

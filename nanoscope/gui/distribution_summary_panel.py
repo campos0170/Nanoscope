@@ -20,12 +20,16 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..analysis.distribution_summary import summarize_distribution
 from ..core.analysis_workspace import _plot_source_recipe, fingerprint_frame
 from ..core.sources import amplitude_units_label, signal_domain_of, source_comparability
+from ..core.source_style import compact_source_labels, validate_source_appearance
+from .analysis_catalog import ANALYSIS_LABELS
+from .axes import ReadableLinearAxis
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
                           write_live_plot_image, write_plot_csv)
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
                             ensure_item_legend, install_plot_workflow)
+from .source_appearance import SourceAppearanceEditor
 
 
 VIEWS = (("ecdf", "ECDF"), ("survival", "Empirical survival (uncensored)"),
@@ -61,7 +65,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
     def __init__(self, session=None, parent=None):
         super().__init__(parent)
         self._session = session
-        self.setWindowTitle("Distribution summaries")
+        self.setWindowTitle(f"NanoScope — {ANALYSIS_LABELS['distribution_summaries']}")
         self.resize(1000, 740)
         self.setMinimumSize(650, 480)
         self._sources = {}
@@ -75,6 +79,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._tables = {}
         self._data_items = []
         self._appearance = PlotAppearance()
+        self._source_appearance = {}
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
@@ -132,13 +137,21 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         if hasattr(self._appearance_widget, "fit_color"):
             self._appearance_widget.fit_color.setEnabled(False)
             self._appearance_widget.fit_color.setToolTip("Distribution summaries have no fitted curve.")
-        appearance = bounded_controls(self._appearance_widget, maximum_height=235)
+        appearance_host = QtWidgets.QWidget()
+        appearance_layout = QtWidgets.QVBoxLayout(appearance_host)
+        appearance_layout.setContentsMargins(0, 0, 0, 0)
+        appearance_layout.addWidget(self._appearance_widget)
+        self._source_appearance_editor = SourceAppearanceEditor(session=session)
+        self._source_appearance_editor.changed.connect(self._source_appearance_from_user)
+        appearance_layout.addWidget(self._source_appearance_editor)
+        appearance = bounded_controls(appearance_host, maximum_height=235)
         export = control_group("Export the committed figure", "Export preserves the last generated figure, "
                                "including its notes and exact visible coordinates; unapplied controls do not change it. "
                                "Use Figure Library to save its numerical snapshot, source bindings and appearance together.")
         for widget in (data, analysis, appearance, export):
             layout.addWidget(widget)
-        self._plot_widget = pg.PlotWidget(background="#111316")
+        self._plot_widget = pg.PlotWidget(background="#111316", axisItems={
+            side: ReadableLinearAxis(orientation=side) for side in ("bottom", "left")})
         self._plot_widget.setMinimumHeight(150)
         self._plot = self._plot_widget.getPlotItem()
         self._plot.setTitle("Distribution summaries · Generate to begin")
@@ -215,7 +228,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         offered = {str(source.key): source for source in sources}
         if len(offered) != len(sources):
             raise ValueError("Distribution sources must have unique keys.")
-        stamps = {key: (fingerprint_frame(source.df), str(source.label),
+        stamps = {key: (fingerprint_frame(source.df),
                         repr(dict(source.provenance)), repr(source.calibration_fingerprint),
                         tuple(source.warnings)) for key, source in offered.items()}
         before = tuple((key, self._source_stamps.get(key)) for key in self._selected_keys)
@@ -227,6 +240,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             self._selected_keys = current[:1] or list(offered)[:1]
         self._source_stamps = stamps
         self._populate_sources()
+        self._sync_source_appearance_editor()
         after = tuple((key, stamps.get(key)) for key in self._selected_keys)
         if before != after:
             self._stale = bool(self._snapshot)
@@ -436,13 +450,16 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         ticks = ([(i, _display_source_label(s["label"], i)) for i, s in enumerate(self._snapshot.get("series", []))]
                  if self._snapshot.get("categorical") else None)
         bottom = self._plot.getAxis("bottom")
-        bottom.enableAutoSIPrefix(ticks is None)
+        # Labels already state the recorded units. Never silently scale ticks,
+        # especially dimensionless probabilities, which must remain in [0, 1].
+        bottom.enableAutoSIPrefix(False)
         bottom.setTicks([ticks] if ticks is not None else None)
-        self._plot.getAxis("left").enableAutoSIPrefix(ticks is not None)
+        self._plot.getAxis("left").enableAutoSIPrefix(False)
         ensure_item_legend(self._plot, entries)
         if self._plot.legend is not None:
             self._plot.legend.show()
         self._appearance_widget.set_legend_available(bool(entries))
+        self._sync_source_appearance_editor()
         self._warnings.set_warnings(self._snapshot.get("warnings", []), full_text=self.details_text())
         self._apply_appearance()
         self._plot.enableAutoRange()
@@ -462,6 +479,9 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
                 text += "\n" + "; ".join(f"{key}={value:.10g}" for key, value in series["stats"].items())
             blocks.append(text)
         blocks.extend(self._snapshot["warnings"])
+        if self._source_appearance:
+            blocks.append("Figure source appearance (original identities and numerical tables unchanged):\n" +
+                          "\n".join(f"{key}: {style}" for key, style in self._source_appearance.items()))
         return "\n\n".join(blocks)
 
     def warning_text(self):
@@ -475,6 +495,77 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
     def _apply_appearance(self):
         apply_plot_appearance(self._plot, self._appearance, plot_widget=self._plot_widget,
                               data_items=self._data_items)
+        self._apply_source_appearance()
+
+    def _sync_source_appearance_editor(self):
+        if self._snapshot:
+            colors = {p["source_key"]: p["color"] for p in self._snapshot.get("primitives", [])}
+            sources = [{**series, "color": colors.get(series["key"], "#0072b2")}
+                       for series in self._snapshot.get("series", [])]
+        else:
+            sources = list(self._sources.values())
+        self._source_appearance_editor.set_sources(sources)
+        self._source_appearance_editor.set_state(self._source_appearance)
+
+    def _source_appearance_from_user(self, state):
+        self.set_source_appearance_state(state)
+        self.workspaceChanged.emit()
+
+    def source_appearance_state(self):
+        return deepcopy(self._source_appearance)
+
+    def set_source_appearance_state(self, state):
+        self._source_appearance = validate_source_appearance(state)
+        self._source_appearance_editor.set_state(self._source_appearance)
+        self._apply_appearance()
+        self._warnings.set_warnings(self._snapshot.get("warnings", []), full_text=self.details_text())
+
+    def _apply_source_appearance(self):
+        """Restyle existing frozen primitives; no summary, data or view changes."""
+        series = self._snapshot.get("series", [])
+        names = compact_source_labels(series, self._source_appearance)
+        counts = {source["key"]: source["n"] for source in series}
+        entries, seen = [], set()
+        ranges = deepcopy(self._plot.viewRange())
+        auto = list(self._plot.getViewBox().autoRangeEnabled())
+        self._plot.disableAutoRange()
+        try:
+            for item, primitive in zip(self._data_items, self._snapshot.get("primitives", [])):
+                key = primitive["source_key"]
+                color = (self._source_appearance.get(key, {}).get("color") or
+                         self._appearance.data_color or primitive["color"])
+                for option, setter in (("pen", item.setPen), ("symbolPen", item.setSymbolPen)):
+                    if option == "symbolPen" and not primitive["symbols"]:
+                        continue
+                    existing = item.opts.get(option)
+                    if existing is not None:
+                        pen = pg.mkPen(existing)
+                        pen.setColor(QtGui.QColor(color))
+                        setter(pen)
+                for option, setter in (("fillBrush", item.setFillBrush), ("symbolBrush", item.setSymbolBrush)):
+                    if option == "symbolBrush" and not primitive["symbols"]:
+                        continue
+                    existing = item.opts.get(option)
+                    if existing is not None:
+                        brush = pg.mkBrush(existing)
+                        tint = QtGui.QColor(color)
+                        tint.setAlpha(brush.color().alpha())
+                        brush.setColor(tint)
+                        setter(brush)
+                if key not in seen:
+                    entries.append((item, f"{names[key]} · n={counts[key]}"))
+                    seen.add(key)
+            ensure_item_legend(self._plot, entries)
+            if self._plot.legend is not None:
+                self._plot.legend.setVisible(bool(entries) and self._appearance.legend_visible is not False)
+            if self._snapshot.get("categorical"):
+                self._plot.getAxis("bottom").setTicks([
+                    [(i, names[source["key"]]) for i, source in enumerate(series)]])
+        finally:
+            self._plot.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
+            for axis, enabled in enumerate(auto):
+                if enabled:
+                    self._plot.enableAutoRange(axis=axis, enable=enabled)
 
     def appearance_state(self):
         return self._appearance.to_dict()
@@ -512,6 +603,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
     def snapshot_state(self):
         payload = {"schema_version": 1, "draft": self.config(),
                    "applied": deepcopy(self._applied_config), "appearance": self.appearance_state(),
+                   "source_appearance": deepcopy(self._source_appearance),
                    "source_recipes": self.figure_source_recipes(), "snapshot": deepcopy(self._snapshot),
                    "stale": self._stale, "view_range": deepcopy(self._plot.viewRange())}
         return payload, {key: frame.copy(deep=True) for key, frame in self._tables.items()}
@@ -591,6 +683,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         if type(payload.get("stale", False)) is not bool or not isinstance(payload.get("appearance", {}), dict):
             raise ValueError("Invalid saved distribution presentation state.")
         appearance = PlotAppearance.from_mapping(payload.get("appearance", {}))
+        source_appearance = validate_source_appearance(payload.get("source_appearance", {}))
         ranges = payload.get("view_range")
         if ranges is not None:
             try:
@@ -605,6 +698,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._applied_config = applied
         self._source_recipes = recipes
         self._appearance = appearance
+        self._source_appearance = source_appearance
         self._appearance_widget.set_state(self._appearance)
         self._stale = bool(payload.get("stale", False))
         self._render_snapshot()

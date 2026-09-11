@@ -12,8 +12,10 @@ population. This is a *draft* and tracks the app as of the current build.
 > gating pore that default is **3.3× worse than the estimator it replaced, with every health check
 > reading `ok`.**
 >
-> So: open the **Preprocess** tab, press **"Measure this recording"**, look at what it proposes, and
-> press **"Use these values"**. It usually takes a few seconds — measured 2 s on a 3 M-sample recording
+> So: open the **Preprocess** tab, press **"Measure this recording"**, and inspect the proposal before
+> deciding whether it is appropriate. Only then press **"Use these values"** if you want to apply it,
+> and inspect the updated overlay afterwards. The existing overlay before applying the proposal does
+> not show that proposal's baseline. Measurement usually takes a few seconds — measured 2 s on a 3 M-sample recording
 > and 6 s on 9 M samples — and the button reads "Measuring…" while it runs, so a two-second wait is the
 > click landing, not the click failing. §5a explains what the two windows mean and how to read the
 > proposal.
@@ -60,32 +62,136 @@ The main window has three regions:
   strip beneath it (a full-extent overview with a draggable region box).
 - **Right dock — Inspector**, a tabbed panel: **Calibration**, **File Info**, and **Analysis**.
 
-The **analysis launcher** is the Analyze stage spelled out: one button per analysis surface —
-**Populations**, **Density / ensemble**, **Power spectrum**, **I-V / conductance**,
-**V-dependence** and **Report figures**. A button you cannot use yet stays on the row, greyed;
+The **analysis launcher** starts with **Analysis home**, followed by shortcuts to
+**Distributions**, **Event waveforms**, **Noise spectrum**, **I-V / conductance**,
+**Voltage dependence**, **Report figures** and **Event gallery**. Full tool names match the
+Analysis menu and Explorer pages. Short labels or glyphs appear when space is limited; hover
+to see the full name. A shortcut you cannot use yet stays on the row, greyed;
 hover it to read what the surface does and why it is not available, or click it to have the reason
 posted in the status bar. Each button opens exactly what the matching **Analysis** menu item does.
 The interactive surfaces share one **Analysis Explorer** instead of opening a pile of overlapping
-windows. Its tabs are **Distributions**, **Event waveforms**, **Noise**, **I-V**, **Voltage
-series**, and **Subpopulations**. The header keeps the selected recording, result freshness
+windows. Its analytical pages are **Distributions**, **Distribution summaries**, **Comparison
+figures**, **Event waveforms**, **Noise spectrum**, **I-V / conductance**, **Voltage dependence**
+and **Subpopulations**. The header keeps the selected recording, result freshness
 (`CURRENT`, `STALE`, or `SAVED SNAPSHOT`), and **Refresh current** visible while you move between
 pages. Pages are created only when first used; switching back to a live page refreshes it before it
 is drawn, while a saved project snapshot is left intact until you explicitly refresh it.
 
+### Analysis home: find a tool before opening it
+
+Open **Analysis home** from the launcher, the **Analyze** workflow step, or the **Analysis** menu.
+It remains the first Explorer tab, with a header button available from every analytical page.
+You can open it without a recording or any detected events.
+
+The catalog lists all eight analytical pages, **Event gallery**, **Report figures**, **Figure
+Library**, and **Guided first analysis**, including tools you have never used. Search by tool,
+plot type or input, such as `ECDF`, `conductance` or `events`. Selecting a name only shows its
+purpose, required inputs and current availability. Choose **Open…**, double-click the list item,
+or press Enter on it to request that tool. An unavailable tool explains its requirements and
+does not open. Availability is checked again when you act.
+
+**Browsing, searching and refreshing availability do not construct analytical pages or run
+calculations.** **Refresh availability** on the home page is different from **Refresh current**
+on an analytical page, which can update that page's result. Noise and pore-characterization
+tools have their own input requirements; event detection is not a prerequisite for opening
+Analysis home or examining a noise spectrum.
+
+### Guided first analysis
+
+Choose **Guided first analysis…** from **Help**, **Analysis**, or the Analysis home catalog.
+The guide is modeless: keep it beside the workspace and move between its seven steps while
+using the normal controls.
+
+1. **Open a recording.** Select the current channel and identify the active recording.
+2. **Verify acquisition and units.** Check sampling, gain, offset and current units against
+   acquisition records rather than trusting a non-default setting.
+3. **Inspect noise and baseline.** Examine a quiet region, measure the open-pore reference,
+   inspect any proposal, and apply it only after deciding it is appropriate.
+4. **Detect candidates.** Inspect the actual settings and active processing chain, then run
+   detection yourself.
+5. **Review the events.** Compare boundaries, baseline and waveform shape with the trace.
+   Acceptance by an analysis mask is not a record of human review.
+6. **Make a figure.** Choose the sources and metric, generate the intended result, then adjust
+   appearance and inspect its units and interpretation.
+7. **Export and save.** Distinguish exporting a picture, saving a Figure Library snapshot or
+   bundle, and saving the resumable project with its required source files.
+
+Each guide button opens the relevant existing control or explicitly requested action. Opening
+the guide, changing steps and checking **I checked this step** never sets scientific parameters,
+applies calibration, starts detection or fits a model. The checkmarks are learning notes, not
+certification; they reset when the selected recording context changes.
+
+Opening another Inspector tab may mark the project unsaved because the existing workspace
+saves which tab you were viewing. This is view metadata, not a change to scientific settings,
+results or review decisions.
+An explicit tool-opening click can still compute that tool's normal live view, for example a
+Noise spectrum or Distributions view. The no-computation guarantee concerns reading and navigating
+the lesson, not every tool action it offers.
+
+For practice, step 1 offers **Create synthetic practice recording…**. Creation is an explicit
+choice with a file destination. The generated CSV has a required **SYNTHETIC-** filename prefix and is
+opened alongside existing recordings, not substituted for experimental data. It contains noise,
+slow drift and four artificial blockades. Its generator settings are explained in the guide;
+they are not promises about detector output or a validation benchmark. The synthetic file's
+current values are already pA, but CSV units still need declaring when necessary. Never copy
+the practice calibration to a real recording without checking the acquisition conversion.
+The final normalized filename is checked for overwrite conflicts, and a practice recording
+cannot replace a recording that is currently open.
+
 The Inspector's **Analysis** tab is where the work happens, and it has its own four-tab strip:
 **Preprocess** (choose **Signal chain** or **Open-pore baseline** from its section selector — §5a) · **Detection** ·
-**ML detector** · **Manual measurement**. All four are ways of producing events, so they feed the
-**shared event-table surface** below the strip. When the recording holds more than one detector
+**ML detector** · **Manual measurement**. Preprocess configures the signal and reference; Detection
+and ML detector produce results shown in the **shared event-table surface** below the strip.
+Manual measurements have their own measurement list. **Add measurement to list** appends there;
+**Mark selection as missed event** instead adds a reviewed candidate to the active source detector
+table. These are different destinations. When the recording holds more than one detector
 result, the **Event table** selector chooses which stored table is shown; changing that selector
 changes only the view and does not replace or merge any result.
+
+### Essential and Advanced controls
+
+The Inspector's **Controls** selector changes presentation complexity only. **Advanced** is
+the default when no preference has been saved; choosing **Essential** hides less-frequent
+tools and collapses advanced settings without resetting, disabling or replacing their values.
+Enabled filters and important retained settings are disclosed in the Essential summary.
+Configured or unresolved ML models remain discoverable. Use **Show advanced tools…** or select
+**Advanced** to inspect the complete controls again. **Baseline reference…** remains a direct
+route to the open-pore reference controls.
+
+Your explicit selector choice is remembered as a UI preference. Guide navigation can switch
+the view without overwriting that preference. Neither view is a scientific preset, and switching
+between them does not rerun analysis, change results or alter review history.
+
+### What the status indicators mean
+
+**Current** means a displayed result matches its tracked source and settings, not that its
+calibration, event review or scientific interpretation has been validated. **Stale** means the
+source or settings changed after the visible result; inspect the difference before refreshing.
+**Saved snapshot** identifies a frozen result displayed without recomputation. These definitions
+are available in the Explorer status tooltip and on Analysis home.
+
+The calibration chip distinguishes **Default gain settings** from **Gain settings entered**.
+Neither certifies the amplifier conversion, physical units or open-pore reference. Defaults can
+be appropriate for already calibrated input, and an entered gain can still be wrong.
+
+The workflow's event counts distinguish candidates accepted by the analysis mask from rows
+with a recognized human-review record. Unknown legacy review status stays unknown rather than
+being counted as reviewed. The Curate completion mark requires review records for all candidate
+rows and no unresolved conflicts; it still does not establish molecular identity or detection
+accuracy. Guide checkmarks are separate from these event-review records.
+
+These additions are intended to make the workflow easier to discover and explain. No formal
+newcomer usability study has yet established a learning-time or error-rate improvement.
 
 Menus: **File** (Open, Open/Save Project, Create segment from selection, Close document, Quit),
 **Edit** (Undo / Redo — §9b), **View** (Overlay/Stacked, Zoom Back/Forward, Reset zoom, drag mode,
 Panels), and **Analysis**, grouped into **Detect** (Run detection, Batch detect, ML model),
 **Curate** (Event inspector, Measure event, Add measurement to list, Compare baseline estimators —
-§9a), **Explore this recording** (Plots, Event plots, Event gallery, Reconcile detector results,
-Event labels, Power spectrum), **Compare recordings** (I-V, Voltage dependence) and **Export**
-(events, training data, figures).
+§9a), **Explore this recording** (Distributions, Distribution summaries, Comparison figures,
+Event waveforms, Event gallery, Reconcile detector results, Event labels, Noise spectrum),
+**Compare recordings** (I-V / conductance, Voltage dependence) and **Export** (events, training
+data, figures). **Analysis home** and **Guided first analysis** also have menu entries; the guide
+is available from **Help**.
 
 Closed a dock by accident? Reopen it from **View ▸ Panels ▸ Files / Inspector**.
 
@@ -216,7 +322,7 @@ voltage.
   **is to the whole app** — which **pane** it draws in and which **overlay group** it shares, and,
   because the whole pipeline resolves a channel's kind through this one override, which channel
   **Detect**, **Analysis ▸ Run detection**, **Batch detect**, **Measure this recording**,
-  **Power spectrum** and **I-V** act on, and what the calibration chip and the workflow strip
+  **Noise spectrum** and **I-V / conductance** act on, and what the calibration chip and the workflow strip
   say — once *Apply* commits it. They all ask the same resolver, so *current* on an undeclared
   channel makes it analysable the moment Apply lands (the Detect button goes from refused to
   runnable and the status-bar chip stops saying *No current channel*, with no reload), and *voltage*
@@ -1195,7 +1301,7 @@ Those steps need an external dataset/versioning pipeline.
 
 ## 10. Population plots & machine learning
 
-**Analysis ▸ Plots…** opens the **Distributions** page of the Analysis Explorer over the per-event
+**Analysis ▸ Distributions…** opens the **Distributions** page of the Analysis Explorer over the per-event
 tables the app holds:
 **one source per (recording, channel, detector result) with at least one row** — Schmitt, CUSUM, ML,
 and Reconciled tables are offered separately, segments included — plus your **manual measurements**.
@@ -1316,8 +1422,8 @@ tool. Clustering runs on the **first ticked** source.
   Every parameter the window prints — τ, the mixture's μ, their confidence intervals, the
   truncation notes — is shown in the unit the axis is showing; a parameter that is not a time (a
   gamma's dimensionless shape `k`, a depth in pA) is shown in its own. The **Fit range** boxes are
-  read in the axis unit too. **Axis range** below is the exception: it is in data units.
-- **Axis range** — type explicit X/Y limits (data units, converted to log internally on a log axis)
+  read in the axis unit too. Axis-range entries follow their displayed unit labels.
+- **Axis range** — type explicit X/Y limits in the displayed units (stored in data units and converted to log internally on a log axis)
   that persist across redraws; **Auto** releases them. The plot is also mouse zoom/pan-able.
 - **Appearance** — a custom title and axis labels, font family + size, data-series and fit colours,
   marker size, line width, grid and background. These controls, legend edits and fit-decoration
@@ -1330,6 +1436,10 @@ tool. Clustering runs on the **first ticked** source.
   editable**: double-click a row in the source list and type, and that series is renamed everywhere it
   is named — legend, fit lines, Details and the plot title. The real name is kept underneath, so
   clearing the edit back to empty restores it rather than legending a blank.
+  Highlight that source and choose **Save name as project default** to reuse its edited name in
+  newly generated figures. **Project source color…** saves its identity color for subsequent
+  source-colored plots; press **Plot/Generate** explicitly to use it. The current frozen picture,
+  single-series data color, fit color and cluster palette are not silently recolored.
 - **Export ▾** keeps the outputs together: **Export current figure…** writes the live plot as PNG, SVG, or
   vector PDF; **Export plot data…** writes the exact plotted values as CSV; and **Export
   configuration JSON…** saves the reproducible plot recipe. Figure export opens a shared format/size
@@ -1338,6 +1448,14 @@ tool. Clustering runs on the **first ticked** source.
   panel is displayed, explicitly tick **Include residual panel** to place it beneath the fitted
   plot; it is excluded by default. Physical dimensions apply to all three formats. The 85 mm and
   180 mm presets are starting widths, not promises of compliance with a particular journal.
+  At a physical size, **Print check** estimates the smallest measurable text and scalable stroke
+  in points. Expand its details before relying on the estimate: outlined text, embedded images,
+  nested panels and cosmetic strokes may need manual inspection. The default 8 pt / 0.5 pt targets
+  are editable preferences, not journal rules. **Enlarge to measured targets** enlarges the whole
+  frozen canvas, preserving its aspect ratio; it does not independently reflow fonts at a fixed
+  column width. For a fixed width, increase typography in Appearance and capture/export again.
+  **Approximate print-size preview…** uses the screen's reported resolution; it is uncalibrated,
+  not a physical ruler. PNG DPI improves raster sampling, not the physical size of text.
 
 ### A consistent plotting workflow
 
@@ -1399,7 +1517,11 @@ separately from the visible numerical result; Distributions also records its app
 
 First save the individual plots to the Figure Library. In **Analysis ▸ Figure Library…**, choose
 **Compose multi-panel figure…**. Check 2–12 figures, edit their panel labels (up to 32 characters),
-and use **Move up / Move down** to arrange them in reading order. Choose 1–4 columns. **Update
+and use **Move up / Move down** to arrange them in reading order. Choose 1–4 columns. The **Rows**
+and **Cols** cells set each panel's span (1–4 cells); a column span must fit the grid. Panels are
+automatically packed without overlap and fitted without cropping. Use a wider span for a trace
+above smaller summary panels. **Panel spacing** and the label font, size, boldness and color are
+editable; sizes are native canvas pixels and scale with publication export. **Update
 preview** builds a frozen composition; changing the selection, labels or layout invalidates that
 preview until you update it again. **Save to Figure Library** creates a new entry and does not
 modify any component figure. Save the project to retain it.
@@ -1411,13 +1533,20 @@ axis labels, units, scale, linear/log mode, direction and tick formatting are re
 built-in readable axes retain their exact notation and unit conversion, including linear and
 logarithmic dwell axes displayed in milliseconds and the PSD's power-of-ten labels. Some plots
 cannot be replayed faithfully with new ranges—such as heatmaps, unknown/custom axis formatters or ticks, error bars,
-annotations, per-point palettes or visible legends. Those figures still compose with their
+annotations, per-point palettes or customized legends. Those figures still compose with their
 original independent axes. Compatible simple I–V, Population Scatter and PSD plots can share
 ranges. Uniform point styling is retained; differing point styles are not flattened.
 Older snapshots without a Cartesian model also use independent axes. A shared-axis refusal is a
 reason to keep independent axes, not to remove scientific annotations needed to interpret a plot.
 Save a new Figure Library snapshot to capture the extended unit-aware model. Older NanoScope
 versions refuse to replay this newer model, while retaining its frozen picture and independent-axis composition.
+
+New snapshots can preserve supported standard legends when sharing ranges. **One shared legend**
+requires every panel to have the same ordered labels and matching symbol/line styles in a faithfully
+replayable Cartesian model. It renders that legend once and removes the matching duplicates from
+detached panel copies. Different names, counts, colors or custom legend items are refused, not
+silently merged. Keep independent legends in those cases. Older snapshots remain usable as frozen
+panels; saving a new source snapshot captures the extended legend model.
 
 Export the composition through the usual Library publication controls (PNG, SVG, PDF, mm/inches
 and DPI). A composition's bundle stores a panel index at the top level; each panel's **original,
@@ -1426,7 +1555,8 @@ exact** numerical tables, configuration, provenance and rendering resources rema
 are labeled **Saved snapshot** rather than claiming that all component analyses were refreshed.
 
 To revise an existing composition, select it in the Library and choose **Revise composition…**.
-The composer restores its panel order, labels, column count and shared-range choices. Reorder or
+The composer restores its panel order, labels, column count, spans, spacing, label styling and
+shared-range/legend choices. Older layouts retain their equal-grid defaults. Reorder or
 uncheck panels, edit labels, change the layout and select **Update preview**. A revision can retain
 1–12 panels. **Save as new figure** creates a separate Library entry; the selected composition and
 all original panels remain unchanged. Changing layout after preview disables saving until a new
@@ -1487,6 +1617,13 @@ its controls or returning to its tab does not calculate a new result.
    in plot labels, with complete names retained in details and exported numerical provenance.
 4. Use **Appearance** to style the committed graphics without recomputing the summary or resetting
    zoom. Data/Analysis edits leave the previous result visible and marked as unapplied until Generate.
+   **Source names and colors → Apply to figure** gives each source a short condition label and
+   a local color override. **Use as project source default** also saves it for that exact source
+   identity (recording/segment, channel and detector) for subsequently generated figures. Save the
+   project to persist defaults. Other frozen figures are not rewritten. Clearing an override
+   restores the figure's captured source style; original names remain in tables and Details.
+   ECDF and survival ticks retain probabilities between 0 and 1, without automatic SI scaling.
+   Measurement ticks stay in the recorded units stated on the axis.
 5. Export the committed picture or plotted-coordinate CSV. Save to the Figure Library to retain
    source observations, summary values, draw coordinates, method settings and provenance together.
    Project reopening paints the stored coordinates; it does not rerun ECDF, quantiles or KDE.
@@ -1532,6 +1669,10 @@ in event tables; opening it never detects events, recalibrates currents or fits 
    retain recording identity. Styling uses saved geometry; it never recalculates bin counts, box
    statistics or swarm offsets. Data/Analysis changes remain drafts until Generate. **Fit canvas**,
    scrolling and dragging magnify/pan the canvas only; exports retain the complete figure.
+   **Source names and colors** offers the same figure-local labels/colors and explicit project
+   defaults as distribution summaries. Short labels appear on facets and legends; full identities
+   and overrides remain in Details and the saved configuration. Duplicate names are disambiguated,
+   not treated as one source. Saved geometry and numerical exports do not change.
 5. Use **Export current figure…** for PNG, PDF or SVG and the shared physical-size/preview controls.
    **Export plotted values CSV…** writes committed drawing values with primitive type, source and
    measurement labels. Use **Save to Figure Library…** or **Save figure bundle…** to retain source
@@ -1549,7 +1690,7 @@ removal, detection, calibration, amplitude estimation, fitting defaults or exist
 
 ## 11. Noise spectra (PSD)
 
-**Analysis ▸ Power spectrum (noise / PSD)…** opens the **Noise** page of the Analysis Explorer: the
+**Analysis ▸ Noise spectrum…** opens the **Noise spectrum** page of the Analysis Explorer: the
 log-log current-noise spectrum every
 nanopore paper uses to grade a pore. It runs on the **raw calibrated trace** (no detection needed,
 no filter chain applied), over a chosen quiet open-pore segment, and separates the three noise
@@ -1784,7 +1925,7 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   (dwell vs amplitude) with marginal densities: the comparison figure for several molecules or
   several voltages on one pair of axes. Amplitude can be depth in pA or fractional blockade ΔI/I₀,
   which is gain-independent and therefore comparable across recordings.
-- **Analysis ▸ Generate standard report figures…** — standard figures (matplotlib) for the current analysis, each as
+- **Analysis ▸ Generate Report figures…** — standard figures (matplotlib) for the current analysis, each as
   PDF + PNG with a source-data CSV sidecar. **Each figure's three files land together or not at
   all**, so a figure can never disagree with the numbers beside it. So does the export as a whole
   against anything environmental: a permission or disk error while staging, or a failure at the
@@ -1824,8 +1965,11 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
 **Presentation controls.** Every analytical page exposes the shared **Appearance** section with
 opt-in built-in and reusable user presets. Shared settings are saved with project workspaces;
 style edits and reopening saved figures do not rerun fits or analyses. Existing automatic units,
-source/category colours and full scientific warnings are retained. Publication previews are scaled
-to fit the dialog, not displayed at physical screen size. Interactive exports freeze their picture
+source/category colours and full scientific warnings are retained. The main preview is scaled to
+fit the dialog. An optional approximate print-size view uses reported screen DPI but is not calibrated.
+The physical-size print check estimates measurable SVG text/strokes and explicitly lists unsupported
+content; it is not a guarantee against clipping, hidden annotations, or journal noncompliance.
+Interactive exports freeze their picture
 before showing the preview, so a background result finishing during the dialogs cannot change the
 approved image. Large marker plots may take time to prepare their vector snapshot; a warning allows
 you to cancel without dropping points. Inspect the exported figure at its final

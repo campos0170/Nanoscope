@@ -1,6 +1,6 @@
 """The standalone event-plots window: the density map + the event ensemble.
 
-Opened from ``Analysis ▸ Event plots (density / ensemble)…``, this is the GUI
+Opened from ``Analysis ▸ Event waveforms…``, this is the GUI
 face of :mod:`nanoscope.analysis.event_shape` -- the two figures every
 translocation paper leads with:
 
@@ -44,6 +44,7 @@ from ..analysis.events import EventSet
 from ..core.session import Session
 from ..core.sources import amplitude_comparability, amplitude_units_label
 from ..plot.style import OKABE_ITO
+from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
@@ -109,7 +110,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._session = session
-        self.setWindowTitle("NanoScope — Event plots")
+        self.setWindowTitle(f"NanoScope — {ANALYSIS_LABELS['event_waveforms']}")
         self.resize(1040, 760)
 
         # Pushed-in source state.

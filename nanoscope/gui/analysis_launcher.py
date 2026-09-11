@@ -43,6 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6 import QtCore, QtWidgets
+from .analysis_catalog import ANALYSIS_LABELS
 
 __all__ = [
     "AnalysisLauncher",
@@ -91,18 +92,18 @@ class Surface:
 SURFACES: tuple[Surface, ...] = (
     # "Populations" has no honest abbreviation, so it does not get one — the short density
     # exists to save the width the OTHER six can spare, not to mangle every label.
-    Surface(SURFACE_POPULATIONS, "Populations", "Populations", "◉"),
-    Surface(SURFACE_EVENT_PLOTS, "Count heatmap / ensemble", "Count map", "▦"),
-    Surface(SURFACE_PSD, "Power spectrum", "Noise", "∿"),
-    Surface(SURFACE_IV, "I-V / conductance", "I-V", "╱"),
-    Surface(SURFACE_VDEP, "V-dependence", "V-dep", "↗"),
-    Surface(SURFACE_FIGURES, "Report figures", "Report", "↓"),
+    Surface(SURFACE_POPULATIONS, ANALYSIS_LABELS["distributions"], "Distributions", "◉"),
+    Surface(SURFACE_EVENT_PLOTS, ANALYSIS_LABELS["event_waveforms"], "Waveforms", "▦"),
+    Surface(SURFACE_PSD, ANALYSIS_LABELS["noise"], "Noise", "∿"),
+    Surface(SURFACE_IV, ANALYSIS_LABELS["iv"], "I-V", "╱"),
+    Surface(SURFACE_VDEP, ANALYSIS_LABELS["voltage_series"], "Voltage", "↗"),
+    Surface(SURFACE_FIGURES, ANALYSIS_LABELS["report_figures"], "Report", "↓"),
     # The seventh, and the only one that CURATES rather than plots. It is here for the
     # reason the other six are: it had no visible affordance at all — item 13 of the
     # ``&Analysis`` menu, no shortcut, and otherwise reachable only from inside another
     # window. The Event INSPECTOR stays out (the strip's CURATE chip is its always-visible
     # door); the gallery has no chip of its own, which is exactly the gap this row fills.
-    Surface(SURFACE_GALLERY, "Event gallery", "Gallery", "▤"),
+    Surface(SURFACE_GALLERY, ANALYSIS_LABELS["event_gallery"], "Gallery", "▤"),
 )
 SURFACE_ORDER: tuple[str, ...] = tuple(s.sid for s in SURFACES)
 _BY_ID: dict[str, Surface] = {s.sid: s for s in SURFACES}
@@ -274,6 +275,7 @@ class AnalysisLauncher(QtWidgets.QFrame):
     """A thin, always-visible row of flat buttons — one per analysis surface."""
 
     surfaceActivated = QtCore.Signal(str)   # a button was clicked (surface id), locked or not
+    homeRequested = QtCore.Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -288,6 +290,12 @@ class AnalysisLauncher(QtWidgets.QFrame):
         root = QtWidgets.QHBoxLayout(self)
         root.setContentsMargins(_EDGE_PAD, 0, _EDGE_PAD, 0)
         root.setSpacing(_BTN_SPACING)
+
+        self._home_btn = QtWidgets.QPushButton(ANALYSIS_LABELS["analysis_home"])
+        self._home_btn.setObjectName("analysisLauncherHome")
+        self._home_btn.setToolTip("Browse all analyses, figure tools and a guided first analysis. No recording is required.")
+        self._home_btn.clicked.connect(self.homeRequested)
+        root.addWidget(self._home_btn)
 
         self._buttons: dict[str, _SurfaceButton] = {}
         for surface in SURFACES:
@@ -330,8 +338,8 @@ class AnalysisLauncher(QtWidgets.QFrame):
     # -- density: degrade instead of forcing the window wider ---------------------------------
     def width_for(self, density: str) -> int:
         """Total width the row needs at ``density``."""
-        n = len(self._buttons)
-        return (2 * _EDGE_PAD
+        n = len(self._buttons) + 1
+        return (2 * _EDGE_PAD + self._home_btn.sizeHint().width()
                 + sum(b.width_for(density) for b in self._buttons.values())
                 + _BTN_SPACING * max(0, n - 1))
 

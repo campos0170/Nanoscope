@@ -104,6 +104,21 @@ class ReadableLogAxis(pg.AxisItem):
         self.display_factor: float = 1.0
         self.enableAutoSIPrefix(False)
 
+    def updateAutoSIPrefix(self) -> None:
+        """Disabling SI prefixes must also remove a previously computed scale.
+
+        Some pyqtgraph versions recompute the prefix even when
+        ``enableAutoSIPrefix(False)`` calls this method. The label then hides the
+        multiplier while ticks retain it. This matters when replaying a saved
+        axis, or disabling prefixes after a sub-unit range has been displayed.
+        """
+        if self.autoSIPrefix:
+            super().updateAutoSIPrefix()
+        else:
+            self.autoSIPrefixScale = 1.0
+            self.labelUnitPrefix = ""
+            self._updateLabel()
+
     def set_display_factor(self, factor: float) -> None:
         """Set the log-mode tick multiplier, redrawing if it changed."""
         f = float(factor)

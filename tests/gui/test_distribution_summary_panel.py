@@ -142,3 +142,106 @@ def test_long_source_names_fit_common_screen_with_full_details_available(page, q
         assert page._plot.getAxis("bottom").autoSIPrefixScale == 1
         assert page._plot.viewRange()[0] == [-.6, .6]
     assert page.grab().save(str(tmp_path / "distribution-summary.png"))
+
+
+@pytest.mark.parametrize("kind", ["ecdf", "survival", "box", "violin"])
+def test_subunit_summary_axes_keep_recorded_units_across_refresh_and_export(
+        page, qapp, monkeypatch, tmp_path, kind):
+    """Sub-second values/probabilities must never acquire a hidden ×1000."""
+    page.set_sources([_source([.001, .002, .003, .004])])
+    page._view_combo.setCurrentIndex(page._view_combo.findData(kind))
+    page.analyze()
+    page.show()
+    qapp.processEvents()
+    page.analyze()  # Previously disabling SI on the now-labelled axis retained ×1000.
+    before, tables = page.snapshot_state()
+    monkeypatch.setattr(M, "summarize_distribution", lambda *a, **k: pytest.fail("Export recomputed"))
+    page.set_appearance_state({"background": "light", "tick_size": 12})
+    page._render_snapshot()
+    qapp.processEvents()
+    for side in ("left", "bottom"):
+        axis = page._plot.getAxis(side)
+        assert not axis.autoSIPrefix
+        assert axis.autoSIPrefixScale == 1.0
+        assert " (x" not in axis.labelString()
+    if kind in ("ecdf", "survival"):
+        axis = page._plot.getAxis("left")
+        labels = axis.tickStrings([0., .2, .4, .6, .8, 1.], axis.autoSIPrefixScale, .2)
+        np.testing.assert_allclose([float(label) for label in labels], [0, .2, .4, .6, .8, 1])
+    for extension in ("svg", "pdf", "png"):
+        target = page.save_image(tmp_path / f"summary.{extension}")
+        assert target.is_file() and target.stat().st_size > 100
+    import xml.etree.ElementTree as ET
+    root = ET.parse(tmp_path / "summary.svg").getroot()
+    text = " ".join(root.itertext())
+    assert "x0.001" not in text
+    if kind in ("ecdf", "survival"):
+        numeric = [node.text for node in root.iter() if node.tag.endswith("}text")]
+        assert "200" not in numeric and "1000" not in numeric
+    after, after_tables = page.snapshot_state()
+    assert after["snapshot"] == before["snapshot"]
+    assert after["applied"] == before["applied"]
+    for key, frame in tables.items():
+        pd.testing.assert_frame_equal(after_tables[key], frame, check_exact=True)
+
+
+@pytest.mark.parametrize("kind", ["ecdf", "survival", "box", "violin"])
+def test_source_appearance_changes_only_existing_ink_and_labels(page, qtbot, monkeypatch, kind):
+    page._view_combo.setCurrentIndex(page._view_combo.findData(kind))
+    page.analyze()
+    page._plot.setRange(xRange=(1.2, 2.8), yRange=(.2, .9), padding=0)
+    payload, tables = page.snapshot_state()
+    points = page._plot_data()
+    items = list(page._data_items)
+    symbols = [item.opts["symbol"] for item in items]
+    monkeypatch.setattr(M, "summarize_distribution", lambda *a, **k: pytest.fail("Appearance recomputed"))
+    monkeypatch.setattr(page, "analyze", lambda *a, **k: pytest.fail("Appearance analyzed"))
+    monkeypatch.setattr(page, "_render_snapshot", lambda *a, **k: pytest.fail("Appearance rebuilt primitives"))
+    for item in items:
+        monkeypatch.setattr(item, "setData", lambda *a, **k: pytest.fail("Appearance replaced numerical arrays"))
+    style = {"measurements": {"label": "Apo-ferritin · −500 mV", "color": "#009e73"}}
+    page.set_source_appearance_state(style)
+    assert page._data_items == items
+    assert [item.opts["symbol"] for item in items] == symbols
+    assert page._plot.viewRange() == payload["view_range"]
+    assert not page._stale
+    assert page._plot.legend.items[0][1].text.startswith("Apo-ferritin")
+    for item, primitive in zip(items, page._snapshot["primitives"]):
+        pen = item.opts["symbolPen"] if primitive["symbols"] else item.opts["pen"]
+        assert pen.color().name() == "#009e73"
+    after, after_tables = page.snapshot_state()
+    assert after["snapshot"] == payload["snapshot"]
+    assert after["applied"] == payload["applied"]
+    pd.testing.assert_frame_equal(page._plot_data(), points, check_exact=True)
+    for key, frame in tables.items():
+        pd.testing.assert_frame_equal(after_tables[key], frame, check_exact=True)
+    other = M.DistributionSummaryWindow()
+    qtbot.addWidget(other)
+    other.restore_state(after, after_tables)
+    assert other.source_appearance_state() == style
+    assert other._plot.viewRange() == payload["view_range"]
+    pd.testing.assert_frame_equal(other._plot_data(), points, check_exact=True)
+    # Figure-local edits override changed project defaults; source aliases/ink do
+    # not invalidate scientific content and never rewrite a frozen snapshot.
+    from dataclasses import replace
+    source = replace(page._sources["measurements"], label="Changed default", colour="#d55e00")
+    page.set_sources([source])
+    assert not page._stale
+    assert page._plot.legend.items[0][1].text.startswith("Apo-ferritin")
+
+
+def test_legacy_distribution_snapshot_without_source_appearance_remains_supported(page):
+    payload, tables = page.snapshot_state()
+    payload.pop("source_appearance")
+    page.restore_state(payload, tables)
+    assert page.source_appearance_state() == {}
+
+
+def test_invalid_distribution_source_style_restore_is_transactional(page):
+    before, tables = page.snapshot_state()
+    corrupt = deepcopy(before)
+    corrupt["source_appearance"] = {"measurements": {"color": "untrusted"}}
+    with pytest.raises(ValueError):
+        page.restore_state(corrupt, tables)
+    after, _ = page.snapshot_state()
+    assert after == before

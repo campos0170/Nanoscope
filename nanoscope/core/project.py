@@ -609,6 +609,9 @@ class ProjectState:
     #: in their own ZIP members rather than inflating ``manifest.json``; see the two value
     #: classes above. Missing on v1-v10 read means an empty workspace.
     workspace: AnalyticalWorkspace = field(default_factory=AnalyticalWorkspace)
+    #: Optional presentation aliases keyed by the existing persistent PlotSource
+    #: identity. Separate from measurement labels and scientific provenance.
+    source_labels: dict[str, str] = field(default_factory=dict)
 
 
 # ================================================================================================
@@ -1142,6 +1145,7 @@ def save_project(path: str | Path, state: ProjectState,
         # rows from numpy-flavoured ints (a slot read back off a frame), and a numpy int64
         # is not JSON.
         "colours": _json_safe(list(state.colours or [])),
+        "source_labels": _json_safe(dict(state.source_labels or {})),
         "measurements": None,
         # v11. Filled after its per-artifact Parquet/blob members have been written.
         "workspace": None,
@@ -1485,6 +1489,17 @@ def _read_project(path: Path) -> ProjectState:
             raise ProjectError(
                 f"{path.name}: the 'workspace' section is missing from {MANIFEST_NAME}.")
 
+    with _manifest_section(path.name, "source_labels"):
+        from .source_style import MAX_SOURCE_STYLES, SourceLabelRegistry
+        raw_source_labels = manifest.get("source_labels", {})
+        if raw_source_labels is None:
+            raw_source_labels = {}
+        if not isinstance(raw_source_labels, dict) or len(raw_source_labels) > MAX_SOURCE_STYLES:
+            raise ValueError("Source labels must be a bounded mapping.")
+        # Like ColourRegistry, malformed individual presentation entries are
+        # ignored rather than costing a recording or scientific result.
+        source_labels = SourceLabelRegistry.from_json(raw_source_labels).to_json()
+
     with _manifest_section(path.name, "view_mode / app_version"):
         return ProjectState(
             documents=documents,
@@ -1503,5 +1518,6 @@ def _read_project(path: Path) -> ProjectState:
             # `_manifest_section` guard as the rest, so a `colours` that is not even a list
             # still surfaces as ProjectError and not as a bare TypeError).
             colours=[dict(r) for r in (manifest.get("colours") or [])],
+            source_labels=source_labels,
             workspace=workspace,
         )

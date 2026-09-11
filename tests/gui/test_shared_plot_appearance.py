@@ -19,6 +19,24 @@ from nanoscope.gui.plot_appearance import (
 from nanoscope.gui.voltage_dep_panel import VDepWindow
 
 
+def test_publication_background_keeps_legend_text_legible_and_resettable(qtbot):
+    widget = pg.PlotWidget(background="#111316")
+    qtbot.addWidget(widget)
+    plot = widget.getPlotItem()
+    legend = plot.addLegend(labelTextColor="#bbbbbb")
+    item = plot.plot([0, 1], [1, 2], name="Condition A")
+    before = _xy(item)
+    apply_plot_appearance(plot, PlotAppearance(background="light"), plot_widget=widget)
+    assert legend.opts["labelTextColor"].name() == "#20242b"
+    assert legend.items[0][1].opts["color"].name() == "#20242b"
+    apply_plot_appearance(plot, PlotAppearance(background="dark"), plot_widget=widget)
+    assert legend.opts["labelTextColor"].name() == "#e6e9ef"
+    apply_plot_appearance(plot, PlotAppearance(), plot_widget=widget)
+    assert legend.opts["labelTextColor"].name() == "#bbbbbb"
+    for original, current in zip(before, _xy(item)):
+        np.testing.assert_array_equal(current, original)
+
+
 @pytest.fixture(params=["iv", "vdep"])
 def scientific_window(request, qtbot):
     if request.param == "iv":
