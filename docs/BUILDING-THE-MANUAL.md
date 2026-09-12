@@ -7,6 +7,19 @@ That is the whole build. It runs from a clean checkout: every path is resolved r
 Needs Python-Markdown (`python3 -m pip install markdown`); `--pdf` also needs Google Chrome
 in `/Applications`.
 
+When headless Chrome is unavailable, use the offline ReportLab renderer:
+
+    python3 docs/gen_page.py --pdf --zip --pdf-engine reportlab --pdf-python /path/to/python-with-reportlab
+
+The authoring Python needs `markdown`; the PDF Python needs `reportlab`, `Pillow` and `pypdf`.
+They may be different environments. The ReportLab route reads the same verified HTML, includes
+its prose, tables and embedded illustrations, and adds page numbers and a generated PDF contents
+page. It uses the macOS Arial/Courier font files; adapt those paths before building on another OS.
+Inspect rendered pages after either route. Browser and ReportLab pagination can differ.
+
+The previous PDF is preserved if rendering fails. `--zip` requires `--pdf` in the same invocation
+so an updated HTML document cannot silently ship beside an older PDF.
+
 ## What comes from where
 
 | Source | Holds |
@@ -31,8 +44,10 @@ Which screenshot heads each reference area, and its caption, is `AREA_IMG` in
 |---|---|
 | `docs/manual.html` | `gen_page.py` — one self-contained file, images inlined, loads nothing from the network |
 | `docs/manual-markdown/manual.html` | a byte-identical copy of it (`shasum -a 256` the two to check) |
-| `docs/nanoscope-manual.pdf` | `--pdf`: headless Chrome printing the page's own print stylesheet |
+| `docs/nanoscope-manual.pdf` | `--pdf`: Chrome with the page's print stylesheet, or the selected offline ReportLab renderer |
 | `docs/nanoscope-manual.zip` | `--zip`: markdown + images + html + pdf, under `nanoscope-manual-md/` |
+| `docs/manual-build-manifest.json` | edition, rendering engine, validation checks and source/output hashes |
+| `docs/manual-current-captures.json` | current-source screenshot provenance, unchanged input-project hashes |
 | `docs/_build/reference.html` | only if you run `gen_manual.py` by itself; a scratch view of the reference section, not shipped |
 
 ## The build checks itself
@@ -42,6 +57,10 @@ not inlined, if the markdown references an image that is not in `images/`, if an
 link points at an id that is not on the page, if a heading is missing from the contents rail,
 or if the page grows a `<script>`, `<iframe>` or external stylesheet. The contents rail and
 the section anchors are both generated from the headings, so they cannot drift apart.
+
+The ZIP also includes the written User Guide, recording-specific reference guide, edition notes,
+inventory and verification manifests. Application executables/DMGs are not rebuilt by this command;
+installed Help retains the bundled edition until a separate application release is built/installed.
 
 ## History
 

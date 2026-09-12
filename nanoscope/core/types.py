@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 import numpy as np
+
+from .acquisition import AcquisitionBandwidth
 
 SOFT_SAMPLE_CEILING: int = 15_000_000   # BINDING. Above this: warn + offer a range. Never nag below.
 CACHE_BUDGET_MB: int = 1024
@@ -39,6 +41,8 @@ class ChannelInfo:
     kind: ChannelKind
     is_dead: bool = False           # a HINT from detect_dead(), set at load, never by probe()
     dead_reason: str | None = None  # e.g. "no signal: max|x|=9.16e-04 <= 8x quantisation step 3.05e-04"
+    acquisition_bandwidth: AcquisitionBandwidth = field(default_factory=AcquisitionBandwidth)
+    # File declaration only. Session-owned user corrections never overwrite this header evidence.
 
 
 @dataclass(frozen=True)

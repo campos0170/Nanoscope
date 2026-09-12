@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import replace
+from numbers import Integral
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from .analysis import AnalysisResult, ResultStore
+from .acquisition import AcquisitionBandwidth
 from .cache import LruArrayCache
 from .calibration import (
     SIDECAR_NONE,
@@ -54,12 +56,14 @@ class Session(QObject):
     cursorMoved = Signal(float)               # x in the current axis unit
     resultsChanged = Signal(str, str)         # doc_id, module_id  — v2; never emitted in v1
     sourceAppearanceChanged = Signal(str)     # persistent PlotSource key; presentation only
+    acquisitionBandwidthChanged = Signal(str, int)  # metadata only, never recalibration
 
     def __init__(self, cache_budget_mb: int = CACHE_BUDGET_MB) -> None:
         super().__init__()
         self._documents: dict[str, Document] = {}
         self._layers: list[Layer] = []
         self._calibration = CalibrationSet()
+        self._acquisition_overrides: dict[tuple[str, int], AcquisitionBandwidth] = {}
         self._cache = LruArrayCache(cache_budget_mb)
         self._results = ResultStore()
         # What the CALIBRATION did to a channel, keyed exactly like the cached calibrated
@@ -178,6 +182,8 @@ class Session(QObject):
 
         self._cache.invalidate_doc(doc_id)
         self._calibration.drop_doc(doc_id)
+        for key in [k for k in self._acquisition_overrides if k[0] == doc_id]:
+            del self._acquisition_overrides[key]
         for key in [k for k in self._calibration_issues if k[0] == doc_id]:
             del self._calibration_issues[key]
         self._path_seen_on_open.pop(doc_id, None)
@@ -271,6 +277,9 @@ class Session(QObject):
         for info in seg.meta.channels:
             self._calibration.set(seg_id, info.index,
                                   self._calibration.get(parent_doc_id, info.index))
+            override = self.acquisition_bandwidth_override(parent_doc_id, info.index)
+            if override is not None:
+                self._acquisition_overrides[(seg_id, info.index)] = override
         return seg_id
 
     def segment_documents(self) -> tuple[SegmentDocument, ...]:
@@ -281,6 +290,40 @@ class Session(QObject):
     # -- calibration -----------------------------------------------------------------------------
     def calibration(self, doc_id: str, ch: int) -> ChannelCalibration:
         return self._calibration.get(doc_id, ch)
+
+    def acquisition_bandwidth_override(self, doc_id: str, ch: int) -> AcquisitionBandwidth | None:
+        self._acquisition_channel(doc_id, ch)
+        return self._acquisition_overrides.get((doc_id, ch))
+
+    def _acquisition_channel(self, doc_id: str, ch: int):
+        channels = self._documents[doc_id].meta.channels
+        if isinstance(ch, bool) or not isinstance(ch, Integral) or not 0 <= ch < len(channels):
+            raise ValueError("acquisition metadata requires a valid channel index")
+        return channels[ch]
+
+    def acquisition_bandwidth(self, doc_id: str, ch: int) -> AcquisitionBandwidth:
+        header = self._acquisition_channel(doc_id, ch).acquisition_bandwidth
+        return self._acquisition_overrides.get((doc_id, ch), header)
+
+    def set_acquisition_bandwidth(self, doc_id: str, ch: int,
+                                  value: AcquisitionBandwidth | None) -> None:
+        """Set acquisition provenance only; None restores the immutable file declaration.
+
+        No samples, cache entries, detections, fits or calibration are changed. Existing
+        results retain the metadata snapshot they were created with. Saved in projects,
+        never written beside raw recordings.
+        """
+        self._acquisition_channel(doc_id, ch)
+        if value is not None and (not isinstance(value, AcquisitionBandwidth) or value.source != "user"):
+            raise ValueError("an acquisition override must be user-provided metadata")
+        key = (doc_id, ch)
+        if self._acquisition_overrides.get(key) == value:
+            return
+        if value is None:
+            self._acquisition_overrides.pop(key, None)
+        else:
+            self._acquisition_overrides[key] = value
+        self.acquisitionBandwidthChanged.emit(doc_id, ch)
 
     # -- what a channel IS: the one resolver ----------------------------------------------------
     def effective_kind(self, doc_id: str, ch: int) -> ChannelKind:
@@ -469,6 +512,8 @@ class Session(QObject):
         cal = self._calibration.get(doc_id, ch)
         units = cal.target_units or info.raw_units
 
+        # Snapshot effective metadata for workers; meta.channels still holds the header.
+        info = replace(info, acquisition_bandwidth=self.acquisition_bandwidth(doc_id, ch))
         return CalibratedChannel(info=info, data=self.calibrated_array(doc_id, ch), units=units,
                                  sample_rate_hz=doc.meta.sample_rate_hz, t0_s=doc.meta.t0_s,
                                  issues=self.calibration_issues(doc_id, ch))

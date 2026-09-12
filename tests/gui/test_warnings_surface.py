@@ -297,22 +297,36 @@ def test_the_block_offers_no_way_to_silence_it(panel, qtbot):
     assert not stats.warnings_label.openExternalLinks()
 
 
-def test_a_result_without_warnings_clears_the_block(panel, qtbot):
-    """The condition going away is what takes the sentence away. A cleared block must not
-    be a stale one either: ``warnings_text`` reads "" only because the widget is hidden."""
+def test_clearing_result_warnings_retains_independent_recorded_advisories(panel, qtbot):
+    """Empty module warnings cannot erase still-applicable QC/acquisition facts."""
     p, session, doc_id, controller = panel
     res = _detect(p, controller, qtbot)
     assert p._stats.warnings_text()
 
     from dataclasses import replace
+    sentinel = "ZZQ-CLEAR-ONLY-THIS module advisory"
+    _install(session, replace(res, warnings=(sentinel,)))
+    assert sentinel in p._stats.warnings_text()
     _install(session, replace(res, warnings=()))
     qtbot.wait(20)
 
+    assert sentinel not in p._stats.warnings_text()
+    assert "Advisory checks only" in p._stats.warnings_text()
+    assert "Acquisition" in p._stats.warnings_text()
+
+
+def test_no_remaining_advisories_clears_the_block(panel, qtbot, monkeypatch):
+    """The generic empty case still clears stale text and the prominent notice."""
+    p, session, doc_id, controller = panel
+    res = _detect(p, controller, qtbot)
+    from dataclasses import replace
+    from nanoscope.gui import analysis_panel
+    monkeypatch.setattr(analysis_panel, "report_recording_messages", lambda *_: ())
+    monkeypatch.setattr(analysis_panel, "acquisition_snapshot_messages", lambda *_: ())
+    _install(session, replace(res, warnings=()))
     assert p._stats.warnings_text() == ""
     assert not p._stats.warnings_label.isVisibleTo(p._stats)
-    text = _visible_text(p)
-    for phrase in _ADVISORY_PHRASES:
-        assert phrase not in text
+    assert p._result_notice.isHidden()
 
 
 def test_a_curation_edit_leaves_the_caveats_exactly_where_they_are(panel, qtbot):

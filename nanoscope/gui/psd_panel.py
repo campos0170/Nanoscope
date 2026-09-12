@@ -712,7 +712,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         w.setMinimumSize(460, 360)
         self._spec_widget = w
         self._spec_plot: pg.PlotItem = w.getPlotItem()
-        self._spec_image = pg.ImageItem()
+        # The rendered matrix is [time, frequency], independent of the app-wide
+        # row-major default used by other image consumers.
+        self._spec_image = pg.ImageItem(axisOrder="col-major")
         self._spec_plot.addItem(self._spec_image)
         self._spec_bar: pg.ColorBarItem | None = None
         self._spec_msg: pg.TextItem | None = None
@@ -2825,7 +2827,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         lo, hi = (float(v) for v in np.percentile(z[finite], [2.0, 99.8]))
         if hi <= lo:
             hi = lo + 1.0
-        # col-major (pyqtgraph's default image axis order) wants image[x, y] = [time, freq].
+        # Explicit col-major orientation maps image[x, y] to [time, frequency].
         self._spec_image.setImage(np.asarray(z.T, dtype=np.float32), autoLevels=False)
         self._spec_image.setLevels((lo, hi))
         cmap = pg.colormap.get(self._spec_cmap_combo.currentText())

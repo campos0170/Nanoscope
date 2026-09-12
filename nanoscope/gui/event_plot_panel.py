@@ -630,8 +630,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         ye_p = _to_plot(ye, logy)
         cmax = float(counts.max())
 
-        img = pg.ImageItem()
-        # ImageItem is col-major by default: image[i, j] -> X-bin i, Y-bin j, exactly counts2d.
+        # density_2d stores counts[x_bin, y_bin]. Pin this item's orientation;
+        # the application's global imageAxisOrder may be row-major for other views.
+        img = pg.ImageItem(axisOrder="col-major")
         img.setImage(counts)
         img.setRect(QtCore.QRectF(
             xe_p[0], ye_p[0], xe_p[-1] - xe_p[0], ye_p[-1] - ye_p[0]))
@@ -878,7 +879,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
         cmap = _get_colormap(self._cmap_combo.currentText())
         cmax = float(counts.max())
-        img = pg.ImageItem()
+        # Saved grids retain the same counts[x_bin, y_bin] contract as live results.
+        img = pg.ImageItem(axisOrder="col-major")
         img.setImage(counts)
         img.setRect(QtCore.QRectF(
             float(xe_p[0]), float(ye_p[0]),

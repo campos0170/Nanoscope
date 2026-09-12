@@ -3,7 +3,7 @@
 This is half of a two-step build; `gen_page.py` is the other half and calls into this
 module. Nothing here reads or writes anything outside `docs/`:
 
-    docs/inventory.json          in   — the control inventory (8 areas, 621 controls)
+    docs/inventory.json          in   — the maintained control inventory (counted at build time)
     docs/_build/reference.html   out  — the rendered section, for inspection only
 
 The page build does not need the file on disk: `gen_page.py` imports
@@ -46,8 +46,8 @@ AREA_TITLE = {
     "stats-merge-measure": "Fits, Merge &amp; Measure",
     "event-table-and-inspector": "Event table &amp; Event inspector",
     "event-gallery": "Event gallery",
-    "plots": "Plots window",
-    "noise-iv-vdep-eventplots": "Noise, I&#8209;V, V&#8209;dependence &amp; Event plots",
+    "plots": "Distributions, Figure Library &amp; publication export",
+    "noise-iv-vdep-eventplots": "Noise, I-V, voltage dependence &amp; event waveforms",
 }
 
 # Screenshots shown at the head of each reference area: area key -> [(image stem, caption)].
@@ -108,6 +108,8 @@ def _figure(images: dict[str, str], stem: str, caption: str) -> str:
     """One <figure>, or "" when the image is not available."""
     if stem not in images:
         return ""
+    if not stem.startswith('current_'):
+        caption = '<b>Historical interface illustration.</b> ' + caption
     return (f'<figure class="shot"><img src="{images[stem]}" alt="" loading="lazy">'
             f"<figcaption>{caption}</figcaption></figure>")
 

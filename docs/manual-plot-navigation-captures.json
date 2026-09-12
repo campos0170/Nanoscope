@@ -1,0 +1,43 @@
+{
+  "source_commit": "703a96a6a50a7150f2158e5aa19d84055dc7c0d7",
+  "source_project_sha256": "635304eb2b8d99065861c08cc5f8bb18cfe92d92867689f2d0f6b119547965e8",
+  "source_project_unchanged": true,
+  "captures": [
+    {
+      "stem": "current_plot_data",
+      "context": "Restored Distributions histogram; Data section, source checkboxes and plot recipe",
+      "dimensions": [
+        1360,
+        1020
+      ],
+      "generation": "Current source widgets, offscreen; restored saved plot; no Generate/Plot/Detect"
+    },
+    {
+      "stem": "current_plot_appearance",
+      "context": "Same restored Distributions figure; Appearance controls, not a refit",
+      "dimensions": [
+        1360,
+        1020
+      ],
+      "generation": "Current source widgets, offscreen; restored saved plot; no Generate/Plot/Detect"
+    },
+    {
+      "stem": "current_summary_analysis",
+      "context": "Restored Distribution summaries result; Analysis section and Generate",
+      "dimensions": [
+        1360,
+        1020
+      ],
+      "generation": "Current source widgets, offscreen; restored saved plot; no Generate/Plot/Detect"
+    },
+    {
+      "stem": "current_comparison_analysis",
+      "context": "Restored Comparison figures result; Analysis section and canvas magnification",
+      "dimensions": [
+        1360,
+        1020
+      ],
+      "generation": "Current source widgets, offscreen; restored saved plot; no Generate/Plot/Detect"
+    }
+  ]
+}

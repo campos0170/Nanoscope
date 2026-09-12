@@ -34,6 +34,7 @@ class FileInfoPanel(QtWidgets.QWidget):
         session.documentOpened.connect(self._on_document_opened)
         session.documentClosed.connect(self._on_document_closed)
         session.calibrationChanged.connect(lambda d, _c: self._refresh_if(d))
+        session.acquisitionBandwidthChanged.connect(lambda d, _c: self._refresh_if(d))
         self._show_empty()
 
     def _build_ui(self) -> None:
@@ -81,6 +82,14 @@ class FileInfoPanel(QtWidgets.QWidget):
         self._table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self._table.setMaximumHeight(160)
         root.addWidget(self._table)
+
+        self._bandwidth = QtWidgets.QLabel()
+        self._bandwidth.setTextFormat(QtCore.Qt.PlainText)
+        self._bandwidth.setWordWrap(True)
+        root.addWidget(self._bandwidth)
+        self._edit_bandwidth = QtWidgets.QPushButton("Acquisition bandwidth…")
+        self._edit_bandwidth.clicked.connect(self._open_bandwidth)
+        root.addWidget(self._edit_bandwidth)
 
         self._notes_head = self._section("Notes")
         root.addWidget(self._notes_head)
@@ -165,6 +174,11 @@ class FileInfoPanel(QtWidgets.QWidget):
                 self._table.setItem(r, c, item)
 
         self._notes.setPlainText("\n".join(meta.notes) if meta.notes else "(none)")
+        from ..core.acquisition import describe_bandwidth
+        self._edit_bandwidth.setEnabled(self._doc_id is not None)
+        self._bandwidth.setText("Acquisition low-pass (metadata only):\n" + "\n".join(
+            f"{info.name}: {describe_bandwidth(self._session.acquisition_bandwidth(self._doc_id, info.index))}"
+            for info in meta.channels))
         # meta.issues describes the recording AS LOADED. Everything that reads a channel
         # reads the CALIBRATED array, and a calibration can ruin one — a gain that overflows
         # float32 leaves 2,420 non-finite samples in the owner's real ABF with meta.issues
@@ -206,6 +220,12 @@ class FileInfoPanel(QtWidgets.QWidget):
                 f"'{header.value}'; it is treated as '{kind.value}' everywhere "
                 f"(panes, detection, the workflow strip).")
 
+    def _open_bandwidth(self) -> None:
+        if self._doc_id is None or not self._session.has_document(self._doc_id):
+            return
+        from .acquisition_dialog import AcquisitionBandwidthDialog
+        AcquisitionBandwidthDialog(self._session, self._doc_id, self).exec()
+
     def _calibration_issues(self) -> tuple[str, ...]:
         """What the current calibration did to each channel of the shown document."""
         if self._doc_id is None or not self._session.has_document(self._doc_id):
@@ -236,5 +256,7 @@ class FileInfoPanel(QtWidgets.QWidget):
         for lbl in self._fields.values():
             lbl.setText("—")
         self._table.setRowCount(0)
+        self._bandwidth.clear()
+        self._edit_bandwidth.setEnabled(False)
         self._notes.setPlainText("")
         self._issues.setPlainText("")

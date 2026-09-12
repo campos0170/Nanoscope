@@ -65,6 +65,8 @@ from ..analysis.conditioning import (
     write_baseline_correction,
 )
 from ..analysis.events import EventSet, mark_reviewed
+from ..analysis.measurement_quality import report_recording_messages
+from ..core.acquisition import acquisition_snapshot_messages
 from ..analysis.merge import (
     MIN_MERGE_OCCUPANCY,
     merge_by_gap,
@@ -3788,33 +3790,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._table.set_clock_offset(
             self._trace_view.clock_offset_for(res.doc_id, res.channel))
         self._fill_summary(events)
-        # ...AND THE CAVEATS THOSE NUMBERS WERE PRODUCED UNDER, beside them.
-        #
-        # ``res.warnings`` is the module's own list of what its table must not be
-        # trusted for. `main_window` persists it (save) and restores it (open) at four
-        # call sites, `remeasure` recomputes it, and until now NOTHING RENDERED IT: the
-        # unprobed-open-pore advisory -- the one warning that fires on a run whose
-        # windows nobody chose, worth 317 events / 85.68 pA against 276 / 87.59 on the
-        # owner's own -600 mV file -- was built, appended, carried, saved and shown to
-        # no one.
-        #
-        # Pushed WHOLE, on every result shown, so this is the surface for warnings in
-        # general and not for one string. It is pushed here rather than inside
-        # `_fill_summary` because a warning belongs to the RESULT, while `_fill_summary`
-        # is also the curation-edit refresh path (`_refresh_summary_from_table`), which
-        # re-derives the counts from the live df on every accept/reject click and must
-        # leave the caveats exactly where they were, because rejecting a row does not
-        # change which open-pore window the depths were measured under. (That path does
-        # hold the result -- it fetches one via `_stored_detection()` to reach the df --
-        # so the reason to keep the push here is what a warning is ABOUT, not what is
-        # reachable from there. An earlier version of this comment claimed the latter.)
-        self._stats.set_warnings(res.warnings)
-        self._result_notice.setText(
-            f'<a style="color:#ffb454" href="summary">'
-            f'Analysis warnings ({len(res.warnings)}) — review Summary</a>'
-            if res.warnings else '')
-        self._result_notice.setToolTip('\n\n'.join(str(item) for item in res.warnings))
-        self._result_notice.setVisible(bool(res.warnings))
+        self._show_result_advisories(res)
         self._sync_results_presence(True, len(events.df))
         prov = events.provenance or {}
         # Pushed on EVERY result, present or absent (see `_show_polarity_evidence`) —
@@ -3875,6 +3851,31 @@ class AnalysisPanel(QtWidgets.QWidget):
         # detection on this target to fit. It used to have no gate at all and reported the
         # failure into its own results box AFTER the click.
         self._stats.set_detection_present(True)
+
+    def _show_result_advisories(self, res: AnalysisResult) -> None:
+        """Keep recorded caveats and current advisory validity beside the summary.
+
+        The quality check only validates its saved evidence against this table; it
+        never reruns detection or silently qualifies an edited measurement. Hardware
+        bandwidth describes the stored run, not today's acquisition editor values.
+        All text stays in Summary/Details and the notice, outside plot artwork.
+        """
+        events = res.payload
+        if not isinstance(events, EventSet):
+            return
+        provenance = events.provenance or {}
+        warnings = tuple(dict.fromkeys(str(item) for item in (
+            *res.warnings,
+            *report_recording_messages(events.df, provenance),
+            *acquisition_snapshot_messages(provenance),
+        ) if str(item)))
+        self._stats.set_warnings(warnings)
+        self._result_notice.setText(
+            f'<a style="color:#ffb454" href="summary">'
+            f'Analysis advisories ({len(warnings)}) — review Summary</a>'
+            if warnings else '')
+        self._result_notice.setToolTip('\n\n'.join(warnings))
+        self._result_notice.setVisible(bool(warnings))
 
     def _show_polarity_evidence(self, evidence: Any) -> None:
         """THE ONLY WRITER of the Detection tab's "measured" polarity line — both answers.
@@ -4022,6 +4023,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         res = self._stored_detection()
         if res is not None and isinstance(res.payload, EventSet):
             self._fill_summary(res.payload)
+            self._show_result_advisories(res)
 
     def _on_acceptance_changed(self, *args) -> None:
         """Any curation edit (from the table or a routed Event Inspector decision on the shared df)

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
 from neo.rawio import AxonRawIO
 
+from ..core.acquisition import AcquisitionBandwidth
 from ..core.calibration import CalibrationSet
 from ..core.document import Document, TraceDocument
 from ..core.types import (
@@ -170,9 +172,7 @@ class AbfReader(BaseReader):
         channels: list[ChannelInfo] = []
         for info, arr in zip(base_channels, buffers):
             is_dead, reason = detect_dead(arr)
-            channels.append(
-                ChannelInfo(index=info.index, name=info.name, raw_units=info.raw_units,
-                            kind=info.kind, is_dead=is_dead, dead_reason=reason))
+            channels.append(replace(info, is_dead=is_dead, dead_reason=reason))
         channels_t = tuple(channels)
 
         nominal_mV, v_prov = self._measure_nominal_voltage(channels_t, buffers)
@@ -354,8 +354,112 @@ class AbfReader(BaseReader):
                 name=str(rec["name"]),
                 raw_units=raw_units,
                 kind=kind_for_units(raw_units),
+                acquisition_bandwidth=AbfReader._acquisition_bandwidth(reader, rec.get("id")),
             ))
         return tuple(infos)
+
+    @staticmethod
+    def _acquisition_bandwidth(reader: AxonRawIO, signal_id) -> AcquisitionBandwidth:
+        """Read channel-aligned declarations already parsed by Neo; never read samples.
+
+        Mapping follows Neo's AxonRawIO._parse_header: ABF1 signal ``id`` is the
+        physical ADC index from nADCSamplingSeq, whereas ABF2 ``id`` indexes
+        listADCInfo (its nADCNum is NOT the list index). Current Neo exposes no
+        ABF1 low-pass fields, so those files honestly remain unknown. Optional
+        per-ADC arrays are supported if a future Neo exposes the same ABF fields;
+        no unverified binary offsets are introduced here.
+
+        Field/sentinel definitions are documented by the pyABF project in its
+        SDK-derived ABF1 reference:
+        https://github.com/swharden/pyABF/blob/main/website/content/abf1-file-format/index.md
+        Signal low-pass 100000 means bypass, not a 100 kHz corner. The telegraph
+        100000 default is kept unknown rather than used as a measured bandwidth.
+        """
+        header = getattr(reader, "_axon_info", None)
+        if not isinstance(header, dict):
+            return AcquisitionBandwidth(note="Acquisition cutoff is not exposed by the ABF reader.")
+        try:
+            version = float(header["fFileVersionNumber"])
+            channel_id = int(signal_id)
+            if not np.isfinite(version) or version < 1 or channel_id < 0:
+                raise ValueError
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return AcquisitionBandwidth(source="file_header", note=(
+                "Acquisition cutoff is unknown: ABF channel/header mapping is unavailable."))
+
+        names = ("nTelegraphEnable", "nTelegraphInstrument", "fTelegraphFilter",
+                 "fSignalLowpassFilter", "nLowpassFilterType",
+                 "fPostProcessLowpassFilter", "nPostProcessLowpassFilterType")
+        values: dict = {}
+        raw: list[tuple[str, str]] = [("neo_signal_id", str(signal_id))]
+        if version < 2:
+            for name in names:
+                try:
+                    values[name] = header[name][channel_id]
+                except (KeyError, IndexError, TypeError):
+                    pass
+            raw.append(("physical_ADC_index", str(channel_id)))
+        else:
+            try:
+                adc = header["listADCInfo"][channel_id]
+                if not isinstance(adc, dict):
+                    raise TypeError
+            except (KeyError, IndexError, TypeError):
+                return AcquisitionBandwidth(source="file_header", header_fields=tuple(raw), note=(
+                    "Acquisition cutoff is unknown: the ABF2 ADC entry could not be mapped."))
+            values = {name: adc[name] for name in names if name in adc}
+            if "nADCNum" in adc:
+                raw.append(("nADCNum", str(adc["nADCNum"])))
+        raw.extend((name, str(value)) for name, value in values.items())
+
+        def number(name: str) -> float | None:
+            value = values.get(name)
+            if isinstance(value, (bool, np.bool_)):
+                return None
+            try:
+                result = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return result if np.isfinite(result) else None
+
+        notes = ["File-header declaration only; verify against the acquisition protocol."]
+        candidates: list[tuple[float, str, str]] = []
+        telegraph = number("fTelegraphFilter")
+        telegraph_enabled = number("nTelegraphEnable") == 1
+        if (telegraph_enabled and telegraph is not None
+                and telegraph > 0 and telegraph != 100000):
+            candidates.append((telegraph, "", "amplifier telegraph"))
+        elif "fTelegraphFilter" in values:
+            notes.append("Amplifier cutoff is unknown: telegraph is disabled, invalid, or uses its default value.")
+
+        signal = number("fSignalLowpassFilter")
+        filter_code = number("nLowpassFilterType")
+        filter_name = {1: "External", 2: "RC", 3: "Bessel", 4: "Butterworth"}.get(filter_code, "")
+        signal_bypassed = signal == 100000
+        if signal is not None and signal > 0 and not signal_bypassed:
+            if filter_code == 0:
+                notes.append("Signal-conditioner cutoff conflicts with the header's no-filter type; not used.")
+            else:
+                candidates.append((signal, filter_name, "signal conditioner"))
+        elif signal_bypassed:
+            notes.append("The signal-conditioner stage is reported bypassed; this does not establish an unfiltered acquisition chain.")
+        elif "fSignalLowpassFilter" in values:
+            notes.append("Signal-conditioner cutoff is absent or invalid; no bandwidth is inferred.")
+
+        if "fPostProcessLowpassFilter" in values:
+            notes.append("ABF post-processing low-pass is preserved separately in header fields, not treated as hardware bandwidth.")
+        if candidates:
+            cutoff, filter_type, stage = min(candidates, key=lambda item: item[0])
+            notes.append(f"Reported cutoff is the narrowest declared hardware stage ({stage}), not the combined effective response.")
+            notes.append("Filter order and full transfer function are unknown; no rise time is inferred.")
+            return AcquisitionBandwidth(cutoff, "reported", "file_header", filter_type,
+                                        note=" ".join(notes), header_fields=tuple(raw))
+        if version < 2 and not any(name in values for name in ("fTelegraphFilter", "fSignalLowpassFilter")):
+            notes.append("The current Neo ABF1 parser does not expose acquisition cutoff fields.")
+        else:
+            notes.append("No usable hardware cutoff is available; unknown does not mean unfiltered.")
+        return AcquisitionBandwidth(status="disabled" if signal_bypassed else "unknown",
+                                    source="file_header", note=" ".join(notes), header_fields=tuple(raw))
 
     @staticmethod
     def _measure_nominal_voltage(channels: tuple[ChannelInfo, ...],

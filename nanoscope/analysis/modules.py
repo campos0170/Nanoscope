@@ -31,6 +31,7 @@ from ..core.analysis import (
     register_module,
 )
 from ..core.identity import doc_id_for_meta
+from ..core.acquisition import stamp_acquisition_bandwidth
 from ..core.types import ChannelKind
 from .baseline import (
     BASELINE_PARAM_KEYS,
@@ -1692,6 +1693,10 @@ def _recharacterize_highpass_candidates(
         )
 
     prov.update(reconcile_row_counts(prov, measured))
+    # The candidate-domain report cannot describe quantitative measurements rebuilt
+    # on the non-high-pass trace. Reassess against that branch's actual baseline.
+    from .measurement_quality import build_measurement_quality
+    prov["measurement_quality"] = build_measurement_quality(current, base, measured, fs, prov)
     return measured, prov, tuple(measurement_detrend_warns)
 
 
@@ -1986,6 +1991,7 @@ class DetectSchmitt:
         # fit reads exactly the rows it read before. MEASURED on the owner's 15 s
         # -1000 mV recording: 115 events, sha256 of the frozen 20 columns
         # a880ca47…28dc, identical before and after this line existed.
+        stamp_acquisition_bandwidth(prov, ctx)
         events = EventSet(stamp_source_status(stamp_original_bounds(df), self.id), prov)
 
         spans = OverlayHint(
@@ -2107,6 +2113,7 @@ class DetectCusum:
         # there. ``self.id`` is ``detect.cusum``, so a table that pooled a Schmitt
         # run and a CUSUM run can say per ROW which of them found each event; that
         # is the whole difference between this column and the result's module_id.
+        stamp_acquisition_bandwidth(prov, ctx)
         events = EventSet(stamp_source_status(stamp_original_bounds(df), self.id), prov)
 
         spans = OverlayHint(

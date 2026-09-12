@@ -1,0 +1,19 @@
+{
+  "edition": "2026-09-11",
+  "source_revision": "703a96a",
+  "pdf_rebuilt": true,
+  "pdf_engine": "reportlab",
+  "checks": [
+    "52 internal links, all resolve to ids on the page",
+    "45 <img> tags, all data: URIs",
+    "22 top-level sections, all in the contents rail (30 rail entries)"
+  ],
+  "sha256": {
+    "manual-markdown/manual.md": "fdbf3a905d4d5b44bef12a78aedf0c293b78fc72fe2ee768763c3a2125184350",
+    "inventory.json": "1cd55a891cc59d1a5f9afc418673d2413cf06027acb221c4b4f4c9560d81a86c",
+    "USER_GUIDE.md": "d600338bd26223517030ad6a07b8f0b58df85bcbf871f30f5b625c1ce7b14bec",
+    "manual.html": "9507f7045b653581a0fe0c9fea4804894284fc51b8005c76632b774218fb3dc1",
+    "manual-markdown/manual.html": "9507f7045b653581a0fe0c9fea4804894284fc51b8005c76632b774218fb3dc1",
+    "nanoscope-manual.pdf": "e5f4bfe0f8cf90f522abe589bfef94bd180fa96e0880453f1501d541fc8880c4"
+  }
+}

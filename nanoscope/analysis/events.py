@@ -1780,6 +1780,15 @@ def _get_provenance(self: "EventSet") -> dict[str, Any]:
         actual = n_clipped_boundary(self.df)
         if prov[CLIPPED_COUNT_KEY] != actual:
             prov[CLIPPED_COUNT_KEY] = actual
+    # Consumers export this dict directly. Once geometry/measurement edits make an
+    # advisory stale, persist that fact once, keeping the original report for audit.
+    # Do not add QC to legacy data or repeatedly wrap already-stale reports.
+    quality = prov.get("measurement_quality")
+    if isinstance(quality, dict) and quality.get("state") == "current":
+        from .measurement_quality import validated_measurement_quality
+        checked = validated_measurement_quality(self.df, prov, copy_report=False)
+        if checked.get("state") != "current":
+            prov["measurement_quality"] = checked
     return prov
 
 

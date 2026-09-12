@@ -1965,6 +1965,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session.resultsChanged.connect(lambda *_: self._mark_dirty())
         self._session.calibrationChanged.connect(lambda *_: self._mark_dirty())
         self._session.sourceAppearanceChanged.connect(lambda *_: self._mark_dirty())
+        self._session.acquisitionBandwidthChanged.connect(lambda *_: self._mark_dirty())
         # Overlay/Stacked is part of ProjectState. Unlike ``layersChanged`` this signal is
         # not emitted by opening, closing or merely selecting a recording: it represents a
         # deliberate view-mode edit (and restore is already protected by ``_restoring``).
@@ -9516,6 +9517,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # unknown/plugin artifacts and pending unresolved built-ins byte-for-byte; only
         # live, successfully installed surfaces replace the stable id they own.
         workspace = self._capture_analytical_workspace()
+        from ..core.acquisition_state import WORKSPACE_KEY, capture_acquisition_overrides
+        workspace.extra[WORKSPACE_KEY] = capture_acquisition_overrides(
+            session, workspace.extra.get(WORKSPACE_KEY, []))
         state = ProjectState(
             documents=documents, segments=segments, calibrations=calibrations, layers=layers,
             view_mode=self._session.view_mode.value, results=results,
@@ -10343,6 +10347,14 @@ class MainWindow(QtWidgets.QMainWindow):
             # a project cannot carry. Restoring a project must never touch anything outside it.
             self._session.set_calibration(doc_id, ch, cal, write_sidecar=False)
             self._restored_records.add(id(c))
+
+        from ..core.acquisition_state import WORKSPACE_KEY, restore_acquisition_overrides
+        bandwidth_messages = restore_acquisition_overrides(
+            self._session, doc_id, state.workspace.extra.get(WORKSPACE_KEY, []), match_key=key,
+            clear_existing=WORKSPACE_KEY in state.workspace.extra)
+        for message in bandwidth_messages:
+            if message not in self._restore_channel_lost:
+                self._restore_channel_lost.append(message)
 
         for lay in state.layers:
             if not _belongs(lay.doc_id):

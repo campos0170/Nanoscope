@@ -1,0 +1,57 @@
+{
+  "source_commit": "703a96a6a50a7150f2158e5aa19d84055dc7c0d7",
+  "source_projects_unchanged": true,
+  "source_project_sha256": {
+    "apo": "635304eb2b8d99065861c08cc5f8bb18cfe92d92867689f2d0f6b119547965e8",
+    "curation": "049f84505c0c4c88aa744c3dfe6dcf41fb557d2e1fd601eb999667e32ef6a724",
+    "reference": "e1043705cc588710ef624c2ee0e6a275040422723c6e48b93e12ea54b69b83f9"
+  },
+  "detection_rerun": false,
+  "captures": [
+    {
+      "stem": "current_main",
+      "context": "Saved apo project; -700 mV IN15; existing Schmitt results",
+      "dimensions": [
+        1550,
+        1000
+      ],
+      "generation": "Current source widgets, offscreen; no desktop GUI automation"
+    },
+    {
+      "stem": "current_analysis_home",
+      "context": "Analysis home capability catalog",
+      "dimensions": [
+        1250,
+        900
+      ],
+      "generation": "Current source widgets, offscreen; no desktop GUI automation"
+    },
+    {
+      "stem": "current_figure_library",
+      "context": "Nine frozen apo-ferritin figures",
+      "dimensions": [
+        1320,
+        920
+      ],
+      "generation": "Current source widgets, offscreen; no desktop GUI automation"
+    },
+    {
+      "stem": "current_event_inspector",
+      "context": "Saved event146; optional manual amplitude and fitted levels",
+      "dimensions": [
+        1350,
+        950
+      ],
+      "generation": "Current source widgets, offscreen; no desktop GUI automation"
+    },
+    {
+      "stem": "current_reference",
+      "context": "Saved synthetic +120 pA known-current recipe; not a value for experimental apo recordings",
+      "dimensions": [
+        416,
+        455
+      ],
+      "generation": "Current source widgets, offscreen; no desktop GUI automation"
+    }
+  ]
+}

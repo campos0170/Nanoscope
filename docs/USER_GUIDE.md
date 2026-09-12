@@ -1,7 +1,15 @@
 # NanoScope — User Guide
 
-A complete walkthrough of the application, from opening a recording to exporting a curated event
-population. This is a *draft* and tracks the app as of the current build.
+A specialist walkthrough from opening a recording to exporting a curated event population.
+Revised 2026-09-11 against NanoScope 0.1.0 source revision `703a96a`. The illustrated manual,
+HTML, PDF and control reference are maintained with this guide. Historical worked examples are
+identified as such; they are not current benchmark or calibration guarantees.
+
+For click-by-click plotting instructions, start with the [illustrated manual](manual.html):
+**Analysis and plotting: navigation guide**, then **Your first plot: a worked histogram**.
+Continue with **Current population plots: recipes and interpretation** for the individual
+analysis recipes, and the analysis troubleshooting guidance when a control, source or result
+does not match what you expect. The sections below provide the companion reference.
 
 If you know the open-pore current or can identify open-pore intervals, see
 [Recording-specific open-pore references](OPEN_PORE_REFERENCE.md). This optional
@@ -9,7 +17,13 @@ workflow accepts your evidence for one recording/channel, previews candidate eve
 without replacing the table, and requires deliberate fresh detection to apply it.
 The Automatic workflow below remains available and unchanged.
 
-> ## Before your first detection — measure the recording
+For the 2026-09-12 source update, see [Measurement-quality and acquisition-bandwidth
+advisories](MEASUREMENT_RELIABILITY.md): how to inspect baseline/polarity warnings in
+Results → Summary, enter acquisition metadata in File Info, and distinguish unassessed
+hardware resolution from the existing software-filter flag. This addendum is separate
+from the previously built illustrated PDF until the next documentation build.
+
+> ## Before your first detection — establish the reference
 >
 > Every depth in this app is measured against an **open-pore baseline**, and the window that
 > estimates it is a property of **your pore**, not of the app. Across four reference recordings on
@@ -18,7 +32,7 @@ The Automatic workflow below remains available and unchanged.
 > gating pore that default is **3.3× worse than the estimator it replaced, with every health check
 > reading `ok`.**
 >
-> So: open the **Preprocess** tab, press **"Measure this recording"**, and inspect the proposal before
+> For the Automatic estimator: open the **Preprocess** tab, press **"Measure this recording"**, and inspect the proposal before
 > deciding whether it is appropriate. Only then press **"Use these values"** if you want to apply it,
 > and inspect the updated overlay afterwards. The existing overlay before applying the proposal does
 > not show that proposal's baseline. Measurement usually takes a few seconds — measured 2 s on a 3 M-sample recording
@@ -26,9 +40,9 @@ The Automatic workflow below remains available and unchanged.
 > click landing, not the click failing. §5a explains what the two windows mean and how to read the
 > proposal.
 >
-> The app cannot do this for you — it can only tell you afterwards that nobody did it, which it does,
-> on every table measured at the untouched default. This is the single largest source of wrong
-> numbers in the program, and it is not a bug.
+> Alternatively, use an independently known signed open-pore current or identified open-pore
+> intervals through the recording-specific workflow above. These are explicit user assertions,
+> not automatically verified truth. No health score alone establishes which plateau is open pore.
 
 ## Contents
 
@@ -60,7 +74,7 @@ The Automatic workflow below remains available and unchanged.
 
 The main window has three regions:
 
-- **Left dock — Files.** A tree of open recordings grouped by applied voltage. Each recording
+- **Left dock — File Manager.** A tree of open recordings grouped by applied voltage. Each recording
   expands into its channels; a checkbox next to each channel toggles it in the viewer, and a colour
   swatch sets its trace colour. Dead channels are greyed out.
 - **Centre — the workflow strip** (`Open › Calibrate › Filter › Detect › Curate › Analyze`, showing
@@ -80,8 +94,12 @@ windows. Its analytical pages are **Distributions**, **Distribution summaries**,
 figures**, **Event waveforms**, **Noise spectrum**, **I-V / conductance**, **Voltage dependence**
 and **Subpopulations**. The header keeps the selected recording, result freshness
 (`CURRENT`, `STALE`, or `SAVED SNAPSHOT`), and **Refresh current** visible while you move between
-pages. Pages are created only when first used; switching back to a live page refreshes it before it
-is drawn, while a saved project snapshot is left intact until you explicitly refresh it.
+pages. Pages are created only when first used: a missing tool tab usually means that tool has not
+been opened, not that the feature is absent. Use **Analysis home** to find it. Returning to a live
+page can refresh its inputs or calculation; the opt-in summary/comparison pages only offer current
+sources until **Generate**. A saved project snapshot remains intact until explicit refresh or
+generation. The header names the active recording, but a multi-source plot uses the sources
+checked inside its own **Data** section, not just that header recording.
 
 ### Analysis home: find a tool before opening it
 
@@ -101,6 +119,20 @@ calculations.** **Refresh availability** on the home page is different from **Re
 on an analytical page, which can update that page's result. Noise and pore-characterization
 tools have their own input requirements; event detection is not a prerequisite for opening
 Analysis home or examining a noise spectrum.
+
+**Three different kinds of navigation:** the Inspector's **Analysis** tab contains preparation,
+detection and measurement controls; the separate Explorer has one tab for each opened analytical
+tool; inside a tool, the **Section** dropdown selects **Data**, **Analysis**, **Appearance** or
+**Export** controls. These are not four more tool tabs. Changing Section only changes what is
+visible. For a histogram or fitted overlay choose **Distributions**; for ECDF, survival, box or
+violin choose **Distribution summaries**; for facets, a pair matrix or strip/swarm choose
+**Comparison figures**. The last two are available through Analysis home or the Analysis menu,
+even though they do not have individual buttons in the short launcher row.
+
+Opening a tool is a distinct action from browsing its description: a live Distributions,
+Event waveforms or Noise spectrum view may calculate immediately. On the two opt-in pages,
+**Refresh current** is another way to execute **Generate**, not a read-only availability check.
+Read the displayed source and result state before using it.
 
 ### Guided first analysis
 
@@ -146,8 +178,9 @@ cannot replace a recording that is currently open.
 
 The Inspector's **Analysis** tab is where the work happens, and it has its own four-tab strip:
 **Preprocess** (choose **Signal chain** or **Open-pore baseline** from its section selector — §5a) · **Detection** ·
-**ML detector** · **Manual measurement**. Preprocess configures the signal and reference; Detection
-and ML detector produce results shown in the **shared event-table surface** below the strip.
+**ML** · **Measure**. Preprocess configures the signal and reference; Detection
+and ML produce results shown in **Results → Events** below the strip. Results also has
+**Summary**, **Fits** and **Quality** tabs. Essential/Advanced changes control visibility only.
 Manual measurements have their own measurement list. **Add measurement to list** appends there;
 **Mark selection as missed event** instead adds a reviewed candidate to the active source detector
 table. These are different destinations. When the recording holds more than one detector
@@ -199,7 +232,7 @@ Event waveforms, Event gallery, Reconcile detector results, Event labels, Noise 
 data, figures). **Analysis home** and **Guided first analysis** also have menu entries; the guide
 is available from **Help**.
 
-Closed a dock by accident? Reopen it from **View ▸ Panels ▸ Files / Inspector**.
+Closed a dock by accident? Reopen it from **View ▸ Panels ▸ File Manager / Inspector**.
 
 ---
 
@@ -666,11 +699,9 @@ match the parent recording's.** Cut it wide, or measure on the parent. If you mu
 short segment, read the warning the baseline block posts and compare its `baseline_pA` against the
 parent's.
 
-> **This behaviour is newer than the shipped `NanoScope.app`.** The bundle on the DMG still carries
-> the old answer, which was to substitute a 10 ms block median: on the same synthetic test it
-> reports **0.0094×** the true depth at 3,072 samples — a 100-fold understatement — and it refuses
-> outright below 500 samples with a message naming a `window_s = 0.01 s` you never set. Anything
-> at or above 5,000 samples is identical in both, which is every ordinary recording.
+> **Historical comparison:** an older build substituted a10ms block median and severely
+> understated depth on this fixture. That is not a description of the current installed build.
+> Use **Help → About NanoScope…** to identify the executable you are actually running.
 
 ---
 
@@ -968,6 +999,11 @@ Manual measurements are kept as their own list, separate from the auto-detected 
 
 **Analysis ▸ Event inspector…** opens a window for stepping through detected events one at a time.
 
+Open the Inspector before choosing the target event, or reselect that event after opening it.
+A new Inspector can start at the first event regardless of an earlier table selection. The
+Event spinner is a position in the filtered subset, not `event_id`; verify the ID and sample bounds.
+For the current −700mV gallery table, position147 in All corresponds to ID146.
+
 - **Waveform.** The current around the event in the recorded **measurement domain**, replaying
   conditioning and low-pass filtering where recorded. The event region is shaded; the baseline
   and equivalent amplitude level use that same domain. The readout distinguishes original median
@@ -1172,7 +1208,7 @@ Four things to know:
 
 The history keeps up to 30 steps **per event table**, within a 128 MiB budget for the whole
 session, and is cleared when the recording closes or a project is opened. When the ceiling evicts
-steps, the Edit menu says so by name (*"Undo history for “<name>” is at its 30-step ceiling — N of
+steps, the Edit menu says so by name (*"Undo history for “&lt;name&gt;” is at its 30-step ceiling — N of
 your steps have been evicted"*) instead of showing the never-edited wording. The per-table depth
 matters when several recordings are open: curating one recording no longer uses up another's
 history, and undoing on one no longer ends the other's redo branch. If a step is ever dropped
@@ -1314,12 +1350,41 @@ and Reconciled tables are offered separately, segments included — plus your **
 **Use accepted events only** is ticked by default; untick it to plot the rejected rows alongside the
 kept ones.
 
-The page opens in a compact beginner view: **Data** shows source selection and the essential plot
-recipe. The fixed toolbar keeps **Plot / Apply** and **Export** reachable. Use the **Section** picker
-for the less frequent **Analysis** (fit, PCA, clustering and axis limits), **Appearance**, and
-**Export** controls; only the chosen section is expanded. A short **Result** and first actionable
+The page opens with **Data** showing source selection and the plot recipe. The fixed toolbar
+keeps **Plot / Apply** and **Export ▾** reachable. Use the **Section** dropdown for **Analysis**
+(plot/fit controls, PCA, clustering and axis limits), **Appearance**, and **Export**; only the chosen
+section is visible. These are control sections within Distributions, not separate Explorer tabs.
+A short **Result** and first actionable
 warning stay under the canvas. Expand **Details — methods and provenance** when you need the full
 audit trail.
+
+### First use: sources, controls, then commit
+
+1. Choose **Section → Data**. Check the source rows you intend to analyze and verify their
+   recording, channel and detector identity. A highlighted row is only the row selected for
+   editing its name or source colour; its checkbox decides whether its events enter the plot.
+2. Choose **Histogram**, **Scatter**, **KDE (density)** or **PCA** and the appropriate measurement
+   columns. Check **Use accepted events only**, units and normalization deliberately.
+3. Press **Plot / Apply** in the fixed toolbar. The local **Plot** button and the **Apply fit**
+   buttons perform the same commit: all pending source, plot-type, column and fit proposals are
+   applied together. Do not assume Apply fit commits only the fit while leaving a proposed source
+   change unapplied. A **●** indicates a pending proposal; the displayed picture may still be the
+   previous result.
+4. Read **Result** and expand **Details — methods and provenance**. Only then choose
+   **Section → Appearance** to style the figure, and export or save a named snapshot.
+
+A live Distributions page normally draws when first populated. Its **Refresh** button in Data,
+and the Explorer's **Refresh current**, repull stored event/manual sources and can redraw; they
+are not just list updates. Existing checked sources are retained where possible, but previous
+PCA/clustering results are cleared when new source tables are supplied. Refreshing a saved
+analytical snapshot explicitly returns that view to current inputs. Save a Figure Library copy
+first if you need to retain the old picture and numbers.
+
+Not every numerical control waits for Plot: bin count, normalization and some log/geometry
+controls redraw an already active plot. Source, plot-type, column and fit proposals use the
+explicit commit described above. Appearance-only edits restyle the existing result without
+running those analyses or applying pending proposals. After changing any numerical control,
+inspect the result and its state before assuming the canvas is unchanged.
 
 ### Comparing two of anything
 
@@ -1329,7 +1394,7 @@ each. That is the two-pore comparison and the two-segment comparison; a segment 
 to its parent still gets its own row, because sources are identified by their stable project key
 rather than by their display name.
 
-Three things happen automatically so the comparison actually means something:
+Three behaviors help organize the comparison; none establishes scientific comparability:
 
 - **Shared bins + normalization.** All drawn sources use ONE set of bin edges, and the y quantity is
   selectable — **count**, **density** or **probability per bin**. It switches to
@@ -1338,9 +1403,12 @@ Three things happen automatically so the comparison actually means something:
        drawn area was 1000 on the default ms axis and 23.3 under the shipped log-x dwell
        template, where no constant factor can repair it. The y axis now names the unit —
        `density (1/s)`, `density (1/pA)` — and Details says where the drawn area is not 1. -->
-  *density* as soon as a second source is shown, because overlaid raw counts from a 5000-event and
-  a 200-event recording are two decades apart and the short one vanishes. (Pick a normalization
-  yourself and your choice sticks.)
+  *density* as soon as a second source is shown, unless you have already selected a normalization.
+  This removes the simple event-count scaling that would otherwise differ by 25-fold between
+  5,000-event and 200-event recordings of identical shape. It does not correct calibration,
+  detection efficiency, acquisition duration or sampling bias. Density is counts divided by
+  `n × bin width` in the column's stored unit; its integral is one in that unit, not necessarily
+  on rescaled millisecond ticks or a logarithmic display. Check the printed y-axis units.
 - **One fit per source.** With a fit enabled each source is fit **separately, using its own
   detector's resolution** — its own `min_dwell_s`, its own filter-limited exclusion, its own
   right-truncation state. Two sources are never pooled into one number, and one recording's
@@ -1350,29 +1418,31 @@ Three things happen automatically so the comparison actually means something:
 - **Colour has one owner.** With more than one source drawn, colour means **source**, and the
   cluster split is disabled (and says why). With a single source, colour means **cluster**.
 
-> **Two recordings on one axis are not automatically comparable, and the window says so once.**
-> Before it draws, it asks one question about the ticked sources and prints one verdict: are they in
-> the same **merge state**; were they detected under the same **baseline window**; and — for an
-> absolute-current column (`depth_pA`, `amplitude`, `ecd_pA_s`, …) — under the same **current
-> calibration**? Each failing half is spelled out in **Details**, most fundamental first, and the
-> plot's own title carries `⚠ NOT COMPARABLE across N sources: <columns>` — in the title because the
-> title is the only thing **Export current figure…** keeps.
+> **Two recordings on one axis are not automatically comparable.** The app checks tracked
+> conditions such as merge state, baseline/reference settings, signal domain and current
+> calibration for the measurements being drawn. Read the short warning below the canvas, then
+> expand **Details — methods and provenance** for the full comparison verdict. Warnings are
+> deliberately not printed in the plot title or artwork. Exporting a clean picture does not
+> resolve those warnings; retain the methods and caveats in your figure legend, project or bundle.
 >
-> The advice is reconciled rather than stacked. `frac_depth` (dI/I₀) survives a *gain* disagreement,
-> so it is offered then. But dI/I₀ is `depth_pA / |baseline_pA|`, so a *baseline* disagreement makes
-> it exactly as incomparable as the depth, and it is dropped from the sentence — what is left is
-> `dwell_s, or a count`. On this bench, re-detecting the −700 mV apoferritin recording under the
-> −600 mV recording's baseline windows moved its median `frac_depth` by 11.3 %.
+> Histogram density/probability normalization only changes the count scale. Fractional depth
+> `depth_pA / |baseline_pA|` can cancel a common multiplicative gain applied consistently to depth
+> and reference, but it does not rescue an incorrect open-pore reference, inconsistent offsets,
+> different signal domains or detection/curation bias. Do not treat the app's suggested alternative
+> axis as a calibration guarantee. In the historical apo example, re-detecting the −700 mV
+> recording using the −600 mV recording's baseline windows moved median fractional depth by
+> 11.3%; that sensitivity is a reason to inspect each recording, not to share its settings blindly.
 
 ### Plot types
 
 - **Histogram** — any numeric column, adjustable bins, linear/log x, linear/log y, a **Normalize**
   choice (`count` / `density` / `probability per bin`), a **Colour by** choice
   (`None` / `Cluster`), and an optional **fit overlay**. Five families: **exponential** (the classic
-  escape model — monotonic, cannot peak), **gamma (peaked)** and **inverse-gaussian (first
+  escape model — monotonic linear-time density, with no interior mode), **gamma (peaked)** and **inverse-gaussian (first
   passage)** (densities *with* a mode, for a dwell histogram that peaks away from zero),
-  **exponential + gamma (bimodal)**, and **gaussian-mixture**. The three dwell families are all
-  truncated at the detector's `min_dwell_s`, so their BIC values compare directly. Choosing a family is a **proposal**: press
+  **exponential + gamma (bimodal)**, and **gaussian-mixture**. The four dwell families are all
+  truncated at the detector's `min_dwell_s`; compare BIC only over the same fitted observations and range.
+  A peak in log-spaced-bin counts alone does not rule out an exponential. Choosing a family is a **proposal**: press
   **Apply fit** beside the combo to draw it (the button carries a ● until you do). It used to fit and
   draw the moment you picked, so walking the list merely to read the options ran five maximisations,
   one of them a nine-second optimisation. Beside the
@@ -1465,10 +1535,12 @@ tool. Clustering runs on the **first ticked** source.
 
 ### A consistent plotting workflow
 
-All analytical pages use **Data → Analysis → Appearance → Export**. The section selector only
-changes which controls are visible; it does not change their values or run an analysis. The
-primary **Analyze**, **Plot / Apply** or **Apply fit** action stays reachable independently of
-appearance controls. Where a report consumes an already-computed result, its Data/Analysis
+Analytical pages use the **Section** dropdown for **Data → Analysis → Appearance → Export**.
+The selector only changes which controls are visible; it does not change their values or run an
+analysis. It is distinct from the Explorer's tool tabs. The primary **Analyze**, **Generate** or
+**Plot / Apply** action stays reachable independently of appearance controls. In Distributions,
+**Apply fit** is another entry point to the same full Plot / Apply commit, not a separate fit-only
+commit. Where a report consumes an already-computed result, its Data/Analysis
 sections explain the source and route an explicit new run to the existing analysis dialog.
 
 The shared Appearance controls include typography, titles/axis labels, canvas/grid, colours,
@@ -1497,7 +1569,8 @@ The library is separate from the Event Gallery: it stores figures, not curated e
 
 Open **Analysis ▸ Figure Library…** without opening any analytical page. Selecting a thumbnail
 does not rerun analysis, even if the recording is missing. **Duplicate** makes an independent
-entry; **Rename** changes only its name. **Export saved figure…** offers the same publication
+frozen entry, not an editable analytical page. Reopen the appropriate Analysis tool and generate
+from stored event data for an editable variant. **Rename** changes only its name. **Export saved figure…** offers the same publication
 sizing/preview for PNG, SVG and PDF. **Save figure bundle…** exports its complete frozen data and
 configuration; **Reveal file** selects its most recent exported file in Finder. These actions do
 not overwrite another library entry or replace its saved numbers with live results.
@@ -1598,6 +1671,12 @@ Open **Analysis ▸ Distribution summaries…** to compare existing measurements
 the established histogram, fitting or detection workflows. This page is opt-in: opening it, changing
 its controls or returning to its tab does not calculate a new result.
 
+You can also find it through **Analysis home → Distribution summaries → Open Distribution
+summaries**. It is not the Histogram option inside Distributions. Use the page's **Section**
+dropdown to alternate between the following control groups. Its **Generate** button and the
+Explorer's **Refresh current** both calculate a new summary from current inputs; the latter is
+not simply refreshing the list. Unapplied controls leave the previous figure visible.
+
 1. In **Data**, check the desired sources. Each stays a separate distribution; values are not pooled.
    **Accepted events only** is on by default. Choose dwell time, median depth, fractional depth or
    the explicitly selected amplitude. Values keep their recorded units and measurement domain.
@@ -1649,6 +1728,12 @@ and [Matplotlib's 1.5-IQR box-plot convention](https://matplotlib.org/stable/api
 
 Open **Analysis ▸ Comparison figures…**. This opt-in page displays measurements already stored
 in event tables; opening it never detects events, recalibrates currents or fits a model.
+
+The equivalent catalog route is **Analysis home → Comparison figures → Open Comparison figures**.
+The **Figure** choice is under **Section → Data**; its detailed controls are under
+**Section → Analysis**. Opening or returning to this page does not generate new comparison
+geometry. Press **Generate** deliberately; **Refresh current** in the Explorer executes the same
+generation path. Checkmarked sources are included; simply highlighting a row does not include it.
 
 1. In **Data**, check the recordings to compare and choose the figure type. **Accepted events
    only** starts enabled. Sources remain separately identified, even when their names or event
@@ -2029,13 +2114,22 @@ one Return meant Replace.
 
 ## 12a. A complete worked example
 
-The manual's **Walkthrough 5 — ML detection, replicated step by step** reproduces a full analysis
+The manual's historical **Walkthrough 5 — ML detection, replicated step by step** records a full analysis
 on the three apo-ferritin reference recordings — open-pore measurement, ML detection with a Keras
 student model, scatter, KDE, histograms with fits, PSD, PCA and GMM/t-SNE/UMAP substructure — with
 the exact numbers this bench produced, screenshots of every surface, and the three traps a
 first-time user hits (wait for the proposal before Apply; detect before switching recordings; read
-the fit's KS verdict in Details before quoting its parameters). Follow it to verify your install
-end to end.
+the fit's KS verdict in Details before quoting its parameters). Its model, preprocessing and
+dependencies must match before its counts are treated as replication checks. The current local
+environment records a TensorFlow/Keras requirement mismatch; this manual refresh does not resolve
+or validate those ML dependencies.
+
+The updated manual also gives a current Schmitt apo-ferritin recipe with recording-specific
+Automatic proposals and explicit10ms post-detection merging:881/239/984 accepted events at
+−500/−600/−700mV, respectively. Its nine native population figures, editable amplitude example,
+and generator-assisted reference examples distinguish numerical replication from seven custom
+Matplotlib layouts. These were generated by current engines/offscreen renderers, not a desktop
+GUI benchmark; retain the exact input files and unverified instrument-scale qualification.
 
 ## 13. Keyboard shortcuts
 
@@ -2076,14 +2170,26 @@ end to end.
 
 ## 14. Known limitations & caveats
 
+- **Current event-count heatmap display limitation:** the Event waveforms image can transpose
+  bin coordinates relative to the correctly indexed counts/marginals. Do not read dwell-depth
+  coordinates from it until a verified fix is installed. Use numerical tables, scatter or the
+  validated histogram. This is distinct from KDE probability density. Documentation does not
+  repair the display code.
+- **Background sub-state fits use frozen inputs.** Cancellation or a changed source, event table,
+  calibration, sample rate, parameters or provenance can prevent a pending fit being installed.
+  Review the message; do not assume a finished worker implies a current result.
+- **Reference/filter restore safety is deliberate.** A malformed or missing applied reference
+  recipe blocks analysis rather than silently using Automatic. An unreplayable stored filter
+  does not silently remeasure raw samples. Resolve the reported source problem; original
+  measurements and curation remain the record of the saved analysis.
+
 - **Reconciliation Preview currently runs synchronously.** The legal candidate and edge caps keep
   ordinary previews bounded, but there is not yet a truthful mid-computation Cancel button. Review
   the source sizes before reconciling an unusually dense detector output.
 
-- **No open-pore baseline default can be right, and no code change can make one.** The correct
-  window is a property of the pore. The app ships a floor, warns when a table was measured at it,
-  and cannot measure the recording for you. **Press "Measure this recording" (§5a) before you trust
-  a depth.** This is the largest item on this list.
+- **No universal reference choice.** For Automatic, inspect a recording-specific proposal;
+  for supplied modes, document the independent current or identified intervals. Neither a
+  passing health check nor user confirmation certifies physical open-pore identity.
 - **An event sitting within one base window of a genuine conductance step gets an overstated depth,
   silently.** Measured on a synthetic gating pore: 205 pA against a true 120 pA (1.71×), with an
   empty `flag` and every one of the nine Baseline health checks reading `ok`. Every gating pore has
@@ -2096,11 +2202,11 @@ end to end.
   60 pA): a baseline of 60.04 pA, a median ΔI/I₀ of 0.665 against a true 0.400, and the events
   reported as "enhancement"; 90 % and 95 % blocked read the same way. A recording that visits two
   conductance levels raises a standing advisory naming both levels, how much of the recording each
-  holds, and the ΔI/I₀ each one implies — every depth is the same number either way, and only ΔI/I₀
-  moves. The warning is the whole defence, because the two readings are the same samples:
-  **compare the baseline with the open-pore current you know for this pore** — the current just
-  after the voltage step, or an unclogged stretch — and analyse that stretch instead if the two
-  disagree.
+  holds, and the implications for ΔI/I₀. These are interpretations, not a certification of the
+  open pore. A deliberate new reference/detector run can change noise, polarity, boundaries,
+  depth and counts. **Compare with the current you independently know for this recording**;
+  supported Schmitt/CUSUM workflows can use that signed current or selected open-pore intervals.
+  Preview first, then Detect explicitly and retain the previous project for comparison.
 - **The false-positive *rate* is not estimated at all** (§6). The AAFT surrogate is not a valid null
   on a real pore, so the control refuses a percentage and reports the event-free count instead.
   Discard any FDR percentage from an older build rather than rescaling it. The lower bound it does

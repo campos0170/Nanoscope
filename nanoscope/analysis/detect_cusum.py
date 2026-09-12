@@ -102,6 +102,7 @@ from .detect import (
 )
 from .events import empty_df, n_clipped_boundary, span_provenance
 from .filters import lowpass, measure_rise_time, noise_rms
+from .measurement_quality import build_measurement_quality
 
 try:  # pragma: no cover - packaging detail
     from importlib.metadata import version as _pkg_version
@@ -876,7 +877,9 @@ def detect_events_cusum(
     if starts.size == 0:
         provenance["n_events"] = 0
         provenance["n_filter_limited"] = 0
-        return empty_df(), provenance
+        df = empty_df()
+        provenance["measurement_quality"] = build_measurement_quality(cur, base, df, fs, provenance)
+        return df, provenance
 
     # `characterize` is the app's SINGLE writer of every event row and the sole owner
     # of `flag` and `accepted`. This detector computes no depth, no dwell, no ECD --
@@ -907,4 +910,5 @@ def detect_events_cusum(
     provenance["n_clipped_boundary"] = n_clipped_boundary(df)
     provenance["n_events"] = int(len(df))
     provenance["n_filter_limited"] = int(df["filter_limited"].sum())
+    provenance["measurement_quality"] = build_measurement_quality(cur, base, df, fs, provenance)
     return df, provenance

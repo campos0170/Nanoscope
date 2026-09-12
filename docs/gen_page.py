@@ -33,6 +33,8 @@ from __future__ import annotations
 import argparse
 import base64
 import html
+import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -204,7 +206,7 @@ footer{border-top:1px solid var(--rule);padding:26px 0 60px;color:var(--ink-3);f
     --trace:#14538c; --trace-soft:#f2f6fa; --span:#8a5200; --span-soft:#fbf6ee;
     --checked:#005c46; --checked-soft:#f0f6f4;
   }
-  @page{ margin:16mm 14mm; }
+  @page{ size:A4; margin:16mm 14mm; @bottom-right{content:counter(page);font:8pt sans-serif;color:#555} }
   body{font-size:10.5pt; line-height:1.5; background:#fff}
   nav.rail{display:none}
   .wrap{display:block; max-width:none; padding:0}
@@ -221,7 +223,7 @@ footer{border-top:1px solid var(--rule);padding:26px 0 60px;color:var(--ink-3);f
   h3,h4{break-after:avoid}
   p,li{orphans:3; widows:3}
   .shot{break-inside:avoid; margin:12pt 0}
-  .shot img{max-width:100%; border-color:#ccc}
+  .shot img{max-width:100%; max-height:190mm; object-fit:contain; border-color:#ccc}
   .shot figcaption{font-size:8.5pt}
   .callout,.check,.readout,.settings{break-inside:avoid}
   .readout{font-size:8pt; white-space:pre-wrap}
@@ -330,6 +332,8 @@ def _figures(body: str, images: dict[str, str]) -> str:
             missing.append(src)
             return m.group(0)
         caption = (m.group(2) or attrs.get("alt", "")).strip()
+        if not stem.startswith("current_") and "historical" not in caption.lower():
+            caption = "<b>Historical interface illustration.</b> " + caption
         return (f'<figure class="shot" data-img="{stem}">'
                 f'<img src="{images[stem]}" alt="" loading="lazy">'
                 f"<figcaption>{caption}</figcaption></figure>")
@@ -470,7 +474,7 @@ def build_page() -> str:
 <p>NanoScope 0.1.0 &middot; This manual documents {total} controls across {len(ref_toc)} areas.</p>
 {prov}
 <p>Built from <code>docs/manual-markdown/manual.md</code> and <code>docs/inventory.json</code> by
-<code>docs/gen_page.py</code>. {len(images)} screenshots are embedded in this file; it loads nothing
+<code>docs/gen_page.py</code>. {body.count('<img ')} illustrations are embedded in this file; it loads nothing
 from the network.</p>
 </footer>
 </main></div>
@@ -528,17 +532,17 @@ def build_pdf(html_path: Path, pdf_path: Path, wait_s: float = 420) -> bool:
     if not CHROME.exists():
         print(f"! no Chrome at {CHROME} — PDF not rebuilt, the existing one is stale")
         return False
-    pdf_path.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as profile:
+        temporary_pdf = Path(profile) / 'manual.pdf'
         cmd = [str(CHROME), "--headless=new", "--disable-gpu", "--no-first-run",
                f"--user-data-dir={profile}", "--no-pdf-header-footer",
                "--virtual-time-budget=120000",
-               f"--print-to-pdf={pdf_path}", html_path.as_uri()]
+               f"--print-to-pdf={temporary_pdf}", html_path.as_uri()]
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             last, stable, t0 = -1, 0, time.time()
             while time.time() - t0 < wait_s and proc.poll() is None:
-                size = pdf_path.stat().st_size if pdf_path.exists() else 0
+                size = temporary_pdf.stat().st_size if temporary_pdf.exists() else 0
                 stable = stable + 1 if size and size == last else 0
                 last = size
                 if stable >= 3:
@@ -551,9 +555,13 @@ def build_pdf(html_path: Path, pdf_path: Path, wait_s: float = 420) -> bool:
                     proc.wait(10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-    if not pdf_path.exists() or pdf_path.stat().st_size < 10_000:
-        print("! Chrome did not produce a PDF")
-        return False
+        if not temporary_pdf.exists() or temporary_pdf.stat().st_size < 10_000:
+            print("! Chrome did not produce a PDF; previous PDF retained")
+            return False
+        # Replace only a successfully rendered artifact, never remove the old manual first.
+        staged = pdf_path.with_suffix('.pdf.pending')
+        shutil.copyfile(temporary_pdf, staged)
+        staged.replace(pdf_path)
     return True
 
 
@@ -564,6 +572,11 @@ def build_zip(zip_path: Path) -> None:
         z.write(OUT_HTML_COPY, f"{root}/manual.html")
         if OUT_PDF.exists():
             z.write(OUT_PDF, f"{root}/nanoscope-manual.pdf")
+        for name in ('USER_GUIDE.md', 'OPEN_PORE_REFERENCE.md', 'MANUAL_REVISION_2026-09-11.md',
+                     'manual-current-captures.json', 'manual-plot-navigation-captures.json',
+                     'manual-build-manifest.json', 'inventory.json'):
+            if (HERE / name).is_file():
+                z.write(HERE / name, f'{root}/{name}')
         for p in sorted(IMG_DIR.iterdir()):
             if p.suffix.lower() in MIME and p.is_file():
                 z.write(p, f"{root}/images/{p.name}")
@@ -573,6 +586,10 @@ def build_zip(zip_path: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--pdf", action="store_true", help="also print a PDF with headless Chrome")
+    ap.add_argument("--pdf-engine", choices=('chrome','reportlab'), default='chrome',
+                    help="PDF renderer; ReportLab works without a browser")
+    ap.add_argument("--pdf-python", default=sys.executable,
+                    help="Python with ReportLab, Pillow and pypdf for the offline PDF renderer")
     ap.add_argument("--zip", action="store_true", help="also rebuild the distribution zip")
     args = ap.parse_args()
 
@@ -586,10 +603,25 @@ def main() -> None:
     print(f"wrote {OUT_HTML.relative_to(HERE.parent)} and "
           f"{OUT_HTML_COPY.relative_to(HERE.parent)}  ({mb:.2f} MB, identical copies)")
 
-    if args.pdf and build_pdf(OUT_HTML, OUT_PDF):
+    if args.pdf:
+        if args.pdf_engine=='reportlab':
+            subprocess.run([args.pdf_python,str(HERE/'render_manual_pdf.py'),
+                            str(OUT_HTML),str(OUT_PDF)],check=True)
+        elif not build_pdf(OUT_HTML, OUT_PDF):
+            raise SystemExit('PDF build failed; previous PDF retained. Use --pdf-engine reportlab '
+                             '--pdf-python PATH_TO_PYTHON_WITH_REPORTLAB for offline rendering.')
         print(f"wrote {OUT_PDF.relative_to(HERE.parent)}  "
               f"({OUT_PDF.stat().st_size / 1e6:.2f} MB)")
+    manifest = dict(edition='2026-09-11', source_revision='703a96a', pdf_rebuilt=bool(args.pdf),
+                    pdf_engine=args.pdf_engine if args.pdf else None,
+                    checks=verify(page), sha256={})
+    for path in (MD_FILE, gen_manual.INVENTORY, HERE/'USER_GUIDE.md', OUT_HTML, OUT_HTML_COPY, OUT_PDF):
+        if path.exists():
+            manifest['sha256'][str(path.relative_to(HERE))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (HERE/'manual-build-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     if args.zip:
+        if not args.pdf:
+            raise SystemExit('Use --pdf --zip together so the bundle cannot contain a stale PDF.')
         build_zip(OUT_ZIP)
         print(f"wrote {OUT_ZIP.relative_to(HERE.parent)}  "
               f"({OUT_ZIP.stat().st_size / 1e6:.2f} MB)")
