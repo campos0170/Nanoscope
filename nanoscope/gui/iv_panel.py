@@ -40,11 +40,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
 from ..analysis import iv, stats
 from ..core.session import Session
+from .worker_thread import DEFAULT_JOIN_MS, JOB_NONE, retire_worker_thread, start_worker_thread
 
 #: Free parameters in the I-V line: (slope, intercept). What
 #: :func:`nanoscope.analysis.stats.r2_dof_tag` subtracts from the recording count to
@@ -106,6 +107,53 @@ def _fmt_q(value: float, units: str) -> str:
     return f"{value:.4g} {units}" if units else f"{value:.4g} (units unknown)"
 
 
+class _IVGatherWorker(QtCore.QObject):
+    """Warm the END-003 median memo off the GUI thread, once, for one session.
+
+    B22: the FIRST ``iv.iv_points`` / ``iv.iv_exclusions`` call for a channel runs a
+    whole-channel ``np.median`` (the memo is cold), synchronously, with no busy
+    cursor -- ~300 ms on the owner's 12.5 M-sample apo-ferritin ABF, which
+    :meth:`IVWindow.__init__` used to pay unconditionally.
+
+    NEVER HOLDS A LIVE ``Session``. An earlier version of this worker took the
+    session itself and called ``iv.iv_points``/``iv.iv_exclusions`` directly on the
+    background thread -- both of which read ``Session.calibrated`` (an unlocked
+    ``LruArrayCache``) and the memo's own key-building, from a thread other than the
+    one ``Session`` documents as its ONLY mutator (``core/session.py``: "mutated on
+    the Qt main thread ONLY... No locks anywhere"). Every other background worker in
+    this codebase (``AnalysisController``, ``BatchDetectController``) resolves
+    ``Session`` data on the GUI thread first and hands the worker only frozen value
+    objects; this worker follows the same rule. It receives already-resolved
+    ``(key, array, units)`` triples (:func:`iv.collect_cold_channel_arrays`, called
+    by :meth:`IVWindow._refresh_maybe_async` BEFORE this worker starts) and computes
+    only plain ``np.median`` over them (:func:`iv.compute_channel_medians`) --
+    nothing it touches is shared with the GUI thread while it runs. The caller
+    (:meth:`IVWindow._on_gather_ready`) installs the result into the memo
+    (:func:`iv.install_channel_medians`) and re-reads the session with a plain
+    :meth:`IVWindow.refresh`, on the GUI thread, exactly as before.
+
+    No cancellation: unlike the fit-note batches in ``plots_panel.py`` this mirrors,
+    a single ``np.median`` cannot be interrupted mid-call, so there is nothing to
+    poll. A superseded result is simply left uninstalled by the sender guard in
+    :meth:`IVWindow._on_gather_ready`.
+    """
+
+    done = QtCore.Signal(object)   # (results dict, None) on success, or (None, exception)
+
+    def __init__(self, items: list[tuple[tuple, np.ndarray, float, float, str]]) -> None:
+        super().__init__()
+        self._items = items
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            results = iv.compute_channel_medians(self._items)
+        except Exception as exc:  # noqa: BLE001 -- handed to the GUI thread, never crashes the worker
+            self.done.emit((None, exc))
+            return
+        self.done.emit((results, None))
+
+
 class IVWindow(QtWidgets.QMainWindow):
     """Scatter open-pore current vs applied voltage and fit the pore conductance.
 
@@ -135,10 +183,12 @@ class IVWindow(QtWidgets.QMainWindow):
         self._fit_item: pg.PlotDataItem | None = None
         self._message_item: pg.TextItem | None = None
         self._appearance = PlotAppearance()
+        self._gather_worker: _IVGatherWorker | None = None
+        self._gather_thread: QtCore.QThread | None = None
 
         self._build_ui()
         if not defer_initial_refresh:
-            self.refresh()
+            self._refresh_maybe_async()
 
     # -- construction ----------------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -268,6 +318,92 @@ class IVWindow(QtWidgets.QMainWindow):
         """Refresh from the button, then notify project persistence exactly once."""
         self.refresh()
         self.workspaceChanged.emit()
+
+    def _refresh_maybe_async(self) -> None:
+        """The constructor's initial gather: :meth:`refresh`, unless it would stall.
+
+        B22: opening this window for the first time on a large recording ran
+        :meth:`refresh` -- and therefore a whole-channel ``np.median`` over the
+        current AND voltage channel -- SYNCHRONOUSLY on the GUI thread, with no busy
+        cursor or status text. ``iv.pending_cold_channel_samples`` is metadata-only
+        (see its docstring), so asking it never itself computes a median; below the
+        threshold this runs exactly as it always has -- every synthetic-data test in
+        this codebase stays on this branch, unchanged. Above it, a plain busy message
+        is shown immediately and the same two gathers run on a background thread
+        instead (:class:`_IVGatherWorker`); :meth:`_on_gather_ready` re-runs
+        :meth:`refresh` once that thread reports the memo warm, which is then cheap
+        (END-003) and produces numbers identical to a synchronous first refresh.
+
+        Only the CONSTRUCTOR'S initial gather is gated this way -- every other call
+        to :meth:`refresh` (the Refresh button, MainWindow's curation/workspace
+        callbacks, direct calls from tests) keeps its exact synchronous contract,
+        and none of them may overlap a gather already in flight -- the Refresh
+        button is disabled for the duration, matching the disabled-while-busy
+        pattern every other long-running action in this app already follows.
+
+        ``iv.collect_cold_channel_arrays`` -- the ONE ``Session``-touching call this
+        whole path makes -- runs HERE, on the GUI thread, before the worker starts
+        (see its docstring and :class:`_IVGatherWorker`'s for why this split exists).
+        """
+        if iv.pending_cold_channel_samples(self._session) <= iv.IV_ASYNC_SAMPLE_THRESHOLD:
+            self.refresh()
+            return
+        items = iv.collect_cold_channel_arrays(self._session)
+        self._message("Gathering I-V points from the open recordings…")
+        self._refresh_btn.setEnabled(False)
+        worker = _IVGatherWorker(items)
+        worker.done.connect(self._on_gather_ready)
+        self._gather_worker = worker
+        self._gather_thread = start_worker_thread(
+            worker, domain=JOB_NONE, label="iv-gather", owner=self)
+
+    @QtCore.Slot(object)
+    def _on_gather_ready(self, outcome: object) -> None:
+        """Install the background gather's medians, then a plain refresh.
+
+        The sender guard matches every other worker in this codebase
+        (``AnalysisController._on_finished``, ``plots_panel._NoteWorker``'s handler):
+        a superseded worker's ``done`` may already be queued on this thread's event
+        loop, and that must not clobber whatever a newer call already installed.
+
+        ``outcome`` is ``(results, None)`` on success or ``(None, exception)`` --
+        either way this re-runs :meth:`refresh` on the GUI thread, so the numbers
+        shown are exactly what a synchronous ``refresh()`` produces from the CURRENT
+        session (which may have changed while the gather was in flight) and a
+        genuine refusal (e.g. an all-non-finite channel) surfaces exactly as it
+        always has, just one gather later than before instead of never.
+        """
+        if self._gather_worker is None or self.sender() is not self._gather_worker:
+            return
+        worker, thread = self._gather_worker, self._gather_thread
+        self._gather_worker = self._gather_thread = None
+        retire_worker_thread(worker, thread, wait_ms=DEFAULT_JOIN_MS)
+        results, _error = outcome
+        if results:
+            iv.install_channel_medians(results)
+        self._refresh_btn.setEnabled(True)
+        self.refresh()
+
+    def abort(self) -> None:
+        """Retire an in-flight background gather without installing its result.
+
+        Discovered and called automatically by ``MainWindow``'s teardown sweep
+        (``_stop_protocols``: "``abort`` is asked of anything that implements it,
+        widget or not, window or not") -- the same mechanism every other
+        background-worker-holding surface in this app relies on, so this window
+        never needs its own ``closeEvent`` override to avoid outliving its worker.
+        A no-op when no gather is running.
+        """
+        if self._gather_worker is None:
+            return
+        worker, thread = self._gather_worker, self._gather_thread
+        self._gather_worker = self._gather_thread = None
+        try:
+            worker.done.disconnect(self._on_gather_ready)
+        except (RuntimeError, TypeError):
+            pass
+        retire_worker_thread(worker, thread, wait_ms=DEFAULT_JOIN_MS)
+        self._refresh_btn.setEnabled(True)
 
     def _render_workspace_snapshot(self) -> None:
         """Draw already-restored values without gathering or fitting them again.

@@ -71,6 +71,11 @@ __all__ = [
     "iv_fit",
     "channel_median_stats",
     "forget_channel_medians",
+    "pending_cold_channel_samples",
+    "collect_cold_channel_arrays",
+    "compute_channel_medians",
+    "install_channel_medians",
+    "IV_ASYNC_SAMPLE_THRESHOLD",
 ]
 
 # Current unit -> amps, voltage unit -> volts. The ONLY conversion tables in the
@@ -755,6 +760,161 @@ def iv_points(session: "Session") -> list[IVPoint]:
         if pt is not None:
             out.append(pt)
     return out
+
+
+#: Above this many samples still pending a FRESH ``np.median`` (see
+#: :func:`pending_cold_channel_samples`), the next gather is treated as expensive
+#: enough to be worth moving off the GUI thread rather than run inline (B22).
+#: Comfortably above every synthetic-data fixture in this codebase's test suite
+#: (a few thousand to a few tens of thousands of samples) and comfortably below a
+#: real recording (millions) -- the exact gap :func:`open_pore_current`'s docstring
+#: and END-003 describe.
+IV_ASYNC_SAMPLE_THRESHOLD = 500_000
+
+
+def _cold_channel_keys(session: "Session") -> list[tuple[str, str, int]]:
+    """``[(kind, doc_id, ch), ...]`` for every open channel the next gather would
+    FRESHLY median -- the shared enumeration :func:`pending_cold_channel_samples`
+    and :func:`collect_cold_channel_arrays` both build on, so the two can never
+    disagree about which channels are cold."""
+    out: list[tuple[str, str, int]] = []
+    for doc in session.documents():
+        if not isinstance(doc, TraceDocument):
+            continue
+        doc_id = doc.doc_id
+        cur_ch = _current_channel(session, doc_id)
+        if cur_ch is not None:
+            key = _channel_key("i_open", session, doc_id, cur_ch)
+            if key is not None and key not in _MEDIAN_MEMO:
+                out.append(("i_open", doc_id, cur_ch))
+        volt_info = _voltage_channel(session, doc_id)
+        if volt_info is not None and not volt_info.is_dead:
+            key = _channel_key("v_med", session, doc_id, volt_info.index)
+            if key is not None and key not in _MEDIAN_MEMO:
+                out.append(("v_med", doc_id, volt_info.index))
+    return out
+
+
+def pending_cold_channel_samples(session: "Session") -> int:
+    """Total sample count of channels the next gather would FRESHLY median.
+
+    Metadata-only -- like ``MainWindow._has_iv_data``'s gate -- so asking this never
+    itself computes a median: it resolves each open trace's current and voltage
+    channel with the exact two resolvers :func:`_iv_gate` uses
+    (:func:`_current_channel`, :func:`_voltage_channel`) and checks the END-003 memo's
+    key set, without calling :func:`np.median`. A caller (:class:`~nanoscope.gui.iv_panel.IVWindow`)
+    reads this to decide whether the next :func:`iv_points` / :func:`iv_exclusions`
+    call is cheap -- every needed channel already memoised, or small enough not to
+    matter -- or would pay a first-miss ``np.median`` over a whole channel, which is
+    what B22 found running SYNCHRONOUSLY on the GUI thread with no busy cursor
+    (~300 ms on the owner's 12.5 M-sample apo-ferritin ABF).
+    """
+    total = 0
+    for kind, doc_id, ch in _cold_channel_keys(session):
+        key = _channel_key(kind, session, doc_id, ch)
+        if key is not None:
+            total += key[-1]      # n_samples is the key's last field
+    return total
+
+
+def collect_cold_channel_arrays(
+    session: "Session",
+) -> list[tuple[tuple, np.ndarray, float, float, str]]:
+    """GUI-THREAD ONLY, and DELIBERATELY CHEAP: resolve just enough to let a
+    background thread compute a channel's calibrated median WITHOUT touching
+    ``Session`` again.
+
+    Every call this makes -- ``session.documents()``, ``_current_channel``,
+    ``_voltage_channel``, ``session.document``, ``session.calibration`` -- is a
+    ``Session`` read, and ``Session`` documents itself as mutated and read on the Qt
+    main thread ONLY (``core/session.py``: "No locks anywhere"). This function is
+    therefore the ONE place B22's async gather is allowed to touch ``Session`` --
+    called from :meth:`~nanoscope.gui.iv_panel.IVWindow._refresh_maybe_async` before
+    any background thread starts, never from inside :class:`_IVGatherWorker`.
+
+    DELIBERATELY does NOT call :meth:`Session.calibrated`: that method's
+    ``calibrated_array`` applies gain/offset over the WHOLE channel on a cache miss
+    (``core/session.py``, ``ChannelCalibration.apply``) -- exactly the O(n) cost B22
+    is about, just moved from ``np.median`` to here, still on the GUI thread, if
+    called from this function. Instead this reads only ``TraceDocument.raw`` (O(1):
+    an already-loaded array reference, no computation) and the calibration's plain
+    ``gain``/``offset``/``target_units`` fields (O(1) dataclass field reads) -- the
+    same ingredients :meth:`Session.calibrated` would use, handed to the worker to
+    combine there. Returns one ``(memo_key, raw_array, gain, offset, units)`` per
+    cold channel.
+    """
+    out: list[tuple[tuple, np.ndarray, float, float, str]] = []
+    for kind, doc_id, ch in _cold_channel_keys(session):
+        key = _channel_key(kind, session, doc_id, ch)
+        if key is None:
+            continue
+        doc = session.document(doc_id)
+        cal = session.calibration(doc_id, ch)
+        units = cal.target_units or doc.meta.channels[ch].raw_units
+        out.append((key, doc.raw(ch), float(cal.gain), float(cal.offset), units))
+    return out
+
+
+def compute_channel_medians(
+    items: list[tuple[tuple, np.ndarray, float, float, str]],
+) -> dict[tuple, tuple[float, str]]:
+    """THREAD-SAFE: apply calibration and take the median of already-resolved raw
+    arrays -- the two genuinely expensive O(n) steps B22 is about, both pure numpy.
+
+    No ``Session``, no module-global state (not even ``_MEDIAN_MEMO``) is touched
+    here -- everything this function reads is its own argument and everything it
+    returns is a fresh dict, so it may run on any thread. The gain/offset step
+    mirrors :meth:`ChannelCalibration.apply` exactly (float32 arithmetic, the
+    identity-calibration fast path included) so the median that follows sees the
+    SAME array :meth:`Session.calibrated` would have produced; the median itself
+    upcasts to float64 first, matching :func:`open_pore_current` and
+    :func:`_voltage_median_of`'s own contract exactly.
+
+    A channel whose ``"i_open"`` array has no finite sample at all is OMITTED from
+    the result (never given a placeholder) rather than raising:
+    :func:`open_pore_current`'s empty-channel refusal is a fact about a specific
+    call site, and the one caller of this function
+    (:meth:`~nanoscope.gui.iv_panel.IVWindow._on_gather_ready`) always re-runs a
+    plain synchronous :meth:`~nanoscope.gui.iv_panel.IVWindow.refresh` afterward
+    regardless of this dict's contents -- an omitted key is simply still cold, and
+    that follow-up call raises exactly as it always has, on the GUI thread, instead
+    of this function inventing a value the real API never returns.
+    """
+    results: dict[tuple, tuple[float, str]] = {}
+    for key, raw, gain, offset, units in items:
+        calibrated = raw if (gain == 1.0 and offset == 0.0) else (
+            raw * np.float32(gain) + np.float32(offset))
+        arr = np.asarray(calibrated, dtype=np.float64)
+        if key[0] == "i_open":
+            finite = arr[np.isfinite(arr)]
+            if finite.size == 0:
+                continue
+            results[key] = (float(np.median(finite)), units)
+        else:
+            results[key] = (float(np.median(arr)), units)
+    return results
+
+
+def install_channel_medians(results: dict[tuple, tuple[float, str]]) -> None:
+    """GUI-THREAD ONLY: install pre-computed medians, exactly as a cache MISS would.
+
+    Same insertion and eviction as :func:`_memoised_channel` on a miss (LRU-bounded,
+    counted as a miss) -- the memo cannot tell the difference between a value
+    computed synchronously and one warmed this way, which is the point: the
+    follow-up :meth:`~nanoscope.gui.iv_panel.IVWindow.refresh` this always precedes
+    must see ordinary cache hits, not a special case. Keys are fully content-
+    addressed (kind, doc_id, channel, gain, offset, units, n_samples), so installing
+    a value for a document that has since closed or changed is harmless: no live
+    channel can ever match a key describing different content.
+    """
+    global _MEDIAN_MISSES
+    if not results:
+        return
+    for key, value in results.items():
+        _MEDIAN_MISSES += 1
+        _MEDIAN_MEMO[key] = value
+    while len(_MEDIAN_MEMO) > _MEDIAN_MEMO_MAX:
+        _MEDIAN_MEMO.popitem(last=False)
 
 
 # ---------------------------------------------------------------------------

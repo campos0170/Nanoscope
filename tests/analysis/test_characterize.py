@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from nanoscope.analysis.characterize import characterize
+from nanoscope.analysis.characterize import characterize, recharacterize_span
 from nanoscope.analysis.events import SCHEMA
 
 FS = 100_000.0
@@ -366,6 +366,45 @@ def test_length_mismatch_raises():
     cur, base, pol = build_trace()
     with pytest.raises(ValueError, match="differ in length"):
         characterize(cur, base, [1000, 2000], [1500], FS, pol, noise_rms=5.0)
+
+
+@pytest.mark.parametrize(
+    "fs, match",
+    [
+        (None, "fs is required"),
+        (0.0, "fs must be positive"),
+        (-50_000.0, "fs must be positive"),
+        (float("inf"), "fs must be positive"),
+        (float("nan"), "fs must be positive"),
+    ],
+)
+def test_bad_fs_raises_value_error_naming_fs(fs, match):
+    """A bad fs must be refused the same way `detect.detect_events` refuses one:
+    ValueError naming fs, never a bare TypeError/ZeroDivisionError/OverflowError
+    leaking out of an un-vetted arithmetic use downstream (regression for B11)."""
+    cur, base, pol = build_trace(events=[(1000, 1500, 100.0)])
+    with pytest.raises(ValueError, match=match):
+        characterize(cur, base, [1000], [1500], fs, pol, noise_rms=5.0)
+
+
+@pytest.mark.parametrize(
+    "fs, match",
+    [
+        (None, "fs is required"),
+        (0.0, "fs must be positive"),
+        (-50_000.0, "fs must be positive"),
+        (float("inf"), "fs must be positive"),
+    ],
+)
+def test_recharacterize_span_bad_fs_raises_value_error_naming_fs(fs, match):
+    """`recharacterize_span` must refuse a bad fs exactly like `characterize` and
+    `detect_events` -- not silently accept a negative rate (which came back as an
+    ACCEPTED row with a negative dwell_s) and not raise
+    ZeroDivisionError/OverflowError/TypeError for 0/inf/None (B11)."""
+    signal = np.full(50_000, -500.0)
+    signal[20_000:20_100] += 100.0
+    with pytest.raises(ValueError, match=match):
+        recharacterize_span(signal, fs, 20_000, 20_100)
 
 
 def test_zero_baseline_flagged_not_silently_infinite():

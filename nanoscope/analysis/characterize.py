@@ -186,6 +186,26 @@ def span_noise_rms(
     return 1e-9
 
 
+def _validate_fs(fs: Any) -> float:
+    """The one ``fs`` gate both `characterize` and `recharacterize_span` pass
+    through -- matching `detect.detect_events`'s contract so a bad rate is refused
+    the same way everywhere: ``ValueError`` naming ``fs``, never a bare
+    ``TypeError``/``ZeroDivisionError``/``OverflowError`` from an un-vetted
+    arithmetic use downstream. ``None`` is refused with `detect_events`'s own
+    wording; anything else that will not convert, plus non-positive or
+    non-finite rates, are refused with `_validate_detection_timing`'s wording.
+    """
+    if fs is None:
+        raise ValueError("fs is required; dwell is undefined without a sample rate")
+    try:
+        fs = float(fs)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"fs must be positive and finite, got {fs!r}") from exc
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError(f"fs must be positive and finite, got {fs!r}")
+    return fs
+
+
 def characterize(
     current: np.ndarray,
     baseline: np.ndarray,
@@ -351,9 +371,7 @@ def characterize(
           inherits whatever the detector chose for the event edges, and shrinks if
           you tighten `k_out`.
     """
-    fs = float(fs)
-    if not np.isfinite(fs) or fs <= 0:
-        raise ValueError(f"fs must be positive and finite, got {fs!r}")
+    fs = _validate_fs(fs)
     current = np.asarray(current, dtype=np.float64)
     baseline = np.asarray(baseline, dtype=np.float64)
     starts = np.asarray(starts, dtype=np.int64).ravel()
@@ -768,9 +786,7 @@ def recharacterize_span(
         and `events.carry_source_status` is the named door for any future caller that
         wants the re-application in one call rather than a loop.
     """
-    fs = float(fs)
-    if not np.isfinite(fs) or fs <= 0:
-        raise ValueError(f"fs must be positive and finite, got {fs!r}")
+    fs = _validate_fs(fs)
     sig = np.asarray(signal)
     n = int(sig.size)
     # The span the DETECTOR analysed, in the rows' own coordinates. Read from the

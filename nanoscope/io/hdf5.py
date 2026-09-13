@@ -367,10 +367,20 @@ class Hdf5Reader(BaseReader):
         head = np.asarray(tsig.read(0, 1000), dtype=np.float64)
         d = np.diff(head)
         if d.size == 0 or not np.all(np.isfinite(head)) or not np.all(d > 0):
-            # Degenerate/non-increasing time head: cannot trust it as a rate source.
+            # Degenerate/non-increasing time head: cannot trust it as a rate source -- and a
+            # value read out of that SAME column is no more trustworthy for t0, even when it
+            # happens to come back finite. A /time that runs backwards has its LARGEST value
+            # at index 0 -- the recording's last instant, not sample `start`'s -- so reading
+            # it here would answer "what time is this window's first sample" from a column
+            # this branch just finished refusing to use as a clock. [MEASURED] before this:
+            # a reversed /time (0.4s down to 0) reported t0_s=0.39998, the file's LAST instant,
+            # with no issue naming t0 at all. Only a column already trusted to run forward can
+            # answer that question, so this branch reports t0 unavailable instead of reading
+            # one more number from data it just refused.
             report.issue("/time is not usable as a monotonic time base; sample rate unknown")
-            t0 = float(tsig.read(start, start + 1)[0]) if start < n_time else 0.0
-            return None, Provenance.UNKNOWN, self._finite_t0(t0, report)
+            report.issue("/time is not usable as a monotonic time base, so it cannot supply "
+                         "this window's start time either; t0 is unavailable and was set to 0.")
+            return None, Provenance.UNKNOWN, 0.0
         dt = float(d.mean())
         if not np.isfinite(dt) or dt <= 0:
             report.issue("/time has no finite positive sample interval; sample rate unknown")

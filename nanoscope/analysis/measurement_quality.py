@@ -19,8 +19,23 @@ from .baseline import BaselineConfig, MASKED_METHODS, baseline_intrusion
 from .open_pore_reference import OPEN_PORE_REFERENCE_PARAM_KEY
 
 REPORT_KEY = "measurement_quality"
-REPORT_VERSION = 2
+REPORT_VERSION = 3
 INTRUSION_ADVISORY_FRACTION = 0.1  # Existing baseline_intrusion severe boundary.
+# Named `baseline.baseline_health` checks that ask -- with a WIDE, cross-checked
+# reference the local two-sided flank check does not have -- whether the
+# estimator's own state/level tracking near events can be trusted at all.
+# `BaselineHealth`'s own docstring names exactly these four as "the same question
+# asked of the answer" (baseline_intrusion), of which excursions became events
+# (mask_reference), of the tracking window against the state timescale
+# (base_vs_state), and of which level is even the majority one (level_occupancy).
+# When one of these reads "warn", a per-event near-flank fraction computed from
+# the SAME baseline is not independent evidence of a clean local baseline: both
+# flanks can share the very ramp-in or locked-in level the wide check condemns,
+# and averaging or comparing two measurements sharing one mistaken reference
+# agrees with itself, not with the truth.
+_ESTIMATOR_STATE_TRACKING_CHECKS = frozenset({
+    "mask_reference", "base_vs_state", "baseline_intrusion", "level_occupancy",
+})
 _LIMITATION = (
     "Advisory checks only: no flag and polarity agreement do not validate the "
     "physical open-pore reference, prove detection completeness, or constitute "
@@ -211,6 +226,21 @@ def build_measurement_quality(
         fractions = baseline_intrusion(
             x, b, (starts, ends), fs, int(used), flank_s=flank_s, pad_s=pad_s,
         )["per_event"]
+    # The near flank check above compares two measurements that share a single
+    # baseline; agreement between them is not evidence either is right. When the
+    # recording-level health block -- built from a WIDE, cross-checked reference
+    # -- already says the estimator's own state or level tracking cannot be
+    # trusted, a locally "clean" fraction from that same baseline is not
+    # independent corroboration and must not be reported as a reassuring zero.
+    health = provenance.get("baseline_health")
+    estimator_state_tracking_untrustworthy = bool(
+        isinstance(health, Mapping)
+        and any(
+            isinstance(c, Mapping) and c.get("name") in _ESTIMATOR_STATE_TRACKING_CHECKS
+            and c.get("level") == "warn"
+            for c in health.get("checks", ())
+        )
+    )
     records = []
     for pos, (s, e) in enumerate(zip(starts, ends)):
         event_flags = list(flags)
@@ -226,7 +256,9 @@ def build_measurement_quality(
         else:
             intrusion_state = "assessed"
         value = float(fractions[pos]) if intrusion_state == "assessed" else None
-        if value is not None and value > INTRUSION_ADVISORY_FRACTION:
+        if value is not None and (
+            value > INTRUSION_ADVISORY_FRACTION or estimator_state_tracking_untrustworthy
+        ):
             event_flags.append("baseline_intrusion_suspected")
         elif intrusion_state.startswith("not_assessed"):
             event_flags.append("baseline_intrusion_not_assessed")
@@ -250,11 +282,25 @@ def build_measurement_quality(
             "cannot be assessed. A zero count does not demonstrate a correct baseline."
         )
     if n_intrusion:
-        messages.append(
-            f"{n_intrusion} event(s) show local baseline-following above the 10% advisory "
-            "threshold relative to flanking baseline estimates. This suggests depth bias, "
-            "not a calibrated estimate of true amplitude error. Inspect the reference."
-        )
+        if estimator_state_tracking_untrustworthy:
+            messages.append(
+                f"{n_intrusion} event(s) are flagged for local baseline intrusion: either "
+                "the near-flank fraction itself exceeds the 10% advisory threshold, or the "
+                "Baseline health block's own wide-reference checks (mask vs a wide-window "
+                "mask, base window vs state dwell, baseline vs the open pore beside each "
+                "state, or level occupancy) already found the estimator's state or level "
+                "tracking unreliable -- in which case a clean-looking near-flank fraction "
+                "is not independent evidence, since both flanks can share the very ramp or "
+                "locked-in level the wide check condemns. This suggests depth bias, not a "
+                "calibrated estimate of true amplitude error. Inspect the reference and the "
+                "Baseline health block."
+            )
+        else:
+            messages.append(
+                f"{n_intrusion} event(s) show local baseline-following above the 10% advisory "
+                "threshold relative to flanking baseline estimates. This suggests depth bias, "
+                "not a calibrated estimate of true amplitude error. Inspect the reference."
+            )
     if n_unassessed:
         messages.append(
             f"Local baseline intrusion was not assessable for {n_unassessed} event(s): "

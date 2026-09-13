@@ -138,6 +138,28 @@ def test_unusable_hdf5_clock_never_exposes_nonfinite_origin(tmp_path, values, ca
     assert result.meta.issues
 
 
+@pytest.mark.parametrize("call", [probe_path, open_document])
+def test_reversed_hdf5_clock_does_not_report_its_last_instant_as_t0(tmp_path, call):
+    """B10: a /time that runs backwards is declared unusable as a rate source, but
+    ``_timebase`` used to go on and read t0 from that same column at index 0 anyway --
+    which for a reversed clock is not the file's first instant, it is its LAST one.
+    ``test_unusable_hdf5_clock_never_exposes_nonfinite_origin`` above only checks
+    ``np.isfinite(t0_s)``, which a reversed-but-finite clock passes while still being
+    wrong, so it never caught this. Was: t0_s == times[0] (the recording's end), with
+    no issue naming t0 at all -- only "sample rate unknown"."""
+    n, fs = 20_000, 50_000.0
+    times = (np.arange(n) / fs)[::-1].copy()
+    result = call(_recording(tmp_path / "reversed_clock.h5", times))
+    assert result.meta.sample_rate_hz is None
+    assert result.meta.t0_s == 0.0, (
+        f"t0_s={result.meta.t0_s!r} was read from a /time column already declared "
+        f"unusable, not the honest 'unavailable' sentinel")
+    assert result.meta.t0_s != pytest.approx(times[0]), (
+        "t0_s must not be the reversed clock's own last instant")
+    assert any("t0" in issue and "unavailable" in issue for issue in result.meta.issues), (
+        "issues must name t0 specifically, not only the sample rate")
+
+
 @pytest.mark.parametrize("link_kind", ["soft", "external"])
 @pytest.mark.parametrize("member", ["current", "time"])
 @pytest.mark.parametrize("call", [probe_path, open_document])
