@@ -4144,6 +4144,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._analysis_explorer is not None:
                     self._analysis_explorer.remove_page(page_id)
                 try:
+                    # Same protocol _stop_holders uses at quit, and the same one
+                    # _plots_window's _abort_note_job is given above: a window that
+                    # can hold a background worker (IVWindow._gather_worker, B22,
+                    # 2026-09-13) must be asked to retire it BEFORE deleteLater()
+                    # schedules the C++ object's destruction. Skipping this step
+                    # would leave the worker's QThread running with nothing left to
+                    # deliver its `done` signal to -- exactly the class of hazard
+                    # app.py's own docstring documents at length for a worker that
+                    # outlives what it reports back to.
+                    abort = getattr(window, "abort", None)
+                    if callable(abort):
+                        abort()
                     window.hide()
                     window.deleteLater()
                 except RuntimeError:

@@ -36,6 +36,7 @@ from nanoscope.core.document import TraceDocument
 from nanoscope.core.session import Session
 from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, RecordingMeta
 from nanoscope.gui.iv_panel import IVWindow
+from nanoscope.gui.main_window import MainWindow
 
 WHERE = "(B22: IVWindow's first gather on a large channel must not block the GUI thread)"
 
@@ -152,3 +153,43 @@ def test_deferred_initial_refresh_still_gathers_nothing_up_front(qapp, qtbot, tm
     assert w.points() == [], WHERE
     assert iv.channel_median_stats()["misses"] == 0, (
         f"defer_initial_refresh=True gathered anyway {WHERE}")
+
+
+def test_reset_analytical_workspace_retires_an_in_flight_gather_before_deleting_the_window(
+        qtbot, tmp_path):
+    """A project reset/switch (MainWindow._reset_analytical_workspace) deletes the IV
+    window directly, bypassing the teardown sweep's _stop_holders discovery. Without
+    calling IVWindow.abort() first, a gather still in flight is orphaned: its QThread
+    keeps running with nothing left to deliver its `done` signal to once the window's
+    C++ object is gone -- the exact class of hazard app.py's own docstring documents at
+    length for a worker outliving what it reports back to."""
+    import shiboken6
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    n = 2_000_000
+    data = np.random.default_rng(11).normal(-500, 1, n).astype(np.float32)
+    info = ChannelInfo(index=0, name="current", raw_units="pA", kind=ChannelKind.CURRENT)
+    meta = RecordingMeta(path=tmp_path / "big.dat", format_name="synthetic", n_samples=n,
+                         sample_rate_hz=50_000.0, rate_provenance=Provenance.FILE_META,
+                         channels=(info,), nominal_voltage_mV=-1000.0,
+                         voltage_provenance=Provenance.FILENAME)
+    doc = TraceDocument(meta=meta, channels=(data,))
+    doc_id = window._session.add_document(doc)
+    window._create_default_layers(doc)
+    window._on_selection(doc_id, 0)
+
+    iv.forget_channel_medians()
+    window._open_iv()
+    iv_window = window._iv_window
+    assert iv_window._gather_worker is not None, (
+        f"fixture sanity: {n} samples must trigger the async gather {WHERE}")
+    thread_ref = iv_window._gather_thread
+
+    window._reset_analytical_workspace()
+
+    assert window._iv_window is None
+    assert not thread_ref.isRunning(), (
+        "the gather's QThread was still running after the window that owned it was "
+        f"deleted -- reset_analytical_workspace must abort() before deleteLater() {WHERE}")
+    qtbot.waitUntil(lambda: not shiboken6.isValid(iv_window), timeout=2_000)
