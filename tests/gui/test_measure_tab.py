@@ -751,7 +751,11 @@ def test_panels_module_still_imports_no_sibling_gui_panel():
 
     # Pure layout helpers are shared; numerical/interactive sibling panels still
     # belong to their existing owners and must not be constructed from panels.py.
-    assert reached <= {'inspector_widgets'}, f"panels.py imported a sibling panel: {reached}"
+    # numeric_text (2026-09-13) is the same kind of shared, panel-free leaf as
+    # inspector_widgets: pure ASCII number-parsing, no widget, no gui/ import of its
+    # own.
+    assert reached <= {'inspector_widgets', 'numeric_text'}, (
+        f"panels.py imported a sibling panel: {reached}")
     # ...and the checker above really would catch the import it is standing guard over.
     guarded = ast.parse("from .measure_panel import MeasurePanel")
     assert any(isinstance(n, ast.ImportFrom) and n.level == 1

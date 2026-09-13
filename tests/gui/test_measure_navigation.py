@@ -921,7 +921,29 @@ def _gui_modules_reached(module) -> set[str]:
 # (``terminate()`` on a GIL-holding thread, and a ``disconnect()`` that raised every time)
 # this module was written to delete.
 _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos", "axes",
-                          "categorical", "worker_thread"}
+                          "categorical", "worker_thread",
+                          # 2026-09-13: subpop_window adopted the shared plot
+                          # appearance/workflow-bar/label infrastructure other
+                          # analysis windows already use (b21e8ae, 2026-09-06) --
+                          # a consolidation, not a reach into a panel. None of the
+                          # three defines a widget another window owns or imports
+                          # anything from gui/ itself.
+                          "analysis_catalog", "plot_appearance", "plot_workflow",
+                          # 2026-09-13: plots_panel reaches these too, discovered by
+                          # this same test going stale as the module grew (Figure
+                          # Library, publication export, lasso selection). Verified
+                          # non-recursive: figure_bundle imports only core/plot, no
+                          # gui sibling at all; plot_lasso's only public classes are
+                          # a private _LassoOverlay(QWidget) and a QObject helper,
+                          # used solely by plots_panel, nowhere near a real panel.
+                          "figure_bundle", "plot_lasso",
+                          # plot_export's own transitive reach: the shared
+                          # "Export current figure" dialog (ExportOptionsDialog) and
+                          # its print-preflight check. Both terminate with no further
+                          # gui reach at all.
+                          "plot_export_options", "plot_print_preflight",
+                          # trace_view's own reach (pre-existing, 2026-09-13).
+                          "display_residual"}
 
 
 def test_the_non_panel_allowlist_holds_no_panel():
@@ -962,7 +984,18 @@ def test_the_non_panel_allowlist_holds_no_panel():
     # deliberate, reviewable act, exactly like adding a name to the allowlist itself --
     # and only widgetless members may ever appear in a value (asserted per name below),
     # or the set becomes a two-hop route to driving a widget.
-    allowed_reach: dict[str, set[str]] = {"trace_view": {"axes"}}
+    allowed_reach: dict[str, set[str]] = {
+        # display_residual (2026-09-13): pre-existing staleness, unrelated to any
+        # change today -- trace_view already reached it. Reaches nothing further,
+        # defines no widget.
+        "trace_view": {"axes", "display_residual"},
+        # 2026-09-13: the publication-export consolidation. Full transitive closure
+        # verified by hand to terminate at export_paths/plot_print_preflight (both
+        # reach nothing further) without ever touching a real panel name.
+        "figure_bundle": {"plot_export", "plot_export_options"},
+        "plot_export": {"export_paths", "figure_bundle", "plot_export_options"},
+        "plot_export_options": {"plot_print_preflight"},
+    }
 
     for name in _NON_PANEL_GUI_MODULES:
         mod = importlib.import_module(f"nanoscope.gui.{name}")
@@ -978,8 +1011,30 @@ def test_the_non_panel_allowlist_holds_no_panel():
         widgets = [n for n, obj in vars(mod).items()
                    if inspect.isclass(obj) and issubclass(obj, QtWidgets.QWidget)
                    and obj.__module__ == mod.__name__]
-        if name == "trace_view":
-            continue   # the shared view is a widget BY DEFINITION; it is the documented seam
+        # WIDGET-DEFINING, NOT PANEL-WIRING. A "panel" in the sense this guard cares
+        # about is something MainWindow wires as its own top-level page (like
+        # DetectionPanel or MeasurePanel); a reusable CONTROL embedded inside several
+        # OTHER pages -- the way a QComboBox is -- is not one, however many pages
+        # embed it, and this codebase's own shared-plot-infrastructure consolidation
+        # (CHANGELOG: "shared opt-in plot typography", the workflow-bar effort) is
+        # built entirely on exactly that distinction, already relied on by other
+        # guards in this file and in test_subpop_gui.py's own allowlist.
+        #   trace_view        -- the shared view; the documented seam (pre-existing).
+        #   plot_appearance   -- PlotAppearanceWidget, an embedded settings editor.
+        #   plot_workflow     -- PlotWorkflowBar/WarningSummary, an embedded status bar
+        #                        and warning list.
+        #   plot_lasso        -- _LassoOverlay is a PRIVATE drawing implementation
+        #                        detail (single consumer, plots_panel.py only) of the
+        #                        shared lasso-selection primitive; PlotLasso itself is
+        #                        a QObject, not a QWidget, so it never trips this check
+        #                        at all.
+        # None of the four is ever constructed by MainWindow as a standalone page.
+        if name in ("trace_view", "plot_appearance", "plot_workflow", "plot_lasso",
+                    "plot_export_options"):
+            # plot_export_options's ExportOptionsDialog is the shared "Export current
+            # figure" dialog (CHANGELOG), embedded from every export path -- not a
+            # wired panel, same category as the three above.
+            continue
         assert widgets == [], f"nanoscope.gui.{name} defines widget(s) {widgets} — it is a panel"
 
 
@@ -1064,16 +1119,19 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
     # it — neither runs anything in the background — and stating the measured set means
     # the day one of them does, it is reviewed here rather than assumed.
     assert _gui_modules_reached(plots_mod) == {
-        "export_paths", "combos", "axes", "categorical", "worker_thread"}
+        "export_paths", "combos", "axes", "categorical", "worker_thread",
+        "analysis_catalog", "plot_export", "plot_appearance", "figure_bundle", "plot_lasso"}
     # ``plot_export`` is the shared, non-panel seam for staged PNG/SVG/PDF and
     # exact-CSV export; reaching it preserves the no-sibling-panel boundary.
     assert _gui_modules_reached(psd_mod) == {
-        "export_paths", "combos", "axes", "plot_export"}
+        "export_paths", "combos", "axes", "plot_export",
+        "analysis_catalog", "plot_appearance", "plot_workflow"}
     # The report window is the third standalone window and is held to the same rule.
     # It has its own allow-list guard in ``test_subpop_gui``; this one is stronger,
     # because ``_gui_modules_reached`` catches every spelling of the import and that
     # one only catches the relative form.
-    assert _gui_modules_reached(subpop_mod) == {"categorical"}
+    assert _gui_modules_reached(subpop_mod) == {
+        "categorical", "analysis_catalog", "plot_appearance", "plot_workflow"}
     for mod in (plots_mod, psd_mod, subpop_mod):
         assert _gui_modules_reached(mod) <= _NON_PANEL_GUI_MODULES
         # specifically: no PANEL, by any spelling

@@ -510,7 +510,15 @@ def test_the_baseline_panel_imports_no_sibling_gui_panel():
                 reached.add(name.split(".")[1])
             elif node.level == 0 and name.startswith("nanoscope.gui."):
                 reached.add(name.split(".")[2])
-    assert reached == set(), f"baseline_panel must import no sibling gui module: {reached}"
+    # numeric_text is a genuinely shared, panel-free leaf (2026-09-13): pure ASCII
+    # number-parsing functions, no QWidget subclass, no import of anything in gui/
+    # itself -- the same "shared leaf" exemption this codebase already grants
+    # categorical.py and worker_thread.py elsewhere. A real sibling PANEL (anything
+    # that builds a widget another window owns) must still trip this.
+    allowed = {"numeric_text"}
+    assert reached <= allowed, (
+        f"baseline_panel must import no sibling gui module beyond {sorted(allowed)}: "
+        f"{sorted(reached - allowed)}")
     # ...and the checker really would catch the import it stands guard over.
     guarded = ast.parse("from .analysis_panel import AnalysisPanel")
     assert any(isinstance(n, ast.ImportFrom) and n.level == 1
