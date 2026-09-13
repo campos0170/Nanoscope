@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 
 import nanoscope  # noqa: F401
+import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -45,8 +46,8 @@ def test_automatic_params_keep_exact_legacy_shape(panel):
 
 
 @pytest.mark.parametrize("text,expected", [("-120", -120), ("−120.25", -120.25),
-                                          ("0", 0), ("2.4e3", 2400)])
-def test_known_current_preserves_sign_zero_and_units(panel, text, expected):
+                                          ("2.4e3", 2400)])
+def test_known_current_preserves_sign_and_units(panel, text, expected):
     editor = choose(panel, "constant")
     editor.current.setText(text)
     assert panel.params()["baseline_open_pore_reference"]["current_pA"] == expected
@@ -63,6 +64,24 @@ def test_invalid_known_input_is_visible_not_automatic_fallback(panel, text):
     assert panel.reference_error()
     assert not editor.validation_label.isHidden()
     assert panel.params()["baseline_open_pore_reference"]["current_pA"] is None
+
+
+@pytest.mark.parametrize("text", ["0", "-0", "1e-300"])
+def test_zero_known_current_is_refused_not_silently_accepted(panel, text):
+    """beta-sweep B06 (2026-09-12): a 0 pA (or anything that underflows to 0 once the
+    app's float32 pipeline holds it, e.g. 1e-300) open-pore current used to be accepted
+    with no error, then silently produced frac_depth=NaN on every event and a NaN
+    Summary median with no explanation. Unlike the unparseable-text case above, the text
+    DOES parse -- ``params()`` still reflects the typed value, exactly as it does for any
+    other physically-questionable-but-parseable field (e.g. a reversed interval) -- and
+    ``reference_error()`` is the separate authority every caller (detection, preview,
+    probe) already gates on before touching that value."""
+    editor = choose(panel, "constant")
+    editor.current.setText(text)
+    assert panel.reference_mode() == "constant"
+    assert "cannot be zero" in panel.reference_error()
+    assert not editor.validation_label.isHidden()
+    assert np.float32(panel.params()["baseline_open_pore_reference"]["current_pA"]) == 0.0
 
 
 def test_selection_request_is_intent_only(panel, qtbot):

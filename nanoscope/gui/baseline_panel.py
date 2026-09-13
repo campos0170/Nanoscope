@@ -69,6 +69,7 @@ import html
 import math
 from typing import Any, Mapping
 
+import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..analysis.baseline import (
@@ -85,6 +86,7 @@ from ..analysis.baseline import (
 )
 from ..analysis.baseline_probe import BaselineProposal, proposal_summary
 from ..analysis.open_pore_reference import OpenPoreReference
+from .numeric_text import parse_strict_number
 
 __all__ = ["BaselinePanel"]
 
@@ -312,13 +314,12 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
 
     @staticmethod
     def _number(value):
-        if "_" in str(value):
-            return None
-        try:
-            number = float(str(value).strip().replace("−", "-"))
-        except (ValueError, TypeError):
-            return None
-        return number if math.isfinite(number) else None
+        """Parse a box's text with the shared strict ASCII parser (beta-sweep B27,
+        2026-09-12): bare ``float()`` silently accepted PEP 515 underscore grouping
+        and non-ASCII digit scripts (Arabic-Indic etc.), neither of which a user typing
+        a plain number here means. The leading Unicode MINUS SIGN convenience (for a
+        value pasted from elsewhere) is preserved."""
+        return parse_strict_number(value, allow_unicode_minus=True)
 
     def _intervals(self):
         return [[self._number(self.table.item(row, col).text())
@@ -347,8 +348,20 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         if mode == "automatic":
             return ""
         if mode == "constant":
-            return ("Enter a finite, signed open-pore current in pA."
-                    if self._number(self.current.text()) is None else "")
+            value = self._number(self.current.text())
+            if value is None:
+                return "Enter a finite, signed open-pore current in pA."
+            # beta-sweep B06 (2026-09-12): 0 (and anything that underflows to 0 once the
+            # app's float32 pipeline holds it, e.g. 1e-300) was silently ACCEPTED as a
+            # physical open-pore current. Every event's fractional depth divides by this
+            # value, so a zero reference does not fail loudly -- it turns every row's
+            # frac_depth into a silent NaN and the Summary's median dI/I0 into an
+            # unexplained NaN. Refuse it here, at the one place the value is confirmed,
+            # rather than downstream where the NaN has already lost its cause.
+            if np.float32(value) == 0.0:
+                return ("Open-pore current cannot be zero: every event's fractional "
+                        "depth divides by it.")
+            return ""
         rows = self._intervals()
         if not rows:
             return "Add at least one trustworthy open-pore interval."

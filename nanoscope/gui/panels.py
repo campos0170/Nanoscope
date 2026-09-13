@@ -100,6 +100,7 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 from .inspector_widgets import Disclosure, InspectorScrollArea, PinnedActions, host_layout
+from .numeric_text import parse_strict_number
 
 from ..core import clock
 from ..analysis import events as events_mod
@@ -4140,15 +4141,11 @@ class DetectionPanel(QWidget):
         out: list[float] = []
         bad: list[str] = []
         for tok in cls._notch_line_tokens(text):
-            if "_" in tok:
-                bad.append(tok)
-                continue
-            try:
-                val = float(tok)
-            except ValueError:
-                bad.append(tok)
-                continue
-            if not (np.isfinite(val) and val > 0):
+            # Shared strict ASCII parser (beta-sweep B27, 2026-09-12): bare float() also
+            # accepted non-ASCII digit scripts (e.g. Arabic-Indic), not only the
+            # underscore this loop already guarded by name.
+            val = parse_strict_number(tok)
+            if val is None or not val > 0:
                 bad.append(tok)
                 continue
             out.append(val)

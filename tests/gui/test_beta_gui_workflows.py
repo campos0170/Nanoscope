@@ -51,13 +51,25 @@ def test_baseline_guide_tooltip_explains_baseline_and_preserves_disabled_reason(
     assert button.toolTip() == "Select a current recording first."
 
 
-def test_numeric_boxes_reject_python_underscores_but_keep_decimal_exponents_and_unicode():
+def test_numeric_boxes_reject_python_underscores_and_non_ascii_digits_but_keep_decimal_exponents_and_the_unicode_minus_sign():
+    """Superseded 2026-09-13 by beta-sweep B27: this test originally also asserted that
+    an Arabic-Indic digit string parsed as its ASCII value (``parse_notch_lines("1.2e2,
+    ٦٠") == [120, 60]`` and ``_number("١٢٠") == 120``) -- i.e. that bare ``float()``'s
+    Unicode-digit-script acceptance was fine to keep, on the same reasoning that keeps
+    the Unicode MINUS SIGN convenience below. A more thorough audit (B27) found the two
+    are not alike: the minus sign is one documented, unambiguous convenience for a
+    pasted signed value, while a non-ASCII digit SCRIPT is exactly the kind of slip
+    (locale, input method, an unintended paste) the underscore rejection two lines above
+    already exists to catch, and silently converting it gives the user no way to tell
+    their intended value was parsed. Both boxes now refuse it, via the shared
+    nanoscope.gui.numeric_text.parse_strict_number every numeric box uses."""
     with pytest.raises(ValueError, match="1_20"):
         DetectionPanel.parse_notch_lines("60, 1_20")
     assert _OpenPoreReferenceEditor._number("1_20") is None
-    assert DetectionPanel.parse_notch_lines("1.2e2, ٦٠") == [120, 60]
+    with pytest.raises(ValueError, match="٦٠"):
+        DetectionPanel.parse_notch_lines("1.2e2, ٦٠")
     assert _OpenPoreReferenceEditor._number("−1.2e2") == -120
-    assert _OpenPoreReferenceEditor._number("١٢٠") == 120
+    assert _OpenPoreReferenceEditor._number("١٢٠") is None
 
 
 @pytest.mark.parametrize("measured_region", [False, True])

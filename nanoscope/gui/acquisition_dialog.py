@@ -4,6 +4,7 @@ from __future__ import annotations
 from PySide6 import QtCore, QtWidgets
 
 from ..core.acquisition import AcquisitionBandwidth, describe_bandwidth
+from .numeric_text import parse_strict_number
 
 
 class AcquisitionBandwidthDialog(QtWidgets.QDialog):
@@ -96,13 +97,13 @@ class AcquisitionBandwidthDialog(QtWidgets.QDialog):
             mode = self.mode.currentData()
             cutoff_hz = None
             if mode == "reported":
-                try:
-                    if "_" in self.cutoff.text():
-                        raise ValueError("underscore is not a numeric separator")
-                    cutoff_hz = float(self.cutoff.text())
-                except ValueError:
+                # Shared strict ASCII parser (beta-sweep B27, 2026-09-12): the previous
+                # ad hoc "_" check caught PEP 515 grouping but not a non-ASCII digit
+                # script (e.g. Arabic-Indic), which bare float() also accepts.
+                cutoff_hz = parse_strict_number(self.cutoff.text())
+                if cutoff_hz is None or not cutoff_hz > 0:
                     raise ValueError(
-                        "acquisition cutoff must be a finite positive number in Hz") from None
+                        "acquisition cutoff must be a finite positive number in Hz")
             value = None if mode == "file" else AcquisitionBandwidth(
                 cutoff_hz=cutoff_hz,
                 status=mode, source="user",
