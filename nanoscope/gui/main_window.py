@@ -658,6 +658,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # the v11 workspace adapters; the Explorer only organises their presentation.
         self._analysis_explorer: AnalysisExplorer | None = None
         self._first_analysis_guide = None
+        #: Retained singleton, never WA_DeleteOnClose (see build_info_dialog.py's
+        #: docstring): reused across Help > About presses instead of accumulating
+        #: one hidden dialog per press, and never a delete target of teardown's
+        #: close()-sweep touching a wrapper this attribute still holds.
+        self._build_info_dialog = None
         self._figure_library = None
         self._event_inspector = None   # the single, lazily-built EventInspectorWindow
         self._event_gallery = None     # the single, lazily-built EventGalleryWindow
@@ -4258,8 +4263,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._first_analysis_guide.activateWindow()
 
     def _open_build_info(self) -> None:
-        from .build_info_dialog import show_build_info
-        show_build_info(self)
+        from .build_info_dialog import BuildInfoDialog
+        if self._build_info_dialog is None:
+            self._build_info_dialog = BuildInfoDialog(self)
+        self._build_info_dialog.show()
+        self._build_info_dialog.raise_()
+        self._build_info_dialog.activateWindow()
 
     def _first_analysis_action(self, route: str) -> None:
         available, reason = self._first_analysis_availability(route)

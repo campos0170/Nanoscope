@@ -819,6 +819,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._trace_view = trace_view
 
         self._sel: tuple[str, int] | None = None
+        self._reference_preview_dialog = None  # see _finish_reference_preview
         self._baseline_view_timer = QtCore.QTimer(self)
         self._baseline_view_timer.setSingleShot(True)
         self._baseline_view_timer.setInterval(200)
@@ -2766,8 +2767,20 @@ class AnalysisPanel(QtWidgets.QWidget):
             self.runRefused.emit("Reference preview discarded: settings or calibration changed. Preview again.")
             return
         from .open_pore_preview import OpenPorePreviewDialog
+        # Never WA_DeleteOnClose (see build_info_dialog.py's docstring for why): a fresh
+        # dialog is built per preview run rather than updated in place, so without explicit
+        # disposal each "Preview reference and detection..." press would otherwise leave a
+        # hidden dialog parented under `self` for the life of the session. Dispose the
+        # PREVIOUS instance ourselves, on our own schedule, instead of leaning on the
+        # attribute to make MainWindow's blanket close()-teardown sweep delete it — that
+        # sweep can run while something else still holds this wrapper. deleteLater() is
+        # safe even if the dialog was already closed by the user.
+        previous = self._reference_preview_dialog
+        if previous is not None:
+            previous.close()
+            previous.deleteLater()
         dialog = OpenPorePreviewDialog(obj, parent=self)
-        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        self._reference_preview_dialog = dialog
         dialog.show()
 
     # -- the baseline probe (off-thread, through the same controller) -----------------------------
