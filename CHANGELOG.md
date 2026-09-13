@@ -72,8 +72,77 @@ tags identify tested development baselines and do not promise a stable file or A
 - Added explicit backward compatibility for v1-v10 projects and refusal by older readers rather
   than allowing them to strip v11 analytical data.
 
+### Fixed
+
+- "Known open-pore current" accepted 0 pA (and anything that underflows to 0 in the
+  float32 pipeline that reads it, e.g. 1e-300) with no error, then silently produced a
+  NaN fractional depth on every event and a NaN Summary median with no explanation.
+  Refused at the editor, at the precision the analysis pipeline actually reads it under.
+- Three numeric boxes (open-pore current, notch lines, acquisition bandwidth cutoff)
+  each guarded only against PEP 515 underscore grouping (`1_20` -> 120.0); none guarded
+  against the non-ASCII digit scripts bare `float()` also accepts (`١٢٠` -> 120.0). A
+  shared strict-ASCII parser now backs all three.
+- The per-event local baseline-intrusion advisory could report "assessed" with a
+  near-zero fraction on exactly the two canonical Automatic-mode baseline failures
+  (isolated long events; high-duty recordings), because it compared a fragment's two
+  flanks to each other rather than to a wider, already-computed reference. Gated on the
+  recording-level baseline-health verdict baseline.py already produces; advisory only,
+  no detector output changes.
+- The HDF5 reader read t0 from a `/time` column it had already declared unusable for a
+  sample rate (all-NaN or reversed), producing a NaN or backwards origin with no issue
+  naming the problem. Returns the documented "unavailable" sentinel with an explicit
+  issue instead.
+- `recharacterize_span` accepted a negative sample rate (a wrong-signed row, no error)
+  and raised the wrong exception type for zero, infinite, or `None`; now raises
+  `ValueError` naming `fs`, matching `detect_events`'s existing convention.
+- Opening Analysis > I-V on a large, never-before-medianed recording blocked the GUI
+  thread for the whole whole-channel median (~300 ms observed) with no busy state. The
+  first gather now runs on a background thread once a channel exceeds ~500,000 samples;
+  the raw arrays it needs are resolved on the GUI thread first and handed to the worker
+  as plain data, never a live `Session` reference, after an earlier version of this fix
+  was found and rejected in review for exactly that hazard.
+- A project reset/switch deleted the I-V window directly, bypassing the retirement step
+  every other background-worker-holding window goes through at teardown; a gather still
+  in flight was left running with nothing left to deliver its result to.
+- Practice-recording duplicate detection compared paths with `==` instead of the one
+  function that answers "is this file already open" -- the literal pattern an
+  architectural guard exists to forbid -- and carried a latent case-sensitivity defect
+  on a case-insensitive volume as a result.
+- Two dialogs (Help > About; the open-pore reference preview) set `WA_DeleteOnClose`,
+  the one lifetime pattern `nanoscope/gui` otherwise avoids everywhere: the app's
+  teardown sweep calls `close()` on every owned window as a stop mechanism, which is a
+  hide for every other window and would have been a delete under a live Python wrapper
+  for these two.
+- Several architectural AST guards had gone stale as legitimate shared infrastructure
+  (plot-appearance/workflow-bar/label modules, a lasso-selection primitive, a
+  publication-export dialog) was adopted by multiple analysis windows without the
+  guards' exact-import-set assertions being updated to match. Each newly-allowed module
+  was individually verified -- no widget of its own, no further reach beyond the same
+  shared, non-panel set -- before being added, rather than the assertions being loosened
+  wholesale.
+
 ### Validation
 
+- 2026-09-13: all six items confirmed still open from the 2026-09-12 beta sweep (a
+  zero open-pore current; non-ASCII digit acceptance in three boxes; the baseline-
+  intrusion advisory's false negative; the HDF5 t0 defect; `recharacterize_span`'s
+  fs validation; the I-V first-open stall) are fixed and independently reviewed;
+  root-cause fixes throughout, not input-specific patches. Nine other items from that
+  sweep, including the acquisition-metadata save failure, were found already resolved
+  by intervening work and are not claimed here. 358+ targeted tests re-verified across
+  measurement quality, the reader contract, characterize/span/flag-invariant guards
+  and I-V; 455 of 457 tests across the sibling-import guard files (the two remaining
+  failures are a pre-existing, unrelated geometry pin).
+- 2026-09-13: root cause found for the intermittent PySide6 signal-manager crash noted
+  below -- once a Qt wrapper's C++ side is destroyed, its Python object becomes
+  permanently invisible to Python's own cyclic garbage collector. Confirmed on PySide6
+  6.11.1 and 6.11.2 both, and confirmed independent of this suite's `gc.disable()`
+  policy (a separate, unrelated deadlock avoidance; re-enabling it does not free these).
+  Measured: ~734 leaked `QObject`s and ~3.6 MB RSS per `MainWindow` construct/destroy
+  cycle, linear with no plateau across 40 cycles. This is a PySide6 characteristic, not
+  fixed here; the manual full-regression CI job now runs the `gui` shard as 16 smaller
+  processes instead of one, bounding rather than eliminating the accumulation a single
+  long process would otherwise reach.
 - Comparison-figure source pass: 571 focused tests passed across rendering, page interaction,
   workspace persistence, Library capture, native vector/export composition and scientific
   regressions. All 37 recorded analysis-module hashes are unchanged. Read-only apo-ferritin
