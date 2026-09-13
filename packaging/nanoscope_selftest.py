@@ -40,12 +40,15 @@ def check(name: str):
 
     def wrap(fn):
         t0 = time.time()
+        print(f"  [RUN] {name}", flush=True)
         try:
             detail = fn() or ""
             _results.append((name, True, f"{detail} [{time.time() - t0:.1f}s]"))
         except Exception as exc:  # noqa: BLE001 - a failed check is data, not a crash
             _results.append((name, False, f"{type(exc).__name__}: {exc}"))
             traceback.print_exc()
+        _, passed, detail = _results[-1]
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}: {detail}", flush=True)
         return fn
 
     return wrap
@@ -197,6 +200,137 @@ def run(argv: list[str]) -> int:
         return _run_checks(argv, tmp)
     finally:
         _remove_scratch(tmp)
+
+
+def _project_restore_smoke(tmp):
+    """Real reader, nested segment/layer restore, and Qt window teardown; no pytest.
+
+    Caller owns QApplication and isolated settings/recovery paths. Synthetic data
+    keeps this check portable. This exercises the restore/TraceView rebuild seam;
+    it is not a reproduction of the earlier state-sensitive native fault.
+    """
+    import time
+    from pathlib import Path
+    import numpy as np
+    import pandas as pd
+    from PySide6 import QtCore, QtWidgets
+    from nanoscope.core.calibration import ChannelCalibration
+    from nanoscope.core.layer import ViewMode
+    from nanoscope.core.types import ChannelKind, Provenance
+    from nanoscope.gui.app import configure_pyqtgraph, create_app
+    from nanoscope.gui.main_window import MainWindow
+    from nanoscope.gui.overlays import register_all_renderers
+
+    app = create_app([])
+    configure_pyqtgraph()
+    register_all_renderers()
+    tmp = Path(tmp)
+    rec = tmp / "restore-smoke.csv"
+    project = tmp / "restore-smoke.nanoscope"
+    n, fs = 60_000, 50_000.0
+    pd.DataFrame({"time": np.arange(n) / fs,
+                  "voltage": np.full(n, -600.0),
+                  "current": 100.0 + np.sin(np.arange(n) / 37.0)}).to_csv(rec, index=False)
+
+    dismissed = []
+
+    def answer_modal():
+        dialog = QtWidgets.QApplication.activeModalWidget()
+        if dialog is not None:
+            detail = dialog.text() if isinstance(dialog, QtWidgets.QMessageBox) else ""
+            dismissed.append(f"{dialog.windowTitle()}: {detail}")
+            dialog.reject()
+
+    # A warning enters a nested event loop before wait_for can check its clock.
+    # Reject it using that event loop, retain the diagnostic, and fail the check.
+    modal_pump = QtCore.QTimer()
+    modal_pump.timeout.connect(answer_modal)
+    modal_pump.start(100)
+
+    def wait_for(predicate, label, timeout=60):
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"{label} timed out after {timeout}s")
+            app.processEvents()
+            if dismissed:
+                raise AssertionError(f"Unexpected restore dialog(s): {dismissed}")
+            time.sleep(0.005)
+        app.processEvents()
+
+    def destroy(window):
+        # Only disposable self-test work can be discarded if an assertion failed.
+        window._confirm_close_choice = lambda: "discard"
+        if not window.close():
+            raise AssertionError("self-test MainWindow refused to close")
+        window.deleteLater()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        app.processEvents()
+
+    windows = []
+    try:
+        win = MainWindow(recovery_enabled=False)
+        windows.append(win)
+        win.show()
+        win.open_paths([str(rec)])
+        wait_for(lambda: win._session.doc_id_for_source(str(rec.resolve())) is not None
+                 and win._active_open is None and not win._open_queue, "source load")
+        session = win._session
+        doc_id = session.doc_id_for_source(str(rec.resolve()))
+        channel = next(c.index for c in session.document(doc_id).meta.channels
+                       if c.kind is ChannelKind.CURRENT)
+        session.set_calibration(doc_id, channel, ChannelCalibration(
+            0.5, -1.0, "pA", Provenance.MEASURED, "restore smoke"), write_sidecar=False)
+        cut_id = session.create_segment(doc_id, 5_000, 25_000, name="cut")
+        win._create_default_layers(session.document(cut_id))
+        nested_id = session.create_segment(cut_id, 2_000, 9_000, name="nested")
+        win._create_default_layers(session.document(nested_id))
+        uids = [session.document(i).origin.segment_uid for i in (cut_id, nested_id)]
+        session.set_calibration(nested_id, 0, ChannelCalibration(
+            0.037, 0.0, "nS", Provenance.UNKNOWN, "segment-local"), write_sidecar=False)
+        session.set_view_mode(ViewMode.STACKED)
+        win._on_selection(doc_id, channel)
+        for layer in session.layers():
+            session.set_layer_visible(layer.layer_id, True)
+        session.set_layer_color(f"{doc_id}#{channel}", "#E57373")
+        session.set_layer_time_offset(f"{doc_id}#{channel}", 0.25)
+        visible_count = sum(layer.visible for layer in session.layers())
+        assert visible_count >= 3, "nested segment layers are not visible"
+        assert win._write_project(str(project)), f"project save failed; dialogs: {dismissed}"
+        destroy(win)
+        windows.remove(win)
+
+        reopened = MainWindow(recovery_enabled=False)
+        windows.append(reopened)
+        reopened.show()
+        restored = []
+        reopened.projectRestored.connect(lambda: restored.append(True))
+        reopened._open_project(str(project))
+        wait_for(lambda: bool(restored), "project restore")
+        session = reopened._session
+        live = session.doc_id_for_source(str(rec.resolve()))
+        assert live is not None and session.document(live).meta.n_samples == n
+        segments = {d.origin.segment_uid: d for d in session.documents() if hasattr(d, "origin")}
+        assert [segments[uid].meta.n_samples for uid in uids] == [20_000, 7_000]
+        assert len(session.documents()) == 3
+        cal = session.calibration(live, channel)
+        assert (cal.gain, cal.offset, cal.target_units, cal.note) == (0.5, -1.0, "pA", "restore smoke")
+        nested_cal = session.calibration(segments[uids[1]].doc_id, 0)
+        assert (nested_cal.gain, nested_cal.target_units, nested_cal.note) == (0.037, "nS", "segment-local")
+        layer = next(l for l in session.layers() if l.doc_id == live and l.channel == channel)
+        assert layer.color == "#E57373" and abs(layer.time_offset_s - 0.25) < 1e-12
+        assert session.view_mode is ViewMode.STACKED
+        assert sum(l.visible for l in session.layers()) == visible_count
+        assert reopened._carried_over is None
+        assert not list(tmp.glob("*.npcal.json")), "self-test wrote a calibration sidecar"
+        assert not dismissed, f"Unexpected restore dialog(s): {dismissed}"
+        return f"60k samples; nested 20k/7k segments; {visible_count} visible layers; calibration + colour + offset survived close/reopen"
+    finally:
+        try:
+            for window in windows:
+                destroy(window)
+        finally:
+            modal_pump.stop()
 
 
 def _run_checks(argv: list[str], tmp: Path) -> int:
@@ -640,6 +774,10 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
         note = f", dismissed {dismissed}" if dismissed else ""
         return (f"{len(docks)} dock(s), {len(menus)} menus, opened "
                 f"{loaded[0].meta.n_samples} samples via open_paths(){note}")
+
+    @check("Project save + close + restore with nested visible segments")
+    def _restore_project():
+        return _project_restore_smoke(tmp)
 
     # -- 5. the standalone analysis surfaces ---------------------------------------------------
     #

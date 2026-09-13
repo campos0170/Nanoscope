@@ -632,7 +632,10 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
     overrides = {"figure.facecolor": background, "axes.facecolor": background,
                  "axes.edgecolor": foreground, "axes.labelcolor": foreground, "text.color": foreground,
                  "xtick.color": foreground, "ytick.color": foreground, "axes.titlesize": title_size,
-                 "axes.labelsize": axis_size, "xtick.labelsize": tick_size, "ytick.labelsize": tick_size}
+                 "axes.labelsize": axis_size, "xtick.labelsize": tick_size, "ytick.labelsize": tick_size,
+                 # Keep short dwell-time ticks legible in narrow comparison
+                 # panels while displaying the scale explicitly in axis units.
+                 "axes.formatter.limits": (-3, 4)}
     if state.get("font_family"):
         overrides["font.family"] = state["font_family"]
     with nanoscope_style(**overrides):

@@ -52,7 +52,7 @@ dist/NanoScope.app/Contents/MacOS/NanoScope --self-test \
     ~/some_recording.abf ~/some_model.keras
 ```
 
-19 checks, approximately one minute, exit code = number of failures. Both file arguments are optional; the checks
+20 checks, approximately one minute, exit code = number of failures. Both file arguments are optional; the checks
 that need them report `SKIPPED` instead of failing — but pass them when you have them: the ML
 check runs the model over a slice of the REAL recording when a data file is supplied, and falls
 back to synthetic noise (where a detector that finds nothing still looks fine) when it is not.
@@ -61,6 +61,11 @@ The checks are headless (offscreen Qt), and one of them auto-dismisses modal dia
 raises its unsaved-work prompt when the window closes with a document loaded, and a modal inside a
 headless run is a permanent deadlock (`QDialog.exec()` waiting for a click that cannot come). The
 check reports which dialog it answered rather than hanging on it.
+
+The project-restore check saves a synthetic recording with nested segments, closes its window,
+then restores the project in a new window and verifies segment sizes, visible-layer count,
+and selected calibration, colour and time-offset values. Each check logs its start and result immediately, so a native crash preserves
+the last check reached.
 
 The comparison-figure check exercises the packaged Seaborn dependency with facets, a pair matrix,
 strip and swarm observations, source-free snapshot restore and twelve PNG/PDF/SVG exports. It
