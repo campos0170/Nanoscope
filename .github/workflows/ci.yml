@@ -50,8 +50,60 @@ jobs:
         include:
           - shard: analysis
             tests: tests/analysis
-          - shard: gui
-            tests: tests/gui
+          # tests/gui is split into 16 shards, not run as one process (2026-09-13).
+          # Root cause: a destroyed Qt wrapper (PySide6 6.11.1 and 6.11.2, both
+          # confirmed) becomes permanently invisible to Python's own cycle
+          # collector -- gc.collect() cannot free it even called explicitly, which
+          # is a separate problem from this suite's gc.disable() policy below (that
+          # guards against a live-wrapper-destruction deadlock; re-enabling it would
+          # not free these dead-wrapper zombies either). Measured: each MainWindow
+          # construct/destroy cycle leaks ~734 zombie QObjects and ~3.6 MB RSS,
+          # linearly, with no plateau across 40 cycles in one process. A single
+          # ~1,000-test gui process run accumulates enough of these to plausibly
+          # explain the intermittent SIGSEGV inside PySide::SignalManager::
+          # retrieveMetaObject seen in long GUI runs (always late, always during
+          # construction of an unrelated class -- consistent with a process-wide,
+          # ever-growing internal registry). Splitting into ~20-file shards cuts
+          # peak per-process accumulation ~16x; a controlled comparison (same
+          # 8-file/159-test combination, combined vs. split into per-file
+          # processes) crashed 1/15 combined vs. 0/15 split -- suggestive, not by
+          # itself definitive, but consistent with the deterministic scaling
+          # measurement. This does not fix the underlying PySide6 issue and does
+          # not eliminate the crash risk; it bounds it. gui_shard is "index/total"
+          # into an alphabetically sorted, interleaved split of tests/gui/test_*.py
+          # computed live below, so it never goes stale as files are added/removed.
+          - shard: gui-01
+            gui_shard: "0/16"
+          - shard: gui-02
+            gui_shard: "1/16"
+          - shard: gui-03
+            gui_shard: "2/16"
+          - shard: gui-04
+            gui_shard: "3/16"
+          - shard: gui-05
+            gui_shard: "4/16"
+          - shard: gui-06
+            gui_shard: "5/16"
+          - shard: gui-07
+            gui_shard: "6/16"
+          - shard: gui-08
+            gui_shard: "7/16"
+          - shard: gui-09
+            gui_shard: "8/16"
+          - shard: gui-10
+            gui_shard: "9/16"
+          - shard: gui-11
+            gui_shard: "10/16"
+          - shard: gui-12
+            gui_shard: "11/16"
+          - shard: gui-13
+            gui_shard: "12/16"
+          - shard: gui-14
+            gui_shard: "13/16"
+          - shard: gui-15
+            gui_shard: "14/16"
+          - shard: gui-16
+            gui_shard: "15/16"
           - shard: remaining
             tests: tests/plot tests/lifetime tests/test_*.py
     env:
@@ -64,10 +116,27 @@ jobs:
           cache: pip
       - name: Install NanoScope and test dependencies
         run: python -m pip install -e ".[dev]"
+      - name: Resolve this shard's test paths
+        id: files
+        run: |
+          if [ -n "${{ matrix.gui_shard }}" ]; then
+            python - "${{ matrix.gui_shard }}" <<'PYEOF'
+          import os, pathlib, sys
+          idx, total = (int(x) for x in sys.argv[1].split("/"))
+          files = sorted(p.as_posix() for p in pathlib.Path("tests/gui").glob("test_*.py"))
+          selected = files[idx::total]
+          if not selected:
+              sys.exit(f"gui shard {idx}/{total} selected zero files out of {len(files)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("paths=" + " ".join(selected) + "\n")
+          PYEOF
+          else
+            echo "paths=${{ matrix.tests }}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Run ${{ matrix.shard }} tests
         run: >-
           python -m pytest -q -p no:cacheprovider -m "not corpus"
-          ${{ matrix.tests }}
+          ${{ steps.files.outputs.paths }}
 
   scientific-smoke:
     name: Scientific behavior and reference-workflow checks
