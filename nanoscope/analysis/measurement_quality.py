@@ -19,7 +19,7 @@ from .baseline import BaselineConfig, MASKED_METHODS, baseline_intrusion
 from .open_pore_reference import OPEN_PORE_REFERENCE_PARAM_KEY
 
 REPORT_KEY = "measurement_quality"
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 INTRUSION_ADVISORY_FRACTION = 0.1  # Existing baseline_intrusion severe boundary.
 _LIMITATION = (
     "Advisory checks only: no flag and polarity agreement do not validate the "
@@ -37,6 +37,7 @@ _INPUT_KEYS = (
     "baseline_fingerprint", "baseline_polarity", "baseline_median_pA",
     "baseline_provided", "baseline_reference_applied", "baseline_estimator_bypassed",
     "baseline_open_pore_reference", "baseline_fallback", "baseline_health", "baseline_warnings",
+    "baseline_informational_warnings",
     "polarity", "polarity_requested", "polarity_source", "polarity_measured",
     "polarity_evidence", "polarity_warning", "filter_cutoff_hz", "filter_kind",
     "filter_order", "filter_zero_phase", "filter_rise_s",
@@ -178,8 +179,13 @@ def build_measurement_quality(
         flags.append("detector_polarity_advisory")
         messages.append(str(provenance["polarity_warning"]))
     if provenance.get("baseline_warnings"):
-        flags.append("baseline_estimator_advisory")
-        messages.extend(str(w) for w in provenance["baseline_warnings"])
+        warnings = [str(w) for w in provenance["baseline_warnings"]]
+        notices = set(provenance.get("baseline_informational_warnings", ()))
+        if any(w not in notices for w in warnings):
+            flags.append("baseline_estimator_advisory")
+        # Keep assumptions/default notices visible once at recording level without
+        # presenting them as observed defects on every event and export row.
+        messages.extend(warnings)
 
     starts = np.asarray(df["start_idx"], dtype=np.int64)
     ends = np.asarray(df["end_idx"], dtype=np.int64)

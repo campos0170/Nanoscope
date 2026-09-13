@@ -66,6 +66,7 @@ from .contract import (
     decoder_message_issue,
     decoder_messages,
     short_read_issue,
+    rejected_channel_issue,
     window_loaded,
     window_t0,
 )
@@ -325,6 +326,8 @@ class TdmsReader(BaseReader):
 
         try:
             plans: list[_ChannelPlan] = []
+            notes: list[str] = []
+            issues: list[str] = []
             # EVERY channel that declares wf_increment, as (channel name, raw value, its own
             # props) in file order — not just the first channel encountered. Timing used to be
             # read from `first_props` alone, which made two false statements possible: a
@@ -343,6 +346,16 @@ class TdmsReader(BaseReader):
                 for ch in group.channels():
                     props = dict(ch.properties)
                     name = f"{group.name}/{ch.name}"
+                    # Text/status and timestamp channels are legal TDMS members, but
+                    # are not sampled numeric signals. Exclude them before deriving the
+                    # common length or clock: a three-message log must not truncate a
+                    # 20,000-sample waveform, nor may datetime64 become a giant float.
+                    dtype = np.dtype(ch.dtype)
+                    if not (np.issubdtype(dtype, np.floating)
+                            or np.issubdtype(dtype, np.integer)):
+                        issues.append(rejected_channel_issue(
+                            name, f"its dtype is {dtype}, not a real numeric signal"))
+                        continue
                     if "wf_increment" in props:
                         timing.append((name, props["wf_increment"], props))
                     if "wf_start_offset" in props:
@@ -360,12 +373,17 @@ class TdmsReader(BaseReader):
                     ))
 
             if not plans:
+                if issues:
+                    raise UnsupportedFormatError(
+                        f"{self.path.name}: no readable numeric signal channels found. "
+                        + " ".join(issues))
+                refusal = filesystem_refusal(self.path)
+                if refusal is not None:
+                    raise CorruptFileError(refusal)
                 raise UnsupportedFormatError(
                     f"{self.path.name}: no channels found in any TDMS group.")
 
             # Layout: presence of wf_increment on ANY waveform channel.
-            notes: list[str] = []
-            issues: list[str] = []
 
             # `"wf_increment" in props`, NOT truthiness of the value. `if wf_increment:` is
             # FALSE at 0.0, so the `inc <= 0.0` guard inside this branch was unreachable for
@@ -568,6 +586,11 @@ class TdmsReader(BaseReader):
                     end = min(pos + LOAD_CHUNK_SAMPLES, stop)
                     # float64 on disk -> in-place downcast to the float32 destination slice
                     block = np.asarray(channel[pos:end])
+                    if not (np.issubdtype(block.dtype, np.floating)
+                            or np.issubdtype(block.dtype, np.integer)):
+                        raise CorruptFileError(
+                            f"{self.path.name}: '{plan.name}' did not decode to a real "
+                            f"numeric signal (dtype {block.dtype}); no values were converted.")
                     if first_block:
                         first_block = False
                         if downcast_needs_audit(block.dtype):
@@ -582,5 +605,10 @@ class TdmsReader(BaseReader):
                         progress(done / total, f"Loading {plan.name}")
                 if audits is not None:
                     audits[ci] = audit
+        except ReaderError:
+            raise
+        except (ValueError, TypeError, OSError) as exc:
+            raise CorruptFileError(
+                f"{self.path.name}: the TDMS signal data could not be decoded ({exc}).") from exc
         finally:
             tf.close()

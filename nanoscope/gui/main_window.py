@@ -803,6 +803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         #: today's drop, and say so".
         self._level_fit_inputs = None
         self._level_fit_pending = None
+        self._active_analysis_label: str | None = None
         self._event_plot_window = None   # the single, lazily-built EventPlotWindow
         self._psd_window = None   # the single, lazily-built PSDWindow
         # Stage 3 analytical state belongs to the PROJECT, not to whichever optional
@@ -846,6 +847,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restore_refusals: dict[str, str] = {}
         self._restore_lost_segments: list[str] = []    # segments with no parent to re-derive from
         self._restore_bad_calibrations: list[str] = []  # stored gain/offset a channel cannot take
+        self._loaded_source_fingerprints: dict[str, Any] = {}
         self._restore_sources: dict[str, Any] = {}     # path -> saved SourceFingerprint | None
         self._restore_notes: list[str] = []            # ready-written sentences for the banner
         self._restore_channel_moved: list[str] = []    # records re-attached by channel identity
@@ -1808,6 +1810,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._file_dock.focus_document(self._current_selection[0])
 
     def _wire(self) -> None:
+        self._session.documentOpened.connect(self._remember_loaded_source)
         self._controller.probed.connect(self._on_probed)
         self._controller.loaded.connect(self._on_loaded)
         self._controller.failed.connect(self._on_failed)
@@ -2293,7 +2296,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._controller.start(path, sample_range)
         self._set_progress_visible(True)
         self._progress.setValue(0)
-        self._progress.setFormat(f"Opening {path.name}…")
+        self._progress.setRange(0, 0 if len(self._active_job_descriptions()) > 1 else 100)
+        self._progress.setFormat(self._progress_description(f"Opening {path.name}…"))
+
+    @QtCore.Slot(str)
+    def _remember_loaded_source(self, doc_id: str) -> None:
+        from ..core.identity import fingerprint_source
+        from ..core.segment import SegmentDocument
+        if doc_id in self._loaded_source_fingerprints or not self._session.has_document(doc_id):
+            return
+        doc = self._session.document(doc_id)
+        if not isinstance(doc, SegmentDocument):
+            # Capture once for this load, including None. Re-reading on Save could
+            # associate the loaded samples with a replacement file's bytes.
+            self._loaded_source_fingerprints[doc_id] = fingerprint_source(
+                doc.source_key, doc.meta.n_samples)
 
     @QtCore.Slot(object)
     def _on_loaded(self, doc) -> None:
@@ -2309,7 +2326,11 @@ class MainWindow(QtWidgets.QMainWindow):
         existing = self._already_open(doc.source_key)
         fresh = existing is None
         if fresh:
-            doc_id = self._session.add_document(doc)
+            try:
+                doc_id = self._session.add_document(doc)
+            except Exception as exc:  # load-completion errors must not strand the queue
+                self._on_failed(f"Could not finish opening {doc.display_name}: {exc}")
+                return
         else:
             doc_id = existing
 
@@ -2376,8 +2397,9 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(float, str)
     def _on_progress(self, frac: float, msg: str) -> None:
         self._set_progress_visible(True)
+        self._progress.setRange(0, 0 if len(self._active_job_descriptions()) > 1 else 100)
         self._progress.setValue(int(frac * 100))
-        self._progress.setFormat(msg if msg else "%p%")
+        self._progress.setFormat(self._progress_description(msg if msg else "%p%"))
 
     def _cancel_load(self) -> None:
         """The Cancel button. Stops whichever background job is live — a load, a single
@@ -2395,10 +2417,12 @@ class MainWindow(QtWidgets.QMainWindow):
           dropped by each controller's sender guard, and the analysis panel's record of
           the in-flight job is cleared here — abort() never reaches its cancelled slot.
         """
+        jobs = self._active_job_descriptions()
         stopped = self._controller.abort_stopped()
         stopped &= self._analysis_controller.abort_stopped()
         stopped &= self._batch_controller.abort_stopped()
         self._analysis_panel.forget_pending_job()
+        self._active_analysis_label = None
         self._level_fit_pending = None
         self._subpop_signal_pending = None
         self._subpop_accepted_ids_pending = None
@@ -2435,10 +2459,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._open_queue.clear()
         msg = ("Cancelled." if stopped else
                "Cancelling — the run is finishing in the background. Its result is discarded.")
+        if len(jobs) > 1:
+            msg = ("Cancelled." if stopped else
+                   "Cancelling — workers are finishing in the background. Their results are discarded.")
+            msg += (" Stopped " if stopped else " Cancellation requested for ") + " and ".join(jobs) + "."
         if dropped:
             msg += f" {dropped} more queued file(s) were not opened."
         self.statusBar().showMessage(msg, 6000)
         self._finish_active()
+
+    def _active_job_descriptions(self) -> list[str]:
+        jobs = []
+        if self._controller.is_busy():
+            jobs.append("opening " + (self._active_open.name if self._active_open else "a recording"))
+        if self._analysis_controller.is_busy():
+            jobs.append("analysis " + (self._active_analysis_label or "run"))
+        if self._batch_controller.is_busy():
+            jobs.append("batch detection")
+        return jobs
+
+    def _progress_description(self, message: str) -> str:
+        jobs = self._active_job_descriptions()
+        return (" + ".join(jobs) + " — " + message) if len(jobs) > 1 else message
 
     def _set_progress_visible(self, visible: bool) -> None:
         self._progress.setVisible(visible)
@@ -2447,6 +2489,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # class of lie as reporting a cancel that did not happen.
         self._cancel_btn.setVisible(visible)
         self._cancel_btn.setEnabled(visible and self._has_cancellable_job())
+        jobs = self._active_job_descriptions()
+        self._cancel_btn.setToolTip("Cancel " + " and ".join(jobs) if jobs else "Cancel")
 
     def _release_load_chrome(self) -> None:
         """A finishing load takes the progress chrome down ONLY if nothing cancellable
@@ -2466,8 +2510,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_progress_visible(False)
             return
         self._set_progress_visible(True)
+        self._progress.setRange(0, 100)
         self._progress.setValue(0)
-        self._progress.setFormat(self._busy_job_format)
+        message = (f"Opening {self._active_open.name}…"
+                   if self._controller.is_busy() and self._active_open is not None
+                   else self._busy_job_format)
+        self._progress.setFormat(self._progress_description(message))
 
     @QtCore.Slot(str)
     def _on_run_refused(self, message: str) -> None:
@@ -2489,23 +2537,35 @@ class MainWindow(QtWidgets.QMainWindow):
     # -- analysis controller chrome --------------------------------------------------------------
     @QtCore.Slot(str)
     def _on_analysis_started(self, module_id: str) -> None:
-        if module_id != "fit.levels":
-            # A different job on the shared controller replaces any detached fit.
-            self._level_fit_pending = None
+        previous = self._active_analysis_label
+        self._active_analysis_label = module_id
+        # started is emitted before each caller installs its NEW pending state.
+        # Replacement uses abort(), which deliberately emits no terminal signal.
+        self._level_fit_pending = None
+        self._on_subpop_stopped()
+        if previous is not None:
+            self.statusBar().showMessage(
+                f"Replaced {previous} with {module_id}. The previous run's result "
+                "will not be applied.", 12000)
+        else:
+            self.statusBar().showMessage(f"Running {module_id}…", 6000)
         self._set_progress_visible(True)
         self._progress.setValue(0)
         # Remembered so a load finishing mid-run can repaint it (_release_load_chrome).
         self._busy_job_format = f"Analysing ({module_id})…"
-        self._progress.setFormat(self._busy_job_format)
+        self._progress.setRange(0, 0 if len(self._active_job_descriptions()) > 1 else 100)
+        self._progress.setFormat(self._progress_description(self._busy_job_format))
 
     @QtCore.Slot(object)
     def _on_analysis_finished(self, _result: object) -> None:
         # The AnalysisPanel installs/handles the result; MainWindow just clears the bar.
-        self._set_progress_visible(False)
+        self._active_analysis_label = None
+        self._release_load_chrome()
 
     @QtCore.Slot(str)
     def _on_analysis_failed(self, message: str) -> None:
-        self._set_progress_visible(False)
+        self._active_analysis_label = None
+        self._release_load_chrome()
         box = QtWidgets.QMessageBox(self)
         box.setIcon(QtWidgets.QMessageBox.Warning)
         box.setWindowTitle("Analysis failed")
@@ -2514,7 +2574,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def _on_analysis_cancelled(self) -> None:
-        self._set_progress_visible(False)
+        self._active_analysis_label = None
+        self._release_load_chrome()
 
     # -- batch detection -------------------------------------------------------------------------
     def _detectable_targets(self) -> list[tuple[str, int, str]]:
@@ -2664,7 +2725,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._progress.setValue(0)
         # Remembered so a load finishing mid-run can repaint it (_release_load_chrome).
         self._busy_job_format = f"Batch detecting {n} recording(s)…"
-        self._progress.setFormat(self._busy_job_format)
+        self._progress.setRange(0, 0 if len(self._active_job_descriptions()) > 1 else 100)
+        self._progress.setFormat(self._progress_description(self._busy_job_format))
 
     @QtCore.Slot(object)
     def _on_batch_finished(self, outcome: object) -> None:
@@ -2672,7 +2734,7 @@ class MainWindow(QtWidgets.QMainWindow):
         resulting resultsChanged refreshes the panel + re-gates the plot actions."""
         from ..analysis.events import EventSet
 
-        self._set_progress_visible(False)
+        self._release_load_chrome()
         results = getattr(outcome, "results", ())
         errors = getattr(outcome, "errors", ())
         total_events = 0
@@ -2708,7 +2770,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def _on_batch_cancelled(self) -> None:
-        self._set_progress_visible(False)
+        self._release_load_chrome()
         self._batch_skipped = 0
         self.statusBar().showMessage("Batch detect cancelled.", 6000)
 
@@ -4292,7 +4354,7 @@ class MainWindow(QtWidgets.QMainWindow):
             doc_id, channel = self._current_selection
             name = self._session.document(doc_id).display_name
             suffix = f" · {count} recording{'s' if count != 1 else ''} open"
-            return f"{name} · channel {int(channel) + 1}{suffix}"
+            return f"{name} · channel {int(channel)}{suffix}"
         if count:
             return f"{count} recording{'s' if count != 1 else ''} open · none selected"
         return "No recordings open"
@@ -4412,7 +4474,7 @@ class MainWindow(QtWidgets.QMainWindow):
             label = str(recipe.get("source_key") or "")
             channel = recipe.get("channel")
             if channel is not None:
-                label += f" · channel {int(channel) + 1}"
+                label += f" · channel {int(channel)}"
             if label and label not in names:
                 names.append(label)
         source_label = "; ".join(names) or "Saved analytical source (see provenance)"
@@ -5688,9 +5750,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         pending = PSD_ARTIFACT_ID in self._workspace_pending
         if self._psd_window is None:
-            self._psd_window = (
-                PSDWindow(self._session, self, defer_initial_refresh=True)
-                if pending else PSDWindow(self._session, self))
+            self._psd_window = PSDWindow(self._session, self, defer_initial_refresh=True)
             self._watch_surface_window(self._psd_window)
             self._watch_workspace_surface(PSD_ARTIFACT_ID, self._psd_window)
         if pending:
@@ -5761,10 +5821,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._workspace_pending.discard(PSD_ARTIFACT_ID)
         self._workspace_frozen.discard(PSD_ARTIFACT_ID)
         if self._psd_window is None:
-            self._psd_window = PSDWindow(self._session, self)
+            self._psd_window = PSDWindow(self._session, self, defer_initial_refresh=True)
             self._watch_surface_window(self._psd_window)
             self._watch_workspace_surface(PSD_ARTIFACT_ID, self._psd_window)
-        self._psd_window.set_target(doc_id, channel)
+        self._psd_window.set_target(doc_id, channel, recompute=False)
         self._psd_window.set_segment(start_s, end_s)
         self._on_workspace_changed(PSD_ARTIFACT_ID)
         self._show_analysis_page(
@@ -8939,6 +8999,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return box.clickedButton() is discard
 
     def _on_document_closed(self, doc_id: str) -> None:
+        self._loaded_source_fingerprints.pop(doc_id, None)
         # Closing the SHOWN recording would otherwise leave the viewer blank while the File
         # Manager still lists the recordings that are open — the mirror image of the pile-on
         # complaint. Fall back to one of the survivors.
@@ -9403,7 +9464,7 @@ class MainWindow(QtWidgets.QMainWindow):
             CalibrationRec, DocumentRef, FitRec, LayerRec, ProjectState, ResultRec, SegmentRec,
         )
         from ..core.calibration import channel_identity
-        from ..core.identity import fingerprint_source
+        from ..core.identity import describe_source_change, same_source
         from ..core.segment import SegmentDocument, persistent_key
 
         session = self._session
@@ -9416,6 +9477,53 @@ class MainWindow(QtWidgets.QMainWindow):
         # re-export that reorders the signal columns moves it. See CalibrationRec/ResultRec
         # and `calibration.resolve_channel`.
         chinfo: dict[str, dict[int, Any]] = {}
+        by_key = {persistent_key(doc): doc for doc in session.documents()}
+
+        def source_document(doc):
+            while isinstance(doc, SegmentDocument):
+                doc = by_key[doc.spec.parent_key]
+            return doc
+
+        for doc in session.documents():
+            self._remember_loaded_source(doc.doc_id)
+        live_sources = dict(self._loaded_source_fingerprints)
+        result_sources = {
+            doc.doc_id: live_sources[source_document(doc).doc_id]
+            for doc in session.documents()
+        }
+
+        def evidence(res):
+            if res.source_fingerprint_recorded or res.source_fingerprint is not None:
+                return res.source_fingerprint
+            return result_sources.get(res.doc_id)
+
+        saved_sources = dict(live_sources)
+        unknown_roots, mismatched_roots = set(), set()
+        carried = self._carried_over or {}
+        parents = {spec.segment_uid: spec.parent_key for spec in carried.get("segments", [])}
+        evidence_records = [(res, source_document(session.document(res.doc_id)))
+                            for res in session.results.all() if session.has_document(res.doc_id)]
+        for record in [*carried.get("results", []), *carried.get("fits", [])]:
+            key, seen = record.doc_id, set()
+            while key in parents and key not in seen:
+                seen.add(key)
+                key = parents[key]
+            match = next((doc for doc in session.documents()
+                          if same_source(persistent_key(doc), key)), None)
+            if match is not None:
+                evidence_records.append((record, source_document(match)))
+        for res, root_doc in evidence_records:
+            if not res.source_fingerprint_recorded and res.source_fingerprint is None:
+                continue
+            if res.source_fingerprint is None:
+                unknown_roots.add(root_doc.doc_id)
+                continue
+            if describe_source_change(res.source_fingerprint, live_sources[root_doc.doc_id],
+                                      loaded_n_samples=root_doc.meta.n_samples):
+                saved_sources[root_doc.doc_id] = res.source_fingerprint
+                mismatched_roots.add(root_doc.doc_id)
+        for doc_id in unknown_roots - mismatched_roots:
+            saved_sources[doc_id] = None
 
         for doc in session.documents():
             doc_id = doc.doc_id
@@ -9434,13 +9542,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 #
                 # The SOURCE FINGERPRINT is what makes the reference checkable. n_samples
                 # comes from the DOCUMENT (what was actually analysed), the rest from the
-                # file; the digest samples 3x256 KiB rather than hashing whole, which is
-                # 1.5 ms against ~1.4 s on the owner's 606 MB recording — a cost every save
-                # and every open would otherwise pay.
+                # file when this load was installed. A save must retain that evidence
+                # even if the path now contains replacement bytes. Restored results may
+                # require an older stamp until they have all been replaced.
                 documents.append(DocumentRef(
                     path=key,
                     loaded_range=(int(lr.start), int(lr.stop)) if lr is not None else None,
-                    source=fingerprint_source(doc.source_key, doc.meta.n_samples)))
+                    source=saved_sources[doc_id]))
             for info in doc.meta.channels:
                 # The record's OWN translation, never a field list spelled out here: a
                 # calibration field that exists on the value object and not in the record is
@@ -9480,6 +9588,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     calibration_fingerprint=res.calibration_fingerprint,
                     module_version=str(res.module_version or ""),
                     baseline_fingerprint=res.baseline_fingerprint,
+                    source_fingerprint=evidence(res),
+                    source_fingerprint_recorded=True,
                     # And the caveats those numbers were produced under — the
                     # unprobed-baseline advisory above all. See ResultRec.
                     warnings=tuple(res.warnings or ()),
@@ -9507,6 +9617,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 params=dict(res.params or {}),
                 calibration_fingerprint=res.calibration_fingerprint,
                 baseline_fingerprint=res.baseline_fingerprint,
+                source_fingerprint=evidence(res),
+                source_fingerprint_recorded=True,
                 warnings=tuple(res.warnings or ()),
                 **_identity(res.doc_id, res.channel)))
 
@@ -9517,7 +9629,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # unknown/plugin artifacts and pending unresolved built-ins byte-for-byte; only
         # live, successfully installed surfaces replace the stable id they own.
         workspace = self._capture_analytical_workspace()
-        from ..core.acquisition_state import WORKSPACE_KEY, capture_acquisition_overrides
+        from ..core.acquisition_state import (
+            WORKSPACE_KEY, capture_acquisition_overrides, prepare_acquisition_workspace,
+        )
+        prepare_acquisition_workspace(workspace.extra)
         workspace.extra[WORKSPACE_KEY] = capture_acquisition_overrides(
             session, workspace.extra.get(WORKSPACE_KEY, []))
         state = ProjectState(
@@ -10046,6 +10161,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 8000)
         self._open_queue.clear()
         self._active_open = None
+        self._active_analysis_label = None
+        self._analysis_panel.forget_pending_job()
         self._reset_analytical_workspace()
         # The outgoing project's unloadable records belong to the outgoing project.
         self._carried_over = None
@@ -10101,6 +10218,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restoring = True
         self._history.set_suspended(True)   # a reconstruction is not an undoable edit
         self._measure_history.set_suspended(True)
+        from ..core.project import stamp_legacy_result_sources
+        stamp_legacy_result_sources(state)
         self._restore_state = state
         workspace = getattr(state, "workspace", None)
         self._analytical_workspace = (
@@ -10125,7 +10244,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restore_refusals = {}
         self._restore_lost_segments = []
         self._restore_bad_calibrations = []
-        self._restore_notes = []
+        from ..core.acquisition_state import prepare_acquisition_workspace
+        self._restore_notes = list(prepare_acquisition_workspace(self._analytical_workspace.extra))
         self._restore_channel_moved = []
         self._restore_channel_lost = []
         self._restore_path_moved = []
@@ -10264,6 +10384,15 @@ class MainWindow(QtWidgets.QMainWindow):
         key = match_key if match_key is not None else persistent_key(doc)
         channels = doc.meta.channels
         where = doc.display_name
+        from ..core.identity import same_source
+        source_key = key
+        parents = {segment.segment_uid: segment.parent_key for segment in state.segments}
+        visited = set()
+        while source_key in parents and source_key not in visited:
+            visited.add(source_key)
+            source_key = parents[source_key]
+        inherited_source = next((ref.source for ref in state.documents
+                                 if same_source(ref.path, source_key)), None)
 
         def _belongs(stored_key: object) -> bool:
             """Is this stored record about the recording that just landed?
@@ -10353,8 +10482,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session, doc_id, state.workspace.extra.get(WORKSPACE_KEY, []), match_key=key,
             clear_existing=WORKSPACE_KEY in state.workspace.extra)
         for message in bandwidth_messages:
-            if message not in self._restore_channel_lost:
-                self._restore_channel_lost.append(message)
+            if message not in self._restore_notes:
+                self._restore_notes.append(message)
 
         for lay in state.layers:
             if not _belongs(lay.doc_id):
@@ -10416,6 +10545,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 calibration_fingerprint=tuple(float(v) for v in fp),
                 payload=events, overlays=(), scalars={},
                 warnings=tuple(r.warnings or ()),
+                source_fingerprint=(r.source_fingerprint if r.source_fingerprint_recorded
+                                    else r.source_fingerprint or inherited_source),
+                source_fingerprint_recorded=True,
                 baseline_fingerprint=(
                     r.baseline_fingerprint
                     if r.baseline_fingerprint is not None
@@ -10452,6 +10584,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 calibration_fingerprint=tuple(float(v) for v in fp),
                 payload=payload, overlays=(), scalars={},
                 warnings=tuple(fr.warnings or ()),
+                source_fingerprint=(fr.source_fingerprint if fr.source_fingerprint_recorded
+                                    else fr.source_fingerprint or inherited_source),
+                source_fingerprint_recorded=True,
                 baseline_fingerprint=fr.baseline_fingerprint))
             self._restored_records.add(id(fr))
 
@@ -10574,6 +10709,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         from dataclasses import fields as _dc_fields, is_dataclass
 
+        from ..core.project import stamp_legacy_result_sources
+        stamp_legacy_result_sources(state)
         installed = self._restored_records
         carried: dict[str, list] = {}
         for f in _dc_fields(state):
@@ -10748,7 +10885,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"no longer has and were NOT applied — they are kept in the project, not "
                 f"dropped: {', '.join(self._restore_channel_lost)}.")
         if notes:
-            self._info_bar.show_message(" ".join(notes) + " The rest of the project was restored.")
+            sentences = [note.rstrip() + ("" if note.rstrip().endswith((".", "!", "?")) else ".")
+                         for note in notes if note.strip()]
+            self._info_bar.show_message(" ".join(sentences) + " The rest of the project was restored.")
         cancelled = list(self._restore_cancelled)
         self._restore_cancelled = []
         self._restore_missing = []

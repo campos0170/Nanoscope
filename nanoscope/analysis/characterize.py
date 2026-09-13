@@ -48,6 +48,7 @@ from .events import (
     FLAG_CLIPPED,
     FLAG_MAX_DWELL,
     FLAG_NON_FINITE,
+    FLAG_SATURATED,
     FLAG_ZERO_BASELINE,
     SCHEMA,
     analysed_span,
@@ -84,11 +85,8 @@ _EDGE_PAD_SAMPLES = 64
 #:
 #: Like ``zero_baseline`` it is a CAVEAT, not a rejection: the event is real, its
 #: dwell is a real measurement, and the depth is a real floor -- so the row stays
-#: accepted and the flag says what the number is worth. Its permanent home is the
-#: vocabulary in :mod:`nanoscope.analysis.events`; it lives here until it can be
-#: added to ``events.DERIVED_FLAGS`` (see the note in :func:`recharacterize_span`,
-#: which already re-derives it rather than inheriting a stale one).
-FLAG_SATURATED = "saturated"
+#: accepted and the flag says what the number is worth. The token is defined in
+#: :mod:`nanoscope.analysis.events` and imported above for compatibility.
 
 #: How many CONSECUTIVE samples must sit on exactly the same extreme value before
 #: the event is called saturated. Ionic current plus thermal noise does not repeat
@@ -354,6 +352,8 @@ def characterize(
           you tighten `k_out`.
     """
     fs = float(fs)
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError(f"fs must be positive and finite, got {fs!r}")
     current = np.asarray(current, dtype=np.float64)
     baseline = np.asarray(baseline, dtype=np.float64)
     starts = np.asarray(starts, dtype=np.int64).ravel()
@@ -768,6 +768,9 @@ def recharacterize_span(
         and `events.carry_source_status` is the named door for any future caller that
         wants the re-application in one call rather than a loop.
     """
+    fs = float(fs)
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError(f"fs must be positive and finite, got {fs!r}")
     sig = np.asarray(signal)
     n = int(sig.size)
     # The span the DETECTOR analysed, in the rows' own coordinates. Read from the
@@ -832,13 +835,7 @@ def recharacterize_span(
     # ``max_dwell_s`` is only RE-DERIVABLE when the limit is known. When it is not,
     # its token has to be inherited or the reason for a rejection is destroyed.
     #
-    # ``saturated`` is added because :func:`characterize` re-derives it from the new
-    # span's own samples on every rebuild -- so it must NOT also be carried over, or a
-    # resize that moves the mask off the railed samples would keep claiming a flat top
-    # that is no longer in the row. It belongs in ``events.DERIVED_FLAGS`` beside the
-    # other four; until it can be added there, this is the one seam that rebuilds rows.
     derived = DERIVED_FLAGS if max_dwell_s is not None else (DERIVED_FLAGS - {FLAG_MAX_DWELL})
-    derived = derived | {FLAG_SATURATED}
     inherit_flag, inherit_accepted = _prior_curation(prior, derived)
 
     out = characterize(

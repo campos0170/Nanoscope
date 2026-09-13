@@ -181,9 +181,8 @@ def _changing_interval_csv(path: Path) -> tuple[Path, float]:
 def test_a_csv_whose_interval_changes_says_the_rate_does_not_describe_the_file(tmp_path):
     """MEASURED on the tree as found: 0.0600 s reported for a 0.3300 s recording, issues=().
 
-    The rate is deliberately NOT corrected — deriving it differently would move every dwell time
-    on every well-formed file. What must not happen is reporting it as though it described the
-    whole recording.
+    The cheap probe describes the disagreement; loading checks every timestamp and
+    withholds the invalid uniform-rate interpretation. Clean rates are not re-estimated.
     """
     path, true_span = _changing_interval_csv(tmp_path / "changing.csv")
 
@@ -198,16 +197,15 @@ def test_a_csv_whose_interval_changes_says_the_rate_does_not_describe_the_file(t
     assert "the rest of the file disagrees" in exact, f"load reported nothing exact: {exact!r}"
     # the sentence must quote the real span, not the one the rate implies
     assert f"{true_span:,.6g}" in exact
-    implied = doc_meta.n_samples / doc_meta.sample_rate_hz
-    assert implied < true_span / 5, "expected the original 5x+ error to reproduce"
+    assert doc_meta.sample_rate_hz is None
+    assert doc_meta.rate_provenance is Provenance.UNKNOWN
 
 
-def test_the_rate_itself_is_not_silently_corrected(tmp_path):
-    """The fix is a sentence, not a new number: correcting the rate here would move dwell times
-    on every well-formed file, which this batch is forbidden to do."""
+def test_an_invalid_loaded_clock_does_not_get_a_guessed_replacement_rate(tmp_path):
+    """Refuse the invalid clock instead of guessing a median or average replacement."""
     path, _ = _changing_interval_csv(tmp_path / "changing.csv")
-    assert open_document(path).meta.sample_rate_hz == pytest.approx(10_000.0, rel=1e-9)
-    assert open_document(path).meta.rate_provenance is Provenance.MEASURED
+    assert open_document(path).meta.sample_rate_hz is None
+    assert open_document(path).meta.rate_provenance is Provenance.UNKNOWN
 
 
 def test_an_hdf5_whose_time_base_does_not_cover_the_signal_says_so(tmp_path):

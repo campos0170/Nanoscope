@@ -50,7 +50,8 @@ from __future__ import annotations
 import contextvars
 import threading
 from contextlib import contextmanager
-from typing import Callable, Iterator, Union
+from functools import wraps
+from typing import Callable, Iterator, ParamSpec, TypeVar, Union
 
 __all__ = [
     "OperationCancelled",
@@ -61,6 +62,7 @@ __all__ = [
     "current_cancel",
     "is_cancelled",
     "resolve_cancel",
+    "propagate_cancel",
     "EVENT_POLL_STRIDE",
 ]
 
@@ -121,6 +123,23 @@ def resolve_cancel(cancel: CancelFlag | None = None) -> Callable[[], bool] | Non
     if isinstance(flag, threading.Event):
         return flag.is_set
     return flag
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def propagate_cancel(function: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Scope a pipeline's keyword-only ``cancel`` token over all nested kernels.
+
+    An explicit token must also win in callees that poll only the ambient token.
+    Restoring the caller's scope on success or exception keeps nested jobs isolated.
+    """
+    @wraps(function)
+    def run(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with cancel_scope(resolve_cancel(kwargs.get("cancel"))):
+            return function(*args, **kwargs)
+    return run
 
 
 def is_cancelled(cancel: CancelFlag | None = None) -> bool:

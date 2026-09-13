@@ -13,7 +13,28 @@ from .identity import same_source
 from .segment import persistent_key
 
 WORKSPACE_KEY = "acquisition_bandwidth_overrides_v1"
+UNREADABLE_KEY = WORKSPACE_KEY + "_unreadable"
 _MISSING = object()
+
+
+def prepare_acquisition_workspace(extra: dict) -> tuple[str, ...]:
+    """Quarantine an unreadable section without losing it or blocking future saves.
+
+    Unknown workspace extras survive old-reader round trips. Never overwrite an
+    existing quarantine entry, including one written by a newer application.
+    """
+    if WORKSPACE_KEY not in extra or isinstance(extra[WORKSPACE_KEY], list):
+        return ()
+    key = UNREADABLE_KEY
+    suffix = 1
+    while key in extra:
+        key = f"{UNREADABLE_KEY}_{suffix}"
+        suffix += 1
+    extra[key] = extra[WORKSPACE_KEY]
+    extra[WORKSPACE_KEY] = []
+    return ("Acquisition metadata could not be read. Its original contents are "
+            "preserved in the project; new acquisition settings and other edits "
+            "can still be saved.",)
 
 
 def capture_acquisition_overrides(session, previous=_MISSING) -> list:

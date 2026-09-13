@@ -228,6 +228,9 @@ def merge_by_gap(
         groups declined by the occupancy floor. ``(eventset, 0)`` unchanged when nothing
         merges.
     """
+    _validate_merge_input(eventset, signal, fs)
+    if not np.isfinite(max_gap_s) or max_gap_s < 0:
+        raise ValueError(f"max_gap_s must be finite and >= 0, got {max_gap_s!r}")
     df = eventset.df
     n = len(df)
     if n < 2:
@@ -307,6 +310,9 @@ def merge_region(
         ``(eventset, 0)`` with ``n_refused == 1``, which is how a caller tells it from
         the ``n_refused == 0`` no-op.
     """
+    _validate_merge_input(eventset, signal, fs)
+    if not np.isfinite(t0_s) or not np.isfinite(t1_s):
+        raise ValueError("merge region bounds must be finite")
     df = eventset.df
     n = len(df)
     if n < 2:
@@ -351,6 +357,25 @@ def merge_region(
 # ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------
+def _validate_merge_input(eventset: EventSet, signal: np.ndarray, fs: float) -> None:
+    """Refuse corrupt rows before a no-op or rebuild can silently retain them."""
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError(f"fs must be positive and finite, got {fs!r}")
+    current = np.asarray(signal)
+    if current.ndim != 1:
+        raise ValueError("merge requires a 1-D signal")
+    df = eventset.df
+    starts = df["start_idx"].to_numpy(dtype=np.int64)
+    ends = df["end_idx"].to_numpy(dtype=np.int64)
+    invalid = (starts < 0) | (ends > current.size) | (ends <= starts)
+    if np.any(invalid):
+        i = int(np.flatnonzero(invalid)[0])
+        raise ValueError(
+            f"event {i} has invalid span [{starts[i]}, {ends[i]}); "
+            f"expected 0 <= start < end <= {current.size}"
+        )
+
+
 def _sort_order(df: pd.DataFrame) -> np.ndarray:
     """Positions that order the rows by ``start_idx`` (stable). Detection output is
     already sorted, but a curated set (a hand-added missed event appends at the end) may

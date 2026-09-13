@@ -377,3 +377,18 @@ def test_checkpoint_all_on_an_untouched_session_pushes_nothing(detected, qtbot):
     for _ in range(4):
         assert window._history.checkpoint_all() is False
     assert window._history.depth() == depth
+
+
+def test_baseline_only_detection_with_fewer_events_is_not_named_merge(detected):
+    window, doc_id, original = detected
+    key = window._undo_key()
+    frame = original.payload.df.iloc[:2].copy(deep=True)
+    params = dict(original.params)
+    params['baseline_open_pore_reference'] = {'mode': 'constant', 'value_pA': I0}
+    rerun = replace(original, params=params, payload=EventSet(frame, dict(original.payload.provenance)))
+    window._session.add_result(rerun)
+    window._history.checkpoint(key)
+    assert window._history.undo_label(key) == 'Re-run detection'
+    window._history.undo(key)
+    pd.testing.assert_frame_equal(window._session.results.get(doc_id, 0, 'detect.schmitt').payload.df,
+                                  original.payload.df)

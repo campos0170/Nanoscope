@@ -1159,19 +1159,22 @@ class PSDWindow(QtWidgets.QMainWindow):
         self.refresh()
         self.workspaceChanged.emit()
 
-    def set_target(self, doc_id: str, channel: int) -> None:
+    def set_target(self, doc_id: str, channel: int, *, recompute: bool = True) -> None:
         """Point the window at ``(doc_id, channel)`` — the active recording.
 
         Re-gathers first (so a just-opened recording is listed), then selects it.
         A target with no current channel / no rate is ignored (the combo keeps its
         selection); the owner only calls this for a current-channel recording.
+        ``recompute=False`` lets the owner set a measured segment next, without
+        first computing an unused spectrum over the entire recording.
         """
         recs = self._gather_recordings()
         # Resolve to the recording's own current channel if the passed channel is not it.
         target = next(((r["doc_id"], r["channel"]) for r in recs if r["doc_id"] == doc_id), None)
         self._repopulate(target)
         self._reconfigure_for_recording()
-        self._recompute()
+        if recompute:
+            self._recompute()
 
     def _select_combo_target(self, target: tuple[str, int] | None) -> bool:
         """Select the combo entry whose ``(doc_id, channel)`` equals ``target``.

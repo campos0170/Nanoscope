@@ -312,6 +312,8 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
 
     @staticmethod
     def _number(value):
+        if "_" in str(value):
+            return None
         try:
             number = float(str(value).strip().replace("−", "-"))
         except (ValueError, TypeError):

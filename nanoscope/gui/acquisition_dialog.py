@@ -94,8 +94,17 @@ class AcquisitionBandwidthDialog(QtWidgets.QDialog):
     def apply(self):
         try:
             mode = self.mode.currentData()
+            cutoff_hz = None
+            if mode == "reported":
+                try:
+                    if "_" in self.cutoff.text():
+                        raise ValueError("underscore is not a numeric separator")
+                    cutoff_hz = float(self.cutoff.text())
+                except ValueError:
+                    raise ValueError(
+                        "acquisition cutoff must be a finite positive number in Hz") from None
             value = None if mode == "file" else AcquisitionBandwidth(
-                cutoff_hz=float(self.cutoff.text()) if mode == "reported" else None,
+                cutoff_hz=cutoff_hz,
                 status=mode, source="user",
                 filter_type=self.filter_type.text().strip() if mode == "reported" else "",
                 filter_order=(self.order.value() or None) if mode == "reported" else None,

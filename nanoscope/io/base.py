@@ -180,6 +180,15 @@ def filesystem_refusal(path: Path, exc: BaseException | None = None) -> str | No
         return f"{path.name} is a folder, not a file."
     if isinstance(exc, PermissionError) or not os.access(path, os.R_OK):
         return f"{path.name} cannot be read: permission denied."
+    # A zero-byte file has no format header or samples. This differs from a valid
+    # recording that decoded to zero samples, and must not inherit that case's advice
+    # that an armed-and-stopped acquisition can be deleted.
+    try:
+        if path.is_file() and path.stat().st_size == 0:
+            return (f"{path.name} is empty — 0 bytes, with no recording data to read. "
+                    f"Check that acquisition or copying finished, or recover the original file.")
+    except OSError:
+        pass  # A filesystem race is classified by the actual open failure below.
     # THE ONE ERRNO FAMILY THE DISK CANNOT ARBITRATE. Every branch above re-derives the cause
     # by statting the path, because the bytes on disk outlast whatever the library tripped
     # over. Out-of-descriptors is the exception that proves that rule: the failure lives in

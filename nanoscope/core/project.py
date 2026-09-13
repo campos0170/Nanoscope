@@ -253,7 +253,7 @@ def _manifest_section(name: str, section: str) -> Iterator[None]:
         yield
     except ProjectError:
         raise
-    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError, OverflowError) as exc:
         detail = f"missing key {exc}" if isinstance(exc, KeyError) else str(exc)
         raise ProjectError(
             f"{name}: the {section!r} section of {MANIFEST_NAME} is malformed ({detail})."
@@ -481,6 +481,8 @@ class ResultRec:
     #: not to whichever module/config happens to be installed when a project reopens.
     module_version: str = ""
     baseline_fingerprint: str | None = None
+    source_fingerprint: SourceFingerprint | None = None
+    source_fingerprint_recorded: bool = False
 
 
 @dataclass
@@ -527,6 +529,38 @@ class FitRec:
     #: :func:`nanoscope.core.calibration.resolve_channel`.
     channel_name: str | None = None
     channel_kind: str | None = None
+    source_fingerprint: SourceFingerprint | None = None
+    source_fingerprint_recorded: bool = False
+
+
+
+def _source_evidence_to_json(record) -> dict:
+    if not record.source_fingerprint_recorded and record.source_fingerprint is None:
+        return {}  # legacy record: its document reference is the only evidence
+    return {"source_fingerprint": (record.source_fingerprint.to_json()
+                                   if record.source_fingerprint is not None else None)}
+
+
+def stamp_legacy_result_sources(state) -> None:
+    """Attach historical evidence before either installation or carry-forward.
+
+    Explicit unknown evidence is different from a new, unstamped computation.
+    Preserve that distinction even when a result's channel cannot be restored.
+    """
+    from .identity import same_source
+    parents = {segment.segment_uid: segment.parent_key for segment in state.segments}
+    for record in [*state.results, *state.fits]:
+        if record.source_fingerprint_recorded:
+            continue
+        key = record.doc_id
+        seen = set()
+        while key in parents and key not in seen:
+            seen.add(key)
+            key = parents[key]
+        if record.source_fingerprint is None:
+            record.source_fingerprint = next((ref.source for ref in state.documents
+                                              if same_source(ref.path, key)), None)
+        record.source_fingerprint_recorded = True
 
 
 @dataclass
@@ -704,7 +738,10 @@ def _df_to_parquet_bytes(df: pd.DataFrame) -> bytes:
 
 
 def _parquet_bytes_to_df(blob: bytes) -> pd.DataFrame:
-    return pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+    try:
+        return pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+    except (ValueError, TypeError, OSError) as exc:
+        raise ProjectError(f"A saved table is damaged or unreadable ({exc}).") from exc
 
 
 _WORKSPACE_KEYS = frozenset({"version", "artifacts"})
@@ -1175,6 +1212,7 @@ def save_project(path: str | Path, state: ProjectState,
                         # even for plugins/derived tables that did not duplicate it into
                         # EventSet provenance.
                         "baseline_fingerprint": res.baseline_fingerprint,
+                        **_source_evidence_to_json(res),
                         # Additive and optional, so no VERSION bump: a reader that does
                         # not know the key ignores it, and a project that lacks it
                         # restores as () exactly as every project did before.
@@ -1199,6 +1237,7 @@ def save_project(path: str | Path, state: ProjectState,
                     "calibration_fingerprint": _fingerprint_to_json(
                         fit.calibration_fingerprint),
                     "baseline_fingerprint": fit.baseline_fingerprint,
+                    **_source_evidence_to_json(fit),
                     "warnings": [str(w) for w in (fit.warnings or ())],
                     # v7 -- see `_identity_to_json` and the note above VERSION.
                     **_identity_to_json(fit),
@@ -1433,6 +1472,8 @@ def _read_project(path: Path) -> ProjectState:
                         baseline_fingerprint=(
                             None if r.get("baseline_fingerprint") is None
                             else str(r["baseline_fingerprint"])),
+                        source_fingerprint=SourceFingerprint.from_json(r.get("source_fingerprint")),
+                        source_fingerprint_recorded="source_fingerprint" in r,
                         warnings=tuple(str(w) for w in (r.get("warnings") or ())),
                         **_identity_from_json(r),
                     )
@@ -1462,20 +1503,25 @@ def _read_project(path: Path) -> ProjectState:
                         baseline_fingerprint=(
                             None if r.get("baseline_fingerprint") is None
                             else str(r["baseline_fingerprint"])),
+                        source_fingerprint=SourceFingerprint.from_json(r.get("source_fingerprint")),
+                        source_fingerprint_recorded="source_fingerprint" in r,
                         warnings=tuple(str(w) for w in (r.get("warnings") or ())),
                         **_identity_from_json(r),
                     )
                 )
 
         measurements: pd.DataFrame | None = None
-        member = manifest.get("measurements")
-        if member:
-            try:
-                measurements = _parquet_bytes_to_df(zf.read(member))
-            except KeyError as exc:
-                raise ProjectError(
-                    f"{path.name}: measurements table {member!r} is missing from the archive."
-                ) from exc
+        with _manifest_section(path.name, "measurements"):
+            member = manifest.get("measurements")
+            if member is not None:
+                if not isinstance(member, str) or not member:
+                    raise ValueError("expected a non-empty archive member name or null")
+                try:
+                    measurements = _parquet_bytes_to_df(zf.read(member))
+                except KeyError as exc:
+                    raise ProjectError(
+                        f"{path.name}: measurements table {member!r} is missing from the archive."
+                    ) from exc
 
         # v11. ABSENT, rather than null, is the additive v1-v10 spelling: those projects
         # had no analytical workspace and therefore restore an empty one. A v11 file that

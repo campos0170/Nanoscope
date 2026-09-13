@@ -377,6 +377,16 @@ def test_an_unknown_job_token_reads_awkwardly_rather_than_anonymously():
     assert wt.describe_job("") == "A background analysis"
 
 
+def test_refusal_names_the_window_with_cancel_without_claiming_shared_recordings():
+    job = wt.LiveJob(domain=wt.JOB_ANALYSIS, label="detect.schmitt", thread=QtCore.QThread())
+    message = wt.refusal_text(job, "batch.detect")
+    assert "one analysis job at a time" in message
+    assert "nothing was started" in message
+    assert "Cancel in the window running that job" in message
+    assert "same recording" not in message
+    assert "batch detection" in message
+
+
 # ================================================================================================
 # C20 — a recording with no samples
 # ================================================================================================

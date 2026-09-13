@@ -181,6 +181,9 @@ FLAG_NON_FINITE = "non_finite"
 #: — C21's failure, at the one call site C21 did not reach.
 FLAG_CURATED = "flagged"
 
+#: A measured amplifier/ADC rail caveat; it does not reject an event or record a note.
+FLAG_SATURATED = "saturated"
+
 #: Tokens that are statements about the CURRENT measurement and are therefore
 #: RE-DERIVED whenever a row is rebuilt, rather than inherited from the rows it
 #: replaces. Everything else (a curator's own note) is inherited verbatim.
@@ -190,7 +193,7 @@ FLAG_CURATED = "flagged"
 #: that no longer touches the boundary stops claiming it does -- instead of C21's
 #: "rejected with NO REASON", which is invisible to every filter and count.
 DERIVED_FLAGS = frozenset(
-    {FLAG_ZERO_BASELINE, FLAG_MAX_DWELL, FLAG_CLIPPED, FLAG_NON_FINITE}
+    {FLAG_ZERO_BASELINE, FLAG_MAX_DWELL, FLAG_CLIPPED, FLAG_NON_FINITE, FLAG_SATURATED}
 )
 
 #: Tokens that EXPLAIN AN AUTOMATIC REJECTION -- the three rules

@@ -41,6 +41,7 @@ from .contract import (
     window_loaded,
 )
 from .errors import CorruptFileError, LoadCancelled, ReaderError, UnsupportedFormatError
+from ._clock import LoadedClockAudit
 
 __all__ = ["Hdf5Reader"]
 
@@ -203,8 +204,10 @@ class Hdf5Reader(BaseReader):
         found: list[_Signal] = []
         report = ReaderReport()
         for name in _SIGNAL_ORDER:
-            obj = h.get(name)
+            obj, link_problem = self._member(h, name)
             if obj is None:
+                if link_problem:
+                    report.issue(rejected_channel_issue(f"/{name}", link_problem))
                 continue
             sig = self._as_signal(name, obj)
             if sig is None:
@@ -222,6 +225,17 @@ class Hdf5Reader(BaseReader):
                     f"/{name} is stored as {sig.dataset.dtype} — raw ADC counts, not a physical "
                     f"unit. It is read as-is; set a gain and units in the Calibration panel.")
         return found, report
+
+    @staticmethod
+    def _member(h: h5py.File, name: str):
+        """Distinguish an absent member from a link whose target cannot be read."""
+        link = h.get(name, getlink=True)
+        if link is None:
+            return None, None
+        try:
+            return h[name], None
+        except (KeyError, OSError):
+            return None, f"its {type(link).__name__} target is missing or cannot be read"
 
     def _time_base(self, h: h5py.File) -> _Signal | None:
         """/time as a structurally valid channel, WHATEVER it holds — or None if it is not one.
@@ -249,7 +263,8 @@ class Hdf5Reader(BaseReader):
         /time too short to difference gets its issue from :meth:`_timebase` and the rate stays
         UNKNOWN, never fabricated.
         """
-        return self._as_signal("time", h.get("time"))
+        obj, _problem = self._member(h, "time")
+        return self._as_signal("time", obj)
 
     def _time_signal(self, h: h5py.File) -> _Signal | None:
         """/time usable as a RATE SOURCE: a structural time base with at least 2 samples."""
@@ -271,14 +286,14 @@ class Hdf5Reader(BaseReader):
         tail = (" " + " ".join(rejected)) if rejected else ""
         if signals:
             only = ", ".join(f"/{s.name}" for s in signals)
-            obj = h.get("time")
-            if obj is not None:
+            obj, link_problem = self._member(h, "time")
+            if obj is not None or link_problem:
                 # /time IS in the file, it just is not a run of samples this reader can read
                 # (a group, a string dtype, a 2-D block). Reaching for "no /time base" here
                 # would deny a member the same sentence goes on to list. Name what is actually
                 # wrong with it, and do not call the file an export: something wrote a clock.
                 return (f"{self.path.name}: {only} present and /time present but unusable as a "
-                        f"time base ({self._reject_reason(obj)}), and there is no second signal "
+                        f"time base ({link_problem or self._reject_reason(obj)}), and there is no second signal "
                         f"channel to read this file without one "
                         f"(top-level members: {members}).{tail}")
             # A lone signal dataset with no /time and no companion channel: a data export
@@ -313,8 +328,9 @@ class Hdf5Reader(BaseReader):
                   report: ReaderReport) -> tuple[float | None, Provenance, float]:
         """Derive (sample_rate_hz, provenance, t0_s) from /time WITHOUT loading it whole.
 
-        Reads only the first ~1000 samples for dt, plus one sample at `start` for t0, plus — and
-        this is the part that was missing — the LAST sample, which HDF5 hands over in O(1).
+        Reads only the first ~1000 samples for dt, one sample at `start` for t0, and the
+        last sample for a preliminary span check. load() then validates every loaded
+        timestamp before exposing this rate to analysis.
 
         dt itself is measured exactly as it always was, from the head, deliberately: deriving it
         differently would move the sample rate, and with it every dwell time, on every
@@ -333,8 +349,10 @@ class Hdf5Reader(BaseReader):
         reported loudly. The user whose acquisition software wrote /time in an unreadable
         shape deserves to know the file carries a clock this reader refused, and why.
         """
-        obj = h.get("time")
+        obj, link_problem = self._member(h, "time")
         if obj is None:
+            if link_problem:
+                report.issue(f"/time is present but unusable ({link_problem}); sample rate unknown")
             return None, Provenance.UNKNOWN, 0.0
         tsig = self._time_signal(h)
         if tsig is None:
@@ -348,12 +366,15 @@ class Hdf5Reader(BaseReader):
         n_time = tsig.length
         head = np.asarray(tsig.read(0, 1000), dtype=np.float64)
         d = np.diff(head)
-        if d.size == 0 or not np.all(d > 0):
+        if d.size == 0 or not np.all(np.isfinite(head)) or not np.all(d > 0):
             # Degenerate/non-increasing time head: cannot trust it as a rate source.
             report.issue("/time is not usable as a monotonic time base; sample rate unknown")
             t0 = float(tsig.read(start, start + 1)[0]) if start < n_time else 0.0
-            return None, Provenance.UNKNOWN, t0
+            return None, Provenance.UNKNOWN, self._finite_t0(t0, report)
         dt = float(d.mean())
+        if not np.isfinite(dt) or dt <= 0:
+            report.issue("/time has no finite positive sample interval; sample rate unknown")
+            return None, Provenance.UNKNOWN, 0.0
         sample_rate_hz = 1.0 / dt
 
         # --- IS THIS CLOCK IN SECONDS AT ALL? ---------------------------------------------------
@@ -416,7 +437,15 @@ class Hdf5Reader(BaseReader):
             # readout, x-axis value and segment rebase of such a window start/fs seconds
             # early, the precise defect class contract.window_t0 was built to end.
             t0_s = float(head[0]) + start * dt
-        return sample_rate_hz, Provenance.MEASURED, t0_s
+        return sample_rate_hz, Provenance.MEASURED, self._finite_t0(t0_s, report)
+
+    @staticmethod
+    def _finite_t0(value: float, report: ReaderReport) -> float:
+        if np.isfinite(value):
+            return value
+        report.issue("/time has a non-finite timestamp at the first loaded sample; "
+                     "its absolute start time is unavailable and was set to 0.")
+        return 0.0
 
     # -- probe ---------------------------------------------------------------------------------
     def probe(self) -> RecordingProbe:
@@ -479,12 +508,44 @@ class Hdf5Reader(BaseReader):
                 # and must not change depending on how much of it the user chose to load.
                 sample_rate_hz, rate_prov, t0_s = self._timebase(h, start, full_n, report)
 
+                # Endpoints can agree even when intervals in the middle are 2x too long
+                # and then 2x too short. Validate the entire loaded clock with bounded
+                # memory, including intervals that cross read-chunk boundaries.
+                tsig = self._time_base(h)
+                clock_work = 0
+                if tsig is not None:
+                    # An uncovered window relies entirely on extrapolation. Its rate
+                    # still needs evidence: validate the available prefix rather than
+                    # considering zero observed timestamps a clean clock.
+                    extrapolated = start >= tsig.length
+                    clock_start = 0 if extrapolated else start
+                    scope = ("available timestamps used to extrapolate this window"
+                             if extrapolated else "loaded samples")
+                    clock = LoadedClockAudit("/time", sample_rate_hz, clock_start, scope)
+                    time_stop = min(stop, tsig.length)
+                    clock_work = max(0, time_stop - clock_start)
+                    for a in range(clock_start, time_stop, LOAD_CHUNK_SAMPLES):
+                        if cancel is not None and cancel():
+                            raise LoadCancelled(f"{self.path.name}: load cancelled.")
+                        b = min(a + LOAD_CHUNK_SAMPLES, time_stop)
+                        clock.observe(tsig.read(a, b))
+                        if progress is not None:
+                            progress((b - clock_start) / max(1, n * len(signals) + clock_work),
+                                     f"Checking /time ({b - clock_start}/{clock_work})")
+                    report.issue(clock.issue())
+                    if clock.problem is not None:
+                        sample_rate_hz, rate_prov = None, Provenance.UNKNOWN
+                        if extrapolated:
+                            t0_s = 0.0
+                            report.issue("This window's absolute start time cannot be "
+                                         "extrapolated from the invalid /time and was set to 0.")
+
                 # --- read each channel: gzip float64 on disk -> preallocated contiguous float32.
                 # `dst[a:b] = sig.read(a, b)` with a float32 dst does the downcast in place, no
                 # float64 temporary of the whole channel. Progress/cancel poll per chunk (gzip
                 # inflate is the slow path this exists for).
-                total_work = n * len(signals)
-                done = 0
+                total_work = n * len(signals) + clock_work
+                done = clock_work
                 arrays: list[np.ndarray] = []
                 # One audit per wide-float channel, kept aligned with `signals` so the
                 # dead-hint substitution below can find its channel's audit again. The mirror

@@ -87,7 +87,7 @@ import numpy as np
 import pandas as pd
 
 from .baseline import BaselineConfig, characterisation_baseline, require_polarity
-from .cancel import CancelFlag, check_cancelled
+from .cancel import CancelFlag, check_cancelled, propagate_cancel
 from .characterize import characterize
 from .detect import (
     MARGINAL_MERGE_OCCUPANCY,
@@ -95,6 +95,8 @@ from .detect import (
     _as_baseline,
     _check_finite,
     _exclusion_samples,
+    _validate_detection_timing,
+    _unmeasurable_noise_message,
     detect_polarity,
     gap_window_samples,
     group_starts_by_gap,
@@ -474,6 +476,7 @@ def cusum_onset_recovery_regions(
 # ---------------------------------------------------------------------------
 # the app-facing detector
 # ---------------------------------------------------------------------------
+@propagate_cancel
 def detect_events_cusum(
     signal: np.ndarray,
     fs: float,
@@ -566,14 +569,7 @@ def detect_events_cusum(
     if fs is None:
         raise ValueError("fs is required; dwell is undefined without a sample rate")
     fs = float(fs)
-    if not (min_dwell_s >= 0):
-        raise ValueError(f"min_dwell_s must be >= 0, got {min_dwell_s}")
-    if max_dwell_s is not None and max_dwell_s <= min_dwell_s:
-        raise ValueError(
-            f"max_dwell_s ({max_dwell_s}) must exceed min_dwell_s ({min_dwell_s})"
-        )
-    if merge_gap_s is not None and merge_gap_s < 0:
-        raise ValueError(f"merge_gap_s must be >= 0, got {merge_gap_s}")
+    _validate_detection_timing(fs, min_dwell_s, max_dwell_s, merge_gap_s)
     # k and h are validated inside the core, where the recurrence they break lives.
     # Same gate as the Schmitt path for polarity, and for the same reason.
     if polarity is not None:
@@ -643,10 +639,11 @@ def detect_events_cusum(
     resid = cur - base
     noise = float(noise_rms(resid))
     if not np.isfinite(noise) or noise <= 0:
-        raise ValueError(
-            f"noise RMS is {noise!r}; cannot set thresholds on a trace with no "
-            "measurable noise."
-        )
+        raise ValueError(_unmeasurable_noise_message(
+            noise, "noise RMS", supplied_baseline=(
+                baseline_provided or bool(baseline_prov.get("baseline_reference_applied"))
+            ) and bool(np.any(cur != cur[0])),
+        ))
 
     # -- polarity ------------------------------------------------------------
     check_cancelled(cancel)

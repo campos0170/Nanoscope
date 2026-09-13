@@ -85,6 +85,53 @@ def test_opening_and_navigating_materializes_no_amplitude(curated):
     assert not inspector._level_line.movable
 
 
+def test_amplitude_and_mask_edit_share_conditioning_and_baseline(qtbot, tmp_path, monkeypatch):
+    from nanoscope.analysis import baseline
+    from nanoscope.gui import event_inspector
+    session, doc_id, channel = builders._session_with_doc(tmp_path)
+    events = builders._events_for(session, doc_id, channel)
+    inspector = builders._inspector(qtbot, session)
+    calls = {"condition": 0, "baseline": 0}
+    condition = event_inspector.detection_signal
+    estimate = baseline.estimate_baseline_result
+    def counted_condition(*args, **kwargs):
+        calls["condition"] += 1
+        return condition(*args, **kwargs)
+    def counted_estimate(*args, **kwargs):
+        calls["baseline"] += 1
+        return estimate(*args, **kwargs)
+    monkeypatch.setattr(event_inspector, "detection_signal", counted_condition)
+    monkeypatch.setattr(baseline, "estimate_baseline_result", counted_estimate)
+    baseline.clear_baseline_cache()
+    inspector.set_events(doc_id, channel, events.df, provenance=dict(events.provenance))
+    row = events.df.iloc[0]
+    raw = session.calibrated(doc_id, channel).data
+    conditioned = inspector._conditioned(raw, builders.FS)
+    assert inspector._amplitude.measurement_signal() is conditioned
+    assert conditioned.dtype == np.float32
+    assert calls == {"condition": 1, "baseline": 1}
+    inspector._recharacterize_row(
+        0, conditioned, builders.FS, int(row.start_idx), int(row.end_idx) - 1)
+    inspector._amplitude.context(events.df.iloc[0])
+    assert calls == {"condition": 1, "baseline": 1}
+    # Reusing one array must not reuse an answer for a different saved filter.
+    inspector._provenance["filter_cutoff_hz"] = 2000.0
+    refreshed = inspector._amplitude.context(events.df.iloc[0])
+    assert refreshed.current is not conditioned
+    assert calls == {"condition": 2, "baseline": 2}
+
+
+def test_amplitude_still_refuses_nonfinite_recording_before_shared_baseline(curated, monkeypatch):
+    inspector, events = curated
+    controls = inspector._amplitude
+    damaged = controls.measurement_signal().copy()
+    damaged[-1] = np.nan  # outside the selected event
+    controls._baseline_cache = None
+    monkeypatch.setattr(controls, "measurement_signal", lambda: damaged)
+    with pytest.raises(ValueError, match="NaN|non.finite"):
+        controls.context(events.df.iloc[0])
+
+
 @pytest.mark.parametrize("method", ["median", "mean", "peak", "mode"])
 def test_apply_method_preserves_every_existing_column(curated, method):
     inspector, events = curated

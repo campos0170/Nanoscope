@@ -7,6 +7,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 import numpy as np
 
 from .document import CalibratedChannel
+from .identity import SourceFingerprint
 from .types import ChannelKind, RecordingMeta
 
 # ================================================================================================
@@ -130,6 +131,12 @@ class AnalysisResult:
     # precisely the rows measured by the block median that this change exists to replace.
     # The value is baseline.BaselineConfig.fingerprint(fs), the digest over
     # (method, rough_s, base_s, decim, mask_sigma, dilate_ms, window_s, despike_size).
+
+    # Source evidence belongs to the result, including an explicitly unknown stamp.
+    # Fresh computations obtain evidence from their immutable loaded document at save;
+    # restored results retain recorded=True even when their historical stamp is None.
+    source_fingerprint: SourceFingerprint | None = None
+    source_fingerprint_recorded: bool = False
 
 
 @runtime_checkable

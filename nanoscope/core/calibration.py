@@ -572,11 +572,13 @@ def load_sidecar(data_path: Path, doc_id: str, calib: CalibrationSet,
     except (OSError, ValueError) as exc:
         return [f"{path.name} could not be read and was ignored ({exc})."]
 
-    version = blob.get("version") if isinstance(blob, dict) else None
-    if (not isinstance(blob, dict) or not isinstance(version, int)
+    if not isinstance(blob, dict):
+        return [f"{path.name} must contain a JSON object and was ignored."]
+    version = blob.get("version")
+    if (not isinstance(version, int)
             or isinstance(version, bool)
             or not (SIDECAR_MIN_READ_VERSION <= version <= SIDECAR_VERSION)):
-        return [f"{path.name} has unsupported version {blob.get('version')!r} and was ignored."]
+        return [f"{path.name} has unsupported version {version!r} and was ignored."]
     raw_channels = blob.get("channels")
     if not isinstance(raw_channels, dict):
         return [f"{path.name} has no 'channels' object and was ignored."]

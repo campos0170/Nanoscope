@@ -3485,6 +3485,7 @@ class DetectionPanel(QWidget):
         """
         self._fs = float(fs) if fs else None
         self._apply_nyquist_ranges()
+        self._refresh_notch_mode()
         self._update_rise_time()
         self._update_response_plot()
 
@@ -4139,6 +4140,9 @@ class DetectionPanel(QWidget):
         out: list[float] = []
         bad: list[str] = []
         for tok in cls._notch_line_tokens(text):
+            if "_" in tok:
+                bad.append(tok)
+                continue
             try:
                 val = float(tok)
             except ValueError:
@@ -4317,7 +4321,9 @@ class DetectionPanel(QWidget):
         :meth:`_accept_notch_text` is the one place that rule is written.
         """
         lines = [float(f) for f in (freqs or [])]
-        text = ", ".join(f"{f:g}" for f in lines)
+        # Results re-seed this form before the next run. Six significant digits
+        # can move a requested line across Nyquist, so replay must round-trip.
+        text = ", ".join(repr(f).removesuffix(".0") for f in lines)
         parts = self._notch_refusal_parts(text) if lines else None
         if parts is not None:
             verdict, rationale = parts
@@ -4374,9 +4380,21 @@ class DetectionPanel(QWidget):
                  "and harmonics above. Type at least one frequency, or untick the box.",
                  True)
             return
-        show(f"Explicit spelling: {len(lines)} line(s) — "
-             f"{', '.join(f'{f:g}' for f in lines)} Hz. The frequency and harmonics "
-             "above are NOT read while this is on.", False)
+        spelling = ", ".join(repr(f).removesuffix(".0") for f in lines)
+        if self._fs is not None and np.isfinite(self._fs) and self._fs > 0:
+            nyquist = self._fs / 2.0
+            dropped = [f for f in lines if f >= nyquist]
+            if dropped:
+                applied = [f for f in lines if f < nyquist]
+                applied_text = ", ".join(repr(f).removesuffix(".0") for f in applied)
+                dropped_text = ", ".join(repr(f).removesuffix(".0") for f in dropped)
+                outcome = (f"Will notch {len(applied)} line(s): {applied_text} Hz."
+                           if applied else "No usable notch lines; detection will be refused.")
+                show(f"⚠ {outcome} Skipping {dropped_text} Hz at or above Nyquist "
+                     f"({nyquist!r} Hz). Requested: {spelling} Hz.", True)
+                return
+        show(f"Explicit spelling: {len(lines)} line(s) — {spelling} Hz. "
+             "The frequency and harmonics above are NOT read while this is on.", False)
 
     def set_savgol_enabled(self, enabled: bool) -> None:
         """Enable/disable the Savitzky-Golay smoothing stage."""
@@ -7471,6 +7489,7 @@ class EventTable(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
         self._applying_columns = False
+        self._refreshing_selection = False
         try:
             saved = json.loads(str(QSettings().value(self._COLUMN_SETTINGS_KEY, '{}')))
             self._column_preferences = saved if isinstance(saved, dict) else {}
@@ -7867,6 +7886,7 @@ class EventTable(QWidget):
         widths = {name: self.view.columnWidth(i) for i, name in enumerate(old_columns)}
         schema_changed = old_columns != list(self._model.df.columns)
         self._applying_columns = True
+        self._refreshing_selection = True
         try:
             self._model.refresh_all()
             if schema_changed:
@@ -7879,6 +7899,7 @@ class EventTable(QWidget):
             self._restore_selection(keep_ids, current_id)
         finally:
             self._applying_columns = False
+            self._refreshing_selection = False
         # ...and the note repaints WITH the table: a bulk gesture elsewhere may have
         # recorded refusals on the shared ledger, or retired remembered rows.
         self._sync_refusal_note()
@@ -8391,7 +8412,10 @@ class EventTable(QWidget):
         self._select_proxy_row(nxt)
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
-        if not current.isValid():
+        # A curation repaint restores the same current event after the model
+        # reset. Echoing that restoration as navigation collapses the gallery's
+        # multi-selection while it is applying successive labels.
+        if self._refreshing_selection or not current.isValid():
             return
         src_row = self._proxy.mapToSource(current).row()
         self.eventSelected.emit(self._model._event_id(src_row))

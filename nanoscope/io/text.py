@@ -3,9 +3,11 @@ from __future__ import annotations
 import codecs
 import csv
 import re
+import warnings
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -42,9 +44,9 @@ from .contract import (
     rate_interval_changes_issue,
     short_window_issue,
     window_loaded,
-    window_t0,
 )
 from .errors import CorruptFileError, LoadCancelled, UnsupportedFormatError
+from ._clock import LoadedClockAudit
 
 FORMAT_NAME = "Text trace"
 
@@ -82,9 +84,9 @@ _MV_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)\s*mV", re.IGNORECASE)
 _SCAN_LINES = 1000
 
 # The head block decoded strictly to settle the file's encoding, and the tail block read back to
-# ask whether the interval measured at the START of the file still holds at its END. Both are one
-# seek and one read: the tail check is what makes the sample rate an answer about the whole file
-# instead of about its first 1000 rows. [MEASURED] on the owner's 332 MB / 9,800,724-row
+# ask whether the interval measured at the START of the file still holds at its END. These are
+# preliminary probe checks; load validates every timestamp, including the middle. Both are one
+# seek and one read. [MEASURED] on the owner's 332 MB / 9,800,724-row
 # 'nisin_fibrin_trace.csv': probe 0.9 ms -> 1.5 ms, full load unchanged at 0.83 s.
 _ENCODING_PROBE_BYTES = 1 << 16
 _TAIL_PROBE_BYTES = 1 << 16
@@ -344,6 +346,9 @@ def _scan_impl(path: Path, encoding: str | None = None) -> _Scan:
         encoding, why_not_utf8 = _detect_encoding(path)
     lines = _read_sample_lines(path, _SCAN_LINES, encoding)
     if not lines:
+        refusal = filesystem_refusal(path)
+        if refusal is not None:
+            raise CorruptFileError(refusal)
         raise UnsupportedFormatError(f"{path.name}: file is empty.")
 
     sample_text = "\n".join(t for t, _ in lines[:50])
@@ -534,8 +539,8 @@ class TextTraceReader(BaseReader):
     def _read_columns(self, scan: _Scan, signal_cols: list[int],
                       skiprows, nrows: int | None, est_total: int,
                       progress: ProgressFn | None, cancel: CancelFn | None,
-                      header: int | None = None
-                      ) -> tuple[list[list[np.ndarray]], list[DowncastAudit]]:
+                      header: int | None = None, start: int = 0
+                      ) -> tuple[list[list[np.ndarray]], list[DowncastAudit], LoadedClockAudit]:
         """One streamed pass over the file, in the encoding ``scan`` settled on.
 
         ``header`` is ``0`` for a read that starts at the top of the file and ``None`` for a
@@ -552,6 +557,7 @@ class TextTraceReader(BaseReader):
         and TDMS readers, whose float64 datasets have the same hole). The returned audits are
         aligned with ``signal_cols``; the float64 exists one chunk at a time, never whole.
         """
+        self._validate_rows(scan, skiprows, nrows, header, progress, cancel, est_total)
         buffers: list[list[np.ndarray]] = [[] for _ in signal_cols]
         audits: list[DowncastAudit] = [
             DowncastAudit(
@@ -560,31 +566,86 @@ class TextTraceReader(BaseReader):
             for c in signal_cols
         ]
         rows_read = 0
-        reader = pd.read_csv(
-            self.path,
-            sep=scan.delimiter,
-            header=header,
-            usecols=signal_cols,
-            dtype=np.float64,
-            chunksize=LOAD_CHUNK_SAMPLES,
-            skiprows=skiprows,
-            nrows=nrows,
-            encoding=scan.encoding,
-            engine="c",
-        )
-        for chunk in reader:
-            if cancel is not None and cancel():
-                raise LoadCancelled(f"{self.path.name}: load cancelled.")
-            for j in range(len(signal_cols)):
-                src = chunk.iloc[:, j].to_numpy(dtype=np.float64, copy=False)
-                dst = src.astype(np.float32)
-                audits[j].observe(src, dst)
-                buffers[j].append(dst)
-            rows_read += len(chunk)
-            if progress is not None:
-                progress(min(1.0, rows_read / est_total),
-                         f"Reading {self.path.name}: {rows_read:,} rows")
-        return buffers, audits
+        clock = LoadedClockAudit("time column", scan.sample_rate_hz, start)
+        # Selecting only signal columns makes pandas silently discard extra fields in
+        # malformed rows. Parse the complete row, including its clock. Explicit names and
+        # index_col=False also prevent a malformed first row of a window from becoming an
+        # inferred index; pandas' warning about that truncation must become a refusal.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", pd.errors.ParserWarning)
+            with pd.read_csv(
+                self.path, sep=scan.delimiter, header=header,
+                names=list(range(scan.ncols)), index_col=False,
+                dtype=np.float64, chunksize=LOAD_CHUNK_SAMPLES,
+                skiprows=skiprows, nrows=nrows, encoding=scan.encoding, engine="c",
+            ) as reader:
+                for chunk in reader:
+                    if cancel is not None and cancel():
+                        raise LoadCancelled(f"{self.path.name}: load cancelled.")
+                    clock.observe(chunk.iloc[:, 0].to_numpy(dtype=np.float64, copy=False))
+                    for j, file_col in enumerate(signal_cols):
+                        src = chunk.iloc[:, file_col].to_numpy(dtype=np.float64, copy=False)
+                        dst = src.astype(np.float32)
+                        audits[j].observe(src, dst)
+                        buffers[j].append(dst)
+                    rows_read += len(chunk)
+                    if progress is not None:
+                        progress(0.25 + 0.75 * min(1.0, rows_read / est_total),
+                                 f"Reading {self.path.name}: {rows_read:,} rows")
+        return buffers, audits, clock
+
+    def _validate_rows(self, scan: _Scan, skiprows, nrows: int | None,
+                       header: int | None, progress: ProgressFn | None,
+                       cancel: CancelFn | None, est_total: int) -> None:
+        """Validate complete CSV records, including the first record of each parser chunk.
+
+        pandas' C parser can truncate extra fields at chunk boundaries even without
+        usecols. Its handling of short rows also conflates missing fields with numeric
+        NaN. A streaming structural pass avoids both ambiguities and respects quoting.
+        Only loaded rows are validated, with the same blank-row and window indexing.
+        """
+        if nrows == 0:
+            return
+        count = 0
+        header_pending = header == 0
+        with self.path.open("r", encoding=scan.encoding, newline="") as fh:
+            remaining = islice(fh, len(skiprows) if skiprows is not None else 0, None)
+            record_has_text = False
+
+            def physical_lines():
+                nonlocal record_has_text
+                for line in remaining:
+                    record_has_text |= bool(line.strip())
+                    yield line
+
+            try:
+                for row in csv.reader(physical_lines(), delimiter=scan.delimiter, strict=True):
+                    blank = not record_has_text
+                    record_has_text = False
+                    if blank:
+                        continue
+                    if header_pending:
+                        header_pending = False
+                        continue
+                    if count % LOAD_CHUNK_SAMPLES == 0:
+                        if cancel is not None and cancel():
+                            raise LoadCancelled(f"{self.path.name}: load cancelled.")
+                        if progress is not None:
+                            progress(0.25 * min(1.0, count / est_total),
+                                     f"Checking rows in {self.path.name}: {count:,}")
+                    if len(row) != scan.ncols:
+                        raise CorruptFileError(
+                            f"{self.path.name}: ragged table at loaded row {count + 1:,}: "
+                            f"expected {scan.ncols} fields but found {len(row)}. "
+                            f"Re-export a rectangular time-and-signal table; no fields "
+                            f"were silently discarded or filled in.")
+                    count += 1
+                    if nrows is not None and count >= nrows:
+                        break
+            except csv.Error as exc:
+                raise CorruptFileError(
+                    f"{self.path.name}: malformed CSV near loaded row {count + 1:,} "
+                    f"({exc}).") from exc
 
     def _count_data_rows(self, scan: _Scan) -> int:
         """The file's exact data-row count, by one streamed counting pass.
@@ -669,7 +730,7 @@ class TextTraceReader(BaseReader):
         scan = _scan(self.path)
         report = ReaderReport(notes=scan.notes, issues=scan.issues)
 
-        signal_cols = list(range(1, scan.ncols))  # positional; column 0 is the time axis, dropped
+        signal_cols = list(range(1, scan.ncols))
 
         # `start` is clamped at 0 only. There is no honest upper clamp here: a CSV's length is an
         # ESTIMATE until its last row is parsed, so clamping against the estimate would be
@@ -697,9 +758,11 @@ class TextTraceReader(BaseReader):
 
         # Aligned with signal_cols; empty means nothing was read, so nothing was downcast.
         audits: list[DowncastAudit] = []
+        clock = LoadedClockAudit("time column", scan.sample_rate_hz, start)
         try:
-            buffers, audits = self._read_columns(scan, signal_cols, skiprows, nrows, est_total,
-                                                 progress, cancel, header=header)
+            buffers, audits, clock = self._read_columns(
+                scan, signal_cols, skiprows, nrows, est_total,
+                progress, cancel, header=header, start=start)
         except LoadCancelled:
             raise
         except pd.errors.EmptyDataError:
@@ -726,18 +789,30 @@ class TextTraceReader(BaseReader):
                 skip_lines, window_t0_read = self._window_start(scan, start)
                 skiprows = range(0, skip_lines)
             try:
-                buffers, audits = self._read_columns(scan, signal_cols, skiprows, nrows,
-                                                     est_total, progress, cancel, header=header)
+                buffers, audits, clock = self._read_columns(
+                    scan, signal_cols, skiprows, nrows, est_total,
+                    progress, cancel, header=header, start=start)
             except LoadCancelled:
                 raise
             except pd.errors.EmptyDataError:
                 buffers = [[] for _ in signal_cols]
-            except (ValueError, OSError, UnicodeDecodeError, pd.errors.ParserError) as exc2:
+            except (ValueError, OSError, UnicodeDecodeError, pd.errors.ParserError,
+                    pd.errors.ParserWarning) as exc2:
                 raise CorruptFileError(
                     f"{self.path.name} is not valid UTF-8 ({where}); read as Latin-1 instead, it "
                     f"then failed on the data itself: {exc2}. That row is the one to look at, "
                     f"not the encoding.") from exc2
-        except (ValueError, OSError, pd.errors.ParserError) as exc:
+        except (pd.errors.ParserError, pd.errors.ParserWarning) as exc:
+            raise CorruptFileError(
+                f"{self.path.name}: the data contains a malformed or ragged row; every row "
+                f"must have {scan.ncols} fields. No extra fields were discarded. ({exc})") from exc
+        except ValueError as exc:
+            raise CorruptFileError(
+                f"{self.path.name}: a time or signal column contains a value that is not "
+                f"a plain number. Re-export numeric fields without thousands separators "
+                f"(for example, -500000.00). Locale-specific number formats are not "
+                f"inferred.") from exc
+        except OSError as exc:
             raise CorruptFileError(f"{self.path.name}: {exc}") from exc
 
         channels: list[np.ndarray] = []
@@ -785,10 +860,8 @@ class TextTraceReader(BaseReader):
         # answer instead of the two-interval comparison the probe had to settle for.
         # A WINDOW that ran off the end of the file also settles the file's exact row count —
         # start + n IS the file length — so the same exact check runs there. A window that
-        # stopped short of the end does not, and gets the probe's two-interval check only. That
-        # is a KNOWN GAP, left open deliberately: the alternative is to test the file's span
-        # against the row-count ESTIMATE, which on a file with variable-width rows would raise
-        # false alarms on well-formed recordings.
+        # stopped short of the end does not establish the whole-file span. Its own timestamps
+        # are still checked individually by LoadedClockAudit, without using an estimated count.
         exact_rows: int | None = None
         if sample_range is None:
             exact_rows = n
@@ -814,23 +887,19 @@ class TextTraceReader(BaseReader):
                 report.issue(short_window_issue(
                     self.path.name, start=start, asked=asked, got=n))
 
-        # A computed clock is allowed, but never in silence: the contract for t0 is "the
-        # experimental time of the first loaded sample", and a value derived from the rate is
-        # that time only if the interval never changes before it. This fires when column 0 of
-        # the window's first row could not be read as a number — the one case the pass above
-        # cannot answer from the file itself.
-        if sample_range is not None and start > 0 and window_t0_read is None:
-            report.note(
-                f"the time column could not be read at row {start:,}, so this window's start "
-                f"time was computed from the sample rate instead of read from the file. If the "
-                f"interval changes anywhere before that row, this recording's absolute times "
-                f"are off by the difference; the samples themselves are unaffected.")
-
         # What the float64->float32 downcast destroyed, if anything — the shared rule's
         # sentence (see _read_columns). issue() is None for a faithful cast, which
         # ReaderReport.issue drops, so a normal file adds nothing here.
         for audit in audits:
             report.issue(audit.issue())
+
+        report.issue(clock.issue())
+        rate = scan.sample_rate_hz if clock.problem is None else None
+        rate_provenance = scan.rate_provenance if rate is not None else Provenance.UNKNOWN
+        # A NaN at a window's first row must never poison every plotted x coordinate.
+        # The issue above names the invalid timestamp, and the axis falls back to samples.
+        loaded_t0 = (clock.first if clock.first is not None and np.isfinite(clock.first)
+                     else 0.0)
 
         dead = {}
         for i, a in enumerate(channels):
@@ -847,22 +916,19 @@ class TextTraceReader(BaseReader):
             path=self.path,
             format_name=FORMAT_NAME,
             n_samples=n,
-            sample_rate_hz=scan.sample_rate_hz,
-            rate_provenance=scan.rate_provenance,
+            sample_rate_hz=rate,
+            rate_provenance=rate_provenance,
             channels=self._channel_infos(scan, dead=dead),
-            # The window's own clock — READ from the file's time column at the window's own
-            # row where that value exists, exactly as the HDF5 reader reads /time at the
-            # window's own index, and only computed from the rate (contract.window_t0) when it
-            # does not: a whole-file load, a window at row 0, or a row whose column 0 could not
-            # be parsed. A computed t0 is right only while the interval is constant through the
-            # whole file, and a CSV whose acquisition paused, was concatenated, or changed
-            # logging rate is exactly the file where it is not — see `_window_start`.
-            t0_s=(window_t0(scan.t0_s, start, scan.sample_rate_hz)
-                  if window_t0_read is None else window_t0_read),
+            # Always the first loaded timestamp; invalid clocks are disclosed and their
+            # rate is unavailable, so a fabricated seconds axis cannot reach analysis.
+            t0_s=loaded_t0,
             loaded_range=window_loaded(sample_range, start, n),
             nominal_voltage_mV=scan.nominal_voltage_mV,
             voltage_provenance=scan.voltage_provenance,
             notes=report.notes,
             issues=report.issues,
         )
-        return TraceDocument(meta=meta, channels=tuple(channels))
+        document = TraceDocument(meta=meta, channels=tuple(channels))
+        if progress is not None:
+            progress(1.0, f"Loaded {self.path.name}")
+        return document

@@ -180,5 +180,11 @@ def build_reference(
         assumptions.append("Interval medians resist isolated outliers but can be wrong if selected regions contain blockages, artifacts, or transitions. Five samples is only a numerical minimum, not a scientific adequacy guarantee.")
     if not np.isfinite(baseline).all():
         raise ValueError("reference construction produced nonfinite values")
+    if np.any(baseline == 0):
+        details["warnings"] = [
+            "The user-supplied open-pore reference contains zero current. "
+            "Fractional depth (dI/I0) is undefined for events whose reference is "
+            "zero; review the reference and signed current before using those ratios."
+        ]
     details["assumptions"] = assumptions
     return baseline, details

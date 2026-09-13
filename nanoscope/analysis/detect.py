@@ -55,7 +55,7 @@ import pandas as pd
 from scipy.signal import find_peaks, peak_widths
 
 from .baseline import BaselineConfig, characterisation_baseline, require_polarity
-from .cancel import CancelFlag, check_cancelled
+from .cancel import CancelFlag, check_cancelled, propagate_cancel
 from .characterize import characterize
 from .events import empty_df, n_clipped_boundary, span_provenance
 from .filters import lowpass, measure_rise_time, noise_rms
@@ -620,6 +620,36 @@ def _merge_intervals(iv: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+def _validate_detection_timing(
+    fs: float, min_dwell_s: float, max_dwell_s: float | None,
+    merge_gap_s: float | None,
+) -> None:
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError(f"fs must be positive and finite, got {fs!r}")
+    if not np.isfinite(min_dwell_s) or min_dwell_s < 0:
+        raise ValueError(f"min_dwell_s must be finite and >= 0, got {min_dwell_s!r}")
+    if max_dwell_s is not None and (
+        not np.isfinite(max_dwell_s) or max_dwell_s <= min_dwell_s
+    ):
+        raise ValueError(
+            f"max_dwell_s ({max_dwell_s}) must be finite and exceed min_dwell_s ({min_dwell_s})"
+        )
+    if merge_gap_s is not None and (not np.isfinite(merge_gap_s) or merge_gap_s < 0):
+        raise ValueError(f"merge_gap_s must be finite and >= 0, got {merge_gap_s!r}")
+
+
+def _unmeasurable_noise_message(noise: float, label: str, *, supplied_baseline: bool) -> str:
+    if supplied_baseline:
+        return (
+            f"{label} after subtracting the supplied open-pore reference/baseline is "
+            f"{noise!r}; cannot resolve detection noise. Check the reference current, "
+            "units and numeric precision: a reference far from this trace can erase "
+            "its noise during subtraction."
+        )
+    return f"{label} is {noise!r}; cannot set thresholds on a trace with no measurable noise."
+
+
+@propagate_cancel
 def detect_events(
     signal: np.ndarray,
     fs: float,
@@ -725,6 +755,9 @@ def detect_events(
     if fs is None:
         raise ValueError("fs is required; dwell is undefined without a sample rate")
     fs = float(fs)
+    _validate_detection_timing(fs, min_dwell_s, max_dwell_s, merge_gap_s)
+    if not np.isfinite(k_in) or not np.isfinite(k_out):
+        raise ValueError(f"k_in and k_out must be finite, got {k_in!r} and {k_out!r}")
     if not (k_out < k_in):
         raise ValueError(
             f"k_out ({k_out}) must be < k_in ({k_in}). Equal thresholds are a "
@@ -733,14 +766,6 @@ def detect_events(
         )
     if not (k_out > 0):
         raise ValueError(f"k_out must be positive, got {k_out}")
-    if not (min_dwell_s >= 0):
-        raise ValueError(f"min_dwell_s must be >= 0, got {min_dwell_s}")
-    if max_dwell_s is not None and max_dwell_s <= min_dwell_s:
-        raise ValueError(
-            f"max_dwell_s ({max_dwell_s}) must exceed min_dwell_s ({min_dwell_s})"
-        )
-    if merge_gap_s is not None and merge_gap_s < 0:
-        raise ValueError(f"merge_gap_s must be >= 0, got {merge_gap_s}")
     # POLARITY IS A DIRECTION, NOT A GAIN, and it was the one knob on this call with
     # nothing standing behind it. It multiplies the deviation while the thresholds are
     # derived from the UNSCALED noise, so any other value silently rescales the
@@ -845,10 +870,11 @@ def detect_events(
     resid = cur - base
     noise = float(noise_rms(resid))
     if not np.isfinite(noise) or noise <= 0:
-        raise ValueError(
-            f"noise RMS is {noise!r}; cannot set thresholds on a trace with no "
-            "measurable noise."
-        )
+        raise ValueError(_unmeasurable_noise_message(
+            noise, "noise RMS", supplied_baseline=(
+                baseline_provided or bool(baseline_prov.get("baseline_reference_applied"))
+            ) and bool(np.any(cur != cur[0])),
+        ))
 
     # -- polarity: measure it (always, for the evidence record) --------------
     check_cancelled(cancel)
@@ -1396,8 +1422,8 @@ def detection_basis(
         `DetectionBasis`.
     """
     fs = float(fs)
-    if fs <= 0:
-        raise ValueError(f"fs must be positive, got {fs}")
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError(f"fs must be positive and finite, got {fs}")
     if polarity is not None:
         require_polarity(polarity)
     work = np.asarray(signal)
@@ -1425,10 +1451,11 @@ def detection_basis(
     resid = cur - base
     noise = noise_level(resid, noise_method)
     if not np.isfinite(noise) or noise <= 0:
-        raise ValueError(
-            f"noise ({noise_method}) is {noise!r}; cannot set thresholds on a trace "
-            "with no measurable noise."
-        )
+        raise ValueError(_unmeasurable_noise_message(
+            noise, f"noise ({noise_method})", supplied_baseline=(
+                baseline is not None or getattr(baseline_config, "open_pore_reference", None) is not None
+            ) and bool(np.any(cur != cur[0])),
+        ))
 
     measured, evidence = detect_polarity(cur, base, k=5.0)
     if polarity is None:

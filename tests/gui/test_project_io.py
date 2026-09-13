@@ -520,8 +520,8 @@ def test_a_cusum_level_table_survives_save_and_reopen(qapp, qtbot, tmp_path):
     win = _fresh_window(qtbot)
     doc_a, ch_a = _install(win, _doc(csv, arr))
     _detect(win, qtbot)
-    win._act_fit_levels.trigger()          # THE MENU PATH
-    qtbot.wait(50)
+    with qtbot.waitSignal(win._analysis_controller.finished, timeout=30_000):
+        win._act_fit_levels.trigger()          # THE MENU PATH
 
     sess = win._session
     before = sess.results.get(doc_a, ch_a, "fit.levels")
@@ -641,8 +641,8 @@ def test_a_restored_level_table_is_REACHABLE_from_the_menu(qapp, qtbot, tmp_path
     win = _fresh_window(qtbot)
     doc_a, ch_a = _install(win, _doc(csv, arr))
     _detect(win, qtbot)
-    win._act_fit_levels.trigger()
-    qtbot.wait(50)
+    with qtbot.waitSignal(win._analysis_controller.finished, timeout=30_000):
+        win._act_fit_levels.trigger()
     assert win._act_export_levels.isEnabled()
     levels = win._session.results.get(doc_a, ch_a, "fit.levels").payload.copy()
 
@@ -696,8 +696,8 @@ def test_a_level_table_retired_by_a_re_detection_is_not_persisted_at_all(qapp, q
     win = _fresh_window(qtbot)
     doc_a, ch_a = _install(win, _doc(csv, arr))
     _detect(win, qtbot, min_dwell_s=1e-5)
-    win._act_fit_levels.trigger()
-    qtbot.wait(50)
+    with qtbot.waitSignal(win._analysis_controller.finished, timeout=30_000):
+        win._act_fit_levels.trigger()
     assert win._session.results.get(doc_a, ch_a, "fit.levels") is not None
 
     # Re-detect with settings that change which events exist at all.

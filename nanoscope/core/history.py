@@ -875,7 +875,9 @@ class EventHistory(QObject):
         # re-detection landing on the same spans are the same problem one level down.
         # The RESULT object separates all of them, so the last word belongs to it.
         detection = replaced and (_params_moved_outside_baseline(prior, res)
-                                  or _curation_was_reset(prior.payload.df, res.payload.df))
+                                  or _curation_was_reset(prior.payload.df, res.payload.df)
+                                  or (len(prior.payload.df) != len(res.payload.df)
+                                      and not _values_equal(prior.params, res.params)))
         if label:
             text = label
         elif detection:

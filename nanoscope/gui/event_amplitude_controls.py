@@ -13,7 +13,7 @@ import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
-from ..analysis.baseline import BaselineConfig, characterisation_baseline
+from ..analysis.baseline import BaselineConfig, characterisation_baseline, require_finite
 from ..analysis.event_amplitude import (
     amplitude_is_current, clear_event_amplitude, measure_event_amplitude,
     write_event_amplitude,
@@ -159,8 +159,12 @@ class EventAmplitudeControls(QtWidgets.QWidget):
             raise ValueError("The saved low-pass configuration cannot be reconstructed.")
         key = (owner._doc_id, owner._channel, id(raw), fs, detection_signal_key(prov))
         if self._signal_cache is None or self._signal_cache[0] != key:
-            arr = detection_signal(raw, fs, prov)
-            self._signal_cache = (key, np.asarray(arr, dtype=np.float64))
+            # Mask resizing and amplitude curation measure the same recording.
+            # Reuse its conditioned float32 array instead of running the filter
+            # again and retaining a second whole-recording float64 copy.
+            arr = (owner._conditioned(raw, fs) if fs is not None
+                   else detection_signal(raw, fs, prov))
+            self._signal_cache = (key, arr)
             self._baseline_cache = None
         return self._signal_cache[1]
 
@@ -184,8 +188,14 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         if config is not None and fs is not None:
             key = (id(current), fs, int(pol), config.fingerprint())
             if self._baseline_cache is None or self._baseline_cache[0] != key:
+                # Amplitude remains strict: distant NaNs must not become an
+                # implicit repaired reference. Once the input is known finite,
+                # use the row-rebuild cache policy so a mask drag reuses this
+                # identical whole-recording estimate. No sample is interpolated.
+                require_finite(current, stage="measure event amplitude")
                 result = characterisation_baseline(
-                    current, fs, config=config, polarity=int(pol), health=False)
+                    current, fs, config=config, polarity=int(pol), health=False,
+                    on_nonfinite="interpolate")
                 self._baseline_cache = (key, np.asarray(result.baseline, dtype=np.float64))
             baseline = self._baseline_cache[1]
             baseline_source = "recording"

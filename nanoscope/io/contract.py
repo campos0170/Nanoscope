@@ -12,9 +12,10 @@ defect in this module's history came from four different answers to one of them:
 2. **What is the sample rate, and how sure are we?**  Both the text and the HDF5 reader
    measure ``dt`` from the first ~1000 rows and then describe the whole file with it. Measured
    on a CSV whose interval changes at row 1500: 0.0600 s reported for a 0.3300 s recording —
-   5.5x wrong, ``issues=()``. The rate itself is not the fix (changing how it is derived would
-   move every dwell time on every well-formed file); *saying that the rest of the file
-   disagrees* is. :func:`rate_disagrees_issue` is the one sentence for it.
+   5.5x wrong, ``issues=()``. Probes report that disagreement; full loads additionally check
+   every loaded timestamp with ``LoadedClockAudit`` and leave an invalid clock's rate
+   unknown. Clean clocks keep the same estimator and rate; damaged clocks cannot silently
+   drive seconds-based analysis. :func:`rate_disagrees_issue` describes the span mismatch.
 
 3. **Which channels exist, and why was one rejected?**  The HDF5 reader silently dropped a
    ``/current`` stored as int32 raw ADC counts, or shaped ``(1, N)``: the channel was simply

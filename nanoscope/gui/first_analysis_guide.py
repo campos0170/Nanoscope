@@ -214,6 +214,10 @@ class FirstAnalysisGuide(QtWidgets.QDialog):
                 button.setProperty("route", route)
                 available, reason = self._availability_provider(route) if self._availability_provider else (True, "")
                 button.setEnabled(bool(available))
+                if available and route == "baseline":
+                    reason = ("Inspect the open-pore reference for this recording. "
+                              "Measure this recording proposes baseline windows; "
+                              "Use these values confirms them.")
                 button.setToolTip(reason)
         self.previous.setEnabled(index > 0)
         self.next.setEnabled(index < len(STEPS) - 1)

@@ -4020,6 +4020,7 @@ class BaselineResult:
         out: list[str] = []
         if self.reference_details is not None:
             out.extend(self.reference_details.get("assumptions", ()))
+            out.extend(self.reference_details.get("warnings", ()))
         if self.fallback:
             out.append(self.fallback)
         if self.health is not None:
@@ -4086,6 +4087,20 @@ class BaselineResult:
         """The single-number open-pore current, the median of the baseline."""
         return float(np.median(self.baseline))
 
+    @property
+    def informational_warnings(self) -> tuple[str, ...]:
+        """Reference assumptions and parameter notices, not measured QC findings.
+
+        They remain in ``warnings`` for display and audit, but cannot by themselves
+        establish that an event or recording has a measurement defect.
+        """
+        notices = list((self.reference_details or {}).get("assumptions", ()))
+        if self.config.is_masked and self.param_source == "default":
+            notices.append(UNPROBED_DEFAULT_WARNING)
+        if self.config.is_masked and self.param_source == BATCH_SOURCE:
+            notices.append(batch_copied_warning(self.config))
+        return tuple(dict.fromkeys(notices))
+
     def provenance(self, *, param_source: str | None = None) -> dict[str, Any]:
         """The flat ``baseline_*`` provenance block (3.5), ready to merge.
 
@@ -4104,6 +4119,7 @@ class BaselineResult:
         )
         prov["baseline_median_pA"] = self.median_pA
         prov["baseline_polarity"] = int(self.polarity)
+        prov["baseline_informational_warnings"] = list(self.informational_warnings)
         if self.reference_details is not None:
             prov["baseline_reference_details"] = self.reference_details
             prov["baseline_polarity_role"] = "not used to construct user reference; 0 means unspecified"

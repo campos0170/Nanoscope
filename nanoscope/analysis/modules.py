@@ -1195,6 +1195,15 @@ def _build_warnings(prov: dict[str, Any], df: pd.DataFrame) -> tuple[str, ...]:
     # startup transient on a trace too short for it to settle, and the depth the
     # smoothers ate. Both are damage done before detect_events saw the trace.
     settling = notch_settling_from_provenance(prov)
+    omitted_lines = prov.get("notch_omitted_freqs") or ()
+    if prov.get("notch_enabled") and omitted_lines:
+        omitted = ", ".join(str(float(f)) for f in omitted_lines)
+        applied = ", ".join(str(float(f)) for f in prov["notch_freqs"])
+        warns.append(
+            f"Requested notch lines {omitted} Hz were omitted because they are at "
+            f"or above Nyquist ({float(prov['fs']) / 2:g} Hz). "
+            f"Applied notch lines: {applied} Hz."
+        )
     if settling is not None and settling[1] > 0:
         settle_s, unsettled_s = settling
         warns.append(
@@ -1431,6 +1440,15 @@ def stamp_preprocess_provenance(
                 freqs=notch_freqs_param(params),
             )
         )
+        requested = notch_freqs_param(params)
+        if requested is None:
+            requested = [
+                prov["notch_freq_hz"] * h
+                for h in range(1, prov["notch_harmonics"] + 1)
+            ]
+        prov["notch_requested_freqs"] = list(requested)
+        applied = set(prov["notch_freqs"])
+        prov["notch_omitted_freqs"] = [f for f in requested if f not in applied]
         # How long this notch needs to forget its own initial state, and how much
         # of that it could not get inside this trace. A high-Q notch rings for
         # ~1/(its width) at each end, and filtered at scipy's default pad that

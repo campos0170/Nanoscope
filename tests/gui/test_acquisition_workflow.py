@@ -72,12 +72,13 @@ def test_dialog_applies_per_channel_override_without_touching_source(dialog_rig)
     assert session.acquisition_bandwidth(key, 0) == HEADER
 
 
-@pytest.mark.parametrize("cutoff", ["", "0", "-1", "nan", "inf", "1e999", "not a number"])
+@pytest.mark.parametrize("cutoff", ["", " ", "0", "-1", "nan", "inf", "1e999", "not a number", "10 kHz", "1_20"])
 def test_invalid_dialog_cutoff_is_refused_without_changing_metadata(dialog_rig, cutoff):
     dialog, session, doc, key, path = dialog_rig
     _reported(dialog, cutoff)
     dialog.apply()
-    assert "Not applied" in dialog.error.text()
+    assert dialog.error.text() == (
+        "Not applied: acquisition cutoff must be a finite positive number in Hz")
     assert session.acquisition_bandwidth_override(key, 0) is None
     assert doc.meta.channels[0].acquisition_bandwidth == HEADER
     assert path.read_bytes() == b"unchanged source fixture"

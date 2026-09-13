@@ -1061,17 +1061,18 @@ def test_every_page_paints_the_events_it_acts_on(win, qtbot):
             assert painted != first, f"page {page + 1} paints the same tiles as page 1"
 
 
-def test_labelling_keeps_the_selection_so_a_second_key_can_be_added(win, qtbot):
-    """MEASURED BEFORE: _after_label_write called refilter(), a model reset, which cleared
-    the selection — so the tiles you had just labelled were deselected and the next digit
-    wrote nothing. Curation needs that reset because the Accepted/Rejected filters are
-    computed from `accepted`; a label never changes `accepted`."""
+@pytest.mark.parametrize("settle_ms", [0, 200])
+def test_labelling_keeps_the_selection_so_a_second_key_can_be_added(win, qtbot, settle_ms):
+    """The full signal route includes the table's curation refresh. Restoring its
+    current row must not echo as navigation and shrink the gallery label scope."""
     from nanoscope.analysis.labels import label_column
 
     w, doc_id, ch = win
     gal = _open_gallery(w, qtbot)
     gal.set_vocabulary(_vocab())
     df = w._session.results.get(doc_id, ch, "detect.schmitt").payload.df
+    if settle_ms:
+        qtbot.wait(settle_ms)
 
     _select_rows(gal, 0, 4)
     gal.apply_hotkey("1")                      # molecule=apo-ferritin

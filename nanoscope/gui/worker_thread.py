@@ -316,13 +316,13 @@ def refusal_text(blocker: LiveJob, attempted: str) -> str:
     """The sentence shown when :func:`blocking_job` refused a start.
 
     It names the job that is ALREADY running (the first real blocker, not a
-    downstream symptom), says what the collision would have cost, states plainly
-    that nothing was started, and gives the two ways out."""
+    downstream symptom), states the process-wide admission policy, and gives the
+    remedy in the window that actually owns the running job."""
     return (
-        f"{describe_job(blocker.label)} is already running. Starting "
-        f"{describe_job(attempted).lower()} now would give the same recording two "
-        f"answers and keep only whichever finished last, so nothing was started. "
-        f"Press Cancel to stop the run in progress, or wait for it to finish."
+        f"{describe_job(blocker.label)} is already running. This app runs one "
+        f"analysis job at a time, so the request for {describe_job(attempted).lower()} "
+        "was refused; nothing was started. Use Cancel in the window running that "
+        "job, or wait for it to finish."
     )
 
 

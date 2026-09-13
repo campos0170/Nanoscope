@@ -318,7 +318,7 @@ What turns up there:
 | What happened | What the Issues box says |
 |---|---|
 | **A truncated TDMS** — the acquisition or the copy stopped mid-file | Which segment it stops inside, how many samples survived, and that *every duration, event rate and capture rate computed here belongs to those samples, not to the recording you started*. Do not pool it with complete files. |
-| **A CSV whose sample interval changes mid-file** | Both halves: the interval near the end against the interval at the start (e.g. `0.001 s against 0.0001 s (10×)`), and the file's true span against the span that rate implies (`0.649 s where that rate implies 0.1999 s (3.247×)`). The rate is *reported*, never silently corrected — so every dwell time from that file is wrong by about that factor. |
+| **A CSV or HDF5 whose loaded timestamps are invalid or change interval** | Every loaded timestamp is checked, including chunk boundaries. An invalid or nonuniform clock leaves the sample rate **unknown**, uses a sample-index axis, and disables seconds-based analysis. Clean selected windows remain usable when their own clock is valid. The quick opening probe is preliminary; it cannot establish that the middle of a file is sound. |
 | **A channel that exists and was refused** | The dataset's name and the reason, so a missing channel is never indistinguishable from a file that never had one. |
 | **A non-UTF-8 text file** | Which encoding was fallen back to and why — Latin-1, or UTF-16, which is what Excel's "Unicode Text" and LabVIEW write by default. A clean fallback is a **Note**; it becomes an **Issue** only when the decode was lossy, i.e. characters in your file did not survive. Either way the interval and span checks above still run on a UTF-16 file, which they did not always. |
 | **A load window that outran the file** | What was asked for, where the file actually ends, and the consequence that matters: *if this window came from a saved project, the recording is not the length it was when that project was saved.* |
@@ -1978,8 +1978,9 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   `<name>.meta.json` sidecar naming the detector, the preprocessing chain, the **open-pore
   estimator** (`baseline_method`, its windows, and a `baseline_fingerprint`) that produced the
   amplitudes, **and the clock the times are on.** The 20-column analysis schema is frozen; the
-  exported CSV carries 23 columns — those 20 plus three export-only columns, `orig_start_idx`,
-  `orig_end_idx` and `added` — and the sidecar's `columns` list names all 23. A new column is
+  standard exported CSV carries 25 columns — those 20 plus `orig_start_idx`,
+  `orig_end_idx`, `added`, `source` and `review`. Optional curation fields may add columns;
+  the sidecar's `columns` list names the columns actually written. A new column is
   therefore not where the origin can go, so it goes in the sidecar: a top-level `t0_s` plus a
   `clock` block giving `columns_clock`, the columns it applies to, `t0_s_known`, and the same
   sentence the on-screen column header shows — *"add t₀ = 1154.9909 s to a number here to find

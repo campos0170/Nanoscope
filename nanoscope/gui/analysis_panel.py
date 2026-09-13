@@ -2157,6 +2157,19 @@ class AnalysisPanel(QtWidgets.QWidget):
         if problem:
             self.runRefused.emit(f"Detection refused — {problem}")
             return False
+        # Reject an impossible finite dwell interval before a worker or progress
+        # indicator is started. Other kernel validations keep their normal path.
+        try:
+            minimum = float(params.get("min_dwell_s"))
+            maximum = float(params.get("max_dwell_s"))
+        except (TypeError, ValueError):
+            pass  # None means the maximum is disabled.
+        else:
+            if np.isfinite(minimum) and np.isfinite(maximum) and 0 < maximum <= minimum:
+                self.runRefused.emit(
+                    f"Detection refused — maximum dwell ({maximum:g} s) must exceed "
+                    f"minimum dwell ({minimum:g} s). Increase the maximum or set it to 0 (off).")
+                return False
         # The Schmitt half of the notch-line cap (S7-NOTCH1; mirror of `_launch_ml`).
         # The DetectionPanel's box refuses an over-cap or illegal list itself, so
         # ``params()`` can never carry one -- but the stale banner's Re-run replays the
