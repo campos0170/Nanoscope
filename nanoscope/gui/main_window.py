@@ -4321,7 +4321,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if chosen is None:
             return
         target = practice_path(chosen)
-        if any(doc.meta.path.resolve() == target.resolve() for doc in self._session.documents()):
+        # "Is this file already open?" is Session.doc_id_for_source, not a raw path
+        # comparison (core/identity.py, core/session.py): it compares through
+        # same_source rather than `==`, which folds `sub/../` and symlinks but not
+        # case, so two spellings of one path on a case-insensitive volume would
+        # otherwise both pass this guard and load the same file twice.
+        if self._session.doc_id_for_source(str(target.resolve())) is not None:
             QtWidgets.QMessageBox.warning(parent, "Recording is already open",
                 "Choose a new filename. A practice recording cannot replace a file currently open in this project.")
             return

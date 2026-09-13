@@ -1006,13 +1006,26 @@ def test_the_gallery_still_reaches_no_sibling_panel():
 
 def test_the_report_window_offers_the_entry_points_without_importing_a_surface():
     """It announces; it does not reach. The two new signals must not have brought an
-    import of the gallery or the trace view with them."""
+    import of the gallery or the trace view with them.
+
+    2026-09-13: the exact-set form of this assertion (``siblings == {"categorical"}``)
+    started failing the moment subpop_window.py adopted the SAME shared plot
+    appearance/workflow-bar/label infrastructure other analysis windows already use --
+    a consolidation, not a reach into a surface. Widened to a named allowlist rather
+    than dropped to a subset check, so a genuine future reach for "event_gallery" or
+    "trace_view" (the two things this test actually exists to catch, per the
+    docstring above) still fails it, and any OTHER new sibling import still has to
+    argue for a place on this list rather than passing silently."""
     import nanoscope.gui.subpop_window as subpop_mod
 
     tree = ast.parse(pathlib.Path(subpop_mod.__file__).read_text())
     siblings = {n.module for n in ast.walk(tree)
                 if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module}
-    assert siblings == {"categorical"}
+    allowed = {"categorical", "analysis_catalog", "plot_appearance", "plot_workflow"}
+    assert siblings == allowed, (
+        f"the report window reaches {sorted(siblings - allowed)} beyond the shared "
+        f"infrastructure it is allowed to reuse {sorted(allowed)}; a real surface "
+        f"(event_gallery, trace_view) must never be among them")
     src = pathlib.Path(subpop_mod.__file__).read_text()
     assert "galleryRequested" in src and "traceRequested" in src
 

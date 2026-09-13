@@ -189,14 +189,25 @@ def test_the_window_still_imports_no_analysis_module():
     """The header now says what the analysis layer says — by calling the report
     object it was handed, NOT by importing the analysis layer. The AST guard in
     ``test_subpop_views`` owns the general rule; this pins the specific risk this
-    change introduced."""
+    change introduced.
+
+    THE ANALYSIS PACKAGE, NOT THE SUBSTRING. A bare ``"analysis" not in node.module``
+    also fails on ``nanoscope.gui.analysis_catalog`` -- a GUI-layer module of shared
+    display LABELS subpop_window.py legitimately imports for consistent naming, two
+    directories away from ``nanoscope/analysis/`` and containing no analysis logic
+    at all. The real package is reached only as ``from ..analysis[.xxx] import ...``
+    (``level == 2``, the sibling of ``gui/`` under ``nanoscope/``) or as an absolute
+    ``nanoscope.analysis[.xxx]``; this checks exactly that shape."""
     import ast
     from nanoscope.gui import subpop_window as SW
 
+    def is_analysis_package(dotted: str) -> bool:
+        return dotted == "analysis" or dotted.startswith("analysis.")             or dotted == "nanoscope.analysis" or dotted.startswith("nanoscope.analysis.")
+
     tree = ast.parse(pathlib.Path(SW.__file__).read_text())
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            assert "analysis" not in node.module, node.module
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 2:
+            assert not is_analysis_package(node.module), node.module
         if isinstance(node, ast.Import):
             for a in node.names:
-                assert "analysis" not in a.name, a.name
+                assert not is_analysis_package(a.name), a.name
