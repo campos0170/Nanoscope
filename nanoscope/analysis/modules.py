@@ -31,7 +31,7 @@ from ..core.analysis import (
     register_module,
 )
 from ..core.identity import doc_id_for_meta
-from ..core.acquisition import stamp_acquisition_bandwidth
+from ..core.acquisition import stamp_acquisition_bandwidth, stamp_reference_availability
 from ..core.types import ChannelKind
 from .baseline import (
     BASELINE_PARAM_KEYS,
@@ -2010,6 +2010,7 @@ class DetectSchmitt:
         # -1000 mV recording: 115 events, sha256 of the frozen 20 columns
         # a880ca47…28dc, identical before and after this line existed.
         stamp_acquisition_bandwidth(prov, ctx)
+        stamp_reference_availability(prov, ctx)
         events = EventSet(stamp_source_status(stamp_original_bounds(df), self.id), prov)
 
         spans = OverlayHint(
@@ -2132,6 +2133,7 @@ class DetectCusum:
         # run and a CUSUM run can say per ROW which of them found each event; that
         # is the whole difference between this column and the result's module_id.
         stamp_acquisition_bandwidth(prov, ctx)
+        stamp_reference_availability(prov, ctx)
         events = EventSet(stamp_source_status(stamp_original_bounds(df), self.id), prov)
 
         spans = OverlayHint(

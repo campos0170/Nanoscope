@@ -817,6 +817,12 @@ REVIEW_NONE = "unreviewed"
 #: third state, and it means the reviewedness was never recorded, not that it is False.
 REVIEW_VALUES = (REVIEW_DONE, REVIEW_NONE)
 
+# Study gate rejections need no native characterizer failure flag. These rows
+# explicitly distinguish automatic choices from human gestures; legacy/native
+# rows keep their existing inferred-rejection rule when this marker is absent.
+STUDY_REVIEW_POLICY_COL = "study_review_policy"
+STUDY_REVIEW_POLICY = "explicit-v1"
+
 #: The owner's three source categories ("conventional detector / ML detector / manual"),
 #: plus the two honest non-answers. :func:`source_kind` is the only reader.
 KIND_CONVENTIONAL = "conventional"
@@ -838,6 +844,16 @@ SOURCE_KIND_BY_MODULE: dict[str, str] = {
     "detect.schmitt": KIND_CONVENTIONAL,
     "detect.cusum": KIND_CONVENTIONAL,
     "detect.keras": KIND_ML,
+    # Candidate regions come from a trained Keras "student" model's own per-sample
+    # probability (see incubation_detection._student_regions, which thresholds
+    # `probability`, not raw current) -- the sliding-window gate in _build_catalog only
+    # MEASURES an already-model-found candidate, it does not find it. Same mechanism
+    # as detect.keras, just a versioned/frozen notebook port rather than the live
+    # interactive detector.
+    "detect.study": KIND_ML,
+    # The manual Cu workflow's plateau-aware Schmitt route does not use a model.
+    # Its result shares the study container but records this distinct row source.
+    "detect.study.schmitt": KIND_CONVENTIONAL,
     # A derived table may contain conventional, ML and manual contributors. Calling
     # the result itself conventional or ML would erase that fact; ``mixed`` is the
     # existing honest category for exactly this case. Individual rows still carry
@@ -1203,7 +1219,8 @@ _MISSING_ACCEPTED = (
     "and there is nothing to derive it from.")
 
 
-def _status_rule(accepted: bool, auto_rejected: bool, review: str | None) -> str:
+def _status_rule(accepted: bool, auto_rejected: bool, review: str | None,
+                 explicit_review: bool = False) -> str:
     """THE derivation. Both public readers are callers of this and of nothing else.
 
     ``auto_rejected`` is :func:`is_automatic_rejection` of the row's ``flag``, already
@@ -1211,6 +1228,12 @@ def _status_rule(accepted: bool, auto_rejected: bool, review: str | None) -> str
     that could be normalised two ways has been normalised once by the time it gets here,
     which is the entire reason this function exists rather than two implementations of
     "the same four rules".
+
+    Marked study exchanges are the scoped exception to rule 2 below: their
+    explicit review token distinguishes an automatic study-gate exclusion from
+    a human rejection, even when no native measurement-failure flag applies.
+    An automatic failure flag still takes precedence. Unmarked rows retain all
+    of the legacy inference rules below.
 
     The rules, in order, and the order is the design:
 
@@ -1245,7 +1268,16 @@ def _status_rule(accepted: bool, auto_rejected: bool, review: str | None) -> str
     export, figure and fit reads.
     """
     if not accepted:
-        return STATUS_AUTO_REJECTED if auto_rejected else STATUS_REJECTED
+        if auto_rejected:
+            return STATUS_AUTO_REJECTED
+        if explicit_review:
+            # Scoped to marked study exchanges. A study's automatic gate can
+            # reject an otherwise measurable event; no invented failure flag is
+            # needed, and native remeasurement must not undo that selection.
+            if review is None:
+                return STATUS_UNKNOWN
+            return STATUS_REJECTED if review == REVIEW_DONE else STATUS_AUTO_REJECTED
+        return STATUS_REJECTED
     if review is None:
         return STATUS_UNKNOWN
     return STATUS_ACCEPTED if review == REVIEW_DONE else STATUS_UNREVIEWED
@@ -1269,7 +1301,8 @@ def status_of(row: Any) -> str:
         raise ValueError(f"status_of() {_MISSING_ACCEPTED}")
     is_acc = bool(accepted)
     auto = (not is_acc) and is_automatic_rejection(_cell(row, "flag") or "")
-    return _status_rule(is_acc, auto, review_of(row))
+    explicit = _normalise_token(_cell(row, STUDY_REVIEW_POLICY_COL)) == STUDY_REVIEW_POLICY
+    return _status_rule(is_acc, auto, review_of(row), explicit)
 
 
 def event_status(df: pd.DataFrame) -> pd.Series:
@@ -1295,6 +1328,8 @@ def event_status(df: pd.DataFrame) -> pd.Series:
     flags = (df["flag"].to_numpy(dtype=object) if "flag" in df.columns
              else np.full(n, "", dtype=object))
     rev = _string_column(df, REVIEW_COL)
+    explicit = [_normalise_token(value) == STUDY_REVIEW_POLICY
+                for value in _string_column(df, STUDY_REVIEW_POLICY_COL)]
 
     # Comprehensions, not ``rev == REVIEW_DONE``: ``rev`` is an object array that may
     # hold ``pd.NA``, and ``pd.NA == 'reviewed'`` is ``pd.NA``, not False -- a numpy
@@ -1320,7 +1355,7 @@ def event_status(df: pd.DataFrame) -> pd.Series:
         autos.append(hit)
 
     out = np.array(
-        [_status_rule(bool(a), bool(au), t) for a, au, t in zip(accepted, autos, tokens)],
+        [_status_rule(bool(a), bool(au), t, policy) for a, au, t, policy in zip(accepted, autos, tokens, explicit)],
         dtype=object)
     if not n:
         out = np.empty(0, dtype=object)
@@ -1672,6 +1707,11 @@ class EventSet:
         if n_demoted:
             self.provenance = {**(self.provenance or {}),
                                "n_infinite_cells_demoted": int(n_demoted)}
+        # Baseline-subtracted study exports carry current in pA but no physical
+        # open-pore denominator. Preserve this explicit absence across native
+        # remeasurement and project restore instead of reporting dI / ~0 as I/I0.
+        if (self.provenance or {}).get("fractional_blockage_reference_unavailable") is True:
+            self.df["frac_depth"] = np.nan
 
     # -- basics -----------------------------------------------------------
     def __len__(self) -> int:

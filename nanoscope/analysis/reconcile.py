@@ -1249,4 +1249,10 @@ def _provenance(
         out["analyzed_duration_s"] = duration
     if span is not None:
         out[ANALYSED_START_KEY], out[ANALYSED_STOP_KEY] = span
+    # Every reconciled input describes the same loaded recording. If an input
+    # identifies it as baseline-subtracted with no physical I0, reconciliation
+    # cannot manufacture that missing denominator for the derived table.
+    if any(r.payload.provenance.get("fractional_blockage_reference_unavailable") is True
+           for r in results):
+        out["fractional_blockage_reference_unavailable"] = True
     return out

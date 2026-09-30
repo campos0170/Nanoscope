@@ -121,14 +121,14 @@ def render(source:Path, output:Path):
     class ManualDoc(BaseDocTemplate):
         def __init__(self,path):
             super().__init__(str(path),pagesize=A4,leftMargin=15*mm,rightMargin=15*mm,
-                topMargin=16*mm,bottomMargin=17*mm,title='NanoScope User Manual - September 2026',
-                author='NanoScope',subject='Specialist workflows and control reference; source 703a96a')
+                topMargin=16*mm,bottomMargin=17*mm,title='NanoScope User Manual - 29 September 2026',
+                author='NanoScope',subject='Unified incubation workflows and control reference; build 40.15.59')
             self.addPageTemplates(PageTemplate(id='manual',frames=[Frame(15*mm,17*mm,width,
                 A4[1]-33*mm,leftPadding=0,rightPadding=0,topPadding=0,bottomPadding=0)],
                 onPage=self.page_footer))
         def page_footer(self,canvas,doc):
             canvas.setFont('Manual',7.5); canvas.setFillColor(colors.HexColor('#61717d'))
-            canvas.drawString(15*mm,10*mm,'NanoScope 0.1.0 | Manual revised 2026-09-11 | Source 703a96a')
+            canvas.drawString(15*mm,10*mm,'NanoScope build 40.15.59 | Manual edition 2026-09-29')
             canvas.drawRightString(A4[0]-15*mm,10*mm,str(doc.page))
         def afterFlowable(self,flow):
             if hasattr(flow,'_toc_title'):
@@ -141,9 +141,10 @@ def render(source:Path, output:Path):
     story=[Spacer(1,28*mm),Paragraph('NANOSCOPE',styles['h1']),
         Paragraph('Specialist user manual',styles['h2']),
         Paragraph('Analysis and plotting, step by step.<br/>Recording-specific references. Event characterization. Reproducible figures.',styles['body']),
-        Spacer(1,10*mm),Paragraph('Revised 11 September 2026<br/>NanoScope 0.1.0 · Source revision 703a96a',styles['body']),
-        Paragraph('Current workflows and interface captures are distinguished from dated historical examples. '
-                  'Scientific settings, assumptions and provenance remain explicit.',styles['body']),
+        Spacer(1,10*mm),Paragraph('Edition 29 September 2026<br/>NanoScope build 40.15.59',styles['body']),
+        Paragraph('This edition updates the unified incubation workflow and shared main-workspace curation. '
+                  'Other main-analysis chapters retain their 11 September source review unless dated otherwise; '
+                  'older figures have not all been recaptured. Scientific settings and historical results retain their scope.',styles['body']),
         PageBreak(),Paragraph('Contents',styles['h2'])]
     toc=TableOfContents(); toc.levelStyles=[ParagraphStyle('toc',parent=styles['body'],
         fontSize=9,leading=13,spaceAfter=5,rightIndent=18)]

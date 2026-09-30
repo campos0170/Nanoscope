@@ -1,12 +1,12 @@
 # NanoScope — User Manual
 
-*Version 0.1.0. Manual revised 2026-09-11 against application source revision 703a96a and current regression evidence. Current interface illustrations and historical apo-ferritin walkthroughs are identified separately. Example results are recipe-specific, not universal detector performance or independent calibration claims.*
+*NanoScope build 40.15.59. Manual edition 2026-09-29. The incubation-study workflow is updated against this build. Other main-analysis chapters retain their 2026-09-11 source review (revision 703a96a), unless a later date is stated; this edition does not claim a new audit of every feature or a recapture of every illustration. Historical apo-ferritin results retain their original recipes and are not detector-performance or calibration guarantees.*
 
 > Images live in `images/`. `manual.html` beside this file is the same text as a single self-contained page; open it in a browser and print to PDF, or run `docs/gen_page.py --pdf` to rebuild both. (Do not use `pandoc` — it is not installed on this bench, and the page's own print stylesheet is what makes the PDF readable.)
 
 ---
 
-User manual · version 0.1.0
+User manual · edition 2026-09-29 · build 40.15.59
 
 # NanoScope
 
@@ -15,7 +15,7 @@ what is left — without ever losing track of which number was measured and whic
 
 - maintained specialist control reference
 - ABF · HDF5 · TDMS · CSV
-- current workflows + 5 historical walkthroughs
+- unified incubation studies + 5 historical walkthroughs
 - real apo-ferritin data
 
 ## Contents
@@ -32,15 +32,16 @@ what is left — without ever losing track of which number was measured and whic
 10. [Figure Library and publication export](#figure-library-and-publication-export)
 11. [Plotting problems: where to look](#plotting-problems-where-to-look)
 12. [Projects, recovery and verification](#projects-recovery-and-verification)
-13. [Historical walkthrough 1: one recording](#walkthrough-1-one-recording-end-to-end)
-14. [Historical walkthrough 2: merging](#walkthrough-2-merging-fragmented-events)
-15. [Historical walkthrough 3: three recordings](#walkthrough-3-comparing-three-recordings)
-16. [Historical walkthrough 4: clustering](#walkthrough-4-clustering-and-reading-it-honestly)
-17. [Historical walkthrough 5: ML](#walkthrough-5-ml-detection-replicated-step-by-step)
-18. [Reconciliation and training labels](#reconciling-detectors-preparing-training-labels)
-19. [Control reference](#control-reference)
-20. [Refusals](#what-the-app-refuses-to-do)
-21. [Known limits](#known-limits)
+13. [Incubation studies: one entry and shared curation](#incubation-studies-one-entry-and-shared-curation)
+14. [Historical walkthrough 1: one recording](#walkthrough-1-one-recording-end-to-end)
+15. [Historical walkthrough 2: merging](#walkthrough-2-merging-fragmented-events)
+16. [Historical walkthrough 3: three recordings](#walkthrough-3-comparing-three-recordings)
+17. [Historical walkthrough 4: clustering](#walkthrough-4-clustering-and-reading-it-honestly)
+18. [Historical walkthrough 5: ML](#walkthrough-5-ml-detection-replicated-step-by-step)
+19. [Reconciliation and training labels](#reconciling-detectors-preparing-training-labels)
+20. [Control reference](#control-reference)
+21. [Refusals](#what-the-app-refuses-to-do)
+22. [Known limits](#known-limits)
 
 ---
 
@@ -76,8 +77,9 @@ black on white.
 `docs/USER_GUIDE.md` in the repository covers the same ground in prose, with more depth
 on the baseline estimator, undo behaviour and project reopening. This page is the illustrated
 companion: it documents every control by label and works through complete analyses on real data.
-Both documents are maintained together. This edition adds the shared Analysis Explorer, Figure
-Library and multi-panel composition, publication export, optional amplitude definitions,
+Both documents are maintained together. This edition adds the unified General, Zn, Cu and Acid
+incubation entry and the complete main-workspace curation handoff. Earlier chapters cover the
+Analysis Explorer, Figure Library and composition, publication export, optional amplitudes,
 recording-specific open-pore references, and analytical-project recovery. The numbered historical
 walkthroughs retain their measured results and illustrations with an explicit date and scope;
 they are not claims that the current app will reproduce those counts under different settings.
@@ -99,7 +101,7 @@ tests, not an automatically exhaustive inventory of every runtime control.
 
 ![Current main window: File Manager, trace/navigation, and Inspector with the saved apo-ferritin project.](images/current_main.webp)
 
-*Current-source offscreen capture, 2026-09-11. File Manager selects the recording/channel, the centre shows the trace and navigation, and Inspector holds analysis controls and Results. Saved scientific results were loaded, not redetected for this illustration.*
+*Dated source capture, 2026-09-11; retained in this edition. File Manager selects the recording/channel, the centre shows the trace and navigation, and Inspector holds analysis controls and Results. Saved scientific results were loaded, not redetected for this illustration.*
 
 Four principal regions (dock layout can be changed):
 
@@ -480,7 +482,7 @@ changes the visible controls. Do not return to the main Inspector to look for th
 
 ![Analysis home lists tools, inputs and availability without calculating a result.](images/current_analysis_home.webp)
 
-*Current-source offscreen capture, 2026-09-11. Analysis home is the capability catalog, not an analysis result. Selecting a tool explains its requirements; opening a numerical page is a separate action.*
+*Dated source capture, 2026-09-11; retained in this edition. Analysis home is the capability catalog, not an analysis result. Selecting a tool explains its requirements; opening a numerical page is a separate action.*
 
 ### Find a tool, even when its tab is missing
 
@@ -1367,6 +1369,162 @@ seven custom Matplotlib illustrations of NanoScope results. Numerical results ca
 the app, but the seven custom layouts are not dedicated one-click app templates. Event Inspector
 does not have the shared publication toolbar of the population pages. Do not infer an export
 button from a supplied API-captured screenshot.
+
+## Incubation studies: one entry and shared curation
+
+This chapter describes **NanoScope build 40.15.59, 29 September 2026**. Use
+**Analysis > Incubation study…** for a new study, an existing saved workspace, or
+another sample or treatment in the future. The study organizes recordings and
+analysis stages; event curation uses the main app's event table, Gallery and Inspector.
+
+### Create a study or resume a saved one
+
+![Unified incubation study launcher.](images/current_incubation_launcher.webp)
+
+*Actual offscreen Qt interface capture, 2026-09-29, build 40.15.59 source. General is selected; Create, Open saved, Continue and the advanced original Zn recipe share this entry. No scientific calculation is shown.*
+
+1. Open **Analysis > Incubation study…**. Select a **Profile**, enter a **Study name**
+   and optional **Sample**, and choose **Create study…**. Select a new empty folder.
+2. For an existing workspace, use **Open saved study…** and select the folder
+   containing `workspace.json`. The saved method and scientific settings determine
+   how it opens; the currently selected new-study profile does not convert it.
+3. Use **Continue selected study** to return to an already open workspace. Opening
+   another study keeps other open studies and their parameter drafts available.
+
+| Profile | Starting workflow | What the choice does not establish |
+|---|---|---|
+| General incubation | Editable preparation, signal or main-workspace detection, review and comparison; reflected median-window edges initially | Sample chemistry, valid physical metadata or a validated detector recipe |
+| Zn incubation | The general workflow with reflected median-window edges | A requirement to use ML, or automatic reproduction of the original Zn experiment |
+| Cu incubation | The general workflow with shrinking median-window edges | Automatic channel selection, interval exclusion, polarity or notebook settings |
+| Acid incubation | The calibrated Acid preparation, CUSUM, measurement and family-analysis method | A generic numerical substitute for the other profiles |
+
+![The explicit General, Zn, Cu and Acid profile choices.](images/current_launcher_profiles.webp)
+
+*Actual expanded profile menu, 2026-09-29, build 40.15.59 source. The profile is selected explicitly, not inferred from a filename.*
+
+General is suitable for future incubation studies. Profiles are explicit choices;
+the app does not identify chemistry from filenames. New-profile defaults do not
+overwrite a saved study's settings. Older markerless Zn/Cu workspaces can display
+the General profile while retaining their original reflected/shrinking preparation,
+detector, measurements and review. General/Zn/Cu do not require a trained model.
+Choose a model only when its actual training and preprocessing contract is appropriate.
+
+### Prepare recordings and obtain candidates
+
+In General/Zn/Cu, use **1 Sources** to apply the study name, sample and condition label
+with **Apply study details**, then add recordings and **Apply recording details**.
+Enter the actual incubation time, physical pore ID, nominal diameter, concentration,
+voltage, current channel and event orientation. Inspect channel combinations and
+retained/excluded intervals. A numerical default is not a measured pore diameter;
+do not leave placeholder values as experimental facts.
+
+In **2 Prepare**, set the preparation appropriate to that recording, choose
+**Prepare selected recording**, and inspect raw, filtered/baseline and prepared
+traces. In **3 Detect / review**, use the signal detector, an optional trained model,
+or the main app's compatible detection tools. Preparation and detection are explicit
+steps, not side effects of opening the launcher. Keep actual source-time exclusions
+in the saved metadata so duration, rate and waveform context remain interpretable.
+
+Acid uses **1 Sources**, **2 Prepare**, **3 Detect**, **4 Review**, **5 Analyze** and
+**6 Figures**. Apply its stage settings, prepare each recording, then choose
+**Calibrate and detect selected recording**. Inspect the calibration and candidate
+tables. The Acid profile retains its calibrated numerical definitions and optional
+family analysis; its settings should not be transplanted into another experiment
+merely because the launcher is shared. Its source form permits an unresolved
+nominal diameter to remain blank.
+
+### Curate with the main event tools
+
+The handoff has three checkpoints: save the edited events, confirm the selected
+population, then recalculate. The main study bar shows which recording will receive
+a curation save. Read that identity before acting on an event table.
+
+![Main-workspace curation of the Zn 18-hour study recording, with Save curation to study and Return to study.](images/current_incubation_curation.webp)
+
+*Actual offscreen Qt capture, 2026-09-29, build 40.15.59 source. The saved Zn 18-hour recording supplies 1,647 candidates in an isolated review workspace; the original study is read only. The main bar identifies the study recording and separates Save curation to study from Return to study. This prepared-trace illustration is not a new detector run or calibration claim.*
+
+1. Select the intended recording and choose **Curate in main workspace…** from
+   **3 Detect / review** (General/Zn/Cu) or **4 Review** (Acid). The study opens its
+   prepared trace and current candidates in the main workspace. Reentering the same
+   current review returns to that workspace and retains pending edits.
+2. Check the recording named in the **Incubation study** bar. Use **Show study
+   events** if another recording is active. Inspect the event table,
+   Event Gallery and Inspector before changing the selection.
+3. Accept or reject candidates, edit bounds, add missed events, merge appropriate
+   events, and apply annotations with the usual main tools. Undo/redo operates on
+   that event table. Check the actual trace and original bounds; an automatic
+   acceptance or a merge is not evidence of molecular identity.
+4. Choose **Save curation to study** in the main workspace. Wait for the success
+   message. This is the action that commits the edited catalog to the study.
+   The study uses its committed measurement settings; values measured from the
+   main prepared trace can differ from the study's calibrated measurements.
+5. Choose **Return to study**. Returning changes the view; it does not save pending
+   curation, confirm the selection, or rerun downstream calculations.
+6. In General/Zn/Cu, choose **Use reviewed events for analysis** for every included
+   recording. In Acid, choose **Confirm event selection for analysis** for every
+   primary recording. These actions approve the current selection; they do not
+   claim that every row was individually inspected or relabel every automatic
+   decision as personal review.
+7. Recompute the analyses and figures that depend on the changed selection.
+   General/Zn/Cu provide **Compute recording comparisons**, **Extract reviewed-event
+   waveform features**, **Run pooled exploratory clustering**, **Fit selected-recording
+   mixture**, and **Generate selected figure group**. Run only the stages you need,
+   with fresh features before a new clustering or mixture fit. Acid provides
+   **Analyze confirmed event selections** and **Generate study figures**.
+
+Saving the main project preserves the main workspace. **Save curation to study**
+updates the incubation checkpoint. Neither replaces the other. A later main-table
+edit needs another study save, selection confirmation and dependent recalculation.
+Keep the whole study folder: the prepared review trace is stored there and a saved
+main project can reference it. Undo history is not a durable study audit archive.
+
+General/Zn/Cu also provide **Use existing main-workspace detections** to import a compatible
+full-recording result from the original recording and channel. Schmitt, CUSUM, ML
+and Reconciled sources are supported when their signal, calibration, range and
+identity match the prepared study. An import is a snapshot; it does not create a
+live link to every future edit. Partial, masked, changed or mismatched sources are
+refused. Read the refusal instead of changing metadata to bypass it.
+
+### Review groups and keep the measurements coherent
+
+In General/Zn/Cu **5 Features / populations**, load or run clustering, inspect the
+events in selected clusters, and accept/reject groups only after checking their
+waveforms and recording domain. **Keep only selected clusters** also rejects the
+other events in that saved domain, including unassigned events unless selected.
+Use **Use cluster-reviewed events for analysis**, confirm any other pending
+recordings, then recompute the comparisons or features and fits you intend to use.
+
+Acid **4 Review** provides **Build event families for review** after selection
+confirmation. Inspect and accept/reject families, confirm the revised selections,
+then analyze. Acceptance-only review retains its frozen family assignments.
+Boundary changes, additions, deletions or merges require appropriate remeasurement
+and invalidate affected family analysis; rebuild before interpreting new results.
+Family/cluster numbers identify groups in a method and run, not chemical species.
+
+Figure styling changes appearance only. It does not perform detection, confirm an
+event selection, update comparisons or fit populations. After recalculation,
+regenerate affected figure groups; then inspect saved styling, titles and colors
+against the new assignments. Save Figure Library entries in the main project
+separately from study figure styling.
+
+### Troubleshoot the handoff
+
+| Situation | Next action |
+|---|---|
+| Main edits are visible but study counts are unchanged | Use **Save curation to study**, wait for completion, then return |
+| The study says review is pending | Confirm the current selection for each included recording; save alone is not confirmation |
+| The curation bar names the wrong recording | Use **Show study events** or return and open the intended recording's review |
+| Save is blocked by running work, drafts or a changed source | Finish/cancel the operation, commit intended settings, and reopen current events after a study change |
+| A study window was closed | **Return to study** reopens it; reopen its events before saving if the review recording was closed |
+| A canceled/failed calculation leaves old results visible | Those are previous completed results, not evidence the new operation succeeded |
+| Figures still describe the previous population | Recompute the dependent stages and generate their figure group again |
+
+**Advanced: original Zn reference recipe…** in the launcher preserves the frozen
+student notebook workflow and its completed result bundles. Its automated **Run
+study** does not consume later main-workspace curation. Use the staged workflow
+above to compare reviewed events. The written Zn and Cu guides retain the original
+recording-specific scientific recipes; the incubation companion explains the
+advanced path without treating it as the default for new studies.
 
 ## Walkthrough 1 — one recording, end to end
 
@@ -2387,7 +2545,7 @@ The histogram and KDE show distributional structure, while the historical GMM la
 
 `PCA` in the plot-type combo projects the same selected features onto two components,
 which is worth a look when you have more than two features and want to know whether they carry
-independent information. **Analysis → Event waveforms** (historically `Event plots (density / ensemble)`) includes an **event-count heatmap**, marginal histograms and an ensemble-average view. A count heatmap is not KDE probability density. **Current-build caveat:** the heatmap has a confirmed image-orientation/bin-coordinate defect; do not use its apparent hotspot coordinates as measurements or publish that view until corrected. The current example gallery substitutes a validated one-dimensional depth histogram; see Known limits.
+independent information. **Analysis → Event waveforms** (historically `Event plots (density / ensemble)`) includes an **event-count heatmap**, marginal histograms and an ensemble-average view. A count heatmap is not KDE probability density. **September 11 audit caveat:** the then-reviewed heatmap had a confirmed image-orientation/bin-coordinate defect; this unrelated behavior was not re-audited for the incubation update, so do not use its apparent hotspot coordinates as measurements or publish that view until corrected. The current example gallery substitutes a validated one-dimensional depth histogram; see Known limits.
 
 ![Historical Event plots count-heatmap and ensemble interface. The current heatmap coordinate defect is described in Known limits; this image is not a validated publication example.](images/event_plots.webp)
 
@@ -2831,8 +2989,8 @@ Older I–V/Voltage dependence screenshots combine a voltage-unit label and an S
 Windows-oriented source paths and a build spec exist (`packaging/NanoScope-win.spec`, `packaging/build_app.ps1`), but the current release has not been validated as a Windows build. Do not treat source compatibility as a completed platform test. Two differences: saving over a file that is open in another program fails rather than
 succeeding, and the hard-link advisory never fires.
 
-#### Event-count heatmap coordinates are incorrect in the verified current build
+#### Event-count heatmap warning from the September 11 audit
 
-The September 11 gallery audit confirmed an image-orientation/bin-mapping defect in **Event waveforms → event-count heatmap**, including its saved-figure rendering path, on source/build `703a96a6a50a`. The count matrix and marginal histograms can be correct while the displayed hotspot is placed at the wrong x/y coordinates. In the audited −700 mV example the 34-event peak belongs near log₁₀(dwell/s) = −1.689 and depth = 90.48 pA, but the image displayed it near −2.780 and 156.42 pA. This is a presentation defect, not a changed event table, but it can cause a wrong scientific reading. Do not publish or infer hotspot coordinates from this heatmap until the app defect is fixed and asymmetric-bin mapping is tested. The refreshed gallery uses a separately verified 40-bin depth histogram whose counts sum to 984 instead; no application-code fix is claimed by this manual update.
+This incubation-focused documentation update did not re-audit the heatmap in build 40.15.59. The September 11 gallery audit confirmed an image-orientation/bin-mapping defect in **Event waveforms → event-count heatmap**, including its saved-figure rendering path, on source/build `703a96a6a50a`. The count matrix and marginal histograms can be correct while the displayed hotspot is placed at the wrong x/y coordinates. In the audited −700 mV example the 34-event peak belongs near log₁₀(dwell/s) = −1.689 and depth = 90.48 pA, but the image displayed it near −2.780 and 156.42 pA. This is a presentation defect, not a changed event table, but it can cause a wrong scientific reading. Do not publish or infer hotspot coordinates from this heatmap until the app defect is fixed and asymmetric-bin mapping is tested. The refreshed gallery uses a separately verified 40-bin depth histogram whose counts sum to 984 instead; no application-code fix is claimed by this manual update.
 
-NanoScope 0.1.0 · This manual distinguishes current source-verified workflows, historical real-recording walkthroughs, current native screenshots/exports and explicitly synthetic or programmatic illustrations. Historical numerical results retain their original settings and caveats; screenshots are not proof of calibration, accuracy or publication readiness. Check the installed build identity and each figure's provenance when reproducing an example.
+NanoScope build 40.15.59 · Manual edition 2026-09-29. This manual distinguishes current source-verified workflows, historical real-recording walkthroughs, current native screenshots/exports and explicitly synthetic or programmatic illustrations. Historical numerical results retain their original settings and caveats; screenshots are not proof of calibration, accuracy or publication readiness. Check the installed build identity and each figure's provenance when reproducing an example.

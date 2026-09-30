@@ -119,6 +119,14 @@ def stamp_acquisition_bandwidth(provenance: dict, ctx) -> None:
     }
 
 
+def stamp_reference_availability(provenance: dict, ctx) -> None:
+    """Propagate 'this document has no physical open-pore reference' onto every
+    detector's own provenance, not just the bridge's synthetic result -- see
+    RecordingMeta.physical_reference_unavailable."""
+    if getattr(ctx.meta, "physical_reference_unavailable", False):
+        provenance["fractional_blockage_reference_unavailable"] = True
+
+
 def acquisition_snapshot_messages(provenance: Mapping) -> tuple[str, ...]:
     """Stored acquisition facts for Details, never rendered into plot artwork."""
     raw = provenance.get("acquisition_bandwidth")

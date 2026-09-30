@@ -159,6 +159,7 @@ _DETECTOR_NAMES = {
     "detect.schmitt": "the Schmitt detector",
     "detect.cusum": "the CUSUM detector",
     "detect.keras": "the ML detector",
+    "detect.study": "the imported study candidate table",
     CONSENSUS_MODULE_ID: "the reconciled result",
 }
 

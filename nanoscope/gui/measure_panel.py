@@ -242,6 +242,7 @@ from ..core.segment import persistent_key
 from ..core.session import Session
 from ..core.sources import DETECTION_MODULE_IDS
 from ..core.types import ChannelKind
+from .busy_cursor import begin_wait_cursor, end_wait_cursor
 from .export_paths import ask_export_path
 from .trace_view import MEASURE_MAX_VIEW_FRACTION, TraceView
 
@@ -2104,7 +2105,7 @@ class MeasurePanel(QtWidgets.QWidget):
 
         Slow by construction on a huge span (~1.1 s at 15 M samples). That is the correct
         trade — an approximated saved number is not a measurement — so it is done under a
-        wait cursor rather than hidden or skipped."""
+        busy indicator rather than hidden or skipped."""
         stats = self._last_stats
         if stats is None:
             return None
@@ -2118,7 +2119,7 @@ class MeasurePanel(QtWidgets.QWidget):
 
     @contextmanager
     def _busy(self, n_samples: int, message: str):
-        """Wait cursor + status while an unbounded measurement of `n_samples` runs.
+        """Status and a platform-safe cursor during an unbounded measurement.
 
         Nothing at all below `_BUSY_CURSOR_SAMPLES`, where the work is a few ms and a
         flickering cursor would be the only thing anyone noticed.
@@ -2130,15 +2131,15 @@ class MeasurePanel(QtWidgets.QWidget):
         row twice. Timers still fire, which is harmless — the geometry this measurement uses
         was read before the pump, so a preview landing mid-flight cannot change it."""
         busy = n_samples >= _BUSY_CURSOR_SAMPLES
+        cursor_active = False
         if busy:
-            QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(Qt.WaitCursor))
+            cursor_active = begin_wait_cursor()
             self._set_status(message)
             QtWidgets.QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
         try:
             yield
         finally:
-            if busy:
-                QtWidgets.QApplication.restoreOverrideCursor()
+            end_wait_cursor(cursor_active)
 
     def exact_measurement(self) -> dict[str, Any] | None:
         """The current selection measured over every sample, or None. Public for callers

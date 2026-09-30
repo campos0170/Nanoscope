@@ -443,18 +443,23 @@ def test_commit_recomputes_exactly_once_when_the_readout_was_a_preview(panel, wi
     assert spy.bounds == [_BIG]
 
 
-def test_the_busy_indicator_is_raised_and_always_dropped_again(panel, window, monkeypatch):
-    """A slow exact commit must show a wait cursor rather than silently freeze — and must
-    never leave one behind, which would wedge the cursor for the rest of the session."""
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_the_busy_indicator_is_raised_and_always_dropped_again(
+        panel, window, monkeypatch, platform):
+    """A slow exact commit shows status, with a cursor only where safe, and cleans up."""
+    from types import SimpleNamespace
     from PySide6 import QtWidgets
+    from nanoscope.gui import busy_cursor
 
     mp, doc_id = panel
+    monkeypatch.setattr(busy_cursor, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(mp_mod, "_BUSY_CURSOR_SAMPLES", 1_000)   # make _BIG count as slow
-    seen: list[bool] = []
+    seen = []
     real = mp_mod.measure_selection
 
     def wrapper(*a, **kw):
-        seen.append(QtWidgets.QApplication.overrideCursor() is not None)
+        seen.append((QtWidgets.QApplication.overrideCursor() is not None,
+                     mp._status.text()))
         return real(*a, **kw)
 
     _place(window, doc_id, *_BIG)
@@ -462,7 +467,9 @@ def test_the_busy_indicator_is_raised_and_always_dropped_again(panel, window, mo
 
     assert QtWidgets.QApplication.overrideCursor() is None
     assert mp.add_current() is True
-    assert seen == [True], "the exact commit must run under a wait cursor"
+    assert len(seen) == 1
+    assert seen[0][0] is (platform != "darwin")
+    assert "exactly" in seen[0][1], "the exact commit must announce work in progress"
     assert QtWidgets.QApplication.overrideCursor() is None, "the cursor leaked"
     assert "Added measurement" in mp._status.text()
 

@@ -74,6 +74,13 @@ hiddenimports = [
     "scipy._lib.array_api_compat.numpy.fft",
     # `NanoScope.exe --self-test`; imported inside a function so the GUI path never pays for it.
     "nanoscope_selftest",
+    # Acid incubation: compiled density/dip-test helpers and Numba runtime.
+    "hdbscan._hdbscan_linkage",
+    "hdbscan._hdbscan_tree",
+    "hdbscan._prediction_utils",
+    "diptest.lib._diptest_core",
+    "numba.core.runtime",
+    "llvmlite.binding",
 ]
 
 datas = [
@@ -81,6 +88,13 @@ datas = [
     # importlib.metadata.version("nanoscope") stamps the app version onto every detection's
     # provenance; without the dist-info every exported CSV loses its version stamp.
     *copy_metadata("nanoscope"),
+    # Keep dependency versions and their upstream license notices in the bundle.
+    *copy_metadata("numba"),
+    *copy_metadata("llvmlite"),
+    *copy_metadata("hdbscan"),
+    *copy_metadata("umap-learn"),
+    *copy_metadata("diptest"),
+    *copy_metadata("pyabf"),
 ]
 binaries = []
 
@@ -132,7 +146,7 @@ excludes = _QT_EXCLUDES + _LEAF_EXCLUDES + [
     "IPython", "ipykernel", "jupyter", "jupyter_client", "jupyter_core", "notebook",
     "nbconvert", "nbformat", "qtconsole", "traitlets", "zmq", "tornado", "jedi",
     "sphinx", "numpydoc", "docutils", "setuptools._distutils",
-    "torch", "torchvision", "jax", "jaxlib", "cv2", "skimage", "sympy", "numba", "llvmlite",
+    "torch", "torchvision", "jax", "jaxlib", "cv2", "skimage", "sympy",
     "statsmodels", "plotly", "dask", "xarray", "sqlalchemy", "openpyxl",
     "xlsxwriter", "tables", "numexpr", "bottleneck", "PIL.ImageQt",
     "tensorflow_estimator", "tensorflow_addons", "tensorflow_datasets", "tensorflow_hub",
@@ -155,6 +169,7 @@ a = Analysis(
     runtime_hooks=[str(HERE / "rthooks" / "rthook_nanoscope_env.py")],
     excludes=excludes,
     noarchive=False,
+    module_collection_mode={"umap": "py", "pynndescent": "py"},
     optimize=0,
 )
 

@@ -838,6 +838,13 @@
         "group": "Recover unsaved NanoScope work",
         "what_it_does": "Dismiss the recovery offer without discarding it.",
         "notes": "Also the escape action; does not recover or permanently delete the snapshot. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
+      },
+      {
+        "label": "Incubation study…",
+        "kind": "menu-action",
+        "group": "Analysis",
+        "what_it_does": "Open the single launcher for General, Zn, Cu and Acid incubation studies.",
+        "notes": "Build 40.15.59. Create a new empty workspace, open its saved method, or continue an open study. The original fixed Zn recipe is an advanced entry inside this launcher. Opening the launcher runs no detector."
       }
     ]
   },
@@ -6119,6 +6126,161 @@
         "group": "Subpopulations",
         "what_it_does": "Read the persistent caveat summary and expandable report details.",
         "notes": "Caveats stay outside plot artwork and travel with report/provenance exports. Source: nanoscope/gui/subpop_window.py; main_window.py."
+      }
+    ]
+  },
+  {
+    "key": "incubation-studies",
+    "area": "Incubation studies and shared main-workspace curation",
+    "summary": "Build 40.15.59: one launcher for General, Zn, Cu and Acid, shared main event editing, explicit study save, review confirmation and dependent recalculation. The calibrated Acid and general numerical methods remain distinct.",
+    "opened_by": "Analysis > Incubation study…; sources: nanoscope/gui/incubation_launcher.py, incubation_profiles.py, manual_study_window.py, acid_study_window.py and main_window.py.",
+    "gotchas": [
+      "Keep the complete workspace folder. A main project can reference the prepared review trace stored inside it.",
+      "Save Project preserves the main workspace; Save curation to study commits the study event snapshot. Neither performs selection confirmation or downstream analysis.",
+      "Profiles are new-study starting defaults. Saved scientific settings are preserved; filenames do not identify an experiment.",
+      "General/Zn/Cu require a positive nominal diameter; replace the initial placeholder with supported metadata. Acid permits unresolved diameter to remain blank.",
+      "Cancel/failure retains the previous completed checkpoint. Old displayed output does not prove a new calculation succeeded."
+    ],
+    "controls": [
+      {
+        "label": "Profile",
+        "kind": "choice",
+        "group": "New study",
+        "what_it_does": "Choose General, Zn, Cu or Acid explicitly.",
+        "notes": "General/Zn/Cu share staged methods; Zn begins with reflected median edges and Cu with shrinking edges. Acid preserves its calibrated method. Profiles apply new defaults, not changes to saved studies."
+      },
+      {
+        "label": "Study name / Sample",
+        "kind": "text",
+        "group": "New study",
+        "what_it_does": "Name the study and optionally identify its sample.",
+        "notes": "General/Zn/Cu also expose editable study name, sample and condition label on Sources. A name does not validate experimental metadata."
+      },
+      {
+        "label": "Create study…",
+        "kind": "button",
+        "group": "Launcher",
+        "what_it_does": "Create the selected profile in a new empty folder.",
+        "notes": "Existing nonempty workspaces are not overwritten by this action."
+      },
+      {
+        "label": "Open saved study…",
+        "kind": "button",
+        "group": "Launcher",
+        "what_it_does": "Open a folder containing a supported workspace.json checkpoint with its saved method and settings.",
+        "notes": "No chemistry inference from filenames; old markerless manual studies may display General while retaining their saved preparation and analysis."
+      },
+      {
+        "label": "Continue selected study",
+        "kind": "button",
+        "group": "Launcher",
+        "what_it_does": "Return to the chosen already open workspace.",
+        "notes": "Opening another study keeps existing study windows and drafts available."
+      },
+      {
+        "label": "Advanced: original Zn reference recipe…",
+        "kind": "button",
+        "group": "Launcher",
+        "what_it_does": "Open the fixed original student workflow or its saved result bundles.",
+        "notes": "Its automated Run study does not consume later manual main-workspace curation."
+      },
+      {
+        "label": "Apply study details",
+        "kind": "button",
+        "group": "General/Zn/Cu Sources",
+        "what_it_does": "Save the entered study name, sample and condition label.",
+        "notes": "Recording metadata and scientific settings have separate apply actions. The profile does not turn an entered value into a verified measurement."
+      },
+      {
+        "label": "Curate in main workspace…",
+        "kind": "button",
+        "group": "General/Zn/Cu Detect / review; Acid Review",
+        "what_it_does": "Open the selected prepared recording and candidates in the main event table, Gallery and Inspector.",
+        "notes": "The same current review is reused with pending edits. Ordinary acceptance, boundaries, manual events, merging, labels and undo tools are available."
+      },
+      {
+        "label": "Show study events",
+        "kind": "button",
+        "group": "Main Incubation study bar",
+        "what_it_does": "Select the recording and event result belonging to the active study review.",
+        "notes": "Read the recording name in the bar before editing or saving."
+      },
+      {
+        "label": "Save curation to study",
+        "kind": "button",
+        "group": "Main Incubation study bar",
+        "what_it_does": "Commit the current edited catalog to the study using its saved measurement definitions.",
+        "notes": "Wait for success. Project Save has a different destination. Edited geometry is remeasured; main prepared-trace and calibrated study metrics need not match. Busy, changed or mismatched inputs can block the handoff."
+      },
+      {
+        "label": "Return to study",
+        "kind": "button",
+        "group": "Main Incubation study bar",
+        "what_it_does": "Return to the associated study and recording.",
+        "notes": "Navigation alone does not save curation, confirm selection or rerun calculations."
+      },
+      {
+        "label": "Use reviewed events for analysis",
+        "kind": "button",
+        "group": "General/Zn/Cu Detect / review",
+        "what_it_does": "Confirm the current selected events for the recording.",
+        "notes": "Required again after acceptance, geometry or relevant measurement changes. Confirmation does not claim every row was personally inspected."
+      },
+      {
+        "label": "Confirm event selection for analysis",
+        "kind": "button",
+        "group": "Acid Review",
+        "what_it_does": "Confirm the current accepted selection for the selected primary recording.",
+        "notes": "Confirm each primary recording before family review or analysis. Automatic decisions remain distinct from explicit personal review."
+      },
+      {
+        "label": "Compute recording comparisons",
+        "kind": "button",
+        "group": "General/Zn/Cu Compare",
+        "what_it_does": "Compute comparisons from confirmed selections and committed comparison settings.",
+        "notes": "Run explicitly after curation. Saved previous output is not an updated result."
+      },
+      {
+        "label": "Extract reviewed-event waveform features",
+        "kind": "button",
+        "group": "General/Zn/Cu Features / populations",
+        "what_it_does": "Extract features from the confirmed event selection.",
+        "notes": "Run before a new pooled clustering or selected-recording mixture after selection changes."
+      },
+      {
+        "label": "Use cluster-reviewed events for analysis",
+        "kind": "button",
+        "group": "General/Zn/Cu Features / populations",
+        "what_it_does": "Confirm reviewed selections for the displayed cluster-review recording domain.",
+        "notes": "Confirm other pending recordings separately, then recompute dependent comparisons/features/fits. Cluster numbers belong to a saved run, not a molecular identity."
+      },
+      {
+        "label": "Build event families for review",
+        "kind": "button",
+        "group": "Acid Review",
+        "what_it_does": "Build family memberships from confirmed selections using the Acid reference method.",
+        "notes": "Acceptance-only changes retain frozen memberships. Boundary changes, additions, deletion and merges invalidate affected family analysis; rebuild before interpretation."
+      },
+      {
+        "label": "Analyze confirmed event selections",
+        "kind": "button",
+        "group": "Acid Analyze",
+        "what_it_does": "Compute the Acid comparisons, validation and analysis from confirmed selections.",
+        "notes": "Uses the calibrated Acid method and committed settings; it is distinct from generic Zn/Cu clustering and mixture definitions."
+      },
+      {
+        "label": "Generate selected figure group / Generate study figures",
+        "kind": "button",
+        "group": "Figures",
+        "what_it_does": "Render the selected completed analysis outputs.",
+        "notes": "General/Zn/Cu use Generate selected figure group; Acid uses Generate study figures. These actions do not perform detection or population fitting."
+      },
+      {
+        "label": "Style selected figure…",
+        "kind": "button",
+        "group": "Figures",
+        "what_it_does": "Open appearance controls for the selected study figure.",
+        "notes": "Save styling to study. Styling does not confirm review or rerun science; regenerate after numerical changes, and save Figure Library entries in the main project separately."
       }
     ]
   }

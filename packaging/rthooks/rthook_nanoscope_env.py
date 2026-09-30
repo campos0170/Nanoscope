@@ -61,6 +61,10 @@ os.environ.setdefault("MPLCONFIGDIR", _writable_cache_dir("matplotlib"))
 # before anything imports matplotlib; see _restore_mpl_cache_dir() there.
 os.environ["NANOSCOPE_MPLCONFIGDIR"] = os.environ["MPLCONFIGDIR"]
 
+# UMAP and PyNNDescent cache compiled kernels. Keep their cache outside the
+# signed, read-only bundle, and respect an explicitly supplied testing cache.
+os.environ.setdefault("NUMBA_CACHE_DIR", _writable_cache_dir("numba"))
+
 # --- TensorFlow -------------------------------------------------------------------------------
 # CPU IS FORCED (see nanoscope/analysis/ml_detect._import_tf): the Apple Metal pluggable device
 # SIGABRTs on this mixed_float16 LSTM. ml_detect does the decisive tf.config.set_visible_devices

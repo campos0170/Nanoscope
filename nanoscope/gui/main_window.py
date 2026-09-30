@@ -149,6 +149,7 @@ _DETECTOR_LABELS = {
     "detect.schmitt": "the threshold detector",
     "detect.cusum": "the CUSUM detector",
     "detect.keras": "the ML detector",
+    "detect.study": "the imported study candidate table",
     CONSENSUS_MODULE_ID: "the reconciled event table",
 }
 
@@ -651,6 +652,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plots_window = None   # the single, lazily-built PlotsWindow
         self._distribution_summary_window = None
         self._comparison_figures_window = None
+        self._incubation_study_window = None
+        self._incubation_reference_window = None
+        # These two are an ALIAS, not a cache: IncubationStudyLauncher._remember()/
+        # _clear_reference() own them and repoint them to whichever window of that
+        # engine it most recently remembered, tolerating several simultaneously-open
+        # windows of the same engine (see launcher._windows, the actual tracked list).
+        # _open_manual_study() below must NOT read or write these — see
+        # _manual_study_shortcut for why.
+        self._manual_study_window = None
+        self._acid_study_window = None
+        # _open_manual_study()'s own single-window cache. Kept separate from the alias
+        # above on purpose: that alias gets silently repointed every time the launcher
+        # remembers ANY manual-study window (including ones this shortcut never
+        # created), which used to make this shortcut show or reuse an unrelated study.
+        self._manual_study_shortcut = None
+        self._study_curation_sessions = {}
+        self._study_curation_context = None
+        self._study_curation_project_generation = 0
         self._iv_window = None   # the single, lazily-built IVWindow
         self._vdep_window = None   # the single, lazily-built VDepWindow
         # One top-level home for the analytical surfaces above/below.  The individual
@@ -922,6 +941,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # you should know exists. Wired in _wire (the actions do not exist yet at this point).
         self._analysis_launcher = AnalysisLauncher()
         lay.addWidget(self._analysis_launcher)
+
+        self._study_curation_bar = QtWidgets.QFrame()
+        self._study_curation_bar.setObjectName('studyCurationBar')
+        self._study_curation_bar.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        study_row = QtWidgets.QHBoxLayout(self._study_curation_bar)
+        self._study_curation_label = QtWidgets.QLabel()
+        self._study_curation_label.setWordWrap(True)
+        study_row.addWidget(self._study_curation_label, 1)
+        self._study_curation_show = QtWidgets.QPushButton('Show study events')
+        self._study_curation_show.clicked.connect(lambda: self._study_curation_action(self.show_study_curation))
+        study_row.addWidget(self._study_curation_show)
+        self._study_curation_save = QtWidgets.QPushButton('Save curation to study')
+        self._study_curation_save.setToolTip('Save acceptance, edited boundaries, manual events, merges and labels. The study recalculates measurements using its committed settings; these can differ from the main prepared-trace measurements.')
+        self._study_curation_save.clicked.connect(lambda: self._study_curation_action(self._save_study_curation))
+        study_row.addWidget(self._study_curation_save)
+        self._study_curation_return = QtWidgets.QPushButton('Return to study')
+        self._study_curation_return.clicked.connect(lambda: self._study_curation_action(self._return_to_study))
+        study_row.addWidget(self._study_curation_return)
+        self._study_curation_bar.hide()
+        lay.addWidget(self._study_curation_bar)
 
         self._info_bar = _InfoBar()
         lay.addWidget(self._info_bar)
@@ -1458,6 +1497,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_vdep.setEnabled(False)
         self._act_vdep.triggered.connect(self._open_vdep)
 
+        self._act_incubation_study = analysis_menu.addAction("Incubation study…")
+        self._act_incubation_study.setToolTip(
+            "Create a Zn, Cu, acid or general incubation study, open a saved study, "
+            "and curate its events with the main workspace tools.")
+        self._act_incubation_study.triggered.connect(self._open_incubation_study)
+
         analysis_menu.addSection("Export")
         self._act_export_events = analysis_menu.addAction("Export &events…")
         self._act_export_events.setToolTip(
@@ -1742,6 +1787,7 @@ class MainWindow(QtWidgets.QMainWindow):
         guide = self._first_analysis_guide
         if guide is not None and guide.isVisible():
             guide.refresh_context()
+        self._sync_study_curation_bar()
 
     def _on_stage_activated(self, stage_value: str) -> None:
         """A workflow-strip stage was clicked. Route an AVAILABLE stage to its existing reveal
@@ -1998,6 +2044,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # announced or not, so hanging the flag off it covers the ones nobody remembered
         # to wire, including the ones written next year.
         self._history.changed.connect(self._mark_dirty)
+        self._history.changed.connect(self._sync_study_curation_bar)
+        self._analysis_panel._result_selector.currentIndexChanged.connect(self._sync_study_curation_bar)
         self._history.changed.connect(self._sync_undo_actions)
         self._history.stepRecorded.connect(self._on_step_recorded)
         self._history.stepRecorded.connect(lambda *_: self._note_step(_UNDO_EVENTS))
@@ -2951,6 +2999,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._retarget_selection(doc_id, channel)
         finally:
             self._workspace_navigating = navigating
+            self._sync_study_curation_bar()
 
     def _retarget_selection(self, doc_id: str, channel: int) -> None:
         """Point the whole window at ``(doc_id, channel)``. ALL OF IT, OR THE USER IS TOLD.
@@ -5623,6 +5672,170 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._event_plot_window.set_source(res.doc_id, res.channel, res.payload)
 
+    def _open_incubation_study(self) -> None:
+        """One entry for new, saved and currently open incubation studies."""
+        from .incubation_launcher import IncubationStudyLauncher
+
+        if self._incubation_study_window is None:
+            self._incubation_study_window = IncubationStudyLauncher(self)
+        self._incubation_study_window.show()
+        self._incubation_study_window.raise_()
+        self._incubation_study_window.activateWindow()
+        return self._incubation_study_window
+
+    def _open_incubation_reference(self) -> None:
+        """Keep the fixed original Zn recipe available as an explicit reference."""
+        from .incubation_window import IncubationStudyWindow
+        if self._incubation_reference_window is None:
+            self._incubation_reference_window = IncubationStudyWindow(self)
+            self._incubation_reference_window.setWindowTitle('Original Zn reference recipe — NanoScope')
+        self._incubation_reference_window.show()
+        self._incubation_reference_window.raise_()
+        self._incubation_reference_window.activateWindow()
+        return self._incubation_reference_window
+
+    def _open_manual_study(self) -> None:
+        """The Zn reference recipe's one remaining fallback link (:mod:`incubation_window`).
+        Uses its OWN cache (:attr:`_manual_study_shortcut`), never the launcher's alias
+        (:attr:`_manual_study_window`) — sharing that slot let the launcher silently
+        repoint this shortcut at an unrelated, already-open study (or vice versa)."""
+        from .manual_study_window import ManualStudyWindow
+
+        if self._manual_study_shortcut is None:
+            self._manual_study_shortcut = ManualStudyWindow(self)
+        self._manual_study_shortcut.show()
+        self._manual_study_shortcut.raise_()
+        self._manual_study_shortcut.activateWindow()
+
+    def open_study_review(self, payload, launch_doc_ids=None):
+        """Open an independent prepared study source in the shared analysis tools."""
+        from .study_event_bridge import open_review
+        return open_review(self, payload, launch_doc_ids)
+
+    def snapshot_study_events(self, record):
+        """Freeze the active compatible detections for an explicit study commit."""
+        from .study_event_bridge import snapshot_events
+        return snapshot_events(self, record)
+
+    def begin_study_curation(self, study, tag, doc_id, *, fresh=False):
+        """Keep the exact study and recording beside the app's shared event tools."""
+        row = next(r for r in study.state['records'] if r['tag'] == tag)
+        previous = self._study_curation_sessions.get(doc_id)
+        context = dict(study=study, tag=tag, doc_id=doc_id, session=self._session,
+            project_generation=self._study_curation_project_generation,
+            recording_id=row['recording_id'], folder=Path(study.folder),
+            path=row['main_workspace_bridge']['path'])
+        if previous:
+            for key in ('message', 'saved_signature', 'module_id', 'error'):
+                if key in previous: context[key] = previous[key]
+        elif fresh:
+            context['saved_signature'] = self._study_curation_signature(self._analysis_panel.current_detection())
+        # No prior in-session record AND fresh=False (the fast-reuse path, re-attaching
+        # to an already-open bridged document) deliberately leaves 'saved_signature'
+        # unset here, not because that path should read as "unsaved forever", but
+        # because there is no persisted way to know whether that document's live table
+        # already diverged from the study's last save before this session's tracking
+        # existed -- test_adopting_existing_project_review_discloses_pending_curation
+        # requires exactly this: an edit made before adoption must still surface as
+        # pending, not read as "up to date" just because nothing was tracked yet.
+        self._study_curation_sessions[doc_id] = context
+        self._study_curation_context = context
+        self._sync_study_curation_bar()
+        self.statusBar().showMessage(
+            'Curate '+tag+' with the event table, Gallery and Inspector. Use Save curation to study above to keep these edits in the incubation study.', 20000)
+
+    @staticmethod
+    def _study_curation_signature(result):
+        from ..analysis.events import EventSet
+        if result is None or not isinstance(result.payload, EventSet): return None
+        from .study_event_bridge import catalog_signature
+        return result.module_id, catalog_signature({'candidates': result.payload.df})
+
+    def _sync_study_curation_bar(self, *_):
+        context = self._study_curation_context
+        selected = getattr(self, '_current_selection', None)
+        if selected and selected[0] in self._study_curation_sessions:
+            context = self._study_curation_sessions[selected[0]]
+            self._study_curation_context = context
+        self._study_curation_bar.setVisible(context is not None)
+        if context is None: return
+        study = context['study']
+        try:
+            study._curation_record(context, verify_current=True)
+            valid = True
+        except (ValueError, RuntimeError):
+            valid = False
+        available = (context['session'] is self._session
+            and context['project_generation'] == self._study_curation_project_generation
+            and self._session.has_document(context['doc_id']))
+        result = self._analysis_panel.current_detection()
+        active = available and result is not None and result.doc_id == context['doc_id']
+        if active: context['module_id'] = result.module_id
+        bound = (result if active else self._session.results.get(context['doc_id'], 0, context.get('module_id', '')))
+        context['pending'] = available and self._study_curation_signature(bound) != context.get('saved_signature')
+        busy = study.is_busy()
+        if not valid:
+            message = 'The study changed. Return to study and open its current events.'
+        elif busy:
+            message = study._operation_label+'…'
+        elif study._curation_closed:
+            message = 'Study closed. Return to study to reopen it before saving.'
+        elif not available:
+            message = 'Review recording closed. Return to study to open its events again.'
+        elif not active:
+            message = 'Another recording is selected. Show study events to continue this curation.'
+        elif context.get('error'):
+            message = context['error']
+        elif context['pending']:
+            message = 'Unsaved study curation. Save curation to study includes these edits in the study; project Save keeps the main workspace.'
+        else:
+            message = context.get('message', 'Use the event table, Gallery and Inspector; save edits to the study here.')
+        self._study_curation_label.setText('Incubation study · '+context['tag']+'\n'+message)
+        self._study_curation_save.setEnabled(valid and active and not busy and not study._curation_closed)
+        self._study_curation_show.setVisible(not active and available and valid)
+        self._study_curation_show.setEnabled(not busy)
+        self._study_curation_return.setEnabled(True)
+
+    def _study_curation_action(self, action):
+        try:
+            return action()
+        except (ValueError, RuntimeError) as exc:
+            QtWidgets.QMessageBox.warning(self, 'Study curation', str(exc))
+            return False
+
+    def show_study_curation(self):
+        context = self._study_curation_context
+        if context is None: return False
+        context['study']._curation_record(context)
+        if (context['session'] is not self._session
+                or context['project_generation'] != self._study_curation_project_generation
+                or not self._session.has_document(context['doc_id'])):
+            raise ValueError('Return to the study and open this recording’s events again.')
+        from .study_event_bridge import _assert_idle
+        _assert_idle(self)
+        self._on_selection(context['doc_id'], 0)
+        self.show(); self.raise_(); self.activateWindow(); self._open_event_gallery()
+        self._sync_study_curation_bar()
+        return True
+
+    def _save_study_curation(self):
+        context = self._study_curation_context
+        if context is None: return False
+        return context['study'].save_main_curation(context)
+
+    def _return_to_study(self):
+        context = self._study_curation_context
+        if context is None: return False
+        study = context['study']
+        try:
+            study.return_to_curation_record(context)
+        except ValueError:
+            # A replaced study can still be brought forward; it must never be
+            # silently switched back to an obsolete folder or recording.
+            study.show(); study.raise_(); study.activateWindow()
+        self._sync_study_curation_bar()
+        return True
+
     # -- I-V / conductance window ----------------------------------------------------------------
     def _has_iv_data(self) -> bool:
         """True when >=1 open recording could contribute an I-V point — a live current channel plus
@@ -7809,6 +8022,7 @@ class MainWindow(QtWidgets.QMainWindow):
         "detect.schmitt": "Schmitt",
         "detect.cusum": "CUSUM",
         "detect.keras": "ML",
+        "detect.study": "Study candidates",
         CONSENSUS_MODULE_ID: "Reconciled",
     }
 
@@ -10167,6 +10381,15 @@ class MainWindow(QtWidgets.QMainWindow):
         parent-has-segments guard does not re-ask per recording — the caller asked once, about
         the whole session.
         """
+        self._study_curation_project_generation += 1
+        self._study_curation_sessions.clear()
+        # Was left unset here: _sync_study_curation_bar only refreshes this pointer
+        # from _study_curation_sessions when the CURRENTLY SELECTED doc has an entry
+        # there (line below), which can never be true right after the clear() above --
+        # so a stale context from before this reset kept pointing at an old study/doc,
+        # and the curation bar stayed visible and "valid" for a session that no longer
+        # exists.
+        self._study_curation_context = None
         recovery_controller = self._recovery_controller
         if recovery_controller is not None:
             reset = getattr(recovery_controller, "reset_session", None)

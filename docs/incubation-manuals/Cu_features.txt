@@ -1,0 +1,1 @@
+log_dwell,depth_max_pA,depth_sust_pA,mean_pA,std_pA,min_dev_pA,skewness,kurtosis,area_pA_ms,t_peak_frac,f_sust,snr

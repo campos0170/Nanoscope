@@ -24,6 +24,7 @@ from ..analysis.reconcile import (
 from ..analysis.scoring import added_mask
 from ..core.analysis import AnalysisResult
 from ..core.sources import detector_name
+from .busy_cursor import begin_wait_cursor, end_wait_cursor
 
 __all__ = ["ReconcileDialog", "can_reconcile_sources"]
 
@@ -286,7 +287,7 @@ class ReconcileDialog(QtWidgets.QDialog):
         for widget in (self.overlap_spin, self.support_spin, self.keep_manual,
                        self.preview_button, self.cancel_button):
             widget.setEnabled(False)
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        cursor_active = begin_wait_cursor()
         # Paint the busy state before the CPU-bound pure analysis call begins. Excluding
         # input avoids a nested click changing parameters behind the preview being built.
         QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ExcludeUserInputEvents)
@@ -299,7 +300,7 @@ class ReconcileDialog(QtWidgets.QDialog):
             self.preview_message.setText(f"Could not reconcile these results: {exc}")
             return
         finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+            end_wait_cursor(cursor_active)
             for check in self._checks.values():
                 check.setEnabled(True)
             for widget in (self.overlap_spin, self.support_spin, self.keep_manual,

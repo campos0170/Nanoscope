@@ -1,9 +1,12 @@
 # NanoScope — User Guide
 
 A specialist walkthrough from opening a recording to exporting a curated event population.
-Revised 2026-09-11 against NanoScope 0.1.0 source revision `703a96a`. The illustrated manual,
-HTML, PDF and control reference are maintained with this guide. Historical worked examples are
-identified as such; they are not current benchmark or calibration guarantees.
+Edition 2026-09-29, NanoScope build `40.16.59`, with the persistent study library
+and the unified incubation and curation workflow introduced in build `40.15.59`.
+Other main-analysis chapters retain their 2026-09-11 review against source `703a96a`,
+unless a later date is stated. The illustrated manual, HTML, PDF and control reference
+are maintained with this guide. Older illustrations and historical results have not
+all been recaptured or rerun; they are not current benchmark or calibration guarantees.
 
 For click-by-click plotting instructions, start with the [illustrated manual](manual.html):
 **Analysis and plotting: navigation guide**, then **Your first plot: a worked histogram**.
@@ -20,8 +23,9 @@ The Automatic workflow below remains available and unchanged.
 For the 2026-09-12 source update, see [Measurement-quality and acquisition-bandwidth
 advisories](MEASUREMENT_RELIABILITY.md): how to inspect baseline/polarity warnings in
 Results → Summary, enter acquisition metadata in File Info, and distinguish unassessed
-hardware resolution from the existing software-filter flag. This addendum is separate
-from the previously built illustrated PDF until the next documentation build.
+hardware resolution from the existing software-filter flag. The detailed addendum
+remains a separate companion document; this incubation-focused edition does not
+claim a new audit of all measurement-advisory behavior.
 
 > ## Before your first detection — establish the reference
 >
@@ -100,6 +104,136 @@ page can refresh its inputs or calculation; the opt-in summary/comparison pages 
 sources until **Generate**. A saved project snapshot remains intact until explicit refresh or
 generation. The header names the active recording, but a multi-source plot uses the sources
 checked inside its own **Data** section, not just that header recording.
+
+### Incubation studies: shared entry and main-workspace curation
+
+**Analysis → Incubation study…** is the entry point for all incubation studies.
+Your **Saved studies** list remains available after restarting the app. Select a
+study and choose **Open selected study**, or double-click its row. **Show study
+folder** reveals its location. The standard library is
+**Documents/NanoScope/Incubation Studies**, with named shortcuts for existing
+studies so their data can stay in place. Successfully opened and newly created
+studies are remembered. **Open saved study…** starts browsing at the last available
+study directory; **Create study…** starts in the library folder.
+
+Choose **General incubation**, **Zn incubation**, **Cu incubation**, or **Acid
+incubation**, give the study a name and optional sample, and choose **Create study…**
+with a new empty folder. Use **Open saved
+study…** to restore an existing study with its saved method and settings, or
+**Continue selected study** to return to an open study. Opening another study keeps
+other open studies and their drafts available.
+
+General, Zn and Cu use the same editable preparation, detection/review, comparison,
+features/populations and figure stages. General supports future samples and conditions;
+study name, sample and condition label are editable. Zn starts with reflected median
+window edges; Cu starts with shrinking edges. Enter each recording's actual time,
+pore diameter and identity, concentration, voltage, channels and retained intervals.
+Profiles supply starting settings, not automatic identification of an experiment.
+Saved workspaces retain their existing method and settings. Older markerless Zn/Cu
+workspaces may display General while retaining their scientific settings. The app
+does not infer the profile from filenames. Apply study metadata in **1 Sources**
+with **Apply study details**; apply each recording's metadata separately. General/Zn/Cu
+require a positive nominal diameter: replace placeholders with supported values;
+the Acid source form allows an unresolved diameter to remain blank.
+Use signal detection or the main workspace's detectors without a study model; a
+trained model is optional. Acid retains its calibrated CUSUM and family-analysis
+method within the same study entry point.
+
+Choose **Curate in main workspace…** on **3 Detect / review** (General/Zn/Cu) or
+**4 Review** (Acid). The prepared recording and its events open in the main event
+table, Event Gallery and Inspector. Accept or reject events, edit boundaries, add
+missed events, merge, annotate, and undo with the usual controls. The persistent
+**Incubation study** bar names the exact recording. Choose **Save curation to study**
+to commit edits using that study's measurement definitions; changed geometry is
+remeasured. Then choose **Return to
+study**. Returning is navigation, not another save or review confirmation.
+Reentering the same current review retains unsaved main-workspace edits. Use
+**Show study events** if the main window is displaying another recording. Confirm the event
+selection before running dependent comparisons, populations, or figures. Saving
+the main project preserves its workspace; later edits require saving to the study
+again.
+
+The General/Zn/Cu workspace also retains **Use existing main-workspace detections** for
+importing a compatible full-recording Schmitt, CUSUM, ML or Reconciled result on
+the original ABF and channel after preparation. The **Advanced: original Zn
+reference recipe…** entry reproduces the fixed student notebook and opens its old
+result bundles; its automated Run study action uses that recipe. See
+[Incubation studies](INCUBATION_STUDIES.md) for this reference method.
+
+Imported acceptance decisions drive the incubation comparisons and features.
+The study recalculates its own measurements and retains the original table's
+columns with a `source_` prefix. Each import is a snapshot: later main-workspace
+edits require **Save curation to study** again (or another explicit import). On **3 Detect / review**,
+use **All candidates**, **Accepted only**, or **Rejected only** to find events,
+then **Accept selected** or **Reject selected**. When the selection is ready,
+click **Use reviewed events for analysis** for each included recording before
+comparisons, waveform features, clustering, or mixture fitting. This approves
+the current selection without changing its decisions; it does not claim that
+every row was individually inspected. Repeat confirmation after acceptance,
+boundary, preparation, or measurement changes, then recompute dependent analyses
+and figures. Older workspaces' saved results remain viewable immediately, but
+new analysis requires this explicit confirmation.
+
+For Acid, use **Confirm event selection for analysis** on **4 Review** for every
+primary recording. If reviewing families, choose **Build event families for review**,
+inspect and accept/reject the groups, then confirm the revised selections. Choose
+**Analyze confirmed event selections** on **5 Analyze**, then **Generate study
+figures** on **6 Figures**. Acceptance-only review retains frozen family assignments;
+boundary edits, additions, deletions and merges require the study's remeasurement
+and invalidate affected family analysis. Rebuild before interpreting a changed
+population. Saving a main prepared-trace measurement does not replace the Acid
+method's calibrated amplitude, polarity or exposure definitions.
+
+To curate whole waveform groups after a first fit, use the cluster review controls
+at the top of **5 Features / populations**:
+
+1. Choose **Pooled clustering** or **Selected-recording mixture**. New runs load
+   their memberships automatically; use **Load saved clusters for review** for an
+   older saved result. Select **K-means**, **HDBSCAN**, or **Mixture populations**,
+   as available, and check the recording domain in the summary table.
+2. Select one or several cluster rows. **Show events in selected clusters** lets
+   you inspect their events against the source trace. **Unassigned / no waveform
+   features** contains events absent from the saved assignment map; HDBSCAN
+   **Noise (-1)** is a distinct label, not an automatic rejection.
+3. Use **Accept selected clusters** or **Reject selected clusters** to change the
+   selected groups. **Keep only selected clusters** accepts them and rejects the
+   other events in that snapshot's recording domain, including unassigned events
+   unless their bucket is selected. Pooled actions affect only the snapshot's
+   recordings; mixture actions affect only the fitted target recording.
+4. Refine individual decisions if needed, then click **Use cluster-reviewed
+   events for analysis** to confirm the displayed recording domain. Confirm any
+   other included recording whose review is pending. Run **Compute recording
+   comparisons** and/or **Extract reviewed-event waveform features**, followed
+   by the desired clustering or mixture fit, then regenerate the affected figures.
+
+Cluster and individual actions edit the same `accepted` selection: the last action
+wins for each affected event, while the original automatic `passes_gate` remains
+unchanged. Acceptance edits invalidate dependent results but retain the review
+memberships, so rejected groups can be accepted again. Fresh measurement,
+detection, or a main-workspace import retires those memberships; new clustering
+or mixture results replace the corresponding review map. Cluster numbers belong
+to one saved method and run, may change on a subset refit, and are not molecular
+identities. Saved plot styles persist when regenerating figures; inspect colors
+again after a refit because a new label may describe a different group.
+
+Importing different sources, outdated results, or partial or masked analysis
+ranges is refused. A prepared review trace is saved inside the study workspace;
+keep that folder available when saving or reopening a main project that uses it.
+Follow the [curation click path](MANUAL_ZN_WORKFLOW.md#5a-curate-with-the-main-analysis-tools-before-comparing-recordings)
+or [the complete manual Zn-insulin guide](MANUAL_ZN_WORKFLOW.md) to reproduce the
+four recordings using the supplied student model. The [manual Cu-insulin guide](MANUAL_CU_WORKFLOW.md)
+uses the Cu notebook's model-free Schmitt route and its own measurement settings.
+
+In **6 Figures**, select a saved figure and choose **Style selected figure…**.
+The editor uses NanoScope's shared appearance controls, with **Panel titles and
+axis labels** and **Linked series colors** for the study's multi-panel plots.
+Click **Apply appearance** to preview, then **Save styling to study** to preserve
+the figure and settings. Saved styles return on reopening and apply again when
+regenerating the figure group. Styling keeps review approval and does not rerun
+detection, waveform features, clustering, or mixture fits. **Export image…** and
+**Save figure bundle…** export an individual figure. **Save to Figure Library…**
+adds it to the main app for composition; use **Save Project** in the main window
+to persist that library entry as part of the project.
 
 ### Analysis home: find a tool before opening it
 

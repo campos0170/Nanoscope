@@ -40,6 +40,7 @@ E = html.escape
 GOTCHA_LIMIT = 60
 
 AREA_TITLE = {
+    "incubation-studies": "Incubation studies and shared curation",
     "menus": "Menu bar",
     "file-and-calibration": "File Manager &amp; Calibration",
     "detection": "Preprocess &amp; Detection",

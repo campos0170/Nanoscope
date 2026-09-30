@@ -2570,6 +2570,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         curation went with the replaced event table.
         """
         res = self._stored_detection()
+        if res is not None and res.module_id == "detect.study":
+            self.runRefused.emit(
+                "Study candidates were imported from the manual study workspace. "
+                "Rerun its detection stages there, or run a source detector here and "
+                "explicitly return those detections to the study.")
+            return
         if res is not None and res.module_id == CONSENSUS_MODULE_ID:
             # Never reinterpret the derived table as the panel's ordinary Schmitt result.
             # This is the programmatic backstop for callers that bypass the stale banner.
@@ -3987,7 +3993,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         adf = df[acc]
         if len(adf):
             summary["median_dwell_us"] = float(np.median(adf["dwell_s"].to_numpy())) * 1e6
-            summary["median_frac_depth"] = float(np.nanmedian(adf["frac_depth"].to_numpy()))
+            fractions = adf["frac_depth"].to_numpy(dtype=float)
+            summary["median_frac_depth"] = (float(np.median(fractions[np.isfinite(fractions)]))
+                                            if np.isfinite(fractions).any() else float("nan"))
             # A DEPTH DOES NOT TRAVEL ALONE. `frac_depth` is a ratio, and a ratio with
             # no numerator and no denominator on screen is a number the reader cannot
             # check: the summary showed dI/I0 and nothing else, so "measured against
@@ -5533,6 +5541,18 @@ class AnalysisPanel(QtWidgets.QWidget):
         """
         if self._sel is None:
             return None
+        # Imported study candidates deliberately use a fixed, reproducible native
+        # reference on their prepared trace. The main detector form is not that
+        # source's configuration. Explicit native remeasurement replaces this
+        # fingerprint and returns to the ordinary live-settings comparison.
+        if res.module_id == "detect.study" and isinstance(res.payload, EventSet):
+            from ..analysis.baseline import BaselineConfig
+            prov = res.payload.provenance or {}
+            fixed = prov.get("study_fixed_baseline_fingerprint")
+            if fixed and fixed == res.baseline_fingerprint == prov.get("baseline_fingerprint"):
+                cfg = BaselineConfig.reproducible_from(prov)
+                if cfg is not None and cfg.method == "constant":
+                    return None
         resolved = self._live_baseline_for_run()
         if resolved is None:
             return None

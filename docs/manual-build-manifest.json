@@ -1,19 +1,34 @@
 {
-  "edition": "2026-09-11",
-  "source_revision": "703a96a",
+  "edition": "2026-09-29",
+  "application_build": "40.15.59",
+  "scope": "Unified incubation entry, study metadata, shared main-workspace curation and staged recalculation",
+  "retained_prior_review": {
+    "date": "2026-09-11",
+    "source_revision": "703a96a",
+    "scope": "Other main-analysis chapters and dated illustrations; not all re-audited in this edition"
+  },
   "pdf_rebuilt": true,
   "pdf_engine": "reportlab",
   "checks": [
-    "52 internal links, all resolve to ids on the page",
-    "45 <img> tags, all data: URIs",
-    "22 top-level sections, all in the contents rail (30 rail entries)"
+    "55 internal links, all resolve to ids on the page",
+    "48 <img> tags, all data: URIs",
+    "23 top-level sections, all in the contents rail (32 rail entries)"
   ],
   "sha256": {
-    "manual-markdown/manual.md": "fdbf3a905d4d5b44bef12a78aedf0c293b78fc72fe2ee768763c3a2125184350",
-    "inventory.json": "1cd55a891cc59d1a5f9afc418673d2413cf06027acb221c4b4f4c9560d81a86c",
-    "USER_GUIDE.md": "d600338bd26223517030ad6a07b8f0b58df85bcbf871f30f5b625c1ce7b14bec",
-    "manual.html": "9507f7045b653581a0fe0c9fea4804894284fc51b8005c76632b774218fb3dc1",
-    "manual-markdown/manual.html": "9507f7045b653581a0fe0c9fea4804894284fc51b8005c76632b774218fb3dc1",
-    "nanoscope-manual.pdf": "e5f4bfe0f8cf90f522abe589bfef94bd180fa96e0880453f1501d541fc8880c4"
+    "manual-markdown/manual.md": "902853d0c4045c026200058d223b7582d1240554dd5f9e7721779a5da7e2b554",
+    "inventory.json": "738743fbd53a2bb55c98f134402f15ce4944ae73d51be49cba36552c24c1dab8",
+    "USER_GUIDE.md": "a93009da671bde122f7851d49a69d26116a3bff559ad57b68482ad68a47de2e0",
+    "INCUBATION_STUDIES.md": "5a7385f3f3bc45727823883cdac009db47c102e9aa98c405a7bbc281eed1ae91",
+    "MANUAL_ZN_WORKFLOW.md": "c088ff29689fccb432ef0cef842833c247865553f08a8028b9ebcb89a61f61c8",
+    "MANUAL_CU_WORKFLOW.md": "76c5c07cce1ddbf2f807067a42fea71a9adcff0b26bb435d0da6e39b1730cc8c",
+    "MANUAL_ACID_WORKFLOW.md": "c19559a5fe163f271417d59eaf6f5d3d9771e986601e4c4d3d14ff9a0e92da84",
+    "MANUAL_REVISION_2026-09-29.md": "8620a238b4344f9cde25cee82a16d30c4bcaa323159ab3cd02a4710ac8c5b6da",
+    "manual-incubation-captures.json": "1e2b0e6cc936e7f2944335d80b68f7b8a72baa7076ca56267fafb30ee502aba3",
+    "gen_page.py": "ffd1d6c52a68a0af106285f834b2580facd698249fbefee75c52131171d6061c",
+    "gen_manual.py": "6497784729af9ed2d278571a41350ba380e62d279d498170338a265502a8b224",
+    "render_manual_pdf.py": "e4394b1a2334b311d0f2fc53f5cd52a22c3a2ed29c34f14dcc2c5d5a69c36270",
+    "manual.html": "b2108e38d6dc31577828d3df6ad9e95416c400f6bec42a7cfbcd514a28b21d2a",
+    "manual-markdown/manual.html": "b2108e38d6dc31577828d3df6ad9e95416c400f6bec42a7cfbcd514a28b21d2a",
+    "nanoscope-manual.pdf": "739513105fe672cb3f496da7f6c9c0e9285adb6cdf5d816caf41d48c7c3f2eb4"
   }
 }

@@ -471,7 +471,7 @@ def build_page() -> str:
 <div class="wrap">{rail}<main>
 {body}
 <footer>
-<p>NanoScope 0.1.0 &middot; This manual documents {total} controls across {len(ref_toc)} areas.</p>
+<p>NanoScope build 40.15.59 &middot; Manual edition 2026-09-29. This manual documents {total} controls across {len(ref_toc)} areas.</p>
 {prov}
 <p>Built from <code>docs/manual-markdown/manual.md</code> and <code>docs/inventory.json</code> by
 <code>docs/gen_page.py</code>. {body.count('<img ')} illustrations are embedded in this file; it loads nothing
@@ -572,7 +572,11 @@ def build_zip(zip_path: Path) -> None:
         z.write(OUT_HTML_COPY, f"{root}/manual.html")
         if OUT_PDF.exists():
             z.write(OUT_PDF, f"{root}/nanoscope-manual.pdf")
-        for name in ('USER_GUIDE.md', 'OPEN_PORE_REFERENCE.md', 'MANUAL_REVISION_2026-09-11.md',
+        for name in ('USER_GUIDE.md', 'OPEN_PORE_REFERENCE.md', 'MEASUREMENT_RELIABILITY.md',
+                     'INCUBATION_STUDIES.md', 'MANUAL_ZN_WORKFLOW.md', 'MANUAL_CU_WORKFLOW.md',
+                     'MANUAL_ACID_WORKFLOW.md',
+                     'MANUAL_REVISION_2026-09-11.md', 'MANUAL_REVISION_2026-09-29.md',
+                     'manual-incubation-captures.json',
                      'manual-current-captures.json', 'manual-plot-navigation-captures.json',
                      'manual-build-manifest.json', 'inventory.json'):
             if (HERE / name).is_file():
@@ -612,10 +616,18 @@ def main() -> None:
                              '--pdf-python PATH_TO_PYTHON_WITH_REPORTLAB for offline rendering.')
         print(f"wrote {OUT_PDF.relative_to(HERE.parent)}  "
               f"({OUT_PDF.stat().st_size / 1e6:.2f} MB)")
-    manifest = dict(edition='2026-09-11', source_revision='703a96a', pdf_rebuilt=bool(args.pdf),
+    manifest = dict(edition='2026-09-29', application_build='40.15.59',
+                    scope='Unified incubation entry, study metadata, shared main-workspace curation and staged recalculation',
+                    retained_prior_review=dict(date='2026-09-11',source_revision='703a96a',
+                        scope='Other main-analysis chapters and dated illustrations; not all re-audited in this edition'),
+                    pdf_rebuilt=bool(args.pdf),
                     pdf_engine=args.pdf_engine if args.pdf else None,
                     checks=verify(page), sha256={})
-    for path in (MD_FILE, gen_manual.INVENTORY, HERE/'USER_GUIDE.md', OUT_HTML, OUT_HTML_COPY, OUT_PDF):
+    for path in (MD_FILE, gen_manual.INVENTORY, HERE/'USER_GUIDE.md', HERE/'INCUBATION_STUDIES.md',
+                 HERE/'MANUAL_ZN_WORKFLOW.md', HERE/'MANUAL_CU_WORKFLOW.md', HERE/'MANUAL_ACID_WORKFLOW.md',
+                 HERE/'MANUAL_REVISION_2026-09-29.md', HERE/'manual-incubation-captures.json',
+                 HERE/'gen_page.py', HERE/'gen_manual.py', HERE/'render_manual_pdf.py',
+                 OUT_HTML, OUT_HTML_COPY, OUT_PDF):
         if path.exists():
             manifest['sha256'][str(path.relative_to(HERE))] = hashlib.sha256(path.read_bytes()).hexdigest()
     (HERE/'manual-build-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')

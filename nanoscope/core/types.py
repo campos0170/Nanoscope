@@ -55,6 +55,13 @@ class SampleRange:
         return self.stop - self.start
 
 
+#: The top-level HDF5 attribute key nanoscope/gui/study_event_bridge.py stamps onto a
+#: prepared-review export. nanoscope/io/hdf5.py reads it to set
+#: RecordingMeta.physical_reference_unavailable. Defined here (not in gui/) so io/ can
+#: import it without an io -> gui dependency.
+STUDY_BRIDGE_ATTR_KEY = "study_event_bridge"
+
+
 @dataclass(frozen=True)
 class RecordingMeta:
     path: Path
@@ -69,6 +76,14 @@ class RecordingMeta:
     voltage_provenance: Provenance = Provenance.UNKNOWN
     notes: tuple[str, ...] = ()             # honest advisories shown in file_info_panel
     issues: tuple[str, ...] = ()            # non-fatal problems found while reading
+    physical_reference_unavailable: bool = False
+    # ^^ True for a document engineered with no real open-pore/physical reference (e.g. a
+    # baseline-subtracted export from the manual-study bridge). ANY detector run against
+    # such a document must refuse frac_depth, not just the bridge's own synthetic result
+    # -- see core/acquisition.py's stamp_reference_availability, which every detector
+    # calls, and characterize.py/events.py/reconcile.py's shared
+    # fractional_blockage_reference_unavailable guard, which was already correct but had
+    # only one producer before this field existed.
     load_uid: str = ""
     # ^^ THE PER-LOAD TOKEN. Identifies THIS load of this file, so that two loads of one
     # path are two different documents and a result computed on one can never be installed

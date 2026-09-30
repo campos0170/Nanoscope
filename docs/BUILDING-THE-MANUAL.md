@@ -1,5 +1,9 @@
 # Rebuilding the manual
 
+Current documentation edition: **2026-09-29**, incubation workflow checked against
+NanoScope build **40.15.59**. Other chapters and retained illustrations carry their
+own earlier review dates. See `MANUAL_REVISION_2026-09-29.md` for scope.
+
     /opt/anaconda3/bin/python3 docs/gen_page.py --pdf --zip
 
 That is the whole build. It runs from a clean checkout: every path is resolved relative to
@@ -10,6 +14,16 @@ in `/Applications`.
 When headless Chrome is unavailable, use the offline ReportLab renderer:
 
     python3 docs/gen_page.py --pdf --zip --pdf-engine reportlab --pdf-python /path/to/python-with-reportlab
+
+For this edition's offline build, a verified environment combination is:
+
+```sh
+/opt/anaconda3/bin/python3 docs/gen_page.py --pdf --zip --pdf-engine reportlab \
+  --pdf-python /Users/abrahamcampos/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
+```
+
+These are environment-specific interpreter locations, not paths required by the
+manual content. Use equivalent local interpreters elsewhere.
 
 The authoring Python needs `markdown`; the PDF Python needs `reportlab`, `Pillow` and `pypdf`.
 They may be different environments. The ReportLab route reads the same verified HTML, includes
@@ -48,6 +62,7 @@ Which screenshot heads each reference area, and its caption, is `AREA_IMG` in
 | `docs/nanoscope-manual.zip` | `--zip`: markdown + images + html + pdf, under `nanoscope-manual-md/` |
 | `docs/manual-build-manifest.json` | edition, rendering engine, validation checks and source/output hashes |
 | `docs/manual-current-captures.json` | current-source screenshot provenance, unchanged input-project hashes |
+| `docs/manual-incubation-captures.json` | provenance for the 2026-09-29 incubation illustrations; earlier capture manifests remain dated |
 | `docs/_build/reference.html` | only if you run `gen_manual.py` by itself; a scratch view of the reference section, not shipped |
 
 ## The build checks itself
@@ -58,8 +73,10 @@ link points at an id that is not on the page, if a heading is missing from the c
 or if the page grows a `<script>`, `<iframe>` or external stylesheet. The contents rail and
 the section anchors are both generated from the headings, so they cannot drift apart.
 
-The ZIP also includes the written User Guide, recording-specific reference guide, edition notes,
-inventory and verification manifests. Application executables/DMGs are not rebuilt by this command;
+The ZIP also includes the written User Guide, incubation companion, Zn/Cu/Acid workflow
+guides, recording-specific reference guide, edition notes, inventory and verification
+manifests. Finalize companion Markdown and captures before the distribution build.
+Application executables/DMGs are not rebuilt by this command;
 installed Help retains the bundled edition until a separate application release is built/installed.
 
 ## History

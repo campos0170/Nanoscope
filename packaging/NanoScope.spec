@@ -85,6 +85,13 @@ hiddenimports = [
     "scipy._lib.array_api_compat.numpy.fft",
     # `NanoScope --self-test`; imported inside a function so the GUI path never pays for it.
     "nanoscope_selftest",
+    # Acid incubation: compiled density/dip-test helpers and Numba runtime.
+    "hdbscan._hdbscan_linkage",
+    "hdbscan._hdbscan_tree",
+    "hdbscan._prediction_utils",
+    "diptest.lib._diptest_core",
+    "numba.core.runtime",
+    "llvmlite.binding",
 ]
 
 # Keras 3 picks its backend at import time from a config file / env var and imports it by string.
@@ -97,6 +104,13 @@ datas = [
     # every detection result's provenance. Without the dist-info it silently degrades to
     # "unknown" and every exported CSV loses its version stamp.
     *copy_metadata("nanoscope"),
+    # Keep dependency versions and their upstream license notices in the bundle.
+    *copy_metadata("numba"),
+    *copy_metadata("llvmlite"),
+    *copy_metadata("hdbscan"),
+    *copy_metadata("umap-learn"),
+    *copy_metadata("diptest"),
+    *copy_metadata("pyabf"),
     # Keras' saving layer reads JSON schemas + the serialization registry from package data.
     *collect_data_files("keras"),
 ]
@@ -172,7 +186,7 @@ excludes = _QT_EXCLUDES + _LEAF_EXCLUDES + [
     "sphinx", "numpydoc", "docutils", "setuptools._distutils",
     # Big scientific packages that live in this conda env but that nanoscope never imports.
     # Without these, a single transitive `import skimage` inside a dependency costs 300 MB.
-    "torch", "torchvision", "jax", "jaxlib", "cv2", "skimage", "sympy", "numba", "llvmlite",
+    "torch", "torchvision", "jax", "jaxlib", "cv2", "skimage", "sympy",
     "statsmodels", "plotly", "dask", "xarray", "sqlalchemy", "openpyxl",
     "xlsxwriter", "tables", "numexpr", "bottleneck", "PIL.ImageQt",
     # TensorFlow satellites present in the env and NOT used by ml_detect. tf_keras in particular
@@ -202,6 +216,8 @@ a = Analysis(
     runtime_hooks=[str(HERE / "rthooks" / "rthook_nanoscope_env.py")],
     excludes=excludes,
     noarchive=False,
+    # Numba's cache locators need actual source paths for these JIT libraries.
+    module_collection_mode={"umap": "py", "pynndescent": "py"},
     optimize=0,
 )
 
@@ -309,17 +325,12 @@ exe = EXE(
     entitlements_file=None,
 )
 
-coll = COLLECT(
+app = BUNDLE(
+    # Assemble the onedir payload directly into .app, avoiding a second full
+    # standalone payload that the macOS installer does not distribute.
     exe,
     a.binaries,
     a.datas,
-    strip=False,
-    upx=False,
-    name=APP_NAME,
-)
-
-app = BUNDLE(
-    coll,
     name=f"{APP_NAME}.app",
     icon=str(HERE / "resources" / "NanoScope.icns"),
     bundle_identifier=BUNDLE_ID,

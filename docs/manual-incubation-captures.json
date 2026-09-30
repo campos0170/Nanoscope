@@ -1,0 +1,125 @@
+{
+  "date": "2026-09-29",
+  "source_version": "40.15.59",
+  "offscreen": true,
+  "source": "/Users/abrahamcampos/Desktop/nanoscope",
+  "source_note": "Actual current-build Qt widgets rendered offscreen with isolated settings. Separate panels are genuine widget crops. Original study checkpoints are read only.",
+  "screens": [
+    {
+      "key": "current_launcher_general",
+      "image": "manual-markdown/images/current_incubation_launcher.webp",
+      "width": 720,
+      "height": 485,
+      "targets": {
+        "profile": [
+          114,
+          121,
+          585,
+          27
+        ],
+        "study_name": [
+          114,
+          198,
+          585,
+          26
+        ],
+        "sample": [
+          114,
+          230,
+          585,
+          26
+        ],
+        "create_study": [
+          21,
+          262,
+          678,
+          29
+        ],
+        "open_saved": [
+          9,
+          309,
+          702,
+          29
+        ]
+      },
+      "caption": "Current unified study launcher \u00b7 general",
+      "sha256": "30995710467912f8a54040ae884ad3d306993a70b2949a97002db55e26eaa3cf",
+      "data_description": "Actual launcher interface; no scientific data or computation displayed."
+    },
+    {
+      "key": "current_launcher_profiles",
+      "image": "manual-markdown/images/current_launcher_profiles.webp",
+      "width": 585,
+      "height": 106,
+      "targets": {
+        "profile_options": [
+          1,
+          1,
+          583,
+          104
+        ]
+      },
+      "caption": "Actual expanded profile list: General, Zn, Cu and Acid",
+      "sha256": "fb441eecf1ca9892c1593a97cfed9130e47b6b3468bb9137e920dc076621a5b7",
+      "data_description": "Actual launcher interface; no scientific data or computation displayed."
+    },
+    {
+      "key": "current_main_curation",
+      "image": "manual-markdown/images/current_incubation_curation.webp",
+      "width": 1760,
+      "height": 1050,
+      "targets": {
+        "main_study_save": [
+          812,
+          122,
+          180,
+          29
+        ],
+        "main_study_return": [
+          998,
+          122,
+          130,
+          29
+        ],
+        "study_status": [
+          16,
+          108,
+          790,
+          57
+        ],
+        "event_table": [
+          1162,
+          573,
+          586,
+          433
+        ],
+        "gallery": [
+          730,
+          65,
+          89,
+          26
+        ],
+        "inspector": [
+          477,
+          31,
+          87,
+          26
+        ]
+      },
+      "caption": "Actual Zn event handoff \u00b7 shared event table, Gallery, Inspector and study save/return",
+      "sha256": "db9462fd29f80524bd40d51fc12ae55fd2ef8debcc0848426c6b4b9e07e67c8e",
+      "data_description": "Actual saved Zn 18-hour recording; 1,647 candidates opened in an isolated prepared review workspace. Original checkpoint read only; no new detector run."
+    }
+  ],
+  "studies": {
+    "zn": {
+      "source": "/Users/abrahamcampos/Documents/Codex/2026-09-12/le/outputs/zn-manual-workflow/manual-study",
+      "tag": "zn_18h",
+      "manifest_sha256_before": "63302ecc6c816393c381628e2335c19936743de94a2771a82d1ab24c071b317e",
+      "source_inventory_verified": true,
+      "source_access": "read only; only selected record instantiated",
+      "samples": 5923839,
+      "candidates": 1647
+    }
+  }
+}

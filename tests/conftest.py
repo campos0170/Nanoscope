@@ -69,10 +69,12 @@ from PySide6 import QtCore, QtGui, QtWidgets
 # that FAILS if any of this is ever undone.
 _SETTINGS_ROOT = Path(tempfile.mkdtemp(prefix="nanoscope-qsettings-"))
 _RECOVERY_ROOT = Path(tempfile.mkdtemp(prefix="nanoscope-recovery-"))
+_STUDY_LIBRARY_ROOT = Path(tempfile.mkdtemp(prefix="nanoscope-study-library-"))
 # Crash-recovery snapshots are user data just like preferences.  Keep every GUI test
 # inside a private store so a long-running test cannot discover, offer, overwrite or
 # retire a recovery left by the installed application.
 os.environ["NANOSCOPE_RECOVERY_ROOT"] = str(_RECOVERY_ROOT)
+os.environ["NANOSCOPE_INCUBATION_LIBRARY_ROOT"] = str(_STUDY_LIBRARY_ROOT)
 QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
 for _scope in (QtCore.QSettings.UserScope, QtCore.QSettings.SystemScope):
     QtCore.QSettings.setPath(QtCore.QSettings.IniFormat, _scope, str(_SETTINGS_ROOT))
@@ -80,6 +82,7 @@ for _scope in (QtCore.QSettings.UserScope, QtCore.QSettings.SystemScope):
 # run into /var/folders is a smaller version of the same discourtesy this block is about.
 atexit.register(shutil.rmtree, str(_SETTINGS_ROOT), True)
 atexit.register(shutil.rmtree, str(_RECOVERY_ROOT), True)
+atexit.register(shutil.rmtree, str(_STUDY_LIBRARY_ROOT), True)
 
 
 def pytest_runtest_setup(item) -> None:
@@ -99,6 +102,7 @@ def pytest_runtest_setup(item) -> None:
     """
     token = hashlib.sha256(item.nodeid.encode("utf-8")).hexdigest()[:20]
     os.environ["NANOSCOPE_RECOVERY_ROOT"] = str(_RECOVERY_ROOT / token)
+    os.environ["NANOSCOPE_INCUBATION_LIBRARY_ROOT"] = str(_STUDY_LIBRARY_ROOT / token)
 
 
 def _locate_real_settings_store() -> Path:

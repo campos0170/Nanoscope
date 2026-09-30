@@ -561,8 +561,9 @@ class MLDetect:
         # CHOICE rather than an accident. ``review`` is ``unreviewed``: the model
         # emits candidates exactly as the threshold detectors do. ``accepted`` is
         # untouched, so no exported number moves.
-        from ..core.acquisition import stamp_acquisition_bandwidth
+        from ..core.acquisition import stamp_acquisition_bandwidth, stamp_reference_availability
         stamp_acquisition_bandwidth(prov, ctx)
+        stamp_reference_availability(prov, ctx)
         events = EventSet(stamp_source_status(stamp_original_bounds(df), self.id), prov)
 
         spans = OverlayHint(

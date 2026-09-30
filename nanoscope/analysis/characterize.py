@@ -885,6 +885,8 @@ def recharacterize_span(
     # there is nothing to warn about. It is here so a caller can tell a rebuilt row
     # that landed on the detector's own baseline from one that had to fall back.
     out.attrs["baseline_source"] = baseline_source
+    if (provenance or {}).get("fractional_blockage_reference_unavailable") is True:
+        out["frac_depth"] = np.nan
     return out
 
 

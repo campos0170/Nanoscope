@@ -106,6 +106,47 @@ def _remove_scratch(tmp: Path) -> None:
     print(f"scratch: {len(files)} file(s), {total / 1e6:.1f} MB in {tmp} — {state}")
 
 
+def _acid_numerics_smoke() -> str:
+    """Exercise compiled acid dependencies inside the frozen executable."""
+    from copy import deepcopy
+    from types import FunctionType
+    import numpy as np
+    import scipy
+    import hdbscan
+    import umap
+    from diptest import diptest
+    from nanoscope.analysis import acid_incubation_math as acid_math
+    from nanoscope.analysis.acid_incubation_config import DEFAULTS
+    from nanoscope.analysis.acid_incubation_numerics import median_filter_1d
+
+    assert scipy.__version__.split('+')[0] not in {'1.15.0', '1.15.1'}, (
+        'This SciPy version has a known one-dimensional median-filter defect')
+    signal = np.array([3., 8., -2., 7., 1., 1., 9.], dtype=np.float32)
+    padded = np.pad(signal, (2, 2), mode='symmetric')
+    expected = np.array([np.median(padded[i:i+5]) for i in range(len(signal))])
+    np.testing.assert_array_equal(median_filter_1d(signal, 5), expected)
+
+    # The same static stage code runs with private recording globals in the app.
+    namespace = dict(vars(acid_math))
+    namespace.update(deepcopy(DEFAULTS))
+    namespace['_acid_cancel'] = None
+    stage = acid_math.stage_016
+    FunctionType(stage.__code__, namespace, stage.__name__, stage.__defaults__,
+                 stage.__closure__)()
+    assert namespace['HAVE_NUMBA'], 'Acid CUSUM lacks its compiled Numba runtime'
+    rng = np.random.default_rng(68)
+    x = np.vstack([rng.normal(-4, .15, (40, 3)), rng.normal(4, .15, (40, 3))])
+    labels = hdbscan.HDBSCAN(min_cluster_size=10, min_samples=5,
+                            core_dist_n_jobs=1).fit_predict(x)
+    assert len(set(labels) - {-1}) == 2, 'Compiled HDBSCAN lost the two separated groups'
+    statistic, pvalue = diptest(x[:, 0])
+    assert np.isfinite(statistic) and 0 <= pvalue <= 1, 'Dip-test extension failed'
+    embedding = umap.UMAP(n_neighbors=8, n_components=2, random_state=68,
+                          n_jobs=1, n_epochs=20).fit_transform(x)
+    assert embedding.shape == (80, 2) and np.isfinite(embedding).all()
+    return 'Acid CUSUM core checks, HDBSCAN, dip test and UMAP completed'
+
+
 def _comparison_figures_smoke(tmp: Path) -> str:
     """Exercise the frozen Seaborn path using stored measurements, never detection."""
     import pandas as pd
@@ -352,10 +393,33 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
     for scope in (QtCore.QSettings.UserScope, QtCore.QSettings.SystemScope):
         QtCore.QSettings.setPath(QtCore.QSettings.IniFormat, scope, str(tmp / "qsettings"))
     os.environ["NANOSCOPE_RECOVERY_ROOT"] = str(tmp / "recovery")
+    os.environ["NANOSCOPE_INCUBATION_LIBRARY_ROOT"] = str(tmp / "study-library")
     # Handoff between checks (an EventSet built by one, exported by the next). A dict, not an
     # attribute on the function: @check runs each body at DECORATION time, so the function name
     # is not yet bound in this scope while its own body is executing.
     shared: dict[str, object] = {}
+
+    @check("incubation study library survives a fresh instance")
+    def _study_library():
+        from nanoscope.analysis import manual_workspace as checkpoint
+        from nanoscope.gui.incubation_library import StudyLibrary
+        from nanoscope.gui.incubation_profiles import initialize_study_metadata
+        from nanoscope.gui.manual_study_window import _empty_state
+
+        root = tmp / "library-persistence"
+        folder = tmp / "saved-library-study"
+        state = initialize_study_metadata(_empty_state(), "cu", name="Saved copper study")
+        checkpoint.save_workspace(state, folder)
+        library = StudyLibrary(root)
+        library.remember(folder, label="Copper incubation")
+        restored = StudyLibrary(root)
+        entries = restored.entries()
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.available and entry.path == folder.resolve()
+        assert entry.label == "Copper incubation" and entry.profile_id == "cu"
+        assert Path(restored.picker_directory()).is_dir()
+        return "named study folder persists; saved method and usable picker directory restored"
 
     # -- 1. the frozen environment itself ------------------------------------------------------
     @check("frozen bundle")
@@ -427,6 +491,10 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
         from neo.rawio import AxonRawIO  # noqa: F401 — the class the ABF reader actually uses
 
         return f"h5py {h5py.__version__}, nptdms {nptdms.__version__}, neo {neo.__version__}, pyarrow {pyarrow.__version__}"
+
+    @check("acid CUSUM and compiled clustering runtime")
+    def _acid_numerics():
+        return _acid_numerics_smoke()
 
     @check("HDF5 write + read through the app's reader")
     def _hdf5_roundtrip():
@@ -753,16 +821,138 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
             if not docks or not menus:
                 raise AssertionError(f"window built empty: {len(docks)} docks, menus={menus}")
 
+            # Exercise the actual lazy menu route: a main-window import alone does
+            # not prove that the bundled acid workspace can be constructed.
+            win._act_incubation_study.trigger()
+            launcher = win._incubation_study_window
+            assert launcher is not None
+            acid = launcher.create_study(tmp / "acid-editor-study", profile="acid")
+            QtCore.QCoreApplication.processEvents()
+            acid = win._acid_study_window
+            assert acid is not None and acid._stages.count() == 6, (
+                "Acid incubation menu did not construct all six workflow stages")
+            controls = {button.text() for button in acid.findChildren(QtWidgets.QPushButton)}
+            for label in ("Accept selected events", "Reject selected events",
+                          "Build event families for review", "Style selected figure",
+                          "Curate in main workspace"):
+                assert any(label in text for text in controls), (
+                    f"Bundled acid workspace is missing {label!r}")
+            # Run the actual shared-editor handoff and checkpoint return inside
+            # the frozen app, including the lazy Arrow/bridge imports.
+            import hashlib
+            import numpy as np
+            import pandas as pd
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            from nanoscope.analysis import acid_incubation as acid_engine
+            from nanoscope.analysis import manual_workspace as acid_checkpoint
+
+            raw_path = tmp / "acid-editor-source.abf"
+            raw_path.write_bytes(b"frozen-app synthetic prepared source identity")
+            signal = np.random.default_rng(91).normal(0, .2, 5000).astype(np.float32)
+            signal[1000:1040] -= 10
+            signal[2000:2060] -= 12
+            parquet = tmp / "acid-editor-prepared.parquet"
+            pq.write_table(pa.table(dict(current_detr_pA=signal, current_raw_pA=signal-200)), parquet)
+            source_hash = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+            acid.state = acid_engine.new_state("Shared editor check", [dict(tag="acid_test",
+                source_path=raw_path, source_info=dict(sha256=source_hash, fs_hz=50000.,
+                    channels=[dict(units="pA")]), incubation_h=2., channel=0)])
+            row = acid.state['records'][0]
+            row['prepared'] = dict(parquet_path=parquet,
+                sha256=hashlib.sha256(parquet.read_bytes()).hexdigest(), source_sha256=source_hash,
+                settings_sha256=acid_engine._digest({k: acid.state['settings'][k] for k in acid_engine.PREPARE_KEYS}),
+                metadata=dict(fs_hz=50000., n_samples=5000, event_polarity=1))
+            row['detection'] = dict(primary_set='cusum', catalog_detector='cusum', settings_sha256='smoke')
+            row['catalog'] = pd.DataFrame(dict(event_id=['C000000', 'C000001'],
+                start_idx=[1000, 2000], end_idx=[1039, 2059], accepted=[True, False],
+                passes_gate=[True, False], automatic_accepted=[True, False], event_review=['unreviewed']*2))
+            acid.refresh()
+            errors = []
+            acid.operationFailed.connect(errors.append)
+
+            def complete_acid(action):
+                assert action() is not False
+                deadline = time.time() + 60
+                while acid.is_busy() and time.time() < deadline:
+                    QtCore.QCoreApplication.processEvents()
+                    time.sleep(.01)
+                assert not acid.is_busy() and not errors, errors
+
+            complete_acid(acid.open_main_curation)
+            result = win._analysis_panel.current_detection()
+            assert win._event_gallery.frame() is result.payload.df
+            assert win._study_curation_bar.isVisible()
+            event_id = int(result.payload.df.event_id.iloc[0])
+            win._analysis_panel.set_event_accepted(event_id, False)
+            complete_acid(lambda: acid.save_main_curation(win._study_curation_context))
+            saved = acid_checkpoint.load_workspace(acid.folder)
+            assert saved['records'][0]['catalog'].accepted.tolist() == [False, False]
+            assert saved['records'][0]['catalog'].event_review.tolist() == ['reviewed', 'unreviewed']
+            acid.close()
+            QtCore.QCoreApplication.processEvents()
+
+            # New profiles and both legacy/general routing modules must survive
+            # freezing, and the same native Save button must commit Zn/Cu edits.
+            from dataclasses import asdict
+            from nanoscope.gui.incubation_profiles import peek_workspace, recording_defaults
+            from nanoscope.gui.manual_study_window import _prep_defaults
+            from nanoscope.analysis import manual_preparation as manual_prep
+            from nanoscope.analysis import manual_detection as manual_detect
+            from nanoscope.analysis.incubation_detection import RecordingAnalysis, _fingerprint
+            for profile in ('general', 'zn', 'cu'):
+                manual = launcher.create_study(tmp / (profile+'-editor-study'), profile=profile)
+                assert peek_workspace(manual.folder).profile_id == profile
+                tag = profile+'_test'
+                raw = signal.astype(np.float64)-200
+                metadata = dict(event_polarity=1, qc_mad_noise_pA=.2)
+                prepared = manual_prep.RawPreparedRecording(tag, raw, signal.copy(), 50000., .1,
+                    metadata, dict(raw_file=_fingerprint(raw_path), event_polarity=1),
+                    raw.copy(), np.full(5000, -200., np.float32))
+                catalog = pd.DataFrame(dict(event_id=[tag+':0', tag+':1'],
+                    start_idx=[1000,2000], end_idx=[1039,2059], accepted=[True,False],
+                    passes_gate=[True,True], depth_peak_pA=[10.,12.], I0_local_pA=[200.,200.]))
+                manual.state['records'] = [dict(recording_id=profile+'-record', tag=tag,
+                    source_path=raw_path, source_info=dict(channels=[dict(index=0,name='Current',units='pA')], fs_hz=50000., n_samples=5000),
+                    incubation_h=2., pore_id='test-pore', pore_diameter_nm=18., concentration_pm=100.,
+                    voltage_mv=-200., channel=0, event_polarity=1, reader_scaling='notebook_float32',
+                    preparation_settings=_prep_defaults(), inference_settings=asdict(manual_detect.InferenceSettings()),
+                    decode_settings=asdict(manual_detect.DecodeSettings()),
+                    measurement_settings=asdict(manual_detect.MeasurementSettings()), prepared=prepared,
+                    analysis=RecordingAnalysis(tag, raw, signal.copy(), 50000., .1, catalog, dict(prepared.provenance)),
+                    **recording_defaults(profile))]
+                manual.refresh()
+                failures = []; manual.operationFailed.connect(failures.append)
+                def complete_manual(action):
+                    assert action() is not False
+                    deadline = time.time()+60
+                    while manual.is_busy() and time.time()<deadline:
+                        QtCore.QCoreApplication.processEvents(); time.sleep(.01)
+                    assert not manual.is_busy() and not failures, failures
+                complete_manual(manual.open_main_analysis)
+                win._analysis_panel.set_event_accepted(0, False)
+                complete_manual(win._save_study_curation)
+                restored = acid_checkpoint.load_workspace(manual.folder)
+                assert restored['study_profile'] == profile
+                assert restored['records'][0]['analysis'].catalog.accepted.tolist() == [False,False]
+                assert restored['model_path'] == ''
+                win._return_to_study()
+                assert manual._stages.currentIndex() == 2
+                manual.close()
+
             # The sink the macOS open-document relay in nanoscope_app.py feeds. Info.plist
             # advertises .abf/.h5/.tdms/.csv/.txt as document types, so this has to actually load
             # a file — an app that claims a file type and then opens empty is worse than one that
             # claims nothing at all.
             win.open_paths([str(tmp / "synthetic.h5")])
             deadline = time.time() + 60
-            while not win._session.documents() and time.time() < deadline:
+            loaded = []
+            while time.time() < deadline:
+                loaded = [doc for doc in win._session.documents()
+                          if doc.meta.path.resolve() == (tmp / "synthetic.h5").resolve()]
+                if loaded: break
                 QtCore.QCoreApplication.processEvents()
                 time.sleep(0.02)
-            loaded = win._session.documents()
             if not loaded:
                 raise AssertionError("open_paths() never produced a document — a macOS "
                                      "double-click would open an empty window")
@@ -773,7 +963,9 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
 
         note = f", dismissed {dismissed}" if dismissed else ""
         return (f"{len(docks)} dock(s), {len(menus)} menus, opened "
-                f"{loaded[0].meta.n_samples} samples via open_paths(){note}")
+                f"{loaded[0].meta.n_samples} samples via open_paths(); "
+                f"unified launcher opens General, Zn, Cu and Acid profiles; "
+                f"shared editor saves decisions back to the acid checkpoint; General/Zn/Cu curation checkpoints round-trip without a model{note}")
 
     @check("Project save + close + restore with nested visible segments")
     def _restore_project():

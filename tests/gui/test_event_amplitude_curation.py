@@ -396,3 +396,56 @@ def test_wired_edit_undo_redo_and_rerun_guard(qapp, qtbot, tmp_path, monkeypatch
     pd.testing.assert_frame_equal(window._analysis_panel.current_detection().payload.df, after)
     assert refits == []
     window._analysis_controller.abort()
+
+
+def test_bulk_peak_on_macos_avoids_native_cursor_and_preserves_undo(
+        qapp, qtbot, tmp_path, monkeypatch):
+    """The real Cocoa crash was in the busy cursor before any event was measured."""
+    from nanoscope.gui import busy_cursor
+
+    monkeypatch.setattr(busy_cursor, "sys", SimpleNamespace(platform="darwin"))
+    window = MainWindow()
+    qtbot.addWidget(window)
+    doc = builders._synth_doc(tmp_path)
+    doc_id = window._session.add_document(doc)
+    window._create_default_layers(doc)
+    window._on_selection(doc_id, 0)
+    events = builders._events_for(window._session, doc_id, 0)
+    window._session.add_result(AnalysisResult(
+        module_id="detect.schmitt", module_version="1.0", doc_id=doc_id, channel=0,
+        params={}, calibration_fingerprint=window._session.calibration(doc_id, 0).fingerprint(),
+        baseline_fingerprint=events.provenance["baseline_fingerprint"], payload=events))
+    window._open_event_inspector()
+    controls = window._event_inspector._amplitude
+    before = events.df.copy(deep=True)
+
+    def forbidden_cursor(*args):
+        pytest.fail("Amplitude curation must not enter the macOS native busy-cursor path")
+
+    monkeypatch.setattr(QtWidgets.QApplication, "setOverrideCursor", forbidden_cursor)
+    monkeypatch.setattr(QtWidgets.QApplication, "restoreOverrideCursor", forbidden_cursor)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *_: QtWidgets.QMessageBox.Yes)
+    controls.method.setCurrentIndex(controls.method.findData("peak"))
+    controls.apply_all()
+    after = events.df.copy(deep=True)
+    assert set(after.amplitude_method) == {"peak"}
+    pd.testing.assert_frame_equal(after[list(before)], before)
+    for _, row in after.iterrows():
+        context = controls.context(row)
+        start, end = int(row.start_idx), int(row.end_idx)
+        baseline = context.baseline if np.ndim(context.baseline) == 0 else context.baseline[start:end]
+        expected = np.max(context.polarity * (context.current[start:end] - baseline))
+        assert row.amplitude_pA == pytest.approx(expected)
+
+    window._undo_events()
+    qtbot.wait(10)
+    pd.testing.assert_frame_equal(window._analysis_panel.current_detection().payload.df, before)
+    window._redo_events()
+    qtbot.wait(10)
+    pd.testing.assert_frame_equal(window._analysis_panel.current_detection().payload.df, after)
+
+    # Applying the same choice again must leave the result and status settled.
+    window._event_inspector._amplitude.apply_all()
+    pd.testing.assert_frame_equal(window._analysis_panel.current_detection().payload.df, after)
+    assert "Calculating" not in controls.note.text()
+    window._analysis_controller.abort()

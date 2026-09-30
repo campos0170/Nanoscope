@@ -9,6 +9,7 @@ import numpy as np
 from ..core.document import Document, TraceDocument
 from ..core.types import (
     LOAD_CHUNK_SAMPLES,
+    STUDY_BRIDGE_ATTR_KEY,
     ChannelInfo,
     ChannelKind,
     Provenance,
@@ -308,7 +309,8 @@ class Hdf5Reader(BaseReader):
                     rate_provenance: Provenance, t0_s: float,
                     loaded_range: SampleRange | None,
                     channels: tuple[ChannelInfo, ...],
-                    report: ReaderReport) -> RecordingMeta:
+                    report: ReaderReport,
+                    physical_reference_unavailable: bool = False) -> RecordingMeta:
         return RecordingMeta(
             path=self.path,
             format_name=self.format_name,
@@ -322,6 +324,7 @@ class Hdf5Reader(BaseReader):
             voltage_provenance=Provenance.UNKNOWN,
             notes=(_UNITS_NOTE,) + report.notes,
             issues=report.issues,
+            physical_reference_unavailable=physical_reference_unavailable,
         )
 
     def _timebase(self, h: h5py.File, start: int, n_signal: int,
@@ -485,6 +488,7 @@ class Hdf5Reader(BaseReader):
                     n_samples=n, sample_rate_hz=sample_rate_hz,
                     rate_provenance=rate_prov, t0_s=t0_s, loaded_range=None,
                     channels=channels, report=report,
+                    physical_reference_unavailable=bool(h.attrs.get(STUDY_BRIDGE_ATTR_KEY)),
                 )
                 return RecordingProbe(meta=meta)
         except ReaderError:
@@ -623,6 +627,7 @@ class Hdf5Reader(BaseReader):
                     rate_provenance=rate_prov, t0_s=t0_s,
                     loaded_range=window_loaded(sample_range, start, n),
                     channels=tuple(channels), report=report,
+                    physical_reference_unavailable=bool(h.attrs.get(STUDY_BRIDGE_ATTR_KEY)),
                 )
                 return TraceDocument(meta=meta, channels=tuple(arrays))
         except ReaderError:

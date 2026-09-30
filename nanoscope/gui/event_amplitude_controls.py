@@ -25,6 +25,7 @@ from ..analysis.modules import (
 )
 from ..analysis.reconcile import CONSENSUS_MODULE_ID
 from ..core.sources import signal_domain_of
+from .busy_cursor import begin_wait_cursor, end_wait_cursor
 
 if TYPE_CHECKING:
     from .event_inspector import EventInspectorWindow
@@ -466,7 +467,10 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         if answer != QtWidgets.QMessageBox.Yes:
             return
         # Compute and validate everything before touching the shared frame.
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        # A text status also works on macOS, where the native wait cursor is unsafe.
+        self.note.setText(f"Calculating {METHOD_LABELS[method]} for {len(df)} events…")
+        self.note.repaint()
+        cursor_active = begin_wait_cursor()
         try:
             measurements = [self._measurement(row, method) for _, row in df.iterrows()]
             staged = df.copy(deep=True)
@@ -481,7 +485,9 @@ class EventAmplitudeControls(QtWidgets.QWidget):
             self.note.setText(f"No amplitudes changed: {exc}")
             return
         finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+            end_wait_cursor(cursor_active)
         if changed:
             pos, _ = self._row()
             self._announce(pos, -1)
+        else:
+            self._update_note(self._row()[1])

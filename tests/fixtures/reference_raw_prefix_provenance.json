@@ -1,0 +1,10 @@
+{
+  "description": "30,001 float32 current values sampled every10 samples from first6.00002 seconds of whole30h acid ABF. Derived from lossless raw codes in provisional freshpreparation, not from its defectivebaseline.",
+  "source_file": "30 h_100 pM_ 16 nm_50 percent_35k_PEG_0000_whole time point.abf",
+  "source_fs_hz": 50000,
+  "source_channel": 0,
+  "units": "pA",
+  "adc_step_pA": 0.30517578125,
+  "fixture_sha256": "1d8bd1993077caa8d0071cedb205ac72c7d22cf14b71879311ab92cc86848338",
+  "purpose": "Independent reflected-window median regression test; no notebook execution."
+}
