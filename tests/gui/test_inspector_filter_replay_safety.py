@@ -21,10 +21,11 @@ def replay(qapp, qtbot, tmp_path):
 @pytest.mark.parametrize("cutoff", [0., -1., np.nan, np.inf, 50_000., "invalid"])
 def test_saved_invalid_lowpass_cannot_be_replayed_as_unfiltered(replay, cutoff):
     inspector, _, _, _, raw = replay
+    saved_cache = inspector._cond_cache
     inspector._provenance = dict(inspector._provenance, filter_cutoff_hz=cutoff)
     with pytest.raises(ValueError, match="saved low-pass"):
         inspector._conditioned(raw, builders.FS)
-    assert inspector._cond_cache is None
+    assert inspector._cond_cache is saved_cache
 
 
 def test_replay_failure_does_not_cache_raw_and_valid_cache_survives(replay, monkeypatch):
@@ -64,7 +65,11 @@ def test_failed_drag_preserves_rows_optional_amplitude_history_signal_handles_an
     inspector.eventEdited.connect(history.append)
     warnings = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args: warnings.append(args))
+    saved_cache = inspector._cond_cache
     if kind == "exception":
+        # Request a different conditioning result so the injected failure is
+        # exercised, rather than legitimately reusing the already valid cache.
+        inspector._provenance = dict(inspector._provenance, filter_cutoff_hz=2000.)
         def fail(*args, **kwargs):
             raise ValueError("saved filter could not run")
         monkeypatch.setattr(inspector_module, "detection_signal", fail)
@@ -90,7 +95,7 @@ def test_failed_drag_preserves_rows_optional_amplitude_history_signal_handles_an
     np.testing.assert_array_equal(inspector._plot.getViewBox().viewRange(), old_range)
     for new, old in zip(inspector._curve.getData(), old_curve):
         np.testing.assert_array_equal(new, old)
-    assert inspector._cond_cache is None
+    assert inspector._cond_cache is saved_cache
     # The inspection view remains usable even though measurement cannot replay.
     inspector.next_event()
     assert inspector._current_id == int(events.df.iloc[1].event_id)

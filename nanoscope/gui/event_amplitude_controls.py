@@ -6,6 +6,7 @@ event-table columns; the Inspector announces those through amplitudeEdited.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,7 +16,7 @@ from PySide6 import QtCore, QtWidgets
 
 from ..analysis.baseline import BaselineConfig, characterisation_baseline, require_finite
 from ..analysis.event_amplitude import (
-    amplitude_is_current, clear_event_amplitude, measure_event_amplitude,
+    METHODS, amplitude_is_current, clear_event_amplitude, measure_event_amplitude,
     write_event_amplitude,
 )
 from ..analysis.modules import (
@@ -65,15 +66,16 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("Amplitude:"))
+        row = QtWidgets.QVBoxLayout()
         self.method = QtWidgets.QComboBox()
         for key, label in METHOD_LABELS.items():
             self.method.addItem(label, key)
         self.method.setToolTip(
             "Explicit optional measurement. Apply never changes median depth_pA, "
             "dI/I0, SNR, event boundaries or fitted states.")
-        row.addWidget(self.method, 1)
+        self.method.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.method.setMinimumContentsLength(16)
+        row.addWidget(self.method)
         self.apply_button = QtWidgets.QPushButton("Apply")
         self.apply_all_button = QtWidgets.QPushButton("Apply to all…")
         self.reset_button = QtWidgets.QPushButton("Reset amplitude")
@@ -81,14 +83,18 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         self.edit_level.setToolTip(
             "Unlock the red line. A drag release saves a manual amplitude for this "
             "event only, separately from median depth. Undo with Edit → Undo.")
-        for widget in (self.apply_button, self.apply_all_button, self.reset_button, self.edit_level):
-            row.addWidget(widget)
+        actions = QtWidgets.QHBoxLayout()
+        for widget in (self.apply_button, self.reset_button):
+            actions.addWidget(widget)
+        row.addLayout(actions)
+        row.addWidget(self.edit_level)
+        row.addWidget(self.apply_all_button)
         layout.addLayout(row)
 
         self.interval_row = QtWidgets.QWidget()
-        interval = QtWidgets.QHBoxLayout(self.interval_row)
+        interval = QtWidgets.QVBoxLayout(self.interval_row)
         interval.setContentsMargins(0, 0, 0, 0)
-        interval.addWidget(QtWidgets.QLabel("Interval samples:"))
+        interval.addWidget(QtWidgets.QLabel("Interval samples (end exclusive):"))
         self.start = QtWidgets.QSpinBox()
         self.end = QtWidgets.QSpinBox()
         for spin in (self.start, self.end):
@@ -96,17 +102,20 @@ class EventAmplitudeControls(QtWidgets.QWidget):
             spin.setKeyboardTracking(False)
         self.start.setToolTip("Absolute first sample, inclusive. Drag the purple interval handles.")
         self.end.setToolTip("Absolute stop sample, exclusive. Does not resize the detected event.")
-        interval.addWidget(self.start)
-        interval.addWidget(QtWidgets.QLabel("to (exclusive)"))
-        interval.addWidget(self.end)
-        interval.addSpacing(10)
+        bounds = QtWidgets.QHBoxLayout()
+        bounds.addWidget(self.start)
+        bounds.addWidget(QtWidgets.QLabel("to"))
+        bounds.addWidget(self.end)
+        interval.addLayout(bounds)
         interval.addWidget(QtWidgets.QLabel("Use fitted state:"))
         self.state = QtWidgets.QComboBox()
-        interval.addWidget(self.state, 1)
+        self.state.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.state.setMinimumContentsLength(12)
+        interval.addWidget(self.state)
         layout.addWidget(self.interval_row)
 
         self.manual_row = QtWidgets.QWidget()
-        manual = QtWidgets.QHBoxLayout(self.manual_row)
+        manual = QtWidgets.QVBoxLayout(self.manual_row)
         manual.setContentsMargins(0, 0, 0, 0)
         manual.addWidget(QtWidgets.QLabel("Equivalent level:"))
         self.level = QtWidgets.QDoubleSpinBox()
@@ -114,12 +123,18 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         self.level.setDecimals(8)
         self.level.setKeyboardTracking(False)
         manual.addWidget(self.level)
-        manual.addWidget(QtWidgets.QLabel("Type a value and Apply, or drag the unlocked red line."), 1)
+        manual_note = QtWidgets.QLabel("Type a value and Apply, or drag the unlocked red line.")
+        manual_note.setWordWrap(True)
+        manual.addWidget(manual_note)
         layout.addWidget(self.manual_row)
         self.note = QtWidgets.QLabel()
         self.note.setWordWrap(True)
+        self.note.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.note.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         layout.addWidget(self.note)
+        for control in (self.method, self.start, self.end, self.state, self.level,
+                        self.apply_button, self.apply_all_button, self.reset_button):
+            control.setMinimumHeight(28)
 
         self.method.currentIndexChanged.connect(self._method_changed)
         self.apply_button.clicked.connect(lambda: self.apply_current())
@@ -270,13 +285,21 @@ class EventAmplitudeControls(QtWidgets.QWidget):
                 if changed_event:
                     self.edit_level.setChecked(False)
                 current = amplitude_is_current(row)
-                method = str(row.get("amplitude_method", "median")) if current else "median"
+                # A changed mask can make a saved measurement stale without
+                # changing the user's estimator choice.
+                method = str(row.get("amplitude_method", "median"))
                 self.method.setCurrentIndex(max(0, self.method.findData(method)))
                 start, end = int(row["start_idx"]), int(row["end_idx"])
-                self.start.setRange(start, end - 1)
-                self.end.setRange(start + 1, end)
-                self.start.setValue(int(row["amplitude_start_idx"]) if current else start)
-                self.end.setValue(int(row["amplitude_end_idx"]) if current else end)
+                selection = ((int(row["amplitude_start_idx"]), int(row["amplitude_end_idx"]))
+                             if current else self._saved_interval(row)
+                             if method in ("selected_median", "selected_mean") else None)
+                a, b = selection if selection is not None else (start, end)
+                # Keep an out-of-mask saved selection visible for correction.
+                # Applying it still fails the estimator's containment check.
+                self.start.setRange(min(start, a), max(end - 1, a))
+                self.end.setRange(min(start + 1, b), max(end, b))
+                self.start.setValue(a)
+                self.end.setValue(b)
             self.level.setSuffix(" " + self.owner._units)
             self.level.setValue(float(self.owner._level_line.value()))
             self._populate_states(row)
@@ -285,6 +308,20 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         finally:
             self._updating = False
         self._method_changed()
+
+    @staticmethod
+    def _saved_interval(row):
+        try:
+            metadata = json.loads(row.get("amplitude_provenance_json"))
+            interval = metadata.get("interval") if isinstance(metadata, dict) else None
+            if (isinstance(interval, list) and len(interval) == 2
+                    and all(isinstance(value, int) and not isinstance(value, bool)
+                            for value in interval)
+                    and 0 <= interval[0] < interval[1] <= np.iinfo(np.int32).max):
+                return tuple(interval)
+        except (TypeError, ValueError):
+            pass
+        return None
 
     def _populate_states(self, row):
         old = self.state.currentData()
@@ -333,7 +370,15 @@ class EventAmplitudeControls(QtWidgets.QWidget):
                     f"({METHOD_LABELS.get(str(row['amplitude_method']), row['amplitude_method'])}). "
                     "Original median depth, dI/I0 and SNR are unchanged.")
         elif pd.notna(row.get("amplitude_method")):
-            text = "Saved amplitude is stale; choose a method and Apply again, or Reset amplitude."
+            selection = self._saved_interval(row)
+            if (str(row.get("amplitude_method")).startswith("selected_")
+                    and selection is not None
+                    and not int(row["start_idx"]) <= selection[0] < selection[1] <= int(row["end_idx"])):
+                text = (f"Saved amplitude is stale: interval [{selection[0]}, {selection[1]}) "
+                        "is outside the event mask. Adjust the amplitude interval and Apply "
+                        "again, or Reset amplitude.")
+            else:
+                text = "Saved amplitude is stale; review this choice and Apply again, or Reset amplitude."
         else:
             text = "No override. Red line = stored median-depth equivalent level; Apply saves a separate amplitude."
         if not self._error and not self.owner._stale_columns:
@@ -438,6 +483,40 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         if changed:
             self._announce(pos, int(row["event_id"]))
         return changed
+
+    def remeasure_after_bounds_edit(self, pos, previous_row) -> bool:
+        """Refresh a saved estimator, exact interval or level within the boundary undo step."""
+        method = previous_row.get("amplitude_method")
+        if (not isinstance(method, str) or method not in METHODS
+                or not amplitude_is_current(previous_row)
+                or self.owner._stale_columns
+                or self.owner._module_id == CONSENSUS_MODULE_ID):
+            return False
+        try:
+            row = self.owner._df.iloc[pos]
+            context = self.context(row)
+            identity = dict(context.provenance)
+            prior_identity = json.loads(previous_row["amplitude_provenance_json"])["signal_identity"]
+            # A fit may be retired by a mask edit. Validate the old signal
+            # context, but carry only the exact sample interval into the new
+            # measurement, never a claim that the fitted state survived.
+            if method.startswith("selected_") and "selected_state" in prior_identity:
+                identity["selected_state"] = prior_identity["selected_state"]
+            if not amplitude_is_current(previous_row, provenance=identity):
+                return False
+            selection = ((int(previous_row["amplitude_start_idx"]),
+                          int(previous_row["amplitude_end_idx"]))
+                         if method.startswith("selected_") else None)
+            measured = measure_event_amplitude(
+                context.current, context.baseline, row, polarity=context.polarity,
+                method=method, units=context.units, selection=selection,
+                manual_level=float(previous_row["amplitude_level_pA"]) if method == "manual" else None,
+                provenance=context.provenance)
+            return write_event_amplitude(self.owner._df, pos, measured)
+        except (ValueError, TypeError, OverflowError):
+            # The caller has already invalidated the old value. Keep it stale
+            # when the new measurement cannot be reconstructed safely.
+            return False
 
     def _announce(self, pos, event_id):
         self.owner._render_event(pos, preserve_view=True)

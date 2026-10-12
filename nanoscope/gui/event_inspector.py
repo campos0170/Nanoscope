@@ -664,7 +664,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         super().__init__(parent)
         self._session = session
         self.setWindowTitle("NanoScope — Event inspector")
-        self.resize(780, 640)
+        self.resize(1160, 760)
 
         # Installed detection. _df is the SAME object the EventTable edits (shared truth).
         self._doc_id: str | None = None
@@ -753,18 +753,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        # -- navigation + curation bars --------------------------------------------------------
-        # TWO rows, not one (owner note, reported twice: "the curate window does not have a
-        # reject button, only a reject all" / "I still only see Accept all / Reject all and not
-        # the individual accept and reject"). The buttons were there and correctly wired the
-        # whole time; the single non-wrapping QHBoxLayout that held them measured 1475 px of
-        # minimum width on a 1512 px display, and Accept/Reject/Accepted were the LAST three
-        # widgets in it — so any Dock, any display scaling, any window not flush with the left
-        # edge pushed exactly those three off the right edge while leaving "Accept all" and
-        # "Reject all" (earlier in the row) visible. A QHBoxLayout does not wrap and offers no
-        # overflow affordance, so nothing said they existed. Splitting the row is the fix that
-        # cannot regress: PER-EVENT gestures on row 1 beside the per-event navigation, WHOLE-
-        # DETECTION gestures and the doors to the other surfaces on row 2.
+        # Keep repeated review actions together below the waveform. Measurement controls
+        # and details live beside it, so changing a method cannot squeeze the plot vertically.
         bar = QtWidgets.QHBoxLayout()
         bar2 = QtWidgets.QHBoxLayout()
         self._prev_btn = QtWidgets.QPushButton("◀ Prev")
@@ -895,37 +885,33 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             "you have already judged. Reversed by Edit ▸ Undo (⌘Z).")
         self._reject_all_btn.clicked.connect(self.reject_all)
 
-        # Row 1 — THIS EVENT: where you are, how much of the recording you see around it, and
-        # the two gestures that judge it. Accept/Reject sit beside the navigation they are used
-        # with, never behind the batch buttons.
+        # This row stays fixed while the side panel scrolls or the event details change.
+        bar.addStretch(1)
         bar.addWidget(self._prev_btn)
         bar.addWidget(self._index_spin)
         bar.addWidget(self._count_label)
         bar.addWidget(self._next_btn)
-        bar.addSpacing(8)
-        bar.addWidget(self._pan_left_btn)
-        bar.addWidget(self._pan_right_btn)
-        bar.addWidget(self._context_combo)
         bar.addSpacing(16)
         bar.addWidget(self._accept_btn)
         bar.addWidget(self._reject_btn)
         bar.addWidget(self._accept_check)
-        bar.addSpacing(8)
-        bar.addWidget(self._revert_btn)
         bar.addStretch(1)
-        root.addLayout(bar)
+        for button in (self._prev_btn, self._next_btn, self._accept_btn, self._reject_btn):
+            button.setMinimumHeight(34)
+        self._accept_btn.setText("Accept  ·  A")
+        self._reject_btn.setText("Reject  ·  R")
 
-        # Row 2 — THE WHOLE DETECTION, and the doors out of this window.
+        # Trace context and view navigation are independent of the review actions.
         bar2.addWidget(QtWidgets.QLabel("Filter:"))
         bar2.addWidget(self._filter_combo)
         bar2.addSpacing(12)
+        bar2.addWidget(QtWidgets.QLabel("Context:"))
+        bar2.addWidget(self._context_combo)
+        bar2.addWidget(self._pan_left_btn)
+        bar2.addWidget(self._pan_right_btn)
+        bar2.addStretch(1)
         bar2.addWidget(self._gallery_btn)
         bar2.addWidget(self._trace_btn)
-        bar2.addStretch(1)
-        bar2.addWidget(self._accept_all_btn)
-        bar2.addWidget(self._reject_all_btn)
-        bar2.addSpacing(12)
-        bar2.addWidget(self._merge_next_btn)
         root.addLayout(bar2)
 
         # -- what the last curation gesture REFUSED ---------------------------------------
@@ -963,7 +949,33 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         root.addWidget(self._level_note)
 
         self._amplitude = EventAmplitudeControls(self)
-        root.addWidget(self._amplitude)
+        self._review_splitter = QtWidgets.QSplitter(Qt.Horizontal)
+        self._review_splitter.setChildrenCollapsible(False)
+        root.addWidget(self._review_splitter, 1)
+        self._review_sidebar = QtWidgets.QScrollArea()
+        self._review_sidebar.setWidgetResizable(True)
+        self._review_sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._review_sidebar.setMinimumWidth(340)
+        self._review_sidebar.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sidebar = QtWidgets.QWidget()
+        side = QtWidgets.QVBoxLayout(sidebar)
+        side.setContentsMargins(6, 0, 6, 0)
+        side.setSpacing(12)
+        amplitude_box = QtWidgets.QGroupBox("Amplitude")
+        amplitude_layout = QtWidgets.QVBoxLayout(amplitude_box)
+        amplitude_layout.addWidget(self._amplitude)
+        side.addWidget(amplitude_box)
+
+        mask_box = QtWidgets.QGroupBox("Event mask")
+        mask_layout = QtWidgets.QVBoxLayout(mask_box)
+        mask_note = QtWidgets.QLabel("Drag the shaded region’s edges to adjust this event.")
+        mask_note.setWordWrap(True)
+        mask_layout.addWidget(mask_note)
+        mask_buttons = QtWidgets.QHBoxLayout()
+        mask_buttons.addWidget(self._revert_btn)
+        mask_buttons.addWidget(self._merge_next_btn)
+        mask_layout.addLayout(mask_buttons)
+        side.addWidget(mask_box)
 
         # -- the waveform plot ----------------------------------------------------------------
         self._plot_widget = pg.PlotWidget()
@@ -975,7 +987,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # which is a worse inconsistency than having neither work. One handler serves both:
         # whatever moved the x range, the loaded window is widened to cover what is now framed.
         self._plot.getViewBox().sigXRangeChanged.connect(self._on_x_range_changed)
-        root.addWidget(self._plot_widget, 1)
+        self._review_splitter.addWidget(self._plot_widget)
 
         # Persistent plot items — created ONCE (four-step order via make_curve) and updated per
         # event; hidden in the empty state. The region is non-movable and ignoreBounds (an
@@ -1008,21 +1020,38 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         readout_box = QtWidgets.QGroupBox("Event")
         rlay = QtWidgets.QVBoxLayout(readout_box)
         rlay.setContentsMargins(8, 6, 8, 8)
-        # THE STALENESS SENTENCE, in a note that owns its lines -- see _FixedLinesNote.
-        # First in the box, under its title, so it stands in one place whatever the mono
-        # readout below it grows into (a labels line, a level table).
-        self._stale_label = _FixedLinesNote(_STALE_NOTE_LINES)
+        # The side panel scrolls independently, so warnings can wrap in full without
+        # moving the waveform or hiding the end of a measurement warning in a tooltip.
+        self._stale_label = QtWidgets.QLabel()
+        self._stale_label.setWordWrap(True)
+        self._stale_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._stale_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self._stale_label.hide()
         self._stale_label.setStyleSheet(f"color: {_MSG_HEX};")
         rlay.addWidget(self._stale_label)
         self._readout = QtWidgets.QLabel("")
         self._readout.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._readout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self._readout.setWordWrap(True)
+        self._readout.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         mono = QtGui.QFont(self._readout.font())
         mono.setStyleHint(QtGui.QFont.Monospace)
         mono.setFamily("monospace")
         self._readout.setFont(mono)
         rlay.addWidget(self._readout)
-        root.addWidget(readout_box)
+        side.addWidget(readout_box)
+        batch_box = QtWidgets.QGroupBox("All events")
+        batch_layout = QtWidgets.QHBoxLayout(batch_box)
+        batch_layout.addWidget(self._accept_all_btn)
+        batch_layout.addWidget(self._reject_all_btn)
+        side.addWidget(batch_box)
+        side.addStretch(1)
+        self._review_sidebar.setWidget(sidebar)
+        self._review_splitter.addWidget(self._review_sidebar)
+        self._review_splitter.setStretchFactor(0, 3)
+        self._review_splitter.setStretchFactor(1, 1)
+        self._review_splitter.setSizes([800, 340])
+        root.addLayout(bar)
 
         self.setCentralWidget(central)
 
@@ -1141,6 +1170,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._stale_columns = cols
         self._stale_note = str(note)
         self._stale_label.setText(f"⚠ {self._stale_sentence()}" if cols else "")
+        self._stale_label.setVisible(bool(cols))
         row = self._row_for_id(self._current_id)
         if row is not None and self._df is not None:
             self._refresh_readout(row)
@@ -2086,6 +2116,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             return
         if new_start == cur_start and new_end == cur_end:
             return                          # rounded back onto the same samples — nothing to do
+        previous_row = self._df.iloc[row].copy()
         fs = self._sample_rate()
         if fs is not None:
             # Re-measure on the trace the DETECTOR measured on, not the raw channel.
@@ -2121,6 +2152,9 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             self._df.iat[row, scol] = int(new_start)
             self._df.iat[row, ecol] = int(new_end)
         invalidate_event_amplitudes(self._df, [row], reason="event boundaries changed")
+        # Carry the user's estimator, exact selection or manual level onto the
+        # new span with fresh numbers/provenance, within this one undo step.
+        self._amplitude.remeasure_after_bounds_edit(row, previous_row)
         self._render_event(row)             # redraw region / baseline / level at the new bounds
         self._refresh_readout(row)
         self._sync_revert_control()         # the row may now BE the detector's own span
@@ -2653,8 +2687,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             self._draw_window(min(win_lo, lo_needed), max(win_hi, hi_needed))
 
     def _event_title(self, r: pd.Series) -> str:
-        # The waveform title is numerical artwork. Warnings remain in the Event
-        # readout and its fixed-height staleness note, not in captured plots.
+        # Two compact lines keep the numerical title readable beside the side panel.
+        # Warnings remain in the Event readout, not in captured plots.
         units = f" {self._units}" if self._units else ""
         dwell_us = float(r["dwell_s"]) * 1e6 if np.isfinite(r["dwell_s"]) else float("nan")
         parts = [
@@ -2665,8 +2699,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         ]
         if amplitude_is_current(r):
             parts.append(f"amplitude {_fmt_num(r['amplitude_pA'], ' ' + str(r['amplitude_units']), 4)} "
-                         f"({r['amplitude_method']})")
-        return "   ·   ".join(parts)
+                         f"({str(r['amplitude_method']).replace('_', ' ')})")
+        return " · ".join(parts[:3]) + "<br>" + " · ".join(parts[3:])
 
     def _refresh_readout(self, row: int) -> None:
         if self._df is None:

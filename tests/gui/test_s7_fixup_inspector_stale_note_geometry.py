@@ -1,16 +1,8 @@
-"""Sweep-7 fix-up B3 / CW-2 -- the staleness sentence must not move the Event Inspector.
+"""Staleness disclosures must not move the waveform or its review controls.
 
-The S7-POP1 fix spliced the banner's sentence into the mono readout as up to six wrapped
-lines. The readout's group box shares one QVBoxLayout column with the waveform plot (which
-carries the stretch), so every line the readout gained was height the plot lost: one
-Preprocess knob on the MAIN window -- or the "Re-measure depths" that clears the badge --
-resized the waveform, its axes, the region and the level lines under the pointer.
-
-Measured before this fix, on the owner's -1000 mV recording: at 1000x800 the plot went
-531 -> 447 -> 531 px and the readout 140 -> 224 px on one knob and back; at the window's
-default size the top-level window itself grew 640 -> 653 px. The subpopulation report's
-S7-POP4 note was built as an always-present fixed-height label precisely so that nothing
-moves; this window now follows it (``_FixedLinesNote``, ``_STALE_NOTE_LINES``).
+The scrollable details sidebar now lets the complete warning wrap without stealing
+height from the plot. Empty warnings reserve no space. The legacy fixed-line note
+helper retains its separate elision contract, but no longer constrains this sidebar.
 """
 
 from __future__ import annotations
@@ -99,16 +91,16 @@ def _shown_inspector(qtbot, tmp_path, size: tuple[int, int] | None) -> EventInsp
 
 
 def _geometry(insp: EventInspectorWindow) -> dict:
-    """Everything a user looking at the waveform would see move: the plot widget's place
-    and size in the window, the viewbox's rectangle, the readout box's place and size,
-    the window's own size and the width it insists on."""
+    """The stable work area; sidebar contents may grow and scroll independently."""
     plot = insp._plot_widget
-    box = insp._readout.parentWidget()
     vb = insp._plot.getViewBox().geometry()
     return {
         "plot": (plot.mapTo(insp, QtCore.QPoint(0, 0)).toTuple(), plot.size().toTuple()),
         "viewbox": (round(vb.x()), round(vb.y()), round(vb.width()), round(vb.height())),
-        "readout_box": (box.mapTo(insp, QtCore.QPoint(0, 0)).toTuple(), box.size().toTuple()),
+        "review_controls": tuple(
+            (widget.mapTo(insp, QtCore.QPoint()).toTuple(), widget.size().toTuple())
+            for widget in (insp._prev_btn, insp._index_spin, insp._next_btn,
+                           insp._accept_btn, insp._reject_btn, insp._accept_check)),
         "window": insp.size().toTuple(),
         "min_width": insp.minimumSizeHint().width(),
     }
@@ -125,7 +117,7 @@ def _flip(insp, qtbot, columns, note) -> None:
 
 @pytest.mark.parametrize("note", [NOTE_BASELINE, NOTE_PREDATES, NOTE_CALIBRATION],
                          ids=["open-pore changed", "predates the stamp", "calibration"])
-def test_the_staleness_flip_leaves_the_plot_the_readout_box_and_the_window_where_they_were(
+def test_the_staleness_flip_leaves_the_plot_review_controls_and_window_where_they_were(
         qapp, qtbot, tmp_path, note):
     insp = _shown_inspector(qtbot, tmp_path, (1000, 800))
     clean = _geometry(insp)
@@ -141,6 +133,8 @@ def test_the_staleness_flip_leaves_the_plot_the_readout_box_and_the_window_where
     assert insp.stale_note() == note
     assert QtWidgets.QLabel.text(insp._stale_label) == f"⚠ {note}"
     assert insp._stale_label.toolTip() == ""
+    assert insp._stale_label.height() >= insp._stale_label.heightForWidth(
+        insp._stale_label.width())
     assert insp._readout.text().count("\n") + 1 == clean_lines, insp._readout.text()
     assert "⚠ " not in insp._readout.text(), "the sentence is a note, not readout lines"
     depth_line = next(l for l in insp._readout.text().splitlines() if l.startswith("median depth:"))
@@ -166,20 +160,27 @@ def test_at_the_default_size_the_window_itself_does_not_grow_when_the_badge_arri
     assert _geometry(insp) == clean
 
 
-def test_the_note_reserves_its_lines_while_clean_and_the_flip_does_not_change_its_height(
+def test_the_note_uses_no_empty_gap_and_wraps_completely_in_the_scrollable_sidebar(
         qapp, qtbot, tmp_path):
-    from nanoscope.gui.event_inspector import _STALE_NOTE_LINES
     insp = _shown_inspector(qtbot, tmp_path, (1000, 800))
     note = insp._stale_label
-    fm = note.fontMetrics()
     assert QtWidgets.QLabel.text(note) == ""
-    reserved = note.height()
-    assert reserved >= fm.lineSpacing() * _STALE_NOTE_LINES, (reserved, fm.lineSpacing())
-    assert note.isVisible() and note.minimumHeight() == note.maximumHeight() == reserved
+    assert note.isHidden()
+    assert note.parentWidget().layout().itemAt(0).isEmpty()
+    clean = _geometry(insp)
     _flip(insp, qtbot, REMEASURED_COLUMNS, NOTE_PREDATES)
-    assert note.height() == reserved
+    assert not note.isHidden() and note.wordWrap()
+    assert note.text() == f"⚠ {NOTE_PREDATES}"
+    assert note.height() >= note.heightForWidth(note.width())
+    assert note.maximumHeight() > note.minimumHeight()
+    insp._review_sidebar.ensureWidgetVisible(note)
+    qtbot.wait(30)
+    assert note.visibleRegion().contains(note.rect().center())
+    assert _geometry(insp) == clean
     _flip(insp, qtbot, (), "")
-    assert note.height() == reserved
+    assert note.isHidden()
+    assert note.parentWidget().layout().itemAt(0).isEmpty()
+    assert _geometry(insp) == clean
 
 
 # ================================================================================================

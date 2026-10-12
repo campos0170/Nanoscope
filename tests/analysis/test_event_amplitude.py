@@ -133,6 +133,61 @@ def test_nonfinite_outside_selected_measurement_does_not_enter_estimator():
                         selection=(2, 11))["amplitude_pA"] == 40
 
 
+@pytest.mark.parametrize("method", METHODS)
+@pytest.mark.parametrize("polarity", [-1, 1])
+@pytest.mark.parametrize("scalar_baseline", [False, True])
+def test_float32_window_matches_full_float64_promotion(method, polarity, scalar_baseline):
+    current, baseline, df = _event([150.125, 149.25, 151.5, 147.75] * 20,
+                                   polarity=polarity, drift=True)
+    current = current.astype(np.float32)
+    baseline = np.float32(1000.0) if scalar_baseline else baseline.astype(np.float32)
+    kwargs = {}
+    if method.startswith("selected_"):
+        kwargs["selection"] = (7, 35)
+    elif method == "manual":
+        kwargs["manual_level"] = 1000 + polarity * 75
+    expected = _measurement(current.astype(np.float64), np.asarray(baseline, dtype=np.float64),
+                            df.iloc[0], method=method, polarity=polarity, **kwargs)
+    assert _measurement(current, baseline, df.iloc[0], method=method,
+                        polarity=polarity, **kwargs) == expected
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_numeric_promotion_is_bounded_by_measurement_interval(method, monkeypatch):
+    current = np.full(100_000, 900.0, dtype=np.float32)
+    baseline = np.full(100_000, 1000.0, dtype=np.float32)
+    row = {"start_idx": 120, "end_idx": 180}
+    kwargs = {"selection": (130, 160)} if method.startswith("selected_") else {}
+    if method == "manual":
+        kwargs["manual_level"] = 900.0
+    max_promoted = 30 if method.startswith("selected_") else 60
+    original_asarray = np.asarray
+    promoted_sizes = []
+
+    def event_sized_asarray(value, dtype=None, *args, **options):
+        if (dtype is not None and np.dtype(dtype) == np.dtype(np.float64)
+                and isinstance(value, np.ndarray)
+                and (np.shares_memory(value, current) or np.shares_memory(value, baseline))):
+            promoted_sizes.append(value.size)
+            assert value.size <= max_promoted, "promoted samples outside the measured interval"
+        return original_asarray(value, dtype=dtype, *args, **options)
+
+    monkeypatch.setattr(np, "asarray", event_sized_asarray)
+    result = _measurement(current, baseline, row, method=method, **kwargs)
+    assert result["amplitude_pA"] == pytest.approx(100.0)
+    assert promoted_sizes == [max_promoted, max_promoted]
+
+
+@pytest.mark.parametrize("which", ["current", "baseline"])
+@pytest.mark.parametrize("dtype", [object, str])
+def test_nonnumeric_outside_interval_still_refuses_the_input(which, dtype):
+    current = np.array(["900", "900", "900", "900"], dtype=dtype)
+    baseline = np.array(["1000", "1000", "1000", "1000"], dtype=dtype)
+    (current if which == "current" else baseline)[0] = "bad"
+    with pytest.raises(ValueError, match="must be numeric"):
+        _measurement(current, baseline, {"start_idx": 1, "end_idx": 3})
+
+
 @pytest.mark.parametrize("kwargs", [
     {"method": "not_a_method"}, {"polarity": 0}, {"polarity": True},
     {"polarity": 2}, {"units": ""}, {"units": None},

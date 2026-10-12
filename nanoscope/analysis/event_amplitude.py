@@ -161,8 +161,15 @@ def measure_event_amplitude(
     except KeyError as exc:
         raise ValueError("The event row must supply sample bounds") from exc
     try:
-        signal = np.asarray(current, dtype=np.float64)
-        base = np.asarray(baseline, dtype=np.float64)
+        signal = np.asarray(current)
+        base = np.asarray(baseline)
+        # Numeric recording arrays can be inspected without promoting the
+        # entire recording for a measurement of a short event. Retain the
+        # previous conversion/validation for object and string inputs.
+        if signal.dtype.kind not in "biufc":
+            signal = np.asarray(current, dtype=np.float64)
+        if base.dtype.kind not in "biufc":
+            base = np.asarray(baseline, dtype=np.float64)
     except (TypeError, ValueError) as exc:
         raise ValueError("Current and baseline must be numeric") from exc
     if signal.ndim != 1 or not (0 <= event_start < event_end <= signal.size):
@@ -181,8 +188,8 @@ def measure_event_amplitude(
         raise ValueError("A selection is only valid with a selected estimator")
     if method != "manual" and manual_level is not None:
         raise ValueError("manual_level is only valid for manual amplitude")
-    window = signal[start:end]
-    baseline_window = base if base.ndim == 0 else base[start:end]
+    window = np.asarray(signal[start:end], dtype=np.float64)
+    baseline_window = np.asarray(base if base.ndim == 0 else base[start:end], dtype=np.float64)
     if not np.isfinite(window).all() or not np.isfinite(baseline_window).all():
         raise ValueError("All measured signal and baseline samples must be finite")
     with np.errstate(over="ignore", invalid="ignore"):

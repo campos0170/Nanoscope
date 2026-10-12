@@ -9,7 +9,7 @@ from PySide6 import QtWidgets
 
 from nanoscope.analysis.detect import detect_events
 from nanoscope.analysis.event_amplitude import AMPLITUDE_COLUMNS, amplitude_is_current
-from nanoscope.analysis.events import EventSet, SCHEMA
+from nanoscope.analysis.events import EventSet, SCHEMA, stamp_original_bounds
 from nanoscope.analysis.modules import DetectSchmitt, detection_signal
 from nanoscope.analysis.reconcile import CONSENSUS_MODULE_ID
 from nanoscope.core.analysis import AnalysisResult
@@ -41,7 +41,7 @@ def _session_with_doc(tmp_path):
 def _events_for(session, doc_id, channel):
     ch = session.calibrated(doc_id, channel)
     df, prov = detect_events(ch.data, ch.sample_rate_hz, min_dwell_s=5e-4)
-    return EventSet(df, prov)
+    return EventSet(stamp_original_bounds(df), prov)
 
 
 def _inspector(qtbot, session):
@@ -281,15 +281,193 @@ def test_reset_clears_only_optional_values_and_navigation_keeps_choices(curated)
     pd.testing.assert_frame_equal(events.df[list(before)], before)
 
 
-def test_mask_resize_invalidates_optional_amplitude(curated):
+@pytest.mark.parametrize("method", ["median", "mean", "peak", "mode"])
+def test_mask_resize_remeasures_saved_whole_event_choice(curated, method):
     inspector, events = curated
-    assert inspector._amplitude.apply_current(method="peak")
-    row = events.df.iloc[0]
+    inspector.next_event()
+    assert inspector._amplitude.apply_current(method="mean")
+    inspector.prev_event()
+    assert inspector._amplitude.apply_current(method=method)
+    before = events.df.copy(deep=True)
+    row = before.iloc[0]
+    raw = inspector._session.calibrated(inspector._doc_id, inspector._channel).data
+    boundary_edits, amplitude_edits = [], []
+    inspector.eventEdited.connect(boundary_edits.append)
+    inspector.amplitudeEdited.connect(amplitude_edits.append)
+
+    # Repeated mask edits and Revert all preserve the estimator, while measuring
+    # the latest span instead of retaining the old scalar or row fingerprint.
+    spans = [(int(row.start_idx) + 3, int(row.end_idx) - 3),
+             (int(row.start_idx) + 8, int(row.end_idx) - 8)]
+    for start, end in spans:
+        inspector._apply_edited_bounds(0, start, end, raw)
+        updated = events.df.iloc[0]
+        assert amplitude_is_current(updated)
+        assert updated.amplitude_method == method
+        assert inspector._amplitude.method.currentData() == method
+        assert (updated.amplitude_start_idx, updated.amplitude_end_idx) == (start, end)
+        audit = json.loads(updated.amplitude_provenance_json)
+        assert audit["event_bounds"] == [start, end]
+        assert audit["sample_count"] == end - start
+        context = inspector._amplitude.context(updated)
+        base = context.baseline if np.ndim(context.baseline) == 0 else context.baseline[start:end]
+        excursions = context.polarity * (context.current[start:end] - base)
+        if method in ("median", "mean", "peak"):
+            reducer = {"median": np.median, "mean": np.mean, "peak": np.max}[method]
+            assert updated.amplitude_pA == pytest.approx(reducer(excursions))
+        else:
+            assert excursions.min() <= updated.amplitude_pA <= excursions.max()
+        pd.testing.assert_frame_equal(events.df.iloc[1:], before.iloc[1:])
+
+    inspector._revert_current()
+    reverted = events.df.iloc[0]
+    assert (reverted.start_idx, reverted.end_idx) == (row.start_idx, row.end_idx)
+    assert amplitude_is_current(reverted)
+    assert reverted.amplitude_method == method
+    assert boundary_edits == [int(row.event_id)] * 3
+    assert amplitude_edits == []  # the boundary action owns the single undo step
+
+
+def test_mask_resize_preserves_manual_level_with_refreshed_baseline(curated, monkeypatch):
+    from dataclasses import replace
+
+    inspector, events = curated
+    controls = inspector._amplitude
+    original_context = controls.context
+    raw = inspector._session.calibrated(inspector._doc_id, inspector._channel).data
+    drifting_baseline = np.linspace(100.0, 200.0, len(raw))
+    monkeypatch.setattr(controls, "context", lambda row: replace(
+        original_context(row), baseline=drifting_baseline))
+    row = events.df.iloc[0].copy()
+    chosen_level = 75.0
+    assert controls.apply_current(method="manual", manual_level=chosen_level)
+    old_amplitude = events.df.iloc[0].amplitude_pA
+    start, end = int(row.start_idx) - 20, int(row.end_idx) + 60
+    inspector._apply_edited_bounds(0, start, end, raw)
+    updated = events.df.iloc[0]
+    expected_baseline = np.mean(drifting_baseline[start:end])
+    assert amplitude_is_current(updated)
+    assert updated.amplitude_method == "manual"
+    assert updated.amplitude_level_pA == pytest.approx(chosen_level)
+    assert updated.amplitude_baseline_pA == pytest.approx(expected_baseline)
+    assert updated.amplitude_pA == pytest.approx(expected_baseline - chosen_level)
+    assert updated.amplitude_pA != pytest.approx(old_amplitude)
+    assert controls.method.currentData() == "manual"
+    assert controls.level.value() == pytest.approx(chosen_level)
+    assert inspector._level_line.value() == pytest.approx(chosen_level)
+
+
+@pytest.mark.parametrize("method", ["selected_mean", "selected_median"])
+@pytest.mark.parametrize("from_fitted_state", [False, True])
+def test_mask_extension_preserves_exact_selected_interval(curated, method, from_fitted_state):
+    inspector, events = curated
+    controls = inspector._amplitude
+    controls.method.setCurrentIndex(controls.method.findData(method))
+    row = events.df.iloc[0].copy()
+    if from_fitted_state:
+        inspector.set_levels(builders._levels_for(
+            inspector._session, inspector._doc_id, inspector._channel, events))
+        controls.state.setCurrentIndex(1)
+    else:
+        controls.start.setValue(int(row.start_idx) + 20)
+        controls.end.setValue(int(row.end_idx) - 20)
+    selection = (controls.start.value(), controls.end.value())
+    assert controls.apply_current()
+    if from_fitted_state:
+        audit = json.loads(events.df.iloc[0].amplitude_provenance_json)
+        assert "selected_state" in audit["signal_identity"]
+    raw = inspector._session.calibrated(inspector._doc_id, inspector._channel).data
+    start, end = int(row.start_idx) - 3, int(row.end_idx) + 3
+    inspector._apply_edited_bounds(0, start, end, raw)
+    updated = events.df.iloc[0]
+    assert amplitude_is_current(updated)
+    assert updated.amplitude_method == method
+    assert (updated.amplitude_start_idx, updated.amplitude_end_idx) == selection
+    assert (controls.start.value(), controls.end.value()) == selection
+    audit = json.loads(updated.amplitude_provenance_json)
+    assert audit["event_bounds"] == [start, end]
+    assert audit["interval"] == list(selection)
+    assert audit["interval_scope"] == "selected_interval"
+    assert "selected_state" not in audit["signal_identity"]
+    assert controls.method.currentData() == method
+    context = controls.context(updated)
+    a, b = selection
+    baseline = context.baseline if np.ndim(context.baseline) == 0 else context.baseline[a:b]
+    reducer = np.mean if method == "selected_mean" else np.median
+    assert updated.amplitude_pA == pytest.approx(
+        reducer(context.polarity * (context.current[a:b] - baseline)))
+
+
+@pytest.mark.parametrize("method", ["selected_mean", "selected_median"])
+@pytest.mark.parametrize("excluded_edge", ["start", "end"])
+def test_mask_resize_leaves_outside_selection_stale_without_clipping(curated, method, excluded_edge):
+    inspector, events = curated
+    controls = inspector._amplitude
+    controls.method.setCurrentIndex(controls.method.findData(method))
+    row = events.df.iloc[0].copy()
+    selection = (int(row.start_idx) + 20, int(row.end_idx) - 20)
+    controls.start.setValue(selection[0])
+    controls.end.setValue(selection[1])
+    assert controls.apply_current()
+    raw = inspector._session.calibrated(inspector._doc_id, inspector._channel).data
+    start = selection[0] + 1 if excluded_edge == "start" else int(row.start_idx)
+    end = selection[1] - 1 if excluded_edge == "end" else int(row.end_idx)
+    inspector._apply_edited_bounds(0, start, end, raw)
+    updated = events.df.iloc[0]
+    assert updated.amplitude_status == "stale"
+    assert np.isnan(updated.amplitude_pA)
+    assert json.loads(updated.amplitude_provenance_json)["interval"] == list(selection)
+    assert (controls.start.value(), controls.end.value()) == selection
+    assert controls.method.currentData() == method
+    assert "stale" in controls.note.text()
+    assert "outside the event mask" in controls.note.text()
+    assert "Adjust the amplitude interval" in controls.note.text()
+    assert not controls.apply_current()
+    assert events.df.iloc[0].amplitude_status == "stale"
+    inspector.next_event()
+    inspector.prev_event()
+    assert (controls.start.value(), controls.end.value()) == selection
+    assert controls.method.currentData() == method
+    controls.start.setValue(max(start, selection[0]))
+    controls.end.setValue(min(end, selection[1]))
+    assert controls.apply_current()
+    assert amplitude_is_current(events.df.iloc[0])
+
+
+@pytest.mark.parametrize("blocked_context", ["stale_row", "stale_table", "changed_signal", "failed_context"])
+@pytest.mark.parametrize("method", ["peak", "manual", "selected_mean"])
+def test_mask_resize_never_resurrects_an_invalid_amplitude(curated, monkeypatch, blocked_context, method):
+    inspector, events = curated
+    controls = inspector._amplitude
+    row = events.df.iloc[0].copy()
+    controls.start.setValue(int(row.start_idx) + 20)
+    controls.end.setValue(int(row.end_idx) - 20)
+    assert controls.apply_current(
+        method=method, manual_level=float(row.baseline_pA) - 25 if method == "manual" else None)
+    if blocked_context == "stale_row":
+        from nanoscope.analysis.event_amplitude import invalidate_event_amplitudes
+        invalidate_event_amplitudes(events.df, [0], reason="old measurement")
+    elif blocked_context == "stale_table":
+        inspector.set_stale_columns(("depth_pA",), "changed baseline")
+    elif blocked_context == "changed_signal":
+        inspector._provenance["filter_cutoff_hz"] = 2000.0
+    else:
+        def unavailable(_row):
+            raise ValueError("saved amplitude reference unavailable")
+        monkeypatch.setattr(controls, "context", unavailable)
     raw = inspector._session.calibrated(inspector._doc_id, inspector._channel).data
     inspector._apply_edited_bounds(0, int(row.start_idx) + 3, int(row.end_idx) - 3, raw)
     assert events.df.iloc[0].amplitude_status == "stale"
     assert np.isnan(events.df.iloc[0].amplitude_pA)
-    assert "stale" in inspector._amplitude.note.text()
+    assert controls.method.currentData() == method
+
+
+def test_mask_resize_does_not_create_an_unrequested_amplitude(curated):
+    inspector, events = curated
+    row = events.df.iloc[0].copy()
+    raw = inspector._session.calibrated(inspector._doc_id, inspector._channel).data
+    inspector._apply_edited_bounds(0, int(row.start_idx) + 3, int(row.end_idx) - 3, raw)
+    assert not set(AMPLITUDE_COLUMNS).intersection(events.df)
 
 
 def test_stale_and_reconciled_tables_cannot_edit_level(curated):
@@ -395,6 +573,22 @@ def test_wired_edit_undo_redo_and_rerun_guard(qapp, qtbot, tmp_path, monkeypatch
     qtbot.wait(10)
     pd.testing.assert_frame_equal(window._analysis_panel.current_detection().payload.df, after)
     assert refits == []
+
+    original = after.iloc[0]
+    raw = window._session.calibrated(doc_id, 0).data
+    inspector._apply_edited_bounds(
+        0, int(original.start_idx) + 3, int(original.end_idx) - 3, raw)
+    resized = window._analysis_panel.current_detection().payload.df.copy(deep=True)
+    assert amplitude_is_current(resized.iloc[0])
+    assert resized.iloc[0].amplitude_method == "peak"
+    assert refits == [True]
+    window._undo_events()
+    qtbot.wait(10)
+    pd.testing.assert_frame_equal(window._analysis_panel.current_detection().payload.df, after)
+    window._redo_events()
+    qtbot.wait(10)
+    pd.testing.assert_frame_equal(window._analysis_panel.current_detection().payload.df, resized)
+    assert window._event_inspector._amplitude.method.currentData() == "peak"
     window._analysis_controller.abort()
 
 
