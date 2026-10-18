@@ -107,6 +107,22 @@ from ..analysis import events as events_mod
 from ..analysis import baseline as baseline_mod
 from ..analysis import filters, ml_detect
 from ..analysis.conditioning import chain_description
+from ..analysis.conditioning_recipes import (
+    BUILTIN_RECIPES,
+    CHAIN_KEYS,
+    DETREND_METHOD_LABELS,
+    MANUAL_PROTOCOL,
+    SCOPE_SENTENCE,
+    STAGE_KEYS,
+    MergeReport as ProtocolMergeReport,
+    chain_differences,
+    complete_recipe,
+    describe_differences,
+    merge_imported_protocols,
+    recipe_key_differences,
+    recipes_equal,
+    validate_recipe,
+)
 from ..analysis.modules import DETECTOR_PRIVATE_KEYS
 from ..analysis.detect_cusum import (
     DEFAULT_CUSUM_H,
@@ -239,14 +255,7 @@ _COLUMN_TIPS = {
 #: (it keeps the smooth trace), while this estimator SUBTRACTS it (it keeps the
 #: residual). Labelling both "Savitzky-Golay" is how a user ends up smoothing when
 #: they meant to detrend.
-_DETREND_LABELS: dict[str, str] = {
-    "block_median": "block median",
-    "percentile": "percentile",
-    "asls": "ASLS",
-    "masked_median": "event-masked median",
-    "robust_median": "robust median",
-    "savgol": "Savitzky-Golay baseline (subtract)",
-}
+_DETREND_LABELS: dict[str, str] = dict(DETREND_METHOD_LABELS)
 
 #: Baseline-drift estimators NOT offered in the Preprocess tab's method combo.
 #: 'constant' is a no-op detrend (a flat level; subtracting it changes nothing but the
@@ -407,6 +416,9 @@ class _CurrentPageStackedWidget(QWidget):
     def currentWidget(self):  # noqa: N802
         return self.widget(self._current)
 
+    def indexOf(self, widget) -> int:  # noqa: N802 - QStackedWidget parity
+        return self._pages.index(widget) if widget in self._pages else -1
+
     def setCurrentWidget(self, widget) -> None:  # noqa: N802
         if widget in self._pages:
             self.setCurrentIndex(self._pages.index(widget))
@@ -434,6 +446,16 @@ class _CurrentPageStackedWidget(QWidget):
             return QSize(0, 0)
         return QSize(max(p.minimumSizeHint().width() for p in self._pages),
                      current.minimumSizeHint().height())
+
+
+class SignalChainEditorParts(NamedTuple):
+    """The live stage-editor widgets the Signal Conditioning window hosts (reparented)."""
+
+    protocol_bar: QWidget
+    stage_stack: QWidget
+    notices: QWidget
+    response_view: QWidget
+    chain_response_toggle: QCheckBox
 
 
 class DetectionPanel(QWidget):
@@ -473,6 +495,18 @@ class DetectionPanel(QWidget):
     _CONTROL_LEVEL_SETTINGS_KEY = "inspector/detection_control_level"
     mlModelChanged = Signal(str)
     notchLinesRefused = Signal(str)
+    #: "Open Signal Conditioning…" on the card (and, while hosted, the baseline
+    #: workspace's Advanced signal-chain settings): the stage key to show, or "" for the
+    #: current one.
+    openSignalConditioningRequested = Signal(str)
+    #: The stage page now raised in the editor (a STAGE_KEYS key), whatever raised it.
+    stageShown = Signal(str)
+    #: A sentence about a protocol recall for the status line (e.g. what the form clamped).
+    protocolNotice = Signal(str)
+
+    #: Stage key per editor page, in filter_selector / filter_stack order.
+    _EDITOR_STAGE_KEYS: tuple[str, ...] = (
+        "lowpass", "highpass", "notch", "median", "detrend", "rmean", "savgol", "normalize")
 
     # Baseline-drift estimators offered in the combo, in combo-index order, BUILT FROM
     # ``baseline.METHODS`` so the menu cannot drift from the set the kernel implements
@@ -629,6 +663,13 @@ class DetectionPanel(QWidget):
         self._ml_loading: bool = False
         self._ml_preset_chosen: bool = False
         self._ml_model_window: int | None = None
+
+        # Signal-chain hosting: see set_signal_chain_hosted / signal_chain_editor_parts.
+        self._chain_editor_hosted = False
+        self._editor_parts: SignalChainEditorParts | None = None
+        self._stage_focus_partner: QWidget | None = None
+        self._chain_status_text = ""
+        self._chain_status_warn = False
 
         root = QVBoxLayout(self)
 
@@ -1475,6 +1516,43 @@ class DetectionPanel(QWidget):
         self.preview_error_label.setStyleSheet("color:#FFB74D;")
         self.preview_error_label.setVisible(False)
 
+        # -- the compact Signal chain card, used while the editor is HOSTED in the Signal
+        # Conditioning window. Every row owns a fixed height, so no state moves anything.
+        self.open_conditioning_button = QPushButton("Open Signal Conditioning…")
+        self.open_conditioning_button.setObjectName("openSignalConditioningButton")
+        self.open_conditioning_button.setToolTip(
+            "Edit the classical detectors' signal chain in execution order, with its "
+            "frequency response, protocols and Copy as Python (Ctrl+Shift+F).")
+        self.open_conditioning_button.clicked.connect(
+            lambda: self.openSignalConditioningRequested.emit(self.current_stage_key()))
+        self.open_conditioning_button.setVisible(False)
+        # Unselectable notes: a selectable QLabel carries a text control and document,
+        # and every QObject here is one more wrapper per MainWindow teardown.
+        self.chain_status_note = _FixedLinesNote(2, selectable=False)
+        self.chain_status_note.setObjectName("chainStatusNote")
+        self.chain_warning_note = _FixedLinesNote(2, selectable=False)
+        self.chain_warning_note.setObjectName("chainWarningNote")
+        self.chain_warning_note.setStyleSheet("color:#FFB74D; font-weight:bold;")
+        self.chain_protocol_note = _ElidingCaption(elide=Qt.ElideRight)
+        self.chain_protocol_note.setObjectName("chainProtocolNote")
+        self.chain_scope_note = _ElidingCaption(SCOPE_SENTENCE, elide=Qt.ElideRight)
+        self.chain_scope_note.setObjectName("chainScopeNote")
+        self.chain_scope_note.setStyleSheet("color:#8b9199;")
+        # The card's copy of active_filters_label (which stays in the in-page editor).
+        self.chain_order_note = _FixedLinesNote(3, selectable=False)
+        self.chain_order_note.setObjectName("chainOrderNote")
+        self.chain_order_note.setStyleSheet("color:#8b9199;")
+        self.signal_chain_summary = QWidget()
+        self.signal_chain_summary.setObjectName("signalChainSummary")
+        _card = QVBoxLayout(self.signal_chain_summary)
+        _card.setContentsMargins(0, 0, 0, 0)
+        _card.setSpacing(4)
+        for _note in (self.chain_status_note, self.chain_warning_note,
+                      self.chain_protocol_note, self.chain_scope_note,
+                      self.chain_order_note):
+            _card.addWidget(_note)
+        self.signal_chain_summary.setVisible(False)
+
         # Combo order == page order; default selection is Low-pass (index 0). Each label
         # is paired with its enable checkbox so the active-filters indicator can mark and
         # summarise the enabled stages.
@@ -1554,7 +1632,8 @@ class DetectionPanel(QWidget):
         # position independent of the panel's width: 3x80 + 2x6 = 252 px, always visible.
         # It is a static reflow — the rows do not rearrange with state or with dock width,
         # so nothing ever moves out from under a pointer that is aiming at it.
-        proto_row.addWidget(QLabel("Protocol:"))
+        self._protocol_label = QLabel("Protocol:")
+        proto_row.addWidget(self._protocol_label)
         proto_row.addWidget(self.protocol_combo, 1)
         proto_btn_row = QHBoxLayout()
         proto_btn_row.addWidget(self.protocol_save_btn)
@@ -1568,6 +1647,7 @@ class DetectionPanel(QWidget):
         self.protocol_rename_btn.clicked.connect(self._rename_protocol)
         self.protocol_delete_btn.clicked.connect(self._delete_protocol)
         self.paramsChanged.connect(self._protocol_drop_to_manual)
+        self.protocol_combo.currentTextChanged.connect(self._refresh_chain_card)
 
         # The stage selector is the head of this group, and the response hint rides its
         # row instead of spending another vertical row. The execution summary and
@@ -1592,8 +1672,11 @@ class DetectionPanel(QWidget):
         filters_layout.addWidget(self.response_chain_check)
         filters_layout.addWidget(self.response_plot)
         filters_layout.addWidget(self.response_note)
+        signal_chain_layout.addWidget(self.signal_chain_summary)
         signal_chain_layout.addWidget(filters_box)
         signal_chain_layout.addStretch(1)
+        self._signal_filters_box = filters_box
+        self._filters_layout = filters_layout
 
         # Selecting a filter in the combo raises its page (index-based on purpose:
         # rewriting an item's TEXT for the ● marker fires currentTextChanged, NOT
@@ -2236,6 +2319,7 @@ class DetectionPanel(QWidget):
                 chain_actions = QWidget()
                 chain_layout = QVBoxLayout(chain_actions)
                 chain_layout.setContentsMargins(0, 0, 0, 0)
+                chain_layout.addWidget(self.open_conditioning_button)
                 chain_layout.addWidget(self.filter_preview)
                 baseline_actions = QWidget()
                 baseline_actions.setLayout(QVBoxLayout())
@@ -2374,9 +2458,12 @@ class DetectionPanel(QWidget):
         self.control_level_selector.blockSignals(was_blocked)
         essential = level == "essential"
         for widget in (self.sweep_button, self.null_button, self.recovery_button,
-                       self.response_hint, self.response_plot, self.response_note,
-                       self.response_chain_check):
+                       self.response_hint):
             widget.setVisible(not essential)
+        # The hosted response view lives in the expert Signal Conditioning window, which
+        # the Inspector's control level does not govern.
+        for widget in (self.response_plot, self.response_note, self.response_chain_check):
+            widget.setVisible(self._chain_editor_hosted or not essential)
         self.advanced_tools_button.setVisible(essential)
         self.essential_settings_summary.setVisible(essential)
         self._refresh_control_level_summary()
@@ -2386,6 +2473,9 @@ class DetectionPanel(QWidget):
             QSettings().setValue(self._CONTROL_LEVEL_SETTINGS_KEY, level)
         if previous != level:
             self.controlLevelChanged.emit(level)
+
+    _NORMALIZE_CRITICAL = "NORMALIZE ON: current-derived values are dimensionless"
+    _HIGHPASS_CRITICAL = "high-pass affects localization and boundaries"
 
     def _refresh_control_level_summary(self, *_args) -> None:
         if not hasattr(self, "essential_settings_summary"):
@@ -2397,9 +2487,9 @@ class DetectionPanel(QWidget):
         if self.merge_gap_ms.value() > 0:
             retained.append(f"merge {self.merge_gap_ms.value():g} ms")
         if self.normalize_enabled.isChecked():
-            retained.append("NORMALIZE ON: current-derived values are dimensionless")
+            retained.append(self._NORMALIZE_CRITICAL)
         if self.hp_enabled.isChecked():
-            retained.append("high-pass affects localization and boundaries")
+            retained.append(self._HIGHPASS_CRITICAL)
         ml_configured = bool(self._model_path or self._ml_preset_chosen
                              or getattr(self, "_nanoscope_unresolved_model_reference", None))
         if ml_configured:
@@ -3401,12 +3491,243 @@ class DetectionPanel(QWidget):
         return tuple(self._DETREND_METHODS)
 
     def show_baseline_drift(self) -> None:
-        """Raise Preprocess and reveal the Baseline drift stage's advanced controls."""
-        self.show_signal_chain()
-        for index, (label, _check) in enumerate(self._filter_specs):
-            if label == "Baseline drift":
-                self.filter_selector.setCurrentIndex(index)
-                return
+        """Raise Preprocess and reveal the Baseline drift stage's advanced controls.
+
+        While hosted those controls live in the Signal Conditioning window, so this asks
+        for that window on the Baseline drift stage and leaves the dock where it is (the
+        user is in the baseline workspace)."""
+        if not self._chain_editor_hosted:
+            self.show_signal_chain()
+        self.select_stage("detrend")
+        if self._chain_editor_hosted:
+            self.openSignalConditioningRequested.emit("detrend")
+
+    # -- the Signal Conditioning window's seam ---------------------------
+    def set_signal_chain_hosted(self, hosted: bool = True) -> None:
+        """Move the stage editor out of the Preprocess page (it is hosted elsewhere).
+
+        The group box is hidden and the compact card plus a pinned "Open Signal
+        Conditioning…" button are shown instead. Every stage widget stays owned here, so
+        :meth:`params`, :meth:`set_params` and the setters are unchanged. A standalone
+        panel (never hosted) keeps the in-page editor exactly as before.
+        """
+        hosted = bool(hosted)
+        if hosted == self._chain_editor_hosted:
+            return
+        self._chain_editor_hosted = hosted
+        self._signal_filters_box.setVisible(not hosted)
+        self.signal_chain_summary.setVisible(hosted)
+        self.open_conditioning_button.setVisible(hosted)
+        # The main-trace preview's error line stays readable in the dock: last on the
+        # card, right under the execution order, so nothing below it can move.
+        card = self.signal_chain_summary.layout()
+        if hosted:
+            card.addWidget(self.preview_error_label)
+        else:
+            self._filters_layout.insertWidget(
+                self._filters_layout.indexOf(self.active_filters_label) + 1,
+                self.preview_error_label)
+        self.response_plot.setMaximumHeight(16_777_215 if hosted else 190)
+        self.set_control_level(self._control_level)
+        self._refresh_chain_card()
+        for actions in self.findChildren(PinnedActions):
+            actions._sync_height()
+
+    def is_signal_chain_hosted(self) -> bool:
+        return self._chain_editor_hosted
+
+    def signal_chain_editor_parts(self) -> SignalChainEditorParts:
+        """The live editor widgets, grouped for a host to reparent (built once).
+
+        The hosted copy gets a stack whose pages are each only as tall as themselves, so
+        the notices placed below it sit right under the shown stage.
+        """
+        if self._editor_parts is not None:
+            return self._editor_parts
+        protocol_bar = QWidget()
+        protocol_bar.setObjectName("signalChainProtocolBar")
+        bar = QVBoxLayout(protocol_bar)
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(4)
+        row = QHBoxLayout()
+        row.addWidget(self._protocol_label)
+        row.addWidget(self.protocol_combo, 1)
+        verbs = QHBoxLayout()
+        for button in (self.protocol_save_btn, self.protocol_rename_btn,
+                       self.protocol_delete_btn):
+            verbs.addWidget(button)
+        verbs.addStretch(1)
+        bar.addLayout(row)
+        bar.addLayout(verbs)
+
+        old_stack = self.filter_stack
+        current = old_stack.currentIndex()
+        stack = _CurrentPageStackedWidget()
+        stack.setObjectName("signalChainStageStack")
+        for page in [old_stack.widget(i) for i in range(old_stack.count())]:
+            old_stack.removeWidget(page)
+            stack.addWidget(page)
+        stack.setCurrentIndex(max(current, 0))
+        old_stack.setVisible(False)
+        self.filter_stack = stack
+
+        notices = QWidget()
+        notices.setObjectName("signalChainNotices")
+        nl = QVBoxLayout(notices)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(4)
+        for label in (self.highpass_measurement_label, self.normalize_units_label,
+                      self.detrend_refusal_label):
+            nl.addWidget(label)
+
+        response_view = QWidget()
+        response_view.setObjectName("signalChainResponseView")
+        rl = QVBoxLayout(response_view)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(4)
+        rl.addWidget(self.response_chain_check)
+        rl.addWidget(self.response_plot, 1)
+        rl.addWidget(self.response_note)
+        self.response_plot.setMaximumHeight(16_777_215)
+        self._set_response_title(self.response_plot.getPlotItem().titleLabel.text)
+        self._editor_parts = SignalChainEditorParts(
+            protocol_bar, stack, notices, response_view, self.response_chain_check)
+        return self._editor_parts
+
+    def set_stage_focus_partner(self, widget: QWidget | None) -> None:
+        """The control that takes focus when a stage switch would hide the focused one."""
+        self._stage_focus_partner = widget
+
+    @staticmethod
+    def stage_keys() -> tuple[str, ...]:
+        """The stages in EXECUTION order (``conditioning_recipes.STAGE_KEYS``)."""
+        return STAGE_KEYS
+
+    def current_stage_key(self) -> str:
+        idx = self.filter_selector.currentIndex()
+        return self._EDITOR_STAGE_KEYS[idx] if 0 <= idx < len(self._EDITOR_STAGE_KEYS) else ""
+
+    def select_stage(self, key: str) -> None:
+        """Raise ``key``'s stage page through the stage selector (unknown keys ignored)."""
+        if key in self._EDITOR_STAGE_KEYS:
+            self.filter_selector.setCurrentIndex(self._EDITOR_STAGE_KEYS.index(key))
+
+    def _stage_checkbox(self, key: str) -> QCheckBox | None:
+        if key not in self._EDITOR_STAGE_KEYS:
+            return None
+        return self._filter_specs[self._EDITOR_STAGE_KEYS.index(key)][1]
+
+    def set_stage_enabled(self, key: str, on: bool) -> None:
+        """Tick or untick ``key``'s own enable checkbox (the only state there is)."""
+        box = self._stage_checkbox(key)
+        if box is not None and box.isChecked() != bool(on):
+            box.setChecked(bool(on))
+
+    def sample_rate(self) -> float | None:
+        return self._fs
+
+    def lowpass_design_hz(self) -> float:
+        """The low-pass cutoff box, which :meth:`params` reports as None while it is off."""
+        return float(self.filter_cutoff_hz.value())
+
+    @classmethod
+    def _stored_recipe(cls, raw: Any) -> dict[str, Any] | None:
+        """A stored protocol as a complete recipe, or None when it cannot be one (a
+        corrupt store entry means that protocol is unreadable, never a crash)."""
+        if not isinstance(raw, Mapping):
+            return None
+        recipe, _why = validate_recipe({k: v for k, v in raw.items() if k in CHAIN_KEYS},
+                                       max_notch_lines=cls.NOTCH_MAX_LINES, ranges=False)
+        return recipe
+
+    def protocol_library_report(self) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        """``(library, unreadable names)``: the user's own protocols as complete recipes
+        (the shipped three excluded), and the stored entries that could not be read."""
+        library: dict[str, dict[str, Any]] = {}
+        unreadable: list[str] = []
+        for name, raw in sorted(self._load_protocols().items()):
+            if name in self._BUILTIN_PROTOCOLS:
+                continue
+            recipe = self._stored_recipe(raw)
+            if recipe is None:
+                unreadable.append(str(name))
+            else:
+                library[name] = recipe
+        return library, unreadable
+
+    def protocol_library(self) -> dict[str, dict[str, Any]]:
+        """The user's own readable protocols as complete recipes (shipped three excluded)."""
+        return self.protocol_library_report()[0]
+
+    def merge_protocols(self, imported: Mapping[str, Mapping[str, Any]], *,
+                        refused: Sequence[str] = ()) -> ProtocolMergeReport:
+        """Add imported protocols to the user's library, never overwriting one (not even
+        a stored entry that cannot be read)."""
+        library, unreadable = self.protocol_library_report()
+        reserved = {**self._BUILTIN_PROTOCOLS, self._PROTO_MANUAL: None,
+                    **{name: None for name in unreadable}}
+        merged, report = merge_imported_protocols(
+            library, imported, reserved=reserved, refused=refused)
+        if report.added or report.renamed:
+            current = self.protocol_combo.currentText()
+            self._store_protocols({**self._load_protocols(), **merged})
+            self._load_protocols_into_combo()
+            self._select_protocol(current if self.protocol_combo.findText(current) >= 0
+                                  else self._PROTO_MANUAL)
+        return report
+
+    def current_protocol(self) -> tuple[str | None, dict[str, Any] | None]:
+        """``(name, complete recipe)`` of the protocol the combo names, or ``(None, None)``."""
+        name = self.protocol_combo.currentText()
+        recipe = self._protocol_recipe(name)
+        return (name, recipe) if recipe is not None else (None, None)
+
+    def _protocol_recipe(self, name: str) -> dict[str, Any] | None:
+        if not name or name == self._PROTO_MANUAL:
+            return None
+        if name in self._BUILTIN_PROTOCOLS:
+            return complete_recipe(self._BUILTIN_PROTOCOLS[name])
+        return self._stored_recipe(self._load_protocols().get(name))
+
+    def set_chain_status(self, text: str, warn: bool = False) -> None:
+        """The chain-versus-detection sentence the card's first line carries."""
+        self._chain_status_text = str(text or "")
+        self._chain_status_warn = bool(warn)
+        self._refresh_chain_card()
+
+    def chain_card_text(self) -> dict[str, str]:
+        """The card's full texts, for tests and for the window's status line."""
+        return {
+            "status": self.chain_status_note.text(),
+            "warning": self.chain_warning_note.text(),
+            "protocol": self.chain_protocol_note.text(),
+            "scope": self.chain_scope_note.text(),
+            "order": self.chain_order_note.text(),
+        }
+
+    def _refresh_chain_card(self, *_a) -> None:
+        if not hasattr(self, "signal_chain_summary"):
+            return
+        critical = []
+        if self.normalize_enabled.isChecked():
+            critical.append(self._NORMALIZE_CRITICAL)
+        if self.hp_enabled.isChecked():
+            critical.append(self._HIGHPASS_CRITICAL)
+        if self.detrend_refusal_label.text() and not self.detrend_refusal_label.isHidden():
+            critical.append(self.detrend_refusal_label.text().split(". ")[0])
+        name = self.protocol_combo.currentText() or self._PROTO_MANUAL
+        texts = (
+            (self.chain_status_note, self._chain_status_text),
+            (self.chain_warning_note, " · ".join(critical)),
+            (self.chain_protocol_note, f"Protocol: {name}"),
+            (self.chain_order_note, self.active_filters_label.text()),
+        )
+        for note, text in texts:
+            if note.text() != text:
+                note.setText(text)
+        style = "color:#FFB74D;" if self._chain_status_warn else "color:#8b9199;"
+        if self.chain_status_note.styleSheet() != style:
+            self.chain_status_note.setStyleSheet(style)
 
     def show_open_pore_baseline(self) -> None:
         """Raise Preprocess and reveal the open-pore baseline controls."""
@@ -4721,91 +5042,18 @@ class DetectionPanel(QWidget):
 
     # -- named preprocessing protocols -----------------------------------------------------------
     #: Sentinel entry: the chain is whatever the pages say, no protocol's name over it.
-    _PROTO_MANUAL = "— manual —"
+    _PROTO_MANUAL = MANUAL_PROTOCOL
     #: The keys a protocol captures — every PREPROCESSING stage, and nothing else:
     #: thresholds (k_in/k_out/min_dwell…) belong to the detection, not the conditioning,
     #: and a "protocol" that silently rewrote them would change what an event IS.
-    _PROTOCOL_KEYS = (
-        "filter_cutoff_hz", "filter_order", "filter_kind",
-        "detrend_enabled", "detrend_method", "detrend_window_s", "detrend_percentile",
-        "detrend_asls_lam", "detrend_asls_p", "detrend_asls_niter", "detrend_asls_decim",
-        "detrend_rough_s", "detrend_base_s", "detrend_mask_sigma", "detrend_dilate_ms",
-        "detrend_decim", "detrend_sg_poly", "detrend_sg_decim",
-        # ``notch_freqs`` is captured like any other stage parameter, and it has to be:
-        # a protocol that stored the six host-guest lines but recalled only
-        # (60 Hz, 3 harmonics) would run a DIFFERENT filter under the same name.
-        "notch_enabled", "notch_freq_hz", "notch_harmonics", "notch_q", "notch_freqs",
-        "median_enabled", "median_window_s",
-        "hp_enabled", "hp_cutoff_hz", "hp_order", "hp_kind",
-        "rmean_enabled", "rmean_window_s",
-        "savgol_enabled", "savgol_window_s", "savgol_polyorder",
-        # Captured like any other stage — a protocol that dropped it would recall a
-        # chain the user cannot tell apart from the one they saved, except that the
-        # depths come out in different units.
-        "normalize_enabled", "normalize_mode", "normalize_clip_sigma",
-    )
+    #: (``conditioning_recipes.CHAIN_KEYS``, which documents each group.)
+    _PROTOCOL_KEYS = CHAIN_KEYS
     _PROTO_SETTINGS_KEY = "detection/filter_protocols"
 
     #: SHIPPED preprocessing protocols, listed above the user's own and not editable.
-    #:
-    #: These are the owner's own three pipelines, recovered from his notebooks and
-    #: cross-checked against the ``*_metadata.json`` his code writes beside every
-    #: processed recording. They exist as DETECTION protocols (this combo) and, under
-    #: matching names, as ML "Model preprocessing" presets
-    #: (``ml_preprocess.PREPROCESS_PRESETS``: ``hg_student`` / ``zn_student`` /
-    #: ``cu_student``) -- the two mechanisms drive two different chains, and each recipe
-    #: needs both halves because the same conditioning feeds both detectors.
-    #:
-    #: A protocol captures PREPROCESSING ONLY (`_PROTOCOL_KEYS`), so none of these
-    #: touches a threshold, a polarity or a dwell limit. What they cannot express is
-    #: named in each entry's own comment; nothing is silently approximated.
-    _BUILTIN_PROTOCOLS: dict[str, dict[str, Any]] = {
-        # HOST-GUEST (CB7 + N-adamantyl), +75 mV, RESISTIVE. Six notch lines with three
-        # gaps -- 240, 360 and 480 Hz were quiet in the Welch census, so the series
-        # spelling cannot express this set without notching three clean bands.
-        "Host-guest (CB7 + adamantyl)": {
-            "notch_enabled": True,
-            "notch_freqs": [60.0, 120.0, 180.0, 300.0, 420.0, 540.0],
-            "notch_freq_hz": 60.0, "notch_harmonics": 3, "notch_q": 30.0,
-            "detrend_enabled": True, "detrend_method": "masked_median",
-            "detrend_rough_s": 0.5, "detrend_base_s": 0.02, "detrend_decim": 10,
-            "detrend_mask_sigma": 3.5, "detrend_dilate_ms": 0.2,
-            "normalize_enabled": True, "normalize_mode": "model_input",
-            "normalize_clip_sigma": 30.0,
-        },
-        # Zn2-INSULIN (zn_30h), -200 mV, CONDUCTIVE. Nine lines, 480 Hz absent.
-        # A Savitzky-Golay baseline was TESTED AND REJECTED on this data (the events are
-        # shallow and abundant, so a polynomial envelope dives into them); the
-        # event-masked median is what survived.
-        "Zn2-insulin (zn_30h)": {
-            "notch_enabled": True,
-            "notch_freqs": [60.0, 120.0, 180.0, 240.0, 300.0, 360.0, 420.0, 540.0,
-                            660.0],
-            "notch_freq_hz": 60.0, "notch_harmonics": 3, "notch_q": 30.0,
-            "detrend_enabled": True, "detrend_method": "masked_median",
-            "detrend_rough_s": 0.5, "detrend_base_s": 0.2, "detrend_decim": 10,
-            "detrend_mask_sigma": 3.0, "detrend_dilate_ms": 2.0,
-            "normalize_enabled": True, "normalize_mode": "model_input",
-            "normalize_clip_sigma": 30.0,
-        },
-        # Cu2-INSULIN, -200 mV, CONDUCTIVE. SAVITZKY-GOLAY, NOT masked median: the
-        # notebook's own cell-0 markdown still says "event-masked robust median" and is
-        # WRONG -- Block 0's BASELINE_METHOD dict says "sg" for all four cu_* recordings
-        # and all four written cu_*_metadata.json agree, with masked_median_params null.
-        # VERIFIED: window 0.2 s / poly 3 / decim 50 reproduces the baseline_pA column
-        # the owner wrote for all four recordings bit-identically (max |diff| exactly
-        # 0.0 pA over 13.9-20.2 M samples each), once the nine-line notch has run.
-        "Cu2-insulin (SavGol baseline)": {
-            "notch_enabled": True,
-            "notch_freqs": [60.0, 120.0, 180.0, 240.0, 300.0, 360.0, 420.0, 540.0,
-                            660.0],
-            "notch_freq_hz": 60.0, "notch_harmonics": 3, "notch_q": 30.0,
-            "detrend_enabled": True, "detrend_method": "savgol",
-            "detrend_window_s": 0.2, "detrend_sg_poly": 3, "detrend_sg_decim": 50,
-            "normalize_enabled": True, "normalize_mode": "model_input",
-            "normalize_clip_sigma": 30.0,
-        },
-    }
+    #: COMPLETE recipes (every stage): the owner's three pipelines and their
+    #: provenance notes live in ``conditioning_recipes._BUILTIN_PARTIALS``.
+    _BUILTIN_PROTOCOLS: Mapping[str, dict[str, Any]] = BUILTIN_RECIPES
 
     @staticmethod
     def _load_protocols() -> dict[str, dict]:
@@ -4865,18 +5113,42 @@ class DetectionPanel(QWidget):
         # Save-as (the name is refused), so a collision can only come from a store
         # written before the shipped set existed -- and the shipped numbers are the
         # verified ones.
-        proto = self._BUILTIN_PROTOCOLS.get(name) or self._load_protocols().get(name)
+        proto = self._protocol_recipe(name)
         if proto is None:
+            self._select_protocol(self._PROTO_MANUAL)
+            self.protocolNotice.emit(
+                f"Protocol “{name}” could not be read (its stored settings are not a valid "
+                f"chain); the form was not changed.")
             return
         # set_params is the SAME round-trip a project restore uses, so the recalled
         # chain is exactly the saved one. It emits paramsChanged, which would drop the
         # combo back to manual — the guard keeps the just-picked name in place.
+        # A protocol is a COMPLETE chain: recalling a partial dict left unrelated stages
+        # (and the low-pass) on under the protocol's name (SP-04).
         self._protocol_updating = True
         try:
-            self.set_params(proto)
+            self.set_params(complete_recipe(proto))
         finally:
             self._protocol_updating = False
+        form = self.params()
+        if not recipes_equal(form, proto):
+            # The form clamped a value (a cutoff above this recording's Nyquist, a stored
+            # value outside a box's range): the chain on screen is not the protocol.
+            changed = (describe_differences(chain_differences(form, proto, fs=self._fs))
+                       or "; ".join(recipe_key_differences(proto, form)))
+            self._select_protocol(self._PROTO_MANUAL)
+            self.protocolNotice.emit(
+                f"Protocol “{name}” could not be applied exactly on this recording, so the "
+                f"form shows “{self._PROTO_MANUAL}”: {changed}.")
+            self._refresh_chain_card()
+            return
         self._set_protocol_buttons_enabled(True)
+        self._refresh_chain_card()
+
+    def _protocol_dialog_parent(self) -> QWidget:
+        """The window the protocol verbs are clicked in (the Signal Conditioning window
+        while hosted), so their prompts open over it."""
+        return self.protocol_combo.window() or self
 
     def _protocol_name_ok(self, name: str, *, title: str) -> bool:
         """Reject the reserved sentinel and the shipped names. Reports, returns False.
@@ -4887,12 +5159,12 @@ class DetectionPanel(QWidget):
         thing that must not become ambiguous.
         """
         if name == self._PROTO_MANUAL:
-            QMessageBox.information(self, title,
+            QMessageBox.information(self._protocol_dialog_parent(), title,
                                     "That name is reserved for the manual state.")
             return False
         if name in self._BUILTIN_PROTOCOLS:
             QMessageBox.information(
-                self, title,
+                self._protocol_dialog_parent(), title,
                 f"“{name}” is a built-in protocol and cannot be replaced. Save your "
                 f"chain under a different name — the built-in one stays available, so "
                 f"you can always get back to the verified settings.")
@@ -4911,7 +5183,7 @@ class DetectionPanel(QWidget):
 
     def _save_protocol(self) -> None:
         name, ok = QInputDialog.getText(
-            self, "Save preprocessing protocol",
+            self._protocol_dialog_parent(), "Save preprocessing protocol",
             "Name for this chain (all stages, enabled or not):")
         name = (name or "").strip()
         if not ok or not name:
@@ -4926,7 +5198,7 @@ class DetectionPanel(QWidget):
         # at least as often as it is an intent to update.
         if name in protocols:
             answer = QMessageBox.question(
-                self, "Overwrite protocol?",
+                self._protocol_dialog_parent(), "Overwrite protocol?",
                 f"A protocol named “{name}” already exists.\n\n"
                 f"Overwriting replaces its saved chain with the settings currently on "
                 f"screen. This cannot be undone.",
@@ -4952,7 +5224,7 @@ class DetectionPanel(QWidget):
         if old not in protocols:
             return
         new, ok = QInputDialog.getText(
-            self, "Rename preprocessing protocol",
+            self._protocol_dialog_parent(), "Rename preprocessing protocol",
             f"New name for “{old}”:", text=old)
         new = (new or "").strip()
         if not ok or not new or new == old:
@@ -4963,7 +5235,7 @@ class DetectionPanel(QWidget):
         # Save-as would, so it asks the same question.
         if new in protocols:
             answer = QMessageBox.question(
-                self, "Overwrite protocol?",
+                self._protocol_dialog_parent(), "Overwrite protocol?",
                 f"A protocol named “{new}” already exists.\n\n"
                 f"Renaming “{old}” onto it replaces its saved chain. This cannot be "
                 f"undone.",
@@ -4984,13 +5256,22 @@ class DetectionPanel(QWidget):
         self._store_protocols(protocols)
         self._load_protocols_into_combo()
 
-    def _protocol_drop_to_manual(self, *_a) -> None:
-        """Any hand edit to any stage takes the protocol's name off the chain — the
-        combo says what produced the settings on screen, and after an edit that is
-        the user, not the protocol."""
+    def _protocol_drop_to_manual(self, params: Mapping[str, Any] | None = None, *_a) -> None:
+        """The combo names a protocol only while the form still IS that protocol.
+
+        Any edit that makes the form differ from the protocol's complete recipe takes the
+        name off — the combo says what produced the settings on screen, and after such an
+        edit that is the user, not the protocol. A set_params that lands on the protocol's
+        exact recipe keeps the name.
+        """
         if self._protocol_updating:
             return
-        if self.protocol_combo.currentText() != self._PROTO_MANUAL:
+        name = self.protocol_combo.currentText()
+        if name == self._PROTO_MANUAL:
+            return
+        recipe = self._protocol_recipe(name)
+        form = params if isinstance(params, Mapping) else self.params()
+        if recipe is None or not recipes_equal(form, recipe):
             self._protocol_updating = True
             try:
                 self.protocol_combo.setCurrentText(self._PROTO_MANUAL)
@@ -5024,6 +5305,7 @@ class DetectionPanel(QWidget):
             self.filter_preview.setText("show processed trace on the plot")
         self._refresh_highpass_measurement_note()
         self._refresh_normalize_units_note()
+        self._refresh_chain_card()
 
     def _refresh_highpass_measurement_note(self) -> None:
         """Keep the classical dual-signal high-pass contract beside the chain."""
@@ -5165,8 +5447,10 @@ class DetectionPanel(QWidget):
         y=467 to y=133, both baseline view boxes from 347/377 to 13/43, and "Back to
         default" / "Use these values" to y=-22, i.e. off the top. The same switch with
         focus off the page moved 0 px, which is what isolates the cause to the focus
-        transfer rather than to the layout: the pages are all the same height and the
-        stack's own size hint does not change when one is raised.
+        transfer rather than to the layout: in this in-page layout the pages are all the
+        same height and the stack's own size hint does not change when one is raised.
+        (The hosted stack in the Signal Conditioning window sizes to the shown page; it
+        sits in its own scroll area below the stage list, so the rule is the same.)
 
         THE ANSWER IS THE COMBO THAT RAISED THE PAGE, the same partner-widget shape
         ``plots_panel._retire_history_button`` uses for its Undo/Redo pair: focus is
@@ -5185,11 +5469,14 @@ class DetectionPanel(QWidget):
         stack = self.filter_stack
         if not 0 <= idx < stack.count():
             return
-        window = self.window()
+        # The STACK's window: while hosted it is the Signal Conditioning window, and the
+        # partner (its stage list) is the control that raised the page there.
+        window = stack.window()
         focused = window.focusWidget() if window is not None else None
         if focused is not None and stack.isAncestorOf(focused):
-            self.filter_selector.setFocus(Qt.OtherFocusReason)
+            (self._stage_focus_partner or self.filter_selector).setFocus(Qt.OtherFocusReason)
         stack.setCurrentIndex(idx)
+        self.stageShown.emit(self._EDITOR_STAGE_KEYS[idx])
 
     # -- frequency-response preview ---------------------------------------
     def _response_args(self) -> tuple[str, dict[str, Any]] | None:
@@ -5239,6 +5526,13 @@ class DetectionPanel(QWidget):
                 "polyorder": int(self.savgol_polyorder.value()),
             }
         return None                           # normalize: a scalar rescale, no |H(f)|
+
+    def _set_response_title(self, title: str) -> None:
+        self.response_plot.setTitle(title)
+        if self._chain_editor_hosted:
+            # pyqtgraph makes a title's text width the plot's minimum width; in the
+            # workspace's narrower pane that clipped the plot itself. Let it elide instead.
+            self.response_plot.getPlotItem().titleLabel.setMinimumWidth(0)
 
     def _clear_response(self, note: str) -> None:
         self.response_curve.setData([], [])
@@ -5316,7 +5610,7 @@ class DetectionPanel(QWidget):
         highpass_localization = self.hp_enabled.isChecked()
         response_scope = (
             "Candidate-localization" if highpass_localization else "Active-chain")
-        self.response_plot.setTitle(
+        self._set_response_title(
             f"{response_scope} response — {len(stages)} linear stage(s) ON")
         self.response_curve.setPen(pg.mkPen("#E69F00", width=2, style=Qt.SolidLine))
         self.response_cutoff_line.setVisible(False)
@@ -5383,7 +5677,7 @@ class DetectionPanel(QWidget):
             if enabled and label == "High-pass"
             else "ON · included in execution chain"
             if enabled else "OFF · design preview only")
-        self.response_plot.setTitle(f"{label} response — {state}")
+        self._set_response_title(f"{label} response — {state}")
         self.response_curve.setPen(pg.mkPen(
             "#56B4E9" if enabled else "#8b9199", width=2,
             style=Qt.SolidLine if enabled else Qt.DashLine))
@@ -6593,13 +6887,15 @@ class _FixedLinesNote(QLabel):
     #: What precedes the segment that must stay painted (see :meth:`_fit`).
     MARKER = "\n⚠ "
 
-    def __init__(self, lines: int, parent: QWidget | None = None) -> None:
+    def __init__(self, lines: int, parent: QWidget | None = None, *,
+                 selectable: bool = True) -> None:
         super().__init__("", parent)
         self._full = ""
+        flags = Qt.TextSelectableByMouse if selectable else Qt.NoTextInteraction
         self.setWordWrap(True)
         self.setTextFormat(Qt.PlainText)
         self.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.setTextInteractionFlags(flags)
         # The width is the form's, and a word-wrapping label must never set the dock's
         # minimum width; the height is decided here, once.
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -6609,7 +6905,7 @@ class _FixedLinesNote(QLabel):
         self._probe = QLabel(self)
         self._probe.setWordWrap(True)
         self._probe.setTextFormat(Qt.PlainText)
-        self._probe.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._probe.setTextInteractionFlags(flags)
         self._probe.hide()
         self._probe.setText("\n".join(["x"] * max(int(lines), 1)))
         self.setFixedHeight(self._probe.sizeHint().height() + 4)
@@ -6726,6 +7022,55 @@ class _ElidingCaption(QLabel):
         painted = (QFontMetrics(self.font()).elidedText(self._full, self._elide, width)
                    if width > 0 else self._full)
         QLabel.setText(self, painted)
+
+
+class _NoticeChip(QPushButton):
+    """A small push button whose label elides instead of flooring its row's width.
+
+    A plain button, NOT a QToolButton InstantPopup: its menu opens through
+    ``EventTable._exec_menu``, the one seam tests can answer (an InstantPopup menu is a
+    C++ ``QMenu::exec`` the suite's modal guard cannot see).
+    """
+
+    _MIN_WIDTH = 28
+
+    def __init__(self, slot_text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self._slot_text = str(slot_text)
+        # The slot is sized for ``slot_text`` and kept while hidden, so the row never
+        # reflows when the chip appears, goes or changes its text (a longer text elides).
+        policy = QSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        policy.setRetainSizeWhenHidden(True)
+        self.setSizePolicy(policy)
+
+    def _size_for(self, text: str) -> QSize:
+        """QPushButton.sizeHint's own computation, for ``text`` instead of text()."""
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        opt.text = text
+        size = QSize(self.fontMetrics().horizontalAdvance(text),
+                     max(self.fontMetrics().height(), 14))
+        return self.style().sizeFromContents(
+            QStyle.ContentsType.CT_PushButton, opt, size, self)
+
+    def _chrome_width(self) -> int:
+        return max(0, self._size_for("").width())
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self._size_for(self._slot_text)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        full = self.sizeHint()
+        return QSize(min(full.width(), self._MIN_WIDTH), full.height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        available = self.width() - self._chrome_width()
+        if self.text() and available < self.fontMetrics().horizontalAdvance(self.text()):
+            opt.text = self.fontMetrics().elidedText(self.text(), Qt.ElideRight,
+                                                     max(0, available))
+        QStylePainter(self).drawControl(QStyle.ControlElement.CE_PushButton, opt)
 
 
 class _BatchCuration(NamedTuple):
@@ -7469,6 +7814,17 @@ class EventTable(QWidget):
     acceptanceRefused = Signal(int)
     inspectRequested = Signal(int)
     galleryRequested = Signal(int)
+    #: One of the notice chip's menu entries was chosen (its key, see _NOTICE_ACTIONS).
+    noticeActionRequested = Signal(str)
+
+    #: The notice the chip's reserved slot is sized for.
+    _NOTICE_SLOT_TEXT = "⚠ Chain changed"
+    #: The notice chip's menu, built ONCE (key, label).
+    _NOTICE_ACTIONS: tuple[tuple[str, str], ...] = (
+        ("revert", "Revert form to this detection's chain"),
+        ("run", "Run detection with the form's chain…"),
+        ("open", "Open Signal Conditioning…"),
+    )
 
     _COLUMN_SETTINGS_KEY = 'inspector/event_columns_v1'
     _SCIENTIFIC_ORDER = ('accepted', 't_start_s', 'dwell_s', 'depth_pA',
@@ -7495,7 +7851,24 @@ class EventTable(QWidget):
         toolbar = QHBoxLayout()
         self.column_toolbar = toolbar
         toolbar.setContentsMargins(0, 0, 0, 0)
-        toolbar.addStretch(1)
+        # Stretch 0: a widget the host inserts with a stretch (the table selector) takes
+        # the spare width; with none, this expanding spacer does.
+        toolbar.addStretch(0)
+        # A notice about the table on screen (e.g. "⚠ Chain changed"), horizontal only.
+        # Its slot is reserved even while hidden, so it never moves Columns…, the table
+        # selector or the rows below.
+        self.notice_chip = _NoticeChip(self._NOTICE_SLOT_TEXT)
+        self.notice_chip.setObjectName("eventTableNoticeChip")
+        self.notice_chip.setStyleSheet("QPushButton { color:#FFB74D; font-weight:600; }")
+        self.notice_chip.setVisible(False)
+        self.notice_menu = QMenu(self.notice_chip)
+        self._notice_actions = {}
+        for key, label in self._NOTICE_ACTIONS:
+            action = self.notice_menu.addAction(label)
+            action.setData(key)
+            self._notice_actions[key] = action
+        self.notice_chip.clicked.connect(self._open_notice_menu)
+        toolbar.addWidget(self.notice_chip)
         self.columns_button = QPushButton('Columns…')
         self.columns_button.setToolTip('Choose visible columns. Drag column headers to reorder; the view is remembered.')
         self.columns_menu = QMenu(self.columns_button)
@@ -8309,6 +8682,34 @@ class EventTable(QWidget):
             self.inspectRequested.emit(event_id)
         elif chosen is act_gallery:
             self.galleryRequested.emit(event_id)
+
+    def set_notice(self, text: str, tooltip: str = "",
+                   actions: Sequence[str] | None = None) -> None:
+        """Show (``text``) or hide (``""``) the toolbar notice chip.
+
+        Only text, tooltip and visibility change, and only when they differ: the chip and
+        its menu are built once, because this is called on every form edit.
+        """
+        text = str(text or "")
+        if text and self.notice_chip.text() != text:
+            self.notice_chip.setText(text)      # hidden, it keeps its last text
+        if self.notice_chip.toolTip() != tooltip:
+            self.notice_chip.setToolTip(tooltip)
+        wanted = set(self._notice_actions) if actions is None else set(actions)
+        for key, action in self._notice_actions.items():
+            if action.isVisible() != (key in wanted):
+                action.setVisible(key in wanted)
+        if self.notice_chip.isHidden() == bool(text):
+            self.notice_chip.setVisible(bool(text))
+
+    def notice_text(self) -> str:
+        return self.notice_chip.text() if not self.notice_chip.isHidden() else ""
+
+    def _open_notice_menu(self) -> None:
+        chip = self.notice_chip
+        chosen = self._exec_menu(self.notice_menu, chip.mapToGlobal(chip.rect().bottomLeft()))
+        if chosen is not None and chosen.data():
+            self.noticeActionRequested.emit(str(chosen.data()))
 
     @staticmethod
     def _exec_menu(menu, global_pos):

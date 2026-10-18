@@ -16,6 +16,18 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Added
 
+- Signal Conditioning window (Analysis ▸ Signal conditioning…, Ctrl+Shift+F; also the
+  Preprocess card's Open button, the Filter step and the baseline workspace's Advanced
+  signal-chain settings): the classical
+  detectors' stage editor, moved out of the Inspector into one built-once window with an
+  execution-order stage list, notices below the form, the full-height response view, protocol
+  Import/Export (versioned JSON, never overwriting) and Copy as Python. The Preprocess tab keeps
+  a fixed-height card. When the form's chain differs from the Schmitt/CUSUM detection on screen,
+  the event table shows "⚠ Chain changed" with Revert / Run / Open, and the card and window name
+  the differences. Recalling a protocol now sets every stage (stages it does not name, and the
+  low-pass, are turned off), and its name stays on the combo only while the form equals it —
+  a value the recording cannot hold (a cutoff above its Nyquist limit) drops it to "— manual —"
+  and the status bar names what changed.
 - Opt-in Comparison figures page: shared-axis per-recording facets, feature-pair matrices with
   common-bin count histograms, and strip/swarm individual-event plots with optional descriptive
   boxes. Seaborn renders prepared observations; generation is explicit, source identities and

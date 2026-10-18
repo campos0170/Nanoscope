@@ -1315,7 +1315,7 @@
     "key": "detection",
     "area": "Preprocess, recording-specific references, Schmitt/CUSUM and ML detection",
     "summary": "Inspector → Analysis contains Preprocess, Detection, ML and Measure tabs. Essential/Advanced controls change visibility, not scientific settings. Preprocess separates Signal chain from Open-pore baseline. Eight conditioning stages and a processed preview make the execution chain visible. New Schmitt/CUSUM runs with high-pass use it for candidate localization while measuring amplitudes on a companion chain with high-pass omitted; boundary-dependent measurements can still change. Detection selects Schmitt trigger (hysteresis) or Sequential CUSUM and explicit thresholds, dwell, merge and polarity. ML has its own model-specific preprocessing. User-supplied open-pore references are explicit, recording/channel-specific Schmitt/CUSUM inputs, not a universal correction.",
-    "opened_by": "Inspector → Analysis → Preprocess / Detection / ML / Measure. Detect is also Analysis → Run detection (Ctrl+D). Baseline reference… opens the reference controls; Preprocess section selects Signal chain or Open-pore baseline. Sources: nanoscope/gui/panels.py, analysis_panel.py, baseline_panel.py, open_pore_preview.py; nanoscope/analysis/baseline.py and reference_context.py.",
+    "opened_by": "Inspector → Analysis → Preprocess / Detection / ML / Measure. Detect is also Analysis → Run detection (Ctrl+D). Baseline reference… opens the reference controls; Preprocess section selects Signal chain or Open-pore baseline; the signal-chain stage forms live in the Signal Conditioning window (Analysis ▸ Signal conditioning…, Ctrl+Shift+F, or Open Signal Conditioning… on the card). Sources: nanoscope/gui/panels.py, signal_conditioning.py, analysis_panel.py, baseline_panel.py, open_pore_preview.py; nanoscope/analysis/baseline.py and reference_context.py.",
     "gotchas": [
       "Selecting a different recording or channel RE-SEEDS the whole detection form from that target's stored run — anything you had dialled in and not yet run is replaced without a prompt (clicking the same channel again is treated as navigation and changes nothing).",
       "k_out is clamped live to stay strictly below k_in, so lowering k_in can silently move k_out down for you (to k_in − 0.5); when restoring settings by hand, set k_in first.",
@@ -1340,7 +1340,7 @@
         "label": "Preprocess",
         "kind": "tab",
         "group": "DetectionPanel tab strip",
-        "what_it_does": "Shows a Preprocess section selector. Signal chain contains all eight conditioning stages, execution-order and response readouts, and the candidate-localization preview; Open-pore baseline contains the quantitative reference estimator.",
+        "what_it_does": "Shows a Preprocess section selector. Signal chain holds the compact chain card (comparison with the table on screen, warnings, protocol, scope and execution order), the pinned Open Signal Conditioning… button and the processed-trace preview toggle — the eight stage forms themselves live in the Signal Conditioning window; Open-pore baseline contains the quantitative reference estimator.",
         "notes": "This is the tab that is showing when the app opens. Every page of every tab stays alive, so a filter you enabled here is still applied when you are looking at the Detection tab."
       },
       {
@@ -1371,246 +1371,300 @@
         "notes": "A bare DetectionPanel has this tab blank; in the running app the measurement tool is installed into it. Raising the tab never turns the cursors on or off."
       },
       {
-        "label": "Low-pass",
-        "kind": "combo",
-        "group": "Preprocess ▸ Signal chain",
-        "what_it_does": "Picks which filter stage's controls are shown below. Tooltip: \"Pick a filter stage to edit. Enabled stages are marked ● here and listed in the summary below; every stage stays active whether or not its page is the one currently shown.\"",
-        "notes": "The eight items, in order, are exactly: Low-pass, High-pass, Notch, Median, Baseline drift, Running mean, Savitzky-Golay, Normalize. An enabled stage's item is rewritten with a \"● \" prefix (e.g. \"● Notch\"). Switching pages does NOT switch stages off — this control only changes what you are looking at."
+        "label": "Stages, in execution order",
+        "kind": "list",
+        "group": "Signal Conditioning",
+        "what_it_does": "The eight signal-chain stages in the order they RUN: 1 Notch, 2 Median, 3 High-pass, 4 Baseline drift, 5 Running mean, 6 Savitzky-Golay, 7 Normalize, 8 Low-pass (applied inside detection). Each row shows the stage's current setting; tick a row to enable or disable that stage, select it to edit it in the form below. Up/Down move between stages and Space toggles the current one.",
+        "notes": "objectName signalConditioningStages. The list is a view of the form: ticking a row writes the stage's own enable checkbox, and a protocol recall or project restore re-renders every row. With a sample rate, the low-pass row's tooltip gives its true -3 dB corner. The old stage-selector combo of the Preprocess tab is hidden while the editor lives in this window; keyboard focus lands on this list whenever the window opens."
+      },
+      {
+        "label": "Follow main trace",
+        "kind": "toolbar toggle",
+        "group": "Signal Conditioning ▸ toolbar",
+        "what_it_does": "On (default): the window this workspace describes — the START/STOP Copy as Python slices — follows the main trace's visible range. Off: it keeps the range it last followed; selecting another recording or channel drops it (the script then takes the whole channel).",
+        "notes": "First on the toolbar so it stays visible at the window's 760 px minimum width; later actions overflow into the » menu. Remembered between sessions."
+      },
+      {
+        "label": "Show main trace",
+        "kind": "toolbar action",
+        "group": "Signal Conditioning ▸ toolbar",
+        "what_it_does": "Lowers this window and brings the main window's trace in front (on macOS a child window otherwise stays above its parent)."
+      },
+      {
+        "label": "Copy as Python",
+        "kind": "toolbar action",
+        "group": "Signal Conditioning ▸ toolbar",
+        "what_it_does": "Copies a script that opens the recording with NanoScope's own reader, applies the channel calibration (raw × gain + offset), conditions the WHOLE channel with nanoscope.analysis.conditioning.conditioned_trace and the chain on the form, then slices the followed window. A derived segment is cut from its parent before conditioning.",
+        "notes": "The status bar reports the script's line count."
+      },
+      {
+        "label": "ML chain…",
+        "kind": "toolbar action",
+        "group": "Signal Conditioning ▸ toolbar",
+        "what_it_does": "Shows the ML detector's own model preprocessing (Inspector ▸ Analysis ▸ ML): the ML detector does not use this chain."
+      },
+      {
+        "label": "Import protocols…",
+        "kind": "toolbar action",
+        "group": "Signal Conditioning ▸ toolbar",
+        "what_it_does": "Adds the protocols of a NanoScope conditioning-protocol .json file to your library. Never overwrites: a name already in use is imported as 'name (imported)', an identical protocol is skipped.",
+        "notes": "A file that is not a protocol file, a newer file version, an unknown key or a value outside a box's range is refused by name — nothing is silently clamped."
+      },
+      {
+        "label": "Export protocols…",
+        "kind": "toolbar action",
+        "group": "Signal Conditioning ▸ toolbar",
+        "what_it_does": "Writes your own protocols (every stage of each) to a versioned .json file, with the usual overwrite confirmation for the file actually written ('.json' is added when the name has no suffix).",
+        "notes": "The three shipped protocols are not exported: every NanoScope has them."
+      },
+      {
+        "label": "Revert to detection's chain",
+        "kind": "button",
+        "group": "Signal Conditioning ▸ status row",
+        "what_it_does": "Enabled when the form differs from the chain the Schmitt/CUSUM table on screen was detected with; puts that chain back on the form.",
+        "notes": "objectName signalConditioningRevert. Chain edits are not on Edit ▸ Undo; this is the way back. It never takes keyboard focus on open."
+      },
+      {
+        "label": "Run detection…",
+        "kind": "button",
+        "group": "Signal Conditioning ▸ status row",
+        "what_it_does": "Analysis ▸ Run detection with the form's chain (asks first when the table on screen carries hand curation). Enabled exactly when that action is.",
+        "notes": "objectName signalConditioningRun."
       },
       {
         "label": "Active execution order: raw calibrated signal (no stages enabled)",
         "kind": "label",
         "group": "Preprocess ▸ Signal chain",
         "what_it_does": "Read-only summary of the actual kernel execution order, not merely the editor order. With high-pass on it reads Candidate-localization order and states that quantitative measurement omits high-pass.",
-        "notes": "This is the only place the whole recipe is visible at once; the stage pages show one stage at a time."
+        "notes": "This is the only place the whole recipe is visible at once in the dock: it is the last line of the Preprocess ▸ Signal chain card (objectName chainOrderNote) while the stage forms live in the Signal Conditioning window, whose stage list shows the same order row by row."
       },
       {
         "label": "enable Low-pass",
         "kind": "checkbox",
-        "group": "Preprocess ▸ Signal chain ▸ Low-pass",
+        "group": "Signal Conditioning ▸ Low-pass",
         "what_it_does": "Turns the low-pass filter on. With it off the detector sees the full-bandwidth trace and the rise-time line reads \"rise time: — (filter disabled; full bandwidth)\".",
         "notes": "Unlike the other stages, the low-pass is applied inside the detector itself, so its cutoff/order/type are stamped into the run's provenance and are what decides which events get marked filter_limited. Unchecking it sends filter_cutoff_hz = None (the detector's 'off' sentinel)."
       },
       {
         "label": "type",
         "kind": "combo",
-        "group": "Preprocess ▸ Signal chain ▸ Low-pass",
+        "group": "Signal Conditioning ▸ Low-pass",
         "what_it_does": "Chooses the low-pass design: Bessel (default), Butterworth or Gaussian. Tooltip: \"Bessel (the electrophysiology convention) has a maximally flat group delay: it preserves pulse shape and does not ring on a step. Butterworth rolls off harder for the same order but overshoots a square blockade. Gaussian has no overshoot at all and no order (it is a symmetric smoothing kernel).\"",
         "notes": "Items in order: Bessel, Butterworth, Gaussian. Also from the tooltip: \"All three run zero-phase (forward+backward), so edges do not shift — but the magnitude is SQUARED: the response is -6 dB at the nominal cutoff, not -3 dB.\" Choosing Gaussian greys out the order spin."
       },
       {
         "label": "order",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Low-pass",
+        "group": "Signal Conditioning ▸ Low-pass",
         "what_it_does": "How many poles the low-pass has. Tooltip: \"Number of poles. Higher is a steeper roll-off and a longer rise time — and zero-phase filtering DOUBLES the effective order on top of this. Gaussian ignores it. 8 is the hardware convention for an Axopatch-style Bessel.\" Raising it cuts more high-frequency noise but blurs the fastest events further; lowering it keeps edges sharper and noisier.",
         "notes": "Range 1–10, default 8. DISABLED whenever type is Gaussian, and its tooltip then reads \"Gaussian is a symmetric kernel and has no order.\" Changing it also re-measures the rise-time readout."
       },
       {
         "label": "cutoff",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Low-pass",
+        "group": "Signal Conditioning ▸ Low-pass",
         "what_it_does": "The low-pass corner frequency in Hz. Tooltip: \"Nominal -3 dB design cutoff. Once a channel is selected the maximum is clamped to just below that recording's Nyquist frequency, so a cutoff the kernel would reject cannot be dialled in.\" Lowering it removes more noise (shallow events become detectable) but lengthens the rise time, so short events are attenuated and their dwells biased long; raising it keeps fast events honest but lets more noise through.",
         "notes": "Range 1.0 Hz up to just under Nyquist (5,000,000.0 Hz until a channel is selected), step 1000.0, default 10,000.0 Hz. Selecting a slower recording can silently pull an out-of-range value down. Above fs/2.5 the rise-time line adds: \"⚠ above fs/2.5 …: the transition band is truncated by Nyquist, so this filter barely attenuates anything and the order is meaningless.\""
       },
       {
         "label": "rise time: — (select a channel)",
         "kind": "label",
-        "group": "Preprocess ▸ Signal chain ▸ Low-pass",
+        "group": "Signal Conditioning ▸ Low-pass",
         "what_it_does": "Bold live readout of the filter's real time resolution, e.g. \"rise time: 34 µs (8-pole Bessel, zero-phase)  →  dwells below ~68 µs are filter-limited (depth attenuated, dwell biased long).\" Use it to decide whether your shortest events survive the filter you chose.",
         "notes": "Reads \"— (sample rate unknown)\" on a recording with no time base, \"— (filter disabled; full bandwidth)\" when the low-pass is off, and \"— (cutoff X Hz is too low to measure live at Y Hz; detection still measures it)\" when the live probe would be too expensive (over 2,000,000 samples). It follows type and order, not just the cutoff."
       },
       {
         "label": "enable High-pass",
         "kind": "checkbox",
-        "group": "Preprocess ▸ Signal chain ▸ High-pass",
+        "group": "Signal Conditioning ▸ High-pass",
         "what_it_does": "Turns on a zero-phase high-pass in the classical candidate-localization branch. New Schmitt/CUSUM event-table amplitudes are measured on the companion chain with high-pass omitted.",
         "notes": "The tooltip states that the orange preview and candidate response include high-pass; baseline, depth, fractional blockade, mean/max amplitude and SNR do not. Start/end, dwell, rise/fall and ECD limits still inherit the filtered boundaries, so keep the cutoff well below the event bandwidth. Manual measurement of Processed signal follows the orange branch."
       },
       {
         "label": "type",
         "kind": "combo",
-        "group": "Preprocess ▸ Signal chain ▸ High-pass",
+        "group": "Signal Conditioning ▸ High-pass",
         "what_it_does": "Chooses the high-pass design: Butterworth (default) or Bessel. Tooltip: \"Butterworth has a maximally flat pass-band above the cutoff. Bessel trades some roll-off sharpness for a flatter group delay. (Gaussian is a low-pass kernel and has no high-pass counterpart.)\"",
         "notes": "Items in order: Butterworth, Bessel."
       },
       {
         "label": "order",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ High-pass",
+        "group": "Signal Conditioning ▸ High-pass",
         "what_it_does": "Poles in the high-pass. Tooltip: \"Number of poles. A steeper high-pass droops and rings a square blockade harder, not less — keep it low and keep the cutoff far below the event band.\"",
         "notes": "Range 1–10, default 4."
       },
       {
         "label": "cutoff",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ High-pass",
+        "group": "Signal Conditioning ▸ High-pass",
         "what_it_does": "Where drift removal starts, in Hz. Raising it flattens drift more aggressively but eats further into real event shape; lowering it is safer for event fidelity and removes less drift.",
         "notes": "Range 0.1 Hz up to just under Nyquist (5,000,000.00 Hz until a channel is selected), step 10.0, default 100.00 Hz. Carries the same distortion warning as the enable box."
       },
       {
         "label": "enable (mains hum + harmonics, zero-phase)",
         "kind": "checkbox",
-        "group": "Preprocess ▸ Signal chain ▸ Notch",
+        "group": "Signal Conditioning ▸ Notch",
         "what_it_does": "Removes mains hum at the line frequency and its harmonics without shifting edges in time.",
         "notes": "Nearly free for sub-millisecond events; it distorts slow (~10 ms) events whose own frequency band overlaps the line."
       },
       {
         "label": "frequency",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Notch",
+        "group": "Signal Conditioning ▸ Notch",
         "what_it_does": "The mains line frequency to remove. Tooltip: \"Mains line frequency: 60 Hz in the Americas, 50 Hz in most of the world.\"",
         "notes": "Range 1.0–100,000.0 Hz (capped just under Nyquist once a channel is selected), step 10.0, default 60.0 Hz."
       },
       {
         "label": "harmonics",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Notch",
+        "group": "Signal Conditioning ▸ Notch",
         "what_it_does": "Tooltip: \"How many multiples of the line to notch (60/120/180 …). Harmonics at or above Nyquist are skipped automatically.\" Raise it when hum is visible at 120/180 Hz as well as at the fundamental.",
         "notes": "Range 1–20, default 3. The note under the response plot lists exactly which lines will be notched and how deep the deepest one is."
       },
       {
         "label": "Q",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Notch",
+        "group": "Signal Conditioning ▸ Notch",
         "what_it_does": "Tooltip: \"Quality factor: higher Q is a narrower notch (Q=30 at 60 Hz is ~2 Hz wide).\" Raise it to take out less of the surrounding signal; lower it to catch a wandering line frequency at the cost of a wider bite.",
         "notes": "Range 1.0–500.0, step 5.0, default 30.0. The response note warns that a narrow notch \"rings for roughly the inverse of that at each end of the trace\"."
       },
       {
         "label": "enable (sliding median, despikes edges intact)",
         "kind": "checkbox",
-        "group": "Preprocess ▸ Signal chain ▸ Median",
+        "group": "Signal Conditioning ▸ Median",
         "what_it_does": "Deletes single-sample spikes and glitches while leaving square event edges intact. Applied early in the chain, so spikes are gone before any smoothing can spread them.",
         "notes": "A median has no frequency response, so the response plot goes blank and says so: \"A sliding median is a NON-LINEAR rank filter: it has no transfer function, so there is no |H(f)| to draw.\""
       },
       {
         "label": "window",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Median",
+        "group": "Signal Conditioning ▸ Median",
         "what_it_does": "Tooltip: \"Median window in seconds. Rejects spikes up to about half the window wide, so keep it a few samples — MUCH shorter than the shortest real event, or the median eats the events along with the spikes. Clamped up to an odd sample count.\"",
         "notes": "Range 0.00001–1.00000 s, step 0.00005, default 0.00010 s."
       },
       {
         "label": "remove baseline wander (flatten slow drift)",
         "kind": "checkbox",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Estimate a slow baseline envelope and subtract its variation while retaining the representative open-pore level. This can flatten slow drift before classical detection.",
         "notes": "The retained DC reference is the median of the estimated baseline, not proof that every absolute level or event depth is unchanged. The estimator/window can absorb long events, distort transitions or amplify wander; inspect before/after traces and warnings. This is different from a known-current reference, which supplies the level against which detection is computed. Source: nanoscope/analysis/baseline.py, remove_baseline_wander."
       },
       {
         "label": "method",
         "kind": "combo",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Choose the baseline-drift subtraction estimator.",
         "notes": "Choices: block median, percentile, ASLS, event-masked median, robust median, and Savitzky-Golay baseline (subtract). Parameters depend on the selected method. This stage subtracts a fitted baseline; it is different from specifying an open-pore reference for detection."
       },
       {
         "label": "window",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Tooltip: \"Smoothing window for the open-pore estimate. Must be MUCH longer than the longest event, or the baseline dives into events and subtracts them (depths come out shallow, short events vanish).\" Raise it for safety on long events; lower it only to follow faster drift.",
         "notes": "Range 0.001–60.000 s, step 0.1, default 0.500 s. Changing it also changes what ASLS's smoothness means (see below)."
       },
       {
         "label": "Block median has no shape parameters — the window above is all it takes.",
         "kind": "label",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift (block median)",
+        "group": "Signal Conditioning ▸ Baseline drift (block median)",
         "what_it_does": "Explains why no extra controls appear when the block-median estimator is selected."
       },
       {
         "label": "percentile",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift (percentile)",
+        "group": "Signal Conditioning ▸ Baseline drift (percentile)",
         "what_it_does": "Tooltip: \"How far toward the OPEN-PORE side to take the level, already sign-corrected for polarity — 80 means 'the level 80% of the way toward open pore', not a raw numpy percentile. Raise it when events are dense enough to drag a median (the case this method exists for); lower it when the trace is mostly open pore.\"",
         "notes": "Range 0.1–99.9, step 5.0, default 80.0. Only visible when method = percentile."
       },
       {
         "label": "smoothness (lam)",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift (ASLS)",
+        "group": "Signal Conditioning ▸ Baseline drift (ASLS)",
         "what_it_does": "Tooltip: \"Smoothness (Eilers-Boelens lambda). Higher is a stiffer, flatter baseline. It is measured in BLOCK units, so its meaning rescales with the window and the knot spacing below — changing the window without revisiting this changes what ASLS does.\"",
         "notes": "Range 1–1,000,000,000, step 10,000, default 60,000. Only visible when method = ASLS."
       },
       {
         "label": "asymmetry (p)",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift (ASLS)",
+        "group": "Signal Conditioning ▸ Baseline drift (ASLS)",
         "what_it_does": "Tooltip: \"Asymmetry. Small means heavily one-sided, which is what lets the fit ignore the events and follow the open pore. Raising it toward 0.5 makes the fit symmetric — it will start tracking events.\"",
         "notes": "Range 0.00001–0.50000, step 0.001, default 0.00100. Only visible when method = ASLS."
       },
       {
         "label": "iterations",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift (ASLS)",
+        "group": "Signal Conditioning ▸ Baseline drift (ASLS)",
         "what_it_does": "Tooltip: \"Reweighting iterations. More costs time and converges the asymmetric fit further onto the open-pore side.\"",
         "notes": "Range 1–100, default 10. Only visible when method = ASLS."
       },
       {
         "label": "knot spacing",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Baseline drift (ASLS)",
+        "group": "Signal Conditioning ▸ Baseline drift (ASLS)",
         "what_it_does": "Tooltip: \"Knot spacing as a fraction of the window. Finer than 1 so some knots fall between dense events; the smoothness comes from lambda, not from this.\"",
         "notes": "Range 0.001–1.000, step 0.05, default 0.100. Only visible when method = ASLS."
       },
       {
         "label": "enable (centred moving average, zero-phase)",
         "kind": "checkbox",
-        "group": "Preprocess ▸ Signal chain ▸ Running mean",
+        "group": "Signal Conditioning ▸ Running mean",
         "what_it_does": "Turns on a plain centred box average — fast, unbiased noise reduction that does not shift features in time, but rounds peaks and smears steps.",
         "notes": "Applied on the already-flattened trace, just before the Savitzky-Golay stage."
       },
       {
         "label": "window",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Running mean",
+        "group": "Signal Conditioning ▸ Running mean",
         "what_it_does": "Tooltip: \"Averaging window in seconds. Suppresses noise by about sqrt(window·fs), but a box average rounds peaks and smears steps — keep it SHORTER than the shortest event you care about. Centred, so it does not shift features in time.\"",
         "notes": "Range 0.00001–1.00000 s, step 0.0001, default 0.00050 s. If the window works out to a single sample the note under the plot says the stage \"is the IDENTITY — it is enabled but changes nothing. Widen the window.\""
       },
       {
         "label": "enable (peak-preserving polynomial smooth)",
         "kind": "checkbox",
-        "group": "Preprocess ▸ Signal chain ▸ Savitzky-Golay",
+        "group": "Signal Conditioning ▸ Savitzky-Golay",
         "what_it_does": "Turns on polynomial-in-a-window smoothing, which suppresses noise while preserving peak height and edges far better than a moving average. It is applied last in the chain.",
         "notes": "The response note warns when it peaks above the pass band: \"a Savitzky-Golay overshoots the plateau of a square blockade and leaves an opposite-sign lobe flanking each edge.\""
       },
       {
         "label": "window",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Savitzky-Golay",
+        "group": "Signal Conditioning ▸ Savitzky-Golay",
         "what_it_does": "Tooltip: \"Smoothing window in seconds. Keep it SHORTER than the shortest event you care about, or the smoother rounds the event off along with the noise. It is clamped up to an odd sample count with more points than the polynomial order.\"",
         "notes": "Range 0.0001–1.0000 s, step 0.0005, default 0.0010 s."
       },
       {
         "label": "poly order",
         "kind": "spinbox",
-        "group": "Preprocess ▸ Signal chain ▸ Savitzky-Golay",
+        "group": "Signal Conditioning ▸ Savitzky-Golay",
         "what_it_does": "Tooltip: \"Order of the polynomial fitted in each window. 2–3 is typical; a higher order follows sharper curvature but smooths less.\"",
         "notes": "Range 2–6, default 3."
       },
       {
         "label": "enable (rescale the whole trace — NOT pA)",
         "kind": "checkbox",
-        "group": "Preprocess ▸ Signal chain ▸ Normalize",
+        "group": "Signal Conditioning ▸ Normalize",
         "what_it_does": "Turns on the stage that changes current samples to a dimensionless scale. The tooltip warns that current-derived amplitude/baseline/threshold readouts and pA/pA·s export fields retain legacy labels while no longer carrying physical units, and that centering invalidates fractional blockade (dI/I0).",
         "notes": "OFF by default and applied LAST. The group-level amber banner remains visible on every stage page. z-score, robust and min–max are data-dependent affine transforms; model input additionally clips to a configured bound and can change event boundaries or counts. Index, time, source, review and status fields keep their ordinary meanings. Use Normalize to feed a model or compare dimensionless recordings, never to measure conductance."
       },
       {
         "label": "mode",
         "kind": "combo",
-        "group": "Preprocess ▸ Signal chain ▸ Normalize",
+        "group": "Signal Conditioning ▸ Normalize",
         "what_it_does": "Which rescale. The four entries are \"z-score  (x − mean) / std\", \"robust z  (x − median) / 1.4826·MAD\", \"min–max  → [−0.5, +0.5]\" and \"model input  (trimmed σ, clipped) → [−1, +1]\".",
         "notes": "z-score uses the whole trace; robust z uses the detector's 1.4826·MAD noise scale; min–max is sensitive to extreme samples; model input uses a twice-trimmed median/MAD, clips at the configured sigma bound, and divides to [−1,+1]. The menu is built from the kernels' own mode list."
       },
       {
         "label": "frequency / |H| response plot",
         "kind": "label",
-        "group": "Preprocess ▸ Signal chain",
+        "group": "Signal Conditioning ▸ Response tab",
         "what_it_does": "Draws the magnitude response of the stage currently selected in the combo, at the exact values in the boxes above it, with a dashed orange line at the nominal cutoff and a dotted grey line at -3 dB. It shows the response AS APPLIED, so the zero-phase squaring is visible rather than implied.",
         "notes": "Blank with an explanation for Median and Baseline drift (neither has a transfer function) and until a channel with a known sample rate is selected (\"select a channel with a known sample rate to see its frequency response\")."
       },
       {
         "label": "response note (line under the plot)",
         "kind": "label",
-        "group": "Preprocess ▸ Signal chain",
+        "group": "Signal Conditioning ▸ Response tab",
         "what_it_does": "One sentence saying what the selected filter really does, e.g. \"At the nominal 10000 Hz the applied response is -6.0 dB — zero-phase, so |H| is SQUARED. The true -3 dB corner is 7800 Hz (0.78× the number in the box).\" For the window smoothers it gives the width in samples and warns that whichever of the smoother and the low-pass has the LOWER -3 dB point sets the real bandwidth — and that the rise-time readout only knows about the low-pass."
       },
       {
@@ -1626,6 +1680,41 @@
         "group": "Preprocess ▸ Signal chain",
         "what_it_does": "Orange warning that appears when the preview could not be computed. It carries the kernel's own reason for a misconfigured stage (an over-Nyquist cutoff, a detrend window longer than the trace, a segment too short for the filter's padding, or a drift window so long the baseline is constant and tracks nothing), and the panel's own reason otherwise — \"sample rate unknown — the filter stages are designed in Hz and seconds, so the processed trace cannot be computed for this recording (detection is disabled for the same reason).\" It also reports what the PLOT could not do, so a ticked box over a plot with no orange curve is never silent.",
         "notes": "Without it the preview curve would simply vanish with the box still ticked."
+      },
+      {
+        "label": "Open Signal Conditioning…",
+        "kind": "button",
+        "group": "Preprocess ▸ Signal chain",
+        "what_it_does": "Opens the Signal Conditioning window (also Analysis ▸ Signal conditioning…, Ctrl+Shift+F, and the workflow strip's Filter step) on the stage the editor last showed. Pinned above the card with 'show processed trace on the plot', so it stays visible whatever the scroll position or stale banner.",
+        "notes": "objectName openSignalConditioningButton. There is one window: it is built on first open, closing it only hides it, and every setting stays on the form."
+      },
+      {
+        "label": "chain status (card line 1)",
+        "kind": "label",
+        "group": "Preprocess ▸ Signal chain",
+        "what_it_does": "Two fixed lines comparing the form's chain with the chain the event table on screen was detected with: 'The form's chain is the one the Schmitt detection on screen ran with.', or '⚠ The form differs from the chain the Schmitt detection on screen ran with: low-pass 10000 → 5000 Hz; … Revert, or run detection to apply it.' (orange), or that an ML or reconciled table was not produced by this chain.",
+        "notes": "objectName chainStatusNote. Fixed height: a change of verdict never moves the rows below."
+      },
+      {
+        "label": "chain warning (card line 2)",
+        "kind": "label",
+        "group": "Preprocess ▸ Signal chain",
+        "what_it_does": "Bold orange, two reserved lines: 'NORMALIZE ON: current-derived values are dimensionless', 'high-pass affects localization and boundaries', or the headline of a refused detrend method. Empty (but reserved) when there is nothing to say.",
+        "notes": "objectName chainWarningNote."
+      },
+      {
+        "label": "Protocol: … (card)",
+        "kind": "label",
+        "group": "Preprocess ▸ Signal chain",
+        "what_it_does": "One line naming the protocol the form currently equals, or 'Protocol: — manual —'.",
+        "notes": "objectName chainProtocolNote. The protocol combo itself is in the Signal Conditioning window."
+      },
+      {
+        "label": "Used by Schmitt/CUSUM detection, Measure ‘Processed signal’ and Export processed trace — not by the ML detector (ML tab ▸ Model preprocessing).",
+        "kind": "label",
+        "group": "Preprocess ▸ Signal chain",
+        "what_it_does": "Grey scope line: which analyses read this chain. The same sentence heads the Signal Conditioning window and the stage list's tooltip.",
+        "notes": "objectName chainScopeNote."
       },
       {
         "label": "k_in (enter)",
@@ -1728,56 +1817,56 @@
         "label": "Signal chain",
         "kind": "group",
         "group": "Preprocess tab",
-        "what_it_does": "The group box that holds all seven pre-detection filter stages. The combo inside it picks which stage's controls are shown; every stage stays active whether or not its page is the one currently on screen, so a stage you cannot see is still being applied.",
+        "what_it_does": "The Preprocess section holding the chain card. The stage forms (all eight pre-detection stages) are in the Signal Conditioning window, where the stage list picks which stage's controls are shown; every stage stays active whether or not its form is the one on screen, so a stage you cannot see is still being applied.",
         "from_crosscheck": true
       },
       {
         "label": "High-pass",
-        "kind": "combo item",
-        "group": "Preprocess tab > Signal chain (stage selector combo)",
-        "what_it_does": "Second item of the filter-stage combo; raises the high-pass (DC / slow-drift removal) page. When the stage is enabled the item text becomes '● High-pass' and the stage is added to the 'Active: …' summary line.",
+        "kind": "list row",
+        "group": "Signal Conditioning ▸ Stages, in execution order",
+        "what_it_does": "Row 3 of the stage list: selecting it raises the High-pass form below the list, ticking it enables the stage (the same checkbox as the form's own enable). Its row says (localization only): with high-pass on, amplitudes are measured on a companion trace with the high-pass omitted.",
         "from_crosscheck": true
       },
       {
         "label": "Notch",
-        "kind": "combo item",
-        "group": "Preprocess tab > Signal chain (stage selector combo)",
-        "what_it_does": "Raises the mains-hum notch page. Shown as '● Notch' once enabled.",
+        "kind": "list row",
+        "group": "Signal Conditioning ▸ Stages, in execution order",
+        "what_it_does": "Row 1 of the stage list: selecting it raises the Notch form below the list, ticking it enables the stage (the same checkbox as the form's own enable).",
         "from_crosscheck": true
       },
       {
         "label": "Median",
-        "kind": "combo item",
-        "group": "Preprocess tab > Signal chain (stage selector combo)",
-        "what_it_does": "Raises the sliding-median despiker page. Shown as '● Median' once enabled. This stage has no frequency-response curve — the plot clears and the note explains that a median is a non-linear rank filter.",
+        "kind": "list row",
+        "group": "Signal Conditioning ▸ Stages, in execution order",
+        "what_it_does": "Row 2 of the stage list: selecting it raises the Median form below the list, ticking it enables the stage (the same checkbox as the form's own enable). It has no frequency-response curve — the Response tab clears and its note explains that a median is a non-linear rank filter.",
         "from_crosscheck": true
       },
       {
         "label": "Baseline drift",
-        "kind": "combo item",
-        "group": "Preprocess tab > Signal chain (stage selector combo)",
-        "what_it_does": "Raises the baseline-wander removal page. Shown as '● Baseline drift' once enabled. Like the median it has no |H(f)| curve: the plot clears and the note says it is an estimator, not a filter.",
+        "kind": "list row",
+        "group": "Signal Conditioning ▸ Stages, in execution order",
+        "what_it_does": "Row 4 of the stage list: selecting it raises the Baseline drift form below the list, ticking it enables the stage (the same checkbox as the form's own enable). Its row says (estimator). Like the median it has no |H(f)| curve: the Response tab clears and the note says it is an estimator, not a filter.",
         "from_crosscheck": true
       },
       {
         "label": "Running mean",
-        "kind": "combo item",
-        "group": "Preprocess tab > Signal chain (stage selector combo)",
-        "what_it_does": "Raises the centred moving-average page. Shown as '● Running mean' once enabled.",
+        "kind": "list row",
+        "group": "Signal Conditioning ▸ Stages, in execution order",
+        "what_it_does": "Row 5 of the stage list: selecting it raises the Running mean form below the list, ticking it enables the stage (the same checkbox as the form's own enable).",
         "from_crosscheck": true
       },
       {
         "label": "Savitzky-Golay",
-        "kind": "combo item",
-        "group": "Preprocess tab > Signal chain (stage selector combo)",
-        "what_it_does": "Raises the polynomial-smoothing page. Shown as '● Savitzky-Golay' once enabled.",
+        "kind": "list row",
+        "group": "Signal Conditioning ▸ Stages, in execution order",
+        "what_it_does": "Row 6 of the stage list: selecting it raises the Savitzky-Golay form below the list, ticking it enables the stage (the same checkbox as the form's own enable).",
         "from_crosscheck": true
       },
       {
         "label": "Normalize",
-        "kind": "combo item",
-        "group": "Preprocess tab > Signal chain (stage selector combo)",
-        "what_it_does": "Raises the whole-trace rescale page — the eighth and LAST stage in the chain. Shown as '● Normalize' once enabled.",
+        "kind": "list row",
+        "group": "Signal Conditioning ▸ Stages, in execution order",
+        "what_it_does": "Row 7 of the stage list: selecting it raises the Normalize form below the list, ticking it enables the stage (the same checkbox as the form's own enable). Its row says (changes units): it is the last stage before the detector's own low-pass.",
         "from_crosscheck": true
       },
       {
@@ -2231,11 +2320,11 @@
         "notes": "Session-scoped on purpose — a persisted list would accumulate dead paths. Re-loading a model already listed selects it rather than duplicating it. Disabled and reading 'none loaded' until the first load."
       },
       {
-        "label": "Protocol (combo + Save as… + Delete)",
+        "label": "Protocol (combo + Save as… + Rename + Delete)",
         "kind": "combo",
-        "group": "Signal chain",
-        "what_it_does": "Named preprocessing protocols: 'Save as…' captures the WHOLE chain — every stage's enable flag and parameters (low-pass, high-pass, notch incl. harmonics, median, baseline drift, running mean, Savitzky-Golay) — under a name; picking a name applies it all at once; Delete forgets it.",
-        "notes": "Stored per user (QSettings JSON), so protocols survive restarts and apply to any recording. Editing any stage by hand drops the combo back to '— manual —' — the name only stands while the chain is exactly the saved one. Detection thresholds (k_in/k_out/min dwell…) are deliberately NOT captured: a protocol conditions the signal, it must not change what an event is."
+        "group": "Signal Conditioning",
+        "what_it_does": "Named preprocessing protocols, at the top of the Signal Conditioning window: 'Save as…' captures the WHOLE chain — every stage's enable flag and parameters (low-pass, high-pass, notch incl. its line list, median, baseline drift, running mean, Savitzky-Golay, normalize) — under a name; picking a name sets EVERY stage (a stage the protocol does not use is turned off, the low-pass included); Rename and Delete act on your own protocols. The three shipped protocols (Host-guest, Zn2-insulin, Cu2-insulin) cannot be renamed or deleted.",
+        "notes": "Stored per user (QSettings JSON), so protocols survive restarts and apply to any recording. The combo shows a protocol's name only while the form still equals that protocol's complete chain; any difference — a hand edit, or a value the form clamps on this recording (a cutoff above its Nyquist limit), which the status bar then names — shows '— manual —'. Detection thresholds (k_in/k_out/min dwell…) are deliberately NOT captured: a protocol conditions the signal, it must not change what an event is. A stored protocol that cannot be read is skipped by Export and named."
       },
       {
         "label": "Controls",
@@ -2296,49 +2385,49 @@
       {
         "label": "event-masked median",
         "kind": "control",
-        "group": "Preprocess → Signal chain → Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Estimate baseline from an initial rough baseline, event mask and a tracking pass.",
         "notes": "Inspect mask threshold/dilation and both windows; heavy occupancy can leave insufficient open-pore evidence. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "robust median",
         "kind": "control",
-        "group": "Preprocess → Signal chain → Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Use the robust median baseline-drift estimator.",
         "notes": "Uses its method-specific robust handling; validate preservation of long and low-amplitude events. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "Savitzky-Golay baseline (subtract)",
         "kind": "control",
-        "group": "Preprocess → Signal chain → Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Subtract the smooth polynomial baseline estimate.",
         "notes": "Different from the Savitzky-Golay smoothing stage, which keeps the smooth fit rather than its residual. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "decimation",
         "kind": "control",
-        "group": "Preprocess → Signal chain → Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Set supported baseline-estimator calculation decimation.",
         "notes": "Numerical estimator parameter, not merely display decimation; method-specific controls apply. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "rough window / tracking window",
         "kind": "control",
-        "group": "Preprocess → Signal chain → Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Set the event-masked estimator’s rough and tracking windows.",
         "notes": "Recording-dependent seconds; they are distinct from the event-duration threshold. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "mask threshold / mask dilation",
         "kind": "control",
-        "group": "Preprocess → Signal chain → Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Control event exclusion in the masked baseline estimator.",
         "notes": "Threshold is in noise sigma; dilation is milliseconds. Inspect sensitivity to these scientific settings. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "poly order / decimation",
         "kind": "control",
-        "group": "Preprocess → Signal chain → Baseline drift",
+        "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Set Savitzky-Golay baseline polynomial order and calculation decimation.",
         "notes": "Applies only to the subtracting baseline estimator, not the separate smoothing page. Source: nanoscope/gui/panels.py."
       }
@@ -2727,6 +2816,13 @@
         "group": "Analysis panel — Results",
         "what_it_does": "Select Schmitt, CUSUM, ML or reconciled stored results when available.",
         "notes": "Shown in Merge sub-events above the table, e.g. CUSUM — N candidates. Selection recalls its recorded settings and does not rerun detection. Source: nanoscope/gui/analysis_panel.py."
+      },
+      {
+        "label": "⚠ Chain changed",
+        "kind": "button",
+        "group": "Analysis panel — Results",
+        "what_it_does": "Appears in the event table's toolbar when the form's chain differs from the chain the Schmitt/CUSUM table on screen was detected with; its tooltip names the differences. Its menu: Revert form to this detection's chain · Run detection with the form's chain… · Open Signal Conditioning….",
+        "notes": "objectName eventTableNoticeChip. Its slot is reserved even while hidden, so it never moves the table selector or Columns…. The rows themselves are not marked stale: they are a faithful record of the chain they were detected with."
       }
     ]
   },
