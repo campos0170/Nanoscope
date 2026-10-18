@@ -74,6 +74,34 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- Reopening a project with ML detections no longer shows a false "open-pore estimator
+  changed" banner when the stored windows differ from the defaults. The ML branch of the
+  stored-detection seeding restored only the ML tab and left the baseline form on the app
+  default, so the banner appeared and its "Re-measure depths" button would have re-measured with
+  the defaults instead of the windows the table was measured with. ML results saved without
+  stored parameters (pre-v3 projects) are unchanged. The baseline form is shared by every
+  detector on a channel, so a table of another detector measured with different windows still
+  reads as stale until it is selected.
+- The ML preprocessing median (`_decimated_median`) is a rolling order statistic instead of
+  ndimage's O(n*w) rank filter: about 40-50x faster at the 2501-tap Host-guest / Zn windows
+  (6.2 s to 0.16 s at 3M samples; 31 s to 0.6 s at 1.5M samples after decimation). Values are
+  identical on 240 synthetic cases and the 35 real-recording corpus tests (the sign of a zero
+  can differ when -0.0 and 0.0 are mixed). Non-finite input and windows longer than the signal
+  keep the previous path. The pinned md5 of `ml_preprocess.py` was re-pinned with this
+  verification; the median's arithmetic now also depends on
+  `acid_incubation_numerics.median_filter_1d`, which has its own tests.
+- Voltage dependence and its menu gate read tables from any primary detector (Schmitt, CUSUM,
+  ML): the one stored on the most recordings that can become a point (Schmitt on a tie) is
+  pooled for the whole series, recorded in saved workspaces, and named in the Pooled provenance
+  block when it is not Schmitt. An ML-only project previously had the action greyed out.
+- Event inspector: opens on the event selected in the table (and, re-opened, where you were)
+  instead of event 0; keyboard focus starts on the waveform instead of the "Event N" spin box,
+  so A/R/T and label digits reach their shortcuts; the first event no longer draws against a
+  0..1 pA placeholder range when the stale-measurement note arrives after the first draw.
+- Analysis > Event labels... fits a laptop screen: its explanation line wraps instead of
+  forcing a minimum width wider than the screen (1777 px at the app's 13 pt font).
+- The trace view gives the current channel more height than the command-voltage pane (5:2
+  instead of equal rows).
 - "Known open-pore current" accepted 0 pA (and anything that underflows to 0 in the
   float32 pipeline that reads it, e.g. 1e-300) with no error, then silently produced a
   NaN fractional depth on every event and a NaN Summary median with no explanation.

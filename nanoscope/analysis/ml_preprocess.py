@@ -91,6 +91,7 @@ import numpy as np
 from scipy.ndimage import binary_dilation, median_filter
 from scipy.signal import filtfilt, iirnotch, medfilt, savgol_filter
 
+from .acid_incubation_numerics import median_filter_1d
 from .filters import MODEL_INPUT_CLIP_SIGMA, robust_normalize
 
 __all__ = [
@@ -284,6 +285,12 @@ def _decimated_median(
     (``np.median`` over a ``sliding_window_view`` of a ``symmetric``-padded copy,
     which is what ``mode='reflect'`` means) at every tap count the presets use.
 
+    Since 2026-10-18 the usual case -- finite input, window no longer than the signal --
+    runs through :func:`~nanoscope.analysis.acid_incubation_numerics.median_filter_1d`
+    (a rolling order statistic over that same symmetric pad) instead: the same values, about
+    40x faster at the 2501-tap Host-guest / Zn windows. The ``(1, m)`` call above remains the
+    path for non-finite input and for a window longer than the signal.
+
     Because the 1-D path could return the wrong answer at any time, a digest taken
     through it proves nothing about the run that produced it -- the four ferritin
     contract digests that ride on this function were re-derived after this fix, in a
@@ -298,7 +305,16 @@ def _decimated_median(
     w = int(float(win_s) * float(fs) / decim)
     if w % 2 == 0:
         w += 1
-    b = median_filter(xs[None, :], size=(1, w), mode="reflect")[0]
+    if len(xs) >= w and np.isfinite(xs).all():
+        # Same values as the (1, m) ndimage call below -- an odd-window median is one of the
+        # input samples and the padding is the same half-sample reflection -- but a rolling
+        # order statistic instead of ndimage's O(n*w) rank filter: 0.6 s against 31 s at
+        # 1.5M samples x 2501 taps (the Host-guest / Zn protocols on a 300 s recording).
+        # Non-finite input and windows longer than the signal keep the ndimage path, which
+        # never raised on them.
+        b = median_filter_1d(xs, w, "reflect")
+    else:
+        b = median_filter(xs[None, :], size=(1, w), mode="reflect")[0]
     xp = np.arange(0, n, decim)[: len(b)]
     return np.interp(np.arange(n), xp, b).astype(np.float32)
 

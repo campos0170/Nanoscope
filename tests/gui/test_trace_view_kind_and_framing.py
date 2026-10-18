@@ -443,3 +443,20 @@ def test_trace_panes_have_no_pyqtgraph_context_menu(qapp, tmp_path):
     for pane in view.panes():
         assert not pane.plot.vb.menuEnabled(), (
             "a trace pane still offers the pyqtgraph context menu")
+
+
+def test_the_current_pane_gets_more_height_than_the_voltage_drive(qapp, qtbot, tmp_path):
+    """MEASURED BEFORE: equal rows gave a constant command voltage -- a flat line -- 42% of the
+    plot, taking height from the trace the user is judging."""
+    doc = _doc(tmp_path, (
+        ChannelInfo(index=0, name="IN14", raw_units="mV", kind=ChannelKind.VOLTAGE),
+        ChannelInfo(index=1, name="IN15", raw_units="pA", kind=ChannelKind.CURRENT)))
+    view = TraceView(_session(doc))
+    qtbot.addWidget(view)
+    view.resize(700, 600)
+    view.show()
+    qtbot.wait(30)
+
+    assert [p.spec.kind for p in view._panes] == [ChannelKind.CURRENT, ChannelKind.VOLTAGE]
+    heights = [p.plot.sceneBoundingRect().height() for p in view._panes]
+    assert heights[0] > 1.8 * heights[1]

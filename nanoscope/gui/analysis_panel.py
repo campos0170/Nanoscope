@@ -1513,6 +1513,17 @@ class AnalysisPanel(QtWidgets.QWidget):
             # would arm a Run button that cannot run. The pipeline is what a stored run
             # can honestly put back, and it is what decides the numbers.
             self._detection.set_ml_params(dict(res.params or {}))
+            # The open-pore estimator is the one object an ML run shares with a Schmitt run:
+            # _launch_ml merges ``self._baseline.params()`` into the run, so the stored params
+            # carry it. Not seeding it left the baseline form on the app default over a table
+            # measured with the confirmed windows, which raised a false "estimator changed"
+            # banner on every reopen and made "Re-measure depths" apply the defaults.
+            # Only a non-empty params dict is seeded: a pre-v3 ML result has no Schmitt-shaped
+            # provenance for the fallback in schmitt_params_from_result to read.
+            if res.params:
+                baseline_params = schmitt_params_from_result(res)
+                if baseline_params:
+                    self._baseline.set_params(baseline_params)
         if self._sel is not None:
             self._regate()
             self._apply_baseline_views()
@@ -5032,6 +5043,13 @@ class AnalysisPanel(QtWidgets.QWidget):
         """The most recent comparison this panel computed (tests and MainWindow's
         status line read it; nothing else depends on it)."""
         return self._last_comparison
+
+    def selected_event_id(self) -> int | None:
+        """The ``event_id`` under the trace marker, or None when nothing is selected.
+
+        Gated on the marker, not on ``_selected_id`` alone: installing a new detection removes
+        the marker but leaves the remembered id, which would name an event of the OLD table."""
+        return self._selected_id if self._marker_id is not None else None
 
     def select_event(self, event_id: int) -> None:
         """Public entry point (the Event Inspector) to select an event exactly as a table-row

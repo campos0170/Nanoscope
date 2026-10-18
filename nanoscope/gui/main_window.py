@@ -5895,11 +5895,12 @@ class MainWindow(QtWidgets.QMainWindow):
     # -- voltage-dependence window ---------------------------------------------------------------
     def _vdep_ready_count(self) -> int:
         """How many open recordings could place on the voltage-dependence plot: a live
-        current channel + a known voltage (like I-V) AND a stored Schmitt detection.
+        current channel + a known voltage (like I-V) AND a stored detection of the series' detector.
         Reads META + the ResultStore only, so gating never computes a metric."""
+        from ..analysis import voltage_dep
         from ..analysis.events import EventSet
 
-        n = 0
+        placeable = []
         for doc in self._session.documents():
             meta = doc.meta
             # effective_kind on both tests: the Calibration-panel override moves a
@@ -5913,14 +5914,16 @@ class MainWindow(QtWidgets.QMainWindow):
                                is ChannelKind.VOLTAGE and not c.is_dead
                                for c in meta.channels)
                            or meta.nominal_voltage_mV is not None)
-            if not (has_current and has_voltage):
-                continue
-            has_detection = any(
-                r.module_id == "detect.schmitt" and isinstance(r.payload, EventSet)
-                for r in self._session.results.for_doc(doc.doc_id))
-            if has_detection:
-                n += 1
-        return n
+            if has_current and has_voltage:
+                placeable.append(doc.doc_id)
+        # The same detector the window will pool (one for the whole series, chosen among the
+        # recordings that can become a point), so this gate and the plot agree about which
+        # tables count.
+        series_module_id = voltage_dep.series_module_id(self._session, placeable)
+        return sum(
+            1 for doc_id in placeable
+            if any(r.module_id == series_module_id and isinstance(r.payload, EventSet)
+                   for r in self._session.results.for_doc(doc_id)))
 
     def _sync_vdep_action(self) -> None:
         """Voltage dependence is live once >=2 recordings have BOTH a voltage AND a
@@ -6172,9 +6175,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._event_inspector = insp
         self._event_inspector.set_vocabulary(self._label_vocab)
         self._refresh_event_inspector()
+        # set_events shows the first event; open on the one the user has selected instead (and,
+        # on a re-open, where they were: inspector navigation moves the panel's selection too).
+        selected = self._analysis_panel.selected_event_id()
+        if selected is not None:
+            self._event_inspector.show_event_quietly(selected)
         self._event_inspector.show()
         self._event_inspector.raise_()
         self._event_inspector.activateWindow()
+        self._event_inspector.focus_curation_surface()
 
     def _edit_labels(self) -> None:
         """Analysis ▸ Event labels… — edit the palette.
@@ -6192,14 +6201,18 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Event labels")
         dlg.resize(560, 380)
+        dlg.setMinimumWidth(480)
         lay = QtWidgets.QVBoxLayout(dlg)
-        lay.addWidget(QtWidgets.QLabel(
+        intro = QtWidgets.QLabel(
             "Each row is one label. <b>Key</b> groups them (a row may carry one value per "
             "key); <b>value</b> is what gets written. Leave <b>hotkey</b> blank to use "
             "1–9 by position. An explicit hotkey is one character; A, R, T and Space "
             "are reserved for curation controls.<br>Examples: "
             "<code>molecule / apo-ferritin</code>, "
-            "<code>type / collision</code>, <code>levels / 3</code>."))
+            "<code>type / collision</code>, <code>levels / 3</code>.")
+        # Unwrapped, the sentence is its own minimum width: 1777 px, wider than a 14" screen.
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
         table = QtWidgets.QTableWidget(0, 4)
         table.setObjectName("labelVocabularyTable")
         table.setHorizontalHeaderLabels(["Key", "Value", "Hotkey", "Note"])

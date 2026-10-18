@@ -1612,6 +1612,28 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
     def current_event_id(self) -> int | None:
         return self._current_id
 
+    def show_event_quietly(self, event_id: int) -> None:
+        """Display ``event_id`` WITHOUT emitting ``eventSelected``.
+
+        For the owner opening the window on the event the user already has selected: the
+        selection is theirs already, so announcing it would only re-zoom the trace to where
+        it is. A no-op when the event is not in this table or is already displayed."""
+        if self._df is None or self._row_for_id(int(event_id)) is None:
+            return
+        if self._current_id == int(event_id):
+            return
+        self._render_and_sync(int(event_id), emit=False)
+
+    def focus_curation_surface(self) -> None:
+        """Give keyboard focus to the waveform, not to the first text field in the tab chain.
+
+        A freshly shown window hands focus to the 'Event N' spin box, which swallows letters and
+        digits: A/R did nothing and a label digit typed itself into the box and jumped to
+        another event. The waveform takes no text, so every curation key reaches its shortcut.
+        Programmatic ``setFocus`` ignores the focus policy, and a child recorded here is the one
+        Qt restores when the window is next activated."""
+        self._plot_widget.setFocus(QtCore.Qt.OtherFocusReason)
+
     def event_count(self) -> int:
         """Number of events in the current filter subset (the N in 'Event i of N')."""
         return len(self._subset_ids())
@@ -2405,7 +2427,14 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             self._show_empty("The recording for this detection was closed.")
             return
         r = self._df.iloc[row]
-        previous_view = self._plot.getViewBox().viewRange() if preserve_view else None
+        view_box = self._plot.getViewBox()
+        if preserve_view and view_box.autoRangeEnabled()[1]:
+            # pyqtgraph applies an autorange lazily, at paint, so until then viewRange() still
+            # holds the empty state's 0..1 placeholder. Pinning THAT left the first event of a
+            # freshly opened inspector blank whenever a stale-columns re-render followed the
+            # first draw: flush the pending autorange so "the current view" means the data.
+            view_box.updateAutoRange()
+        previous_view = view_box.viewRange() if preserve_view else None
         start_idx = int(r["start_idx"])
         end_idx = int(r["end_idx"])
 

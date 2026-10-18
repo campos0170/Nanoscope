@@ -1203,6 +1203,88 @@ def test_label_editor_invalid_accept_stays_open_then_saves_correction(win, monke
         "type", "translocation", "x")
 
 
+def test_label_editor_fits_a_laptop_screen(win, monkeypatch):
+    """MEASURED BEFORE: the explanation QLabel did not wrap, so the dialog's minimum width was
+    1777 px and OK/Cancel sat past the right edge of a 1512 px screen."""
+    seen: dict[str, int] = {}
+
+    def inspect_dialog(dialog):
+        seen["min_width"] = dialog.minimumSizeHint().width()
+        return QtWidgets.QDialog.Rejected
+
+    monkeypatch.setattr(QtWidgets.QDialog, "exec", inspect_dialog)
+    win._edit_labels()
+
+    assert seen["min_width"] <= 900
+
+
+def _open_inspector_with_events(win, tmp_path, n=30, level=None):
+    doc = _doc(tmp_path)
+    if level is not None:
+        doc.channels[0][:] = level + 10.0 * np.sin(np.arange(N) / 50.0)
+    doc_id = _install(win, doc)
+    _install_detection(win._session, doc_id, _eventset([True] * n))
+    win._on_selection(doc_id, 0)
+    QtWidgets.QApplication.processEvents()
+    win._sync_export_action()
+    return doc_id
+
+
+def test_inspector_opens_on_the_selected_event_not_event_zero(win, tmp_path, qtbot):
+    """MEASURED BEFORE: Ctrl+I / the Curate chip / the menu opened on event 0 whatever the user had
+    selected, and re-opening a window they were working in threw their place away."""
+    _open_inspector_with_events(win, tmp_path)
+    win._analysis_panel.select_event(7)
+    qtbot.wait(20)
+    assert win._analysis_panel.selected_event_id() == 7
+
+    win._open_event_inspector()
+
+    assert win._event_inspector.current_event_id() == 7
+    # ...and a later re-open returns to where inspector navigation left off.
+    win._event_inspector.show_event(12)
+    win._open_event_inspector()
+    assert win._event_inspector.current_event_id() == 12
+
+
+def test_inspector_opens_with_focus_on_the_waveform_not_the_index_spin(win, tmp_path):
+    """MEASURED BEFORE: the first focusable child was the 'Event N' spin box, which swallowed
+    A/R and typed label digits into itself."""
+    _open_inspector_with_events(win, tmp_path)
+    win._open_event_inspector()
+    insp = win._event_inspector
+    assert insp.focusWidget() is insp._plot_widget
+    assert insp.focusWidget() is not insp._index_spin
+
+
+def test_a_stale_columns_rerender_does_not_pin_the_placeholder_range(win, tmp_path, qtbot):
+    """MEASURED BEFORE: the re-render pinned the viewbox's CURRENT y-range, which pyqtgraph had not
+    yet autoranged to the data, so the first event of a fresh inspector drew against 0..1 pA."""
+    _open_inspector_with_events(win, tmp_path, level=-60.0)
+    win._open_event_inspector()
+    insp = win._event_inspector
+    insp.set_stale_columns(("depth_pA", "frac_depth"), "measurements are stale")
+    qtbot.wait(20)
+    lo, hi = insp._plot.getViewBox().viewRange()[1]
+    assert lo < -60.0 < hi and hi - lo > 5.0
+
+
+def test_selected_event_id_does_not_outlive_its_table(win, tmp_path, qtbot):
+    """A new detection removes the trace marker; the id left behind named an event of the OLD
+    table, so the inspector opened mid-table and skipped the events before it."""
+    doc_id = _open_inspector_with_events(win, tmp_path)
+    win._analysis_panel.select_event(7)
+    qtbot.wait(20)
+    assert win._analysis_panel.selected_event_id() == 7
+
+    _install_detection(win._session, doc_id, _eventset([True] * 30))
+    qtbot.wait(20)
+
+    assert win._analysis_panel.selected_event_id() is None
+    win._open_event_inspector()
+    assert win._event_inspector.current_event_id() == 0
+
+
 def test_the_palette_reaches_an_already_open_inspector(win, tmp_path, qtbot):
     """MEASURED BEFORE: a restore handed the palette to the gallery only, so an inspector
     left open across an Open Project kept the previous project's vocabulary and its digits

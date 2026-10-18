@@ -2043,6 +2043,9 @@ def capture_voltage_dependence(window: Any) -> WorkspaceArtifact:
                          if isinstance(v, Mapping)]
     same_restored_series = series is getattr(window, "_nanoscope_workspace_vdep_series", None)
     point_sources = [_clone_plain(dict(v)) for v in remembered_points] if same_restored_series else []
+    # The detector the window pooled; a series built on another detector must not be recorded
+    # (and later fingerprint-checked) against the Schmitt tables of the same recordings.
+    series_module_id = str(getattr(window, "_series_module_id", "detect.schmitt"))
     if not same_restored_series:
         from nanoscope.analysis.iv import iv_point
 
@@ -2069,17 +2072,17 @@ def capture_voltage_dependence(window: Any) -> WorkspaceArtifact:
             if matched is None:
                 point_sources.append({"source_key": "", "channel": None,
                                       "channel_name": None, "channel_kind": None,
-                                      "module_id": "detect.schmitt",
+                                      "module_id": series_module_id,
                                       "result_fingerprint": None})
                 continue
             result = next((res for res in window._session.results.for_doc(matched.doc_id)
-                           if str(getattr(res, "module_id", "")) == "detect.schmitt"
+                           if str(getattr(res, "module_id", "")) == series_module_id
                            and hasattr(getattr(res, "payload", None), "df")), None)
             if result is not None:
                 point_sources.append(_result_recipe(window, result))
             else:
                 point_sources.append({**_stable_source(window, str(matched.doc_id)),
-                                      "module_id": "detect.schmitt",
+                                      "module_id": series_module_id,
                                       "result_fingerprint": None})
     payload = {
         "config": {

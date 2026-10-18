@@ -74,7 +74,7 @@ from PySide6.QtCore import Qt, Signal
 
 from ..analysis import stats, voltage_dep
 from ..core.session import Session
-from ..core.sources import gain_label
+from ..core.sources import DEFAULT_DETECTION_MODULE_ID, DETECTOR_NAMES, gain_label
 from ..plot.style import OKABE_ITO
 from .analysis_catalog import ANALYSIS_LABELS
 from .combos import choose_combo_item
@@ -195,6 +195,8 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._series: voltage_dep.VDepSeries = voltage_dep.vdep_comparability(
             (), metric="capture_rate_hz")
         self._points: list[voltage_dep.VDepPoint] = []
+        #: The detection every point of the current series was read from.
+        self._series_module_id: str = DEFAULT_DETECTION_MODULE_ID
         #: recording -> why it is plotted but NOT in the fit. Written by
         #: :meth:`_redraw` from the fit's own report, read by :meth:`_fill_table`.
         self._not_in_fit: dict[str, str] = {}
@@ -488,9 +490,12 @@ class VDepWindow(QtWidgets.QMainWindow):
         ``vdep_points``: the verdict on pooling these recordings arrives with the
         points, so it cannot be forgotten by this method or by a future one.
         """
+        self._series_module_id = voltage_dep.series_module_id(
+            self._session, voltage_dep.placeable_doc_ids(self._session))
         self._series = voltage_dep.vdep_series(
             self._session, metric=self._metric(),
-            accepted_only=self._accepted_only.isChecked())
+            accepted_only=self._accepted_only.isChecked(),
+            module_id=self._series_module_id)
         self._points = list(self._series.points)
         self._redraw()
 
@@ -940,6 +945,9 @@ class VDepWindow(QtWidgets.QMainWindow):
     def _provenance_lines(self, series: voltage_dep.VDepSeries) -> list[str]:
         """The 'Pooled provenance' block: what measured every point on this plot."""
         lines = ["Pooled provenance"]
+        if self._series_module_id != DEFAULT_DETECTION_MODULE_ID:
+            name = DETECTOR_NAMES.get(self._series_module_id, self._series_module_id)
+            lines.append(f"  {'Detector:':<10}{name}")
 
         def block(label: str, groups, note: str = "") -> None:
             if len(groups) == 1:

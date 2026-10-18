@@ -96,11 +96,12 @@ and said out loud.
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple
 
 import numpy as np
 
 from ..core.sources import (
+    DETECTION_MODULE_IDS,
     GAIN_UNSTATED,
     UNKNOWN_BASELINE,
     UNMERGED,
@@ -140,6 +141,8 @@ __all__ = [
     "vdep_exclusions",
     "vdep_comparability",
     "vdep_series",
+    "series_module_id",
+    "placeable_doc_ids",
     "vdep_fit",
     "vdep_predict",
 ]
@@ -148,6 +151,11 @@ __all__ = [
 # summarise. Kept as the default so the voltage-dependence plot reads the same
 # results the batch detector writes.
 _DETECT_MODULE_ID = "detect.schmitt"
+
+# The detectors a voltage series may pool, in tie-break order (see series_module_id).
+_SERIES_DETECTORS = tuple(
+    mid for mid in DETECTION_MODULE_IDS
+    if mid in ("detect.schmitt", "detect.cusum", "detect.keras"))
 
 # Metric ids the plot offers. "capture_rate_hz" and "n_events" are whole-EventSet
 # reductions (rate / count); the "median_*" ids are the median of one event column.
@@ -986,6 +994,42 @@ def vdep_comparability(points, *, metric: str, excluded=()) -> VDepSeries:
         duration_groups=_duration_groups(pts),
         voltage_source_groups=_voltage_source_groups(pts),
     )
+
+
+def placeable_doc_ids(session: "Session") -> list[str]:
+    """Ids of the recordings with a known applied voltage: the ones that can become a point.
+
+    Reads the voltage through :func:`~nanoscope.analysis.iv.iv_point`, the resolver the series
+    itself uses, so it is for a window that is about to gather anyway -- not for a menu gate,
+    which must stay meta-only and builds the same list from channel kinds instead."""
+    return [doc.doc_id for doc in session.documents()
+            if iv.iv_point(session, doc.doc_id) is not None]
+
+
+def series_module_id(session: "Session", doc_ids: "Iterable[str] | None" = None) -> str:
+    """The detection a voltage series should pool: the one stored on the most recordings.
+
+    A series that mixed detectors would compare numbers with different biases, so exactly
+    one module is chosen for every point. Only the primary detectors compete (Schmitt, CUSUM,
+    ML): a reconciled or study-candidate table is a derived catalogue, not a detector, and
+    pooling one should be a deliberate act. When ``doc_ids`` is given, only those recordings
+    count (callers pass the ones that can become a point, so the choice agrees with what the
+    plot will place; see :func:`placeable_doc_ids`). Ties go to
+    Schmitt, the app's default engine, then CUSUM, then ML; a session with no qualifying
+    table keeps reading Schmitt, so the "no stored detection" exclusions name the usual detector.
+    """
+    allowed = None if doc_ids is None else set(doc_ids)
+    holders: dict[str, set[str]] = {}
+    for doc in session.documents():
+        if allowed is not None and doc.doc_id not in allowed:
+            continue
+        for res in session.results.for_doc(doc.doc_id):
+            if res.module_id in _SERIES_DETECTORS and isinstance(res.payload, EventSet):
+                holders.setdefault(res.module_id, set()).add(doc.doc_id)
+    if not holders:
+        return _DETECT_MODULE_ID
+    best = max(len(docs) for docs in holders.values())
+    return next(mid for mid in _SERIES_DETECTORS if len(holders.get(mid, ())) == best)
 
 
 def vdep_series(

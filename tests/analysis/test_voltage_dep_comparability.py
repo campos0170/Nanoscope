@@ -109,8 +109,9 @@ def _install(
     duration_s: float,
     fingerprint: str | None,
     merged_window_s: float | None = None,
+    module_id: str = "detect.schmitt",
 ) -> None:
-    """Store a ``detect.schmitt`` result whose provenance says how it was measured."""
+    """Store a detection result whose provenance says how it was measured."""
     prov: dict = {"analyzed_duration_s": float(duration_s), "recording": "rec"}
     if fingerprint is not None:
         prov["baseline_fingerprint"] = fingerprint
@@ -119,7 +120,7 @@ def _install(
         prov["merged"] = {"rule": "gap", "window_s": float(merged_window_s),
                           "n_before": len(df) + 1, "n_after": len(df)}
     session.add_result(AnalysisResult(
-        module_id="detect.schmitt", module_version="1.0", doc_id=doc_id, channel=0,
+        module_id=module_id, module_version="1.0", doc_id=doc_id, channel=0,
         params={}, calibration_fingerprint=(1.0, 0.0), payload=EventSet(df, prov)))
 
 
@@ -401,3 +402,66 @@ def test_vdep_series_rejects_an_unknown_metric(tmp_path):
         voltage_dep.vdep_series(_ladder(tmp_path, _ONE_FINGERPRINT), metric="median_snr")
     with pytest.raises(ValueError, match="unknown metric"):
         voltage_dep.vdep_comparability((), metric="median_snr")
+
+
+# ================================================================================================
+# series_module_id: one detector for the whole series
+# ================================================================================================
+
+def _session_with(tmp_path: Path, modules: list[str]) -> Session:
+    session = Session()
+    for i, module_id in enumerate(modules):
+        mV = -500.0 - 100.0 * i
+        doc_id = session.add_document(_doc(tmp_path, nominal_mV=mV, name=f"m_{i}.dat"))
+        _install(session, doc_id, _constant_df(n=10, dwell_s=1e-3, depth_pA=-50.0, frac_depth=-0.05),
+                 duration_s=10.0, fingerprint=None, module_id=module_id)
+    return session
+
+
+def test_series_module_id_defaults_to_schmitt_with_nothing_stored(tmp_path):
+    assert voltage_dep.series_module_id(Session()) == "detect.schmitt"
+
+
+def test_series_module_id_follows_the_detector_on_most_recordings(tmp_path):
+    session = _session_with(tmp_path, ["detect.keras", "detect.keras", "detect.schmitt"])
+    assert voltage_dep.series_module_id(session) == "detect.keras"
+
+
+def test_series_module_id_breaks_a_tie_toward_schmitt(tmp_path):
+    session = _session_with(tmp_path, ["detect.keras", "detect.schmitt"])
+    assert voltage_dep.series_module_id(session) == "detect.schmitt"
+
+
+def test_an_ml_only_series_pools_every_recording_once_its_module_is_named(tmp_path):
+    session = _session_with(tmp_path, ["detect.keras"] * 3)
+    module_id = voltage_dep.series_module_id(session)
+    series = voltage_dep.vdep_series(session, metric="n_events", module_id=module_id)
+    assert len(series.points) == 3 and not series.excluded
+
+
+def test_series_module_id_ignores_recordings_that_cannot_become_a_point(tmp_path):
+    """Three Schmitt tables on recordings with no applied voltage must not outvote two ML tables
+    that can: the gate counts placeable recordings, so the choice has to as well."""
+    session = Session()
+    for i in range(3):
+        doc_id = session.add_document(_doc(tmp_path, nominal_mV=None, name=f"nov_{i}.dat"))
+        _install(session, doc_id, _constant_df(n=10, dwell_s=1e-3, depth_pA=-50.0,
+                                               frac_depth=-0.05),
+                 duration_s=10.0, fingerprint=None)
+    for i, mV in enumerate((-500.0, -600.0)):
+        doc_id = session.add_document(_doc(tmp_path, nominal_mV=mV, name=f"ml_{i}.dat"))
+        _install(session, doc_id, _constant_df(n=10, dwell_s=1e-3, depth_pA=-50.0,
+                                               frac_depth=-0.05),
+                 duration_s=10.0, fingerprint=None, module_id="detect.keras")
+    placeable = voltage_dep.placeable_doc_ids(session)
+    assert len(placeable) == 2
+    assert voltage_dep.series_module_id(session) == "detect.schmitt"   # unrestricted: 3 > 2
+    assert voltage_dep.series_module_id(session, placeable) == "detect.keras"
+
+
+def test_series_module_id_never_picks_a_derived_catalogue(tmp_path):
+    """detect.study / detect.reconciled are catalogues, not detectors: pooling one is not a
+    default a gate may make for the user."""
+    session = _session_with(tmp_path, ["detect.study"] * 3 + ["detect.schmitt"])
+    assert voltage_dep.series_module_id(session) == "detect.schmitt"
+

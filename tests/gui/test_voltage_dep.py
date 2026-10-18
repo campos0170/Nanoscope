@@ -91,10 +91,10 @@ def _constant_df(*, n: int, dwell_s: float, depth_pA: float, frac_depth: float) 
 
 
 def _install_detection(session: Session, doc_id: str, df: pd.DataFrame, *, duration_s: float,
-                       channel: int = 0) -> None:
+                       channel: int = 0, module_id: str = "detect.schmitt") -> None:
     ev = EventSet(df, {"analyzed_duration_s": float(duration_s), "recording": "rec"})
     session.add_result(AnalysisResult(
-        module_id="detect.schmitt", module_version="1.0", doc_id=doc_id, channel=channel,
+        module_id=module_id, module_version="1.0", doc_id=doc_id, channel=channel,
         params={}, calibration_fingerprint=(1.0, 0.0), payload=ev))
 
 
@@ -333,6 +333,47 @@ def test_vdep_action_gated_and_opens_single_window(qapp, qtbot, tmp_path):
     # re-opening focuses the SAME instance (never a second window)
     win._open_vdep()
     assert win._vdep_window is first
+
+
+def test_vdep_action_lights_for_an_ml_only_series_and_names_the_detector(qapp, qtbot, tmp_path):
+    """MEASURED BEFORE: the gate and the plot read only ``detect.schmitt``, so a project whose
+    every table came from the ML detector had the action greyed out."""
+    win = MainWindow()
+    qtbot.addWidget(win)
+    for name, mV in (("a.dat", -500.0), ("b.dat", -700.0)):
+        doc_id = _install(win, _current_doc(tmp_path, nominal_mV=mV, name=name))
+        _install_detection(win._session, doc_id, _constant_df(
+            n=6, dwell_s=1e-3, depth_pA=20.0, frac_depth=0.02), duration_s=1.0,
+            module_id="detect.keras")
+    win._sync_vdep_action()
+    assert win._act_vdep.isEnabled()
+
+    win._open_vdep()
+    assert len(win._vdep_window.points()) == 2
+    assert any("Detector:" in line and "Keras" in line
+               for line in win._vdep_window._provenance_lines(win._vdep_window._series))
+
+
+def test_workspace_capture_records_the_detector_the_series_pooled(qapp, qtbot, tmp_path):
+    """The saved point sources named detect.schmitt whatever detector the window pooled, so a
+    Keras series was fingerprint-checked against (and mislabelled as) a Schmitt table."""
+    from nanoscope.core import analysis_workspace as workspace
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    for name, mV in (("a.dat", -500.0), ("b.dat", -700.0), ("c.dat", -900.0)):
+        doc_id = _install(win, _current_doc(tmp_path, nominal_mV=mV, name=name))
+        _install_detection(win._session, doc_id, _constant_df(
+            n=6, dwell_s=1e-3, depth_pA=20.0, frac_depth=0.02), duration_s=1.0,
+            module_id="detect.keras")
+    win._open_vdep()
+
+    artifact = workspace.capture_voltage_dependence(win._vdep_window)
+
+    sources = artifact.payload["point_sources"]
+    assert len(sources) == 3
+    assert {s["module_id"] for s in sources} == {"detect.keras"}
+    assert all(s["result_fingerprint"] for s in sources)
 
 
 def test_vdep_action_dead_without_a_detection(qapp, qtbot, tmp_path):

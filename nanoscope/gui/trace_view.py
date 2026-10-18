@@ -232,6 +232,11 @@ def plan_panes(session: Session) -> list[PaneSpec]:
 _KIND_RANK = {ChannelKind.CURRENT: 0, ChannelKind.CONDUCTANCE: 1,
               ChannelKind.VOLTAGE: 2, ChannelKind.RAW_VOLTAGE: 3, ChannelKind.UNKNOWN: 4}
 
+#: Relative height of a pane's row. With equal rows a constant command voltage -- a flat
+#: line -- took ~37% of the plot height away from the current trace the user is judging.
+_PANE_STRETCH_CURRENT = 5
+_PANE_STRETCH_OTHER = 2
+
 
 def _current_first(specs: list[PaneSpec]) -> list[PaneSpec]:
     return sorted(specs, key=lambda s: _KIND_RANK.get(s.kind, len(_KIND_RANK)))
@@ -680,6 +685,9 @@ class TraceView(pg.GraphicsLayoutWidget):
                                 viewBox=TraceViewBox(on_double_click=self._request_measure_placement),
                                 axisItems={"bottom": ReadableLinearAxis(orientation="bottom"),
                                            "left": ReadableLinearAxis(orientation="left")})
+            self.ci.layout.setRowStretchFactor(
+                row, _PANE_STRETCH_CURRENT if spec.kind is ChannelKind.CURRENT
+                else _PANE_STRETCH_OTHER)
             plot.vb.setMouseMode(self._drag_mode)   # box-zoom (or pan) + vertical wheel-pan
             # No pyqtgraph context menu on the trace panes — same call the navigator and
             # the subpop embedding already make, and here it is load-bearing: the default

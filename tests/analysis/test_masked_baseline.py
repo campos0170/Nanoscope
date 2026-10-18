@@ -85,7 +85,23 @@ APO_ABF = pathlib.Path(
 #: corpus-marked tests here and in ``test_ml_preprocess.py``
 #: (ferritin_data1/2/3 and the apo -600 mV ABF, 13 tests) passed on the real data.
 #: The contract remains: no numerical edit without re-verification.
-_ML_PREPROCESS_MD5 = "48e364c4264dcef2c25a2fadad9bc4a1"
+#:
+#: Re-pinned 2026-10-18 for ONE speed change in ``_decimated_median``: the (1, m) ndimage
+#: rank filter (31 s at 1.5M samples x 2501 taps, the Host-guest/Zn protocols) became a
+#: rolling order statistic (``acid_incubation_numerics.median_filter_1d``, 0.6 s), with the
+#: ndimage call kept as the fallback for non-finite input and windows longer than the
+#: signal. Verified bit-exact against the previous implementation with ``np.array_equal``
+#: over 240 cases (4 lengths x 5 windows x 3 decimations x gaussian / quantised / stepped /
+#: constant input) plus the hand-computed median in
+#: ``test_decimated_median_fast_path.py``; the 35 corpus-marked tests
+#: (ferritin_data1/2/3 digests, the apo -600 mV ABF) passed on the real recordings.
+#: The median's arithmetic now lives in ``acid_incubation_numerics.median_filter_1d``, which
+#: this pin does not cover: ``tests/test_acid_incubation_numerics.py``,
+#: ``tests/test_acid_reference_median_regression.py`` and the fast-path test guard it.
+#: The median's arithmetic now lives in ``acid_incubation_numerics.median_filter_1d``, which
+#: this pin does not cover: ``tests/test_acid_incubation_numerics.py``,
+#: ``tests/test_acid_reference_median_regression.py`` and the fast-path test guard it.
+_ML_PREPROCESS_MD5 = "983d778ef485df6d067595dc92ad4983"
 
 
 # ===========================================================================
