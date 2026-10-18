@@ -40,6 +40,13 @@ This file asserts the viewport and the scrollbars, which is where the defect liv
 The last test in this file is not a fix at all: it is the measurement that REJECTED the
 sibling report of a "13 px empty" horizontal scrollbar on the event table. See its
 docstring — that bar is in ``ScrollPerItem`` units and hides ~1000 px of real columns.
+
+CHANGE A MOVED THE STRIP into the Results dock under the trace, behind the Results toolbar's
+``Merge…`` toggle (off by default), and this file was rewritten around that home (it had been
+red since the strip went behind a collapsed disclosure). The windows here open it first.
+Docked under the trace the Results panel is never narrower than the trace column's own
+~365 px floor, where the 252 px group needs no scrollbar at all; the widths at which the bar
+arrives are reached the way a user reaches them — with the panel FLOATING.
 """
 
 from __future__ import annotations
@@ -62,8 +69,8 @@ from nanoscope.gui.main_window import MainWindow
 DISPLAY = (1512, 900)
 SIZES = (DISPLAY, (1440, 900), (1280, 800))
 
-#: Inspector widths a user can plausibly drag to. 270 and below are the ones that need the
-#: horizontal scrollbar; 180 is the width a saved window state opens at.
+#: Floating Results-panel widths a user can drag to. 270 and below are the ones that need the
+#: horizontal scrollbar.
 _DOCK_WIDTHS = (620, 560, 460, 380, 320, 280, 270, 260, 240, 200, 180)
 
 
@@ -97,6 +104,8 @@ def _open(qapp, qtbot, size) -> MainWindow:
     win.resize(*size)
     qapp.processEvents()
     assert (win.width(), win.height()) == tuple(size), (win.width(), win.height())
+    win._analysis_panel.merge_toggle.setChecked(True)
+    qapp.processEvents()
     return win
 
 
@@ -133,15 +142,19 @@ def _rect_in(widget: QtWidgets.QWidget, host: QtWidgets.QWidget) -> QtCore.QRect
 
 
 def _set_dock_width(win: MainWindow, qapp, width: int) -> None:
-    """Resize the Inspector AND LET THE LAYOUT SETTLE.
+    """Float the Results panel at ``width`` AND LET THE LAYOUT SETTLE.
 
-    A single ``processEvents`` after ``resizeDocks`` is not enough: the scroll area's
+    A single ``processEvents`` after a resize is not enough: the scroll area's
     scrollbars are re-evaluated on a later pass, so the viewport still reports its old
     height and a test that measures immediately reads the layout as it was. Measured on the
     pre-fix build at dock 260: without the wait, viewport 238x95 / hbar 14 / vbar 0 (the
     stale frame); with it, 220x77 / hbar 32 / vbar 18 — the defect. ``qWait`` spins the
     event loop, which is what the extra pass needs."""
-    win.resizeDocks([win._inspector], [width], QtCore.Qt.Horizontal)
+    dock = win._results_dock
+    if not dock.isFloating():
+        dock.setFloating(True)
+        QTest.qWait(30)
+    dock.resize(width, 420)
     QTest.qWait(30)
     qapp.processEvents()
 
@@ -274,7 +287,7 @@ def test_nothing_in_the_strip_moves_as_the_dock_is_dragged(window, qapp):
 # ================================================================================================
 
 def test_the_reservation_adds_no_height_floor(window):
-    """The spacer's minimum is zero and the area's is still 1 px. A minimum here would
+    """The spacer's minimum is zero. A minimum here would
     propagate into ``QDockWidget::minimumSize()`` and take the whole window's minimum
     height up with it (measured: 363 -> 459 the last time this strip acquired a floor).
 
@@ -286,15 +299,19 @@ def test_the_reservation_adds_no_height_floor(window):
     from nanoscope.gui.panels import EventTable
 
     area = _strip(window)
-    assert area.minimumHeight() <= 1
-
     pane = area.parentWidget()
     table = pane.findChild(EventTable)
     assert table is not None, "the strip is no longer in the event table's pane"
-    added = pane.minimumSizeHint().height() - table.minimumSizeHint().height()
-    assert added <= 10, (
-        f"the strip adds {added} px to the minimum height of the pane it shares with the "
-        "event table; the 18 px of reserved scrollbar room became a floor")
+    # Updated for change A: the open strip holds its height and the Events page scrolls
+    # instead of squeezing the table, so the floor stops at that page; pinned at the dock.
+    dock = window._results_dock
+    opened = (dock.minimumSizeHint().height(), window.minimumSizeHint().height())
+    window._analysis_panel.merge_toggle.setChecked(False)
+    QtWidgets.QApplication.processEvents()
+    closed = (dock.minimumSizeHint().height(), window.minimumSizeHint().height())
+    assert opened == closed, (
+        f"the open strip moved the dock/window minimum heights {closed} -> {opened}; the "
+        "18 px of reserved scrollbar room became a floor")
 
 
 @pytest.mark.parametrize("size", SIZES)

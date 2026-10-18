@@ -7,6 +7,21 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- The event table, its Summary / Fits / Quality tabs and the Merge sub-events strip moved out of
+  the Inspector into a new **Results** dock under the trace (View ▸ Panels ▸ Results, ⇧⌘R; close
+  it to give the trace its full height — nothing is lost). The Inspector keeps only the parameter
+  forms, so they get its full height back (Detection page 256 → 592 px at 1512x900). The Results
+  dock opens tall enough for six table rows, capped at a third of the window (at least four whole
+  rows at 1512x900), and its two header rows have a fixed height: the toolbar (Table selector,
+  Columns…, Merge…, the table's constant columns, advisories) and one status line — the event
+  count, or the stale notice, which is now one amber line (verdict, action, Details for the full
+  sentence) instead of a wrapped banner up to 254 px tall. When the action is unavailable the
+  line starts its reason, giving up the verdict first on a narrow panel. Table rows are 24 px on
+  a Mac (one text line + 8 px). A short panel (or Merge… open) scrolls the Events page instead of
+  squeezing the table. ⇧⌘R hides the panel with the focus parked on the trace and, shown again,
+  hands it back to the table, so a/r/f keep working.
+  Saved layouts keep their dock widths and gain the Results dock; the layout is now saved as
+  version 1, so a downgraded build resets the layout once and names `windowState` on its info bar.
 - Keep scientific warnings and fit verdicts in Details/readouts and saved figure
   provenance, not on plot titles, fit legends or Event Gallery waveform captions.
   Optional fit statistics, units, curves and numerical exports are unchanged.

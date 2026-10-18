@@ -168,7 +168,9 @@ def test_the_stale_banners_rerun_of_a_flooded_stored_run_is_refused_and_the_bann
     window._session.set_calibration(did, 0, ChannelCalibration(2.0, 0.0, "pA"),
                                     write_sidecar=False)
     qtbot.wait(20)
-    assert panel._stale.isVisibleTo(panel) and panel._stale.kind == "calibration"
+    # isHidden(), not isVisibleTo(panel): the stale line lives in the Results dock now, so the
+    # panel is not its ancestor and isVisibleTo would depend on the window being shown.
+    assert not panel._stale.isHidden() and panel._stale.kind == "calibration"
 
     # Withheld before any click, by name, with the door named.
     assert not panel._stale._btn.isEnabled()
@@ -183,7 +185,7 @@ def test_the_stale_banners_rerun_of_a_flooded_stored_run_is_refused_and_the_bann
     assert f"{CAP + 1} lines" in refused.args[0]
     assert "press Detect" in refused.args[0]
     assert panel._pending is None, "a refused replay must not be recorded as a pending job"
-    assert panel._stale.isVisibleTo(panel), "the banner is dismissed by a RUN, not a click"
+    assert not panel._stale.isHidden(), "the banner is dismissed by a RUN, not a click"
     assert panel.current_detection() is flooded, "the stored table was not replaced"
 
 

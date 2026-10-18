@@ -144,7 +144,9 @@ def test_the_status_line_never_claims_geometry_unchanged_when_it_dropped_the_ans
     assert terminal, said
     assert not any("geometry and curation unchanged" in m for _, m in terminal), said
     # ...and the table is still marked stale, which is still true.
-    assert panel._stale.isVisibleTo(panel)
+    # isHidden(), not isVisibleTo(panel): the stale line lives in the Results dock now, so the
+    # panel is not its ancestor and isVisibleTo would depend on the window being shown.
+    assert not panel._stale.isHidden()
 
 
 def test_an_ordinary_re_measure_still_installs_and_says_so(qapp, qtbot, tmp_path):

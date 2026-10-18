@@ -89,7 +89,9 @@ def test_reopened_ml_table_seeds_the_baseline_form_and_shows_no_stale_banner(
     assert float(bp.rough_s.value()) == 2.0
     assert float(bp.base_s.value()) == 0.5
     assert bp.config().fingerprint(FS) == stored.fingerprint(FS)
-    assert not panel._stale.isVisibleTo(panel), (
+    # isHidden(), not isVisibleTo(panel): the stale line lives in the Results dock now, so the
+    # panel is not its ancestor and isVisibleTo would depend on the window being shown.
+    assert panel._stale.isHidden(), (
         "a reopened ML table measured with the form's own estimator must not read as stale")
 
 

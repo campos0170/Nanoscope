@@ -189,8 +189,8 @@
         "label": "Panels",
         "kind": "menu-action",
         "group": "View",
-        "what_it_does": "Submenu of checkable items that show or hide the two docks.",
-        "notes": "Contains exactly two entries, generated from the docks themselves."
+        "what_it_does": "Submenu of checkable items that show or hide the docks.",
+        "notes": "One entry per dock, generated from the docks themselves: File Manager, Inspector, Results (Ctrl+Shift+R)."
       },
       {
         "label": "File Manager",
@@ -205,6 +205,13 @@
         "group": "View > Panels",
         "what_it_does": "Shows or hides the right-hand Inspector dock, which holds the Calibration, File Info and Analysis tabs.",
         "notes": "Checkable; also unticked by the dock's own ✕. Opens at 460 px on a first launch. Several commands re-open and raise this dock for you (the calibration chip, the workflow strip, and turning on Measure event)."
+      },
+      {
+        "label": "Results",
+        "kind": "checkbox",
+        "group": "View > Panels",
+        "what_it_does": "Shows or hides the Results dock under the trace: the Table selector, Columns…, Merge… and the status line, then Events / Summary / Fits / Quality.",
+        "notes": "Ctrl+Shift+R (⇧⌘R). Also closed by its own ✕; floatable and dockable on any side; place and height remembered. Hiding it gives the trace its full height and loses nothing. On a first launch it opens under the trace at up to a third of the window height (six rows when that fits)."
       },
       {
         "label": "Detect",
@@ -2348,7 +2355,7 @@
     "key": "stats-merge-measure",
     "area": "Results, fitting, post-detection merge and manual measurements",
     "summary": "Results provides Events, Summary, Fits and Quality views of the selected stored detection. Fits explicitly use accepted events, with filter-limited and efficiency options. Merge sub-events is a post-detection curation operation with an occupancy guard, distinct from the detector merge gap. Measure provides cursor-based live statistics and a separate saved measurement table. An event result, a manual measurement, a fitted substate table and a frozen plot are separate artifacts with separate provenance.",
-    "opened_by": "Inspector → Analysis → Results (Events / Summary / Fits / Quality). The Table selector in Merge sub-events chooses a stored detector result. Measure is the fourth compact tab; Analysis → Measure event arms cursors and Add measurement to list (Ctrl+M) saves a measurement. Sources: nanoscope/gui/analysis_panel.py, merge_panel.py, panels.py, measure_panel.py.",
+    "opened_by": "View ▸ Panels ▸ Results — the dock under the trace (Events / Summary / Fits / Quality). The Table selector at the left of its toolbar chooses a stored detector result; Merge… beside it shows the Merge sub-events strip above the table. Measure is the fourth compact tab; Analysis → Measure event arms cursors and Add measurement to list (Ctrl+M) saves a measurement. Sources: nanoscope/gui/analysis_panel.py, merge_panel.py, panels.py, measure_panel.py.",
     "gotchas": [
       "The Fit button is dead until the current channel has a stored detection — the amber line beside it tells you so, but only after you look; it is not the results box.",
       "Fits use ACCEPTED events only, so every accept/reject you make in the event table silently changes what the next Fit reports.",
@@ -2691,7 +2698,7 @@
         "kind": "control",
         "group": "Analysis panel — Results",
         "what_it_does": "Show the selected stored result and its quality/fit views.",
-        "notes": "Expandable container; Events, Summary, Fits and Quality are separate tabs. Source: nanoscope/gui/analysis_panel.py."
+        "notes": "A dock (ResultsDock) under the trace — close, float or re-dock it; View ▸ Panels ▸ Results (Ctrl+Shift+R). Events, Summary, Fits and Quality are separate tabs. Source: nanoscope/gui/analysis_panel.py, main_window.py."
       },
       {
         "label": "Events",
@@ -2726,7 +2733,14 @@
         "kind": "control",
         "group": "Analysis panel — Results",
         "what_it_does": "Select Schmitt, CUSUM, ML or reconciled stored results when available.",
-        "notes": "Shown in Merge sub-events above the table, e.g. CUSUM — N candidates. Selection recalls its recorded settings and does not rerun detection. Source: nanoscope/gui/analysis_panel.py."
+        "notes": "At the left of the Results panel's toolbar, e.g. CUSUM — N candidates. Selection recalls its recorded settings and does not rerun detection. Source: nanoscope/gui/analysis_panel.py."
+      },
+      {
+        "label": "Merge…",
+        "kind": "button",
+        "group": "Merge sub-events",
+        "what_it_does": "Shows or hides the Merge sub-events strip above the event table.",
+        "notes": "In the Results panel's toolbar. Off by default and not remembered; turning it on switches to the Events tab, and the button keeps an accent outline while it is on. When the panel is too short for the strip and a table row, the Events page scrolls."
       }
     ]
   },
@@ -2734,7 +2748,7 @@
     "key": "event-table-and-inspector",
     "area": "Event results, review decisions and Event Inspector",
     "summary": "The shared event table is sortable and supports acceptance, review and flags. The scientific event schema remains distinct from optional curation/amplitude columns, so column count depends on the result. Event Inspector shows one event with context, baseline, equivalent red level and optional fitted substates. Curate exposes explicit acceptance and optional amplitude methods, including a manually editable red level. Optional amplitude curation does not redefine the detector median depth, fractional depth, SNR, boundaries or fitted states.",
-    "opened_by": "Select a result in Inspector → Analysis → Results → Events. Open Event inspector… from Analysis, or open a tile from Event gallery. Curate contains amplitude editing. Sources: nanoscope/gui/event_inspector.py, event_amplitude_controls.py, panels.py and analysis_panel.py; nanoscope/analysis/event_amplitude.py.",
+    "opened_by": "Select a result in the Results panel (under the trace) → Events. Open Event inspector… from Analysis, or open a tile from Event gallery. Curate contains amplitude editing. Sources: nanoscope/gui/event_inspector.py, event_amplitude_controls.py, panels.py and analysis_panel.py; nanoscope/analysis/event_amplitude.py.",
     "gotchas": [
       "There is NO search or filter box on the Event table — the only way to narrow it down is to sort by a column header, or to switch to the Event Inspector and use its All / Accepted only / Rejected only combo.",
       "Table sorting compares the DISPLAYED TEXT, not the numbers, so numeric columns sort alphabetically (a dwell of '9e-05' sorts after '0.0012') — use it to group rows, never to rank them.",
@@ -2748,7 +2762,7 @@
       "Changing event bounds invalidates the previous fitted levels for those bounds. The Inspector can re-fit that single event when the standing fit context remains valid; otherwise it clears the levels with an explicit reason. It does not silently reinterpret the old fit as current.",
       "The Event Inspector's 'levels:' line and its 'CUSUM levels:' line are two different estimators and are allowed to disagree — the readout tells you when they do, and CUSUM is the fitted one.",
       "The CUSUM level listing stops after 8 levels; if an event has more, the readout says how many it withheld and you must export the level table to see them all.",
-      "'Merge with next' silently uses the Window value from the Merge sub-events group in the Analysis panel — it never prompts, so check that number before clicking or the merge may report 'No sub-events within N ms to merge.'",
+      "'Merge with next' silently uses the Window value from the Merge sub-events strip (Results ▸ Merge…) — it never prompts, so check that number before clicking or the merge may report 'No sub-events within N ms to merge.'",
       "Curating an event out of the active filter subset does not move you off it: the event stays on screen and the readout switches to 'filtered out of …', which can look like the Prev/Next buttons have stopped working.",
       "A column header ending in ⚠ means those numbers were measured against an open-pore baseline that is no longer the configured one — they are shown exactly as stored, and can be an order of magnitude off on some recordings.",
       "Event inspector… (Ctrl+I) requires a stored detection for the selected source. A saved result can be inspected without rerunning detection; selecting a recording with no detection leaves the inspector empty.",

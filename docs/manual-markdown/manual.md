@@ -101,7 +101,7 @@ tests, not an automatically exhaustive inventory of every runtime control.
 
 ![Current main window: File Manager, trace/navigation, and Inspector with the saved apo-ferritin project.](images/current_main.webp)
 
-*Dated source capture, 2026-09-11; retained in this edition. File Manager selects the recording/channel, the centre shows the trace and navigation, and Inspector holds analysis controls and Results. Saved scientific results were loaded, not redetected for this illustration.*
+*Dated source capture, 2026-09-11; retained in this edition. File Manager selects the recording/channel, the centre shows the trace and navigation, and Inspector holds analysis controls and Results (Results now has its own dock under the trace). Saved scientific results were loaded, not redetected for this illustration.*
 
 Four principal regions (dock layout can be changed):
 
@@ -151,8 +151,9 @@ Every path in this manual that begins “the `Preprocess` tab” or
 “the `Detection` tab” means that strip; the screenshot above shows it docked on the right, and
 `View` will hide or show the whole dock.
 
-Below those tabs, expand `Results` and choose `Events`, `Summary`, `Fits` or `Quality`.
-The Events page has a `Table` result selector near `Merge sub-events`. If one recording has Schmitt, CUSUM, ML, and
+In the `Results` panel under the trace choose `Events`, `Summary`, `Fits` or `Quality`
+(`View › Panels › Results`, ⇧⌘R, shows or hides it). The `Table` result selector is at the left
+of its toolbar, beside `Columns…` and `Merge…`. If one recording has Schmitt, CUSUM, ML, and
 Reconciled results, the selector moves between their separately stored tables; switching it changes
 only the view and never replaces or silently pools them.
 
@@ -853,7 +854,7 @@ files, not arbitrary recordings with similar voltage labels.
    inspect and explicitly accept `Use these values` for that recording.
 3. Use Schmitt **k_in 5 / k_out 2**, **min dwell 0.0000200 s**, max dwell 0 off, detector merge gap 0 ms,
    and **auto (measure)** polarity. Detect separately on each recording.
-4. In `Results › Events › Merge sub-events`, enter **Window 10.00 ms** and `Merge all`.
+4. In `Results › Events`, press `Merge…`, then in `Merge sub-events` enter **Window 10.00 ms** and `Merge all`.
    This post-detection merge is different from the detector's merge-gap control.
 5. Check both pre-merge and post-merge counts, then save the project before plotting.
 

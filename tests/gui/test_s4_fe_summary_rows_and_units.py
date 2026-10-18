@@ -270,7 +270,9 @@ def test_a_gain_edit_does_not_re_caption_numbers_measured_under_the_old_gain(win
         "the caption was rewritten under a gain the numbers were never measured under")
     assert _value(win, "median_depth_pA") == shown
     banner = win._analysis_panel._stale
-    assert banner.isVisibleTo(win._analysis_panel)
+    # isHidden(), not isVisibleTo(panel): the stale line lives in the Results dock now, so the
+    # panel is not its ancestor and isVisibleTo would depend on the window being shown.
+    assert not banner.isHidden()
     assert "Calibration changed" in banner.message()
 
 

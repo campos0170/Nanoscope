@@ -80,7 +80,9 @@ def detected(window, qtbot, tmp_path):
     qtbot.wait(50)
     assert panel.current_detection() is not None
     assert panel._table.stale_columns == ()
-    assert not panel._stale.isVisibleTo(panel)
+    # isHidden(), not isVisibleTo(panel): the stale line lives in the Results dock now, so the
+    # panel is not its ancestor and isVisibleTo would depend on the window being shown.
+    assert panel._stale.isHidden()
     return window, did
 
 
@@ -94,7 +96,7 @@ def test_a_preprocess_knob_after_a_detection_announces_the_badges_and_their_clea
     with qtbot.waitSignal(panel.stalenessChanged, timeout=1_000):
         bl.rough_s.setValue(original * 4)
     assert panel._table.stale_columns == REMEASURED_COLUMNS
-    assert panel._stale.isVisibleTo(panel)
+    assert not panel._stale.isHidden()
     assert panel._stale.kind == "baseline"
 
     # The CLEAR path announces itself too: a surface that only hears "went stale" keeps
@@ -102,7 +104,7 @@ def test_a_preprocess_knob_after_a_detection_announces_the_badges_and_their_clea
     with qtbot.waitSignal(panel.stalenessChanged, timeout=1_000):
         bl.rough_s.setValue(original)
     assert panel._table.stale_columns == ()
-    assert not panel._stale.isVisibleTo(panel)
+    assert panel._stale.isHidden()
 
 
 def test_a_calibration_edit_after_a_detection_announces_the_badges(detected, qtbot):
@@ -112,7 +114,7 @@ def test_a_calibration_edit_after_a_detection_announces_the_badges(detected, qtb
         window._session.set_calibration(did, 0, ChannelCalibration(2.0, 0.0, "pA"),
                                         write_sidecar=False)
     assert panel._table.stale_columns == REMEASURED_COLUMNS
-    assert panel._stale.isVisibleTo(panel)
+    assert not panel._stale.isHidden()
     assert panel._stale.kind == "calibration"
 
 

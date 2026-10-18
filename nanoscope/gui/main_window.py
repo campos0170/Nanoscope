@@ -258,6 +258,11 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
                                        "separately to _push_stale_columns (S7-POP1), which "
                                        "pushes the table's badge tuple + the banner sentence "
                                        "onto the gallery and inspector; no frame moved",
+    "analysis_panel.resultsRevealRequested": "asks MainWindow to show/raise the Results dock "
+                                             "— layout only, no frame moved",
+    "analysis_panel.staleLineShownChanged": "the amber stale line came or went; drives only "
+                                            "the closed-Results-dock status-bar hint — no "
+                                            "frame moved",
     "analysis_panel.mergeFinished": "the OUTCOME of an off-thread 'Merge all', for the "
                                     "status line. When it installed a merged table it did "
                                     "so through Session.add_result, so the frame change "
@@ -353,6 +358,18 @@ _INSPECTOR_NESTED_CHROME_WIDTH = 24
 #: One dock separator. Two of them stand between the three columns: measured at 1512, where
 #: 320 (file) + 620 (viewer) + 560 (inspector) = 1500 leaves exactly 12 px.
 _DOCK_SEPARATOR_WIDTH = 6
+
+#: saveState/restoreState version. 0 = every layout written before the Results dock.
+#: A change that adds a dock bumps this and appends a step to _migrate_window_state.
+_WINDOW_STATE_VERSION = 1
+#: The Results dock's OPENING height (first launch, or a migrated old layout): tall enough
+#: for this many table rows, capped at a fraction of the dock area so the trace keeps the
+#: rest, and never below the minimum. Like the dock widths, a default and not a floor.
+_RESULTS_DEFAULT_ROWS = 6
+_RESULTS_MAX_HEIGHT_FRACTION = 1 / 3
+_RESULTS_MIN_DEFAULT_HEIGHT = 180
+#: Where the Results panel is reopened from, said ONCE: every hint that names it quotes this.
+_RESULTS_PANEL_PATH = "View ▸ Panels ▸ Results (⇧⌘R)"
 
 
 def _with_project_suffix(path: str) -> str:
@@ -592,6 +609,15 @@ class MainWindow(QtWidgets.QMainWindow):
         #: 1440 whatever the screen — which is how the Inspector's ceiling came to be
         #: unreachable from the app's own launch path. See :meth:`showEvent`.
         self._opening_layout_pending = False
+        #: The same, for the Results dock's opening HEIGHT (a first launch or a migrated
+        #: old layout); a restored current layout keeps the user's height.
+        self._results_layout_pending = False
+        #: Which shown table (doc, channel, module) was last announced stale behind a closed
+        #: Results dock, or None while the shown table is current: one hint per transition.
+        self._results_stale_seen = None
+        #: (widget that had the focus, widget it was parked on) when the Results dock was
+        #: hidden with the focus inside it; the toggle that re-shows the dock returns it.
+        self._results_focus_return = None
 
         self._session = Session()
         # THE UNDO DOOR. One stack over every EventSet mutation in the session (see
@@ -1017,8 +1043,9 @@ class MainWindow(QtWidgets.QMainWindow):
         info_scroll.setWidget(self._file_info_panel)
         tabs.addTab(cal_scroll, "Calibration")
         tabs.addTab(info_scroll, "File Info")
-        # The analysis panel owns its own scrolling (inner scroll areas + splitter) so the
-        # event table keeps its native scrollbar; add it directly, not wrapped.
+        # The analysis panel owns its own scrolling (one bounded scroll area per settings
+        # page, with its action strip pinned above it); add it directly, not wrapped. Its
+        # results surface is taken out below and docked under the trace.
         tabs.addTab(self._analysis_panel, "Analysis")
         # Let the tab bar scroll rather than widen the dock once the three labels stop fitting.
         tabs.setUsesScrollButtons(True)
@@ -1043,6 +1070,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._inspector.setObjectName("InspectorDock")
         self._inspector.setWidget(tabs)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self._inspector)
+
+        # THE RESULTS DOCK, under the trace: the event table and its Summary / Fits /
+        # Quality tabs get their own height instead of splitting the Inspector's with the
+        # parameter forms. AnalysisPanel still owns every widget in it.
+        #
+        # INVARIANT: nothing in this dock may impose a width floor — it sits under the
+        # trace, so its floor would floor the viewer — nor a height floor beyond its two
+        # fixed header rows.
+        self._results_dock = QtWidgets.QDockWidget("Results", self)
+        self._results_dock.setObjectName("ResultsDock")
+        self._results_dock.setAccessibleName("Results")
+        self._results_dock.setWidget(self._analysis_panel.take_results_widget())
+        self._apply_dock_corners()
+        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self._results_dock)
+        self._sync_results_title_bar()
 
     def _build_actions_and_menus(self) -> None:
         menubar = self.menuBar()
@@ -1210,6 +1252,13 @@ class MainWindow(QtWidgets.QMainWindow):
         panels = view_menu.addMenu("&Panels")
         panels.addAction(self._file_dock.toggleViewAction())
         panels.addAction(self._inspector.toggleViewAction())
+        self._act_toggle_results = self._results_dock.toggleViewAction()
+        self._act_toggle_results.setShortcut(QtGui.QKeySequence("Ctrl+Shift+R"))
+        self._act_toggle_results.setStatusTip(
+            "Show or hide the Results panel under the trace — the event table with its "
+            "Summary, Fits and Quality tabs. Hiding it gives the trace its full height; "
+            "nothing is lost.")
+        panels.addAction(self._act_toggle_results)
 
         # ``&Analysis`` used to be a flat ~14-item list in which the five plot surfaces were
         # items 10-14 — a dumping ground you had to read end-to-end to find anything. It is now
@@ -2140,6 +2189,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # banner. Neither the knob path nor the calibration path reaches a surface refresh,
         # so this is the only door that catches them (see _push_stale_columns).
         self._analysis_panel.stalenessChanged.connect(self._push_stale_columns)
+        # The Results dock: the panel asks, MainWindow (which owns the dock) shows it; and
+        # while the user has it closed, a new table or a stale one is said on the status
+        # bar instead of re-opening anything under the pointer.
+        self._analysis_panel.resultsRevealRequested.connect(self._reveal_results_panel)
+        self._analysis_panel.stalenessChanged.connect(self._hint_hidden_staleness)
+        self._analysis_panel.staleLineShownChanged.connect(self._hint_hidden_staleness)
+        self._session.resultsChanged.connect(self._hint_hidden_results)
+        self._results_dock.dockLocationChanged.connect(self._queue_results_title_sync)
+        self._results_dock.topLevelChanged.connect(self._queue_results_title_sync)
+        # ⇧⌘R is a keyboard round trip: hiding the dock parks the focus on the trace (not on
+        # Qt's next-in-chain workflow chip), and the toggle that re-shows it hands it back.
+        self._results_dock.installEventFilter(self)
+        self._act_toggle_results.triggered.connect(self._return_results_focus)
 
         # The analysis launcher. Its buttons carry the surfaces' OWN explanatory copy — the
         # tooltips that were written for the QActions and that a native macOS menu never
@@ -5237,6 +5299,12 @@ class MainWindow(QtWidgets.QMainWindow):
             insp.note_level_gap(int(event_id), note if gap else "")
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
+        if obj is getattr(self, "_results_dock", None):
+            # Explicitly hidden (✕, the toggle), not merely inside a window being hidden.
+            # Hide arrives before Qt moves the focus, so parking it here wins.
+            if event.type() == QtCore.QEvent.Hide and obj.isHidden():
+                self._park_results_focus()
+            return super().eventFilter(obj, event)
         if event.type() in (QtCore.QEvent.Show, QtCore.QEvent.Hide):
             if any(obj is w for w in self._surface_windows().values() if w is not None):
                 self._sync_analysis_open_state()
@@ -11345,7 +11413,15 @@ class MainWindow(QtWidgets.QMainWindow):
             # sentence as a wrong-typed value: either way the saved geometry is not applied.
             ignored.append("geometry")
         state = _restorable_bytes(s, "windowState", ignored)
-        if state is None or not self.restoreState(state):
+        # Newest version first; a layout saved before the Results dock (version 0) still
+        # restores — every width and visibility it holds — and is then migrated.
+        restored = None
+        if state is not None:
+            for version in range(_WINDOW_STATE_VERSION, -1, -1):
+                if self.restoreState(state, version):
+                    restored = version
+                    break
+        if restored is None:
             if state is not None:
                 ignored.append("windowState")
             # No usable dock layout, for either reason: fall back to the designed widths
@@ -11358,7 +11434,15 @@ class MainWindow(QtWidgets.QMainWindow):
             # window actually got. Applied here as well, because a window that is never
             # shown — most of the headless tests — still needs the designed widths.
             self._opening_layout_pending = True
+            self._results_layout_pending = True
             self._apply_default_dock_widths()
+            self._apply_default_results_height()
+        else:
+            # saveState carries the corners and a version-0 state carries Qt's defaults.
+            self._apply_dock_corners()
+            if restored < _WINDOW_STATE_VERSION:
+                self._migrate_window_state(restored)
+        self._sync_results_title_bar()
         raw = s.value("recentFiles", [])
         if isinstance(raw, str):
             raw = [raw] if raw else []
@@ -11524,6 +11608,153 @@ class MainWindow(QtWidgets.QMainWindow):
             [_FILE_DOCK_DEFAULT_WIDTH, self._inspector_default_width()],
             QtCore.Qt.Horizontal)
 
+    def _apply_dock_corners(self) -> None:
+        """The side columns run the full height; a top or bottom dock sits under the trace.
+
+        Code-owned, not a preference — but ``saveState`` CARRIES the corners and
+        ``restoreState`` overwrites them, and a version-0 state carries Qt's defaults
+        (top/bottom own all four corners: measured, the Results dock then spans 1512 px and
+        cuts both side docks to 736). So this runs at construction AND after every
+        successful restore. Not spanning under the File Manager is deliberate: the file
+        tree keeps its whole height for long voltage and incubation series.
+        """
+        self.setCorner(QtCore.Qt.TopLeftCorner, QtCore.Qt.LeftDockWidgetArea)
+        self.setCorner(QtCore.Qt.BottomLeftCorner, QtCore.Qt.LeftDockWidgetArea)
+        self.setCorner(QtCore.Qt.TopRightCorner, QtCore.Qt.RightDockWidgetArea)
+        self.setCorner(QtCore.Qt.BottomRightCorner, QtCore.Qt.RightDockWidgetArea)
+
+    def _migrate_window_state(self, from_version: int) -> None:
+        """Bring a restored older layout up to date; its widths and visibilities stay.
+
+        Says so on the status bar and NOT on the info bar: a migration is not damage."""
+        if from_version < 1:
+            # A version-0 layout predates the Results dock, which Qt leaves wherever it
+            # happens to be at a degenerate height.
+            self._results_dock.setFloating(False)
+            self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self._results_dock)
+            self._results_dock.show()
+            self._results_layout_pending = True
+            self._apply_default_results_height()
+            QtCore.QTimer.singleShot(0, self, lambda: self.statusBar().showMessage(
+                "The event table now lives in the Results panel under the trace — "
+                f"{_RESULTS_PANEL_PATH}.", 10000))
+
+    def _dock_area_height(self) -> int:
+        """The height the docks and the central widget share: the window minus an
+        in-window menu bar and the status bar."""
+        bar = self.menuBar()
+        menu = 0 if bar.isNativeMenuBar() else max(bar.height(), bar.sizeHint().height())
+        status = max(self.statusBar().height(), self.statusBar().sizeHint().height())
+        return max(0, self.height() - menu - status)
+
+    def _results_default_height(self) -> int:
+        """How tall the Results dock OPENS: ``_RESULTS_DEFAULT_ROWS`` table rows, capped at
+        ``_RESULTS_MAX_HEIGHT_FRACTION`` of the dock area, never below
+        ``_RESULTS_MIN_DEFAULT_HEIGHT``. A default, applied like the Inspector's opening
+        width — never re-imposed once the layout is the user's."""
+        wanted = self._analysis_panel.results_height_for_rows(_RESULTS_DEFAULT_ROWS)
+        cap = int(self._dock_area_height() * _RESULTS_MAX_HEIGHT_FRACTION)
+        return max(_RESULTS_MIN_DEFAULT_HEIGHT, min(wanted, cap))
+
+    def _apply_default_results_height(self) -> None:
+        dock = self._results_dock
+        if dock.isFloating() or self.dockWidgetArea(dock) not in (
+                QtCore.Qt.TopDockWidgetArea, QtCore.Qt.BottomDockWidgetArea):
+            return
+        self.resizeDocks([dock], [self._results_default_height()], QtCore.Qt.Vertical)
+
+    def _queue_results_title_sync(self, *_args) -> None:
+        # Deferred: never change a dock's features in the middle of Qt's own drag/plug.
+        QtCore.QTimer.singleShot(0, self, self._sync_results_title_bar)
+
+    def _sync_results_title_bar(self) -> None:
+        """A vertical title bar while docked at the top or bottom (it costs width there,
+        not a row of the table); a normal one on the sides or floating. Qt does not save
+        this feature, so it is re-derived from where the dock actually is."""
+        dock = self._results_dock
+        flag = QtWidgets.QDockWidget.DockWidgetVerticalTitleBar
+        vertical = not dock.isFloating() and self.dockWidgetArea(dock) in (
+            QtCore.Qt.TopDockWidgetArea, QtCore.Qt.BottomDockWidgetArea)
+        features = dock.features()
+        wanted = (features | flag) if vertical else (features & ~flag)
+        if wanted != features:
+            dock.setFeatures(wanted)
+
+    def _reveal_results_panel(self) -> None:
+        self._results_dock.show()
+        self._results_dock.raise_()
+
+    def _hint_hidden_results(self, doc_id: str, module_id: str) -> None:
+        """A new table for the selected recording landed while the user has the Results
+        panel closed: say where it is, once, and re-open nothing."""
+        if (self._restoring or self._history.is_applying()
+                or not self._results_dock.isHidden()
+                or module_id not in self._detection_module_ids()):
+            return
+        sel = self._current_selection
+        if sel is None or sel[0] != doc_id:
+            return
+        self.statusBar().showMessage(
+            f"New events are in the Results panel, which is closed — {_RESULTS_PANEL_PATH}.",
+            8000)
+
+    def _hint_hidden_staleness(self, *_args) -> None:
+        """Edge-triggered PER SHOWN TABLE: a table on screen just turned (or was selected)
+        stale while the Results panel — the only place its amber line lives — is closed.
+
+        Read from the line's real visibility, which the panel also reports when a repoint
+        to an empty recording hides it without re-judging anything."""
+        panel = self._analysis_panel
+        key = None
+        if not panel._stale.isHidden():
+            res = panel.current_detection()
+            key = ("shown",) if res is None else (res.doc_id, res.channel, res.module_id)
+        was, self._results_stale_seen = self._results_stale_seen, key
+        if (key is not None and key != was and not self._restoring
+                and self._results_dock.isHidden()):
+            self.statusBar().showMessage(
+                "The shown event table is now stale; the Results panel says why — "
+                f"{_RESULTS_PANEL_PATH}.", 10000)
+
+    def _park_results_focus(self) -> None:
+        """The Results dock is being hidden: if the focus is inside it, put it on the trace
+        and remember where it was. Qt would otherwise hand it to the next widget in the
+        chain — the workflow strip's first chip, where Space opens a file."""
+        self._results_focus_return = None
+        try:
+            focus = QtWidgets.QApplication.focusWidget() or self.focusWidget()
+            if focus is None or not self._results_dock.isAncestorOf(focus):
+                return
+            self._trace_view.setFocus(QtCore.Qt.OtherFocusReason)
+        except RuntimeError:     # a teardown hide: nothing to park
+            return
+        self._results_focus_return = (focus, self._trace_view)
+
+    def _return_results_focus(self, shown: bool) -> None:
+        """The Results toggle re-showed the dock: if the focus is still where hiding it
+        parked it, hand it back (normally the event table, so j/k/a/r/f keep working).
+        Showing the dock any other way never takes the focus."""
+        if not shown:
+            return
+        memo, self._results_focus_return = self._results_focus_return, None
+        if memo is None:
+            return
+        widget, parked = memo
+        focus = QtWidgets.QApplication.focusWidget() or self.focusWidget()
+        try:
+            if focus is not parked or not widget.isVisible():
+                return
+            if self._results_dock.isFloating():
+                self._results_dock.activateWindow()
+            widget.setFocus(QtCore.Qt.OtherFocusReason)
+        except RuntimeError:     # the remembered widget is gone
+            return
+
+    @staticmethod
+    def _detection_module_ids() -> tuple[str, ...]:
+        from ..core.sources import DETECTION_MODULE_IDS
+        return tuple(DETECTION_MODULE_IDS)
+
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802
         """Re-derive the opening dock widths against the width the window ACTUALLY got.
 
@@ -11547,8 +11778,12 @@ class MainWindow(QtWidgets.QMainWindow):
         :meth:`_inspector_default_width` states.
         """
         super().showEvent(event)
+        pending = self._opening_layout_pending or self._results_layout_pending
         if self._opening_layout_pending:
             self._apply_default_dock_widths()
+        if self._results_layout_pending:
+            self._apply_default_results_height()
+        if pending:
             # Bound to `self` so the callback dies with the window rather than firing into a
             # deleted C++ object at teardown.
             QtCore.QTimer.singleShot(0, self, self._finish_opening_layout)
@@ -11569,15 +11804,18 @@ class MainWindow(QtWidgets.QMainWindow):
         super().resizeEvent(event)
         if self._opening_layout_pending and self.isVisible():
             self._apply_default_dock_widths()
+        if self._results_layout_pending and self.isVisible():
+            self._apply_default_results_height()
 
     def _finish_opening_layout(self) -> None:
-        """The layout is the user's from here: the opening widths are never re-imposed."""
+        """The layout is the user's from here: the opening sizes are never re-imposed."""
         self._opening_layout_pending = False
+        self._results_layout_pending = False
 
     def _save_settings(self) -> None:
         s = QtCore.QSettings()
         s.setValue("geometry", self.saveGeometry())
-        s.setValue("windowState", self.saveState())
+        s.setValue("windowState", self.saveState(_WINDOW_STATE_VERSION))
         s.setValue("recentFiles", self._recent)
         s.setValue("recentProjects", self._recent_projects)
         s.setValue("lastDir", self._last_dir)

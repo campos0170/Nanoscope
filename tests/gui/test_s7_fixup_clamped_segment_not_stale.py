@@ -96,7 +96,9 @@ def test_a_clamped_run_is_not_stale_against_the_form_it_was_run_from(clamped, qt
     window, _did = clamped
     panel = window._analysis_panel
     res = panel.current_detection()
-    assert not panel._stale.isVisibleTo(panel), (
+    # isHidden(), not isVisibleTo(panel): the stale line lives in the Results dock now, so the
+    # panel is not its ancestor and isVisibleTo would depend on the window being shown.
+    assert panel._stale.isHidden(), (
         "a false 'estimator changed' banner over a run nothing has changed: "
         + panel._stale.message())
     assert panel._table.stale_columns == ()
@@ -123,7 +125,7 @@ def test_a_form_change_that_clamps_to_the_same_windows_is_not_stale_either(clamp
     with qtbot.waitSignal(panel.stalenessChanged, timeout=1_000):
         bl.base_s.setValue(0.2)
     assert (bl.rough_s.value(), bl.base_s.value()) == (1.0, 0.2)
-    assert not panel._stale.isVisibleTo(panel), panel._stale.message()
+    assert panel._stale.isHidden(), panel._stale.message()
     assert panel._table.stale_columns == ()
 
 
@@ -139,7 +141,7 @@ def test_a_form_change_that_clamps_differently_is_stale_says_so_and_a_re_measure
         bl.base_s.setValue(0.2)
     assert bl.base_s.value() == 0.2
     banner = panel._stale
-    assert banner.isVisibleTo(panel) and banner.kind == "baseline"
+    assert not banner.isHidden() and banner.kind == "baseline"
     msg = banner.message()
     assert "changed since this detection ran" in msg
     assert "CLAMPED to this recording's 0.08 s length" in msg, msg
@@ -153,7 +155,7 @@ def test_a_form_change_that_clamps_differently_is_stale_says_so_and_a_re_measure
     qtbot.waitUntil(lambda: panel._pending is None, timeout=30_000)
     qtbot.wait(50)
     assert panel.current_detection().baseline_fingerprint == want
-    assert not banner.isVisibleTo(panel)
+    assert banner.isHidden()
     assert panel._table.stale_columns == ()
 
 
@@ -174,7 +176,7 @@ def test_a_form_change_the_ladder_does_not_clamp_is_judged_against_the_form_itse
     cfg, token, live, fs, _n = panel._live_baseline_for_run()
     assert token is None and cfg == live
     banner = panel._stale
-    assert banner.isVisibleTo(panel) and banner.kind == "baseline"
+    assert not banner.isHidden() and banner.kind == "baseline"
     msg = banner.message()
     assert "rough 500 ms / base 50 ms" in msg and "is configured now" in msg, msg
     assert "CLAMPED" not in msg, msg
@@ -184,5 +186,5 @@ def test_a_form_change_the_ladder_does_not_clamp_is_judged_against_the_form_itse
     qtbot.waitUntil(lambda: panel._pending is None, timeout=30_000)
     qtbot.wait(50)
     assert panel.current_detection().baseline_fingerprint == want
-    assert not banner.isVisibleTo(panel)
+    assert banner.isHidden()
     assert panel._table.stale_columns == ()

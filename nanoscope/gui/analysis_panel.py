@@ -391,6 +391,15 @@ _STALE_ACTION_TIPS = {
         "estimator now configured. Events are NOT re-detected: every span, and every "
         "accept/reject and hand-written flag on it, is kept."),
 }
+#: The one-line verdict the Results panel's status line leads with, per staleness kind.
+#: The full sentence (``_StaleBanner.message()``) is unchanged and sits behind Details;
+#: `_judge_staleness` passes a more specific verdict where the reason is narrower.
+_STALE_SUMMARIES = {
+    _STALE_CALIBRATION: "Depths stale — calibration changed",
+    _STALE_BASELINE: "Depths stale — estimator changed",
+    _STALE_RECONCILIATION_SOURCE: "Source table changed",
+}
+_RESULTS_EMPTY_TEXT = "Run detection to see events, summaries and quality scores."
 
 
 def schmitt_params_from_result(res: AnalysisResult | None) -> dict[str, Any]:
@@ -641,8 +650,75 @@ class _ElidedLabel(QtWidgets.QLabel):
             QtWidgets.QLabel.setText(self, elided)
 
 
+def _opening_words(text: str) -> str:
+    """The first word of ``text`` — two when the first is an article like "A"."""
+    words = text.split(" ")
+    if len(words[0]) < 3 and len(words) > 1:
+        return " ".join(words[:2])
+    return words[0]
+
+
+class _StaleLineLabel(_ElidedLabel):
+    """The stale notice's one line. ``text()`` is always the full line (the first variant).
+
+    The painted copy is the first variant that shows ``must_show`` whole, elided after it;
+    the gated line passes the refusal's opening words, and its narrower variants drop the
+    verdict, never the refusal, so the reason starts on screen however narrow the dock."""
+
+    def set_line(self, variants: tuple[str, ...], must_show: str = "") -> None:
+        self._variants = tuple(variants)
+        self._must_show = must_show
+        self.setText(self._variants[0])
+
+    def _apply_elide(self) -> None:
+        variants = getattr(self, "_variants", ())
+        must = getattr(self, "_must_show", "")
+        if not variants or variants[0] != self._full:
+            variants, must = (self._full,), ""
+        width = max(0, self.width())
+        metrics = self.fontMetrics()
+        elided = ""
+        for text in variants:
+            # Judged on the text Qt would actually paint, not on a width estimate.
+            elided = metrics.elidedText(text, QtCore.Qt.ElideRight, width)
+            if not must or must in elided:
+                break
+        if elided != QtWidgets.QLabel.text(self):
+            QtWidgets.QLabel.setText(self, elided)
+
+
+class _NoWidthFloor(QtWidgets.QFrame):
+    """A row container that keeps its HEIGHT minimum but demands no width.
+
+    A row of fixed-width buttons otherwise floors every dock above it (``qSmartMinSize``);
+    the Results dock sits under the trace, so its floor would floor the signal viewer.
+    Here a too-narrow dock clips the row's right end instead."""
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt override)
+        return QtCore.QSize(0, super().minimumSizeHint().height())
+
+
+class _CompactTabStyle(QtWidgets.QProxyStyle):
+    """The application's style with less vertical tab padding. Fusion's document-mode
+    tabs are 36 px at the 13 pt reference look, a whole table row of the Results dock.
+    Shrinking the tab's size hint instead clips descenders: the text rect keeps the
+    style's padding, so the padding itself is what has to change."""
+
+    def pixelMetric(self, metric, option=None, widget=None) -> int:  # noqa: N802
+        if metric == QtWidgets.QStyle.PM_TabBarTabVSpace:
+            return 6
+        return super().pixelMetric(metric, option, widget)
+
+
 class _StaleBanner(QtWidgets.QFrame):
-    """A thin banner shown when a stored result no longer matches the live settings.
+    """The amber status line shown when a stored result no longer matches the live settings.
+
+    ONE LINE, IN A RESERVED SLOT. It lives in the Results panel's second header row, which
+    has a fixed height whether the line is up or not (the grey event-count summary holds the
+    slot otherwise), so a staleness flip moves no pixel of the table, the tabs or the
+    Inspector. The line is ``⚠ <short verdict>``, the action button and Details; the FULL
+    sentence (``message()``, unchanged — the docs quote it) is in the Details popup, and in
+    the line's tooltip.
 
     TWO stamps can go stale, and they want DIFFERENT repairs, so the banner carries
     one action button whose label and meaning are set with the message:
@@ -670,44 +746,98 @@ class _StaleBanner(QtWidgets.QFrame):
     tab" -- that this button can never take, because Re-run replays the result's STORED
     dict, never the box (CW-1). `set_action_gate` is the one door the panel's resolver
     (`AnalysisPanel._stale_action_refusal`) pushes through: the button is disabled and
-    the reason is printed under the message, the way the Detect button's gate label
-    prints its own, so a refusal is on screen before any click and never only in a
-    tooltip.
+    the reason is printed ON THE LINE, after the verdict ("· Re-run unavailable: ..."),
+    the way the Detect button's gate label prints its own. The reason therefore STARTS on
+    screen before any click and is never only in a tooltip; on a narrow dock the line
+    elides, and the full refusal is one click away in Details (``_why``).
     """
 
     actionRequested = QtCore.Signal(str)   # one of _STALE_* below
+    #: The line was explicitly shown (True) or hidden (False). Its host swaps the slot's
+    #: other occupant (the grey summary) on it, so the slot is never empty or doubled.
+    shownChanged = QtCore.Signal(bool)
 
     def __init__(self, on_action, parent=None) -> None:
         super().__init__(parent)
-        self.setVisible(False)
+        self.setObjectName("staleNotice")
         self.setStyleSheet(
-            "QFrame{background:#5a3d00; border:1px solid #7a5510; border-radius:4px;}"
+            "QFrame#staleNotice{background:#5a3d00; border:1px solid #7a5510;"
+            " border-radius:4px;}"
             "QLabel{border:none; color:#ffd479;}")
-        outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(10, 6, 6, 6)
-        outer.setSpacing(4)
-        lay = QtWidgets.QHBoxLayout()
-        lay.setContentsMargins(0, 0, 0, 0)
-        self._label = QtWidgets.QLabel()
-        self._label.setWordWrap(True)
-        lay.addWidget(self._label, 1)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(6, 0, 2, 0)
+        lay.setSpacing(4)
+        self._summary = _StaleLineLabel()
+        lay.addWidget(self._summary, 1)
         self._kind = _STALE_CALIBRATION
+        self._verdict = ""
+        self._refusal = ""
         self._btn = QtWidgets.QPushButton("Re-run")
+        self._btn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self._btn.clicked.connect(lambda: self.actionRequested.emit(self._kind))
         self.actionRequested.connect(on_action)
         lay.addWidget(self._btn)
-        outer.addLayout(lay)
-        # Why the offered action cannot run right now -- shown only while it cannot, in
-        # the banner itself rather than a hover-only tooltip.
+        # A plain clicked -> popup(), never setMenu/InstantPopup: QToolButton's own popup
+        # runs a C++ QMenu::exec that nothing can interrupt.
+        self._details = QtWidgets.QToolButton()
+        self._details.setText("Details")
+        self._details.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self._details.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        self._details.setToolTip("Show the full sentence: what changed and what the button does.")
+        self._details.clicked.connect(self._open_details)
+        lay.addWidget(self._details)
+        # The popup is built ONCE and kept; it is never read back through .menu().
+        self._details_menu = QtWidgets.QMenu(self)
+        pane = QtWidgets.QFrame()
+        pane_lay = QtWidgets.QVBoxLayout(pane)
+        pane_lay.setContentsMargins(10, 8, 10, 8)
+        pane_lay.setSpacing(6)
+        self._label = QtWidgets.QLabel()
+        # The sentence the docs quote, verbatim, and the full refusal under it.
         self._why = QtWidgets.QLabel()
-        self._why.setWordWrap(True)
+        for label in (self._label, self._why):
+            label.setTextFormat(QtCore.Qt.PlainText)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            label.setFixedWidth(420)
+            pane_lay.addWidget(label)
         self._why.setVisible(False)
-        outer.addWidget(self._why)
+        self._details_action = QtWidgets.QWidgetAction(self._details_menu)
+        self._details_action.setDefaultWidget(pane)
+        self._details_menu.addAction(self._details_action)
+        self._details_pane = pane
+        # LAST: the setVisible override below touches the menu.
+        self.setVisible(False)
+
+    def setVisible(self, visible: bool) -> None:  # noqa: N802 (Qt override)
+        was_shown = not self.isHidden()
+        super().setVisible(visible)
+        menu = getattr(self, "_details_menu", None)
+        if menu is not None and not visible:
+            menu.hide()
+        if was_shown != (not self.isHidden()):
+            self.shownChanged.emit(not self.isHidden())
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt override)
+        return QtCore.QSize(0, super().minimumSizeHint().height())
+
+    def fit_height(self, height: int) -> None:
+        """Make the line ``height`` tall: the buttons give up vertical padding, not text,
+        so the status line costs no more height than the toolbar row above it."""
+        border = max(0, self.sizeHint().height() - self.layout().sizeHint().height())
+        for button in (self._btn, self._details):
+            button.setFixedHeight(max(1, int(height) - border))
+
+    def _open_details(self) -> None:
+        self._details_pane.adjustSize()
+        self._details_menu.popup(
+            self._details.mapToGlobal(QtCore.QPoint(0, self._details.height())))
 
     def show_message(self, text: str, kind: str = _STALE_CALIBRATION,
-                     action_label: str = "Re-run") -> None:
+                     action_label: str = "Re-run", summary: str | None = None) -> None:
         self._label.setText(text)
         self._kind = str(kind)
+        self._verdict = "⚠ " + (summary or _STALE_SUMMARIES.get(self._kind, "Results stale"))
         self._btn.setText(action_label)
         # A fresh message starts with the action offered; the panel pushes the gate's
         # real answer right after (`_judge_staleness` -> `_sync_stale_action`).
@@ -715,21 +845,46 @@ class _StaleBanner(QtWidgets.QFrame):
         self.setVisible(True)
 
     def set_action_gate(self, ok: bool, why: str = "") -> None:
-        """Enable the offered action, or disable it and say why -- under the message
-        AND in the button's tooltip. ``why`` is the panel's sentence (the detection
-        gate's reason, or the replay refusal); this only frames it with the action's
-        own label so "Re-run is unavailable: ..." reads about the button beside it."""
+        """Enable the offered action, or disable it and say why -- on the line, in
+        Details AND in the button's tooltip. ``why`` is the panel's sentence (the
+        detection gate's reason, or the replay refusal); this only frames it with the
+        action's own label so "Re-run is unavailable: ..." reads about the button beside
+        it."""
         ok = bool(ok)
         self._btn.setEnabled(ok)
         if ok:
             self._btn.setToolTip(_STALE_ACTION_TIPS.get(self._kind, ""))
+            self._refusal = ""
             self._why.clear()
             self._why.setVisible(False)
-            return
-        text = f"{self._btn.text()} is unavailable: {why}"
-        self._btn.setToolTip(text)
-        self._why.setText(text)
-        self._why.setVisible(True)
+        else:
+            self._refusal = str(why)
+            text = f"{self._btn.text()} is unavailable: {why}"
+            self._btn.setToolTip(text)
+            self._why.setText(text)
+            self._why.setVisible(True)
+        self._sync_line()
+
+    def _sync_line(self) -> None:
+        tip = self._label.text()
+        if self._btn.isEnabled():
+            self._summary.set_line((self._verdict,))
+        else:
+            # Narrower variants give up the verdict word by word (it is in the tooltip and in
+            # Details), then the action's name (it is on the greyed button beside the line),
+            # then the ⚠ (the amber pill says it), never the refusal's opening words.
+            action = self._btn.text()
+            refusal = f"unavailable: {self._refusal}"
+            head = self._verdict.split(" — ")[0]
+            variants = [f"{self._verdict} · {action} {refusal}"]
+            if head != self._verdict:
+                variants.append(f"{head} · {action} {refusal}")
+            variants += [f"{head} · {refusal}", f"⚠ {action} {refusal}", f"⚠ {refusal}",
+                         refusal]
+            self._summary.set_line(
+                tuple(variants), must_show="unavailable: " + _opening_words(self._refusal))
+            tip += "\n\n" + self._why.text()
+        self._summary.setToolTip(tip)
 
     def action_refusal(self) -> str:
         """Why the action button is disabled, or ``""`` while it is offered (tests and
@@ -751,6 +906,10 @@ class _StaleBanner(QtWidgets.QFrame):
 
 class AnalysisPanel(QtWidgets.QWidget):
     """Detection params + run + results table + event navigation + staleness.
+
+    The results half (status line, Events/Summary/Fits/Quality, the event table) is one
+    widget, ``_results_host``, which a host may take with :meth:`take_results_widget` and
+    dock elsewhere; this panel keeps owning and wiring everything inside it.
 
     Two signals FORWARD the owned :class:`EventTable`'s row selection and curation
     so MainWindow can keep the standalone Event Inspector in sync WITHOUT reaching
@@ -810,6 +969,13 @@ class AnalysisPanel(QtWidgets.QWidget):
     #: Free when nothing has changed, by the same contract that lets four redundant signals
     #: drive a checkpoint.
     willReplaceEvents = QtCore.Signal()
+    #: Asks the host (MainWindow, the sole wirer) to show and raise the dock this panel's
+    #: results surface lives in. Carries nothing: panels never touch docks.
+    resultsRevealRequested = QtCore.Signal()
+    #: The amber stale line was shown (True) or hidden (False), by ANY path — including a
+    #: repoint to a recording with nothing to show, which re-judges nothing and so emits no
+    #: ``stalenessChanged``. Lets the host say so while the Results dock is closed.
+    staleLineShownChanged = QtCore.Signal(bool)
 
     def __init__(self, session: Session, controller: AnalysisController,
                  trace_view: TraceView, parent=None) -> None:
@@ -948,8 +1114,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._title.setStyleSheet("font-weight:600; font-size:13px;")
         root.addWidget(self._title)
 
+        # Built here, laid out in the results surface's status line below.
         self._stale = _StaleBanner(self._on_stale_action)
-        root.addWidget(self._stale)
 
         self._detection = DetectionPanel()
         #: What the Detection tab's "measured" polarity line reads before anything has been
@@ -970,11 +1136,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._result_selector.setSizeAdjustPolicy(
             QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._result_selector.setMinimumContentsLength(12)
-        # The strip must still fit without scrolling at a 320 px Inspector. Its popup
-        # retains the full item text and the tooltip explains the control, so the closed
-        # box may elide instead of making its 150 px size hint a dock-width floor.
+        # The first thing in the Results toolbar to give way on a narrow dock: its popup
+        # keeps the full item text, so the closed box may elide down to this minimum while
+        # the buttons beside it stay whole.
         self._result_selector.setSizePolicy(
-            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+            QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        self._result_selector.setMinimumWidth(96)
         self._result_selector.setToolTip(
             "Choose which stored detector result is shown below. Switching only changes "
             "the view; every source table and its curation stays stored."
@@ -1022,34 +1189,96 @@ class AnalysisPanel(QtWidgets.QWidget):
         # overlay checkbox is indistinguishable from a feature that no longer exists.
         self._detection.show_open_pore_baseline()
 
-        # Settings have their own bounded scrollers and persistent mode/actions.
-        # Results are an independent surface, so interpretation is never buried
-        # under whichever settings page happens to be active.
+        # THE RESULTS SURFACE. Settings and results are separate surfaces: the parameter
+        # forms keep the Inspector's full height, and everything a run produced lives in
+        # `_results_host`, which MainWindow docks under the trace (`take_results_widget`).
+        # A standalone panel keeps it inline below the forms. This panel owns every
+        # widget, signal and slot in it either way.
+        #
+        # Two header rows of FIXED height, then the tabs. Nothing in the header appears,
+        # disappears or changes height on a staleness flip, a gate change or an edit:
+        #   1. resultsToolbar: Table [selector] [Columns…] [Merge…] constants… [⚠ n advisories]
+        #   2. resultsStatusLine: the grey event count, OR the amber stale line, one slot.
         self._results_present = False
         self._results_host = QtWidgets.QWidget()
+        self._results_host.setObjectName("resultsSurface")
         results_layout = QtWidgets.QVBoxLayout(self._results_host)
         results_layout.setContentsMargins(0, 0, 0, 0)
-        results_layout.setSpacing(4)
-        self.results_toggle = QtWidgets.QToolButton()
-        self.results_toggle.setText("Results")
-        self.results_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        self.results_toggle.setCheckable(True)
-        self.results_toggle.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        self.results_toggle.setStyleSheet("QToolButton { text-align: left; padding: 4px; font-weight:600; }")
-        results_layout.addWidget(self.results_toggle)
-        self._results_empty = QtWidgets.QLabel("Run detection to see events, summaries and quality scores.")
-        self._results_empty.setWordWrap(True)
-        self._results_empty.setStyleSheet("color:#8b9199;")
-        results_layout.addWidget(self._results_empty)
+        results_layout.setSpacing(2)
+
+        self._results_toolbar = _NoWidthFloor()
+        self._results_toolbar.setObjectName("resultsToolbar")
+        toolbar = QtWidgets.QHBoxLayout(self._results_toolbar)
+        # Tight: at 1280x800 the 13 pt row is within a few px of the dock's width.
+        toolbar.setContentsMargins(2, 0, 2, 0)
+        toolbar.setSpacing(4)
+        toolbar.addWidget(QtWidgets.QLabel("Table"))
+        toolbar.addWidget(self._result_selector)
+        self._table.column_toolbar.removeWidget(self._table.columns_button)
+        toolbar.addWidget(self._table.columns_button)
+        self.merge_toggle = QtWidgets.QToolButton()
+        self.merge_toggle.setObjectName("mergeToggle")
+        self.merge_toggle.setText("Merge…")
+        self.merge_toggle.setCheckable(True)
+        self.merge_toggle.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.merge_toggle.setToolTip(
+            "Show the Merge sub-events controls above the event table: stitch fragments "
+            "within a time window (Merge all) or inside the Measure selection.")
+        # ON must read from across the screen, on any tab: Fusion's own checked shade is
+        # 7/255 off the unchecked one. (The size hint is the same checked or not.)
+        self.merge_toggle.setStyleSheet(
+            "QToolButton#mergeToggle:checked { background:#1d3a47;"
+            " border:1px solid #4FC3F7; border-radius:4px; }")
+        toolbar.addWidget(self.merge_toggle)
+        # The table's constant columns, said once, in the toolbar's free run instead of a
+        # caption row above the table (which cost the dock a table row). Ignored width: it
+        # only takes what the buttons leave, and its tooltip carries the whole text.
+        constants = self._table.constants_label
+        self._table.layout().removeWidget(constants)
+        constants.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        toolbar.addWidget(constants, 1)
+        toolbar.addStretch(0)
         self._result_notice = QtWidgets.QLabel()
-        self._result_notice.setWordWrap(True)
+        self._result_notice.setWordWrap(False)
+        self._result_notice.setTextFormat(QtCore.Qt.RichText)
         self._result_notice.setOpenExternalLinks(False)
+        self._result_notice.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self._result_notice.linkActivated.connect(lambda _link: self.show_result_summary())
         self._result_notice.hide()
-        results_layout.addWidget(self._result_notice)
+        toolbar.addWidget(self._result_notice)
+        self._results_toolbar.setFixedHeight(max(
+            self._result_selector.sizeHint().height(),
+            self._table.columns_button.sizeHint().height(),
+            self.merge_toggle.sizeHint().height()))
+        results_layout.addWidget(self._results_toolbar)
+
+        self._results_status = _NoWidthFloor()
+        self._results_status.setObjectName("resultsStatusLine")
+        status = QtWidgets.QHBoxLayout(self._results_status)
+        status.setContentsMargins(0, 0, 0, 0)
+        status.setSpacing(0)
+        self._results_summary = _ElidedLabel(_RESULTS_EMPTY_TEXT)
+        self._results_summary.setStyleSheet("color:#8b9199;")
+        status.addWidget(self._results_summary, 1)
+        status.addWidget(self._stale, 1)
+        self._stale.shownChanged.connect(self._on_stale_shown)
+        row_height = self._results_toolbar.maximumHeight()
+        self._stale.fit_height(row_height)
+        self._results_status.setFixedHeight(max(
+            row_height, self._results_summary.sizeHint().height()))
+        results_layout.addWidget(self._results_status)
+
         self.results_tabs = QtWidgets.QTabWidget()
-        self.results_tabs.setMinimumSize(0, 0)
+        tab_bar = self.results_tabs.tabBar()
+        # Parented to the bar, so it lives exactly as long as the bar that uses it.
+        tab_style = _CompactTabStyle(QtWidgets.QApplication.style().name())
+        tab_style.setParent(tab_bar)
+        tab_bar.setStyle(tab_style)
+        self.results_tabs.setDocumentMode(True)
         self.results_tabs.setElideMode(QtCore.Qt.ElideRight)
+        # An explicit 0 is ignored by qSmartMinSize; 1 px is how "no floor" is spelled.
+        self.results_tabs.setMinimumSize(1, 1)
         results_layout.addWidget(self.results_tabs, 1)
 
         events_page = QtWidgets.QWidget()
@@ -1060,32 +1289,56 @@ class AnalysisPanel(QtWidgets.QWidget):
         merge_layout = QtWidgets.QVBoxLayout(merge_host)
         merge_layout.setContentsMargins(0, 0, 0, 0)
         merge_layout.addWidget(self._merge)
-        from .inspector_widgets import Disclosure, InspectorScrollArea
+        from .inspector_widgets import InspectorScrollArea
         merge_scroll = _scroll_wrap(merge_host)
         _pin_scroll_height(merge_scroll, merge_host)
+        # Shown above the table only while Merge… is checked; it takes its height from the
+        # table, which is the deliberate cost of a deliberate toggle. It keeps its whole
+        # height: the page scrolls instead (below), so this floor never reaches the dock.
         merge_scroll.setMinimumHeight(merge_scroll.maximumHeight())
-        self.merge_details = Disclosure('Merge sub-events', merge_scroll)
-        event_layout.addWidget(self.merge_details)
-        # Keep the stored-result selector beside the table even when the optional
-        # merge controls are folded. These remain the original live widgets.
+        merge_scroll.setVisible(False)
+        self._merge_scroll = merge_scroll
+        self.merge_toggle.toggled.connect(self._set_merge_shown)
+        event_layout.addWidget(merge_scroll)
+        # The selector lives in the Results toolbar, so the merge group's own caption for
+        # it is redundant.
         for label in self._merge.findChildren(QtWidgets.QLabel):
             if label.text() == 'Table':
                 label.hide()
-        self._table.column_toolbar.insertWidget(0, QtWidgets.QLabel('Table'))
-        self._table.column_toolbar.insertWidget(1, self._result_selector, 1)
+        # Compact rows: 24 px on the Mac (13 pt is 13 px at its 72 dpi, line height 16),
+        # 28 at the offscreen 96 dpi reference; Fusion's are 30 there. One line to revert.
+        view = self._table.view
+        rows = view.verticalHeader()
+        rows.setMinimumSectionSize(1)
+        rows.setDefaultSectionSize(max(20, view.fontMetrics().height() + 8))
+        # Never painted squeezed: below header + one row + scrollbar the page scrolls.
+        view.setMinimumHeight(
+            view.horizontalHeader().sizeHint().height() + rows.defaultSectionSize()
+            + view.horizontalScrollBar().sizeHint().height() + 2 * view.frameWidth())
         event_layout.addWidget(self._table, 1)
-        self.results_tabs.addTab(events_page, "Events")
+        # A short dock (dragged down, or Merge… open at the default height) CLIPS the page
+        # behind a scrollbar instead of compressing the table's captions into its header.
+        # The dock keeps no height floor: the tab widget's own minimum is 1 px.
+        events_scroll = QtWidgets.QScrollArea()
+        events_scroll.setObjectName("eventsPage")
+        events_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        events_scroll.setWidgetResizable(True)
+        events_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        events_scroll.setFocusPolicy(QtCore.Qt.NoFocus)
+        events_scroll.setWidget(events_page)
+        self._events_page = events_page
+        self.results_tabs.addTab(events_scroll, "Events")
         self.results_tabs.addTab(InspectorScrollArea(self._stats), "Summary")
         self.results_tabs.addTab(InspectorScrollArea(self._stats.fits_page), "Fits")
         self.results_tabs.addTab(InspectorScrollArea(self._score), "Quality")
-        self._results_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self._results_splitter.setChildrenCollapsible(False)
-        self._results_splitter.addWidget(self._detection)
-        self._results_splitter.addWidget(self._results_host)
-        self._results_splitter.setStretchFactor(0, 3)
-        self._results_splitter.setStretchFactor(1, 2)
-        root.addWidget(self._results_splitter, 1)
-        self.results_toggle.toggled.connect(self._set_results_expanded)
+        for index, tip in enumerate((
+                "The event table: one row per event, curated with the checkbox or a/r/f.",
+                "Counts, rates and distributions of this table, with its advisories.",
+                "Dwell and depth fits of the accepted events.",
+                "How the detector scores against your curation.")):
+            self.results_tabs.setTabToolTip(index, tip)
+        root.addWidget(self._detection, 1)
+        root.addWidget(self._results_host, 1)
         self._sync_results_presence(False)
 
         # -- panel signals ---------------------------------------------------------------------
@@ -3780,37 +4033,53 @@ class AnalysisPanel(QtWidgets.QWidget):
         elif module_id in ("fit.dwell", "fit.depth"):
             self._refresh_fit_text()
 
-    def _set_results_expanded(self, expanded: bool) -> None:
-        """Change only result-panel geometry; every result/control remains alive."""
-        expanded = bool(expanded and self._results_present)
-        self.results_toggle.setArrowType(
-            QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
-        self.results_tabs.setVisible(expanded)
-        self._results_empty.setVisible(not self._results_present)
-        if expanded:
-            self._results_host.setMaximumHeight(16777215)
-            total = max(600, sum(self._results_splitter.sizes()))
-            self._results_splitter.setSizes([int(total * .55), int(total * .45)])
-        else:
-            self._results_host.setMaximumHeight(self._results_host.sizeHint().height())
+    def take_results_widget(self) -> QtWidgets.QWidget:
+        """Hand the results surface to a host (MainWindow's Results dock). Only the Qt
+        parent changes; this panel still owns every widget, signal and slot in it."""
+        self.layout().removeWidget(self._results_host)
+        return self._results_host
+
+    def results_height_for_rows(self, rows: int) -> int:
+        """Height of the results surface at which ``rows`` table rows are visible.
+
+        Layout arithmetic, so it answers before the window is shown."""
+        host = self._results_host.layout()
+        margins = host.contentsMargins()
+        table = self._table
+        view = table.view
+        spacing = table.layout().spacing()
+        return int(
+            margins.top() + margins.bottom()
+            + self._results_toolbar.maximumHeight() + host.spacing()
+            + self._results_status.maximumHeight() + host.spacing()
+            + self.results_tabs.tabBar().sizeHint().height()
+            + table.selection_label.sizeHint().height() + spacing
+            + view.horizontalHeader().sizeHint().height()
+            + view.horizontalScrollBar().sizeHint().height()
+            + 2 * view.frameWidth()
+            + int(rows) * view.verticalHeader().defaultSectionSize())
+
+    def _on_stale_shown(self, shown: bool) -> None:
+        # One slot, two occupants: the grey count while the table is current, the amber
+        # line while it is stale.
+        self._results_summary.setVisible(not shown)
+        self.staleLineShownChanged.emit(bool(shown))
+
+    def _set_merge_shown(self, shown: bool) -> None:
+        if shown:
+            self.results_tabs.setCurrentIndex(0)
+        self._merge_scroll.setVisible(bool(shown))
 
     def _sync_results_presence(self, present: bool, count: int = 0) -> None:
-        changed = self._results_present != present
         self._results_present = present
-        self.results_toggle.setEnabled(present)
-        self.results_toggle.setText(f'Results · {count} events' if present else 'Results')
         if not present:
             self._result_notice.hide()
-        if changed or not present:
-            self.results_toggle.setChecked(present)
-            self._set_results_expanded(present)
-        elif not self.results_toggle.isChecked():
-            self._set_results_expanded(False)
+            self._results_summary.setText(_RESULTS_EMPTY_TEXT)
 
     def show_result_summary(self) -> None:
         """Reveal the existing summary/fit controls without rerunning analysis."""
         if self._results_present:
-            self.results_toggle.setChecked(True)
+            self.resultsRevealRequested.emit()
             self.results_tabs.setCurrentIndex(1)
             if not self._stats.warnings_label.isHidden():
                 self.results_tabs.widget(1).ensureWidgetVisible(self._stats.warnings_label)
@@ -3913,11 +4182,16 @@ class AnalysisPanel(QtWidgets.QWidget):
             *acquisition_snapshot_messages(provenance),
         ) if str(item)))
         self._stats.set_warnings(warnings)
+        n = len(warnings)
+        # Short on the toolbar so the buttons beside it never clip on a narrow dock; the
+        # long phrase is the accessible name and leads the tooltip.
         self._result_notice.setText(
-            f'<a style="color:#ffb454" href="summary">'
-            f'Analysis advisories ({len(warnings)}) — review Summary</a>'
+            f'<a style="color:#ffb454" href="summary">⚠ {n} advisories</a>'
             if warnings else '')
-        self._result_notice.setToolTip('\n\n'.join(warnings))
+        self._result_notice.setAccessibleName(f"Analysis advisories ({n})")
+        self._result_notice.setToolTip(
+            f"Analysis advisories ({n}) — click to review them on the Summary tab.\n\n"
+            + '\n\n'.join(warnings) if warnings else '')
         self._result_notice.setVisible(bool(warnings))
 
     def _show_polarity_evidence(self, evidence: Any) -> None:
@@ -4040,6 +4314,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         # none, which is what every other read-out in the app already does (FE-04).
         self._stats.set_units(self._selection_units())
         self._stats.set_summary(summary)
+        # The Results status line's count. This is its one writer, and it reruns on every
+        # curation through `_refresh_summary_from_table`.
+        self._results_summary.setText(
+            f"{n:,} event{'s' if n != 1 else ''} · {summary['n_accepted']:,} accepted")
 
     def _selection_units(self) -> str:
         """The units the selected channel's numbers are in, or ``""`` when undeclared.
@@ -5453,7 +5731,9 @@ class AnalysisPanel(QtWidgets.QWidget):
                    if reference_changed else ""),
                 kind=_STALE_CALIBRATION,
                 action_label=("Refresh sources first" if reconciled else "Run detection"
-                              if reference_changed else "Re-run"))
+                              if reference_changed else "Re-run"),
+                summary=("Calibration and open-pore reference changed"
+                         if reference_changed else None))
             self._sync_stale_action(res)
             # The amplitude columns are stale either way, and badging them is about
             # the NUMBERS, not about which stamp moved.
@@ -5478,18 +5758,30 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._table.set_stale_columns(())
             return
         reason = self._baseline_staleness(res)
-        if not reconciled and self._reference_redetection_needed(res):
+        reference_changed = not reconciled and self._reference_redetection_needed(res)
+        if reference_changed:
             reason = ("The user open-pore reference changed. The existing event table is unchanged. "
                       "Preview the reference, then run detection to recompute noise, polarity "
                       "and candidates. Review any existing curation before replacing it.")
         if reason is not None:
+            if reference_changed:
+                verdict = "Open-pore reference changed"
+            elif reconciled:
+                verdict = "Estimator changed — refresh the sources"
+            elif not res.baseline_fingerprint:
+                # The migration case: no stamp at all, so nothing "changed" — the table
+                # simply predates the estimator now in use.
+                verdict = "Depths stale — predates the current estimator"
+            else:
+                verdict = None
             self._stale.show_message(
                 reason + (" Refresh the source detector results, then reconcile again."
                           if reconciled else ""),
                 kind=_STALE_BASELINE,
                 action_label=("Refresh sources first"
                               if reconciled else "Run detection"
-                              if self._reference_redetection_needed(res) else "Re-measure depths"))
+                              if reference_changed else "Re-measure depths"),
+                summary=verdict)
             self._sync_stale_action(res)
             self._table.set_stale_columns(REMEASURED_COLUMNS)
             return

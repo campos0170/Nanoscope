@@ -18,7 +18,8 @@ that runs the box -- the Detect button -- was enabled the whole time and never n
 
 One resolver (``AnalysisPanel._stale_action_refusal``) now decides whether the banner's
 action may be offered, ``_regate`` and ``_judge_staleness`` both push its answer onto the
-banner (``_StaleBanner.set_action_gate``), the reason is printed under the message, and the
+banner (``_StaleBanner.set_action_gate``), the reason starts on the banner's one line (the
+whole sentence one click away in Details), and the
 programmatic doors (``_run_detection`` on the gate, ``_on_rerun``) refuse OUT LOUD through
 ``runRefused`` instead of returning in silence. Driven through a real MainWindow with a real
 Schmitt detection on a synthetic recording; every ``set_calibration`` is ``write_sidecar=False``.
@@ -104,7 +105,9 @@ def detected(window, qtbot, tmp_path):
         assert panel._run_detection(panel.detection_params())
     qtbot.wait(50)
     assert panel.current_detection() is not None
-    assert not panel._stale.isVisibleTo(panel)
+    # isHidden(), not isVisibleTo(panel): the stale line lives in the Results dock now, so the
+    # panel is not its ancestor and isVisibleTo would depend on the window being shown.
+    assert panel._stale.isHidden()
     return window, did
 
 
@@ -126,13 +129,18 @@ def test_the_reverse_override_disables_the_banners_rerun_and_prints_the_gates_ow
     assert "your Calibration-panel override" in gate_reason, gate_reason
 
     banner = panel._stale
-    assert banner.isVisibleTo(panel) and banner.kind == "calibration"
+    assert not banner.isHidden() and banner.kind == "calibration"
     assert banner.action_text() == "Re-run"
     assert not banner._btn.isEnabled(), "a live Re-run on a channel the gate refuses"
     why = banner.action_refusal()
     assert why.startswith("Re-run is unavailable: "), why
     assert gate_reason in why, "ONE gate answer: the banner says what the Detect button says"
-    assert banner._why.isVisibleTo(banner), "the reason is on the banner, not only on hover"
+    # Updated for the one-line stale notice (change A): the reason STARTS on the line before
+    # any click, and the whole sentence is one click away in Details (``_why``).
+    assert "Re-run unavailable: " in banner._summary.text(), (
+        "the reason starts on the line, not only on hover")
+    assert not banner._why.isHidden() and banner._why.text() == why, (
+        "the full refusal is one click away, in Details")
     assert banner._btn.toolTip() == why
 
     # A click on the disabled button is inert, and the stored table is untouched...
@@ -146,7 +154,7 @@ def test_the_reverse_override_disables_the_banners_rerun_and_prints_the_gates_ow
     assert gate_reason in refused.args[0], refused.args[0]
     assert panel._pending is None
     assert panel.current_detection() is before
-    assert banner.isVisibleTo(panel), "the banner is dismissed by a RUN, never by a refusal"
+    assert not banner.isHidden(), "the banner is dismissed by a RUN, never by a refusal"
     qtbot.wait(20)
     assert window.statusBar().currentMessage() == refused.args[0]
 
@@ -158,10 +166,12 @@ def test_the_reverse_override_disables_the_banners_rerun_and_prints_the_gates_ow
             did, 0, ChannelCalibration(2.5, 0.0, "pA", Provenance.MEASURED),
             write_sidecar=False)
     assert det.detect_button.isEnabled()
-    assert banner.isVisibleTo(panel) and banner.kind == "calibration"
+    assert not banner.isHidden() and banner.kind == "calibration"
     assert banner._btn.isEnabled()
     assert banner.action_refusal() == ""
-    assert not banner._why.isVisibleTo(banner)
+    # Updated for the one-line stale notice (change A): no refusal on the line or in Details.
+    assert banner._why.isHidden()
+    assert "unavailable" not in banner._summary.text()
     assert banner._btn.toolTip() == AP._STALE_ACTION_TIPS["calibration"]
 
 
@@ -190,12 +200,12 @@ def test_re_measure_depths_rides_the_same_gate_as_the_probe(detected, qtbot):
     panel = window._analysis_panel
     window._session.set_calibration(did, 0, _as_voltage(1.0), write_sidecar=False)
     qtbot.wait(20)
-    assert not panel._stale.isVisibleTo(panel), "gain 1.0: the calibration stamp matches"
+    assert panel._stale.isHidden(), "gain 1.0: the calibration stamp matches"
     bl = panel.baseline_panel
     with qtbot.waitSignal(panel.stalenessChanged, timeout=1_000):
         bl.rough_s.setValue(bl.rough_s.value() * 4)
     banner = panel._stale
-    assert banner.isVisibleTo(panel) and banner.kind == "baseline"
+    assert not banner.isHidden() and banner.kind == "baseline"
     assert banner.action_text() == "Re-measure depths"
     assert not banner._btn.isEnabled()
     why = banner.action_refusal()
@@ -223,7 +233,7 @@ def test_a_flooded_stored_list_withholds_rerun_and_names_detect_which_then_runs_
         window._session.set_calibration(did, 0, ChannelCalibration(2.0, 0.0, "pA"),
                                         write_sidecar=False)
     banner = panel._stale
-    assert banner.isVisibleTo(panel) and banner.kind == "calibration"
+    assert not banner.isHidden() and banner.kind == "calibration"
 
     # Refused BEFORE any click, with the count, the cap, and the door that runs the box.
     assert not banner._btn.isEnabled()
@@ -256,7 +266,7 @@ def test_a_flooded_stored_list_withholds_rerun_and_names_detect_which_then_runs_
     assert fresh.params["notch_freqs"] == [60.0, 120.0]
     assert tuple(fresh.calibration_fingerprint) == \
         tuple(window._session.calibration(did, 0).fingerprint())
-    assert not banner.isVisibleTo(panel), "the run the sentence pointed at clears the banner"
+    assert banner.isHidden(), "the run the sentence pointed at clears the banner"
 
 
 def test_a_legal_stored_list_keeps_rerun_offered(detected, qtbot):
@@ -272,7 +282,7 @@ def test_a_legal_stored_list_keeps_rerun_offered(detected, qtbot):
                                     write_sidecar=False)
     qtbot.wait(20)
     banner = panel._stale
-    assert banner.isVisibleTo(panel) and banner.kind == "calibration"
+    assert not banner.isHidden() and banner.kind == "calibration"
     assert banner._btn.isEnabled() and banner.action_refusal() == ""
 
 

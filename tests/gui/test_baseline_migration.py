@@ -221,7 +221,9 @@ def test_a_pre_change_table_is_marked_stale_and_its_columns_badged(qapp, qtbot, 
     win, _ = _window(qtbot, tmp_path, _signal())
     panel = win._analysis_panel
 
-    assert panel._stale.isVisibleTo(panel)
+    # isHidden(), not isVisibleTo(panel): the stale line lives in the Results dock now, so the
+    # panel is not its ancestor and isVisibleTo would depend on the window being shown.
+    assert not panel._stale.isHidden()
     assert panel._stale.kind == _STALE_BASELINE
     assert panel._stale.action_text() == "Re-measure depths"
     msg = panel._stale.message()
@@ -248,7 +250,7 @@ def test_a_matching_stamp_is_not_marked(qapp, qtbot, tmp_path):
     """The control. Without it the two tests above pass on a banner that is always up."""
     win, _ = _window(qtbot, tmp_path, _signal(), config=DEFAULT_BASELINE)
     panel = win._analysis_panel
-    assert not panel._stale.isVisibleTo(panel)
+    assert panel._stale.isHidden()
     assert panel._table.stale_columns == ()
 
 
@@ -279,10 +281,10 @@ def test_editing_the_estimator_re_judges_the_shown_detection_at_once(qapp, qtbot
     until the next selection change."""
     win, _ = _window(qtbot, tmp_path, _signal(), config=DEFAULT_BASELINE)
     panel = win._analysis_panel
-    assert not panel._stale.isVisibleTo(panel)
+    assert panel._stale.isHidden()
     panel.baseline_panel.rough_s.setValue(2.0)
     QtWidgets.QApplication.processEvents()
-    assert panel._stale.isVisibleTo(panel)
+    assert not panel._stale.isHidden()
     assert panel._stale.kind == _STALE_BASELINE
 
 
@@ -335,11 +337,11 @@ def test_the_banner_button_re_measures_and_never_re_detects(qapp, qtbot, tmp_pat
 def test_a_re_measure_clears_the_banner_and_the_badge(qapp, qtbot, tmp_path):
     win, _ = _window(qtbot, tmp_path, _signal())
     panel = win._analysis_panel
-    assert panel._stale.isVisibleTo(panel)
+    assert not panel._stale.isHidden()
     panel.remeasure_active_detection()
     _pump(qtbot, panel)
     assert panel.current_detection().baseline_fingerprint == DEFAULT_BASELINE.fingerprint(FS)
-    assert not panel._stale.isVisibleTo(panel)
+    assert panel._stale.isHidden()
     assert panel._table.stale_columns == ()
 
 
@@ -445,7 +447,7 @@ def test_a_table_merged_while_the_re_measure_runs_drops_the_answer_and_says_so(
 
     assert any(t == "superseded" for t, _ in said), said
     assert len(panel.current_detection().payload.df) == n_after_merge
-    assert panel._stale.isVisibleTo(panel)            # still stale, and still true
+    assert not panel._stale.isHidden()            # still stale, and still true
 
 
 def test_the_params_a_re_run_would_reproduce_name_the_new_estimator(qapp, qtbot, tmp_path):
@@ -572,7 +574,7 @@ def test_a_stale_table_stays_readable_plottable_and_exportable(qapp, qtbot, tmp_
     """§4.2.5. Marked stale, badged — and otherwise a fully working analysis."""
     win, _ = _window(qtbot, tmp_path, _signal())
     panel = win._analysis_panel
-    assert panel._stale.isVisibleTo(panel)
+    assert not panel._stale.isHidden()
 
     df = panel.current_detection().payload.df
     assert len(df) and panel._table._model.rowCount() == len(df)
@@ -626,7 +628,7 @@ def test_reselecting_the_same_channel_does_not_discard_a_confirmed_baseline(
     QtWidgets.QApplication.processEvents()
     assert bp.param_source() == "user"
     confirmed = bp.config().fingerprint(FS)
-    assert panel._stale.isVisibleTo(panel), "the edit must mark the shown table stale"
+    assert not panel._stale.isHidden(), "the edit must mark the shown table stale"
 
     # ...and then re-selects the channel that is already selected.
     win._on_selection(doc_id, 0)
@@ -638,7 +640,7 @@ def test_reselecting_the_same_channel_does_not_discard_a_confirmed_baseline(
     assert bp.config().fingerprint(FS) == confirmed
     params = panel._form_params()
     assert params["baseline_rough_s"] == 2.0 and params["baseline_base_s"] == 0.5
-    assert panel._stale.isVisibleTo(panel), (
+    assert not panel._stale.isHidden(), (
         "the banner cleared without the estimator changing back"
     )
     assert panel._table.stale_columns == REMEASURED_COLUMNS
@@ -670,7 +672,7 @@ def test_a_stored_detection_still_seeds_a_form_the_user_has_not_confirmed(
     assert float(bp.rough_s.value()) == 2.0
     assert float(bp.base_s.value()) == 0.5
     assert bp.config().fingerprint(FS) == stored.fingerprint(FS)
-    assert not panel._stale.isVisibleTo(panel)
+    assert panel._stale.isHidden()
 
 
 def test_a_confirmed_configuration_does_not_follow_the_user_to_another_recording(

@@ -35,6 +35,13 @@ WHAT EACH TEST HERE IS GUARDING, since none of them is about the merge maths:
 * nothing in it moves when the dock is dragged. The room a horizontal scrollbar will need is
   reserved before the scrollbar exists, so it arrives into empty space instead of re-flowing
   the group under the user's pointer.
+
+CHANGE A MOVED ITS HOME, and this file was rewritten around it (it had been red since the
+strip went behind a collapsed disclosure). The results half of the Analysis page — the event
+table, its tabs and this strip — is now the Results dock under the trace, and the strip is
+shown above the table by the Results toolbar's ``Merge…`` toggle (off by default). So the
+fixture checks that toggle, "the pane" is the Events page, and "dragging the dock" means
+narrowing the trace column the Results dock sits under, by widening the Inspector.
 """
 
 from __future__ import annotations
@@ -67,8 +74,10 @@ _NARROW = 180
 #: does not depend on a sibling module's choice of opening width.
 _SHIPPED_VIEWPORT = 420
 
-#: Inspector widths a user can plausibly drag to, narrowest last.
-_DOCK_WIDTHS = (620, 560, 460, 380, 320, 260, 200)
+#: Results-dock widths a user can reach with it docked under the trace, narrowest last (the
+#: trace column itself floors at ~365 px; narrower is only reachable floating — see
+#: test_lay2_merge_strip_reserved_room.py).
+_DOCK_WIDTHS = (720, 620, 560, 460, 400)
 
 
 # ================================================================================================
@@ -108,6 +117,8 @@ def window(qapp, isolated_settings, qtbot):
     win.resize(*DISPLAY)
     qapp.processEvents()
     assert (win.width(), win.height()) == DISPLAY, (win.width(), win.height())
+    win._analysis_panel.merge_toggle.setChecked(True)
+    qapp.processEvents()
     yield win
     win.close()
 
@@ -125,7 +136,7 @@ def _ancestors(widget: QtWidgets.QWidget, stop: QtWidgets.QWidget) -> list[QtWid
 
 
 def _scroll_ancestor(widget: QtWidgets.QWidget,
-                     stop: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+                     stop: QtWidgets.QWidget | None) -> QtWidgets.QScrollArea:
     for node in _ancestors(widget, stop):
         if isinstance(node, QtWidgets.QScrollArea):
             return node
@@ -133,13 +144,13 @@ def _scroll_ancestor(widget: QtWidgets.QWidget,
 
 
 def _merge_scroll(win: MainWindow) -> QtWidgets.QScrollArea:
-    return _scroll_ancestor(win._analysis_panel.merge_controls, win._analysis_panel)
+    return _scroll_ancestor(win._analysis_panel.merge_controls, None)
 
 
-def _controls_scroll(win: MainWindow) -> QtWidgets.QScrollArea:
-    """The deep scrolled control column — the one the merge group used to be at the bottom
-    of. Identified by what it holds (the detector), never by index."""
-    return _scroll_ancestor(win._analysis_panel.detection_panel, win._analysis_panel)
+def _control_columns(win: MainWindow) -> list[QtWidgets.QScrollArea]:
+    """The scrolled settings columns — one per mode page since the Inspector redesign —
+    the merge group used to be at the bottom of. Found through the detector, never by index."""
+    return list(win._analysis_panel.detection_panel.page_scrolls.values())
 
 
 def _rect_in(widget: QtWidgets.QWidget, host: QtWidgets.QWidget) -> QtCore.QRect:
@@ -153,8 +164,11 @@ def _merge_controls(win: MainWindow) -> list[tuple[str, QtWidgets.QWidget]]:
             ("merge_region_btn", mp.merge_region_btn)]
 
 
-def _set_dock_width(win: MainWindow, qapp, width: int) -> None:
-    win.resizeDocks([win._inspector], [width], QtCore.Qt.Horizontal)
+def _set_results_width(win: MainWindow, qapp, width: int) -> None:
+    """Narrow the trace column — and with it the Results dock under it — by widening the
+    Inspector."""
+    room = win.width() - 2 * 6 - win._file_dock.width()
+    win.resizeDocks([win._inspector], [room - width], QtCore.Qt.Horizontal)
     qapp.processEvents()
 
 
@@ -163,36 +177,57 @@ def _set_dock_width(win: MainWindow, qapp, width: int) -> None:
 # ================================================================================================
 
 def test_the_merge_group_is_not_inside_the_scrolled_control_column(window):
-    """The regression itself. If someone re-adds ``self._merge`` to ``clay`` it lands 1943 px
-    below the fold again and this fails."""
+    """The regression itself. If someone re-adds ``self._merge`` to a settings column it
+    lands far below the fold again and this fails."""
     panel = window._analysis_panel
     merge = panel.merge_controls
     assert isinstance(merge, MergePanel)
 
-    column = _controls_scroll(window)
-    assert isinstance(column.widget(), QtWidgets.QWidget)
-    assert column.widget().findChild(MergePanel) is None, (
-        "the merge group is back inside the deep control column")
-    assert _merge_scroll(window) is not column
+    columns = _control_columns(window)
+    assert columns, "the detector has no scrolled settings columns at all"
+    for column in columns:
+        assert column.widget().findChild(MergePanel) is None, (
+            "the merge group is back inside a settings column")
+        assert _merge_scroll(window) is not column
+    assert not window._inspector.isAncestorOf(merge), "the merge group is in the Inspector"
 
 
 def test_the_merge_group_rides_with_the_event_table_it_edits(window):
-    """Not merely "somewhere else" — in the splitter pane that holds the event table, above
+    """Not merely "somewhere else" — on the Events page that holds the event table, above
     it. That adjacency is the whole reason the move is not an arbitrary shuffle."""
     panel = window._analysis_panel
-    split = panel.findChild(QtWidgets.QSplitter)
-    assert split.orientation() == QtCore.Qt.Vertical
-    assert split.count() == 2
+    assert window._results_dock.isAncestorOf(panel.merge_controls)
 
-    pane = split.widget(1)
+    pane = _merge_scroll(window).parentWidget()
+    # The Events tab is a frameless scroll area around the page (it clips a short dock).
+    assert pane is panel.results_tabs.widget(0).widget(), "the strip is not on the Events page"
     assert pane.findChild(MergePanel) is panel.merge_controls
     table = pane.findChild(EventTable)
-    assert table is not None
-    assert split.widget(0).findChild(DetectionPanel) is panel.detection_panel
+    assert table is panel._table
+    assert panel.findChild(DetectionPanel) is panel.detection_panel
 
     strip = _rect_in(_merge_scroll(window), pane)
-    assert strip.top() == 0, "the strip is the top of the pane, not floating in it"
+    assert strip.top() == 0, "the strip is the top of the page, not floating in it"
     assert strip.bottom() < _rect_in(table, pane).top(), "the strip sits ABOVE the table"
+
+
+def test_the_merge_toggle_opens_the_strip_without_moving_itself(window, qapp):
+    """Merge… is off by default; turning it on shows the strip BELOW the toggle, so the
+    toggle itself never moves under the pointer — the table below gives up the height."""
+    panel = window._analysis_panel
+    toggle = panel.merge_toggle
+    table_view = panel._table.view
+    on_toggle, on_table = _rect_in(toggle, window), _rect_in(table_view, window)
+    toggle.setChecked(False)
+    qapp.processEvents()
+    assert _merge_scroll(window).isHidden()
+    off_toggle, off_table = _rect_in(toggle, window), _rect_in(table_view, window)
+    assert off_toggle == on_toggle, "the toggle moved when the strip it opens closed"
+    assert off_table.top() < on_table.top(), "the strip did not take its room from the table"
+    toggle.setChecked(True)
+    qapp.processEvents()
+    assert _rect_in(toggle, window) == on_toggle
+    assert _rect_in(table_view, window) == on_table
 
 
 # ================================================================================================
@@ -201,7 +236,7 @@ def test_the_merge_group_rides_with_the_event_table_it_edits(window):
 
 def test_every_merge_control_is_wholly_inside_its_viewport_at_1512x900(window):
     """MEASURED BEFORE: "Merge all" at content y=2472..2497 against a 529 px viewport — zero
-    pixels on screen. AFTER: x=507..587, y=27..52 inside a 598x95 viewport."""
+    pixels on screen."""
     area = _merge_scroll(window)
     viewport = area.viewport()
     box = QtCore.QRect(QtCore.QPoint(0, 0), viewport.size())
@@ -231,19 +266,19 @@ def test_every_merge_control_is_inside_the_1512x900_window(window):
         assert screen.contains(rect), f"{name} {rect} falls outside {screen}"
 
 
-def test_the_merge_strip_would_fit_the_inspector_width_this_app_shipped_with(window, qapp):
-    """Reachability may not depend on how wide a SIBLING module decides to open the dock.
+def test_the_merge_strip_fits_the_narrowest_docked_results_panel(window, qapp):
+    """Reachability may not depend on how wide a SIBLING decides to leave the trace column.
 
-    The Inspector shipped at 460 px = a 420 px viewport, and the merge group's own layout
-    minimum is 252 px, so it fits that with 168 px to spare. Widen the group past 420 and
-    this fails even if the dock happens to be opening wider today."""
+    The merge group's own layout minimum is 252 px; it must fit the 420 px viewport the app
+    once shipped with, and it does fit the narrowest the docked Results panel can be dragged
+    to (the trace column's own floor)."""
     merge = window._analysis_panel.merge_controls
     assert merge.minimumSizeHint().width() <= _SHIPPED_VIEWPORT, (
         merge.minimumSizeHint().width())
 
-    _set_dock_width(window, qapp, 460)
+    _set_results_width(window, qapp, _NARROW)
     area = _merge_scroll(window)
-    assert area.horizontalScrollBar().maximum() == 0
+    assert area.horizontalScrollBar().maximum() == 0, window._results_dock.width()
     box = QtCore.QRect(QtCore.QPoint(0, 0), area.viewport().size())
     for name, widget in _merge_controls(window):
         assert box.contains(_rect_in(widget, area.viewport())), name
@@ -267,32 +302,60 @@ def test_the_merge_strip_imposes_no_dock_width_floor(window):
     assert area.minimumWidth() == 0
     assert area.minimumSizeHint().width() <= _SMALL_ENOUGH_TO_SHRINK
 
-    assert window._analysis_panel.minimumSizeHint().width() <= _SMALL_ENOUGH_TO_SHRINK
-    assert window._inspector.minimumSizeHint().width() <= _SMALL_ENOUGH_TO_SHRINK
+    assert window._analysis_panel._results_host.minimumSizeHint().width() \
+        <= _SMALL_ENOUGH_TO_SHRINK
+    assert window._results_dock.minimumSizeHint().width() <= _SMALL_ENOUGH_TO_SHRINK
 
 
-def test_the_inspector_still_drags_narrow_with_the_merge_strip_installed(window, qapp):
-    _set_dock_width(window, qapp, _NARROW)
-    assert window._inspector.width() <= _NARROW + 4, window._inspector.width()
+def test_the_results_dock_still_drags_narrow_with_the_merge_strip_open(window, qapp):
+    """Floating, nothing but the dock's own minimum bounds it — and the open strip adds
+    nothing to that minimum."""
+    dock = window._results_dock
+    closed = dock.minimumSizeHint().width()
+    window._analysis_panel.merge_toggle.setChecked(False)
+    qapp.processEvents()
+    assert dock.minimumSizeHint().width() == closed
+    window._analysis_panel.merge_toggle.setChecked(True)
+    dock.setFloating(True)
+    dock.resize(_NARROW, 400)
+    qapp.processEvents()
+    assert dock.width() <= _NARROW + 4, dock.width()
 
 
-def test_the_merge_strip_imposes_no_window_height_floor(window):
+def test_the_merge_strip_imposes_no_window_height_floor(window, qapp):
     """A ``QScrollArea`` reports ``minimumSizeHint() == 90x90`` whatever it holds, and that
-    90 would ADD to the event table's own 129 inside this pane: measured, it pushed
+    90 would ADD to the event table's own minimum inside this pane: measured, it pushed
     ``MainWindow.minimumSizeHint().height()`` 363 -> 459, so a window asked to be 450 px
-    tall came back 459. The explicit 1 px minimum is how "no floor" is spelled."""
+    tall came back 459.
+
+    Updated for change A: the open strip now holds its whole height and the Events page
+    SCROLLS when the dock is shorter (a squeezed table painted its header over its own
+    scrollbar), so the floor stops at that page. The claim is pinned where it matters: the
+    dock's and the window's minimum heights do not move when the strip opens."""
     area = _merge_scroll(window)
-    assert area.minimumHeight() <= 1
     assert area.maximumHeight() < 16_777_215, "the strip must be capped, or it stretches"
+    toggle = window._analysis_panel.merge_toggle
+    opened = (window._results_dock.minimumSizeHint().height(),
+              window.minimumSizeHint().height())
+    toggle.setChecked(False)
+    qapp.processEvents()
+    closed = (window._results_dock.minimumSizeHint().height(),
+              window.minimumSizeHint().height())
+    assert opened == closed, f"the open strip moved the minimum heights {closed} -> {opened}"
 
-    pane = window._analysis_panel.findChild(QtWidgets.QSplitter).widget(1)
-    table = pane.findChild(EventTable)
-    added = pane.minimumSizeHint().height() - table.minimumSizeHint().height()
-    assert added <= 10, f"the strip added {added} px to the pane's minimum height"
 
+def test_a_short_window_is_still_allowed(window, qapp, qtbot):
+    """The suite measures geometry at 775x450; the merge strip may not make that impossible.
 
-def test_a_short_window_is_still_allowed(window, qapp):
-    """The suite measures geometry at 775x450; the merge strip may not make that impossible."""
+    Updated for change A: a bottom dock adds its own two-row header to the window's minimum
+    height while it is open (the trace column keeps its own), and nothing while closed."""
+    dock = window._results_dock
+    assert dock.minimumSizeHint().height() <= 80, dock.minimumSizeHint()
+    window.resize(775, 450)
+    qapp.processEvents()
+    assert window.height() <= 460 + dock.minimumSizeHint().height() + 6, window.height()
+    dock.close()
+    qtbot.wait(30)   # the minimum is recomputed on the layout pass the close posts
     window.resize(775, 450)
     qapp.processEvents()
     assert window.height() <= 460, window.height()
@@ -304,13 +367,11 @@ def test_a_short_window_is_still_allowed(window, qapp):
 
 def test_the_merge_controls_do_not_move_vertically_as_the_dock_is_dragged(window, qapp):
     """Three rounds of a previous campaign were lost to controls that shifted while the user
-    was aiming at them. Dragging the Inspector narrow enough to need a horizontal scrollbar
-    must not re-flow the group: the scrollbar's room is reserved up front, so it arrives into
-    empty space. Measured: y = 27 for "Merge all" at every width from 620 down to 200."""
+    was aiming at them. Narrowing the Results dock must not re-flow the group."""
     area = _merge_scroll(window)
     seen: dict[str, set[tuple[int, int]]] = {name: set() for name, _ in _merge_controls(window)}
     for width in _DOCK_WIDTHS:
-        _set_dock_width(window, qapp, width)
+        _set_results_width(window, qapp, width)
         for name, widget in _merge_controls(window):
             rect = _rect_in(widget, area.widget())
             seen[name].add((rect.top(), rect.height()))
@@ -335,13 +396,13 @@ def test_the_merge_group_never_appears_or_disappears_with_state(window, qtbot):
 
 
 # ================================================================================================
-# 5. the column it came out of is unchanged in kind
+# 5. the columns it came out of are unchanged in kind
 # ================================================================================================
 
 def test_the_control_column_is_still_wrapped_and_still_imposes_nothing(window):
     """The move must not have cost the Analysis page the 2024 round's fix."""
-    column = _controls_scroll(window)
-    assert column.widgetResizable()
-    assert column.horizontalScrollBarPolicy() == QtCore.Qt.ScrollBarAsNeeded
-    assert column.minimumWidth() == 0
-    assert column.minimumSizeHint().width() <= _SMALL_ENOUGH_TO_SHRINK
+    for column in _control_columns(window):
+        assert column.widgetResizable()
+        assert column.horizontalScrollBarPolicy() == QtCore.Qt.ScrollBarAsNeeded
+        assert column.minimumWidth() == 0
+        assert column.minimumSizeHint().width() <= _SMALL_ENOUGH_TO_SHRINK

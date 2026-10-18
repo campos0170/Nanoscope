@@ -234,42 +234,29 @@ def test_the_measure_tab_holds_the_real_measure_widgets(window, tmp_path):
 
 
 def test_the_measure_panel_is_no_longer_a_splitter_child(window):
-    """It left the splitter: two panes now, controls above and the event table below.
+    """It is reached only through the mode tabs — never as a pane beside the controls.
 
     Its old home was pane 2 — under a long control scroll AND under the table, which is the
-    "I don't like its location" the owner reported."""
+    "I don't like its location" the owner reported. (Updated for change A: the Analysis page
+    has no splitter at all any more; the results half moved to the Results dock.)"""
     panel = window._analysis_panel
-    split = panel.findChild(QtWidgets.QSplitter)
     mp = panel.measure_panel
-    assert split.count() == 2
-    panes = {split.widget(i) for i in range(split.count())}
-    assert mp not in panes
+    assert panel.findChild(QtWidgets.QSplitter) is None
     wrapper = next(w for w in _ancestors(mp, panel)
                    if isinstance(w, QtWidgets.QScrollArea) and w.widget() is mp)
-    assert wrapper not in panes, "its scroll wrapper must not be a splitter pane either"
-    # It reaches the splitter ONLY through pane 0 (the controls scroll), i.e. via the tabs.
-    assert split.widget(0) in _ancestors(mp, panel)
-    # ...and pane 1 is the results half. It stopped being the bare EventTable when the merge
-    # group came out of the deep control column (it was 1943 px below that column's fold, and
-    # unreachable) and became a fixed strip above the table it edits; the table is still what
-    # that pane is FOR, and still not this panel's problem. See
-    # tests/gui/test_lay_analysis_container.py.
-    assert split.widget(1) in _ancestors(panel._table, panel)
+    assert wrapper is not None
+    assert _mode_tabs(window) in _ancestors(mp, panel)
+    assert _measure_page(window) in _ancestors(mp, panel)
 
 
 def test_the_event_table_stayed_below_the_tabs(window):
-    """The shared result surface every detector feeds did NOT move: still in the splitter's
-    second pane, still outside the mode tabs.
-
-    It IS the pane no longer, only because the merge strip joined it there — see
-    ``test_the_measure_panel_is_no_longer_a_splitter_child`` and
-    tests/gui/test_lay_analysis_container.py. Below the tabs, outside them, is unchanged."""
+    """The shared result surface every detector feeds stays OUTSIDE the mode tabs — in the
+    Results dock under the trace since change A, not in the Inspector."""
     panel = window._analysis_panel
-    split = panel.findChild(QtWidgets.QSplitter)
     table = panel._table
     assert isinstance(table, EventTable)
-    assert split.widget(1) in _ancestors(table, panel)
-    assert split.widget(1).findChild(EventTable) is table
+    assert window._results_dock.isAncestorOf(table)
+    assert not window._inspector.isAncestorOf(table)
     assert _measure_page(window) not in _ancestors(table, window)
     assert _mode_tabs(window) not in _ancestors(table, window)
 

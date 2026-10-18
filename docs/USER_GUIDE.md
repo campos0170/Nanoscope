@@ -22,7 +22,7 @@ The Automatic workflow below remains available and unchanged.
 
 For the 2026-09-12 source update, see [Measurement-quality and acquisition-bandwidth
 advisories](MEASUREMENT_RELIABILITY.md): how to inspect baseline/polarity warnings in
-Results → Summary, enter acquisition metadata in File Info, and distinguish unassessed
+the Results panel's Summary tab, enter acquisition metadata in File Info, and distinguish unassessed
 hardware resolution from the existing software-filter flag. The detailed addendum
 remains a separate companion document; this incubation-focused edition does not
 claim a new audit of all measurement-advisory behavior.
@@ -76,7 +76,7 @@ claim a new audit of all measurement-advisory behavior.
 
 ## 1. The workspace
 
-The main window has three regions:
+The main window has four regions:
 
 - **Left dock — File Manager.** A tree of open recordings grouped by applied voltage. Each recording
   expands into its channels; a checkbox next to each channel toggles it in the viewer, and a colour
@@ -85,6 +85,13 @@ The main window has three regions:
   where you are), then the **analysis launcher** row, then **the trace view** with a **navigator**
   strip beneath it (a full-extent overview with a draggable region box).
 - **Right dock — Inspector**, a tabbed panel: **Calibration**, **File Info**, and **Analysis**.
+- **Bottom dock — Results**, under the trace: a toolbar (the **Table** selector, **Columns…**,
+  **Merge…**, the table's constant columns such as `recording = …`, and the advisories link), a
+  one-line status (the event count, or the amber stale
+  notice), then **Events** / **Summary** / **Fits** / **Quality**. Close it (its ✕,
+  **View ▸ Panels ▸ Results**, or **⇧⌘R**) to give the trace its full height — nothing in it is
+  lost; drag its top edge for more rows. It floats or docks on any side, and its place and height
+  are remembered.
 
 The **analysis launcher** starts with **Analysis home**, followed by shortcuts to
 **Distributions**, **Event waveforms**, **Noise spectrum**, **I-V / conductance**,
@@ -313,13 +320,15 @@ cannot replace a recording that is currently open.
 The Inspector's **Analysis** tab is where the work happens, and it has its own four-tab strip:
 **Preprocess** (choose **Signal chain** or **Open-pore baseline** from its section selector — §5a) · **Detection** ·
 **ML** · **Measure**. Preprocess configures the signal and reference; Detection
-and ML produce results shown in **Results → Events** below the strip. Results also has
-**Summary**, **Fits** and **Quality** tabs. Essential/Advanced changes control visibility only.
+and ML produce results shown in the **Results** panel under the trace, on its **Events** tab;
+it also has **Summary**, **Fits** and **Quality** tabs. Essential/Advanced changes control
+visibility only.
 Manual measurements have their own measurement list. **Add measurement to list** appends there;
 **Mark selection as missed event** instead adds a reviewed candidate to the active source detector
 table. These are different destinations. When the recording holds more than one detector
-result, the **Event table** selector chooses which stored table is shown; changing that selector
-changes only the view and does not replace or merge any result.
+result, the **Event table** selector — **Table**, at the left of the Results panel's toolbar —
+chooses which stored table is shown; changing that selector changes only the view and does not
+replace or merge any result.
 
 ### Essential and Advanced controls
 
@@ -366,7 +375,9 @@ Event waveforms, Event gallery, Reconcile detector results, Event labels, Noise 
 data, figures). **Analysis home** and **Guided first analysis** also have menu entries; the guide
 is available from **Help**.
 
-Closed a dock by accident? Reopen it from **View ▸ Panels ▸ File Manager / Inspector**.
+Closed a dock by accident? Reopen it from **View ▸ Panels ▸ File Manager / Inspector / Results**
+(**⇧⌘R** toggles Results). While the Results panel is closed, a new detection or a table turning
+stale is announced on the status bar; the panel is never re-opened for you.
 
 ---
 
@@ -888,9 +899,9 @@ single batched **span overlay** on the current pane.
 ### Merging fragmented events
 
 A noisy or multi-level translocation that briefly recrosses `k_out` is reported as several adjacent
-rows, each with a fraction of the true dwell. **Merge sub-events**, in the Analysis panel's controls
-column, stitches them back together *after* detection, so you do not have to re-tune thresholds and
-lose the genuinely short events:
+rows, each with a fraction of the true dwell. **Merge sub-events** — shown above the event table
+when you press **Merge…** in the Results panel's toolbar — stitches them back together *after*
+detection, so you do not have to re-tune thresholds and lose the genuinely short events:
 
 - **Window** — the merge window in **milliseconds** (0.01–100 ms, default 0.15 ms). Two events merge
   when `next.start − current.end ≤ window`, transitively along a chain. There is no `0` here: the
@@ -1232,8 +1243,10 @@ carries with nothing in it — and which estimator produced that baseline is sta
 next to the calibration stamp.
 
 If a stored detection's stamp does not match the estimator now set in **Preprocess ▸ Open-pore
-baseline** (or if the table predates the stamp entirely), the analysis panel shows an amber banner
-naming the old estimator, and the affected columns — `baseline_pA`, `depth_pA`, `frac_depth`,
+baseline** (or if the table predates the stamp entirely), the Results panel's status line turns
+amber — *Depths stale — estimator changed* (or *Depths stale — predates the current estimator*) —
+with **Re-measure depths** and **Details**, which shows the full sentence naming the old
+estimator; and the affected columns — `baseline_pA`, `depth_pA`, `frac_depth`,
 `ecd_pA_s`, `mean_dev_pA`, `max_dev_pA`, `snr`, `rise_s`, `fall_s` — carry a ⚠ in the table header
 and are shown in amber. `rise_s` and `fall_s` are on that list because 10 %/90 % are fractions of
 each event's *own* depth, so a changed depth moves them; they were once documented as unaffected,
@@ -1244,11 +1257,14 @@ were stored.
   would change: old vs new `depth_pA` per event against the y = x line, the ratio distribution, and
   how many events have a stamped baseline that moves more than 10 pA. On a recording without the
   pathology this shows ~1.0× everywhere. Opening it changes nothing.
-- **Re-measure depths** (on the banner, or from inside that report) rewrites the amplitude columns
+- **Re-measure depths** (on that line, or from inside that report) rewrites the amplitude columns
   against the configured estimator. It does **not** re-detect: every event span keeps its
   boundaries, and every accept/reject and hand-written flag survives — including ones you make
-  while it is running. A calibration change is different: its banner offers **Re-run**, which
-  re-detects, and the current curation does not survive that.
+  while it is running. A calibration change is different: its line (*Depths stale — calibration
+  changed*) offers **Re-run**, which re-detects, and the current curation does not survive that.
+  When the offered action cannot run (for example the channel is overridden to voltage), the
+  button is greyed and the line goes on *· Re-run unavailable: …* (on a narrow panel it gives up
+  the verdict first, never the start of the reason); the whole reason is in **Details**.
 
 Optional selected amplitudes are not silently reinterpreted under the new baseline: affected
 values become stale and must be reapplied. If an amplitude choice is edited while re-measurement
@@ -1419,8 +1435,9 @@ rebuild events from one waveform, so run those on a source detector table; plots
 fits over already-stored Reconciled columns remain available.
 
 The Reconciled table is a provenance-bearing snapshot. If a selected source is later rerun, edited,
-removed, or otherwise no longer matches its stored fingerprint, a stale-lineage banner keeps the
-snapshot viewable and exportable but tells you to inspect the source tables and reconcile again.
+removed, or otherwise no longer matches its stored fingerprint, a stale-lineage line in the
+Results panel (*Source table changed*, with **Details**) keeps the snapshot viewable and exportable
+but tells you to inspect the source tables and reconcile again.
 
 ### Review and label the result
 
@@ -2293,6 +2310,7 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Event inspector:** T | Centre the main trace on the event on screen |
 | **Event inspector & Event gallery:** Ctrl/⌘+S | Save the complete project through the same writer as File ▸ Save Project |
 | **Event inspector & Event gallery:** Ctrl/⌘+Shift+S | Save the complete project under a new name |
+| Ctrl/⌘+Shift+R | Show / hide the Results panel (event table, Summary, Fits, Quality) |
 | **Event table:** j / k | Next / previous row |
 | **Event table:** a / r / f | Accept / Reject / flag the current row |
 | **Event gallery:** A / R / Space | Accept / Reject / toggle every selected tile |

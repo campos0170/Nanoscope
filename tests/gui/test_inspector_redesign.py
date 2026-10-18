@@ -98,26 +98,25 @@ def test_inactive_detector_does_not_leave_a_gap_in_the_active_form(window):
     assert dwell_top - below_thresholds < 2 * detection.fontMetrics().height()
 
 
-def test_empty_results_are_compact_and_populated_results_have_direct_tabs(window):
+def test_the_results_tabs_are_direct_and_live_in_the_results_dock(window):
+    # Rewritten for change A: results moved to their own dock, which never collapses, so the
+    # tabs are always present and the empty state is the status line's sentence.
+    from nanoscope.gui.analysis_panel import _RESULTS_EMPTY_TEXT
     panel = window._analysis_panel
-    empty_height = panel._results_host.height()
-    assert empty_height < 100
-    assert not panel.results_tabs.isVisible()
-    panel._sync_results_presence(True, 10)
-    settle()
-    assert panel.results_tabs.isVisible()
     assert [panel.results_tabs.tabText(i) for i in range(panel.results_tabs.count())] == [
         'Events', 'Summary', 'Fits', 'Quality']
+    assert window._results_dock.isAncestorOf(panel.results_tabs)
+    assert not window._inspector.isAncestorOf(panel.results_tabs)
+    assert panel.results_tabs.isVisible()
+    assert panel._results_summary.text() == _RESULTS_EMPTY_TEXT
+    empty_strip = panel._results_status.height()
+    panel._sync_results_presence(True, 10)
+    settle()
+    assert panel._results_status.height() == empty_strip
     for index in range(panel.results_tabs.count()):
         panel.results_tabs.setCurrentIndex(index)
         settle()
         assert panel.detection_panel.mode_tabs.isVisible()
-    panel.results_toggle.setChecked(False)
-    settle()
-    assert panel._results_host.height() < 100
-    panel.results_toggle.setChecked(True)
-    settle()
-    assert panel.results_tabs.isVisible()
 
 
 def test_baseline_buttons_fit_without_scrollbar_occlusion(window):
