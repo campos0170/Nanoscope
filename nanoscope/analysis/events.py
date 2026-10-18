@@ -1214,6 +1214,27 @@ def is_reviewed(row: Any) -> bool | None:
     return None if token is None else token == REVIEW_DONE
 
 
+def reviewed_mask(df: pd.DataFrame) -> np.ndarray:
+    """``is_reviewed(row) is True`` for every row, as one boolean array.
+
+    Decided by :func:`_normalise_review`, once per DISTINCT cell value, so the vectorised
+    answer cannot drift from the per-row one. An absent column, ``pd.NA`` and an
+    unrecognised token are all ``False``: only an explicit ``reviewed`` counts.
+    """
+    n = len(df)
+    if REVIEW_COL not in df.columns or not n:
+        return np.zeros(n, dtype=bool)
+    codes, uniques = pd.factorize(pd.Series(df[REVIEW_COL].to_numpy(dtype=object)),
+                                  use_na_sentinel=True)
+    hit = np.fromiter((_normalise_review(u) == REVIEW_DONE for u in uniques),
+                      dtype=bool, count=len(uniques))
+    out = np.zeros(n, dtype=bool)
+    known = codes >= 0
+    if len(uniques):
+        out[known] = hit[codes[known]]
+    return out
+
+
 _MISSING_ACCEPTED = (
     "needs the 'accepted' column: the status is derived from (review, accepted), "
     "and there is nothing to derive it from.")

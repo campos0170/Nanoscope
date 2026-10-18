@@ -1154,16 +1154,24 @@ For the current −700mV gallery table, position147 in All corresponds to ID146.
   and equivalent amplitude level use that same domain. The readout distinguishes original median
   depth from an optional selected amplitude, alongside dwell, ΔI/I₀, SNR, rise/fall, level count,
   and filter-limited flag. Normalized traces are labelled dimensionless, not pA.
-- **Navigate.** Prev / Next, an "Event *i* of *N*" index, and a filter (All / Accepted / Rejected).
-  Keyboard: **←/→** move, **A/R** accept/reject, **Space** toggles.
+- **Navigate.** Prev / Next, an "Event *i* of *N*" index, and a **Filter** — All, Accepted only,
+  Rejected only, Unreviewed, and (once a label palette exists or any event carries a label)
+  Unlabelled and one **Labelled: key=value** entry per label. Keyboard: **←/→** move, **A/R**
+  accept/reject, **Space** toggles. See *A curation pass* below for Unreviewed, **Advance after
+  decision** and **First unreviewed**.
 - **Context.** A `Context:` combo sets how much recording is *loaded* either side of the event —
   **± 3 ms** (the default), **± 30 ms**, **± 300 ms** or **Whole trace** — and the choice persists as
   you step, because it is a working preference rather than a per-event one. Below ±3 ms was once the
   hard-coded pad and therefore a ceiling: panning inside a 6 ms slice cannot answer *"was the pore
   quiet before this?"*, only loading more samples can.
 - **Show in trace** (`T`) centres the main trace on the event you are looking at — the same jump as
-  double-clicking its tile in the gallery — and **Gallery…** opens the contact sheet. The three event
-  surfaces all link to each other now; none of them is a dead end.
+  right-click ▸ **Go to event in trace** on its tile in the gallery — and **Gallery…** opens the
+  contact sheet. The three event surfaces all link to each other now; none of them is a dead end.
+- **Label.** While an event is on screen, the bottom right of the Event box holds the gallery's
+  Label idiom for it: pick a palette entry, **Apply** writes it, **Clear** removes that entry's *key* (other
+  labels and flags stay). Both record that a person reviewed the event, both are one Undo step, and
+  neither moves on. A readout line too long for the window ends in "…" (hover the readout for all of
+  it) rather than widening the window, so the row never moves.
 - **Curate.** Accepting/rejecting writes to the shared event table, so it flows to the table
   checkbox, the trace span overlay, the summary counts, the plots, and exports — all at once, in both
   directions. Navigating also zooms the main trace to the event.
@@ -1171,6 +1179,50 @@ For the current −700mV gallery table, position147 in All corresponds to ID146.
   has unsaved changes. Press **Save Project** (use its arrow for **Save Project As…**), **Ctrl/⌘+S**,
   or **Ctrl/⌘+Shift+S**. These controls use the same guarded project writer as the main File menu;
   cancelling or failing a save leaves the unsaved warning in place.
+- **Undo without leaving the window.** **Ctrl/⌘+Z** and **Ctrl/⌘+Shift+Z** in the inspector run the
+  main window's Edit ▸ Undo / Redo (there is one undo history). After an undo or redo the inspector
+  keeps its filter and the event on screen, and the gallery its selection, as long as the restored
+  table holds the same events; an undo that renumbers events (a merge) starts again from the first.
+
+### A curation pass: Unreviewed, Advance after decision and progress
+
+Both the inspector and the gallery offer the same tools for working through a detection.
+
+- **Unreviewed** (Filter / Show) holds the events no person has ruled on yet — no accept, reject or
+  label. Events with **no review record** at all (detections saved before review tracking, or from a
+  detector that does not stamp it) count as unreviewed here; the progress tooltip says how many.
+- **First unreviewed** (**Ctrl/⌘+U**, or the button) goes to the first unreviewed event of the
+  current filter — in the gallery, the first such tile in the current sort, turning the page. If the
+  filter has none it says how many remain elsewhere.
+- **Advance after decision** (a tick box, off by default and shared by both windows) makes the
+  *keys* — A, R, Space and the label keys — move to the next event of the current filter once the
+  decision is written. In the gallery it moves only a **one-tile** selection, turning the page when
+  needed; a swept selection never moves. Buttons, the Accepted box and the Label row never move on.
+  A refused accept stays on the event (in the gallery under Unreviewed, where the refusal's review
+  stamp takes the tile out, the selection goes on to the next tile instead of to nothing). At the
+  end of the filter the window stays and the progress line says so (*End of Unreviewed · 12
+  earlier*). With the option on, **Ctrl/⌘+Z** in the window also goes back to the event the last
+  advance moved away from, when the undo changed that event. Decision keys never auto-repeat, so
+  holding R cannot reject a run of events.
+- **The progress line** — beside **First unreviewed** in each window's status bar — reads
+  *Reviewed 312 / 870 · accepted 801 · labels: type=collision 40,
+  type=translocation 260*. It counts the whole detection, not the current filter; hover it for the
+  breakdown (unknown review records, labels outside the palette, merge conflicts). It shares the
+  status bar with the project label by what each says: when both are long, the file name gives way
+  first and the save state stays readable.
+
+| Key | Event inspector | Event gallery |
+|---|---|---|
+| ← / → | Previous / next event of the filter | Native: move the focused tile on the page. After a decision takes the focused tile out of the Show subset, nothing is selected and the first ← / → selects the tile beside it |
+| A / R / Space | Accept / reject / toggle the event on screen (moves on with Advance) | Same on every selected tile (moves on only for one tile with Advance) |
+| 1–9, custom label keys | Label the event on screen (moves on with Advance) | Label every selected tile (moves on only for one tile with Advance) |
+| T | Show the event in the main trace | — |
+| Ctrl/⌘+U | First unreviewed event of the filter | First unreviewed tile of the Show subset, in sort order |
+| Ctrl/⌘+Z | Undo (main window's history) | Undo (main window's history) |
+| Ctrl/⌘+Shift+Z | Redo | — |
+| PgDn / PgUp, Home / End | — | Next / previous page, first / last page |
+| Ctrl/⌘+A, Esc, Ctrl/⌘+I | — | Select all on the page / none / inverse |
+| Ctrl/⌘+S, Ctrl/⌘+Shift+S | Save / Save As | Save / Save As |
 
 ### Choosing an amplitude and editing the red level
 
@@ -2306,14 +2358,16 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | Double-click trace | Place/activate a Measure mask at the click, capped at 20% of the visible view |
 | Mouse wheel on trace | Move the signal vertically only (up moves up; down moves down) |
 | **Event inspector:** ←/→ | Previous / Next event |
-| **Event inspector:** A / R / Space | Accept / Reject / toggle |
+| **Event inspector:** A / R / Space | Accept / Reject / toggle (then the next event of the filter when **Advance after decision** is on) |
 | **Event inspector:** T | Centre the main trace on the event on screen |
+| **Event inspector & Event gallery:** Ctrl/⌘+U | First unreviewed event / tile of the current filter |
+| **Event inspector:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo on the main window's history, without leaving the inspector |
 | **Event inspector & Event gallery:** Ctrl/⌘+S | Save the complete project through the same writer as File ▸ Save Project |
 | **Event inspector & Event gallery:** Ctrl/⌘+Shift+S | Save the complete project under a new name |
 | Ctrl/⌘+Shift+R | Show / hide the Results panel (event table, Summary, Fits, Quality) |
 | **Event table:** j / k | Next / previous row |
 | **Event table:** a / r / f | Accept / Reject / flag the current row |
-| **Event gallery:** A / R / Space | Accept / Reject / toggle every selected tile |
+| **Event gallery:** A / R / Space | Accept / Reject / toggle every selected tile (a single tile moves to the next one when **Advance after decision** is on) |
 | **Event gallery:** PageDown / PageUp | Next / previous page |
 | **Event gallery:** Home / End | First / last page |
 | **Event inspector & Event gallery:** 1–9 | Apply the matching label from the palette (**Analysis ▸ Event labels…**) — same digits, same meanings, in both windows |

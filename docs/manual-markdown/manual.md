@@ -434,11 +434,14 @@ one at a time in full detail. The **Event gallery** shows them all at once as ti
 when there are too many to click through. Anything you accept or reject in either lands in the same
 table, the same overlays and the same exports, and `Edit › Undo` (`Ctrl+Z`) reaches all
 of it. The inspector's toolbar has explicit `Accept` and `Reject` buttons for the
-displayed event (the same write as the `A`/`R` keys — neither advances), `⟵`/`⟶`
+displayed event (the same write as the `A`/`R` keys; the buttons never advance, and the keys
+move to the next event only with `Advance after decision` ticked), `⟵`/`⟶`
 buttons that pan the view half a window sideways without touching the mask, and a
 `Gallery…` button; the gallery's tiles answer with a right-click menu whose
 `Open in Event Inspector` lands the inspector, the table row and the trace zoom on
-that event together. Both surfaces also apply **event labels** — a `key=value` vocabulary you define in
+that event together. Both windows can browse `Unreviewed` events (no accept, reject or label yet —
+events with no review record count too), jump to the first one with `Ctrl/⌘+U`, and show a progress
+line such as `Reviewed 312 / 870 · accepted 801 · labels: type=collision 40` for the whole detection. Both surfaces also apply **event labels** — a `key=value` vocabulary you define in
 `Analysis › Event labels…` and stamp with the number keys `1`–`9`. Labels ride in the
 event table's existing `flag` column, so they survive a rebuild and an older project reads back
 unchanged. Applying or clearing a structured label also records every targeted event as reviewed,

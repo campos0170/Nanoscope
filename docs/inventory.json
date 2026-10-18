@@ -3037,8 +3037,8 @@
         "label": "All",
         "kind": "combo",
         "group": "Event Inspector — navigation bar",
-        "what_it_does": "Browse every detected event, accepted or not. This is the default and the state the window resets to whenever a new detection is installed.",
-        "notes": "One of the three items in the Filter combo, whose tooltip reads: 'The browsed subset. Prev/Next step within it (curation moves events between the Accepted and Rejected subsets).'"
+        "what_it_does": "Browse every detected event, accepted or not. This is the default and the state the window resets to whenever a new detection is installed. An Edit ▸ Undo or Redo that restores the same events keeps the filter and the event on screen.",
+        "notes": "One of the Filter combo's items (All, Accepted only, Rejected only, Unreviewed, then Unlabelled and one 'Labelled: key=value' per label once a palette or a label exists). The combo keeps a fixed width; long label filters are elided in it and shown whole in its list."
       },
       {
         "label": "Accepted only",
@@ -3053,6 +3053,34 @@
         "group": "Event Inspector — navigation bar",
         "what_it_does": "Restrict Prev/Next and the Event spinbox to events you have rejected — the fast way to re-check what you threw away.",
         "notes": "Same behaviour as above: accepting the displayed event moves it out of this subset without navigating away."
+      },
+      {
+        "label": "Unreviewed",
+        "kind": "combo",
+        "group": "Event Inspector — navigation bar",
+        "what_it_does": "Restrict Prev/Next and the Event spinbox to events no person has ruled on yet — no accept, reject or label recorded.",
+        "notes": "Events with no review record at all (detections saved before review tracking, or a detector that does not stamp it) count as unreviewed here; the progress line's tooltip says how many. A decision takes the event out of this subset; it stays on screen, 'filtered out of Unreviewed'."
+      },
+      {
+        "label": "Unlabelled",
+        "kind": "combo",
+        "group": "Event Inspector — navigation bar",
+        "what_it_does": "Events that carry no key=value label. Offered once a label palette exists or any event carries a label.",
+        "notes": "Bare flag tokens (the curator's own 'flagged' mark, the detector's rejection reasons) are not labels."
+      },
+      {
+        "label": "Labelled: key=value",
+        "kind": "combo",
+        "group": "Event Inspector — navigation bar",
+        "what_it_does": "Events carrying that label — one entry per palette entry, plus any label found in the detection that is not in the palette.",
+        "notes": "An event a merge left with two values for one key (molecule=apo|holo) counts under each value. The filter you are browsing stays offered even after its last event loses the label."
+      },
+      {
+        "label": "Advance after decision",
+        "kind": "checkbox",
+        "group": "Event Inspector — navigation bar",
+        "what_it_does": "When ticked, the keys A, R, Space and the label keys move to the next event of the current filter once the decision is written. Off by default.",
+        "notes": "Keys only: the Accept / Reject buttons, the Accepted box and the Label row never move on. A refused accept stays on the event. At the end of the filter the window stays and the progress line says 'End of …'. One shared choice for the inspector and the gallery, remembered between sessions. Decision keys do not auto-repeat."
       },
       {
         "label": "Accept all",
@@ -3285,6 +3313,18 @@
         "from_crosscheck": true
       },
       {
+        "label": "Ctrl/⌘+U",
+        "kind": "shortcut",
+        "group": "Event Inspector — keyboard",
+        "what_it_does": "First unreviewed event of the current filter — the same as the First unreviewed button."
+      },
+      {
+        "label": "Ctrl/⌘+Z / Ctrl/⌘+Shift+Z",
+        "kind": "shortcut",
+        "group": "Event Inspector — keyboard",
+        "what_it_does": "Undo / redo on the main window's one history, without leaving the inspector. With Advance after decision, undo also returns to the event the last advance moved away from — when the undo changed that event."
+      },
+      {
         "group": "Event Inspector",
         "kind": "slider",
         "label": "(shaded event region — drag the middle to slide the whole window)",
@@ -3330,15 +3370,51 @@
         "label": "Accept",
         "kind": "button",
         "group": "Event Inspector — curation",
-        "what_it_does": "Accept the displayed event — the same write as the A key and the Accepted checkbox. Does not advance; press → for the next event.",
+        "what_it_does": "Accept the displayed event — the same write as the A key and the Accepted checkbox. The button never moves on; with 'Advance after decision' ticked, the A key does.",
         "notes": "Added because the Accepted checkbox is a state indicator, not an action affordance — a whole detection was once curated without either being found. DISABLED until a detection is installed and an event is displayed. Accepts an event the detector flagged unmeasurable only if the derived guard allows it; a refusal is reported under the toolbar, nothing is written."
       },
       {
         "label": "Reject",
         "kind": "button",
         "group": "Event Inspector — curation",
-        "what_it_does": "Reject the displayed event — the same write as the R key. Does not advance; press → for the next event.",
+        "what_it_does": "Reject the displayed event — the same write as the R key. The button never moves on; with 'Advance after decision' ticked, the R key does.",
         "notes": "Same handler as the R key, exactly. The curated event stays on screen so you can change your mind; the Prev/Next filter subsets reflect the new state immediately."
+      },
+      {
+        "label": "Label:",
+        "kind": "combo",
+        "group": "Event Inspector — curation",
+        "what_it_does": "The palette entry the Label row's Apply writes onto the event on screen, and whose key Clear removes. The row sits at the bottom right of the Event box. Edit the palette under Analysis ▸ Event labels….",
+        "notes": "HIDDEN until an event is displayed (like Accept / Reject), and DISABLED until a palette exists. 1–9 and custom label keys do the same from the keyboard."
+      },
+      {
+        "label": "Apply (Label row)",
+        "kind": "button",
+        "group": "Event Inspector — curation",
+        "what_it_does": "Write the chosen label onto THIS event and record that a person reviewed it. One Undo step; never moves on.",
+        "notes": "The gallery's Apply, for one event."
+      },
+      {
+        "label": "Clear (Label row)",
+        "kind": "button",
+        "group": "Event Inspector — curation",
+        "what_it_does": "Remove the chosen label's KEY from this event, whatever its value; other labels and flags stay. Records a review, as the gallery's Clear does.",
+        "notes": "Never moves on."
+      },
+      {
+        "label": "First unreviewed",
+        "kind": "button",
+        "group": "Event Inspector — curation",
+        "shortcut": "Ctrl/⌘+U",
+        "what_it_does": "Go to the first event of the current filter that no person has ruled on yet.",
+        "notes": "If the filter holds none, the progress line says how many remain elsewhere (Filter ▸ Unreviewed shows them), or that every event is reviewed."
+      },
+      {
+        "label": "(progress line)",
+        "kind": "label",
+        "group": "Event Inspector — curation",
+        "what_it_does": "Reads e.g. 'Reviewed 312 / 870 · accepted 801 · labels: type=collision 40, type=translocation 260' — counts for the whole detection, not the current filter.",
+        "notes": "In the status bar, beside First unreviewed; it shares the bar with the project label by what each says, and the project file name gives way first (the save state stays readable). Fixed height; a long line is cut at the end and shown whole in the tooltip, with the breakdown (no-record reviews, labels outside the palette, merge conflicts). An end-of-filter note from Advance after decision comes first."
       },
       {
         "label": "⟵ / ⟶ (pan)",
@@ -3359,7 +3435,7 @@
         "kind": "button",
         "group": "Event Inspector — navigation",
         "shortcut": "T",
-        "what_it_does": "Centre the main trace on the event you are looking at — the same jump as double-clicking its tile in the gallery.",
+        "what_it_does": "Centre the main trace on the event you are looking at — the same jump as right-click ▸ Go to event in trace on its tile in the gallery.",
         "notes": "The third side of the triangle, and the one that did not exist: the Analysis panel opens the inspector and the gallery, and the gallery jumps to the trace, but from here the only way to see the event in its recording was to hunt for its row in the event table. A pure VIEW move — it changes no curation. DISABLED until an event is displayed."
       },
       {
@@ -3495,8 +3571,8 @@
         "label": "Show",
         "kind": "combo",
         "group": "Top toolbar",
-        "what_it_does": "Chooses which events the grid contains: all of them, only the ones you have accepted, or only the ones you have rejected. Options are \"All\", \"Accepted only\" and \"Rejected only\".",
-        "notes": "Same three subsets, by the same names, as the Event inspector. Changing it re-pages the grid from the start of the new subset, and it also decides what \"Accept all …\" / \"Reject all …\" at the bottom will act on."
+        "what_it_does": "Chooses which events the grid contains. Options are \"All\", \"Accepted only\", \"Rejected only\" and \"Unreviewed\", then — once a palette or a label exists — \"Unlabelled\" and one \"Labelled: key=value\" per label.",
+        "notes": "The same subsets, by the same names, as the Event inspector. Changing it re-pages the grid from the start of the new subset, and it also decides what \"Accept all …\" / \"Reject all …\" at the bottom will act on. Fixed width; long label filters are shown whole in its list."
       },
       {
         "label": "All",
@@ -3518,6 +3594,20 @@
         "group": "Show",
         "what_it_does": "Shows only the events you have thrown out — useful for a second pass over your own culling before you export.",
         "notes": "Accepting a tile here makes it vanish from the grid. \"Accept all …\" while this filter is on un-rejects everything you had rejected."
+      },
+      {
+        "label": "Unreviewed",
+        "kind": "combo",
+        "group": "Show",
+        "what_it_does": "Only the events no person has ruled on yet; events with no review record count as unreviewed.",
+        "notes": "A decision — or a label — takes the tile out of the grid at once."
+      },
+      {
+        "label": "Unlabelled / Labelled: key=value",
+        "kind": "combo",
+        "group": "Show",
+        "what_it_does": "Events with no key=value label, or with that label (a merge conflict counts under each value).",
+        "notes": "Labelling under these filters re-cuts the subset; tiles that leave are named on the status line ('filtered out of Unlabelled')."
       },
       {
         "label": "Sort",
@@ -3628,8 +3718,8 @@
         "label": "Double-click a tile",
         "kind": "gesture",
         "group": "Mouse and keyboard in the grid",
-        "what_it_does": "Goes to that event in the trace: the main window zooms its trace onto the event and comes to the front, in front of the gallery.",
-        "notes": "Double-click does NOT accept or reject — it used to, and was changed precisely because a destructive action on the open-things gesture was wrong. Rejecting is a click plus R (or the button). Expect the gallery to be covered by the main window afterwards."
+        "what_it_does": "Opens that event in the Event Inspector, in front of the gallery.",
+        "notes": "Double-click does NOT accept or reject — it used to, and was changed precisely because a destructive action on the open-things gesture was wrong. Rejecting is a click plus R (or the button). The trace is right-click ▸ Go to event in trace."
       },
       {
         "label": "Drag a rubber band over tiles",
@@ -3673,6 +3763,12 @@
         "group": "Mouse and keyboard in the grid",
         "what_it_does": "Jump to the first / last page of the current subset.",
         "notes": "In this window Home means \"first page\" — not \"reset zoom\", which is what Home does in the main window. The left/right arrow keys move the tile cursor within the page; despite what the ◀ / ▶ tooltips say, they do not turn the page."
+      },
+      {
+        "label": "Ctrl/⌘+U",
+        "kind": "shortcut",
+        "group": "Mouse and keyboard in the grid",
+        "what_it_does": "Select the first unreviewed tile of the Show subset, in the current sort, turning to its page — the same as First unreviewed in the status bar."
       },
       {
         "label": "|◀",
@@ -3723,6 +3819,13 @@
         "group": "Pager (under the grid)",
         "what_it_does": "\"Tiles per page. \\\"Fit\\\" sizes the page to the window, so a page is exactly one screenful and turning the page is the only way to move.\" Options are \"Fit\" (default), \"24\", \"48\", \"96\" and \"200\".",
         "notes": "Changing this keeps you looking at roughly the same tile — the first tile of your current page stays on screen — rather than keeping the same page NUMBER and dumping you somewhere else in the recording."
+      },
+      {
+        "label": "Advance after decision",
+        "kind": "checkbox",
+        "group": "Pager (under the grid)",
+        "what_it_does": "When ticked, a keyboard decision (A, R, Space, a label key) on ONE selected tile moves the selection to the next tile of the Show subset, turning the page when needed.",
+        "notes": "A selection of several tiles never moves, and the buttons never do. A refused accept stays on its tile, except under Unreviewed, where the review stamp the refusal still makes takes the tile out and the selection goes on to the next one. At the end of the subset the status bar says 'End of …'. Shared with the Event inspector; off by default; remembered between sessions."
       },
       {
         "label": "Fit",
@@ -3781,6 +3884,13 @@
         "what_it_does": "Marks every event in the current filter rejected — across all pages. Its label changes to show the count, e.g. \"Reject all 412\".",
         "notes": "Tooltip: \"Mark every tile in the current filter rejected.\" Destructive to your curation and applied with no confirmation; recovery is Edit ▸ Undo in the main window (recorded as \"Reject all events\"). With Show = \"All\" this empties your accepted set entirely, which also re-locks the surfaces that need at least one accepted event (e.g. Event plots). Disabled while the grid is empty.",
         "correction": "Same: constructor text \"Reject all shown\", rewritten by _sync_controls to f\"Reject all {subset}\" — e.g. \"Reject all 412\". The \"shown\" wording never appears once a detection is loaded."
+      },
+      {
+        "label": "First unreviewed / (progress line)",
+        "kind": "label",
+        "group": "Window foot",
+        "what_it_does": "In the status bar under the footer: First unreviewed (Ctrl/⌘+U) and the progress line 'Reviewed N / M · accepted K · labels: …' for the whole detection.",
+        "notes": "Not part of the footer status line, whose height decides the Fit page; the footer's clauses are unchanged."
       },
       {
         "label": "Ctrl-click / Shift-click a tile",

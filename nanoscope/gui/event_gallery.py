@@ -71,10 +71,17 @@ import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
+from ..analysis.curation_view import (
+    FILTER_ACCEPTED, FILTER_ALL, FILTER_REJECTED, FILTER_UNLABELLED, FILTER_UNREVIEWED,
+    LABEL_FILTER_PREFIX, curation_progress, describe_progress, end_of_filter_note, filter_depends_on_labels_or_review,
+    filter_display_candidates, filter_mask, filter_options, format_progress, is_filter,
+    label_rows, no_unreviewed_note, row_unchanged, same_events, unlabel_rows,
+)
 from ..analysis.events import (
     AUTOMATIC_REJECTION_FLAGS, FRAC_DEPTH_ENHANCEMENT, flag_tokens, mark_reviewed,
+    reviewed_mask,
 )
-from ..analysis.labels import LabelVocabulary, apply_label, clear_labels, label_column
+from ..analysis.labels import LabelVocabulary, label_column
 from ..analysis.reconcile import clear_curation_conflicts
 from ..core.session import Session
 from ..plot.style import LEVEL_INK
@@ -82,12 +89,19 @@ from .categorical import NOISE_HEX, category_colour
 
 __all__ = ["TRACE_CALIBRATED", "TRACE_DETRENDED", "EventGalleryWindow"]
 
-# -- filter subsets. The same three the inspector offers, by the same names, because they
-# -- are the same question asked of the same column.
-_FILTER_ALL = "All"
-_FILTER_ACCEPTED = "Accepted only"
-_FILTER_REJECTED = "Rejected only"
+# -- filter subsets. The inspector's, by the same names, because they are the same question
+# -- asked of the same frame: both windows read them from analysis.curation_view.
+_FILTER_ALL = FILTER_ALL
+_FILTER_ACCEPTED = FILTER_ACCEPTED
+_FILTER_REJECTED = FILTER_REJECTED
 _FILTERS = (_FILTER_ALL, _FILTER_ACCEPTED, _FILTER_REJECTED)
+
+#: The Event inspector's key, deliberately: one "Advance after decision" for both windows.
+#: Spelled twice because this window may not import its sibling.
+_ADVANCE_SETTINGS_KEY = "curation/advance_after_decision"
+#: The progress line's floor in the status bar (the inspector's number): room for "End of
+#: Unreviewed · 868 earlier (⌘U)" and the reviewed count, however long the project label is.
+_PROGRESS_MIN_W = 330
 
 # -- sort orders. "Detection order" is the default because it is the only one in which a
 # -- tile's neighbours are its neighbours IN TIME, which is what makes a burst of false
@@ -723,7 +737,7 @@ class _TileModel(QtCore.QAbstractListModel):
         self.endResetModel()
 
     def set_filter(self, mode: str) -> None:
-        if mode not in _FILTERS or mode == self._filter:
+        if not is_filter(mode) or mode == self._filter:
             return
         self.beginResetModel()
         self._filter = mode
@@ -798,14 +812,8 @@ class _TileModel(QtCore.QAbstractListModel):
         self.endResetModel()
 
     def _filtered_rows(self, df: pd.DataFrame) -> np.ndarray:
-        """The acceptance + subpopulation subset, unsorted and unsampled."""
-        accepted = df["accepted"].to_numpy(dtype=bool)
-        if self._filter == _FILTER_ACCEPTED:
-            keep = np.nonzero(accepted)[0]
-        elif self._filter == _FILTER_REJECTED:
-            keep = np.nonzero(~accepted)[0]
-        else:
-            keep = np.arange(len(df))
+        """The Show + subpopulation subset, unsorted and unsampled."""
+        keep = np.flatnonzero(filter_mask(df, self._filter))
         if self._subpop is not None and self._classes is not None and keep.size:
             keep = keep[self._classes[keep] == int(self._subpop)]
         return keep
@@ -1295,6 +1303,181 @@ class _StatusLine(QtWidgets.QLabel):
         self.setToolTip(full if clipped else "")
 
 
+class _ProgressLine(_StatusLine):
+    """The curation progress line in the status bar: one reserved line, cut from the tail,
+    whose tooltip always carries the full line and the detail behind it."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(1, parent)
+        self._detail = ""
+        # Its whole text is its hint: the window shares the bar by content (_share_status_bar).
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+
+    def set_line(self, text: str, detail: str = "") -> None:
+        self._detail = str(detail)
+        changed = str(text) != self._full
+        self.setText(text)
+        if changed:
+            self.updateGeometry()
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt override)
+        return QtCore.QSize(self.fontMetrics().horizontalAdvance(self._full) + 8,
+                            self.minimumHeight())
+
+    def _fit(self) -> None:
+        super()._fit()
+        detail = getattr(self, "_detail", "")
+        self.setToolTip("\n\n".join(s for s in (self._full, detail) if s))
+
+
+#: Item data: an item's shorter display forms, longest first (see _ElidingCombo).
+_SHORT_TEXTS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+class _ElidingCombo(QtWidgets.QComboBox):
+    """A fixed-width combo whose closed face shows the longest of the current item's
+    ``_SHORT_TEXTS_ROLE`` forms that fits, so a label filter keeps its VALUE in view
+    rather than its prefix. Spelled identically in both curation windows, which may not
+    import each other."""
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802 (Qt override)
+        painter = QtWidgets.QStylePainter(self)
+        painter.setPen(self.palette().color(QtGui.QPalette.ColorRole.Text))
+        opt = QtWidgets.QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ComboBox, opt)
+        opt.currentText = self._face(opt)
+        painter.drawControl(QtWidgets.QStyle.ControlElement.CE_ComboBoxLabel, opt)
+
+    def shown_text(self) -> str:
+        """What the closed face paints."""
+        opt = QtWidgets.QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        return self._face(opt)
+
+    def _face(self, opt: QtWidgets.QStyleOptionComboBox) -> str:
+        forms = (self.itemData(self.currentIndex(), _SHORT_TEXTS_ROLE)
+                 if self.currentIndex() >= 0 else None)
+        if not forms:
+            return opt.currentText
+        field = self.style().subControlRect(
+            QtWidgets.QStyle.ComplexControl.CC_ComboBox, opt,
+            QtWidgets.QStyle.SubControl.SC_ComboBoxEditField, self)
+        fm = self.fontMetrics()
+        fit = next((t for t in forms if fm.horizontalAdvance(t) <= field.width()), None)
+        # Nothing fits: cut the shortest form in the middle, so both ends of the value stay.
+        return fit if fit is not None else fm.elidedText(forms[-1], Qt.ElideMiddle,
+                                                         field.width())
+
+
+class _ElidedLabel(QtWidgets.QLabel):
+    """A one-line label that gives up width before its neighbours do: it paints as much
+    of its text as fits, ending in "…", while :meth:`text` returns all of it. Spelled
+    identically in both curation windows, which may not import each other."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setTextFormat(Qt.PlainText)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt override)
+        self._full = str(text)
+        self.updateGeometry()
+        self._fit()
+
+    def text(self) -> str:  # noqa: N802 (Qt override)
+        return self._full
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt override)
+        m = self.contentsMargins()
+        return QtCore.QSize(self.fontMetrics().horizontalAdvance(self._full) + 4
+                            + m.left() + m.right(), super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt override)
+        return QtCore.QSize(min(self.sizeHint().width(),
+                                self.fontMetrics().horizontalAdvance("x" * 14)),
+                            super().minimumSizeHint().height())
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._fit()
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802 (Qt override)
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.FontChange:
+            self.updateGeometry()
+            self._fit()
+
+    def _fit(self) -> None:
+        shown = self.fontMetrics().elidedText(self._full, Qt.ElideRight,
+                                              max(self.contentsRect().width() - 4, 0))
+        if shown != QtWidgets.QLabel.text(self):
+            QtWidgets.QLabel.setText(self, shown)
+
+
+def _widest_count(fm: QtGui.QFontMetrics, n: int) -> str:
+    """The widest number with as many digits as ``n`` in this font. Digits are
+    proportional ("1" is narrower), so a width sized for ``n`` can clip a smaller count."""
+    lead = max("123456789", key=fm.horizontalAdvance)
+    rest = max("0123456789", key=fm.horizontalAdvance)
+    return lead + rest * (len(str(max(int(n), 0))) - 1)
+
+
+def _status_share(avail: int, want_p: int, want_l: int, keep_l: int,
+                  floor_p: int) -> tuple[int, int]:
+    """``(progress floor, label width)`` for ``avail`` px shared by the progress line and
+    the project label, granted in turn: the progress line up to ``floor_p``, the label up
+    to ``keep_l``, the progress line up to all of its text, the label up to all of its.
+    What is left over goes to the progress line."""
+    floor = min(want_p, floor_p)
+    label = min(want_l, keep_l, max(avail - floor, 0))
+    progress = min(want_p, max(avail - label, floor))
+    return floor, min(want_l, max(avail - progress, label))
+
+
+def _native_key(seq: str) -> str:
+    """``"Ctrl+U"`` as this platform prints it (``⌘U`` on macOS)."""
+    return QtGui.QKeySequence(seq).toString(QtGui.QKeySequence.SequenceFormat.NativeText)
+
+
+def _read_advance_setting() -> bool:
+    """The shared "Advance after decision" choice; any unreadable store means off."""
+    try:
+        value = QtCore.QSettings().value(_ADVANCE_SETTINGS_KEY, False)
+    except Exception:  # noqa: BLE001 — a broken settings store is the default, never a crash
+        return False
+    return value is True or str(value).strip().lower() in ("true", "1")
+
+
+def _write_advance_setting(on: bool) -> None:
+    try:
+        QtCore.QSettings().setValue(_ADVANCE_SETTINGS_KEY, bool(on))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class _TileView(QtWidgets.QListView):
+    """The tile grid. :meth:`select_only` moves the cursor as a plain click does -- the
+    current tile, the only selected one, and the anchor a Shift-click extends from --
+    whatever modifier is down. A bare ``setCurrentIndex`` reads the live modifiers: under
+    the inspector's ⌘Z or ⌘U (relayed here) it toggled the tile INTO the selection."""
+
+    _forced = False
+
+    def selectionCommand(self, index, event=None):  # noqa: N802 (Qt override)
+        if self._forced:
+            return (QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QtCore.QItemSelectionModel.SelectionFlag.Rows)
+        return super().selectionCommand(index, event)
+
+    def select_only(self, index: QtCore.QModelIndex) -> None:
+        self._forced = True
+        try:
+            self.setCurrentIndex(index)
+        finally:
+            self._forced = False
+
+
 class EventGalleryWindow(QtWidgets.QMainWindow):
     """Scan a whole detection as a grid of waveform tiles and curate it in bulk.
 
@@ -1353,6 +1536,8 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
     # back the other way), so the gesture reaches the one stack from the window the batch
     # gesture happened in.
     undoRequested = Signal()
+    # The user ticked/unticked "Advance after decision"; MainWindow mirrors it on the inspector.
+    advanceAfterDecisionChanged = Signal(bool)
     # Project saving is intent only: MainWindow owns the path, dirty flag, validation and
     # serializer. These signals merely make saving reachable from the active gallery.
     saveProjectRequested = Signal()
@@ -1456,11 +1641,21 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         #: The selection size the status line currently prints, so a selection signal that
         #: does not move the number does not rebuild the line. See _on_selection_changed.
         self._shown_sel_count = 0
+        # -- curation throughput: the inspector's state by the same names ----------------
+        self._advancing = False          # fence: the cursor move an advance itself makes
+        self._advanced_from: int | None = None
+        self._note: tuple[str, str] = ("", "")   # (short, full) on the progress line
+        self._progress_state = None
+        self._filter_items: tuple[str, ...] = ()
+        #: ``(before, after, cursor)`` event ids around a cursor tile that a write took out
+        #: of the subset: the cursor waits, unselected, and ←/→ land on before / after.
+        self._parked: tuple[int | None, int | None, int] | None = None
 
         self._envelopes = _EnvelopeSource(session)
         self._model = _TileModel(self)
         self._build_ui()
         self._install_project_save_controls()
+        self._install_curation_status()
         self._sync_controls()
 
     # -- construction ----------------------------------------------------------------------------
@@ -1483,8 +1678,17 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         bar.setSpacing(8)
 
         bar.addWidget(QtWidgets.QLabel("Show"))
-        self.filter_box = QtWidgets.QComboBox()
-        self.filter_box.addItems(_FILTERS)
+        self.filter_box = _ElidingCombo()
+        # A fixed width, so label filters arriving with a palette never shift the row.
+        self.filter_box.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.filter_box.setMinimumContentsLength(11)
+        self._rebuild_filter_items()
+        self.filter_box.setToolTip(
+            "Which events the grid holds. Unreviewed: events no person has ruled on yet "
+            "(accept, reject or a label), including events with no review record. "
+            "Unlabelled: no key=value label. Labelled: events carrying that label (a merge "
+            "conflict counts under each value).")
         self.filter_box.currentTextChanged.connect(self._on_filter_changed)
         bar.addWidget(self.filter_box)
 
@@ -1663,7 +1867,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         root.addWidget(self._caveat_box)
         self._caveat_box.setVisible(False)
 
-        self.view = QtWidgets.QListView()
+        self.view = _TileView()
         self.view.setModel(self._model)
         self.view.setItemDelegate(_TileDelegate(self))
         self.view.setViewMode(QtWidgets.QListView.IconMode)
@@ -1745,6 +1949,20 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self.page_size_box.currentTextChanged.connect(self._on_page_size_changed)
         pager.addWidget(self.page_size_box)
         pager.addStretch(1)
+        # Right-aligned, so a page count that changes width never slides it.
+        self._advance_check = QtWidgets.QCheckBox("Advance after decision")
+        self._advance_check.setObjectName("advanceAfterDecision")
+        self._advance_check.setFocusPolicy(Qt.NoFocus)
+        self._advance_check.setChecked(_read_advance_setting())
+        self._advance_check.setToolTip(
+            "A keyboard decision on ONE selected tile — A, R, Space or a label key — moves "
+            "the selection to the next tile of the Show subset once it is written, turning "
+            "the page when needed. A selection of several tiles never moves, and neither do "
+            "the buttons. At the end of the subset the selection stays and the status bar "
+            "says so. Shared with the Event inspector and remembered between sessions; off "
+            "by default.")
+        self._advance_check.toggled.connect(self._on_advance_toggled)
+        pager.addWidget(self._advance_check)
         root.addLayout(pager)
 
         foot = QtWidgets.QHBoxLayout()
@@ -1763,7 +1981,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # shortcut that does nothing.
         self.undo_btn = QtWidgets.QPushButton("Undo")
         self.undo_btn.setEnabled(False)
-        self.undo_btn.clicked.connect(lambda: self.undoRequested.emit())
+        self.undo_btn.clicked.connect(lambda _=False: self._request_undo())
         foot.addWidget(self.undo_btn)
         self.accept_all_btn = QtWidgets.QPushButton("Accept all shown")
         self.accept_all_btn.setToolTip(_ACCEPT_ALL_TIP)
@@ -1786,7 +2004,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self.act_undo.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
         self.act_undo.setShortcutContext(Qt.WindowShortcut)
         self.act_undo.setEnabled(False)
-        self.act_undo.triggered.connect(lambda: self.undoRequested.emit())
+        self.act_undo.triggered.connect(lambda _=False: self._request_undo())
         self.addAction(self.act_undo)
         self._sync_undo_affordance()
 
@@ -1808,19 +2026,25 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         #
         # This does NOT weaken the gallery's own A/R -- see _handle_own_key for the other
         # half, which covers the one state the narrower context would otherwise cost.
-        for seq, slot in ((QtGui.QKeySequence(Qt.Key_A), lambda: self.set_accepted_selected(True)),
-                          (QtGui.QKeySequence(Qt.Key_R), lambda: self.set_accepted_selected(False)),
-                          (QtGui.QKeySequence(Qt.Key_Space), self._toggle_selected),
-                          (QtGui.QKeySequence(Qt.Key_PageDown),
-                           lambda: self.set_page(self._model.page() + 1)),
-                          (QtGui.QKeySequence(Qt.Key_PageUp),
-                           lambda: self.set_page(self._model.page() - 1)),
-                          (QtGui.QKeySequence(Qt.Key_Home), lambda: self.set_page(0)),
-                          (QtGui.QKeySequence(Qt.Key_End),
-                           lambda: self.set_page(self._model.page_count() - 1))):
+        # A / R / Space / the label keys go through the decide_* doors (which move on only
+        # with "Advance after decision" on) and never auto-repeat: a held R must not curate
+        # a run of tiles nobody looked at.
+        for seq, slot, repeat in (
+                (QtGui.QKeySequence(Qt.Key_A), lambda: self.decide_selected(True), False),
+                (QtGui.QKeySequence(Qt.Key_R), lambda: self.decide_selected(False), False),
+                (QtGui.QKeySequence(Qt.Key_Space), self.decide_toggle_selected, False),
+                (QtGui.QKeySequence(Qt.Key_PageDown),
+                 lambda: self.set_page(self._model.page() + 1), True),
+                (QtGui.QKeySequence(Qt.Key_PageUp),
+                 lambda: self.set_page(self._model.page() - 1), True),
+                (QtGui.QKeySequence(Qt.Key_Home), lambda: self.set_page(0), True),
+                (QtGui.QKeySequence(Qt.Key_End),
+                 lambda: self.set_page(self._model.page_count() - 1), True),
+                (QtGui.QKeySequence("Ctrl+U"), lambda: self.first_unreviewed(), False)):
             act = QtGui.QAction(self)
             act.setShortcut(seq)
             act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            act.setAutoRepeat(repeat)
             act.triggered.connect(slot)
             self.addAction(act)
         # 1-9 write the palette's first nine labels onto the selection. This is the whole
@@ -1835,7 +2059,8 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             act = QtGui.QAction(self)
             act.setShortcut(QtGui.QKeySequence(str(n)))
             act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-            act.triggered.connect(lambda _=False, ch=str(n): self.apply_hotkey(ch))
+            act.setAutoRepeat(False)
+            act.triggered.connect(lambda _=False, ch=str(n): self.decide_label(ch))
             self.addAction(act)
         # AND THE SAME KEYS WHEN NO WIDGET IN HERE HOLDS THE FOCUS. See _handle_own_key:
         # narrowing the context above is what stops this window answering for the events
@@ -1885,15 +2110,45 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             "Save the complete analysis project. Use the arrow for Save Project As…")
         self._project_save_button.setAccessibleName("Save project")
 
-        self._project_save_label = QtWidgets.QLabel(self)
+        self._project_save_label = _ElidedLabel(self)
         self._project_save_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._project_save_label.setAccessibleName("Project save status")
 
         save_bar = self.statusBar()
         save_bar.setSizeGripEnabled(False)
-        save_bar.addPermanentWidget(self._project_save_label, 1)
+        # No stretch: it takes the width its text needs and no more; the progress line
+        # beside it takes the rest (see _install_curation_status).
+        save_bar.addPermanentWidget(self._project_save_label, 0)
         save_bar.addPermanentWidget(self._project_save_button)
         self.set_project_save_state(None, False)
+
+    def _install_curation_status(self) -> None:
+        """First unreviewed + the progress line at the left of the status bar -- the
+        inspector's container by the same object names. In the status bar, not the
+        footer: the footer's height is the Fit page's input and must not change."""
+        self._curation_status = QtWidgets.QWidget(self)
+        self._curation_status.setObjectName("curationStatus")
+        lay = QtWidgets.QHBoxLayout(self._curation_status)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self._first_unreviewed_btn = QtWidgets.QToolButton(self._curation_status)
+        self._first_unreviewed_btn.setText("First unreviewed")
+        self._first_unreviewed_btn.setObjectName("firstUnreviewedButton")
+        self._first_unreviewed_btn.setFocusPolicy(Qt.NoFocus)
+        self._first_unreviewed_btn.setToolTip(
+            f"Select the first tile of the Show subset, in the current sort, that no person "
+            f"has ruled on yet ({_native_key('Ctrl+U')}), turning to its page. Events with "
+            "no review record count as unreviewed.")
+        self._first_unreviewed_btn.clicked.connect(lambda _=False: self.first_unreviewed())
+        lay.addWidget(self._first_unreviewed_btn)
+        self._progress = _ProgressLine(self._curation_status)
+        self._progress.setObjectName("curationProgress")
+        # A floor; past it the line and the project label share the bar by content
+        # (_share_status_bar, the inspector's rule).
+        self._progress.setMinimumWidth(_PROGRESS_MIN_W)
+        lay.addWidget(self._progress, 1)
+        self.statusBar().insertPermanentWidget(0, self._curation_status, 1)
+        self._render_progress()
 
     def set_project_save_state(self, path: str | None, unsaved: bool) -> None:
         """Show MainWindow's authoritative project path and unsaved state.
@@ -1924,13 +2179,25 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         font = self._project_save_label.font()
         font.setBold(unsaved)
         self._project_save_label.setFont(font)
+        # The save state stays readable however narrow the bar gets; the name gives way.
+        floor = QtGui.QFontMetrics(font).horizontalAdvance(text.split(" — ")[0] + " …")
+        self._project_save_label.setMinimumWidth(
+            min(floor + 4, self._project_save_label.sizeHint().width()))
+        self._share_status_bar()
 
     # -- contents --------------------------------------------------------------------------------
     def set_events(self, doc_id: str, channel: int, events_df: pd.DataFrame | None,
                    module_id: str | None = None,
                    provenance: dict[str, Any] | None = None,
-                   refusals: "_RefusalLedger | None" = None) -> None:
+                   refusals: "_RefusalLedger | None" = None,
+                   keep_place: bool = False) -> None:
         """Install the CURRENT detection's shared frame (a reference, never a copy).
+
+        ``keep_place`` is MainWindow saying this re-feed is an undo or redo. When the new
+        frame holds the very same events (identical ``event_id`` and ``start_idx``), the
+        selection and the cursor are put back -- quietly, emitting nothing -- instead of
+        the cursor landing on tile 0, which announced a selection and moved the trace, the
+        table and the inspector with it. Anything else gets today's reset.
 
         ``refusals`` is the refusal ledger to adopt WITH the frame — in the wired app,
         MainWindow's per-detection-lineage ledger, shared with the inspector and the
@@ -1941,6 +2208,12 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         row stayed refused), and a fresh one when a new detection replaced it. Without it
         (a standalone window) this method keeps its own rule: a different frame is a
         different detection, and the window's private ledger is dropped."""
+        keep = (bool(keep_place) and self._df is not None and events_df is not self._df
+                and doc_id == self._doc_id and channel == self._channel
+                and same_events(self._df, events_df))
+        keep_sel = ([int(self._df["event_id"].iloc[r]) for r in self._selected_rows()]
+                    if keep else [])
+        keep_cur = self._current_event_id() if keep else None
         self._doc_id = doc_id
         self._channel = channel
         self._module_id = module_id
@@ -1955,6 +2228,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # selected point at events that are not here any more (see :attr:`_offpage_ids`).
         self._offpage_ids = ()
         self._missed_id = None
+        self._parked = None
         self._hotkey_note = ""
         self._model.set_frame(self._df)
         # A DIFFERENT FRAME IS A DIFFERENT DETECTION, so any installed subpopulation map is
@@ -1977,9 +2251,17 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             # one's unmeasurable rows describes events that are no longer on screen -- and
             # the ids it counted now point at somebody else's events.
             self._clear_refusals()
+        self._advanced_from = None
+        self._note = ("", "")
+        self._fix_counter_widths()
+        self._sync_progress()
         self._sync_controls()
+        if keep:
+            self._restore_selection(keep_sel, keep_cur)
+            self._sync_controls()
+            return
         if self._model.rowCount() and not self.view.currentIndex().isValid():
-            self.view.setCurrentIndex(self._model.index(0, 0))
+            self.view.select_only(self._model.index(0, 0))
 
     def clear(self) -> None:
         self._doc_id = self._channel = self._df = self._module_id = None
@@ -1989,12 +2271,55 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self._shared_span_cache = None
         self._offpage_ids = ()
         self._missed_id = None
+        self._parked = None
         self._hotkey_note = ""
         self._model.set_frame(None)
         self.set_subpopulations(None)
         self.set_levels(None)
         self._clear_refusals()
+        self._advanced_from = None
+        self._note = ("", "")
+        self._fix_counter_widths()
+        self._sync_progress()
         self._sync_controls()
+
+    def _fix_counter_widths(self) -> None:
+        """Size the page box, its "of N" and the footer's "…all N" buttons once per frame,
+        for the largest numbers this frame can put in them: a subset shrinking as decisions
+        land (Unreviewed) must not slide Undo or the pager under the pointer."""
+        n = len(self._df) if self._df is not None else 0
+
+        def fix(widget, texts) -> None:
+            keep = widget.text()
+            if self._df is None:
+                # No frame: _sync_controls leaves the old count on the (disabled) button.
+                texts = (*texts, keep)
+            widget.setMinimumWidth(0)
+            widget.setMaximumWidth(16777215)
+            width = 0
+            for text in texts:
+                widget.setText(text)
+                width = max(width, widget.sizeHint().width())
+            widget.setText(keep)
+            widget.setFixedWidth(width)
+
+        big = _widest_count(self.accept_all_btn.fontMetrics(), n)
+        fix(self.accept_all_btn, (f"Accept all {big}", f"Accept {big} of {big}"))
+        fix(self.reject_all_btn, (f"Reject all {big}",))
+        fix(self.page_label, (f"of {_widest_count(self.page_label.fontMetrics(), max(n, 1))}",))
+        spin = self.page_spin
+        prev, self._updating = self._updating, True
+        try:
+            lo, hi, value = spin.minimum(), spin.maximum(), spin.value()
+            spin.setMinimumWidth(0)
+            spin.setMaximumWidth(16777215)
+            spin.setRange(1, int(_widest_count(spin.fontMetrics(), max(n, 1))))
+            width = spin.sizeHint().width()
+            spin.setRange(lo, hi)
+            spin.setValue(value)
+        finally:
+            self._updating = prev
+        spin.setFixedWidth(width)
 
     def refresh(self) -> None:
         """Re-read the shared frame after somebody else edited it (bounds, curation, merge).
@@ -2024,6 +2349,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self._envelopes.clear()
         self._shared_span_cache = None
         self._units = self._resolve_units()
+        self._advanced_from = None
+        self._note = ("", "")            # another surface wrote: its counts may be stale
+        self._sync_progress()
         self._refilter_keeping_selection()
         self._sync_controls()
 
@@ -2032,6 +2360,57 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         if row is None or self._df is None or not (0 <= row < len(self._df)):
             return None
         return int(self._df["event_id"].iloc[row])
+
+    def _park_cursor(self, order: list[int], gone_id: int) -> None:
+        """The cursor's tile just left the subset (a decision under Unreviewed, an R under
+        Accepted only). Put the cursor -- not the selection -- on the tile that took its
+        place in ``order`` (the subset before the write), else on the last one before it,
+        on this page. A first ← / → then lands next to the decided tile, as the inspector's
+        step does, instead of on the page's first tile; nothing is selected, so no key
+        curates a tile nobody chose."""
+        row = self._row_for_id(gone_id)
+        slot = {r: i for i, r in enumerate(self._model.page_df_rows())}
+        sm = self.view.selectionModel()
+        if row is None or not slot or sm is None or row not in order:
+            return
+        pos = order.index(row)
+        after = next((r for r in order[pos + 1:] if r in slot), None)
+        before = next((r for r in reversed(order[:pos]) if r in slot), None)
+        target = after if after is not None else before
+        if target is None:
+            return
+        prev, self._updating = self._updating, True
+        try:
+            sm.setCurrentIndex(self._model.index(slot[target], 0),
+                               QtCore.QItemSelectionModel.NoUpdate)
+        finally:
+            self._updating = prev
+        eid = self._df["event_id"]
+        self._parked = (None if before is None else int(eid.iloc[before]),
+                        None if after is None else int(eid.iloc[after]),
+                        int(eid.iloc[target]))
+
+    def _step_from_parked(self, forward: bool) -> bool:
+        """← / → straight after :meth:`_park_cursor`: select the tile on that side of the
+        one that left. ``False`` when there is none (the arrow then does what it does)."""
+        parked, self._parked = self._parked, None
+        target = parked[1 if forward else 0] if parked else None
+        row = self._row_for_id(target) if target is not None else None
+        idx = self._model.index_for_df_row(row) if row is not None else QtCore.QModelIndex()
+        if not idx.isValid():
+            return False
+        self._select_and_announce(idx)
+        self.view.scrollTo(idx)
+        return True
+
+    def _select_and_announce(self, idx: QtCore.QModelIndex) -> None:
+        """Make ``idx`` the current and only selected tile, announced as a click is -- also
+        when the cursor was already parked on it (no ``currentChanged`` fires then)."""
+        self._parked = None
+        was_current = self.view.currentIndex() == idx
+        self.view.select_only(idx)
+        if was_current:
+            self._on_current_changed(idx, idx)
 
     def _restore_selection(self, event_ids: list[int], current: int | None) -> None:
         """Re-select ``event_ids`` (those still on the current page) and put the cursor
@@ -2130,12 +2509,18 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         selected = [int(self._df["event_id"].iloc[r]) for r in self._selected_rows()] \
             if self._df is not None else []
         current = self._current_event_id()
+        order = self._model.df_rows() if current is not None else []
+        parked, self._parked = self._parked, None
         if self._subpops is not None:
             self._model.set_classes(self._row_classes())
             self._rebuild_subpop_box()
         else:
             self._model.refilter()
         self._restore_selection(selected, current)
+        if current is not None and not self.view.currentIndex().isValid():
+            self._park_cursor(order, current)
+        elif parked is not None and not selected and current == parked[2]:
+            self._parked = parked            # an echo of the same write: still waiting
         back = [int(self._df["event_id"].iloc[r]) for r in self._selected_rows()] \
             if self._df is not None else []
         gone = [ev for ev in selected if ev not in set(back)]
@@ -2152,25 +2537,33 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         :meth:`show_event`'s alone. The page turn is what the inbound mirror is FOR (the
         table moved to an event; the gallery follows), and it is what a frame edit must never
         do -- so the selection-keeping reset does not call this; see
-        :meth:`_refilter_keeping_selection`. ``view.setCurrentIndex`` here is ClearAndSelect
-        on purpose: the mirror selects the tile the other surface chose."""
-        row = self._row_for_id(event_id)
-        if row is None:
-            return False
-        page = self._model.page_of_df_row(row)
-        if page is None:
+        :meth:`_refilter_keeping_selection`. The move is ClearAndSelect on purpose -- the
+        mirror selects the tile the other surface chose -- and stated, never read from the
+        modifiers: the inspector's ⌘Z / ⌘U arrive here with ⌘ still down."""
+        idx = self._index_on_its_page(event_id)
+        if not idx.isValid():
             return False
         self._updating = True
         try:
-            if page != self._model.page():
-                self._model.set_page(page)
-            idx = self._model.index_for_df_row(row)
-            if not idx.isValid():
-                return False
-            self.view.setCurrentIndex(idx)
+            self.view.select_only(idx)
         finally:
             self._updating = False
         return True
+
+    def _index_on_its_page(self, event_id: int) -> QtCore.QModelIndex:
+        """``event_id``'s tile index, turning (quietly) to its page first; invalid when the
+        current subset excludes it. The page turn :meth:`_focus_event` and the advance share."""
+        row = self._row_for_id(event_id)
+        page = self._model.page_of_df_row(row) if row is not None else None
+        if page is None:
+            return QtCore.QModelIndex()
+        if page != self._model.page():
+            self._updating = True
+            try:
+                self._model.set_page(page)
+            finally:
+                self._updating = False
+        return self._model.index_for_df_row(row)
 
     def _resolve_units(self) -> str:
         if self._doc_id is None or self._channel is None:
@@ -2669,8 +3062,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         names it, and the gesture that reaches it. Asked in the order the model applies
         them (:meth:`_TileModel._filtered_rows`, then the sample)."""
         mode = self.filter_box.currentText()
-        accepted = bool(self._df.iloc[row]["accepted"])
-        if (mode == _FILTER_ACCEPTED and not accepted) or (mode == _FILTER_REJECTED and accepted):
+        if is_filter(mode) and not bool(filter_mask(self._df.iloc[[row]], mode)[0]):
             return mode, "set Show to All to reach it"
         classes = self._model.classes()
         cid = self._model.subpop()
@@ -2788,6 +3180,12 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         """
         if self._updating:
             return
+        if self._parked is not None:
+            cur = self.view.currentIndex()
+            row = self._model.df_row(cur)
+            if row is not None and self._selected_rows() == [row]:
+                # A click on the parked tile: no currentChanged fires, so announce it here.
+                self._on_current_changed(cur, cur)
         retired = self._retire_offpage_record()
         # AND THE COUNT ON THE LINE FOLLOWS THE SELECTION. Rebuilt only when the NUMBER
         # moved, not on every signal: a rubber band emits one of these per mouse-move, and
@@ -2809,6 +3207,12 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
     def _on_current_changed(self, current: QtCore.QModelIndex, _prev) -> None:
         if self._updating:
             return
+        self._parked = None
+        if not self._advancing:
+            self._advanced_from = None
+        if self._note != ("", ""):
+            self._note = ("", "")
+            self._render_progress()
         row = self._model.df_row(current)
         if row is None or self._df is None:
             return
@@ -2966,7 +3370,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             # label.  Valid rows refused by an automatic flag still pass the guard below
             # and are reviewed normally.
             self._refusals.record_blocked(len(rows))
+            self._note = ("", "")
             self._sync_controls()
+            self._render_progress()
             # Nothing was written, but the SHARED ledger just changed: announce the
             # refusal itself so the owner can repaint the other surfaces' notes.
             self.acceptanceRefused.emit()
@@ -2976,6 +3382,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # so without this an explicit "Accept all shown" exported zero reviewed truths.
         conflict_changed = clear_curation_conflicts(self._df, rows_arr)
         review_changed = mark_reviewed(self._df, rows=rows_arr)
+        self._note = ("", "")
         # ONE VECTORISED PASS, NOT ONE ``iat`` PER ROW. The per-row loop this replaces
         # cost 2.5-4.0 s of frozen GUI per "Reject all"/"Accept all" at 100,000 events
         # (5 pandas scalar round-trips per row); the decision it made is unchanged and
@@ -3010,6 +3417,11 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             # The acceptance column may be unchanged while the review column moved. That
             # is still persistent curation, so it gets the same one batch announcement and
             # Undo step as a boolean-changing gesture.
+            if ((review_changed or conflict_changed)
+                    and filter_depends_on_labels_or_review(self.filter_box.currentText())):
+                # Under Unreviewed (or a label filter) the stamp alone moves a tile out.
+                self._refilter_keeping_selection()
+            self._sync_progress()
             self._sync_controls()
             if review_changed or conflict_changed:
                 self.set_undo_state(True, self._undo_label)
@@ -3048,6 +3460,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # replace the standing tuple: a gesture that keeps every tile leaves it empty.
         self._offpage_ids = tuple(ev for ev in selected if ev not in set(back))
         self._hotkey_note = ""
+        self._sync_progress()
         self._sync_controls()
         self.view.viewport().update()
 
@@ -3198,6 +3611,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # new palette rebuilds the line; a note about a digit the OLD palette did not arm
         # is about a palette that is gone.
         self._hotkey_note = ""
+        self._sync_progress()
         if hasattr(self, "status"):
             self._sync_controls()
         self.view.viewport().update()
@@ -3215,8 +3629,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             action = QtGui.QAction(self)
             action.setShortcut(QtGui.QKeySequence(ch))
             action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            action.setAutoRepeat(False)
             action.triggered.connect(
-                lambda _checked=False, ch=ch: self.apply_hotkey(ch))
+                lambda _checked=False, ch=ch: self.decide_label(ch))
             self.addAction(action)
             self._custom_label_actions.append(action)
 
@@ -3313,8 +3728,8 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         rows = self._selected_rows()
         if not rows:
             return
-        label_changed = clear_labels(self._df, rows, str(token).partition("=")[0])
-        review_changed = mark_reviewed(self._df, rows=np.asarray(rows, dtype=np.int64))
+        label_changed, review_changed = unlabel_rows(
+            self._df, rows, str(token).partition("=")[0])
         if label_changed or review_changed:
             self._after_label_write(len(rows))
 
@@ -3330,8 +3745,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         rows = self._selected_rows()
         if not rows:
             return 0
-        changed = apply_label(self._df, rows, key, value)
-        review_changed = mark_reviewed(self._df, rows=np.asarray(rows, dtype=np.int64))
+        changed, review_changed = label_rows(self._df, rows, key, value)
         if changed or review_changed:
             self._after_label_write(len(rows))
         return changed
@@ -3345,13 +3759,23 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         digit wrote nothing. Curation needs the reset because the Accepted/Rejected filters
         are computed from `accepted`; a label never changes `accepted`, so the subset cannot
         have moved.
+
+        EXCEPT UNDER A LABEL OR REVIEW FILTER (Unreviewed, Unlabelled, Labelled: k=v), where
+        the write itself moves tiles in or out. Then the selection-keeping reset runs: the
+        tiles still in the subset stay selected, and the ones that left are named on the
+        status line ("filtered out of Unlabelled"). Under All / Accepted / Rejected nothing
+        is reset, exactly as before.
         """
         self._hotkey_note = ""
+        self._note = ("", "")
         # A label write is checkpointed too (``labelsChanged`` -> _checkpoint_labels), so the
         # same lower bound holds: see _set_rows_accepted for why this window may arm its own
         # Undo but may never disarm it.
         if n_selected:
             self.set_undo_state(True, self._undo_label)
+        if filter_depends_on_labels_or_review(self.filter_box.currentText()):
+            self._refilter_keeping_selection()
+        self._sync_progress()
         self._sync_controls()
         self.view.viewport().update()
         self.labelsChanged.emit()
@@ -3368,6 +3792,242 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         if self._label_key and self._label_key in labels:
             return labels[self._label_key]
         return next(iter(labels.values()))
+
+    # -- Advance after decision: the keyboard doors that may move on ------------------------
+    def advance_after_decision(self) -> bool:
+        """The shared setting, re-read so a change made in the inspector holds here too."""
+        on = _read_advance_setting()
+        if self._advance_check.isChecked() != on:
+            was = self._advance_check.blockSignals(True)
+            self._advance_check.setChecked(on)
+            self._advance_check.blockSignals(was)
+        return on
+
+    def set_advance_after_decision(self, on: bool) -> None:
+        self.advance_after_decision()
+        self._advance_check.setChecked(bool(on))
+
+    def _on_advance_toggled(self, on: bool) -> None:
+        _write_advance_setting(bool(on))
+        if self._note != ("", ""):
+            self._note = ("", "")
+            self._render_progress()
+        self.advanceAfterDecisionChanged.emit(bool(on))
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 (Qt override)
+        super().showEvent(event)
+        self.advance_after_decision()        # the inspector may have changed the shared choice
+        self._share_status_bar()
+
+    def _advance_target(self) -> tuple[int, list[int], int] | None:
+        """``(decided event_id, subset order, its position)`` when a decision may advance:
+        Advance on, and the selection is exactly the current tile. A sweep never moves."""
+        if self._df is None or not self.advance_after_decision():
+            return None
+        row = self._model.df_row(self.view.currentIndex())
+        if row is None or self._selected_rows() != [row]:
+            return None
+        order = self._model.df_rows()
+        try:
+            pos = order.index(row)
+        except ValueError:
+            return None
+        return int(self._df["event_id"].iloc[row]), order, pos
+
+    def _decision_landed(self, event_id: int, accepted: bool | None) -> bool:
+        """An accept that the derived half refused did not land; anything else did."""
+        row = self._row_for_id(event_id)
+        if row is None:
+            return False
+        return not (accepted and not bool(self._df.iloc[row]["accepted"]))
+
+    def decide_selected(self, accepted: bool) -> bool:
+        """A / R: :meth:`set_accepted_selected`, then -- for a one-tile selection with
+        Advance on, once the decision landed -- the next tile. ``True`` when it moved."""
+        target = self._advance_target()
+        self.set_accepted_selected(accepted)
+        if target is None:
+            return False
+        if not self._decision_landed(target[0], bool(accepted)):
+            return self._after_refusal(target)
+        return self._advance_to(target)
+
+    def decide_toggle_selected(self) -> bool:
+        """Space, as :meth:`decide_selected`."""
+        target = self._advance_target()
+        requested = None
+        if target is not None:
+            requested = not bool(self._df.iloc[self._row_for_id(target[0])]["accepted"])
+        self._toggle_selected()
+        if target is None:
+            return False
+        if not self._decision_landed(target[0], requested):
+            return self._after_refusal(target)
+        return self._advance_to(target)
+
+    def _after_refusal(self, target: tuple[int, list[int], int]) -> bool:
+        """A refused accept does not move on: the tile stays current, with the refusal on
+        the status line. Unless the review stamp the refusal still makes took the tile out
+        of the subset (Unreviewed): then nothing would be selected and the next key would
+        act on nothing, so the selection goes where an advance would have. ``False``
+        either way -- the decision did not land."""
+        row = self._row_for_id(target[0])
+        if not self._selected_rows() and row not in set(self._model.df_rows()):
+            self._advance_to(target, end_note=False)
+        return False
+
+    def decide_label(self, ch: str) -> bool:
+        """A label key: :meth:`apply_hotkey`, then advance as :meth:`decide_selected`."""
+        target = self._advance_target()
+        self.apply_hotkey(ch)
+        if (target is None or self._vocab.for_hotkey(ch) is None
+                or self._df is None or "flag" not in self._df.columns):
+            return False
+        return self._advance_to(target)
+
+    def _advance_to(self, target: tuple[int, list[int], int], *, end_note: bool = True) -> bool:
+        """Select the first tile after the decided one, in the order the subset had when
+        the key was pressed, that is still in the subset -- or stay and say so."""
+        decided, order, pos = target
+        alive = set(self._model.df_rows())
+        for row in order[pos + 1:]:
+            if row in alive:
+                moved = self._move_cursor_to(int(self._df["event_id"].iloc[row]))
+                if moved:
+                    self._advanced_from = int(decided)
+                return moved
+        if not end_note:
+            return False
+        unreviewed = ~reviewed_mask(self._df)
+        mode = self.filter_box.currentText()
+        earlier = sum(1 for r in order[:pos] if r in alive)
+        self._note = end_of_filter_note(
+            mode, noun="tile", n_earlier=earlier if mode == FILTER_UNREVIEWED else 0,
+            n_unreviewed=int(unreviewed.sum()), first_key=_native_key("Ctrl+U"))
+        self._render_progress()
+        return False
+
+    def _move_cursor_to(self, event_id: int) -> bool:
+        """Make ``event_id``'s tile the current AND only selected tile, turning to its page
+        first, and announce it as a click would (:meth:`_TileView.select_only`, which no
+        held or latched modifier can turn into an extension)."""
+        idx = self._index_on_its_page(event_id)
+        sm = self.view.selectionModel()
+        if not idx.isValid() or sm is None:
+            return False
+        self._advancing = True
+        try:
+            self._select_and_announce(idx)
+        finally:
+            self._advancing = False
+        self.view.scrollTo(idx)
+        self._sync_controls()
+        self.view.viewport().update()
+        return self.current_event_id() == int(event_id)
+
+    def first_unreviewed(self) -> int | None:
+        """Select the first tile of the Show subset, in the current sort, that no person has
+        ruled on (⌘U / the status-bar button); ``None``, with a note, when there is none."""
+        if self._df is None:
+            return None
+        unreviewed = ~reviewed_mask(self._df)
+        for row in self._model.df_rows():
+            if unreviewed[row]:
+                eid = int(self._df["event_id"].iloc[row])
+                return eid if self._move_cursor_to(eid) else None
+        self._note = no_unreviewed_note(self.filter_box.currentText(), noun="tile",
+                                        n_unreviewed=int(unreviewed.sum()), chooser="Show")
+        self._render_progress()
+        return None
+
+    def _request_undo(self) -> None:
+        """This window's Undo / ⌘Z: MainWindow's undo, then back to the tile the last
+        advance moved away from -- only when the same events came back AND the undo
+        changed that event (the inspector's rule; see its ``_request_undo``)."""
+        back, before = self._advanced_from, self._df
+        self._advanced_from = None
+        self.undoRequested.emit()
+        after = self._df
+        if back is None or after is before or not same_events(before, after):
+            return
+        row = self._row_for_id(back)
+        if (row is None or back == self.current_event_id()
+                or row_unchanged(before, after, row)):
+            return
+        self._move_cursor_to(back)
+
+    # -- the progress line ------------------------------------------------------------------
+    def progress_text(self) -> str:
+        return self._progress.text() if hasattr(self, "_progress") else ""
+
+    def filter_options(self) -> tuple[str, ...]:
+        return self._filter_items
+
+    def _sync_progress(self) -> None:
+        """Recount curation progress for the frame and refresh what reads it (the Show
+        items, the line). On writes and re-feeds only, never on a page turn."""
+        self._progress_state = (curation_progress(self._df, self._vocab)
+                                if self._df is not None else None)
+        self._rebuild_filter_items()
+        self._render_progress()
+
+    def _render_progress(self) -> None:
+        if not hasattr(self, "_progress"):
+            return
+        short, full = self._note
+        p = self._progress_state
+        if p is None:
+            self._progress.set_line(short, full)
+            self._share_status_bar()
+            return
+        line = (f"{short} · " if short else "") + format_progress(p)
+        self._progress.set_line(line, "\n\n".join(s for s in (full, describe_progress(p)) if s))
+        self._share_status_bar()
+
+    def _share_status_bar(self) -> None:
+        """Size the progress line's floor and the project label by what each says (see
+        :func:`_status_share`). The pair's total width is the bar's to give, so this moves
+        neither First unreviewed nor Save."""
+        prog = getattr(self, "_progress", None)
+        label = getattr(self, "_project_save_label", None)
+        if prog is None or label is None:
+            return
+        fixed = (self._first_unreviewed_btn.sizeHint().width()
+                 + self._curation_status.layout().spacing())
+        avail = self._curation_status.width() + label.width() - fixed
+        # The label's floor is its save state; the file name is the first thing to go.
+        floor, width = _status_share(avail, prog.sizeHint().width(), label.sizeHint().width(),
+                                     label.minimumWidth(), _PROGRESS_MIN_W)
+        prog.setMinimumWidth(floor)
+        label.setMaximumWidth(max(width, label.minimumWidth()))
+
+    def _rebuild_filter_items(self, extra: str | None = None) -> None:
+        """Refill the Show combo when the offered filters change, keeping the one shown
+        (and ``extra``, about to be chosen). Signals are blocked: a rebuild is not a choice."""
+        if not hasattr(self, "filter_box"):
+            return
+        current = self._model._filter
+        opts = filter_options(self._progress_state, self._vocab, extra or current)
+        if current not in opts and is_filter(current):
+            opts = (*opts, current)
+        if opts == self._filter_items:
+            return
+        box = self.filter_box
+        blocker = QtCore.QSignalBlocker(box)
+        try:
+            box.clear()
+            for text in opts:
+                if text == FILTER_UNLABELLED and box.count():
+                    box.insertSeparator(box.count())
+                box.addItem(text)
+                box.setItemData(box.count() - 1, filter_display_candidates(text),
+                                _SHORT_TEXTS_ROLE)
+            box.setCurrentText(current)
+        finally:
+            blocker.unblock()
+        self._filter_items = opts
+        fm = box.fontMetrics()
+        box.view().setMinimumWidth(max(fm.horizontalAdvance(t) for t in opts) + 32)
 
     def reflect_acceptance(self, event_id: int, accepted: bool) -> None:
         """Somebody else curated this event; repaint to match. Never re-emits.
@@ -3395,6 +4055,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         col = self._df.columns.get_loc("accepted")
         if bool(self._df.iat[row, col]) != bool(accepted):
             self._df.iat[row, col] = bool(accepted)
+        self._advanced_from = None
+        self._note = ("", "")
+        self._sync_progress()
         self._refilter_keeping_selection()
         self._sync_controls()
         self.view.viewport().update()
@@ -3496,7 +4159,10 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
 
     # -- controls ---------------------------------------------------------------------------------
     def set_filter(self, mode: str) -> None:
-        if mode in _FILTERS:
+        if is_filter(mode):
+            # A non-editable combo ignores text it does not hold: offer the filter first.
+            if mode not in self._filter_items:
+                self._rebuild_filter_items(extra=mode)
             self.filter_box.setCurrentText(mode)
 
     def set_sort(self, mode: str) -> None:
@@ -3508,7 +4174,12 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             self.size_box.setCurrentText(name)
 
     def _on_filter_changed(self, text: str) -> None:
+        if not is_filter(text):
+            return
         self._model.set_filter(text)
+        if self._note != ("", ""):
+            self._note = ("", "")
+            self._render_progress()
         self._sync_controls()
 
     def _on_sort_changed(self, text: str) -> None:
@@ -3578,6 +4249,10 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             # Same seam, same reason, as EventTable.eventFilter.
             if self._handle_own_key(event):
                 return True
+            if (self._parked is not None and event.key() in (Qt.Key_Left, Qt.Key_Right)
+                    and not (event.modifiers() & ~Qt.KeypadModifier)
+                    and self._step_from_parked(event.key() == Qt.Key_Right)):
+                return True
         if obj is self.view.viewport() and event.type() == QtCore.QEvent.Resize:
             # ``status`` is the last thing _build_ui creates: a viewport resize delivered
             # while the toolbar is still being assembled has nothing to sync.
@@ -3625,6 +4300,8 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
                 continue
             shortcut = act.shortcut()
             if not shortcut.isEmpty() and shortcut == seq:
+                if event.isAutoRepeat() and not act.autoRepeat():
+                    return True              # a held decision key: consumed, not repeated
                 act.trigger()
                 return True
         return False
@@ -3673,6 +4350,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # line's "scroll for the rest" hint must track that (owner note #12).
         if hasattr(self, "_model"):
             self._sync_controls()
+        self._share_status_bar()
 
     def set_shared_scale(self, on: bool) -> None:
         self.shared_scale_box.setChecked(bool(on))
@@ -3716,6 +4394,8 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         for w in (self.accept_selected_btn, self.reject_selected_btn,
                   self.accept_all_btn, self.reject_all_btn, self.inspect_btn):
             w.setEnabled(has)
+        if hasattr(self, "_first_unreviewed_btn"):
+            self._first_unreviewed_btn.setEnabled(self._df is not None)
         if self._df is None:
             # TWO STATES, TWO SENTENCES. A completed run that found nothing is a finding --
             # the null control is SUPPOSED to produce it -- and it must not be reported as
@@ -3738,7 +4418,10 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # line this window states its counts on (measured: reject everything, then Show =
         # Accepted only).
         span = f"{lo}–{lo + n - 1}" if n else "0"
-        bits = [f"{span} of {subset} ({shown.lower()})",
+        # A label filter keeps its token's case: "Labelled: molecule=ApoF" is not "apof".
+        shown_name = (shown.lower() if not shown.startswith(LABEL_FILTER_PREFIX)
+                      else LABEL_FILTER_PREFIX.lower() + shown[len(LABEL_FILTER_PREFIX):])
+        bits = [f"{span} of {subset} ({shown_name})",
                 f"{n_acc} of {n_all} accepted"]
         # HOW MANY TILES THE NEXT A / R / DIGIT WOULD WRITE. The audit assumed this count was
         # already here ("the selection count is already in the status line so the feedback

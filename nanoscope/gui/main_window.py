@@ -215,7 +215,7 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     "analysis_panel.eventSelected": "selection only — no surface window plots the selection",
     "event_inspector.eventSelected": "selection only; relayed to the panel's table + trace",
     "event_gallery.eventSelected": "selection only; relayed to the panel's table + trace",
-    "event_gallery.eventActivated": "double-click 'go to this event in the trace' — a view move",
+    "event_gallery.eventActivated": "the tile menu's 'Go to event in trace' — a view move",
     "event_gallery.inspectRequested": "'Open in Event Inspector' — the tile's double-click, its "
                                       "context menu and the Inspector… button all raise it; "
                                       "opens a window and selects, never the numbers",
@@ -237,6 +237,18 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
                                    "undo in this application. Whatever that undo restores "
                                    "reaches every surface on the history's own signals; the "
                                    "request itself moves nothing",
+    "event_inspector.undoRequested": "⌘Z INSIDE the Event inspector — a request to run "
+                                     "MainWindow's own undo (_undo_events). Whatever that "
+                                     "undo restores reaches every surface on the history's "
+                                     "own signals; the request itself moves nothing",
+    "event_inspector.redoRequested": "⇧⌘Z INSIDE the Event inspector — the same request for "
+                                     "MainWindow's redo (_redo_events); it moves nothing "
+                                     "itself",
+    "event_inspector.advanceAfterDecisionChanged": "the 'Advance after decision' tick — a "
+                                                   "keyboard preference mirrored onto the "
+                                                   "gallery; no frame moved",
+    "event_gallery.advanceAfterDecisionChanged": "the same tick in the gallery, mirrored onto "
+                                                 "the inspector; no frame moved",
     "event_gallery.saveProjectRequested": "a request to run MainWindow's authoritative "
                                            "project save; emitting it changes no analysis",
     "event_gallery.saveProjectAsRequested": "a request to run MainWindow's authoritative "
@@ -711,6 +723,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._figure_library = None
         self._event_inspector = None   # the single, lazily-built EventInspectorWindow
         self._event_gallery = None     # the single, lazily-built EventGalleryWindow
+        #: True only while an event-table undo/redo installs its snapshot: the re-feeds it
+        #: causes may keep the curation windows' place (see _undo_events).
+        self._keep_curation_place = False
         #: ``(accept, n_shown, n_events)`` while one of the gallery's "all shown" buttons is
         #: mid-click, else None — the one thing its ``curationBatchChanged`` cannot say.
         #: See :meth:`_arm_gallery_whole_frame`.
@@ -6236,6 +6251,12 @@ class MainWindow(QtWidgets.QMainWindow):
             # A refusal WRITES nothing, so no data signal will repaint the other two
             # surfaces' notes — the mirror of the table's acceptanceRefused hop.
             insp.acceptanceRefused.connect(self._on_inspector_acceptance_refused)
+            # ⌘Z / ⇧⌘Z in the inspector reach the ONE undo stack (the gallery's twin is
+            # in _open_event_gallery); the window has no menu bar to reach Edit ▸ Undo.
+            insp.undoRequested.connect(self._undo_events)
+            insp.redoRequested.connect(self._redo_events)
+            # One "Advance after decision" for both curation windows.
+            insp.advanceAfterDecisionChanged.connect(self._mirror_advance_after_decision)
             # ...and every one of the three, from the ONE table, to the ONE refresher. A
             # curation done in this window used to leave the Populations and Event Plots
             # windows drawing the pre-curation fit (see SURFACE_MUTATION_SIGNALS).
@@ -6561,6 +6582,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda g=gal: g.set_undo_state(self._act_undo.isEnabled(),
                                                self._act_undo.text()))
             gal.set_undo_state(self._act_undo.isEnabled(), self._act_undo.text())
+            gal.advanceAfterDecisionChanged.connect(self._mirror_advance_after_decision)
             self._wire_surface_refresh("event_gallery", gal)
             self._event_gallery = gal
             # The gallery is a launcher surface now, so its show/hide has to reach the row's
@@ -6600,6 +6622,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 win.lower()
         self.raise_()
         self.activateWindow()
+
+    def _mirror_advance_after_decision(self, on: bool) -> None:
+        """Show the shared "Advance after decision" choice on both curation windows. The
+        window that changed it already reads ``on``, so this cannot loop."""
+        for win in (self._event_inspector, self._event_gallery):
+            if win is not None:
+                win.set_advance_after_decision(bool(on))
 
     def _note_gallery_selection(self, event_id: int) -> None:
         """A PLAIN CLICK on a tile also did something — say so.
@@ -6698,7 +6727,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._event_gallery.set_events(
             res.doc_id, res.channel, res.payload.df, res.module_id,
             dict(res.payload.provenance or {}),
-            refusals=self._refusal_ledger_for(res))
+            refusals=self._refusal_ledger_for(res),
+            keep_place=self._keep_curation_place)
         self._event_gallery.set_levels(levels)
         # ...and the staleness badges, on EVERY branch: the table's judgement is about
         # the frame just fed, and a window fed a frame without its badges repeats a
@@ -6784,7 +6814,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # The ledger travels with the frame, chosen by lineage — see _refresh_event_gallery.
         self._event_inspector.set_events(res.doc_id, res.channel, res.payload.df, res.module_id,
                                          res.payload.provenance,
-                                         refusals=self._refusal_ledger_for(res))
+                                         refusals=self._refusal_ledger_for(res),
+                                         keep_place=self._keep_curation_place)
         # ...and the levels are re-established on EVERY re-feed, not only on the one that
         # happens to follow a fit (see _levels_for_detection)...
         self._event_inspector.set_levels(self._levels_for_detection(res))
@@ -12331,7 +12362,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if target == _UNDO_MEASUREMENTS:
             label = self._measure_history.undo()
         else:
-            label = self._history.undo(self._undo_key())
+            label = self._keeping_curation_place(
+                lambda: self._history.undo(self._undo_key()))
         if label:
             self._take_last(self._undo_journal, target)
             self._redo_journal.append(target)
@@ -12346,12 +12378,44 @@ class MainWindow(QtWidgets.QMainWindow):
         if target == _UNDO_MEASUREMENTS:
             label = self._measure_history.redo()
         else:
-            label = self._history.redo(self._undo_key())
+            label = self._keeping_curation_place(
+                lambda: self._history.redo(self._undo_key()))
         if label:
             self._take_last(self._redo_journal, target)
             self._undo_journal.append(target)
             self.statusBar().showMessage(f"Redone: {label}.", 8000)
         self._sync_undo_actions()
+
+    def _keeping_curation_place(self, step) -> str:
+        """Run an event-table undo/redo ``step`` so the re-feeds it causes keep the
+        curation windows' filter, event and selection when the restored table holds the
+        same events (each window checks that itself) -- and the panel's selected row and
+        trace marker with them, re-selected quietly: the windows emit nothing on such a
+        re-feed, so nothing else would put the table back on the event being curated."""
+        from ..analysis.curation_view import same_events
+        from ..analysis.events import EventSet
+
+        def frame():
+            res = self._analysis_panel.current_detection()
+            return res.payload.df if res is not None and isinstance(res.payload, EventSet) \
+                else None
+
+        panel = self._analysis_panel
+        before, selected = frame(), panel.selected_event_id()
+        self._keep_curation_place = True
+        try:
+            label = step()
+        finally:
+            self._keep_curation_place = False
+        after = frame()
+        if (selected is not None and panel.selected_event_id() is None
+                and after is not before and same_events(before, after)):
+            was = panel.blockSignals(True)
+            try:
+                panel.select_event(int(selected))
+            finally:
+                panel.blockSignals(was)
+        return label
 
     def _mark_dirty(self) -> None:
         """Flag that the session holds unsaved analysis a project save would persist, and

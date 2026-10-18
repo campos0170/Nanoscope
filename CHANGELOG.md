@@ -31,6 +31,18 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Added
 
+- Curation throughput in the Event inspector and the Event gallery: **Advance after decision**
+  (off by default, one remembered choice for both windows) makes the A / R / Space / label keys
+  move on to the next event of the filter — in the gallery only for a one-tile selection, turning
+  pages; buttons never move on and decision keys no longer auto-repeat. New **Unreviewed**,
+  **Unlabelled** and **Labelled: key=value** filters; **First unreviewed** (Ctrl/⌘+U); a
+  fixed-height progress line (*Reviewed 312 / 870 · accepted 801 · labels: …*); a Label row
+  (Apply / Clear) for the inspector's current event; ⌘Z / ⇧⌘Z in the inspector on the main
+  undo history. Edit ▸ Undo / Redo no longer reset the inspector to All / the first event or move
+  the gallery to tile 0 when the restored table holds the same events. An inspector readout line
+  too long for the window now ends in "…" instead of widening the window, and in the gallery a
+  decision that takes the focused tile out of the Show subset leaves the cursor beside it (the
+  next ← / → selects its neighbour, not the page's first tile).
 - Opt-in Comparison figures page: shared-axis per-recording facets, feature-pair matrices with
   common-bin count histograms, and strip/swarm individual-event plots with optional descriptive
   boxes. Seaborn renders prepared observations; generation is explicit, source identities and
