@@ -544,6 +544,15 @@ class ChainStatus:
     revert_params: dict[str, Any] | None = None
     detector_label: str = ""
 
+    @property
+    def headline(self) -> str:
+        """The verdict for one elided line, differences first (the full :attr:`sentence`
+        is for its tooltip)."""
+        if self.kind == "differs" and self.diffs:
+            label = self.detector_label or "detection"
+            return f"⚠ Differs from the {label} run: {describe_differences(self.diffs)}"
+        return self.sentence
+
     @classmethod
     def none(cls) -> "ChainStatus":
         return cls("none")
@@ -611,9 +620,10 @@ class StageRow:
 
     @property
     def text(self) -> str:
-        """The row label. The role comes right after the title so it survives elision."""
+        """The row label. The setting comes before the role note, so a right-elided row
+        loses the note (also in the tooltip), never the cutoff or window."""
         role = f" ({self.role})" if self.role else ""
-        return f"{self.position}  {self.title}{role} — {self.summary}"
+        return f"{self.position}  {self.title} — {self.summary}{role}"
 
 
 def _lowpass_corner(st: Mapping[str, Any], fs: float) -> str:

@@ -166,8 +166,9 @@ def test_stage_list_is_execution_order_and_reflects_and_writes_enable_state(load
     assert tuple(r.key for r in rows) == cr.STAGE_KEYS
     texts = [ws.stage_list.item(i).text() for i in range(8)]
     assert texts[0].startswith("1  Notch") and texts[-1].startswith("8  Low-pass")
-    # UPDATED (review D-A3): the role follows the title, so right-elision keeps it.
-    assert texts[-1].startswith("8  Low-pass (applied inside detection) — ")
+    # UPDATED (review DA-5): the setting precedes the role, so right-elision keeps the cutoff.
+    assert texts[-1].startswith("8  Low-pass — ") and texts[-1].endswith(
+        "(applied inside detection)")
     assert ws.stage_list.verticalScrollBar().maximum() == 0
     # The form reflects into the list...
     det.set_stage_enabled("median", True)
@@ -206,9 +207,19 @@ def test_stage_list_selection_raises_the_form_and_follows_the_panel(window, qtbo
     assert ws.stage_list.currentRow() == 0
 
 
-def test_role_tags_survive_the_default_column_width(window, qtbot):
-    """Review D-A3: at the default 350 px column the label's TAIL elides, so the role sits
-    right after the title, inside the part that is painted."""
+@pytest.mark.parametrize("recipe", ["", *cr.BUILTIN_RECIPES])
+def test_stage_settings_survive_the_default_column_width(window, qtbot, recipe):
+    """UPDATED (review DA-5, replacing D-A3's role-first test): at the default column the
+    label's TAIL elides, so each row's setting comes before its role note (which the row's
+    tooltip repeats) and is painted in full: the low-pass cutoff, the windows.
+
+    The one exception is the event-masked median, whose method and two windows are wider
+    than the column on their own; its method still fits and the tooltip has the windows."""
+    det = window._analysis_panel.detection_panel
+    if recipe:
+        det.protocol_combo.setCurrentText(recipe)
+    else:
+        det.set_params({"filter_cutoff_hz": 10_000.0, "hp_enabled": True})
     window._open_signal_conditioning()
     ws = _ws(window)
     ws.resize(ws.minimumWidth(), ws.minimumHeight())
@@ -216,10 +227,14 @@ def test_role_tags_survive_the_default_column_width(window, qtbot):
     fm = ws.stage_list.fontMetrics()
     room = ws.stage_list.viewport().width() - 2 * fm.height()   # minus the check box
     for row in ws.stage_rows():
+        item = ws.stage_list.item(row.position - 1)
+        head = f"{row.position}  {row.title} — {row.summary}"
+        assert item.text().startswith(head)
         if row.role:
-            head = f"{row.position}  {row.title} ({row.role})"
-            assert ws.stage_list.item(row.position - 1).text().startswith(head)
-            assert fm.horizontalAdvance(head) < room, (head, room)
+            assert item.text().endswith(f"({row.role})") and row.role in item.toolTip()
+        if row.key == "detrend" and row.summary.startswith("event-masked"):
+            head = head[:head.index(" · rough")]
+        assert fm.horizontalAdvance(head) < room, (head, room)
 
 
 # -- focus and keyboard (review D-A1 / D-A5) ------------------------------------------------
@@ -379,6 +394,119 @@ def test_notices_are_below_the_stage_form(window, qtbot):
     assert det.hp_enabled.mapTo(ws, QtCore.QPoint(0, 0)).y() == y_before
     stack_bottom = det.filter_stack.mapTo(ws, QtCore.QPoint(0, det.filter_stack.height())).y()
     assert det.highpass_measurement_label.mapTo(ws, QtCore.QPoint(0, 0)).y() >= stack_bottom
+
+
+def _combo_y(combo, ws):
+    return combo.mapTo(ws.form_area.viewport(), QtCore.QPoint(0, 0)).y()
+
+
+def _overflow_by(ws, bar, px, qtbot):
+    """Make the window just tall enough that the form overflows by about ``px``."""
+    ws.resize(ws.width(), ws.minimumHeight())
+    qtbot.wait(30)
+    ws.resize(ws.width(), ws.height() + bar.maximum() - px)
+    qtbot.wait(30)
+    assert 0 < bar.maximum() <= px + 20, ("precondition: the form overflows a little",
+                                          bar.maximum())
+
+
+def _pick(combo, word, avoid=None):
+    return next(i for i in range(combo.count()) if word in combo.itemText(i).lower()
+                and not (avoid and avoid in combo.itemText(i).lower()))
+
+
+def test_a_shorter_form_never_slides_the_edited_control(window, qtbot):
+    """Review DA-1: a choice that shortened the shown stage (fewer detrend knobs, a smaller
+    notice) clamped the scrolled form and moved the combo just used ~30 px down — onto the
+    stage's own enable box, for a second click to untick."""
+    det = window._analysis_panel.detection_panel
+    window._open_signal_conditioning("detrend")
+    ws = _ws(window)
+    ws.resize(ws.minimumWidth(), ws.minimumHeight())
+    det.protocol_combo.setCurrentText("Zn2-insulin (zn_30h)")     # masked median, long
+    det.set_stage_enabled("highpass", True)
+    det.select_stage("detrend")
+    qtbot.wait(30)
+    bar = ws.form_area.verticalScrollBar()
+    method = det.detrend_method
+    _overflow_by(ws, bar, 40, qtbot)        # as at 1512x900: a little, so a shrink clamps
+    bar.setValue(min(bar.maximum(), max(1, _combo_y(method, ws) + bar.value() - 4)))
+    qtbot.wait(10)
+    scrolled, y = bar.value(), _combo_y(method, ws)
+    assert scrolled > 0 and 0 <= y < ws.form_area.viewport().height()
+    method.setCurrentIndex(_pick(method, "block"))
+    qtbot.wait(30)
+    assert bar.value() == scrolled and _combo_y(method, ws) == y
+    # A stage switch starts again from the content's own height.
+    det.select_stage("notch")
+    qtbot.wait(10)
+    det.select_stage("detrend")
+    qtbot.wait(30)
+    lay = ws._form_host.layout()
+    natural = max(lay.totalHeightForWidth(ws._form_host.width()),
+                  lay.totalMinimumSize().height(), ws.form_area.viewport().height())
+    assert ws._form_host.height() <= natural
+    # The normalize mode's notice shrinking at the bottom of the form moves nothing either.
+    det.protocol_combo.setCurrentText("Zn2-insulin (zn_30h)")
+    det.set_stage_enabled("highpass", True)
+    det.select_stage("normalize")
+    qtbot.wait(30)
+    mode = det.normalize_mode
+    _overflow_by(ws, bar, 30, qtbot)
+    bar.setValue(bar.maximum())
+    qtbot.wait(10)
+    scrolled, y = bar.value(), _combo_y(mode, ws)
+    assert 0 <= y < ws.form_area.viewport().height(), "the combo is on screen"
+    mode.setCurrentIndex(_pick(mode, "z", avoid="model"))
+    qtbot.wait(30)
+    assert bar.value() == scrolled and _combo_y(mode, ws) == y
+
+
+def test_the_status_line_leads_with_what_differs(detected, qtbot):
+    """Review DA-3: at the 760 px default the fixed prefix of the sentence filled the line,
+    so the window never showed WHAT differs."""
+    window, _ = detected
+    ap = window._analysis_panel
+    det = ap.detection_panel
+    window._open_signal_conditioning()
+    ws = _ws(window)
+    ws.resize(ws.DEFAULT_WIDTH, ws.minimumHeight())
+    det.set_stage_enabled("median", True)
+    det.filter_cutoff_hz.setValue(5_000.0)
+    qtbot.waitUntil(lambda: ap.chain_status().kind == "differs", timeout=2000)
+    qtbot.wait(20)
+    status = ap.chain_status()
+    line = ws.status_line
+    assert line.text().startswith(f"⚠ Differs from the {status.detector_label} run: ")
+    assert line.toolTip() == status.sentence
+    first = status.diffs[0].text
+    lead = line.text()[:line.text().index(first) + len(first)]
+    assert line.fontMetrics().horizontalAdvance(lead) < line.width(), "the first diff shows"
+
+
+def test_run_detection_follows_the_panels_own_gate(loaded, qtbot):
+    """Review DA-4: the button copied the menu action, which only re-synced on a retarget
+    or a menu open, so an open-pore reference edit left it live-but-refused or dead."""
+    window, _ = loaded
+    ap = window._analysis_panel
+    window._open_signal_conditioning()
+    ws = _ws(window)
+    editor = ap._baseline.reference_editor
+
+    def states():
+        return [ap.can_run(), window._act_run_detection.isEnabled(), ws.run_button.isEnabled()]
+
+    assert states() == [True, True, True]
+    editor.mode.setCurrentIndex(1)          # a known open-pore current, box still empty
+    qtbot.wait(20)
+    assert ap._baseline.reference_error()
+    assert states() == [False, False, False]
+    analysis = next(m for m in window.menuBar().findChildren(QtWidgets.QMenu)
+                    if m.menuAction().text().replace("&", "") == "Analysis")
+    analysis.aboutToShow.emit()
+    editor.mode.setCurrentIndex(0)          # back to automatic
+    qtbot.wait(20)
+    assert states() == [True, True, True]
 
 
 # -- the judge -----------------------------------------------------------------------------

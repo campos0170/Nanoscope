@@ -211,6 +211,23 @@ def test_the_card_rows_have_fixed_heights_whatever_they_say(panel, qtbot):
     assert "not by the ML detector" in text["scope"]
 
 
+def test_the_card_mirrors_a_detrend_refusal_set_and_cleared_alone(panel):
+    """Review DA-R1: while hosted the card is the only place in the dock that shows the
+    refusal, and a refusal can come and go with no widget value (so no paramsChanged)."""
+    panel.set_signal_chain_hosted(True)
+    panel.set_params({"detrend_enabled": True, "detrend_method": "block_median"})
+    assert "not applied" not in panel.chain_card_text()["warning"]
+    form = panel.params()
+    form["detrend_method"] = "bogus_method"         # refused: the combo does not move
+    panel.set_params(form)
+    assert panel.detrend_refusal_label.text()
+    assert "Baseline-drift method not applied" in panel.chain_card_text()["warning"]
+    form["detrend_method"] = "block_median"         # the combo's own value: clears it
+    panel.set_params(form)
+    assert not panel.detrend_refusal_label.text()
+    assert "not applied" not in panel.chain_card_text()["warning"]
+
+
 def test_a_recall_the_form_clamps_drops_to_manual_and_says_what_changed(panel):
     """Review D2: on a 50 kHz recording a 40 kHz low-pass is clamped to Nyquist, so the
     form is not the protocol and the combo must not keep its name."""
@@ -318,6 +335,34 @@ def test_event_table_notice_chip_floors_nothing(qtbot):
     assert selector.geometry() == selector_geo and table.columns_button.geometry() == columns
     # The spare width goes to the selector, not to an empty gap.
     assert selector.width() > table.notice_chip.sizeHint().width()
+
+
+def test_a_narrow_row_takes_width_from_the_empty_slot_too(qtbot):
+    """Review DA-2: the hidden chip's reserved slot kept its full width at every Inspector
+    width, so at the narrowest the table selector painted one letter."""
+    table = EventTable()
+    qtbot.addWidget(table)
+    table.column_toolbar.insertWidget(0, QtWidgets.QLabel("Table"))
+    selector = QtWidgets.QComboBox()
+    selector.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+    table.column_toolbar.insertWidget(1, selector, 1)
+    chip = table.notice_chip
+    table.resize(640, 300)
+    table.show()
+    qtbot.wait(20)
+    assert chip.width() == chip.sizeHint().width(), "wide: the full slot"
+    wide_selector = selector.width()
+    table.resize(300, 300)
+    qtbot.wait(20)
+    assert chip.width() < chip.sizeHint().width()
+    assert selector.width() >= chip.width() - 1, (selector.width(), chip.width())
+    assert wide_selector > selector.width()
+    # ...and appearing still moves nothing at that width.
+    geos = [w.geometry() for w in (selector, chip, table.columns_button)]
+    table.set_notice("⚠ Chain changed", "tip")
+    qtbot.wait(20)
+    assert [w.geometry() for w in (selector, chip, table.columns_button)] == geos
+    assert chip.minimumSizeHint().width() <= 32
 
 
 def test_the_notice_actions_are_built_once(qtbot):

@@ -6552,6 +6552,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ap.statusMessage.connect(lambda msg: self.statusBar().showMessage(msg, 8000))
         ap.conditioningStateChanged.connect(self._push_conditioning_status)
         det.paramsChanged.connect(lambda *_: self._push_conditioning_chain())
+        # The panel re-gates Detect on its own (e.g. an open-pore reference edit); the
+        # menu action and the window's Run detection… must move with it, not on the
+        # next menu open.
+        det.runGateChanged.connect(lambda *_: self._sync_detection_action())
         self._trace_view.sigVisibleRangeChanged.connect(
             lambda *_: self._push_conditioning_window())
         self._session.documentClosed.connect(
@@ -6580,6 +6584,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ws.mlChainRequested.connect(self._reveal_ml_chain)
         ws.showMainTraceRequested.connect(self._show_main_trace)
         ws.followMainChanged.connect(lambda on: self._push_conditioning_window() if on else None)
+        ws.saveProjectRequested.connect(lambda w=ws: self._save_project_from(w, save_as=False))
+        ws.saveProjectAsRequested.connect(lambda w=ws: self._save_project_from(w, save_as=True))
         self._signal_conditioning = ws
         return ws
 
@@ -6646,7 +6652,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ws.set_source_label(ap.conditioning_source_label())
         self._push_conditioning_chain(force=True)
         ws.set_chain_status(ap.refresh_chain_status())
-        ws.set_run_enabled(self._act_run_detection.isEnabled())
+        self._sync_detection_action()        # the gate itself, not the action's last copy
         # A window kept for another recording/channel slices nothing on this one.
         key = ap.conditioning_source_key()
         if ws.follows_main() or key != self._signal_conditioning_source:

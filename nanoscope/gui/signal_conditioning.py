@@ -101,6 +101,41 @@ class _ElidedLine(QtWidgets.QLabel):
             QtWidgets.QLabel.setText(self, shown)
 
 
+class _FormHost(QtWidgets.QWidget):
+    """The stage form's scroll content, which never gets SHORTER while the same stage
+    stays shown at the same width.
+
+    A form that shrank under a scrolled viewport (a detrend method with fewer knobs, a
+    notice going away) clamped the scroll value and slid every control down under the
+    pointer. The spare height left below is harmless; a stage switch or a new width
+    starts again from the content's own height."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._stack: QtWidgets.QWidget | None = None
+        self._held_for: tuple[int, int] | None = None
+        self._held = 0
+
+    def set_stage_stack(self, stack: QtWidgets.QWidget) -> None:
+        self._stack = stack
+
+    def _hold(self, width: int, natural: int) -> int:
+        key = (self._stack.currentIndex() if self._stack is not None else -1, int(width))
+        if key != self._held_for:
+            self._held_for, self._held = key, natural
+        else:
+            self._held = max(self._held, natural)
+        return self._held
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt override)
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(hint.width(), self._hold(self.width(), hint.height()))
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt override)
+        natural = super().heightForWidth(width)
+        return natural if natural < 0 else self._hold(width, natural)
+
+
 class SignalConditioningWindow(QtWidgets.QWidget):
     """The classical detectors' signal-chain workspace. See the module docstring.
 
@@ -114,6 +149,8 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         mlChainRequested(): show the ML detector's own chain (ML tab).
         showMainTraceRequested(): bring the main trace in front of this window.
         followMainChanged(bool): "Follow main trace" toggled.
+        saveProjectRequested() / saveProjectAsRequested(): ⌘S / ⌘⇧S while this window is
+            the active one — MainWindow runs its own project save.
     """
 
     stageSelected = QtCore.Signal(str)
@@ -126,6 +163,8 @@ class SignalConditioningWindow(QtWidgets.QWidget):
     mlChainRequested = QtCore.Signal()
     showMainTraceRequested = QtCore.Signal()
     followMainChanged = QtCore.Signal(bool)
+    saveProjectRequested = QtCore.Signal()
+    saveProjectAsRequested = QtCore.Signal()
 
     MIN_WIDTH = 760
     MIN_HEIGHT = 560
@@ -193,6 +232,20 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             "import on another computer.")
         self.act_export.triggered.connect(lambda *_: self.exportProtocolsRequested.emit())
         root.addWidget(self.toolbar)
+
+        # ⌘S / ⌘⇧S: the main window's File actions do not reach a separate top-level
+        # window, so this one forwards them (as the Event Gallery and Inspector do).
+        self.act_save_project = QtGui.QAction("Save Project", self)
+        self.act_save_project.setShortcut(QtGui.QKeySequence.StandardKey.Save)
+        self.act_save_project.setShortcutContext(QtCore.Qt.WindowShortcut)
+        self.act_save_project.triggered.connect(lambda *_: self.saveProjectRequested.emit())
+        self.addAction(self.act_save_project)
+        self.act_save_project_as = QtGui.QAction("Save Project As…", self)
+        self.act_save_project_as.setShortcut(QtGui.QKeySequence.StandardKey.SaveAs)
+        self.act_save_project_as.setShortcutContext(QtCore.Qt.WindowShortcut)
+        self.act_save_project_as.triggered.connect(
+            lambda *_: self.saveProjectAsRequested.emit())
+        self.addAction(self.act_save_project_as)
 
         self.scope_line = _ElidedLine(SCOPE_SENTENCE)
         self.scope_line.setObjectName("signalConditioningScope")
@@ -280,7 +333,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self.form_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self.form_area.setFocusPolicy(QtCore.Qt.NoFocus)   # not a Tab stop of its own
         self.form_area.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self._form_host = QtWidgets.QWidget()
+        self._form_host = _FormHost()
         self._form_layout = QtWidgets.QVBoxLayout(self._form_host)
         self._form_layout.setContentsMargins(0, 0, 0, 0)
         self._form_layout.setSpacing(6)
@@ -320,6 +373,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self._protocol_slot.addWidget(parts.protocol_bar)
         self._form_layout.insertWidget(0, parts.stage_stack)
         self._form_layout.insertWidget(1, parts.notices)
+        self._form_host.set_stage_stack(parts.stage_stack)
         self._response_layout.addWidget(parts.response_view, 1)
         self._parts = parts
         self._order_tab_chain()
@@ -418,10 +472,12 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         """The chain-versus-detection verdict on the status row."""
         status = status or ChainStatus.none()
         self._status = status
-        text = status.sentence or (
+        text = status.headline or (
             "No Schmitt/CUSUM detection is shown, so the chain has nothing to be compared "
             "with." if status.kind == "none" else "")
         self.status_line.setText(text)
+        # One line at the default width: the differences lead, the sentence is the tip.
+        self.status_line.setToolTip(status.sentence or text)
         warn = status.kind == "differs"
         style = "color:#FFB74D; font-weight:600;" if warn else "color:#8b9199;"
         if self.status_line.styleSheet() != style:

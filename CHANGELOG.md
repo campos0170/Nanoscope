@@ -24,7 +24,9 @@ tags identify tested development baselines and do not promise a stable file or A
   Import/Export (versioned JSON, never overwriting) and Copy as Python. The Preprocess tab keeps
   a fixed-height card. When the form's chain differs from the Schmitt/CUSUM detection on screen,
   the event table shows "⚠ Chain changed" with Revert / Run / Open, and the card and window name
-  the differences. Recalling a protocol now sets every stage (stages it does not name, and the
+  the differences. Ctrl+S / Ctrl+Shift+S save the project from the window, and its Run
+  detection… follows the Detect button's gate. Recalling a protocol now sets every stage
+  (stages it does not name, and the
   low-pass, are turned off), and its name stays on the combo only while the form equals it —
   a value the recording cannot hold (a cutoff above its Nyquist limit) drops it to "— manual —"
   and the status bar names what changed.

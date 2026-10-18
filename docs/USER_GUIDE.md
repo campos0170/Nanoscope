@@ -597,7 +597,7 @@ strip, or **Advanced signal-chain settings** in the open-pore baseline workspace
 the Baseline drift stage). There is one window: closing it hides it, and every setting stays on the form. It opens
 against the right edge of the main window, over the Inspector, so the main trace stays in view;
 **Show main trace** on its toolbar brings the main window back in front, and NanoScope remembers
-where you put it.
+where you put it. **Ctrl+S** / **Ctrl+Shift+S** save the project from this window too.
 
 The window edits the same chain the Preprocess tab always held — it moves the controls, it does
 not copy them — so detection, **Measure ‘Processed signal’**, **Export processed trace** and a
@@ -607,8 +607,9 @@ the ML detector (ML tab ▸ Model preprocessing)*. **ML chain…** shows that ot
 
 On the left, **Stages, in execution order** lists the eight stages the way they run — notch,
 median, high-pass, baseline drift, running mean, Savitzky-Golay, normalize, then the low-pass,
-marked *applied inside detection*. Each row shows the stage's current setting; with a sample rate,
-the low-pass row's tooltip adds its true −3 dB corner. Tick a row to enable the stage; select it to
+marked *applied inside detection*. Each row shows the stage's current setting, then its role
+(when a narrow column cuts a row short, the role goes first; the tooltip has it all); with a
+sample rate, the low-pass row's tooltip adds its true −3 dB corner. Tick a row to enable the stage; select it to
 edit it in the form below. Notices about the chain (high-pass is for localization only,
 Normalize is on, a refused detrend method) appear **below** the form, so enabling a stage never
 moves the control you just clicked. The **Response** tab on the right shows the selected stage's
@@ -652,8 +653,8 @@ or CUSUM detection and you change the chain, an orange **⚠ Chain changed** but
 table's toolbar, the Preprocess card and the window's status line name the differences
 (*low-pass 10000 → 5000 Hz; notch Q 30 → 20*), and **Revert to detection's chain** is enabled.
 The rows are not marked stale: they are a faithful record of the chain they were detected with,
-and nothing changes until you run detection again (**Run detection…** in the window, or the
-button's menu). A table from the ML detector or a reconciled table is labelled as not produced by
+and nothing changes until you run detection again (**Run detection…** in the window, enabled
+exactly when the Detect button is, or the button's menu). A table from the ML detector or a reconciled table is labelled as not produced by
 this chain.
 
 Open **Preprocess ▸ Signal chain** for the compact card: the comparison with the table on screen,

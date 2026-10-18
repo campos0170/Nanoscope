@@ -503,6 +503,8 @@ class DetectionPanel(QWidget):
     stageShown = Signal(str)
     #: A sentence about a protocol recall for the status line (e.g. what the form clamped).
     protocolNotice = Signal(str)
+    #: The Detect gate moved (``set_runnable``): True when detection can run now.
+    runGateChanged = Signal(bool)
 
     #: Stage key per editor page, in filter_selector / filter_stack order.
     _EDITOR_STAGE_KEYS: tuple[str, ...] = (
@@ -3880,12 +3882,15 @@ class DetectionPanel(QWidget):
         a detector cannot run, the buttons go grey and ``reason`` explains why,
         rather than fabricating a dwell time from a nonexistent rate.
         """
+        moved = self.detect_button.isEnabled() != bool(runnable)
         for btn in (self.detect_button, self.sweep_button,
                     self.null_button, self.recovery_button):
             btn.setEnabled(bool(runnable))
         self._gate_label.setText("" if runnable else reason)
         self._gate_label.setVisible(bool(reason) and not runnable)
         self._gate_host.setVisible(bool(reason) and not runnable)
+        if moved:
+            self.runGateChanged.emit(bool(runnable))
 
     # -- ML detector ------------------------------------------------------
     def browse_model(self) -> None:
@@ -4349,10 +4354,13 @@ class DetectionPanel(QWidget):
         It sits with the normalize units banner, ABOVE the filter stack, because the
         refusal has to be visible from whichever page the user is on -- the whole point
         is that they may never open the Baseline drift page and so would never see a
-        note that lived there.
+        note that lived there. While hosted, the Preprocess card's warning line mirrors
+        it, so the card is refreshed on every write here: a refusal set or cleared with
+        no widget value changing emits no ``paramsChanged``.
         """
         self.detrend_refusal_label.setText(text)
         self.detrend_refusal_label.setVisible(bool(text))
+        self._refresh_chain_card()
 
     def _on_detrend_method_changed(self, *_a) -> None:
         """Raise the selected estimator's sub-page and gate the shared knobs above it.
@@ -7037,11 +7045,25 @@ class _NoticeChip(QPushButton):
     def __init__(self, slot_text: str = "", parent: QWidget | None = None) -> None:
         super().__init__("", parent)
         self._slot_text = str(slot_text)
-        # The slot is sized for ``slot_text`` and kept while hidden, so the row never
-        # reflows when the chip appears, goes or changes its text (a longer text elides).
-        policy = QSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        # The slot is kept while hidden, so the row never reflows when the chip appears,
+        # goes or changes its text (a longer text elides). Its host gives it the same
+        # stretch as its neighbour (the table selector), capped at the slot text's width:
+        # a narrow row then takes width from the empty slot as much as from the selector.
+        policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         policy.setRetainSizeWhenHidden(True)
         self.setSizePolicy(policy)
+        self.setMinimumWidth(self._MIN_WIDTH)
+        self._fit_slot()
+
+    def _fit_slot(self) -> None:
+        width = max(self._MIN_WIDTH, self._size_for(self._slot_text).width())
+        if self.maximumWidth() != width:
+            self.setMaximumWidth(width)
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._fit_slot()
 
     def _size_for(self, text: str) -> QSize:
         """QPushButton.sizeHint's own computation, for ``text`` instead of text()."""
@@ -7856,10 +7878,12 @@ class EventTable(QWidget):
         toolbar.addStretch(0)
         # A notice about the table on screen (e.g. "⚠ Chain changed"), horizontal only.
         # Its slot is reserved even while hidden, so it never moves Columns…, the table
-        # selector or the rows below.
+        # selector or the rows below; stretch 1 shares a narrow row with the selector.
         self.notice_chip = _NoticeChip(self._NOTICE_SLOT_TEXT)
         self.notice_chip.setObjectName("eventTableNoticeChip")
         self.notice_chip.setStyleSheet("QPushButton { color:#FFB74D; font-weight:600; }")
+        self.notice_chip.ensurePolished()
+        self.notice_chip._fit_slot()       # the bold stylesheet font sets the slot width
         self.notice_chip.setVisible(False)
         self.notice_menu = QMenu(self.notice_chip)
         self._notice_actions = {}
@@ -7868,7 +7892,7 @@ class EventTable(QWidget):
             action.setData(key)
             self._notice_actions[key] = action
         self.notice_chip.clicked.connect(self._open_notice_menu)
-        toolbar.addWidget(self.notice_chip)
+        toolbar.addWidget(self.notice_chip, 1)
         self.columns_button = QPushButton('Columns…')
         self.columns_button.setToolTip('Choose visible columns. Drag column headers to reorder; the view is remembered.')
         self.columns_menu = QMenu(self.columns_button)

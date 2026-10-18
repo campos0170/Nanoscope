@@ -202,6 +202,19 @@ def test_judge_chain_kinds():
     assert cr.judge_chain(run, None, module_id="detect.study").kind == "not_classical"
 
 
+def test_the_headline_puts_the_differences_first():
+    """Review DA-3: one elided status line must show WHAT differs, not a fixed preamble."""
+    run = _form(filter_cutoff_hz=10_000.0)
+    form = dict(run, filter_cutoff_hz=5_000.0, median_enabled=True)
+    differs = cr.judge_chain(form, run, module_id="detect.schmitt", detector_label="Schmitt")
+    assert differs.headline == ("⚠ Differs from the Schmitt run: "
+                                + cr.describe_differences(differs.diffs))
+    assert differs.headline.index("median off → on") < 45
+    for same in (cr.judge_chain(run, run, module_id="detect.schmitt", detector_label="Schmitt"),
+                 cr.judge_chain(run, None, module_id="detect.keras"), cr.ChainStatus.none()):
+        assert same.headline == same.sentence
+
+
 def test_a_detection_run_judges_as_matching_its_own_form(context_factory):
     from nanoscope.analysis.modules import DetectSchmitt, detection_params_from_provenance
 
@@ -261,12 +274,14 @@ def test_stage_row_summaries_and_roles():
         _form(filter_cutoff_hz=10_000.0, hp_enabled=True), FS)}
     assert rows["highpass"].summary == "100 Hz · Butterworth 4"
     assert rows["highpass"].role == "localization only"
-    # UPDATED (review D-A3): the role follows the title so a right-elided row keeps it, and
-    # the true corner moved to the row's tooltip (StageRow.detail).
+    # The true corner is in the row's tooltip (StageRow.detail). UPDATED (review DA-5): the
+    # setting now precedes the role note, so a right-elided row loses the note (which the
+    # tooltip repeats), never the cutoff.
     assert rows["lowpass"].summary == "Bessel 8 · 10 kHz"
     assert rows["lowpass"].detail == "−3 dB 7.6 kHz"
-    assert rows["lowpass"].text == "8  Low-pass (applied inside detection) — Bessel 8 · 10 kHz"
-    assert rows["highpass"].text.startswith("3  High-pass (localization only) — ")
+    assert rows["lowpass"].text == "8  Low-pass — Bessel 8 · 10 kHz (applied inside detection)"
+    assert rows["highpass"].text == "3  High-pass — 100 Hz · Butterworth 4 (localization only)"
+    assert cr.stage_rows(_form())[0].text == "1  Notch — 60/120/180 Hz · Q 30", "no role, no ()"
     assert rows["median"].summary == "0.1 ms" and not rows["median"].linear
     assert cr.stage_rows(_form(), lowpass_design_hz=5000.0)[-1].summary == "Bessel 8 · 5 kHz"
     assert cr.stage_rows(_form())[-1].summary == "off"
