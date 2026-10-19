@@ -6543,6 +6543,9 @@ class MainWindow(QtWidgets.QMainWindow):
     _SC_GEOMETRY_KEY = "signalConditioning/geometry"
     _SC_SPLITTER_KEY = "signalConditioning/splitter"
     _SC_FOLLOW_KEY = "signalConditioning/followMain"
+    _SC_VIEW_KEYS = (("signalConditioning/tab", "preview_tab", "set_preview_tab"),
+                     ("signalConditioning/timeMode", "time_mode_choice", "set_time_mode"),
+                     ("signalConditioning/responseView", "response_view", "set_response_view"))
 
     def _wire_signal_conditioning(self) -> None:
         """Panel-side wiring; the window's own is done once it is built."""
@@ -6558,7 +6561,8 @@ class MainWindow(QtWidgets.QMainWindow):
         det.runGateChanged.connect(lambda *_: self._sync_detection_action())
         self._trace_view.sigVisibleRangeChanged.connect(
             lambda *_: self._push_conditioning_window())
-        self._session.documentClosed.connect(
+        self._session.documentClosed.connect(self._drop_conditioning_document)
+        self._session.calibrationChanged.connect(
             lambda *_: self._push_conditioning_source()
             if _on_screen(self._signal_conditioning) else None)
 
@@ -6584,6 +6588,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ws.mlChainRequested.connect(self._reveal_ml_chain)
         ws.showMainTraceRequested.connect(self._show_main_trace)
         ws.followMainChanged.connect(lambda on: self._push_conditioning_window() if on else None)
+        ws.notchLinesRequested.connect(self._add_notch_lines_from_spectrum)
         ws.saveProjectRequested.connect(lambda w=ws: self._save_project_from(w, save_as=False))
         ws.saveProjectAsRequested.connect(lambda w=ws: self._save_project_from(w, save_as=True))
         self._signal_conditioning = ws
@@ -6628,6 +6633,11 @@ class MainWindow(QtWidgets.QMainWindow):
         state = _restorable_bytes(s, self._SC_SPLITTER_KEY, ignored)
         if state is not None and not ws.restore_splitter_state(state):
             ignored.append(self._SC_SPLITTER_KEY)
+        for key, _getter, setter in self._SC_VIEW_KEYS:
+            value = s.value(key)
+            if value is not None and not (isinstance(value, str)
+                                          and getattr(ws, setter)(value)):
+                ignored.append(key)
         follow = s.value(self._SC_FOLLOW_KEY)
         if follow is not None:
             if isinstance(follow, bool) or str(follow).lower() in ("true", "false"):
@@ -6650,6 +6660,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         ap = self._analysis_panel
         ws.set_source_label(ap.conditioning_source_label())
+        ws.set_source(ap.conditioning_source())
         self._push_conditioning_chain(force=True)
         ws.set_chain_status(ap.refresh_chain_status())
         self._sync_detection_action()        # the gate itself, not the action's last copy
@@ -6659,6 +6670,22 @@ class MainWindow(QtWidgets.QMainWindow):
             ws.clear_view_window()
         self._signal_conditioning_source = key
         self._push_conditioning_window(force=True)
+
+    def _drop_conditioning_document(self, doc_id: str) -> None:
+        """A closed document leaves nothing behind in the window's preview memo."""
+        ws = self._signal_conditioning
+        if ws is None:
+            return
+        ws.drop_document(doc_id)
+        if _on_screen(ws):
+            self._push_conditioning_source()
+
+    def _add_notch_lines_from_spectrum(self, freqs) -> None:
+        """Signal Conditioning ▸ Spectrum ▸ Send to notch: through the panel's own setters."""
+        text = self._analysis_panel.detection_panel.add_notch_lines(list(freqs))
+        self.statusBar().showMessage(text, 8000)
+        if self._signal_conditioning is not None:
+            self._signal_conditioning.show_notch_outcome(text)
 
     def _push_conditioning_chain(self, *, force: bool = False) -> None:
         ws = self._signal_conditioning
@@ -11775,6 +11802,8 @@ class MainWindow(QtWidgets.QMainWindow):
             s.setValue(self._SC_GEOMETRY_KEY, ws.saveGeometry())
             s.setValue(self._SC_SPLITTER_KEY, ws.splitter_state())
             s.setValue(self._SC_FOLLOW_KEY, bool(ws.follows_main()))
+            for key, getter, _setter in self._SC_VIEW_KEYS:
+                s.setValue(key, str(getattr(ws, getter)()))
         # Flush to disk HERE rather than relying on QSettings' own destructor. The quit
         # path may end in ``exit_without_destroying_live_threads`` (a worker that would
         # not stop), which runs no destructors at all — so an unsynced setting would be

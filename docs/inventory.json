@@ -1381,7 +1381,7 @@
         "label": "Follow main trace",
         "kind": "toolbar toggle",
         "group": "Signal Conditioning ▸ toolbar",
-        "what_it_does": "On (default): the window this workspace describes — the START/STOP Copy as Python slices — follows the main trace's visible range. Off: it keeps the range it last followed; selecting another recording or channel drops it (the script then takes the whole channel).",
+        "what_it_does": "On (default): the previews and the START/STOP Copy as Python slices follow the main trace's visible range. Panning or zooming a Time preview turns it off and previews that range instead; off, the window keeps the range it last showed, and selecting another recording or channel drops it.",
         "notes": "First on the toolbar so it stays visible at the window's 760 px minimum width; later actions overflow into the » menu. Remembered between sessions."
       },
       {
@@ -1653,6 +1653,55 @@
         "group": "Signal Conditioning ▸ Normalize",
         "what_it_does": "Which rescale. The four entries are \"z-score  (x − mean) / std\", \"robust z  (x − median) / 1.4826·MAD\", \"min–max  → [−0.5, +0.5]\" and \"model input  (trimmed σ, clipped) → [−1, +1]\".",
         "notes": "z-score uses the whole trace; robust z uses the detector's 1.4826·MAD noise scale; min–max is sensitive to extreme samples; model input uses a twice-trimmed median/MAD, clips at the configured sigma bound, and divides to [−1,+1]. The menu is built from the kernels' own mode list."
+      },
+      {
+        "label": "Overlay / Split / Raw − processed",
+        "kind": "segmented buttons",
+        "group": "Signal Conditioning ▸ Time tab",
+        "what_it_does": "How the visible window is drawn: raw (calibrated, grey) and processed (blue) on one axis, on two linked axes, or raw minus processed. With Normalize on (the unit changes) or a high-pass on (DC removed) the view is forced to Split and Overlay is disabled; Raw − processed is disabled only under Normalize. The processed axis names its real unit, e.g. \"processed (σ, whole-trace z-score)\" or \"processed (pA, DC removed by 100 Hz high-pass)\".",
+        "notes": "Each plot has a legend in its own title row, above the data: \"raw (calibrated)\" and \"processed — exact\" or \"processed — window estimate\". An axis too short for its label shows a shorter one (\"processed (σ)\", then the unit alone, \"σ\" or \"pA, no DC\"; \"s (instrument clock)\"); the full label is the axis tooltip. While a new preview is pending, the processed entry reads \"processed — previous chain\". Dragging or wheeling a plot turns Follow main trace off."
+      },
+      {
+        "label": "Compute exact",
+        "kind": "button",
+        "group": "Signal Conditioning ▸ Time tab",
+        "what_it_does": "Conditions the WHOLE recording in the background and previews its exact samples. Enabled only while the preview is a window estimate (Baseline drift or Normalize on, or a stage that settles longer than the 40 s padding, and the window does not reach both ends of the recording); never runs by itself, and an edit of the chain cancels it. Reads \"Computing…\" while it runs and \"Retry exact\" after a failed pass of the same chain, at one fixed width. Its tooltip says why it is disabled.",
+        "notes": "objectName signalConditioningComputeExact. The result is kept for the last two chains, so returning to one shows it again at once."
+      },
+      {
+        "label": "time status line",
+        "kind": "label",
+        "group": "Signal Conditioning ▸ Time tab",
+        "what_it_does": "Says what is happening first — \"Computing exact (whole recording)…\" (\"— the preview waits for it\" when a window preview is queued behind it), \"Exact pass failed: <why>\", or \"Updating…\" until a new preview arrives — then the verdict on the CURRENT chain: \"Exact for these stages · window 2.00 s, padded ±0.40 s · 27 ms\", \"Window estimate — Baseline drift/Normalize use whole-recording statistics · press Compute exact for the true trace\", \"Whole recording (exact)\", or \"Preview unavailable: <the stage's own complaint>\". A view wider than 2,000,000 samples previews its centre, and the line says so right after the verdict (\"centre 40.0 s of the 250.1 s view (preview limit)\").",
+        "notes": "objectName signalConditioningTimeStatus. Three fixed lines, elided at the end of the third (the transient state and the verdict lead, so they are never cut); the full sentence is in the tooltip. A stage that settles longer than the padding is named: \"Window estimate — High-pass settles over 400 s, longer than the ±40 s padding\"."
+      },
+      {
+        "label": "spectrum (raw against processed)",
+        "kind": "plot",
+        "group": "Signal Conditioning ▸ Spectrum tab",
+        "what_it_does": "Welch power spectra of the same visible window before (grey) and after (blue) the chain, log-log, with dashed yellow markers on the lines found. The line above it gives the resolution, e.g. \"Δf 6.10 Hz (nperseg 8,192) on a 2.00 s window\", and when Δf is coarser than 1 Hz how long a window would resolve mains.",
+        "notes": "With Normalize on, the processed curve leaves Normalize out (legend \"processed (no normalize)\"; the resolution line adds \"the processed curve leaves Normalize out (it only rescales)\") so both curves share one unit. objectName of the resolution line: signalConditioningSpectrumNote."
+      },
+      {
+        "label": "narrow lines list",
+        "kind": "list",
+        "group": "Signal Conditioning ▸ Spectrum tab",
+        "what_it_does": "Narrow lines in the raw spectrum at least 10 dB above a running-median floor a quarter-octave wide, from 20 Hz to the low-pass cutoff (or Nyquist), e.g. \"4570.8 Hz · +18.5 dB\" or \"120.0 Hz · +24.0 dB · mains 60×2\" (snapped onto the harmonic only when Δf ≤ 1 Hz; coarser, the measured frequency is kept and the tag reads \"near mains 60×2\"). Rows end \"· notched\" when the notch already takes at least 20 dB off them at their measured frequency and \"· Δf too coarse\" when the spectrum cannot place them within the notch's own width; neither can be sent.",
+        "notes": "objectName signalConditioningLines. Deterministic (a pandas rolling median, not scipy's median filter); at most 24 rows."
+      },
+      {
+        "label": "Send to notch",
+        "kind": "button",
+        "group": "Signal Conditioning ▸ Spectrum tab",
+        "what_it_does": "Adds the ticked lines (or the selected one) to the notch's explicit line list through the form's own setters and checks, and turns the notch on. A line the list already removes is skipped and a list past 32 lines is refused with nothing changed. When the notch is off and keeps a list of its own, the lines join that list and the notch stays off (\"Notch still OFF: added … — tick Notch to apply them\"), so nothing switched off comes back and nothing kept is lost. The outcome is shown in two fixed lines under the button, consequence first, and on the status bar. Double-click or Return on a row sends that line.",
+        "notes": "objectName signalConditioningSendToNotch; the outcome line is signalConditioningLinesNote."
+      },
+      {
+        "label": "Magnitude / Phase / Group delay / Step",
+        "kind": "segmented buttons",
+        "group": "Signal Conditioning ▸ Response tab",
+        "what_it_does": "Magnitude is the |H(f)| plot below. Phase and Group delay draw the APPLIED response solid — flat at 0, because every stage NanoScope applies is zero-phase (a 180° step is a smoother's sign flip, not a delay) — and the same IIR design run once, causally, dashed. Step pushes a unit step through the linear stages and reads off the 10–90 % rise, overshoot and pre-shoot.",
+        "notes": "They follow the selected stage, or every enabled linear stage when \"show combined response of enabled linear stages\" is ticked; the median, baseline drift and Normalize are listed as \"Not representable as a linear response\"."
       },
       {
         "label": "frequency / |H| response plot",

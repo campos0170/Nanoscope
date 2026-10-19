@@ -107,6 +107,7 @@ from ..analysis import events as events_mod
 from ..analysis import baseline as baseline_mod
 from ..analysis import filters, ml_detect
 from ..analysis.conditioning import chain_description
+from ..analysis.conditioning_preview import merge_notch_lines
 from ..analysis.conditioning_recipes import (
     BUILTIN_RECIPES,
     CHAIN_KEYS,
@@ -276,6 +277,14 @@ def _near(value: float, target: float | None, *, rtol: float = 1e-9) -> bool:
     return abs(float(value) - float(target)) <= max(1e-12, abs(float(target)) * rtol)
 
 
+def _notch_lines_text(lines: Sequence[float]) -> str:
+    """'60, 120, 180 Hz', or '12 lines: 60, 120, 180 … 4570.8 Hz' for a long list."""
+    spelled = [f"{float(f):g}" for f in lines]
+    if len(spelled) <= 6:
+        return ", ".join(spelled) + " Hz"
+    return f"{len(spelled)} lines: " + ", ".join(spelled[:3]) + f" … {spelled[-1]} Hz"
+
+
 def _detrend_method_choices() -> tuple[tuple[str, str], ...]:
     """``(label, method)`` pairs for the detrend combo, in combo-index order.
 
@@ -376,6 +385,36 @@ class _ElidingCheckBox(QCheckBox):
                 self.text(), Qt.ElideRight, max(0, available)
             )
         QStylePainter(self).drawControl(QStyle.ControlElement.CE_CheckBox, opt)
+
+
+class _WrappedLabel(QLabel):
+    """A word-wrapped label never shorter than its text at its own width.
+
+    QFormLayout gives a spanning wrapped label its size-hint height even when its
+    height-for-width is more (measured: 60 of the 80 px the rise-time readout's four
+    lines need at 310 px, so the last line was cut); a minimum height makes it honour it."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt override)
+        super().setText(text)
+        self._fit_height()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._fit_height()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self._fit_height()
+
+    def _fit_height(self) -> None:
+        need = self.heightForWidth(self.width()) if self.width() > 0 else -1
+        if need > 0 and need != self.minimumHeight():
+            self.setMinimumHeight(need)
 
 
 class _CurrentPageStackedWidget(QWidget):
@@ -863,8 +902,7 @@ class DetectionPanel(QWidget):
         filt_form.addRow("cutoff", self.filter_cutoff_hz)
 
         # THE readout. Bold, wraps, lives on the Low-pass page.
-        self.rise_time_label = QLabel("rise time: — (select a channel)")
-        self.rise_time_label.setWordWrap(True)
+        self.rise_time_label = _WrappedLabel("rise time: — (select a channel)")
         f = self.rise_time_label.font()
         f.setBold(True)
         self.rise_time_label.setFont(f)
@@ -3628,6 +3666,53 @@ class DetectionPanel(QWidget):
     def sample_rate(self) -> float | None:
         return self._fs
 
+    def add_notch_lines(self, freqs: Sequence[float]) -> str:
+        """Add spectrum lines to the notch through the form's own setters; the outcome.
+
+        On: the lines IN FORCE (a live series spelled out, so nothing it removed is lost)
+        gain the new ones. Off with an explicit list kept: the new lines join that list
+        and the notch STAYS off — switching it on would bring back lines the user
+        switched off, and replacing the list would lose them; the outcome says so. Off
+        with the series spelling, nothing is kept: the new lines become the list and the
+        notch is turned on (the series spins keep their values). A line the notch already
+        removes is skipped; a list past :attr:`NOTCH_MAX_LINES` is refused and the form
+        is left as it was."""
+        on = self.notch_enabled.isChecked()
+        current = self.notch_lines_choice()
+        keep_off = not on and current is not None
+        if not on and current is None:
+            current = []
+        elif current is None:
+            f0, n = float(self.notch_freq_hz.value()), int(self.notch_harmonics.value())
+            try:
+                current = (filters.notch_frequencies(float(self._fs), f0, harmonics=n)
+                           if self._fs else [f0 * h for h in range(1, n + 1)])
+            except ValueError:          # every line at or above Nyquist: none in force
+                current = []
+        merge = merge_notch_lines(current, freqs, q=float(self.notch_q.value()),
+                                  max_lines=self.NOTCH_MAX_LINES)
+        if merge.lines is None:
+            return merge.refusal
+        if not merge.added:
+            listed = ", ".join(f"{f:g}" for f in merge.skipped)
+            verb = "is" if len(merge.skipped) == 1 else "are"
+            if keep_off:
+                return (f"Notch still OFF: {listed} Hz {verb} already in the list it keeps "
+                        "— tick Notch to apply it.")
+            return f"Notch: {listed} Hz {verb} already removed — nothing was added."
+        self.set_notch_lines(merge.lines)
+        if self.notch_lines_choice() != merge.lines:
+            return self._notch_refusal or "Refused: the notch list was not accepted."
+        if not keep_off:
+            self.set_notch_enabled(True)
+        self._emit_params()
+        added = ", ".join(f"{f:g}" for f in merge.added)
+        if keep_off:
+            return (f"Notch still OFF: added {added} Hz to the list it keeps, now "
+                    f"{_notch_lines_text(merge.lines)} — tick Notch to apply them.")
+        return (f"Notch: added {added} Hz — the explicit line list is now "
+                f"{_notch_lines_text(merge.lines)}.")
+
     def lowpass_design_hz(self) -> float:
         """The low-pass cutoff box, which :meth:`params` reports as None while it is off."""
         return float(self.filter_cutoff_hz.value())
@@ -5619,7 +5704,9 @@ class DetectionPanel(QWidget):
         response_scope = (
             "Candidate-localization" if highpass_localization else "Active-chain")
         self._set_response_title(
-            f"{response_scope} response — {len(stages)} linear stage(s) ON")
+            f"{response_scope} response — {len(stages)} linear stage(s) ON"
+            if not self._chain_editor_hosted else
+            f"{response_scope} response — {len(stages)} stage{'s' * (len(stages) != 1)}")
         self.response_curve.setPen(pg.mkPen("#E69F00", width=2, style=Qt.SolidLine))
         self.response_cutoff_line.setVisible(False)
         if self._fs is None:
@@ -5685,6 +5772,10 @@ class DetectionPanel(QWidget):
             if enabled and label == "High-pass"
             else "ON · included in execution chain"
             if enabled else "OFF · design preview only")
+        if self._chain_editor_hosted:
+            # The workspace's preview pane is ~380 px: the long form was clipped mid-word.
+            state = ("ON · localization only" if enabled and label == "High-pass"
+                     else "ON" if enabled else "OFF · design preview")
         self._set_response_title(f"{label} response — {state}")
         self.response_curve.setPen(pg.mkPen(
             "#56B4E9" if enabled else "#8b9199", width=2,

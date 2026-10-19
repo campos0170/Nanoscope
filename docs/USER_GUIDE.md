@@ -612,8 +612,74 @@ marked *applied inside detection*. Each row shows the stage's current setting, t
 sample rate, the low-pass row's tooltip adds its true −3 dB corner. Tick a row to enable the stage; select it to
 edit it in the form below. Notices about the chain (high-pass is for localization only,
 Normalize is on, a refused detrend method) appear **below** the form, so enabling a stage never
-moves the control you just clicked. The **Response** tab on the right shows the selected stage's
-applied |H(f)| at full height.
+moves the control you just clicked.
+
+### Previewing the chain: Time, Spectrum and Response
+
+The tabs on the right preview the chain on the **window the main trace shows** (with **Follow main
+trace** on; at most 2,000,000 samples — 40 s at 50 kHz — and the centre of a wider view, which the
+status line says). Panning or zooming a preview turns Follow off and previews that range instead;
+tick Follow again to rejoin the main trace. The previews are computed off the user interface on one
+background thread, a quarter-second after your last edit, and a newer edit cancels an older
+preview; nothing is computed while the window is closed. **Ctrl+1 / Ctrl+2 / Ctrl+3** pick the
+three tabs.
+
+**Time** draws the raw (calibrated) trace in grey and the processed trace in blue, with a legend:
+**Overlay** puts them on one axis, **Split** on two linked axes, and **Raw − processed** shows what
+the chain removed. When the chain changes the unit (Normalize) or removes DC (high-pass) the view
+is forced to Split, and the processed axis names its real unit — *processed (σ, whole-trace
+z-score)* or *processed (pA, DC removed by 100 Hz high-pass)* (shortened on an axis too short for
+it; hover the axis for the full label). The legend sits above each plot, never over the trace.
+
+**Window estimate versus exact.** The window is padded on each side by the chain's longest settling
+or window length, so for the local stages — notch, median, high-pass, running mean,
+Savitzky-Golay and the low-pass — the preview is the same samples as the whole recording,
+conditioned and sliced: the status line reads *Exact for these stages · window 2.00 s, padded
+±1.47 s*. **Baseline drift** and **Normalize** use statistics of the whole recording, so on a
+window they are only an estimate: the status line says *Window estimate — Baseline drift/Normalize
+use whole-recording statistics* and the legend says *processed — window estimate*. The padding is
+capped at 40 s a side, so a very slow high-pass or notch can be an estimate too, and then the
+status line names it (*Window estimate — High-pass settles over 400 s, longer than the ±40 s
+padding*). A view wider than the preview limit is previewed at its centre, and the status line
+says so next (*centre 40.0 s of the 250.1 s view*). **Compute exact** conditions the whole
+recording (seconds on a long file, in the background) and shows its exact samples (*Whole
+recording (exact)*); it runs only when you press it, and an edit of the chain cancels it. While
+it runs the button reads **Computing…** and the status line starts with *Computing exact (whole
+recording)…*; if it fails it starts with *Exact pass failed: …* and the button offers **Retry
+exact** (for that chain only). Right after an edit, until the new preview arrives, the status line
+starts with *Updating…* and already gives the verdict of the chain you now have, and the legend
+calls the curve still on screen *processed — previous chain*. The status line keeps three fixed
+lines, what is happening first, so the plot never moves; hover it for the whole sentence. The
+Phase, Group delay and short Step views are computed at once, so they never wait for an exact
+pass; only the step of a very slow stage does, and its note says so.
+
+**Spectrum** shows Welch spectra of the same window before (grey) and after (blue) the chain on a
+log-log plot, with the frequency resolution above it (*Δf 6.10 Hz (nperseg 8,192) on a 2.00 s
+window*); resolving mains lines needs Δf ≤ 1 Hz, which takes about a 10 s window at 50 kHz. With
+Normalize on, the *after* curve leaves Normalize out (it only rescales) so both curves share one
+unit. Below the plot, a list names the narrow lines in the raw spectrum — at least 10 dB above a
+running-median floor a quarter-octave wide, from 20 Hz up to the low-pass cutoff (or Nyquist) —
+tagging mains harmonics (*120.0 Hz · +24.0 dB · mains 60×2*). A line is placed on the harmonic
+itself only when Δf ≤ 1 Hz; at a coarser resolution it is listed where it was measured
+(*240.3 Hz · +24.0 dB · near mains 60×4*), because a line 5 Hz off a harmonic still falls within
+one 6 Hz bin of it, and a notch on the harmonic would leave most of it. Tick lines and press
+**Send to notch** (or double-click one, or press Return on it) to add them to the notch's explicit
+line list through the form's own checks: the notch is switched on, a line the notch already
+removes (at least 20 dB off) is marked *notched* and skipped, the list never grows past 32 lines,
+and a line whose frequency the spectrum cannot place within the notch's own width (*Δf too
+coarse*) cannot be sent — widen the window first. If the notch is off but keeps a list of its own,
+the lines join that list and the notch **stays off** (*Notch still OFF: added … — tick Notch to
+apply them*): switching it on would bring back lines you switched off, and replacing the list
+would lose them. The outcome is said in the two lines under the button, and on the status bar.
+
+**Response** has four views of the selected stage — or, with **show combined response of enabled
+linear stages**, of the whole linear chain. **Magnitude** is the applied |H(f)|. **Phase** and
+**Group delay** show the applied response as a solid line — every stage NanoScope applies is
+zero-phase, so it is flat at 0 (a 180° step is a smoother's sign flip, not a delay) — and, dashed,
+the same IIR design run once causally, which is what a hardware filter of that design would do.
+**Step** pushes a unit step through the linear stages and reads off the 10–90 % rise, overshoot and
+pre-shoot (a zero-phase filter rings symmetrically before and after an edge). The median, baseline
+drift and Normalize are listed as *not representable as a linear response* rather than drawn.
 
 The line headed **Active execution order** is the recipe NanoScope will actually run, including the
 detector-owned low-pass in its real last position. It stays on the Preprocess card in the dock.
@@ -2337,6 +2403,7 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Ctrl+M** | **Save the current cursor region as an independent manual measurement (works from any tab; not a detector-training candidate)** |
 | **Ctrl+Shift+M** | **Write the current cursor region as a reviewed, accepted, hand-added event in the selected source detector table; loudly refuses without a source or on Reconciled** |
 | **Ctrl+Shift+F** | **Open the Signal Conditioning window (the classical detectors' signal chain)** |
+| **Signal Conditioning:** Ctrl+1 / Ctrl+2 / Ctrl+3 | Time / Spectrum / Response preview tab |
 | Ctrl+0 / trace-focused Home / **Full** button | Reset zoom to the complete trace |
 | Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history) |
 | Ctrl+E | Centre the view on the current selection |

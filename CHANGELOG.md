@@ -30,6 +30,18 @@ tags identify tested development baselines and do not promise a stable file or A
   low-pass, are turned off), and its name stays on the combo only while the form equals it —
   a value the recording cannot hold (a cutoff above its Nyquist limit) drops it to "— manual —"
   and the status bar names what changed.
+- Signal Conditioning previews of the main trace's visible window, computed on one background
+  thread 250 ms after the last edit (a newer edit cancels the older preview): Time (raw against
+  processed — Overlay, Split, Raw − processed — split onto the processed trace's real unit when
+  Normalize or a high-pass changes it), Spectrum (Welch before/after with a deterministic line
+  finder and Send to notch through the form's own checks) and Response (Magnitude plus Phase,
+  Group delay and Step, applied zero-phase against the single-pass design). The status line says
+  "Window estimate" while baseline drift or Normalize (or a stage settling longer than the 40 s
+  padding, which it names) make a window inexact; Compute exact runs the whole recording on
+  demand only, and the status line leads with what is happening (Computing exact…, Exact pass
+  failed…, Updating…) before the current chain's verdict. A mains line is snapped onto its
+  harmonic only when Δf ≤ 1 Hz. Send to notch on an off notch that keeps a list adds to that list
+  and leaves the notch off. The window keeps its one preview thread from first open to quit.
 - Opt-in Comparison figures page: shared-axis per-recording facets, feature-pair matrices with
   common-bin count histograms, and strip/swarm individual-event plots with optional descriptive
   boxes. Seaborn renders prepared observations; generation is explicit, source identities and

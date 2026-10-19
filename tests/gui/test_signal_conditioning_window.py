@@ -153,7 +153,9 @@ def test_the_editor_widgets_live_in_the_workspace(window, qtbot):
     assert det.signal_chain_summary.window() is window
     assert det.filter_preview.window() is window
     assert ws.preview_tabs.objectName() == "signalConditioningPreview"
-    assert [ws.preview_tabs.tabText(i) for i in range(ws.preview_tabs.count())] == ["Response"]
+    # D-beta added the Time and Spectrum previews ahead of the relocated Response view.
+    assert [ws.preview_tabs.tabText(i) for i in range(ws.preview_tabs.count())] == [
+        "Time", "Spectrum", "Response"]
 
 
 # -- the stage list ------------------------------------------------------------------------
@@ -235,6 +237,46 @@ def test_stage_settings_survive_the_default_column_width(window, qtbot, recipe):
         if row.key == "detrend" and row.summary.startswith("event-masked"):
             head = head[:head.index(" · rough")]
         assert fm.horizontalAdvance(head) < room, (head, room)
+
+
+def test_the_rise_readout_and_the_magnitude_title_are_never_clipped(qapp, qtbot, tmp_path):
+    """Review DB-R2-09: the form layout gave the four-line rise readout its size-hint
+    height (60 of 80 px), cutting its last line; the hosted magnitude title was clipped
+    mid-word in the ~380 px preview pane. It shows with the app's own font set before the
+    window is built (as the app does), so this test builds its own window under it."""
+    previous = QtWidgets.QApplication.font()
+    QtWidgets.QApplication.setFont(QtGui.QFont(".AppleSystemUIFont", 13))
+    try:
+        window = MainWindow()
+        qtbot.addWidget(window)
+        window.resize(1512, 875)
+        window.show()
+        did = window._session.add_document(_doc(tmp_path))
+        window._create_default_layers(window._session.document(did))
+        window._on_selection(did, 0)
+        qtbot.wait(20)
+        det = window._analysis_panel.detection_panel
+        window._open_signal_conditioning()
+        ws = _ws(window)
+        qtbot.wait(50)
+        det.select_stage("lowpass")
+        qtbot.wait(20)
+        det.set_params({"filter_cutoff_hz": 10_000.0})       # 2 lines -> 4 at this width
+        qtbot.wait(50)
+        label = det.rise_time_label
+        assert label.heightForWidth(label.width()) > 2 * label.fontMetrics().lineSpacing()
+        assert label.height() >= label.heightForWidth(label.width())
+        ws.splitter.setSizes([ws.LEFT_MIN_WIDTH, ws.width() - ws.LEFT_MIN_WIDTH])
+        qtbot.wait(30)
+        assert label.height() >= label.heightForWidth(label.width())
+        ws.set_preview_tab("response")
+        qtbot.wait(30)
+        title = det.response_plot.getPlotItem().titleLabel
+        assert title.text == "Low-pass response — ON"
+        assert title.boundingRect().width() <= det.response_plot.width()
+        window._analysis_controller.abort()
+    finally:
+        QtWidgets.QApplication.setFont(previous)
 
 
 # -- focus and keyboard (review D-A1 / D-A5) ------------------------------------------------
@@ -824,7 +866,7 @@ def test_the_run_button_mirrors_the_run_action(loaded, qtbot):
 
 
 def test_the_module_imports_no_sibling_gui_module():
-    """MainWindow is the only wirer: the window reaches nothing in gui/ (every spelling of
+    """MainWindow is the only wirer: the window reaches no panel in gui/ (every spelling of
     a sibling import — the canonicaliser of test_measure_navigation, inlined)."""
     import pathlib
 
@@ -837,7 +879,9 @@ def test_the_module_imports_no_sibling_gui_module():
             if node.level == 1 or (node.level == 2 and (node.module or "").startswith("gui")) \
                     or (node.level == 0 and (node.module or "").startswith("nanoscope.gui")):
                 reached.add(f"{node.level}:{node.module}")
-    assert reached == set()
+    # D-beta: the previews need the mandated worker-thread seam, the readable axes and the
+    # trace view's curve factory — all on test_measure_navigation's non-panel allowlist.
+    assert reached == {"1:worker_thread", "1:axes", "1:trace_view"}
 
 
 def test_hosting_does_not_raise_the_inspector_floor(window, qtbot):

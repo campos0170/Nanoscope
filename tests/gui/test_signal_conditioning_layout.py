@@ -101,6 +101,9 @@ def test_protocol_verbs_are_reachable_and_left_aligned_in_the_workspace(window, 
 def test_the_response_plot_gets_the_workspace_height(window, qtbot):
     window._open_signal_conditioning()
     ws = window._signal_conditioning
+    # D-beta: Time is now the first tab; the |H(f)| plot is the Response tab's Magnitude view.
+    ws.set_preview_tab("response")
+    ws.set_response_view("magnitude")
     ws.resize(ws.MIN_WIDTH, ws.MIN_HEIGHT)
     _settle(qtbot, ws)
     plot = window._analysis_panel.detection_panel.response_plot
@@ -181,3 +184,24 @@ def test_the_card_moves_nothing_across_states(window, qtbot):
 def test_the_window_class_is_built_from_its_own_defaults():
     assert SignalConditioningWindow.MIN_WIDTH == 760 and SignalConditioningWindow.MIN_HEIGHT == 560
     assert SignalConditioningWindow.DEFAULT_WIDTH >= SignalConditioningWindow.MIN_WIDTH
+
+
+def test_every_preview_tab_fits_the_minimum_window(window, qtbot):
+    """D-beta: the Time, Spectrum and Response controls never floor the window, and the
+    stage editor keeps its column."""
+    window._open_signal_conditioning()
+    ws = window._signal_conditioning
+    for tab in ("spectrum", "response", "time"):
+        ws.set_preview_tab(tab)
+        if tab == "response":
+            for view in ("phase", "group_delay", "step", "magnitude"):
+                ws.set_response_view(view)
+    ws.resize(ws.MIN_WIDTH, ws.MIN_HEIGHT)
+    _settle(qtbot, ws)
+    hint = ws.minimumSizeHint()
+    assert hint.width() <= ws.MIN_WIDTH and hint.height() <= ws.MIN_HEIGHT
+    assert ws.splitter.sizes()[0] >= ws.LEFT_MIN_WIDTH
+    pane = ws.preview_tabs
+    for widget in (*ws.time_mode_buttons.values(), ws.exact_button):
+        top_left = widget.mapTo(pane, QtCore.QPoint(0, 0))
+        assert pane.rect().contains(QtCore.QRect(top_left, widget.size())), widget.text()

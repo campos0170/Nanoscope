@@ -367,6 +367,16 @@ exchange protocols as a `.json` file, and import never overwrites one you have. 
 copies a script that rebuilds the processed trace with
 `nanoscope.analysis.conditioning.conditioned_trace`.
 
+The `Time`, `Spectrum` and `Response` tabs preview the chain on the window the main trace shows
+(`Follow main trace`; panning a preview previews that range instead). `Time` draws raw against
+processed (`Overlay`, `Split`, `Raw − processed`), on separate axes when Normalize or a high-pass
+changes the unit or removes DC. The status line says whether the preview is exact for these stages
+or a `Window estimate` (baseline drift and Normalize use whole-recording statistics); `Compute
+exact` runs the whole recording on demand. `Spectrum` compares the window's spectra before and
+after the chain and lists narrow lines; `Send to notch` adds the ticked ones to the notch's line
+list. `Response` adds `Phase`, `Group delay` and `Step` to the magnitude: solid as applied
+(zero-phase), dashed as the same design run once, causally.
+
 If you change the chain after a Schmitt or CUSUM run, `⚠ Chain changed` appears in the event
 table's toolbar and `Revert to detection's chain` puts the run's chain back; the rows themselves are
 unchanged until you detect again.

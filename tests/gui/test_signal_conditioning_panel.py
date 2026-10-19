@@ -395,3 +395,84 @@ def test_the_pinned_area_still_floors_nothing_once_hosted(panel):
     for actions in panel.findChildren(PinnedActions):
         actions._sync_height()
     assert panel.minimumSizeHint().width() <= floor
+
+
+# -- D-beta: the spectrum's Send to notch, and the Response tab's stage split -------------------
+def test_add_notch_lines_spells_out_a_live_series_and_turns_the_notch_on(panel):
+    panel.set_notch_enabled(True)                    # the 60 Hz ×3 series is live
+    said = panel.add_notch_lines([4570.83, 120.2])
+    assert said == ("Notch: added 4570.8 Hz — the explicit line list is now "
+                    "60, 120, 180, 4570.8 Hz.")
+    params = panel.params()
+    assert params["notch_enabled"] and params["notch_freqs"] == [60.0, 120.0, 180.0, 4570.8]
+    assert panel.notch_use_lines.isChecked()
+    assert panel.add_notch_lines([4570.8]).endswith("is already removed — nothing was added.")
+
+
+def test_add_notch_lines_on_an_off_notch_starts_a_list_of_its_own(panel):
+    assert not panel.notch_enabled.isChecked()
+    panel.add_notch_lines([300.0])
+    assert panel.params()["notch_freqs"] == [300.0], "the off series is not smuggled in"
+
+
+def test_add_notch_lines_keeps_an_off_notchs_list_and_leaves_it_off(panel):
+    """An off notch's kept list is neither switched back on with the new line nor lost:
+    the line joins it and the notch stays off, and the sentence leads with that."""
+    panel.set_notch_lines([60.0, 120.0, 180.0, 240.0, 300.0, 360.0, 420.0, 540.0, 660.0])
+    panel.set_notch_enabled(False)
+    said = panel.add_notch_lines([4570.8])
+    params = panel.params()
+    assert not params["notch_enabled"]
+    assert params["notch_freqs"] == [60.0, 120.0, 180.0, 240.0, 300.0, 360.0, 420.0, 540.0,
+                                     660.0, 4570.8]
+    assert said == ("Notch still OFF: added 4570.8 Hz to the list it keeps, now 10 lines: "
+                    "60, 120, 180 … 4570.8 Hz — tick Notch to apply them.")
+    again = panel.add_notch_lines([4570.8])
+    assert again.startswith("Notch still OFF: 4570.8 Hz is already in the list it keeps")
+    assert panel.params()["notch_freqs"][-1] == 4570.8 and not panel.params()["notch_enabled"]
+
+
+def test_add_notch_lines_refuses_past_the_cap_and_touches_nothing(panel):
+    many = [100.0 * (k + 1) for k in range(DetectionPanel.NOTCH_MAX_LINES)]
+    panel.set_notch_lines(many)
+    # On: those 32 lines are in force, so one more is past the cap. (Off, they would not
+    # be, and the new line would replace them.)
+    panel.set_notch_enabled(True)
+    before = (panel.params(), panel.notch_freqs.text())
+    said = panel.add_notch_lines([5_123.0])
+    assert said.startswith("Refused:") and f"at most {DetectionPanel.NOTCH_MAX_LINES}" in said
+    assert (panel.params(), panel.notch_freqs.text()) == before
+
+
+def _random_chains(n: int, seed: int = 7):
+    import random
+
+    rng = random.Random(seed)
+    for _ in range(n):
+        yield {
+            "notch_enabled": rng.random() < 0.5,
+            "notch_freq_hz": rng.choice([50.0, 60.0]), "notch_harmonics": rng.randint(1, 5),
+            "notch_q": rng.choice([10.0, 30.0, 50.0]),
+            "notch_freqs": rng.choice([None, [60.0, 180.0, 300.0]]),
+            "median_enabled": rng.random() < 0.5,
+            "hp_enabled": rng.random() < 0.5, "hp_cutoff_hz": rng.choice([1.0, 20.0, 100.0]),
+            "hp_order": rng.randint(1, 6), "hp_kind": rng.choice(["butter", "bessel"]),
+            "detrend_enabled": rng.random() < 0.5,
+            "rmean_enabled": rng.random() < 0.5, "rmean_window_s": rng.choice([2e-4, 5e-4]),
+            "savgol_enabled": rng.random() < 0.5, "savgol_window_s": rng.choice([5e-4, 1e-3]),
+            "savgol_polyorder": rng.randint(2, 4),
+            "normalize_enabled": rng.random() < 0.5,
+            "filter_cutoff_hz": rng.choice([None, 5_000.0, 10_000.0]),
+            "filter_order": rng.choice([2, 4, 8]),
+            "filter_kind": rng.choice(["bessel", "butter", "gaussian"]),
+        }
+
+
+def test_linear_stage_specs_equal_the_panels_active_stages(panel):
+    """The Response tab's Phase / Group delay / Step derive their stages from params; the
+    Magnitude view (the panel) from its widgets. They must be the same stages."""
+    from nanoscope.analysis.filter_views import linear_stage_specs
+
+    for chain in _random_chains(24):
+        panel.set_params(complete_recipe(chain))
+        assert linear_stage_specs(panel.params()) == panel._active_linear_response_stages(), chain

@@ -64,6 +64,7 @@ from ..analysis.conditioning import (
     conditioning_params,
     write_baseline_correction,
 )
+from ..analysis.conditioning_preview import ConditioningSource
 from ..analysis.conditioning_recipes import (
     ChainStatus,
     judge_chain,
@@ -6118,6 +6119,25 @@ class AnalysisPanel(QtWidgets.QWidget):
             return None
         doc_id, channel = self._sel
         return (doc_id, int(channel), int(self._session.document(doc_id).meta.n_samples))
+
+    def conditioning_source(self) -> ConditioningSource | None:
+        """The selected channel's calibrated samples for the Signal Conditioning previews.
+
+        The array is the Session's own (never written in place), so a worker may read it
+        while the GUI moves on; the offset is the one the main trace draws it through."""
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            return None
+        doc_id, channel = self._sel
+        try:
+            ch = self._session.calibrated(doc_id, channel)
+        except (TypeError, IndexError, KeyError):
+            return None
+        cal = self._session.calibration(doc_id, channel)
+        return ConditioningSource(
+            doc_id=doc_id, channel=int(channel), label=self.conditioning_source_label(),
+            data=np.asarray(ch.data), fs=ch.sample_rate_hz, units=str(ch.units or ""),
+            x_offset_s=self._trace_view.clock_offset_for(doc_id, channel),
+            cal_gain=float(cal.gain), cal_offset=float(cal.offset))
 
     def conditioning_source_label(self) -> str:
         """``'<recording> · <channel>'`` for the Signal Conditioning title, or ""."""
