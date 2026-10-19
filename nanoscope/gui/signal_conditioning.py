@@ -1277,6 +1277,10 @@ class SignalConditioningWindow(QtWidgets.QWidget):
     def splitter_state(self) -> QtCore.QByteArray:
         return self.splitter.saveState()
 
+    def reset_splitter(self) -> None:
+        total = max(self.splitter.width(), self.DEFAULT_WIDTH)
+        self.splitter.setSizes([self.LEFT_WIDTH, max(1, total - self.LEFT_WIDTH)])
+
     def restore_splitter_state(self, state) -> bool:
         return bool(self.splitter.restoreState(QtCore.QByteArray(state)))
 

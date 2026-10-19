@@ -949,6 +949,9 @@ class AnalysisPanel(QtWidgets.QWidget):
     #: the detector ran). A discarded answer that says nothing is indistinguishable from a
     #: detector that found nothing.
     runRefused = QtCore.Signal(str)               # human message
+    #: Why the last hand-add said no, when it said so itself ("" otherwise): MainWindow's
+    #: generic "could not be added" line must not cover it.
+    last_missed_refusal = ""
     #: A 'Merge all' finished (or was refused / dropped) — carrying its
     #: :class:`MergeReport`. That merge runs OFF-THREAD (it costs 3.3-8.7 s on the
     #: owner's recordings), so its outcome cannot be the return value of the click;
@@ -4606,6 +4609,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         table, span overlays, score, inspector and exports all pick up the new row) and the new
         ``event_id`` is returned, or ``None`` when there is nothing to add.
         """
+        self.last_missed_refusal = ""
         res = self._stored_detection()
         if res is None or not isinstance(res.payload, EventSet):
             return None
@@ -4640,6 +4644,17 @@ class AnalysisPanel(QtWidgets.QWidget):
 
         events = res.payload
         df = events.df
+        # A span the detector already found is not "missed": a second row over it would be
+        # counted twice in n, the rate and every export.
+        covered = self._events_overlapping(df, start, end)
+        if covered:
+            self.last_missed_refusal = (
+                f"That span overlaps event {covered[0]}"
+                + (f" and {len(covered) - 1} more" if len(covered) > 1 else "")
+                + ", which the detection already has, so nothing was added. Select that "
+                "event to curate it, or bracket only the stretch between events.")
+            self.runRefused.emit(self.last_missed_refusal)
+            return None
         ensure_added_column(df)
         recording, pore_id = self._missed_identity(df, doc_id)
         # Measure the hand-added event on the trace the DETECTOR measured on, so its row
@@ -4689,6 +4704,16 @@ class AnalysisPanel(QtWidgets.QWidget):
         # so every row-derived count and sentence on the result is re-read from it.
         self._session.add_result(reconcile_result(res, new_events))
         return int(new_id)
+
+    @staticmethod
+    def _events_overlapping(df: pd.DataFrame, start: int, end: int) -> list[int]:
+        """``event_id`` of every row whose ``[start_idx, end_idx)`` meets ``[start, end)``."""
+        if not len(df):
+            return []
+        first = df["start_idx"].to_numpy(dtype=float)
+        last = df["end_idx"].to_numpy(dtype=float)
+        hit = (first < end) & (last > start)           # NaN compares False
+        return [int(i) for i in df["event_id"].to_numpy()[hit]]
 
     @staticmethod
     def _missed_identity(df: pd.DataFrame, doc_id: str) -> tuple[str, str]:

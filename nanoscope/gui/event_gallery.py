@@ -2211,6 +2211,11 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         keep = (bool(keep_place) and self._df is not None and events_df is not self._df
                 and doc_id == self._doc_id and channel == self._channel
                 and same_events(self._df, events_df))
+        # The owner handing back the ledger this window already holds says it is the same
+        # detection, edited by the app itself (a hand-add, a merge, their undo).
+        same_lineage = (self._df is not None and refusals is not None
+                        and refusals is self._refusals
+                        and doc_id == self._doc_id and channel == self._channel)
         keep_sel = ([int(self._df["event_id"].iloc[r]) for r in self._selected_rows()]
                     if keep else [])
         keep_cur = self._current_event_id() if keep else None
@@ -2261,7 +2266,16 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             self._sync_controls()
             return
         if self._model.rowCount() and not self.view.currentIndex().isValid():
-            self.view.select_only(self._model.index(0, 0))
+            # An edit the app made itself is not a gesture: announcing tile 0 would move the
+            # trace, the table and the inspector off the place the curator left them.
+            prev = self._updating
+            self._updating = prev or same_lineage
+            try:
+                self.view.select_only(self._model.index(0, 0))
+            finally:
+                self._updating = prev
+            if same_lineage:
+                self._sync_controls()
 
     def clear(self) -> None:
         self._doc_id = self._channel = self._df = self._module_id = None

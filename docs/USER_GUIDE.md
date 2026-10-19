@@ -1233,7 +1233,9 @@ section of the Analysis tab.
      as missed event** (or **Ctrl+Shift+M**, from any tab) adds it to that event table as a reviewed,
      accepted, hand-added candidate. The shortcut stays enabled whenever a recording is selected:
      if no source result exists or Reconciled is selected, it gives a clear refusal telling you to
-     run or select a source detector rather than failing silently.
+     run or select a source detector rather than failing silently. A span that overlaps an event
+     the table already has is refused too (the status bar names the event): select that event to
+     curate it instead, so nothing is counted twice.
 
 7. Continue without losing your scale: press **Scan ▶** (or **Shift+→**) to move forward by 90% of
    the current view. The 10% overlap keeps boundary events visible, and active Measure cursors move

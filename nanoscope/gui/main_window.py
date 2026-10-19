@@ -3515,6 +3515,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         event_id = self._analysis_panel.add_current_selection_as_event()
         if event_id is None:
+            if self._analysis_panel.last_missed_refusal:
+                return                  # it said why, on the status bar, itself
             self.statusBar().showMessage(
                 "The selection could not be added. Check that its cursors are on the selected "
                 "recording and span at least one sample.", 10000)
@@ -6770,6 +6772,8 @@ class MainWindow(QtWidgets.QMainWindow):
         key = window.property("nanoscopeGeometryKey")
         if not key or not window.isWindow() or not window.property("nanoscopeGeometryShown"):
             return
+        if key not in _CHILD_WINDOW_KEYS:      # Signal Conditioning has keys of its own
+            return
         geometry = window.saveGeometry()
         self._child_geometry[str(key)] = geometry
         QtCore.QSettings().setValue(_geometry_setting(str(key)), geometry)
@@ -6990,7 +6994,9 @@ class MainWindow(QtWidgets.QMainWindow):
         s = QtCore.QSettings()
         s.setValue(_SETTING_INSPECTOR_HOST, _HOST_WINDOW)
         for key in (*_SETTING_DETAILS.values(),
-                    *(_geometry_setting(k) for k in _CHILD_WINDOW_KEYS)):
+                    *(_geometry_setting(k) for k in _CHILD_WINDOW_KEYS),
+                    _geometry_setting("signal_conditioning"),    # written by an earlier build
+                    self._SC_GEOMETRY_KEY, self._SC_SPLITTER_KEY):
             s.remove(key)
         self._child_geometry.clear()
         self._inspector_window_geometry = None
@@ -7012,6 +7018,9 @@ class MainWindow(QtWidgets.QMainWindow):
             window.setProperty("nanoscopeGeometryPlaced", False)
             if window.isWindow() and window.isVisible():
                 self._place_child_window(window, key)
+            else:
+                # Hidden: it was forgotten above, so the quit-save must not write it back.
+                window.setProperty("nanoscopeGeometryShown", False)
         self.statusBar().showMessage(
             "Window layout reset to its defaults. Your analysis is unchanged.", 8000)
 
@@ -7407,6 +7416,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._signal_conditioning_placed:
             self._place_signal_conditioning(ws)
             self._signal_conditioning_placed = True
+        elif not ws.property("nanoscopeGeometryShown"):
+            # Window > Reset Window Layout forgot it while it was hidden.
+            self._place_signal_conditioning_window(ws, QtCore.QSettings(), [])
         if stage_key:
             det.select_stage(stage_key)
         ws.show_stage(det.current_stage_key())
@@ -7419,24 +7431,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _place_signal_conditioning(self, ws) -> None:
         """First open: the saved geometry (validated, clamped to the screen), else the
         default — right-anchored over the Inspector so the main trace stays visible."""
-        from .signal_conditioning import clamp_rect, default_window_rect
-
         s = QtCore.QSettings()
         ignored: list[str] = []
-        avail = self._available_screen_geometry()
-        geo = _restorable_bytes(s, self._SC_GEOMETRY_KEY, ignored)
-        restored = geo is not None and ws.restoreGeometry(QtCore.QByteArray(geo))
-        if geo is not None and not restored:
-            ignored.append(self._SC_GEOMETRY_KEY)
-        if restored:
-            ws.setGeometry(clamp_rect(ws.geometry(), avail))
-        else:
-            ws.setGeometry(default_window_rect(
-                self.frameGeometry(), self.geometry(), avail,
-                width=max(ws.minimumWidth(), ws.DEFAULT_WIDTH)))
-        state = _restorable_bytes(s, self._SC_SPLITTER_KEY, ignored)
-        if state is not None and not ws.restore_splitter_state(state):
-            ignored.append(self._SC_SPLITTER_KEY)
+        self._place_signal_conditioning_window(ws, s, ignored)
         for key, _getter, setter in self._SC_VIEW_KEYS:
             value = s.value(key)
             if value is not None and not (isinstance(value, str)
@@ -7452,6 +7449,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(
                 f"Ignored saved Signal Conditioning preference(s) this app could not use "
                 f"({', '.join(ignored)}); their defaults were used.", 8000)
+
+    def _place_signal_conditioning_window(self, ws, s: QtCore.QSettings,
+                                          ignored: list[str]) -> None:
+        """Its size, place and splitter: the saved ones, else the defaults."""
+        from .signal_conditioning import clamp_rect, default_window_rect
+
+        avail = self._available_screen_geometry()
+        geo = _restorable_bytes(s, self._SC_GEOMETRY_KEY, ignored)
+        restored = geo is not None and ws.restoreGeometry(QtCore.QByteArray(geo))
+        if geo is not None and not restored:
+            ignored.append(self._SC_GEOMETRY_KEY)
+        if restored:
+            ws.setGeometry(clamp_rect(ws.geometry(), avail))
+        else:
+            ws.setGeometry(default_window_rect(
+                self.frameGeometry(), self.geometry(), avail,
+                width=max(ws.minimumWidth(), ws.DEFAULT_WIDTH)))
+        state = _restorable_bytes(s, self._SC_SPLITTER_KEY, ignored)
+        if state is None:
+            ws.reset_splitter()
+        elif not ws.restore_splitter_state(state):
+            ignored.append(self._SC_SPLITTER_KEY)
 
     def _available_screen_geometry(self) -> QtCore.QRect:
         """The usable area of the screen this window is on (a seam for tests)."""
@@ -12825,8 +12844,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._write_window_preferences(s)
         ws = getattr(self, "_signal_conditioning", None)
         if ws is not None and self._signal_conditioning_placed:
-            s.setValue(self._SC_GEOMETRY_KEY, ws.saveGeometry())
-            s.setValue(self._SC_SPLITTER_KEY, ws.splitter_state())
+            if ws.property("nanoscopeGeometryShown"):      # not one a Reset just forgot
+                s.setValue(self._SC_GEOMETRY_KEY, ws.saveGeometry())
+                s.setValue(self._SC_SPLITTER_KEY, ws.splitter_state())
             s.setValue(self._SC_FOLLOW_KEY, bool(ws.follows_main()))
             for key, getter, _setter in self._SC_VIEW_KEYS:
                 s.setValue(key, str(getattr(ws, getter)()))
@@ -13543,7 +13563,7 @@ class MainWindow(QtWidgets.QMainWindow):
         raised because a cooperative job stops in milliseconds, so a longer wait only ever
         bites on a genuinely uninterruptible C call (a TensorFlow import is 4.1 s), and
         ``gui.app.main`` reads the count back to guarantee the process leaves cleanly
-        either way. Settings are saved BEFORE any of that, and synced, so nothing depends
+        either way. Settings are saved and synced BEFORE the drain, so nothing depends
         on how the process ends.
 
         WHAT IS STOPPED IS DISCOVERED, NOT LISTED — see :meth:`_owned_background_holders`.
@@ -13617,7 +13637,10 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if callable(getattr(holder, self._STOP_ABORT, None)):
                 protocols.append(self._STOP_ABORT)
+            # A floating dock is a window too, but closing it hides it, and the layout is
+            # saved after this: it would come back hidden. Its contents are found on their own.
             if (isinstance(holder, QtWidgets.QWidget)
+                    and not isinstance(holder, QtWidgets.QDockWidget)
                     and (holder.isWindow()
                          or bool(holder.property("nanoscopeAnalysisExplorerPage")))):
                 protocols.append(self._STOP_CLOSE)

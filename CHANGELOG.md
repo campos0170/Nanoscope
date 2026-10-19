@@ -149,6 +149,13 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- A dock that is floating when you quit (Results, Inspector or File manager) now comes back
+  floating and visible; quitting used to close it before the layout was saved. **Window ▸ Reset
+  Window Layout…** now also forgets the Signal Conditioning window's size, place and splitter,
+  and no longer lets a window you opened and hid earlier write its old place back at quit.
+  A hand-added event (Ctrl+Shift+M) over an event the detection already has is refused with a
+  status-bar line instead of counting the event twice, and a hand-add (or Merge all, or their
+  undo) with the Event gallery open no longer jumps the main trace to the gallery's first tile.
 - Reopening a project with ML detections no longer shows a false "open-pore estimator
   changed" banner when the stored windows differ from the defaults. The ML branch of the
   stored-detection seeding restored only the ML tab and left the baseline form on the app
