@@ -838,6 +838,9 @@ _ANALYSIS_ACTION_ATTRS = (
     "_act_compare_baseline",
     "_act_plots", "_act_event_plots", "_act_event_gallery", "_act_reconcile", "_act_labels",
     "_act_mark_missed",
+    # Change D: Signal conditioning… joins Explore this recording just before the PSD,
+    # after _act_plots (which must stay item 8).
+    "_act_signal_conditioning",
     # ``_act_psd_selection`` sits immediately after ``_act_psd``: it opens the SAME
     # surface over the region the Measure tool is bracketing, carrying the selection as
     # sample indices so the trace's instrument clock and the panel's recording clock
@@ -848,6 +851,9 @@ _ANALYSIS_ACTION_ATTRS = (
     "_act_export_events", "_act_export_processed", "_act_export_training", "_act_export_levels",
     "_act_export_density", "_act_density_style", "_act_export_figure",
     "_act_analysis_home", "_act_first_analysis_guide",
+    # Listed here once the Incubation/Manual/Acid Study commit added it to the menu (this
+    # test was red at 1aeb651 for exactly that omission).
+    "_act_incubation_study",
 )
 # ``_act_compare_baseline`` is in *Curate*, beside the Event inspector, because it is
 # about the events already on screen -- it changes nothing by itself, it measures what
@@ -893,6 +899,11 @@ def test_analysis_menu_keeps_every_shortcut_and_flag(win):
         QtCore.Qt.ControlModifier, QtCore.Qt.Key_M)
     assert win._act_mark_missed.shortcut() == QtCore.QKeyCombination(
         QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier, QtCore.Qt.Key_M)
+    # Reserved for Signal conditioning… (change D), and always enabled: disabled, the key
+    # would fall through to the event table's modifier-blind curation keys (F = flag).
+    assert win._act_signal_conditioning.shortcut() == QtCore.QKeyCombination(
+        QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier, QtCore.Qt.Key_F)
+    assert win._act_signal_conditioning.isEnabled()
     for attr in _ANALYSIS_ACTION_ATTRS:
         if attr != "_act_measure":
             assert getattr(win, attr).toolTip()

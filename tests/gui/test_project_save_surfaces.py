@@ -243,6 +243,43 @@ def test_child_shortcuts_dispatch_once_to_the_main_windows_existing_paths(
     assert calls == ["save-as", "save"]
 
 
+def test_the_signal_conditioning_window_forwards_save_once(
+        make_window, monkeypatch, qtbot):
+    """Review DA-R2: the user tunes the chain in this top-level window for minutes, and
+    ⌘S there saved nothing (the main window's File actions do not reach it)."""
+    calls: list[str] = []
+    monkeypatch.setattr(MainWindow, "_save_project", lambda self: calls.append("save") or True)
+    monkeypatch.setattr(MainWindow, "_save_project_as",
+                        lambda self: calls.append("save-as") or True)
+    window, _doc_id, _frame = make_window()
+    window._open_signal_conditioning("notch")
+    ws = window._signal_conditioning
+    for sequence in (QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Save),
+                     QtGui.QKeySequence("Ctrl+Shift+S")):
+        owners = _shortcut_objects(ws, sequence)
+        assert len(owners) == 1 and _shortcut_context(owners[0]) == Qt.WindowShortcut
+    no_close = QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Close)
+    assert _shortcut_objects(ws, no_close) == [], "⌘W stays File ▸ Close document"
+    det = window._analysis_panel.detection_panel
+    ws.activateWindow()
+    for target, mods, want in ((ws.stage_list, Qt.ControlModifier, "save"),
+                               (det.notch_q, Qt.ControlModifier, "save"),
+                               (ws.stage_list, Qt.ControlModifier | Qt.ShiftModifier,
+                                "save-as")):
+        calls.clear()
+        target.setFocus(Qt.OtherFocusReason)
+        qtbot.wait(20)
+        QTest.keyClick(target, Qt.Key_S, mods)
+        qtbot.wait(20)
+        assert calls == [want], (target, calls)
+    # ...and the save UI belongs to the window the gesture came from.
+    parents: list[QtWidgets.QWidget] = []
+    monkeypatch.setattr(MainWindow, "_save_project",
+                        lambda self: parents.append(self._project_save_parent()) or True)
+    ws.saveProjectRequested.emit()
+    assert parents == [ws] and window._project_save_requester is None
+
+
 def test_children_are_seeded_immediately_and_mirror_every_main_state_change(
         make_window, tmp_path, qtbot):
     window, _doc_id, _frame = make_window()

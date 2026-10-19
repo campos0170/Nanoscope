@@ -318,7 +318,7 @@ The final normalized filename is checked for overwrite conflicts, and a practice
 cannot replace a recording that is currently open.
 
 The Inspector's **Analysis** tab is where the work happens, and it has its own four-tab strip:
-**Preprocess** (choose **Signal chain** or **Open-pore baseline** from its section selector — §5a) · **Detection** ·
+**Preprocess** (choose **Signal chain** — whose stages you edit in the Signal Conditioning window, §5 — or **Open-pore baseline** from its section selector, §5a) · **Detection** ·
 **ML** · **Measure**. Preprocess configures the signal and reference; Detection
 and ML produce results shown in the **Results** panel under the trace, on its **Events** tab;
 it also has **Summary**, **Fits** and **Quality** tabs. Essential/Advanced changes control
@@ -609,17 +609,106 @@ other enabled transform still applies. In particular, Normalize still recenters 
 makes physical-current and fractional-blockade interpretation invalid. With high-pass off,
 localization and characterization receive the same samples.
 
-Open **Preprocess**, then leave **Preprocess section** on **Signal chain**. The baseline estimator is
-now a separate subsection rather than a long form above the filters, so the active recipe, processed
-trace preview and selected stage remain reachable in the narrow Inspector. Choosing the **Filter**
-step on the workflow rail opens this subsection directly.
+### The Signal Conditioning window
+
+The stage controls live in their own window, **Signal Conditioning**. Open it in any of four
+ways: **Analysis ▸ Signal conditioning…** (**Ctrl+Shift+F**), the **Open Signal Conditioning…**
+button pinned at the top of **Preprocess ▸ Signal chain**, the **Filter** step on the workflow
+strip, or **Advanced signal-chain settings** in the open-pore baseline workspace (which opens it on
+the Baseline drift stage). There is one window: closing it hides it, and every setting stays on the form. It opens
+against the right edge of the main window, over the Inspector, so the main trace stays in view;
+**Show main trace** on its toolbar brings the main window back in front, and NanoScope remembers
+where you put it. **Ctrl+S** / **Ctrl+Shift+S** save the project from this window too.
+
+The window edits the same chain the Preprocess tab always held — it moves the controls, it does
+not copy them — so detection, **Measure ‘Processed signal’**, **Export processed trace** and a
+saved project all read exactly what it shows. A grey line under its toolbar says so: the chain is
+*used by Schmitt/CUSUM detection, Measure ‘Processed signal’ and Export processed trace — not by
+the ML detector (ML tab ▸ Model preprocessing)*. **ML chain…** shows that other chain.
+
+On the left, **Stages, in execution order** lists the eight stages the way they run — notch,
+median, high-pass, baseline drift, running mean, Savitzky-Golay, normalize, then the low-pass,
+marked *applied inside detection*. Each row shows the stage's current setting, then its role
+(when a narrow column cuts a row short, the role goes first; the tooltip has it all); with a
+sample rate, the low-pass row's tooltip adds its true −3 dB corner. Tick a row to enable the stage; select it to
+edit it in the form below. Notices about the chain (high-pass is for localization only,
+Normalize is on, a refused detrend method) appear **below** the form, so enabling a stage never
+moves the control you just clicked.
+
+### Previewing the chain: Time, Spectrum and Response
+
+The tabs on the right preview the chain on the **window the main trace shows** (with **Follow main
+trace** on; at most 2,000,000 samples — 40 s at 50 kHz — and the centre of a wider view, which the
+status line says). Panning or zooming a preview turns Follow off and previews that range instead;
+tick Follow again to rejoin the main trace. The previews are computed off the user interface on one
+background thread, a quarter-second after your last edit, and a newer edit cancels an older
+preview; nothing is computed while the window is closed. **Ctrl+1 / Ctrl+2 / Ctrl+3** pick the
+three tabs.
+
+**Time** draws the raw (calibrated) trace in grey and the processed trace in blue, with a legend:
+**Overlay** puts them on one axis, **Split** on two linked axes, and **Raw − processed** shows what
+the chain removed. When the chain changes the unit (Normalize) or removes DC (high-pass) the view
+is forced to Split, and the processed axis names its real unit — *processed (σ, whole-trace
+z-score)* or *processed (pA, DC removed by 100 Hz high-pass)* (shortened on an axis too short for
+it; hover the axis for the full label). The legend sits above each plot, never over the trace.
+
+**Window estimate versus exact.** The window is padded on each side by the chain's longest settling
+or window length, so for the local stages — notch, median, high-pass, running mean,
+Savitzky-Golay and the low-pass — the preview is the same samples as the whole recording,
+conditioned and sliced: the status line reads *Exact for these stages · window 2.00 s, padded
+±1.47 s*. **Baseline drift** and **Normalize** use statistics of the whole recording, so on a
+window they are only an estimate: the status line says *Window estimate — Baseline drift/Normalize
+use whole-recording statistics* and the legend says *processed — window estimate*. The padding is
+capped at 40 s a side, so a very slow high-pass or notch can be an estimate too, and then the
+status line names it (*Window estimate — High-pass settles over 400 s, longer than the ±40 s
+padding*). A view wider than the preview limit is previewed at its centre, and the status line
+says so next (*centre 40.0 s of the 250.1 s view*). **Compute exact** conditions the whole
+recording (seconds on a long file, in the background) and shows its exact samples (*Whole
+recording (exact)*); it runs only when you press it, and an edit of the chain cancels it. While
+it runs the button reads **Computing…** and the status line starts with *Computing exact (whole
+recording)…*; if it fails it starts with *Exact pass failed: …* and the button offers **Retry
+exact** (for that chain only). Right after an edit, until the new preview arrives, the status line
+starts with *Updating…* and already gives the verdict of the chain you now have, and the legend
+calls the curve still on screen *processed — previous chain*. The status line keeps three fixed
+lines, what is happening first, so the plot never moves; hover it for the whole sentence. The
+Phase, Group delay and short Step views are computed at once, so they never wait for an exact
+pass; only the step of a very slow stage does, and its note says so.
+
+**Spectrum** shows Welch spectra of the same window before (grey) and after (blue) the chain on a
+log-log plot, with the frequency resolution above it (*Δf 6.10 Hz (nperseg 8,192) on a 2.00 s
+window*); resolving mains lines needs Δf ≤ 1 Hz, which takes about a 10 s window at 50 kHz. With
+Normalize on, the *after* curve leaves Normalize out (it only rescales) so both curves share one
+unit. Below the plot, a list names the narrow lines in the raw spectrum — at least 10 dB above a
+running-median floor a quarter-octave wide, from 20 Hz up to the low-pass cutoff (or Nyquist) —
+tagging mains harmonics (*120.0 Hz · +24.0 dB · mains 60×2*). A line is placed on the harmonic
+itself only when Δf ≤ 1 Hz; at a coarser resolution it is listed where it was measured
+(*240.3 Hz · +24.0 dB · near mains 60×4*), because a line 5 Hz off a harmonic still falls within
+one 6 Hz bin of it, and a notch on the harmonic would leave most of it. Tick lines and press
+**Send to notch** (or double-click one, or press Return on it) to add them to the notch's explicit
+line list through the form's own checks: the notch is switched on, a line the notch already
+removes (at least 20 dB off) is marked *notched* and skipped, the list never grows past 32 lines,
+and a line whose frequency the spectrum cannot place within the notch's own width (*Δf too
+coarse*) cannot be sent — widen the window first. If the notch is off but keeps a list of its own,
+the lines join that list and the notch **stays off** (*Notch still OFF: added … — tick Notch to
+apply them*): switching it on would bring back lines you switched off, and replacing the list
+would lose them. The outcome is said in the two lines under the button, and on the status bar.
+
+**Response** has four views of the selected stage — or, with **show combined response of enabled
+linear stages**, of the whole linear chain. **Magnitude** is the applied |H(f)|. **Phase** and
+**Group delay** show the applied response as a solid line — every stage NanoScope applies is
+zero-phase, so it is flat at 0 (a 180° step is a smoother's sign flip, not a delay) — and, dashed,
+the same IIR design run once causally, which is what a hardware filter of that design would do.
+**Step** pushes a unit step through the linear stages and reads off the 10–90 % rise, overshoot and
+pre-shoot (a zero-phase filter rings symmetrically before and after an edge). The median, baseline
+drift and Normalize are listed as *not representable as a linear response* rather than drawn.
 
 The line headed **Active execution order** is the recipe NanoScope will actually run, including the
-detector-owned low-pass in its real last position. When high-pass is on, it instead names the
-**Candidate-localization order** and says that quantitative measurement omits high-pass. Pick a
-stage to edit it. Its response graph says **ON · included in execution chain**, **ON · candidate
-localization only** for high-pass, or **OFF · design preview only**. An off-stage design is grey and
-dashed so inspecting a useful-looking curve cannot be mistaken for enabling it.
+detector-owned low-pass in its real last position. It stays on the Preprocess card in the dock.
+When high-pass is on, it instead names the **Candidate-localization order** and says that
+quantitative measurement omits high-pass. The response graph says **ON · included in execution
+chain**, **ON · candidate localization only** for high-pass, or **OFF · design preview only**. An
+off-stage design is grey and dashed so inspecting a useful-looking curve cannot be mistaken for
+enabling it.
 
 Tick **show combined response of enabled linear stages** to replace that curve with the cumulative
 response of the active linear cascade. NanoScope multiplies the zero-phase responses on one shared
@@ -627,6 +716,38 @@ frequency grid and names the stages it cannot honestly put in a fixed transfer f
 baseline estimation and normalization are nonlinear or data-dependent. When high-pass is on, both
 this combined response and the orange trace show the **localization branch**, not the no-high-pass
 branch used for quantitative measurement.
+
+**Protocols.** The **Protocol** combo at the top of the window recalls a saved chain. A protocol is
+the complete chain: picking one sets every stage, and turns off any stage it does not name — the
+low-pass included. The combo shows the protocol's name only while the form still is that protocol;
+the moment a setting differs it reads **— manual —**. That includes a value this recording cannot
+hold — a cutoff above its Nyquist limit, say: the form clamps it, the combo reads **— manual —**
+and the status bar names what changed. **Export protocols…** writes your own
+protocols to a `.json` file; **Import protocols…** adds the protocols of such a file to your
+library. Import never overwrites: a name you already use comes in as *name (imported)*, a protocol
+identical to one you have is skipped, and a file that is not a NanoScope protocol file, or a
+protocol naming a setting that is not part of the signal chain, is refused by name.
+
+**Copy as Python** puts a short script on the clipboard that rebuilds the processed trace outside
+NanoScope: it opens the recording with NanoScope's own reader, applies the channel's calibration
+(gain and offset), runs `nanoscope.analysis.conditioning.conditioned_trace` with the chain on the
+form, and slices the window the main trace shows (**Follow main trace** on; untick it to keep the
+last range — selecting another recording or channel drops that range, and the script then takes
+the whole channel).
+
+**When the form no longer matches the table.** If the event table on screen came from a Schmitt
+or CUSUM detection and you change the chain, an orange **⚠ Chain changed** button appears in the
+table's toolbar, the Preprocess card and the window's status line name the differences
+(*low-pass 10000 → 5000 Hz; notch Q 30 → 20*), and **Revert to detection's chain** is enabled.
+The rows are not marked stale: they are a faithful record of the chain they were detected with,
+and nothing changes until you run detection again (**Run detection…** in the window, enabled
+exactly when the Detect button is, or the button's menu). A table from the ML detector or a reconciled table is labelled as not produced by
+this chain.
+
+Open **Preprocess ▸ Signal chain** for the compact card: the comparison with the table on screen,
+any warning, the protocol name, the scope line and the execution order, with **Open Signal
+Conditioning…** and **show processed trace on the plot** pinned above it. The baseline estimator is
+the separate **Open-pore baseline** subsection.
 
 | Filter | What it does | When to use it |
 |---|---|---|
@@ -637,7 +758,7 @@ branch used for quantitative measurement.
 | **Running mean** | Simple moving average. | Fast, coarse smoothing (blurs edges). |
 | **Median** | Sliding median. **Removes impulse/spike noise while preserving square event edges.** | Despiking a noisy trace before detection. |
 | **Baseline drift** | Estimates the slow open-pore level and *subtracts the drift*, keeping event depths intact (not a high-pass). Methods: block-median, percentile, ASLS. | Long recordings with electrode/temperature/clogging drift. |
-| **Normalize** | Rescales the whole conditioned trace onto a **dimensionless** scale — `z-score`, `robust z` (÷ the same 1.4826·MAD sigma the detector thresholds on), `min–max` → [−0.5, +0.5], or the clipped `model input` transform. Applied **last**, after every other stage. **It divides the picoamps out:** current-derived amplitudes, baselines, thresholds and pA/pA·s export fields retain physical-unit labels while no longer carrying physical units. Centering makes `frac_depth`/dI/I0 invalid; model-input clipping can also move boundaries or counts. Index, time, source, review and status fields keep their ordinary meanings. Off by default; while it is on an amber banner stays up on every page of the Signal-filters group. | Feeding a model, or putting recordings on a common scale — **never** to measure a conductance. |
+| **Normalize** | Rescales the whole conditioned trace onto a **dimensionless** scale — `z-score`, `robust z` (÷ the same 1.4826·MAD sigma the detector thresholds on), `min–max` → [−0.5, +0.5], or the clipped `model input` transform. Applied **last**, after every other stage. **It divides the picoamps out:** current-derived amplitudes, baselines, thresholds and pA/pA·s export fields retain physical-unit labels while no longer carrying physical units. Centering makes `frac_depth`/dI/I0 invalid; model-input clipping can also move boundaries or counts. Index, time, source, review and status fields keep their ordinary meanings. Off by default; while it is on an amber banner stays up under every stage of the Signal Conditioning window, and the Preprocess card says so. | Feeding a model, or putting recordings on a common scale — **never** to measure a conductance. |
 
 Notes:
 - The **Baseline drift** window must be *much longer than your longest event* (it flattens drift, not
@@ -2383,6 +2504,8 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Ctrl+G** | **Open the Event gallery** |
 | **Ctrl+M** | **Save the current cursor region as an independent manual measurement (works from any tab; not a detector-training candidate)** |
 | **Ctrl+Shift+M** | **Write the current cursor region as a reviewed, accepted, hand-added event in the selected source detector table; loudly refuses without a source or on Reconciled** |
+| **Ctrl+Shift+F** | **Open the Signal Conditioning window (the classical detectors' signal chain)** |
+| **Signal Conditioning:** Ctrl+1 / Ctrl+2 / Ctrl+3 | Time / Spectrum / Response preview tab |
 | Ctrl+0 / trace-focused Home / **Full** button | Reset zoom to the complete trace |
 | Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history) |
 | Ctrl+E | Centre the view on the current selection |

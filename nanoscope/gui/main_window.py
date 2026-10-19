@@ -278,6 +278,12 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     "analysis_panel.staleLineShownChanged": "the amber stale line came or went; drives only "
                                             "the closed-Results-dock status-bar hint — no "
                                             "frame moved",
+    "analysis_panel.conditioningStateChanged": "the form-versus-detection chain verdict was "
+                                               "re-judged — text for the Signal Conditioning "
+                                               "window and the Preprocess card; no frame moved",
+    "analysis_panel.statusMessage": "status-bar text (protocol import/export, Copy as Python)",
+    "analysis_panel.openSignalConditioningRequested": "opens the Signal Conditioning window — "
+                                                      "a view move, never the numbers",
     "analysis_panel.mergeFinished": "the OUTCOME of an off-thread 'Merge all', for the "
                                     "status line. When it installed a merged table it did "
                                     "so through Session.add_result, so the frame change "
@@ -1119,6 +1125,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # central widget shows, so its overlays/preview/zoom land on the real panes.
         self._analysis_panel = AnalysisPanel(
             self._session, self._analysis_controller, self._trace_view)
+        # The stage editor lives in the Signal Conditioning window (built on first open);
+        # the Preprocess page keeps the compact card and its pinned Open button.
+        self._signal_conditioning = None
+        self._signal_conditioning_placed = False
+        self._signal_conditioning_source = None
+        self._analysis_panel.detection_panel.set_signal_chain_hosted(True)
         tabs = QtWidgets.QTabWidget()
         # INVARIANT for every Inspector tab: nothing in here may impose a width floor. A
         # child's minimum width propagates through the tab widget into
@@ -1549,6 +1561,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_mark_missed.setEnabled(False)
         self._act_mark_missed.triggered.connect(self._mark_selection_as_missed)
 
+        # After _act_plots (which must stay item 8). ALWAYS enabled: disabled, ⌘⇧F would
+        # fall through to the event table, whose curation keys ignore modifiers.
+        self._act_signal_conditioning = analysis_menu.addAction("Signal c&onditioning…")
+        self._act_signal_conditioning.setShortcut(QtGui.QKeySequence("Ctrl+Shift+F"))
+        self._act_signal_conditioning.setToolTip(
+            "Edit the classical detectors' signal chain in execution order, with its "
+            "frequency response, protocols and Copy as Python. The ML detector keeps its "
+            "own chain (ML tab).")
+        self._act_signal_conditioning.triggered.connect(
+            lambda *_: self._open_signal_conditioning())
+
         self._act_psd = analysis_menu.addAction(ANALYSIS_LABELS[PAGE_NOISE] + "…")
         self._act_psd.setToolTip(
             "Open the current-noise power spectrum for a recording's current channel: "
@@ -1964,6 +1987,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif stage is Stage.FILTER:
             self._reveal_detection_panel()
             self._analysis_panel.detection_panel.show_signal_chain()
+            self._open_signal_conditioning()
         elif stage is Stage.DETECT:
             self._reveal_detection_panel()
             self._analysis_panel.detection_panel.show_detection_tab()
@@ -2305,6 +2329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Qt's next-in-chain workflow chip), and the toggle that re-shows it hands it back.
         self._results_dock.installEventFilter(self)
         self._act_toggle_results.triggered.connect(self._return_results_focus)
+        self._wire_signal_conditioning()
 
         # The analysis launcher. Its buttons carry the surfaces' OWN explanatory copy — the
         # tooltips that were written for the QActions and that a native macOS menu never
@@ -3221,6 +3246,9 @@ class MainWindow(QtWidgets.QMainWindow):
         step("Run ML", self._sync_ml_detection_action)
         step("Measure", self._sync_measure_action)
         step("Export", self._sync_export_action)
+        step("Signal conditioning",
+             lambda: self._push_conditioning_source()
+             if _on_screen(self._signal_conditioning) else None)
         # THE FOUR SURFACE-WINDOW FEEDS FOLLOW THE `_refresh_surface_windows` RULE: a
         # window the user has CLOSED is not re-fed. These four used to be unconditional —
         # each refresher's own guard answers only "was it ever built", and close() merely
@@ -3290,6 +3318,8 @@ class MainWindow(QtWidgets.QMainWindow):
         document's CURRENT channel (so clicking voltage does not disable detection), and this action
         must agree with the panel's Detect button rather than re-deriving from the raw selection."""
         self._act_run_detection.setEnabled(self._analysis_panel.can_run())
+        if getattr(self, "_signal_conditioning", None) is not None:
+            self._signal_conditioning.set_run_enabled(self._act_run_detection.isEnabled())
 
     def _run_detection(self) -> None:
         """The Analysis ▸ Run detection action — delegate to the panel so params and
@@ -7311,6 +7341,193 @@ class MainWindow(QtWidgets.QMainWindow):
         self._event_gallery.raise_()
         self._event_gallery.activateWindow()
 
+    # -- Signal Conditioning window ----------------------------------------------------------
+    _SC_GEOMETRY_KEY = "signalConditioning/geometry"
+    _SC_SPLITTER_KEY = "signalConditioning/splitter"
+    _SC_FOLLOW_KEY = "signalConditioning/followMain"
+    _SC_VIEW_KEYS = (("signalConditioning/tab", "preview_tab", "set_preview_tab"),
+                     ("signalConditioning/timeMode", "time_mode_choice", "set_time_mode"),
+                     ("signalConditioning/responseView", "response_view", "set_response_view"))
+
+    def _wire_signal_conditioning(self) -> None:
+        """Panel-side wiring; the window's own is done once it is built."""
+        ap = self._analysis_panel
+        det = ap.detection_panel
+        ap.openSignalConditioningRequested.connect(self._open_signal_conditioning)
+        ap.statusMessage.connect(lambda msg: self.statusBar().showMessage(msg, 8000))
+        ap.conditioningStateChanged.connect(self._push_conditioning_status)
+        det.paramsChanged.connect(lambda *_: self._push_conditioning_chain())
+        # The panel re-gates Detect on its own (e.g. an open-pore reference edit); the
+        # menu action and the window's Run detection… must move with it, not on the
+        # next menu open.
+        det.runGateChanged.connect(lambda *_: self._sync_detection_action())
+        self._trace_view.sigVisibleRangeChanged.connect(
+            lambda *_: self._push_conditioning_window())
+        self._session.documentClosed.connect(self._drop_conditioning_document)
+        self._session.calibrationChanged.connect(
+            lambda *_: self._push_conditioning_source()
+            if _on_screen(self._signal_conditioning) else None)
+
+    def _ensure_signal_conditioning(self):
+        """Build the window ONCE (it is never deleted; closing hides it)."""
+        if self._signal_conditioning is not None:
+            return self._signal_conditioning
+        from .signal_conditioning import SignalConditioningWindow
+
+        ap = self._analysis_panel
+        det = ap.detection_panel
+        ws = SignalConditioningWindow(self)
+        ws.install_editor(det.signal_chain_editor_parts())
+        det.set_stage_focus_partner(ws.stage_list)
+        ws.stageSelected.connect(det.select_stage)
+        ws.stageEnableRequested.connect(det.set_stage_enabled)
+        det.stageShown.connect(ws.show_stage)
+        ws.revertRequested.connect(lambda: ap.revert_chain_to_shown_detection())
+        ws.runDetectionRequested.connect(self._run_detection)
+        ws.exportProtocolsRequested.connect(lambda: ap.export_protocols(ws))
+        ws.importProtocolsRequested.connect(lambda: ap.import_protocols(ws))
+        ws.copyPythonRequested.connect(lambda: ap.copy_chain_as_python(ws.current_window()))
+        ws.mlChainRequested.connect(self._reveal_ml_chain)
+        ws.showMainTraceRequested.connect(self._show_main_trace)
+        ws.followMainChanged.connect(lambda on: self._push_conditioning_window() if on else None)
+        ws.notchLinesRequested.connect(self._add_notch_lines_from_spectrum)
+        ws.saveProjectRequested.connect(lambda w=ws: self._save_project_from(w, save_as=False))
+        ws.saveProjectAsRequested.connect(lambda w=ws: self._save_project_from(w, save_as=True))
+        self._signal_conditioning = ws
+        # Listed in the Window menu; its own placement and geometry keys stay in charge.
+        self._register_child_window(ws, "signal_conditioning")
+        return ws
+
+    def _open_signal_conditioning(self, stage_key: str = "") -> None:
+        """Analysis ▸ Signal conditioning… (⌘⇧F), the card's Open button, the Filter chip
+        and the baseline workspace's Advanced signal-chain settings: show the one window,
+        on ``stage_key`` if given."""
+        ws = self._ensure_signal_conditioning()
+        det = self._analysis_panel.detection_panel
+        if not self._signal_conditioning_placed:
+            self._place_signal_conditioning(ws)
+            self._signal_conditioning_placed = True
+        if stage_key:
+            det.select_stage(stage_key)
+        ws.show_stage(det.current_stage_key())
+        self._push_conditioning_source()
+        ws.show()
+        ws.raise_()
+        ws.activateWindow()
+        ws.focus_stage_list()
+
+    def _place_signal_conditioning(self, ws) -> None:
+        """First open: the saved geometry (validated, clamped to the screen), else the
+        default — right-anchored over the Inspector so the main trace stays visible."""
+        from .signal_conditioning import clamp_rect, default_window_rect
+
+        s = QtCore.QSettings()
+        ignored: list[str] = []
+        avail = self._available_screen_geometry()
+        geo = _restorable_bytes(s, self._SC_GEOMETRY_KEY, ignored)
+        restored = geo is not None and ws.restoreGeometry(QtCore.QByteArray(geo))
+        if geo is not None and not restored:
+            ignored.append(self._SC_GEOMETRY_KEY)
+        if restored:
+            ws.setGeometry(clamp_rect(ws.geometry(), avail))
+        else:
+            ws.setGeometry(default_window_rect(
+                self.frameGeometry(), self.geometry(), avail,
+                width=max(ws.minimumWidth(), ws.DEFAULT_WIDTH)))
+        state = _restorable_bytes(s, self._SC_SPLITTER_KEY, ignored)
+        if state is not None and not ws.restore_splitter_state(state):
+            ignored.append(self._SC_SPLITTER_KEY)
+        for key, _getter, setter in self._SC_VIEW_KEYS:
+            value = s.value(key)
+            if value is not None and not (isinstance(value, str)
+                                          and getattr(ws, setter)(value)):
+                ignored.append(key)
+        follow = s.value(self._SC_FOLLOW_KEY)
+        if follow is not None:
+            if isinstance(follow, bool) or str(follow).lower() in ("true", "false"):
+                ws.set_follow_main(follow is True or str(follow).lower() == "true")
+            else:
+                ignored.append(self._SC_FOLLOW_KEY)
+        if ignored:
+            self.statusBar().showMessage(
+                f"Ignored saved Signal Conditioning preference(s) this app could not use "
+                f"({', '.join(ignored)}); their defaults were used.", 8000)
+
+    def _available_screen_geometry(self) -> QtCore.QRect:
+        """The usable area of the screen this window is on (a seam for tests)."""
+        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else self.frameGeometry()
+
+    def _push_conditioning_source(self) -> None:
+        ws = self._signal_conditioning
+        if ws is None:
+            return
+        ap = self._analysis_panel
+        ws.set_source_label(ap.conditioning_source_label())
+        ws.set_source(ap.conditioning_source())
+        self._push_conditioning_chain(force=True)
+        ws.set_chain_status(ap.refresh_chain_status())
+        self._sync_detection_action()        # the gate itself, not the action's last copy
+        # A window kept for another recording/channel slices nothing on this one.
+        key = ap.conditioning_source_key()
+        if ws.follows_main() or key != self._signal_conditioning_source:
+            ws.clear_view_window()
+        self._signal_conditioning_source = key
+        self._push_conditioning_window(force=True)
+
+    def _drop_conditioning_document(self, doc_id: str) -> None:
+        """A closed document leaves nothing behind in the window's preview memo."""
+        ws = self._signal_conditioning
+        if ws is None:
+            return
+        ws.drop_document(doc_id)
+        if _on_screen(ws):
+            self._push_conditioning_source()
+
+    def _add_notch_lines_from_spectrum(self, freqs) -> None:
+        """Signal Conditioning ▸ Spectrum ▸ Send to notch: through the panel's own setters."""
+        text = self._analysis_panel.detection_panel.add_notch_lines(list(freqs))
+        self.statusBar().showMessage(text, 8000)
+        if self._signal_conditioning is not None:
+            self._signal_conditioning.show_notch_outcome(text)
+
+    def _push_conditioning_chain(self, *, force: bool = False) -> None:
+        ws = self._signal_conditioning
+        if ws is None or not (force or ws.isVisible()):
+            return
+        det = self._analysis_panel.detection_panel
+        ws.set_chain(det.params(), det.sample_rate(), det.lowpass_design_hz())
+
+    def _push_conditioning_status(self) -> None:
+        ws = self._signal_conditioning
+        if ws is not None:
+            ws.set_chain_status(self._analysis_panel.chain_status())
+
+    def _push_conditioning_window(self, *, force: bool = False) -> None:
+        ws = self._signal_conditioning
+        if ws is None or not ws.follows_main() or not (force or ws.isVisible()):
+            return
+        rng = self._analysis_panel.visible_sample_range()
+        if rng is not None:
+            ws.set_view_window(*rng)
+
+    def _reveal_ml_chain(self) -> None:
+        """Signal Conditioning ▸ ML chain…: the ML detector's own preprocessing (ML tab)."""
+        self._reveal_detection_panel()
+        self._analysis_panel.detection_panel.show_ml_tab()
+        self._show_main_trace()
+
+    def _show_main_trace(self) -> None:
+        """Bring the main window in front of the Signal Conditioning window.
+
+        On macOS a child window stays above its parent whatever the parent does, so the
+        child is LOWERED (the same rule as :meth:`_goto_event_in_trace`)."""
+        ws = self._signal_conditioning
+        if ws is not None and ws.isVisible():
+            ws.lower()
+        self.raise_()
+        self.activateWindow()
+
     def _goto_event_in_trace(self, event_id: int) -> None:
         """Select ``event_id`` and bring the MAIN TRACE out from behind the curation windows.
 
@@ -7329,7 +7546,7 @@ class MainWindow(QtWidgets.QMainWindow):
         exception at shutdown.
         """
         self._analysis_panel.select_event(int(event_id))
-        for win in (self._event_gallery, self._event_inspector):
+        for win in (self._event_gallery, self._event_inspector, self._signal_conditioning):
             # A docked inspector is already beside the trace, and keeps the keyboard.
             if win is not None and win.isWindow() and win.isVisible():
                 win.lower()
@@ -12606,6 +12823,13 @@ class MainWindow(QtWidgets.QMainWindow):
         s.setValue("lastDir", self._last_dir)
         s.setValue("lastProjectDir", self._last_project_dir)
         self._write_window_preferences(s)
+        ws = getattr(self, "_signal_conditioning", None)
+        if ws is not None and self._signal_conditioning_placed:
+            s.setValue(self._SC_GEOMETRY_KEY, ws.saveGeometry())
+            s.setValue(self._SC_SPLITTER_KEY, ws.splitter_state())
+            s.setValue(self._SC_FOLLOW_KEY, bool(ws.follows_main()))
+            for key, getter, _setter in self._SC_VIEW_KEYS:
+                s.setValue(key, str(getattr(ws, getter)()))
         # Flush to disk HERE rather than relying on QSettings' own destructor. The quit
         # path may end in ``exit_without_destroying_live_threads`` (a worker that would
         # not stop), which runs no destructors at all — so an unsynced setting would be

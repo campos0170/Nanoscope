@@ -64,6 +64,14 @@ from ..analysis.conditioning import (
     conditioning_params,
     write_baseline_correction,
 )
+from ..analysis.conditioning_preview import ConditioningSource
+from ..analysis.conditioning_recipes import (
+    ChainStatus,
+    judge_chain,
+    python_script,
+    read_protocols_file,
+    write_protocols_file,
+)
 from ..analysis.events import EventSet, mark_reviewed
 from ..analysis.measurement_quality import report_recording_messages
 from ..core.acquisition import acquisition_snapshot_messages
@@ -976,6 +984,12 @@ class AnalysisPanel(QtWidgets.QWidget):
     #: repoint to a recording with nothing to show, which re-judges nothing and so emits no
     #: ``stalenessChanged``. Lets the host say so while the Results dock is closed.
     staleLineShownChanged = QtCore.Signal(bool)
+    #: The form-versus-detection chain verdict (:meth:`chain_status`) was re-judged.
+    conditioningStateChanged = QtCore.Signal()
+    #: A sentence for the status bar (protocol import/export, Copy as Python).
+    statusMessage = QtCore.Signal(str)
+    #: Open the Signal Conditioning window on this stage key ("" = the current one).
+    openSignalConditioningRequested = QtCore.Signal(str)
 
     def __init__(self, session: Session, controller: AnalysisController,
                  trace_view: TraceView, parent=None) -> None:
@@ -1102,6 +1116,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._wire_session()
         self._wire_trace_view()
         self._wire_controller()
+        self._init_conditioning()
         self._show_empty()
 
     # -- construction ----------------------------------------------------------------------------
@@ -1238,6 +1253,18 @@ class AnalysisPanel(QtWidgets.QWidget):
         constants.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         toolbar.addWidget(constants, 1)
         toolbar.addStretch(0)
+        # The "⚠ Chain changed" chip leaves the table's own toolbar row (emptied above) for
+        # this one. This row has no width to spare at 1280x800, so here the chip gives up its
+        # slot while hidden and, shown, takes only what the buttons leave (shared 3:1 with the
+        # constants label, eliding down to "⚠…"; its tooltip and menu carry the whole notice).
+        # Columns…, Merge… and the advisories link are never squeezed by it.
+        chip = self._table.notice_chip
+        self._table.column_toolbar.removeWidget(chip)
+        policy = chip.sizePolicy()
+        policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Ignored)
+        policy.setRetainSizeWhenHidden(False)
+        chip.setSizePolicy(policy)
+        toolbar.addWidget(chip, 3)
         self._result_notice = QtWidgets.QLabel()
         self._result_notice.setWordWrap(False)
         self._result_notice.setTextFormat(QtCore.Qt.RichText)
@@ -2195,7 +2222,9 @@ class AnalysisPanel(QtWidgets.QWidget):
 
         Plus MainWindow's Analysis ▸ Run detection (⌘D), which is a gesture in another
         module and therefore gets its own gated door here,
-        :meth:`trigger_detection_from_menu`. Every one of those four asks
+        :meth:`trigger_detection_from_menu` — as do Signal Conditioning's "Run
+        detection…" button and the event table's "Run detection with the form's chain…"
+        chip entry, which go through that same door. Every one of those four asks
         :meth:`confirm_replacing_curation` first. NOTE that the banner's Re-run does not
         come through this method at all — it replays the RESULT's stored params through
         :meth:`_on_rerun`, which is why gating this method would not have caught it.
@@ -2506,8 +2535,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             return None
         body = why[len("Refused: "):] if why.startswith("Refused: ") else why
         return (f"the notch list this run would replay was not accepted: {body} Re-run "
-                f"replays this run's STORED list, never the box: fix the list on the "
-                f"Preprocess tab (“use an explicit line list”) and press Detect.")
+                f"replays this run's STORED list, never the box: fix the list in Signal "
+                f"Conditioning (Preprocess tab ▸ Open Signal Conditioning…, Notch stage, "
+                f"“use an explicit line list”) and press Detect.")
 
     def _on_notch_lines_edited(self, _text: str) -> None:
         """A USER edit of the Preprocess tab's "lines" box (never the panel's rollback)."""
@@ -5699,6 +5729,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         "went stale" keeps its marks after the banner is gone."""
         self._judge_staleness(res)
         self.stalenessChanged.emit()
+        self._schedule_chain_judge()     # after the existing logic; never raises
 
     def _judge_staleness(self, res: AnalysisResult) -> None:
         """Mark the shown result stale when either stamp no longer matches. Never fix it.
@@ -6254,6 +6285,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._merge.set_detection_present(False)
         self._stats.set_detection_present(False)
         self._sync_result_selector()
+        self._schedule_chain_judge()
 
     def _show_empty(self) -> None:
         self._baseline_view_timer.stop()
@@ -6294,6 +6326,240 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._baseline.set_gate(False, "Select a CURRENT channel to measure its baseline.")
         self._sync_baseline_workspace()
         self._clear_results()
+
+
+    # -- the signal chain: judge, protocols, Copy as Python -----------------------------------
+    def _init_conditioning(self) -> None:
+        """State and wiring for the chain-versus-detection judge (kept out of _build_ui)."""
+        self._chain_status = ChainStatus.none()
+        self._chain_judge_timer = QtCore.QTimer(self)
+        self._chain_judge_timer.setSingleShot(True)
+        self._chain_judge_timer.setInterval(0)
+        self._chain_judge_timer.timeout.connect(self._judge_chain_now)
+        # Connected AFTER _on_params_changed, so the judge runs after its logic (whichever
+        # of its returns it takes); _check_staleness schedules it at its own end.
+        self._detection.paramsChanged.connect(self._schedule_chain_judge)
+        self._detection.openSignalConditioningRequested.connect(
+            self.openSignalConditioningRequested)
+        self._detection.protocolNotice.connect(self.statusMessage)
+        self._table.noticeActionRequested.connect(self._on_chain_notice_action)
+
+    def _schedule_chain_judge(self, *_a) -> None:
+        """Coalesce: ~40 paramsChanged per set_params become ONE judgement."""
+        self._chain_judge_timer.start()
+
+    def _judge_chain_now(self) -> None:
+        """Re-judge the form against the shown detection. Never raises."""
+        try:
+            status = self._compute_chain_status()
+        except Exception:  # noqa: BLE001 - a verdict must never break a slot
+            status = ChainStatus.unknown()
+        self._apply_chain_status(status)
+
+    def _compute_chain_status(self) -> ChainStatus:
+        res = self._stored_detection()
+        if res is None or not isinstance(res.payload, EventSet):
+            return ChainStatus.none()
+        module_id = str(res.module_id)
+        run = (schmitt_params_from_result(res)
+               if module_id in (_MODULE_ID, _CUSUM_MODULE_ID) else None)
+        fs = None
+        if self._sel is not None and self._session.has_document(self._sel[0]):
+            fs = self._session.document(self._sel[0]).meta.sample_rate_hz
+        return judge_chain(self._detection.params(), run, module_id=module_id,
+                           detector_label=detector_name(module_id), fs=fs)
+
+    def _apply_chain_status(self, status: ChainStatus) -> None:
+        previous = self._chain_status
+        self._chain_status = status
+        differs = status.kind == "differs"
+        self._detection.set_chain_status(status.sentence, differs)
+        self._table.set_notice("⚠ Chain changed" if differs else "",
+                               status.sentence if differs else "")
+        if (previous.kind, previous.sentence) != (status.kind, status.sentence):
+            self.conditioningStateChanged.emit()
+
+    def chain_status(self) -> ChainStatus:
+        """The last verdict: how the form's chain relates to the detection on screen."""
+        return self._chain_status
+
+    def refresh_chain_status(self) -> ChainStatus:
+        """Judge now (instead of on the next event-loop pass) and return the verdict."""
+        self._chain_judge_timer.stop()
+        self._judge_chain_now()
+        return self._chain_status
+
+    def revert_chain_to_shown_detection(self) -> bool:
+        """Put the shown detection's chain back on the form. False when there is none."""
+        status = self.refresh_chain_status()
+        if status.kind != "differs" or not status.revert_params:
+            return False
+        self._detection.set_params(status.revert_params)
+        self.refresh_chain_status()
+        self.statusMessage.emit(
+            f"Form reverted to the chain the {status.detector_label} detection on screen "
+            f"ran with.")
+        return True
+
+    def _on_chain_notice_action(self, key: str) -> None:
+        if key == "revert":
+            self.revert_chain_to_shown_detection()
+        elif key == "run":
+            self.trigger_detection_from_menu()
+        elif key == "open":
+            self.openSignalConditioningRequested.emit("")
+
+    def visible_sample_range(self) -> tuple[int, int] | None:
+        """The main trace's visible ``[i0, i1)`` of the selected channel, or None."""
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            return None
+        doc_id, channel = self._sel
+        n = int(self._session.document(doc_id).meta.n_samples)
+        return self._visible_sample_range(doc_id, channel, n)
+
+    def conditioning_source_key(self) -> tuple[str, int, int] | None:
+        """``(doc_id, channel, n_samples)`` of the selected channel, or None."""
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            return None
+        doc_id, channel = self._sel
+        return (doc_id, int(channel), int(self._session.document(doc_id).meta.n_samples))
+
+    def conditioning_source(self) -> ConditioningSource | None:
+        """The selected channel's calibrated samples for the Signal Conditioning previews.
+
+        The array is the Session's own (never written in place), so a worker may read it
+        while the GUI moves on; the offset is the one the main trace draws it through."""
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            return None
+        doc_id, channel = self._sel
+        try:
+            ch = self._session.calibrated(doc_id, channel)
+        except (TypeError, IndexError, KeyError):
+            return None
+        cal = self._session.calibration(doc_id, channel)
+        return ConditioningSource(
+            doc_id=doc_id, channel=int(channel), label=self.conditioning_source_label(),
+            data=np.asarray(ch.data), fs=ch.sample_rate_hz, units=str(ch.units or ""),
+            x_offset_s=self._trace_view.clock_offset_for(doc_id, channel),
+            cal_gain=float(cal.gain), cal_offset=float(cal.offset))
+
+    def conditioning_source_label(self) -> str:
+        """``'<recording> · <channel>'`` for the Signal Conditioning title, or ""."""
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            return ""
+        doc_id, channel = self._sel
+        doc = self._session.document(doc_id)
+        try:
+            ch_name = doc.meta.channels[channel].name or f"channel {channel}"
+        except (IndexError, AttributeError):
+            ch_name = f"channel {channel}"
+        return f"{doc.display_name} · {ch_name}"
+
+    def export_protocols(self, parent: QtWidgets.QWidget | None = None) -> bool:
+        """Write the user's protocols to a JSON exchange file the user chooses."""
+        library, unreadable = self._detection.protocol_library_report()
+        skipped = (f" Skipped {len(unreadable)} stored protocol(s) that could not be read: "
+                   + ", ".join(f"“{n}”" for n in unreadable) + "." if unreadable else "")
+        if not library:
+            self.statusMessage.emit(
+                "No protocols of your own to export yet — save the chain with “Save as…” "
+                "first (the three built-in protocols ship with every NanoScope)." + skipped)
+            return False
+
+        def with_suffix(p: Path) -> Path:
+            return p if p.suffix.lower() == ".json" else p.with_name(p.name + ".json")
+
+        # The overwrite prompt must judge the file that is really written.
+        path = ask_export_path(parent or self, title="Export conditioning protocols",
+                               suggestion="conditioning-protocols.json",
+                               filters="NanoScope conditioning protocols (*.json)",
+                               outputs=lambda p: [with_suffix(Path(p))])
+        if path is None:
+            return False
+        target = with_suffix(Path(path))
+        from .. import __version__
+        try:
+            write_protocols_file(target, library, app_version=str(__version__))
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(parent or self, "Export conditioning protocols",
+                                          f"Could not write {target.name}: {exc}")
+            return False
+        n = len(library)
+        self.statusMessage.emit(
+            f"Exported {n} protocol{'s' if n != 1 else ''} to {target.name}." + skipped)
+        return True
+
+    def import_protocols(self, parent: QtWidgets.QWidget | None = None) -> bool:
+        """Add the protocols of a JSON exchange file to the user's library (never overwrites)."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            parent or self, "Import conditioning protocols", "",
+            "NanoScope conditioning protocols (*.json);;All files (*)")
+        if not path:
+            return False
+        try:
+            imported, refused = read_protocols_file(
+                path, max_notch_lines=DetectionPanel.NOTCH_MAX_LINES)
+        except ValueError as exc:
+            self.statusMessage.emit(f"Import refused: {exc}")
+            QtWidgets.QMessageBox.warning(parent or self, "Import conditioning protocols",
+                                          str(exc))
+            return False
+        report = self._detection.merge_protocols(imported, refused=refused)
+        self.statusMessage.emit(report.sentence())
+        if refused:
+            QtWidgets.QMessageBox.warning(
+                parent or self, "Import conditioning protocols",
+                report.sentence())
+        return bool(report.added or report.renamed)
+
+    def copy_chain_as_python(self, window: tuple[int, int] | None = None) -> str:
+        """Put a script that rebuilds the processed trace on the clipboard; return it."""
+        from PySide6 import QtGui
+
+        from .. import __version__
+        from ..core.segment import SegmentDocument
+
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            self.statusMessage.emit("Select a recording first: the script rebuilds the "
+                                    "processed trace of the selected channel.")
+            return ""
+        doc_id, channel = self._sel
+        doc = self._session.document(doc_id)
+        meta = doc.meta
+        cal = self._session.calibration(doc_id, channel)
+        info = meta.channels[channel]
+        path: str | None = str(meta.path)
+        loaded = meta.loaded_range
+        segment = None
+        path_note = ""
+        if isinstance(doc, SegmentDocument):
+            origin = doc.origin
+            parent_doc = next((d for d in self._session.documents()
+                               if persistent_key(d) == origin.parent_key
+                               and not isinstance(d, SegmentDocument)), None)
+            if parent_doc is None:
+                path, loaded = None, None
+                path_note = (f"the parent recording of segment “{origin.name}”; then cut "
+                             f"[{origin.i0}, {origin.i1}) before conditioning")
+            else:
+                path, loaded = str(parent_doc.meta.path), parent_doc.meta.loaded_range
+            segment = (int(origin.i0), int(origin.i1))
+        offset = self._trace_view.clock_offset_for(doc_id, channel)
+        params = self._detection.params()
+        script = python_script(
+            params, path=path, channel_index=int(channel),
+            channel_name=str(info.name or ""), units=str(cal.target_units or info.raw_units or ""),
+            fs=meta.sample_rate_hz, cal_gain=float(cal.gain), cal_offset=float(cal.offset),
+            loaded_range=(None if loaded is None else (int(loaded.start), int(loaded.stop))),
+            segment=segment, t0_s=float(offset if offset is not None else meta.t0_s),
+            window=window, app_version=str(__version__), polarity=params.get("polarity"),
+            path_note=path_note)
+        QtGui.QGuiApplication.clipboard().setText(script)
+        n = script.count("\n")
+        self.statusMessage.emit(
+            f"Copied a {n}-line Python script that rebuilds this processed trace to the "
+            f"clipboard.")
+        return script
 
 
 def _empty_events() -> EventSet:

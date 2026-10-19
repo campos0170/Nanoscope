@@ -349,14 +349,38 @@ neither does what was true about them.
 
 ### 3 · Filter (optional)
 
-The signal-chain stages can be saved as a named **protocol** (`Protocol: Save as…`
-in `Preprocess › Signal chain`): one pick re-applies the whole chain —
-enable flags and parameters, notch harmonics included — on any recording. Editing
-any stage afterwards drops the name back to `— manual —`.
+In the **Signal Conditioning** window: `Analysis › Signal conditioning…` (`Ctrl+Shift+F`), the
+`Open Signal Conditioning…` button pinned on `Preprocess › Signal chain`, or the `Filter` step of
+the workflow strip. Its `Stages, in execution order` list holds the eight stages — notch, median,
+high-pass, baseline drift, running mean, Savitzky-Golay, normalize, then the low-pass applied inside
+detection; tick a stage to enable it and select it to edit it below. Leave the chain off unless you
+know why you are turning it on: filtering changes the dwell times you are about to measure, and
+the app reports the resulting rise time so you can see the cost. The chain feeds Schmitt/CUSUM
+detection, Measure ‘Processed signal’ and Export processed trace — not the ML detector, which has
+its own model preprocessing.
 
-On the `Preprocess` tab. Low-pass, high-pass, notch, median and drift options. Leave it
-off unless you know why you are turning it on: filtering changes the dwell times you are about to
-measure, and the app reports the resulting rise time so you can see the cost.
+The stages can be saved as a named **protocol** (`Protocol: Save as…` at the top of the window):
+one pick sets every stage — enable flags and parameters, notch lines included, and any stage the
+protocol does not use is turned off. The combo shows the name only while the form still equals
+that protocol; once a setting differs (an edit, or a value this recording cannot hold, such as a
+cutoff above its Nyquist limit) it reads `— manual —`. `Export protocols…` / `Import protocols…`
+exchange protocols as a `.json` file, and import never overwrites one you have. `Copy as Python`
+copies a script that rebuilds the processed trace with
+`nanoscope.analysis.conditioning.conditioned_trace`.
+
+The `Time`, `Spectrum` and `Response` tabs preview the chain on the window the main trace shows
+(`Follow main trace`; panning a preview previews that range instead). `Time` draws raw against
+processed (`Overlay`, `Split`, `Raw − processed`), on separate axes when Normalize or a high-pass
+changes the unit or removes DC. The status line says whether the preview is exact for these stages
+or a `Window estimate` (baseline drift and Normalize use whole-recording statistics); `Compute
+exact` runs the whole recording on demand. `Spectrum` compares the window's spectra before and
+after the chain and lists narrow lines; `Send to notch` adds the ticked ones to the notch's line
+list. `Response` adds `Phase`, `Group delay` and `Step` to the magnitude: solid as applied
+(zero-phase), dashed as the same design run once, causally.
+
+If you change the chain after a Schmitt or CUSUM run, `⚠ Chain changed` appears in the event
+table's toolbar and `Revert to detection's chain` puts the run's chain back; the rows themselves are
+unchanged until you detect again.
 
 ### 4 · Detect
 

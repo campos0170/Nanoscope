@@ -726,6 +726,38 @@ def test_the_toolbar_fits_the_1280_dock_at_the_real_look(real_font, qapp, isolat
         win.close()
 
 
+@pytest.mark.parametrize("size", [(1512, 900), (1280, 800)], ids=["1512x900", "1280x800"])
+def test_the_chain_chip_lives_in_the_results_toolbar_and_moves_no_button(
+        size, real_font, qapp, isolated_settings, qtbot, tmp_path):
+    """The Signal Conditioning chip used to sit in the table's own toolbar row, which this dock
+    empties; here it shares the Results toolbar. Its appearance (after a chain edit, made in the
+    Signal Conditioning window) never squeezes a button at 1512x900 and never pushes one out
+    of the row at 1280x800."""
+    win = _open(qapp, qtbot, size)
+    try:
+        _detect(win, qtbot, tmp_path)
+        _settle(qapp)
+        panel = win._analysis_panel
+        chip = panel._table.notice_chip
+        assert panel._results_toolbar.isAncestorOf(chip)
+        assert panel._table.column_toolbar.indexOf(chip) == -1
+        buttons = (panel._table.columns_button, panel.merge_toggle, panel._result_notice)
+        panel._table.set_notice("⚠ Chain changed", "the form's chain differs")
+        _settle(qapp)
+        assert chip.isVisible()
+        bar = panel._results_toolbar
+        if size == (1512, 900):
+            # At 1280x800 the row has no spare width, so a shown chip (only while the form's
+            # chain differs from the detection) costs Columns… a few px; nothing leaves the row.
+            for widget in buttons:
+                assert widget.width() >= widget.sizeHint().width(), widget
+        for widget in (*buttons, chip):
+            assert bar.rect().contains(_rect(widget, bar)), widget
+    finally:
+        win._analysis_controller.abort()
+        win.close()
+
+
 # ================================================================================================
 # 5. floors
 # ================================================================================================

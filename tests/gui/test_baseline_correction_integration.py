@@ -112,9 +112,15 @@ def test_workspace_runs_visual_and_runtime_contracts_then_exports_runtime_snapsh
 
     # The compact selector is a proxy, not a second parameter owner: Advanced opens
     # the actual signal-chain page and its baseline-drift stage.
+    # UPDATED (Signal Conditioning, review D-A7): that page now lives in the Signal
+    # Conditioning window, so the dock stays on this baseline workspace.
+    section = panel.detection_panel.preprocess_sections.currentIndex()
     workspace.advanced_button.click()
-    assert panel.detection_panel.preprocess_sections.currentIndex() == 0
+    assert panel.detection_panel.preprocess_sections.currentIndex() == section
     assert "Baseline drift" in panel.detection_panel.filter_selector.currentText()
+    conditioning = window._signal_conditioning
+    assert conditioning is not None and conditioning.isVisible()
+    assert panel.detection_panel.current_stage_key() == "detrend"
 
     # An ordinary Median filter is a different stage.  It may be enabled in the
     # live chain, but the baseline-only comparison must name it as excluded rather
