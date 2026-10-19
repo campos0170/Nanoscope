@@ -258,6 +258,20 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
     def page(self, page_id: str) -> QtWidgets.QWidget | None:
         return self._pages.get(page_id)
 
+    def raise_page(self, page_id: str) -> bool:
+        """Bring an installed page and this window forward, as a click on its tab would
+        (so its activator runs). ``False`` when the page is not installed."""
+        page = self._pages.get(page_id)
+        if page is None:
+            return False
+        if self._tabs.currentWidget() is not page:
+            self._tabs.setCurrentWidget(page)
+        self.refresh_header()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        return True
+
     def page_count(self) -> int:
         return len(self._pages)
 

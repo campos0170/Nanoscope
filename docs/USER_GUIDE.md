@@ -373,11 +373,21 @@ Panels), and **Analysis**, grouped into **Detect** (Run detection, Batch detect,
 Event waveforms, Event gallery, Reconcile detector results, Event labels, Noise spectrum),
 **Compare recordings** (I-V / conductance, Voltage dependence) and **Export** (events, training
 data, figures). **Analysis home** and **Guided first analysis** also have menu entries; the guide
-is available from **Help**.
+is available from **Help**. **Window** lists the windows NanoScope opens — the main window,
+Event inspector, Event gallery, Analysis Explorer (with one indented entry per open page), Figure
+Library, and — once opened this session — Guided first analysis, About NanoScope, the Incubation
+study launcher and the Original Zn reference recipe — with a check mark beside each
+one on screen; choosing one opens it or brings it forward through the same door as its own menu
+item. It also holds **Bring All to Front**, **Dock Event inspector beside the trace** (§9) and
+**Reset Window Layout…**. Child windows reopen where you last left them (size and place,
+remembered between sessions and brought back onto the screen you have now).
 
 Closed a dock by accident? Reopen it from **View ▸ Panels ▸ File Manager / Inspector / Results**
-(**⇧⌘R** toggles Results). While the Results panel is closed, a new detection or a table turning
-stale is announced on the status bar; the panel is never re-opened for you.
+(**⇧⌘R** toggles Results), or put everything back with **Window ▸ Reset Window Layout…**, which
+asks first, returns the panels to their opening places and sizes and the Event inspector to its own
+window, and forgets remembered window sizes (your analysis is not changed). While the Results panel
+is closed, a new detection or a table turning stale is announced on the status bar; the panel is
+never re-opened for you.
 
 ---
 
@@ -1144,6 +1154,18 @@ Manual measurements are kept as their own list, separate from the auto-detected 
 
 **Analysis ▸ Event inspector…** opens a window for stepping through detected events one at a time.
 
+**Its own window or docked beside the trace.** It opens as its own window. **Dock beside trace**
+(bottom-right of its toolbar), or **Window ▸ Dock Event inspector beside the trace**, puts it in
+the main window instead, as a tab beside the Inspector panel right of the trace, so the trace stays
+in view while you curate; **Own window** puts it back. The choice is remembered. Docked, it can be
+dragged to the left column (not above or below the trace), and its tab's ✕ closes it — Ctrl+I
+brings it back. A click anywhere in the docked inspector, or on its tab while you were typing in the
+Inspector panel, gives it the keyboard; when its tab goes behind the Inspector panel the keyboard
+moves to the trace, and Tab skips whichever of the two is behind, so a key never curates an event
+or edits a setting that is not on screen. The toolbar is two rows in a wide window and five short
+rows in the docked column (or a narrow window); the buttons keep their order. In a short column the
+part under the toolbar scrolls rather than pushing the main window past the screen.
+
 Open the Inspector before choosing the target event, or reselect that event after opening it.
 A new Inspector can start at the first event regardless of an earlier table selection. The
 Event spinner is a position in the filtered subset, not `event_id`; verify the ID and sample bounds.
@@ -1154,7 +1176,16 @@ For the current −700mV gallery table, position147 in All corresponds to ID146.
   and equivalent amplitude level use that same domain. The readout distinguishes original median
   depth from an optional selected amplitude, alongside dwell, ΔI/I₀, SNR, rise/fall, level count,
   and filter-limited flag. Normalized traces are labelled dimensionless, not pA.
-- **Navigate.** Prev / Next, an "Event *i* of *N*" index, and a **Filter** — All, Accepted only,
+- **Details.** **Details ▾ / ▸**, under the waveform, shows or hides the readout of this event's
+  numbers. Hidden, the waveform takes the room; in a narrow column its title keeps depth and dI/I0
+  whole and drops the event number, then the dwell, before them (hover the title for all of it).
+  Shown, drag the bar between them to share the height; docked, the readout leads with median depth
+  and dI/I0. It starts hidden when docked and shown in a window, and each is remembered. The button
+  and the waveform's top-left never move when it is toggled. When the numbers are stale the button
+  reads **⚠ Details** and its tooltip carries the sentence; the readout's first line is that
+  sentence as a one-line chip (hover it for all of it), and each stale number keeps its own ⚠. On a
+  short waveform the current axis is labelled **I** rather than "Measurement current".
+- **Navigate.** ◀ / ▶, an "Event *i* of *N*" index, and a **Filter** — All, Accepted only,
   Rejected only, Unreviewed, and (once a label palette exists or any event carries a label)
   Unlabelled and one **Labelled: key=value** entry per label. Keyboard: **←/→** move, **A/R**
   accept/reject, **Space** toggles. See *A curation pass* below for Unreviewed, **Advance after
@@ -1167,20 +1198,22 @@ For the current −700mV gallery table, position147 in All corresponds to ID146.
 - **Show in trace** (`T`) centres the main trace on the event you are looking at — the same jump as
   right-click ▸ **Go to event in trace** on its tile in the gallery — and **Gallery…** opens the
   contact sheet. The three event surfaces all link to each other now; none of them is a dead end.
-- **Label.** While an event is on screen, the bottom right of the Event box holds the gallery's
-  Label idiom for it: pick a palette entry, **Apply** writes it, **Clear** removes that entry's *key* (other
-  labels and flags stay). Both record that a person reviewed the event, both are one Undo step, and
-  neither moves on. A readout line too long for the window ends in "…" (hover the readout for all of
-  it) rather than widening the window, so the row never moves.
+- **Label.** While an event is on screen, the bar under the waveform holds the gallery's
+  Label idiom for it (it stays there when Details is hidden): pick a palette entry, **Apply** writes
+  it, **Clear** removes that entry's *key* (other labels and flags stay). Both record that a person
+  reviewed the event, both are one Undo step, and neither moves on. A readout line too long for the
+  window ends in "…" (hover the readout for all of it) rather than widening the window.
 - **Curate.** Accepting/rejecting writes to the shared event table, so it flows to the table
   checkbox, the trace span overlay, the summary counts, the plots, and exports — all at once, in both
   directions. Navigating also zooms the main trace to the event.
 - **Save without leaving the window.** The status bar names the current project and says whether it
   has unsaved changes. Press **Save Project** (use its arrow for **Save Project As…**), **Ctrl/⌘+S**,
   or **Ctrl/⌘+Shift+S**. These controls use the same guarded project writer as the main File menu;
-  cancelling or failing a save leaves the unsaved warning in place.
+  cancelling or failing a save leaves the unsaved warning in place. Docked, the main window's title
+  carries the unsaved mark and the keys are File ▸ Save Project's own — the same writer.
 - **Undo without leaving the window.** **Ctrl/⌘+Z** and **Ctrl/⌘+Shift+Z** in the inspector run the
-  main window's Edit ▸ Undo / Redo (there is one undo history). After an undo or redo the inspector
+  main window's Edit ▸ Undo / Redo (there is one undo history; docked, they are Edit ▸ Undo / Redo
+  themselves). After an undo or redo the inspector
   keeps its filter and the event on screen, and the gallery its selection, as long as the restored
   table holds the same events; an undo that renumbers events (a merge) starts again from the first.
 
@@ -2361,8 +2394,8 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Event inspector:** A / R / Space | Accept / Reject / toggle (then the next event of the filter when **Advance after decision** is on) |
 | **Event inspector:** T | Centre the main trace on the event on screen |
 | **Event inspector & Event gallery:** Ctrl/⌘+U | First unreviewed event / tile of the current filter |
-| **Event inspector:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo on the main window's history, without leaving the inspector |
-| **Event inspector & Event gallery:** Ctrl/⌘+S | Save the complete project through the same writer as File ▸ Save Project |
+| **Event inspector:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo on the main window's history, without leaving the inspector (docked: Edit ▸ Undo / Redo themselves; an advance is still walked back) |
+| **Event inspector & Event gallery:** Ctrl/⌘+S | Save the complete project through the same writer as File ▸ Save Project (docked inspector: File ▸ Save Project itself) |
 | **Event inspector & Event gallery:** Ctrl/⌘+Shift+S | Save the complete project under a new name |
 | Ctrl/⌘+Shift+R | Show / hide the Results panel (event table, Summary, Fits, Quality) |
 | **Event table:** j / k | Next / previous row |

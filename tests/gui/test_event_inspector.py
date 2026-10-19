@@ -1444,25 +1444,32 @@ def test_the_curation_bar_fits_a_1512_px_display(qapp, qtbot, tmp_path):
     try:
         session, doc_id, ch = _session_with_doc(tmp_path)
         insp = _inspector(qtbot, session)
-        assert insp.minimumSizeHint().width() <= 1100
+        # Updated (change C): the rows now fit a docked 460 px column, so the bound is that
+        # column, not the 1512 px display.
+        assert insp.minimumSizeHint().width() <= 460
 
         insp.set_events(doc_id, ch, _events_for(session, doc_id, ch).df)
         assert insp._accept_btn.isVisibleTo(insp) and insp._reject_btn.isVisibleTo(insp)
-        assert insp.minimumSizeHint().width() <= 1100, \
-            "with every control shown the window must still fit a 1512 px display"
+        assert insp.minimumSizeHint().width() <= 460, \
+            "with every control shown the window must still fit a docked column"
 
         # The per-event gestures sit with the per-event navigation, never behind the batch
-        # buttons: same layout row as Prev, a different one from 'Accept all'.
+        # buttons: same toolbar row as Prev, a different one from 'Accept all' -- in both of
+        # the toolbar's arrangements.
         def _row_of(w):
-            for i in range(insp.centralWidget().layout().count()):
-                item = insp.centralWidget().layout().itemAt(i)
-                lay = item.layout()
-                if lay is not None and lay.indexOf(w) >= 0:
+            for i in range(insp._toolbar_rows.count()):
+                if insp._toolbar_rows.itemAt(i).layout().indexOf(w) >= 0:
                     return i
             return None
 
-        assert _row_of(insp._accept_btn) == _row_of(insp._prev_btn)
-        assert _row_of(insp._accept_btn) != _row_of(insp._accept_all_btn)
+        for wide in (False, True):
+            insp._arrange_toolbar(wide)
+            assert _row_of(insp._accept_btn) == _row_of(insp._prev_btn) is not None
+            assert _row_of(insp._accept_btn) != _row_of(insp._accept_all_btn)
+            assert _row_of(insp._accept_all_btn) is not None
+        insp._arrange_toolbar(False)
+        for i in range(insp._toolbar_rows.count()):
+            assert insp._toolbar_rows.itemAt(i).layout().minimumSize().width() <= 436
     finally:
         qapp.setFont(old_font)
 

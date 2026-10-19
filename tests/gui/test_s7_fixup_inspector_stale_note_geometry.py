@@ -136,11 +136,17 @@ def test_the_staleness_flip_leaves_the_plot_the_readout_box_and_the_window_where
     stale = _geometry(insp)
     assert stale == clean, f"the badge moved the window:\n  {clean}\n  {stale}"
     assert clean_lines == 10, clean_lines
-    # ...while the disclosure is fully there: the sentence in the note, whole and shown
-    # whole (nothing elided at this width), and the per-line marks in the readout.
+    # ...while the disclosure is fully there: the sentence in the note, and the per-line
+    # marks in the readout. Updated (change C): the note is a one-line chip, so a sentence
+    # longer than the line shows its head and carries the whole in its tooltip.
     assert insp.stale_note() == note
-    assert QtWidgets.QLabel.text(insp._stale_label) == f"⚠ {note}"
-    assert insp._stale_label.toolTip() == ""
+    shown = QtWidgets.QLabel.text(insp._stale_label)
+    if shown == f"⚠ {note}":
+        assert insp._stale_label.toolTip() == ""
+    else:
+        assert shown.endswith(" …") and f"⚠ {note}".startswith(shown[:-2]), shown
+        assert insp._stale_label.toolTip() == f"⚠ {note}"
+    assert insp._details_btn.text().startswith("⚠ ") and note in insp._details_btn.toolTip()
     assert insp._readout.text().count("\n") + 1 == clean_lines, insp._readout.text()
     assert "⚠ " not in insp._readout.text(), "the sentence is a note, not readout lines"
     depth_line = next(l for l in insp._readout.text().splitlines() if l.startswith("median depth:"))
@@ -157,7 +163,8 @@ def test_the_staleness_flip_leaves_the_plot_the_readout_box_and_the_window_where
 def test_at_the_default_size_the_window_itself_does_not_grow_when_the_badge_arrives(
         qapp, qtbot, tmp_path):
     """CW-2's second measurement: at the window's default size the top-level window grew
-    640 -> 653 px when the sentence arrived -- the readout's sizeHint pushed the frame."""
+    640 -> 653 px when the sentence arrived -- the readout's sizeHint pushed the frame.
+    (Updated, change C: the default size is now 1100x860; the invariant is the same.)"""
     insp = _shown_inspector(qtbot, tmp_path, None)
     clean = _geometry(insp)
     _flip(insp, qtbot, REMEASURED_COLUMNS, NOTE_BASELINE)
@@ -209,7 +216,8 @@ def test_a_sentence_longer_than_the_reserved_lines_is_elided_from_the_head_with_
     assert note.height() == reserved
 
     # Widened, the same sentence fits and is shown whole; the tooltip stands down.
-    host.resize(1400, 120)
+    # (Updated, change C: one reserved line, so "wide enough" is the sentence's own width.)
+    host.resize(note.fontMetrics().horizontalAdvance(f"⚠ {NOTE_PREDATES}") + 40, 120)
     qtbot.wait(30)
     assert QtWidgets.QLabel.text(note) == f"⚠ {NOTE_PREDATES}"
     assert note.toolTip() == ""

@@ -2,7 +2,7 @@
   {
     "key": "menus",
     "area": "Menu bar, navigation, project and recovery controls",
-    "summary": "The five menus are File, Edit, View, Analysis and Help. Analysis is organized into Detect, Curate, Explore this recording, Compare recordings and Export. Analysis home and the launcher provide named routes into the shared Analysis Explorer; Event inspector and Event gallery remain dedicated curation surfaces. Enabled actions depend on the selected source, sample rate, stored results and optional dependencies. The status bar reports cursor/sample-rate context, analysis progress and calibration warnings. This maintained control reference covers reviewed workflows, not an exhaustive census of every dynamically generated control.",
+    "summary": "The six menus are File, Edit, View, Analysis, Window and Help. Analysis is organized into Detect, Curate, Explore this recording, Compare recordings and Export. Analysis home and the launcher provide named routes into the shared Analysis Explorer; Event inspector and Event gallery remain dedicated curation surfaces. Enabled actions depend on the selected source, sample rate, stored results and optional dependencies. The status bar reports cursor/sample-rate context, analysis progress and calibration warnings. This maintained control reference covers reviewed workflows, not an exhaustive census of every dynamically generated control.",
     "opened_by": "Menu bar and status bar are always available; on macOS the menu bar is at the top of the screen. Analysis home is available from Analysis and Help. Sources: nanoscope/gui/main_window.py, analysis_catalog.py, analysis_home.py, analysis_explorer.py, build_info_dialog.py; project persistence: nanoscope/core/project.py.",
     "gotchas": [
       "Actions are gated by their actual inputs, not one universal detection prerequisite. Noise needs current and a sample rate; I-V needs current/voltage observations; event pages need stored results. Analysis home, Figure Library and Help remain available to explain requirements. Optional ML availability depends on the installed model/runtime.",
@@ -782,6 +782,34 @@
         "group": "Analysis",
         "what_it_does": "Open the analysis catalogue and input requirements.",
         "notes": "Navigation itself does not run a scientific analysis. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
+      },
+      {
+        "label": "Bring All to Front",
+        "kind": "menu-action",
+        "group": "Window",
+        "what_it_does": "Raises every open NanoScope window above other applications' windows; the window you were working in keeps the keyboard.",
+        "notes": "No shortcut (⌘M is Add measurement to list)."
+      },
+      {
+        "label": "Event inspector / Event gallery / Analysis Explorer / Figure Library",
+        "kind": "menu-action",
+        "group": "Window",
+        "what_it_does": "One entry per window NanoScope opens, checked while it is on screen. Choosing one opens it or brings it forward through its own opener (the same as Analysis ▸ Event inspector… / Event gallery…), so it is re-fed exactly as the menu item would. The inspector's entry reads 'Event inspector — docked' while it is docked; the main window is listed by its title.",
+        "notes": "Under Analysis Explorer, one indented entry per page the Explorer has open brings it forward on that page. Guided first analysis, About NanoScope, the Incubation study launcher and the Original Zn reference recipe are listed once they have been opened this session."
+      },
+      {
+        "label": "Dock Event inspector beside the trace",
+        "kind": "menu-action",
+        "group": "Window",
+        "what_it_does": "Checked: the Event inspector is a tab in the main window's right column, beside the Inspector panel and the trace. Unchecked: it opens as its own window (the default). The same as the inspector's own Dock beside trace / Own window button; remembered between sessions.",
+        "notes": "An open inspector moves and stays open; a closed one opens in the chosen place next time."
+      },
+      {
+        "label": "Reset Window Layout…",
+        "kind": "menu-action",
+        "group": "Window",
+        "what_it_does": "After asking, puts the File manager, Inspector and Results panels back where and how wide they open on a first launch, returns the Event inspector to its own window and its Details to their defaults, and forgets every remembered window size and place. Open windows stay open; the analysis is not changed.",
+        "notes": "The main window's own size and place are unchanged."
       },
       {
         "label": "Guided first analysis…",
@@ -2990,14 +3018,14 @@
         "kind": "menu-action",
         "group": "Menu bar ▸ Analysis ▸ Curate",
         "what_it_does": "Opens the Event Inspector window: 'Step through the detected events one at a time: see each event's raw waveform with its baseline/level/boundaries and accept/reject it. Curation flows back to the table, the trace, the summary and the exports.'",
-        "notes": "DISABLED until the currently selected recording+channel has a detection — run detection (or the ML detector) first. Ctrl+I opens the Inspector. Only ever one Inspector window: choosing it again re-focuses the existing one and re-feeds it the current detection. The menu item is written '&Event inspector…' in source, so the underlined mnemonic is E.",
+        "notes": "DISABLED until the currently selected recording+channel has a detection — run detection (or the ML detector) first. Ctrl+I opens the Inspector. Only ever one Inspector — in its own window (the default) or docked beside the trace (Window ▸ Dock Event inspector beside the trace): choosing it again re-focuses it and re-feeds it the current detection. The menu item is written '&Event inspector…' in source, so the underlined mnemonic is E.",
         "shortcut": "Ctrl+I"
       },
       {
-        "label": "◀ Prev",
+        "label": "◀",
         "kind": "button",
         "group": "Event Inspector — navigation bar",
-        "what_it_does": "Goes to the previous event in the current filter (←).",
+        "what_it_does": "Goes to the previous event in the current filter (←). Its accessible name is 'Previous event'.",
         "shortcut": "←",
         "notes": "Disabled when you are already on the first event of the subset, and when the subset is empty. If you just curated the displayed event out of the subset (e.g. rejected it while viewing 'Accepted only'), this snaps to the nearest remaining event behind it."
       },
@@ -3018,10 +3046,10 @@
         "correction": "QLabel(\"of 0\") — a read-only caption, not a combo box. Its text is rewritten to f\"of {n}\" (e.g. \"of 412\") whenever the filter subset changes; \"of 0\" is only the empty state. event_inspector.py:187, 1007, 1013."
       },
       {
-        "label": "Next ▶",
+        "label": "▶",
         "kind": "button",
         "group": "Event Inspector — navigation bar",
-        "what_it_does": "Goes to the next event in the current filter (→).",
+        "what_it_does": "Goes to the next event in the current filter (→). Its accessible name is 'Next event'.",
         "shortcut": "→",
         "notes": "Disabled when you are on the last event of the subset, and when the subset is empty."
       },
@@ -3153,9 +3181,15 @@
         "label": "Event",
         "kind": "table",
         "group": "Event Inspector — readout",
-        "what_it_does": "The group box under the waveform holding the full per-event numbers in a fixed-width font. Its text is selectable so you can copy a value out.",
-        "notes": "Group box title is the single word 'Event'. In the empty state it shows the same message as the plot, e.g. 'No detection — run detection to browse events.'",
-        "correction": "setPrefix(\"Event \") — trailing space; the visible text is \"Event 3\" (the i-th event of the current filter subset, 1-based), not \"Event\". It is disabled and shows 0 when the subset is empty. event_inspector.py:183, 1004-1012."
+        "what_it_does": "The group box under the waveform holding the full per-event numbers in a fixed-width font. Its text is selectable so you can copy a value out. Details ▾ / ▸ shows or hides it (hidden by default when the inspector is docked, shown in its own window); drag the bar between it and the waveform to share the height, and it scrolls when given less room than its lines.",
+        "notes": "Group box title is the single word 'Event'. Its first line is reserved for the staleness chip: one line, the head of the sentence, the whole of it in the tooltip. Docked, that line is given back while nothing is stale, and median depth and dI/I0 come right after the event's own line. In the empty state it shows the same message as the plot, e.g. 'No detection — run detection to browse events.'"
+      },
+      {
+        "label": "Details ▾ / Details ▸",
+        "kind": "button",
+        "group": "Event Inspector — readout",
+        "what_it_does": "Shows (▾) or hides (▸) the Event readout under the waveform. Hidden, the waveform takes the room; its title keeps depth and dI/I0 whole (the event number and dwell too when they fit; hover the title for all of it). Shown or hidden is remembered separately for the docked inspector and the windowed one.",
+        "notes": "Sits at the right of the bar under the waveform, at a fixed height: neither it nor the waveform's top-left moves when it is toggled. While the numbers are stale it reads '⚠ Details' and its tooltip carries the staleness sentence."
       },
       {
         "label": "Event 12    [3 of 412 · All]",
@@ -3286,23 +3320,23 @@
       },
       {
         "group": "Event Inspector",
-        "kind": "dock",
+        "kind": "window",
         "label": "NanoScope — Event inspector",
-        "what_it_does": "The title bar of the inspector itself — it is a separate top-level window (QMainWindow), not a dock or a tab inside the main window. Opened from Analysis ▸ Event inspector…, it opens at 780×640 and there is only ever one; re-invoking the menu action re-focuses the existing window. Source: setWindowTitle(\"NanoScope — Event inspector\") at event_inspector.py:140.",
+        "what_it_does": "The title bar of the inspector itself while it is its own window (a QMainWindow, the default host). Opened from Analysis ▸ Event inspector…, it opens at 1100×860 (fitted to the screen) or where it was last left, and there is only ever one; re-invoking the menu action re-focuses it. Docked beside the trace (Dock beside trace on its toolbar, or Window ▸ Dock Event inspector beside the trace) the same window becomes the 'Event inspector' tab beside the Inspector panel, and its title is not shown — the main window's title carries the unsaved mark. Source: setWindowTitle(\"NanoScope — Event inspector\") in event_inspector.py.",
         "from_crosscheck": true
       },
       {
         "group": "Event Inspector — keyboard",
         "kind": "button",
         "label": "←",
-        "what_it_does": "Left-arrow key: same as ◀ Prev — steps back one event within the current Filter subset. It is a window-wide shortcut (Qt.WindowShortcut), so it fires wherever the focus is inside the inspector, including while the Event spin box has focus. Source: event_inspector.py:297.",
+        "what_it_does": "Left-arrow key: same as ◀ — steps back one event within the current Filter subset. It fires while the focus is anywhere inside the inspector (a WidgetWithChildren shortcut), in its own window or docked, including while the Event spin box or a combo has focus; with the focus elsewhere in the main window it does nothing here. Source: event_inspector.py _install_shortcuts.",
         "from_crosscheck": true
       },
       {
         "group": "Event Inspector — keyboard",
         "kind": "button",
         "label": "→",
-        "what_it_does": "Right-arrow key: same as Next ▶ — steps forward one event within the current Filter subset. Window-wide shortcut, fires wherever the focus is inside the inspector. Source: event_inspector.py:298.",
+        "what_it_does": "Right-arrow key: same as ▶ — steps forward one event within the current Filter subset. It fires while the focus is anywhere inside the inspector (a WidgetWithChildren shortcut), in its own window or docked, including while the Event spin box or a combo has focus; with the focus elsewhere in the main window it does nothing here. Source: event_inspector.py _install_shortcuts.",
         "from_crosscheck": true
       },
       {
@@ -3384,7 +3418,7 @@
         "label": "Label:",
         "kind": "combo",
         "group": "Event Inspector — curation",
-        "what_it_does": "The palette entry the Label row's Apply writes onto the event on screen, and whose key Clear removes. The row sits at the bottom right of the Event box. Edit the palette under Analysis ▸ Event labels….",
+        "what_it_does": "The palette entry the Label row's Apply writes onto the event on screen, and whose key Clear removes. The row sits at the left of the bar under the waveform, so it stays on screen when Details hides the readout. Edit the palette under Analysis ▸ Event labels….",
         "notes": "HIDDEN until an event is displayed (like Accept / Reject), and DISABLED until a palette exists. 1–9 and custom label keys do the same from the keyboard."
       },
       {
@@ -3422,6 +3456,13 @@
         "group": "Event Inspector — navigation",
         "what_it_does": "Pan the waveform view left/right by half a window, to inspect the trace before/after the event.",
         "notes": "A pure VIEW move: the event mask, the table and the readout are untouched, and the next Prev/Next re-centres as always. Buttons rather than drag because the movable mask region owns the drag gesture over the middle of the view — dragging there resizes/moves the mask, not the view. DISABLED until an event is displayed."
+      },
+      {
+        "label": "Dock beside trace / Own window",
+        "kind": "button",
+        "group": "Event Inspector — navigation",
+        "what_it_does": "Moves the Event inspector between its own window (the default) and a tab in the main window's right column, beside the Inspector panel and the trace — the same window, with its event, filter and context kept. The choice is remembered; Window ▸ Dock Event inspector beside the trace does the same.",
+        "notes": "Docked, it may be dragged to the left column but not above or below the trace; its tab's ✕ closes it (Ctrl+I reopens it). In a short column the part under its toolbar scrolls rather than pushing the main window past the screen. Docked, Ctrl/⌘+S, ⇧⌘S, ⌘Z and ⇧⌘Z are the main window's File and Edit items themselves, a click anywhere in it gives it the keyboard, clicking its tab takes the keyboard out of the panel that went behind, and when its tab goes behind the Inspector panel the keyboard moves to the trace; Tab skips whichever of the two is behind."
       },
       {
         "label": "Gallery…",

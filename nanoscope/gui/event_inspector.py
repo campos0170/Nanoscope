@@ -1,6 +1,7 @@
 """The Event Inspector / Browser: step through detected events one at a time.
 
-A standalone top-level window (opened from ``Analysis ▸ Event inspector…``) that
+Opened from ``Analysis ▸ Event inspector…`` and hosted by MainWindow either as its own
+top-level window (the default) or docked beside the trace (:meth:`set_host`), it
 shows ONE event's measurement waveform at a time — the recorded conditioning of
 the calibrated current around ``[start_idx, end_idx)``. The baseline and equivalent
 amplitude level share that domain. Opt-in amplitude curation is stored separately
@@ -31,6 +32,8 @@ Signals:
         shared ledger only. No data signal will fire, so the owner repaints the other
         two surfaces' notes off this one.
     saveProjectRequested() / saveProjectAsRequested(): ask MainWindow to save the project.
+    hostToggleRequested(): the "Dock beside trace" / "Own window" button; MainWindow
+        moves this same window between its two hosts.
 """
 
 from __future__ import annotations
@@ -88,6 +91,7 @@ from ..core.session import Session
 from .overlays import STEP_LEVEL_HEX
 from .trace_view import ChannelPane
 from .event_amplitude_controls import EventAmplitudeControls
+from .inspector_widgets import PinnedActions
 
 __all__ = ["EventInspectorWindow"]
 
@@ -127,17 +131,42 @@ _CONTEXT_CHOICES: tuple[tuple[str, float | None], ...] = (
 #: unbounded listing grows the window past the height of the plot it sits above.
 _MAX_LEVEL_LINES = 8
 #: Lines the Event box RESERVES for the staleness sentence, empty or not -- see
-#: _FixedLinesNote. Three, measured: at this window's minimum width (1008 px; the box is
-#: 976 px inside) the banner's two open-pore sentences (342 and 427 characters) wrap to
-#: three lines and the calibration one to one. Fixed, so the sentence's arrival -- or
-#: its clearing -- never changes the box's height, and the plot above keeps its geometry.
-_STALE_NOTE_LINES = 3
+#: _FixedLinesNote. One: a chip whose head is the sentence and whose tooltip is all of it.
+#: The window now docks in a 460 px column, where the banner's sentences (342 and 427
+#: characters) would need eight lines; each stale number keeps its own ⚠ in the readout,
+#: and the Details button carries the ⚠ while the readout is hidden.
+_STALE_NOTE_LINES = 1
 _PAD_SAMPLES_FALLBACK = 200  # rate-unknown (legacy-TDMS): the axis is samples, so pad in samples
-#: The waveform's minimum height.
-_PLOT_MIN_H = 300
+#: The waveform's minimum size. Small enough for the window to dock beside the trace with
+#: the readout shown; the readout is what gives way first (it scrolls), then this.
+_PLOT_MIN_W = 240
+_PLOT_MIN_H = 180
 #: The progress line's floor in the status bar: room for "End of Unreviewed · 868 earlier
 #: (⌘U)" and the reviewed count, however long the project label beside it is.
 _PROGRESS_MIN_W = 330
+#: ...and docked, where the bar holds only First unreviewed, the line and Save, in a
+#: column that may be 460 px wide. The line elides; its tooltip keeps all of it.
+_PROGRESS_MIN_W_DOCKED = 150
+
+#: The two hosts MainWindow can give this one window (see :meth:`EventInspectorWindow.set_host`).
+_HOST_WINDOW = "window"
+_HOST_DOCK = "dock"
+#: Whether the readout (Details) shows in each host when nothing was remembered: docked the
+#: column is narrow and tall, so the waveform takes the room; as a window there is room for both.
+_DETAILS_DEFAULT = {_HOST_WINDOW: True, _HOST_DOCK: False}
+#: The size the window opens at when nobody has said otherwise: wide enough for the
+#: two-row toolbar (see EventInspectorWindow._sync_toolbar).
+_WINDOW_DEFAULT_SIZE = (1100, 860)
+#: Space between the toolbar's widgets, stated so the arrangement's width can be computed.
+_TOOLBAR_SPACING = 6
+#: The root layout's margins.
+_ROOT_MARGIN = 6
+#: Docked, how short the body under the toolbar may get before it scrolls instead (see
+#: _BodyScroll). Small enough that every amplitude method, note and Details state fits a
+#: side column under the File manager on a 1280x800 screen.
+_DOCKED_BODY_MIN_H = 200
+#: Readout lines that stay in view at the Details pane's smallest.
+_READOUT_MIN_LINES = 3
 
 #: Samples of slack between the VIEW and the LOADED WINDOW before the view is treated as asking
 #: for more data. A view range round-trips through the time axis and back to an index, and a
@@ -586,10 +615,8 @@ class _FixedLinesNote(QtWidgets.QLabel):
 
     Longer than the reserved lines at the current width, the sentence is shown from the
     head with its tail replaced by "…" and the whole of it in the tooltip: show the head
-    and say what was withheld, as :meth:`EventInspectorWindow._level_lines` does. That
-    case is a backstop, not the expectation -- at this window's minimum width the box is
-    976 px wide and the banner's longest sentence (427 characters) wraps to exactly the
-    three reserved lines (see ``_STALE_NOTE_LINES``).
+    and say what was withheld, as :meth:`EventInspectorWindow._level_lines` does. For the
+    staleness chip (one line, ``_STALE_NOTE_LINES``) that is the normal case.
 
     :meth:`text` returns the FULL sentence; what is painted is what fitted.
     """
@@ -771,31 +798,19 @@ class _ReadoutLabel(QtWidgets.QLabel):
     """The mono per-event readout. Its text never sets the window's width.
 
     A line longer than its room ends in "…" (keeping a trailing stale mark), and the
-    tooltip then carries the whole readout. The corner widget -- the Label row -- sits
-    at the bottom-right; only the lines beside it lose the room it takes, so it never
-    covers text and a long line can neither widen the window nor slide it sideways.
-    :meth:`set_spare_lines` reserves height for a line that may come and go (the labels
-    line), so a label write never resizes the box. :meth:`text` returns the full text.
+    tooltip then carries the whole readout, so a long line can neither widen the window
+    nor slide anything sideways. :meth:`set_spare_lines` reserves height for a line that
+    may come and go (the labels line), so a label write never resizes the box.
+    :meth:`text` returns the full text.
     """
-
-    _GAP = 12
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__("", parent)
         self._full = ""
         self._spare = 0
-        self._corner: QtWidgets.QWidget | None = None
         self.setTextFormat(Qt.PlainText)
         self.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-
-    def set_corner(self, widget: QtWidgets.QWidget, min_chars: int = 24) -> None:
-        self._corner = widget
-        widget.setParent(self)
-        widget.installEventFilter(self)
-        self.setMinimumWidth(widget.sizeHint().width() + self._GAP
-                             + self.fontMetrics().horizontalAdvance("M" * int(min_chars)))
-        self._place_corner()
 
     def setText(self, text: str) -> None:  # noqa: N802 (Qt override)
         self._full = str(text)
@@ -808,48 +823,22 @@ class _ReadoutLabel(QtWidgets.QLabel):
         """Blank lines painted after the text (and counted in its height), not in it."""
         self._spare = max(int(n), 0)
 
-    def _line_step(self) -> int:
-        fm = self.fontMetrics()
-        return max(fm.lineSpacing(), fm.height())
-
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
-        self._place_corner()
+        self._fit()
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802 (Qt override)
         super().changeEvent(event)
         if event.type() == QtCore.QEvent.Type.FontChange:
             self._fit()
 
-    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
-        if obj is self._corner and event.type() in (
-                QtCore.QEvent.Type.Show, QtCore.QEvent.Type.Hide,
-                QtCore.QEvent.Type.LayoutRequest):
-            self._place_corner()
-        return super().eventFilter(obj, event)
-
-    def _place_corner(self) -> None:
-        c = self._corner
-        if c is not None:
-            size = c.sizeHint()
-            r = self.contentsRect()
-            c.setGeometry(r.right() + 1 - size.width(), r.bottom() + 1 - size.height(),
-                          size.width(), size.height())
-        self._fit()
-
     def _fit(self) -> None:
         fm = self.fontMetrics()
-        r = self.contentsRect()
-        c = self._corner
-        beside = c is not None and not c.isHidden()
-        step = self._line_step()
         # A few px of slack: the selectable label lays text out through a text document.
-        wide = r.width() - 4
-        narrow = (c.geometry().left() - self._GAP - r.left()) if beside else wide
+        room = self.contentsRect().width() - 4
         shown, cut = [], False
-        for i, line in enumerate(self._full.split("\n")):
-            near = beside and r.top() + (i + 1) * step > c.geometry().top()
-            fitted = self._elide(fm, line, narrow if near else wide)
+        for line in self._full.split("\n"):
+            fitted = self._elide(fm, line, room)
             cut = cut or fitted != line
             shown.append(fitted)
         text = "\n".join(shown + [""] * (self._spare if self._full else 0))
@@ -866,6 +855,197 @@ class _ReadoutLabel(QtWidgets.QLabel):
             room -= fm.horizontalAdvance(_STALE_MARK)
             return fm.elidedText(head, Qt.ElideRight, max(room, 0)) + _STALE_MARK
         return fm.elidedText(line, Qt.ElideRight, max(room, 0))
+
+
+class _FittedTitle(pg.LabelItem):
+    """The waveform's title, never wider than the plot it titles.
+
+    pyqtgraph's LabelItem makes its minimum width the width of its text, and that minimum
+    reaches the PlotItem but not the view: in a 486 px docked column the title pushed the
+    PlotItem 13 px past the widget's right edge (267 px with an amplitude clause), cutting
+    that much off the waveform. Here the minimum is zero and a title longer than the room
+    is painted in the longest of its shorter forms (:meth:`set_forms`) that fits, cut only
+    between whole clauses -- never inside a number. ``text`` stays the whole title, and the
+    tooltip carries it whenever less is painted.
+    """
+
+    _full = ""
+    _shown: str | None = None
+    _applying = False
+    _forms_for = ""
+    _forms: tuple[str, ...] = ()
+
+    def set_forms(self, full: str, forms) -> None:
+        """Shorter forms of the title ``full`` (whole clauses, longest first), used while
+        the title shown is ``full``. Set before the title, so it is painted once."""
+        self._forms_for, self._forms = str(full), tuple(forms)
+        if self._full == self._forms_for:
+            self._apply(force=True)
+
+    def setText(self, text, **args) -> None:  # noqa: N802 (pyqtgraph override)
+        self._full = str(text)
+        self._apply(force=True, **args)
+
+    def _apply(self, *, force: bool = False, **args) -> None:
+        shown = self._full
+        room = self.rect().width() - 8
+        if shown and room > 0:
+            font = QtGui.QFont(self.item.font())
+            size = str(self.opts.get("size", ""))
+            if size.endswith("pt"):
+                font.setPointSizeF(float(size[:-2]))
+            fm = QtGui.QFontMetricsF(font)
+            forms = (shown, *(self._forms if self._forms_for == shown else ()))
+            # Measured as drawn: the label is HTML, which collapses runs of spaces.
+            fitting = next((f for f in forms if fm.horizontalAdvance(" ".join(f.split())) <= room),
+                           None)
+            shown = fitting if fitting is not None else self._clauses_that_fit(fm, forms[-1], room)
+        if shown == self._shown and not force:
+            return
+        self._shown = shown
+        self._applying = True
+        try:
+            super().setText(shown, **args)
+        finally:
+            self._applying = False
+        self.text = self._full
+        self.setToolTip(self._full if shown != self._full else "")
+
+    @staticmethod
+    def _clauses_that_fit(fm: QtGui.QFontMetricsF, title: str, room: float) -> str:
+        clauses = [c.strip() for c in title.split("·")]
+        for n in range(len(clauses) - 1, 0, -1):
+            head = " · ".join(clauses[:n]) + " …"
+            if fm.horizontalAdvance(head) <= room:
+                return head
+        return fm.elidedText(clauses[0], Qt.ElideRight, room)
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(ev)
+        if not self._applying and self._full:
+            self._apply()
+
+    def updateMin(self) -> None:  # noqa: N802 (pyqtgraph override)
+        super().updateMin()
+        self.setMinimumWidth(0)
+        hint = self._sizeHint.get(Qt.SizeHint.MinimumSize)
+        if hint is not None:
+            self._sizeHint[Qt.SizeHint.MinimumSize] = (0, hint[1])
+
+
+def _fit_title(plot: pg.PlotItem) -> None:
+    """Swap ``plot``'s title label for a :class:`_FittedTitle`, once, at construction."""
+    old = plot.titleLabel
+    plot.layout.removeItem(old)
+    old.setParentItem(None)
+    if old.scene() is not None:
+        old.scene().removeItem(old)
+    title = _FittedTitle("", size="11pt", parent=plot)
+    plot.layout.addItem(title, 0, 1)
+    plot.titleLabel = title
+    plot.setTitle(None)
+
+
+def _fmt_dwell(dwell_us) -> str:
+    """A dwell in the unit that keeps it short ("16.4 ms", not "1.642e+04 µs")."""
+    try:
+        us = float(dwell_us)
+    except (TypeError, ValueError):
+        return "—"
+    if not np.isfinite(us):
+        return "—"
+    for scale, unit in ((1e6, "s"), (1e3, "ms")):
+        if abs(us) >= scale:
+            return f"{us / scale:.3g} {unit}"
+    return f"{us:.3g} µs"
+
+
+class _BodyLayout(QtWidgets.QVBoxLayout):
+    """The body's layout, which does not offer height-for-width to the scroll area above.
+
+    Its wrapped notes make it height-for-width, and a QScrollArea then sizes its content to
+    the PREFERRED height for the width (the waveform's size hint), not to the room it has:
+    measured, the body scrolled 140 px in a column it fitted. Inside, the wrapped notes
+    still get their height for the width."""
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt override)
+        return False
+
+
+class _BodyScroll(QtWidgets.QScrollArea):
+    """Everything between the toolbar and the Label / Details bar.
+
+    In its own window this never scrolls: its minimum is its content's. Docked it may be
+    shorter than that and scrolls, so the interval or manual amplitude rows, a level note
+    and Details can never force the main window taller than the screen (measured: docked
+    under the File manager they pushed the status bar 20-98 px off a 1512x900 screen).
+    """
+
+    def __init__(self, content: QtWidgets.QWidget) -> None:
+        super().__init__()
+        self._floored = True
+        self._content_min = QtCore.QSize()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setWidget(content)
+
+    def set_floored(self, on: bool) -> None:
+        if bool(on) != self._floored:
+            self._floored = bool(on)
+            self.updateGeometry()
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt override)
+        content = self.widget()
+        hint = content.minimumSizeHint()
+        height = max(hint.height(), content.minimumHeight())
+        if not self._floored:
+            height = min(height, _DOCKED_BODY_MIN_H)
+        return QtCore.QSize(hint.width(), height)
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt override)
+        return self.widget().sizeHint()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._fit_content()
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        if event.type() == QtCore.QEvent.Type.LayoutRequest and obj is self.widget():
+            self._fit_content()
+        return super().eventFilter(obj, event)
+
+    def _fit_content(self) -> None:
+        """Keep the content as tall as its rows need at this width. The layout's own
+        minimum counts a wrapped note at its widest, so in a narrow column the waveform
+        and the readout were squeezed below theirs and overlapped. And the layout above
+        caches this widget's minimum, while QScrollArea re-fits its content only on a
+        resize: both are told when it changes."""
+        content = self.widget()
+        need = self._rows_height(content.layout(), self.viewport().width())
+        hint = content.minimumSizeHint()
+        if need == content.minimumHeight() and hint == self._content_min:
+            return
+        self._content_min = hint
+        content.setMinimumHeight(need)
+        self.updateGeometry()
+        self.setWidgetResizable(True)          # re-runs QScrollArea's content fit
+
+    @staticmethod
+    def _rows_height(layout: QtWidgets.QLayout, width: int) -> int:
+        margins = layout.contentsMargins()
+        inner = max(width - margins.left() - margins.right(), 0)
+        total, shown = margins.top() + margins.bottom(), 0
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.isEmpty():
+                continue
+            height = item.minimumSize().height()
+            if item.hasHeightForWidth():
+                height = max(height, item.heightForWidth(inner))
+            total += height
+            shown += 1
+        return total + max(shown - 1, 0) * layout.spacing()
 
 
 def _widest_count(fm: QtGui.QFontMetrics, n: int) -> str:
@@ -937,6 +1117,17 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         first_unreviewed() -> int | None         # ⌘U / the First unreviewed button
         apply_label_current(key, value) / clear_label_current(key) # the Label row's writes
         progress_text() / filter_options()       # the progress line / the offered filters
+        set_host(host) / host()                  # MainWindow: "window" or docked ("dock")
+        details_shown() / set_details_shown(on)  # the readout (Details), per host
+        details_state() / restore_details_state(d)
+        request_undo()                           # this window's ⌘Z, from MainWindow's Undo
+
+    One instance, two hosts. MainWindow reparents it between its own top-level window and
+    a dock beside the trace; nothing is rebuilt. The toolbar is two rows when the window is
+    wide enough and five short ones otherwise (a docked column), in the same order.
+    Docked, the window gives up the shortcuts MainWindow already answers (Save, Save As,
+    Undo, Redo) so neither goes dead as an ambiguous pair, and a click anywhere in it takes
+    the keyboard (see :meth:`set_host`).
 
     The event region is MOVABLE: dragging either edge rewrites that event's
     ``[start_idx, end_idx]`` on the shared df and re-characterizes it (see
@@ -976,12 +1167,18 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
     redoRequested = Signal()
     # The user ticked/unticked "Advance after decision"; MainWindow mirrors it on the gallery.
     advanceAfterDecisionChanged = Signal(bool)
+    # "Dock beside trace" / "Own window": intent only; MainWindow moves this window.
+    hostToggleRequested = Signal()
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._session = session
         self.setWindowTitle("NanoScope — Event inspector")
-        self.resize(780, 640)
+        self.resize(*_WINDOW_DEFAULT_SIZE)
+        self._host = _HOST_WINDOW
+        self._details_shown = dict(_DETAILS_DEFAULT)
+        #: The detail splitter's sizes per host, kept for this session only.
+        self._detail_sizes: dict[str, list[int]] = {}
 
         # Installed detection. _df is the SAME object the EventTable edits (shared truth).
         self._doc_id: str | None = None
@@ -1072,33 +1269,38 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._install_curation_status()
         self._install_shortcuts()
         self._show_empty(_NO_DETECTION_MSG)
+        self._apply_details()
 
     # -- construction ----------------------------------------------------------------------------
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(_ROOT_MARGIN, _ROOT_MARGIN, _ROOT_MARGIN, _ROOT_MARGIN)
+        root.setSpacing(6)
 
         # -- navigation + curation bars --------------------------------------------------------
-        # TWO rows, not one (owner note, reported twice: "the curate window does not have a
-        # reject button, only a reject all" / "I still only see Accept all / Reject all and not
-        # the individual accept and reject"). The buttons were there and correctly wired the
-        # whole time; the single non-wrapping QHBoxLayout that held them measured 1475 px of
-        # minimum width on a 1512 px display, and Accept/Reject/Accepted were the LAST three
-        # widgets in it — so any Dock, any display scaling, any window not flush with the left
-        # edge pushed exactly those three off the right edge while leaving "Accept all" and
-        # "Reject all" (earlier in the row) visible. A QHBoxLayout does not wrap and offers no
-        # overflow affordance, so nothing said they existed. Splitting the row is the fix that
-        # cannot regress: PER-EVENT gestures on row 1 beside the per-event navigation, WHOLE-
-        # DETECTION gestures and the doors to the other surfaces on row 2.
-        bar = QtWidgets.QHBoxLayout()
-        bar2 = QtWidgets.QHBoxLayout()
-        self._prev_btn = QtWidgets.QPushButton("◀ Prev")
-        self._prev_btn.setToolTip("Previous event in the current filter (←).")
+        # SHORT rows (owner note, reported twice: "the curate window does not have a reject
+        # button, only a reject all"). The buttons were there and correctly wired the whole
+        # time; the single non-wrapping QHBoxLayout that held them measured 1475 px of minimum
+        # width on a 1512 px display, and Accept/Reject/Accepted were the LAST three widgets in
+        # it, so anything that narrowed the window pushed exactly those off the right edge.
+        # PER-EVENT gestures sit on the navigation row; every row fits a 440 px docked column,
+        # and the strip scrolls sideways rather than flooring a narrower one.
+        def _tool(text: str, tip: str, name: str = "") -> QtWidgets.QToolButton:
+            # A QToolButton is 30-70 px where a QPushButton is at least 80; StrongFocus so a
+            # click takes the keyboard into this window in either host.
+            btn = QtWidgets.QToolButton()
+            btn.setText(text)
+            btn.setToolTip(tip)
+            btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            btn.setFocusPolicy(Qt.StrongFocus)
+            if name:
+                btn.setAccessibleName(name)
+            return btn
+
+        self._prev_btn = _tool("◀", "Previous event in the current filter (←).", "Previous event")
         self._prev_btn.clicked.connect(self.prev_event)
-        self._next_btn = QtWidgets.QPushButton("Next ▶")
-        self._next_btn.setToolTip("Next event in the current filter (→).")
+        self._next_btn = _tool("▶", "Next event in the current filter (→).", "Next event")
         self._next_btn.clicked.connect(self.next_event)
 
         self._index_spin = QtWidgets.QSpinBox()
@@ -1144,13 +1346,13 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # already, but a state indicator is not an action affordance — the owner curated a
         # whole detection without finding either. Same handler as the keys, exactly: curate
         # the displayed event, do not navigate.
-        self._accept_btn = QtWidgets.QPushButton("Accept")
-        self._accept_btn.setToolTip(
+        self._accept_btn = _tool(
+            "Accept",
             "Accept this event (A). The button never moves on; with “Advance after "
             "decision” on, the A key moves to the next event of the filter.")
         self._accept_btn.clicked.connect(lambda: self.set_accepted_current(True))
-        self._reject_btn = QtWidgets.QPushButton("Reject")
-        self._reject_btn.setToolTip(
+        self._reject_btn = _tool(
+            "Reject",
             "Reject this event (R). The button never moves on; with “Advance after "
             "decision” on, the R key moves to the next event of the filter.")
         self._reject_btn.clicked.connect(lambda: self.set_accepted_current(False))
@@ -1171,15 +1373,15 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # movable mask region owns that drag — so the buttons are the reliable gesture;
         # each shifts the view by half its width. A pure view move: nothing is edited,
         # and the next Prev/Next re-centres as always.
-        self._pan_left_btn = QtWidgets.QPushButton("⟵")
-        self._pan_left_btn.setToolTip(
+        self._pan_left_btn = _tool(
+            "⟵",
             "Pan the view left by half a window to inspect the trace before this event. "
-            "View only — the event mask does not move.")
+            "View only — the event mask does not move.", "Pan left")
         self._pan_left_btn.clicked.connect(lambda: self._pan_view(-0.5))
-        self._pan_right_btn = QtWidgets.QPushButton("⟶")
-        self._pan_right_btn.setToolTip(
+        self._pan_right_btn = _tool(
+            "⟶",
             "Pan the view right by half a window to inspect the trace after this event. "
-            "View only — the event mask does not move.")
+            "View only — the event mask does not move.", "Pan right")
         self._pan_right_btn.clicked.connect(lambda: self._pan_view(0.5))
 
         # HOW MUCH context to load around the event. _PAD_MS was unreachable from the UI, which
@@ -1246,44 +1448,77 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             "you have already judged. Reversed by ⌘Z in this window or Edit ▸ Undo.")
         self._reject_all_btn.clicked.connect(self.reject_all)
 
-        # Row 1 — THIS EVENT: where you are, how much of the recording you see around it, and
-        # the two gestures that judge it. Accept/Reject sit beside the navigation they are used
-        # with, never behind the batch buttons.
-        bar.addWidget(self._prev_btn)
-        bar.addWidget(self._index_spin)
-        bar.addWidget(self._count_label)
-        bar.addWidget(self._next_btn)
-        bar.addSpacing(8)
-        bar.addWidget(self._pan_left_btn)
-        bar.addWidget(self._pan_right_btn)
-        bar.addWidget(self._context_combo)
-        bar.addSpacing(16)
-        bar.addWidget(self._accept_btn)
-        bar.addWidget(self._reject_btn)
-        bar.addWidget(self._accept_check)
-        bar.addSpacing(8)
-        bar.addWidget(self._revert_btn)
-        bar.addStretch(1)
-        root.addLayout(bar)
+        # Where this window lives. Hidden until MainWindow hosts it (set_host): a standalone
+        # window has nobody to move it.
+        self._host_btn = _tool("Dock beside trace", "", "Event inspector host")
+        self._host_btn.setObjectName("inspectorHostToggle")
+        self._host_btn.setFocusPolicy(Qt.NoFocus)
+        self._host_btn.setMinimumWidth(max(
+            self._host_btn.fontMetrics().horizontalAdvance(t)
+            for t in ("Dock beside trace", "Own window")) + 18)
+        self._host_btn.clicked.connect(lambda _=False: self.hostToggleRequested.emit())
+        self._host_btn.setVisible(False)
 
-        # Row 2 — THE WHOLE DETECTION, and the doors out of this window.
-        bar2.addWidget(QtWidgets.QLabel("Filter:"))
-        bar2.addWidget(self._filter_combo)
-        bar2.addSpacing(12)
-        bar2.addWidget(self._advance_check)
-        bar2.addSpacing(12)
-        bar2.addWidget(self._gallery_btn)
-        bar2.addWidget(self._trace_btn)
-        bar2.addStretch(1)
-        bar2.addWidget(self._accept_all_btn)
-        bar2.addWidget(self._reject_all_btn)
-        bar2.addSpacing(12)
-        bar2.addWidget(self._merge_next_btn)
-        root.addLayout(bar2)
+        # Hidden until there is an event (see _sync_controls) -- keeping their room, so a
+        # neighbour never slides when the first event arrives.
+        for _w in (self._accept_btn, self._reject_btn, self._accept_check, self._revert_btn):
+            _policy = _w.sizePolicy()
+            _policy.setRetainSizeWhenHidden(True)
+            _w.setSizePolicy(_policy)
+
+        # TWO ARRANGEMENTS OF THE SAME WIDGETS, chosen by the room the window has (see
+        # _sync_toolbar): two long rows in a wide window, five short ones in a docked column
+        # or a narrow window. Both keep Accept/Reject on the navigation row, never behind the
+        # batch buttons. Narrow rows at 13 pt with 10 000 events: 435 / 366 / 434 / 427 /
+        # 361 px. The strip scrolls sideways rather than flooring anything narrower.
+        filter_label = QtWidgets.QLabel("Filter:")
+        self._toolbar_wide = (
+            (self._prev_btn, self._index_spin, self._count_label, self._next_btn, 8,
+             self._pan_left_btn, self._pan_right_btn, self._context_combo, 16,
+             self._accept_btn, self._reject_btn, self._accept_check, 8, self._revert_btn,
+             None, self._host_btn),
+            (filter_label, self._filter_combo, 12, self._advance_check, 12,
+             self._gallery_btn, self._trace_btn, None, self._accept_all_btn,
+             self._reject_all_btn, 12, self._merge_next_btn),
+        )
+        self._toolbar_narrow = (
+            (self._prev_btn, self._index_spin, self._count_label, self._next_btn, 8,
+             self._accept_btn, self._reject_btn, None),
+            (self._accept_check, self._revert_btn, self._merge_next_btn, None),
+            (self._pan_left_btn, self._pan_right_btn, self._context_combo, 8,
+             self._trace_btn, self._gallery_btn, None),
+            (filter_label, self._filter_combo, 8, self._accept_all_btn,
+             self._reject_all_btn, None),
+            (self._advance_check, None, self._host_btn),
+        )
+        toolbar_content = QtWidgets.QWidget()
+        self._toolbar_rows = QtWidgets.QVBoxLayout(toolbar_content)
+        self._toolbar_rows.setContentsMargins(0, 0, 0, 0)
+        self._toolbar_rows.setSpacing(2)
+        for _ in self._toolbar_narrow:
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(_TOOLBAR_SPACING)
+            self._toolbar_rows.addLayout(row)
+        self._toolbar_is_wide: bool | None = None
+        self._arrange_toolbar(wide=False)
+        self._toolbar = PinnedActions(toolbar_content)
+        self._toolbar.setObjectName("inspectorToolbar")
+        root.addWidget(self._toolbar)
+
+        # The notes, the amplitude rows, the waveform and the readout: docked, this part
+        # scrolls rather than flooring the column's height (see _BodyScroll).
+        body_content = QtWidgets.QWidget()
+        body = _BodyLayout(body_content)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(root.spacing())
+        self._body = _BodyScroll(body_content)
+        self._body.setObjectName("eventInspectorBody")
+        root.addWidget(self._body, 1)
 
         # LABEL THIS EVENT: the gallery's Label / Apply / Clear idiom, on the event on screen
-        # only. It sits in the readout's bottom-right corner (see _ReadoutLabel), which is
-        # empty at every width: a row of its own cost the waveform 38 px of height.
+        # only. It sits in the bar under the waveform (see _summary_bar), which stays on
+        # screen when the readout is hidden.
         self._label_row = QtWidgets.QWidget()
         self._label_row.setObjectName("labelRow")
         label_bar = QtWidgets.QHBoxLayout(self._label_row)
@@ -1292,27 +1527,30 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._label_combo = _ElidingCombo()
         self._label_combo.setSizeAdjustPolicy(
             QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._label_combo.setMinimumContentsLength(16)
+        self._label_combo.setMinimumContentsLength(9)
         self._label_combo.setFocusPolicy(Qt.NoFocus)
         self._label_combo.setToolTip(
             "The label Apply writes onto the event on screen, and whose KEY Clear removes "
             "from it. 1–9 (and any custom label keys) do the same from the keyboard. The "
             "list is the shared palette — edit it under Analysis ▸ Event labels….")
         label_bar.addWidget(self._label_combo)
-        self._label_apply_btn = QtWidgets.QPushButton("Apply")
-        self._label_apply_btn.setFocusPolicy(Qt.NoFocus)
-        self._label_apply_btn.setToolTip(
+        self._label_apply_btn = _tool(
+            "Apply",
             "Write the chosen label onto THIS event and record that a person reviewed it. "
             "Never moves on. Reversed by ⌘Z in this window or Edit ▸ Undo.")
+        self._label_apply_btn.setFocusPolicy(Qt.NoFocus)
         self._label_apply_btn.clicked.connect(self.apply_chosen_label)
         label_bar.addWidget(self._label_apply_btn)
-        self._label_clear_btn = QtWidgets.QPushButton("Clear")
-        self._label_clear_btn.setFocusPolicy(Qt.NoFocus)
-        self._label_clear_btn.setToolTip(
+        self._label_clear_btn = _tool(
+            "Clear",
             "Remove the chosen label's KEY from THIS event — its other labels and every "
             "flag stay. Never moves on.")
+        self._label_clear_btn.setFocusPolicy(Qt.NoFocus)
         self._label_clear_btn.clicked.connect(self.clear_chosen_label)
         label_bar.addWidget(self._label_clear_btn)
+        _policy = self._label_row.sizePolicy()
+        _policy.setRetainSizeWhenHidden(True)
+        self._label_row.setSizePolicy(_policy)
         self._sync_label_combo()
 
         # -- what the last curation gesture REFUSED ---------------------------------------
@@ -1327,7 +1565,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._batch_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._batch_note.setStyleSheet(f"color: {_MSG_HEX};")
         self._batch_note.setVisible(False)
-        root.addWidget(self._batch_note)
+        body.addWidget(self._batch_note)
 
         # -- why the SUB-STATE LEVELS are not on the waveform (F2) -------------------------
         # ITS OWN WIDGET, beside the refusal note rather than inside it. The two say
@@ -1347,22 +1585,26 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._level_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._level_note.setStyleSheet(f"color: {_MSG_HEX};")
         self._level_note.setVisible(False)
-        root.addWidget(self._level_note)
+        body.addWidget(self._level_note)
 
         self._amplitude = EventAmplitudeControls(self)
-        root.addWidget(self._amplitude)
+        body.addWidget(self._amplitude)
 
         # -- the waveform plot ----------------------------------------------------------------
         self._plot_widget = pg.PlotWidget()
-        self._plot_widget.setMinimumSize(480, _PLOT_MIN_H)
+        self._plot_widget.setMinimumSize(_PLOT_MIN_W, _PLOT_MIN_H)
         self._plot: pg.PlotItem = self._plot_widget.getPlotItem()
+        _fit_title(self._plot)
+        # The left axis label runs along the axis; shorter than it, the label is abbreviated.
+        self._axis_label: tuple[str, str, str | None] | None = None
+        self._axis_label_shown: str | None = None
+        self._plot.getAxis("left").geometryChanged.connect(self._fit_axis_label)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         # The MOUSE half of panning. The arrows load samples (see _pan_view); without this the
         # drag and the wheel would still run off into blank space exactly as they did before,
         # which is a worse inconsistency than having neither work. One handler serves both:
         # whatever moved the x range, the loaded window is widened to cover what is now framed.
         self._plot.getViewBox().sigXRangeChanged.connect(self._on_x_range_changed)
-        root.addWidget(self._plot_widget, 1)
 
         # Persistent plot items — created ONCE (four-step order via make_curve) and updated per
         # event; hidden in the empty state. The region is non-movable and ignoreBounds (an
@@ -1407,11 +1649,59 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         mono.setStyleHint(QtGui.QFont.Monospace)
         mono.setFamily("monospace")
         self._readout.setFont(mono)
-        # Bottom-right: the box's bottom edge is fixed (the readout grows upward, a labels
-        # line or a level table), and its right edge is the window's.
-        self._readout.set_corner(self._label_row)
         rlay.addWidget(self._readout)
-        root.addWidget(readout_box)
+        rlay.addStretch(1)
+        # The readout scrolls when the user gives it less room than its lines, so it never
+        # sets the window's minimum height.
+        self._readout_area = QtWidgets.QScrollArea()
+        self._readout_area.setObjectName("eventInspectorReadout")
+        self._readout_area.setWidgetResizable(True)
+        self._readout_area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._readout_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # At its smallest the pane still shows the box title and a few lines, not just the
+        # title (a 48 px floor showed none in a 1280x800 docked column).
+        frame, inner = readout_box.contentsMargins(), rlay.contentsMargins()
+        self._readout_area.setMinimumHeight(
+            frame.top() + frame.bottom() + inner.top() + inner.bottom()
+            + _READOUT_MIN_LINES * QtGui.QFontMetrics(mono).lineSpacing() + 2)
+        self._readout_area.setWidget(readout_box)
+
+        # Waveform over readout; the waveform takes what a resize adds.
+        self._detail_splitter = QtWidgets.QSplitter(Qt.Vertical)
+        self._detail_splitter.setObjectName("eventInspectorDetailSplitter")
+        self._detail_splitter.setChildrenCollapsible(False)
+        self._detail_splitter.addWidget(self._plot_widget)
+        self._detail_splitter.addWidget(self._readout_area)
+        self._detail_splitter.setStretchFactor(0, 1)
+        self._detail_splitter.setStretchFactor(1, 0)
+        self._detail_splitter.installEventFilter(self)
+        #: Hosts whose splitter has had its opening split (see _default_split).
+        self._split_defaulted: set[str] = set()
+        body.addWidget(self._detail_splitter, 1)
+
+        # Under the waveform, at a fixed height and never moving: the Label row and the
+        # Details toggle. Hiding the readout grows the waveform downward, so neither the
+        # toggle nor the plot's top-left moves.
+        self._details_btn = QtWidgets.QToolButton()
+        self._details_btn.setObjectName("eventInspectorDetails")
+        self._details_btn.setCheckable(True)
+        self._details_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._details_btn.setFocusPolicy(Qt.NoFocus)
+        self._details_btn.setAccessibleName("Details")
+        self._details_btn.setMinimumWidth(max(
+            self._details_btn.fontMetrics().horizontalAdvance(t)
+            for t in ("⚠ Details ▾", "⚠ Details ▸")) + 18)
+        self._details_btn.toggled.connect(self._on_details_toggled)
+        self._summary_bar = QtWidgets.QWidget()
+        self._summary_bar.setObjectName("eventInspectorSummary")
+        summary = QtWidgets.QHBoxLayout(self._summary_bar)
+        summary.setContentsMargins(0, 0, 0, 0)
+        summary.addWidget(self._label_row)
+        summary.addStretch(1)
+        summary.addWidget(self._details_btn)
+        self._summary_bar.setFixedHeight(max(self._label_row.sizeHint().height(),
+                                             self._details_btn.sizeHint().height()))
+        root.addWidget(self._summary_bar)
 
         self.setCentralWidget(central)
 
@@ -1565,10 +1855,12 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._stale_columns = cols
         self._stale_note = str(note)
         self._stale_label.setText(f"⚠ {self._stale_sentence()}" if cols else "")
+        self._sync_stale_line()
+        self._sync_details_btn()
         row = self._row_for_id(self._current_id)
         if row is not None and self._df is not None:
             self._refresh_readout(row)
-            self._plot.setTitle(self._event_title(self._df.iloc[row]))
+            self._set_event_title(self._df.iloc[row])
             self._render_event(row, preserve_view=True)
 
     def stale_columns(self) -> tuple[str, ...]:
@@ -1812,6 +2104,9 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         label = getattr(self, "_project_save_label", None)
         if prog is None or label is None:
             return
+        if label.isHidden():
+            prog.setMinimumWidth(min(prog.sizeHint().width(), _PROGRESS_MIN_W_DOCKED))
+            return
         fixed = (self._first_unreviewed_btn.sizeHint().width()
                  + self._curation_status.layout().spacing())
         avail = self._curation_status.width() + label.width() - fixed
@@ -1874,7 +2169,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         """
         self._shortcuts: list[QtGui.QShortcut] = []
 
-        def add(seq, slot, repeat: bool = True) -> None:
+        def add(seq, slot, repeat: bool = True) -> QtGui.QShortcut:
             sc = QtGui.QShortcut(QtGui.QKeySequence(seq), self)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             # Decision keys never auto-repeat: with Advance on, a held R would otherwise
@@ -1882,6 +2177,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             sc.setAutoRepeat(repeat)
             sc.activated.connect(slot)
             self._shortcuts.append(sc)
+            return sc
 
         add(Qt.Key_Left, self.prev_event)
         add(Qt.Key_Right, self.next_event)
@@ -1890,9 +2186,10 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         add(Qt.Key_Space, self.decide_toggle, repeat=False)
         add(Qt.Key_T, self._on_show_in_trace)
         add("Ctrl+U", self.first_unreviewed, repeat=False)
-        # ⌘Z / ⇧⌘Z here, on MainWindow's one stack (this window has no menu bar).
-        add("Ctrl+Z", self._request_undo)
-        add("Ctrl+Shift+Z", self.redoRequested.emit)
+        # ⌘Z / ⇧⌘Z here, on MainWindow's one stack (this window has no menu bar). Docked,
+        # MainWindow's own Undo / Redo answer instead (see set_host).
+        self._undo_shortcut = add("Ctrl+Z", self._request_undo)
+        self._redo_shortcut = add("Ctrl+Shift+Z", self.redoRequested.emit)
         # 1-9 label the browsed event from the shared palette (see analysis.labels). Same
         # digits, same meanings, as the gallery — a curator who learns them once uses them
         # in both places. Explicit non-digit keys are rebuilt by
@@ -1970,10 +2267,12 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 (Qt override)
         super().showEvent(event)
         self.advance_after_decision()        # the gallery may have changed the shared choice
+        self._sync_toolbar()
         self._share_status_bar()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
+        self._sync_toolbar()
         self._share_status_bar()
 
     # -- data in ---------------------------------------------------------------------------------
@@ -2165,7 +2464,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         Public for the same reason :meth:`refusal_note` is: a disclosure the suite can only
         reach through a private widget is one that can be silently stopped being rendered.
         """
-        return self._level_note.text() if self._level_note.isVisible() else ""
+        return self._level_note.text() if self._level_note.isVisibleTo(self) else ""
 
     def _bounds_of(self, event_id: int) -> tuple[int | None, int | None]:
         """``(start_idx, end_idx)`` for one event, or ``(None, None)`` when it is not in the
@@ -2342,6 +2641,263 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         Programmatic ``setFocus`` ignores the focus policy, and a child recorded here is the one
         Qt restores when the window is next activated."""
         self._plot_widget.setFocus(QtCore.Qt.OtherFocusReason)
+
+    # -- the toolbar's two arrangements ---------------------------------------------------------
+    def _arrange_toolbar(self, wide: bool) -> None:
+        """Lay the same widgets out as the wide (two-row) or narrow (five-row) toolbar."""
+        if wide == self._toolbar_is_wide:
+            return
+        spec = self._toolbar_wide if wide else self._toolbar_narrow
+        rows = [self._toolbar_rows.itemAt(i).layout()
+                for i in range(self._toolbar_rows.count())]
+        for row in rows:
+            while row.count():
+                row.takeAt(0)
+        for row, items in zip(rows, spec):
+            for item in items:
+                if item is None:
+                    row.addStretch(1)
+                elif isinstance(item, int):
+                    row.addSpacing(item)
+                else:
+                    row.addWidget(item)
+        self._toolbar_is_wide = wide
+        # Once the strip has taken its new height: re-arranged during a move between hosts
+        # (the window re-created as it is reparented), the rows otherwise kept the old
+        # strip's height and the second row fell out of sight.
+        QtCore.QTimer.singleShot(0, self, self._relayout_toolbar)
+
+    def _relayout_toolbar(self) -> None:
+        self._toolbar_rows.invalidate()
+        self._toolbar_rows.activate()
+
+    def _toolbar_need(self, spec) -> int:
+        """The width ``spec``'s widest row asks for (a small over-estimate is harmless:
+        the wide rows arrive a few pixels later)."""
+        need = 0
+        for items in spec:
+            total, gaps = 0, -1
+            for item in items:
+                if item is None:
+                    continue
+                if isinstance(item, int):
+                    total += item
+                elif item.isHidden() and not item.sizePolicy().retainSizeWhenHidden():
+                    continue
+                else:
+                    total += max(item.minimumWidth(), item.minimumSizeHint().width())
+                gaps += 1
+            need = max(need, total + _TOOLBAR_SPACING * max(gaps, 0))
+        return need
+
+    def _sync_toolbar(self) -> None:
+        """Two rows when they fit, five when they do not. Re-flows only when the window's
+        own width changes (the user's resize, a dock column's drag) or the counter widens."""
+        if getattr(self, "_toolbar_is_wide", None) is None:
+            return
+        room = self.width() - 2 * _ROOT_MARGIN
+        self._arrange_toolbar(room >= self._toolbar_need(self._toolbar_wide))
+
+    # -- the two hosts ---------------------------------------------------------------------------
+    def host(self) -> str:
+        return self._host
+
+    def set_host(self, host: str) -> None:
+        """Present this window for ``host``: ``"window"`` (its own top-level window) or
+        ``"dock"`` (a tab beside the trace). MainWindow does the reparenting; this changes
+        only what goes with it.
+
+        DOCKED, THE SHORTCUTS MAINWINDOW ALSO OWNS ARE GIVEN UP. Inside the main window this
+        window's Ctrl+S and MainWindow's both match while the focus is here, and Qt fires
+        neither of an ambiguous pair. So Save, Save As, Undo and Redo go to MainWindow's
+        actions, which run the same paths (Undo comes back through :meth:`request_undo`);
+        the Save button keeps working, and every curation key stays this window's.
+
+        DOCKED, A CLICK ANYWHERE IN IT TAKES THE KEYBOARD. A window gets that from being
+        activated and a dock does not: after a click on a label or a no-focus button the
+        keys would go wherever the focus was -- a detection parameter's spin box, say.
+        """
+        if host not in (_HOST_WINDOW, _HOST_DOCK):
+            raise ValueError(f"unknown host {host!r}")
+        if host != self._host and not self._readout_area.isHidden():
+            self._remember_detail_sizes()
+        self._host = host
+        docked = host == _HOST_DOCK
+        if docked:
+            self.act_save_project.setShortcuts([])
+            self.act_save_project_as.setShortcuts([])
+            for sc in (self._undo_shortcut, self._redo_shortcut):
+                sc.setKey(QtGui.QKeySequence())
+        else:
+            self.act_save_project.setShortcut(QtGui.QKeySequence.StandardKey.Save)
+            self.act_save_project_as.setShortcut(QtGui.QKeySequence.StandardKey.SaveAs)
+            self._undo_shortcut.setKey(QtGui.QKeySequence("Ctrl+Z"))
+            self._redo_shortcut.setKey(QtGui.QKeySequence("Ctrl+Shift+Z"))
+        # A press anywhere a widget does not take it propagates up to this window; the
+        # widgets that take a press without taking the focus are named. (Not findChildren:
+        # a wrapper per internal child is a zombie per teardown in this PySide6.)
+        for widget in self._click_without_focus():
+            if docked:
+                widget.installEventFilter(self)
+            else:
+                widget.removeEventFilter(self)
+        # Docked, the main window's title carries the project's saved state.
+        self._project_save_label.setVisible(not docked)
+        self._share_status_bar()
+        if docked:
+            self._host_btn.setText("Own window")
+            self._host_btn.setToolTip(
+                "Move the Event inspector back to its own window. Also Window ▸ Dock Event "
+                "inspector beside the trace.")
+        else:
+            self._host_btn.setText("Dock beside trace")
+            self._host_btn.setToolTip(
+                "Put the Event inspector in the main window, as a tab beside the Inspector "
+                "panel right of the trace, so the trace stays in view while you curate. "
+                "Also Window ▸ Dock Event inspector beside the trace.")
+        self._host_btn.setVisible(True)
+        # Docked, the body scrolls rather than setting the main window's minimum height.
+        self._body.set_floored(not docked)
+        self._sync_stale_line()
+        self._sync_toolbar()
+        self._apply_details()
+        remembered = self._detail_sizes.get(host)
+        if remembered and not self._readout_area.isHidden():
+            self._detail_splitter.setSizes(remembered)
+        row = self._row_for_id(self._current_id)
+        if row is not None and self._df is not None:
+            self._refresh_readout(row)          # the line order follows the host
+
+    def _sync_stale_line(self) -> None:
+        # Docked, the readout pane is short: its blank reserved line is given back while
+        # nothing is stale (the pane scrolls, so this moves nothing outside it).
+        self._stale_label.setVisible(self._host != _HOST_DOCK or bool(self._stale_columns))
+
+    def _click_without_focus(self) -> tuple[QtWidgets.QWidget, ...]:
+        return (self._advance_check, self._label_combo, self._label_apply_btn,
+                self._label_clear_btn, self._details_btn, self._host_btn,
+                self._first_unreviewed_btn, self._project_save_button)
+
+    def request_undo(self) -> None:
+        """MainWindow's Undo, pressed while the focus is in the docked window: run this
+        window's own ⌘Z, so the event the last advance moved away from comes back too."""
+        self._request_undo()
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        kind = event.type()
+        # Installed only while docked (see set_host).
+        if kind == QtCore.QEvent.Type.MouseButtonPress:
+            self._take_the_keyboard()
+        elif kind == QtCore.QEvent.Type.Resize and obj is self._detail_splitter:
+            # sizes() still describes the old geometry here; the event has the new one.
+            self._default_split(event.size().height() - self._detail_splitter.handleWidth())
+        return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802 (Qt override)
+        # A press no widget in here took (a label, the readout's frame, an empty strip).
+        self._take_the_keyboard()
+        super().mousePressEvent(event)
+
+    def _take_the_keyboard(self) -> None:
+        if self._host != _HOST_DOCK:
+            return
+        focus = QtWidgets.QApplication.focusWidget()
+        if focus is None or not (focus is self or self.isAncestorOf(focus)):
+            self.focus_curation_surface()
+
+    # -- Details: the readout under the waveform ------------------------------------------------
+    def details_shown(self, host: str | None = None) -> bool:
+        return bool(self._details_shown[host or self._host])
+
+    def set_details_shown(self, on: bool, host: str | None = None) -> None:
+        target = host or self._host
+        if target not in self._details_shown:
+            raise ValueError(f"unknown host {target!r}")
+        if target == self._host and not on and not self._readout_area.isHidden():
+            self._remember_detail_sizes()
+        self._details_shown[target] = bool(on)
+        if target == self._host:
+            self._apply_details()
+
+    def details_state(self) -> dict[str, bool]:
+        """Shown or hidden, per host -- what MainWindow remembers between sessions."""
+        return dict(self._details_shown)
+
+    def restore_details_state(self, state: Any) -> None:
+        """Adopt a remembered :meth:`details_state`; anything not a bool keeps its default."""
+        if isinstance(state, dict):
+            for host in (_HOST_WINDOW, _HOST_DOCK):
+                if isinstance(state.get(host), bool):
+                    self._details_shown[host] = state[host]
+        self._apply_details()
+
+    def reset_details_state(self) -> None:
+        self._details_shown = dict(_DETAILS_DEFAULT)
+        self._detail_sizes.clear()
+        self._split_defaulted.clear()
+        self._apply_details()
+        self._default_split()
+
+    def _on_details_toggled(self, on: bool) -> None:
+        if not on:
+            self._remember_detail_sizes()
+        self._details_shown[self._host] = bool(on)
+        self._apply_details()
+
+    def _remember_detail_sizes(self) -> None:
+        sizes = self._detail_splitter.sizes()
+        if len(sizes) == 2 and min(sizes) > 0:
+            self._detail_sizes[self._host] = sizes
+
+    def _apply_details(self) -> None:
+        on = self._details_shown[self._host]
+        if self._details_btn.isChecked() != on:
+            blocked = self._details_btn.blockSignals(True)
+            self._details_btn.setChecked(on)
+            self._details_btn.blockSignals(blocked)
+        area = self._readout_area
+        if on and area.isHidden():
+            area.show()
+            sizes = self._detail_sizes.get(self._host)
+            if sizes:
+                self._detail_splitter.setSizes(sizes)
+            else:
+                self._split_defaulted.discard(self._host)
+                self._default_split()
+        elif not on and not area.isHidden():
+            area.hide()
+        self._sync_details_btn()
+
+    def _default_split(self, total: int | None = None) -> None:
+        """The opening split, once per host and only while nothing is remembered: the
+        readout's own lines, but never more than 55 % of the room in a window or 40 % of a
+        docked column. (QSplitter alone gave the readout under 100 px of a 450 px column.)"""
+        host = self._host
+        if (self._readout_area.isHidden() or host in self._detail_sizes
+                or host in self._split_defaulted):
+            return
+        if total is None:
+            total = sum(self._detail_splitter.sizes())
+        if total <= 0:
+            return
+        self._split_defaulted.add(host)
+        want = self._readout.parentWidget().sizeHint().height()
+        cap = int(total * (0.4 if host == _HOST_DOCK else 0.55))
+        share = max(self._readout_area.minimumHeight(), min(want, cap))
+        self._detail_splitter.setSizes([max(total - share, 1), share])
+
+    def _sync_details_btn(self) -> None:
+        on = self._details_btn.isChecked()
+        stale = bool(self._stale_columns)
+        self._details_btn.setText(("⚠ " if stale else "") + ("Details ▾" if on else "Details ▸"))
+        tip = ("Show or hide this event's numbers — dwell, depth, dI/I0, SNR, rise/fall, "
+               "levels, baseline. Hidden, the waveform takes the room and its title keeps "
+               "depth and dI/I0 (dwell and the event number too, when they fit; the whole "
+               "title is in its tooltip). Remembered separately for the docked and the "
+               "windowed inspector.")
+        if stale:
+            tip += f"\n\n⚠ {self._stale_sentence()}"
+        self._details_btn.setToolTip(tip)
 
     def event_count(self) -> int:
         """Number of events in the current filter subset (the N in 'Event i of N')."""
@@ -3177,6 +3733,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         finally:
             self._updating = prev
         spin.setFixedWidth(width)
+        self._sync_toolbar()
 
     def _render_event(self, row: int, *, preserve_view: bool = False) -> None:
         """Draw the measurement trace and explicitly named equivalent amplitude level."""
@@ -3278,7 +3835,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._amplitude.sync(r)
 
         # Frame the loaded window in x; y autoranges to the slice (annotations are ignoreBounds).
-        self._plot.setTitle(self._event_title(r))
+        self._set_event_title(r)
         if previous_view is None:
             self._plot.enableAutoRange(y=True)
             self._frame(float(xs[0]), float(xs[-1]))
@@ -3320,12 +3877,12 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             return None
         try:
             data = self._amplitude.measurement_signal()
-            self._plot.setLabel("left", "Measurement current", units=self._units)
+            self._set_axis_label("Measurement current", "I", self._units)
         except (ValueError, TypeError, OverflowError):
             # Browsing remains available when an old recipe cannot be replayed, but
             # quantitative lines/editing are hidden by _render_event's explicit refusal.
             data = np.asarray(self._session.calibrated(self._doc_id, self._channel).data)
-            self._plot.setLabel("left", "Raw channel — measurement unavailable")
+            self._set_axis_label("Raw channel — measurement unavailable", "Raw channel", None)
         xvals = self._session.x_axis(self._doc_id).values
         n = int(min(data.size, xvals.size))
         lo = int(np.clip(lo, 0, n))
@@ -3340,6 +3897,28 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         if self._current_id is not None:
             self._draw_cusum_levels(int(self._current_id), xs, lo)
         return xs
+
+    def _set_axis_label(self, text: str, short: str, units: str | None) -> None:
+        """The left axis label, abbreviated to ``short`` while the axis is shorter than it
+        (a rotated label longer than its axis is cut off at both ends)."""
+        if self._axis_label == (text, short, units):
+            return
+        self._axis_label = (text, short, units)
+        self._plot.setLabel("left", text, units=units)
+        self._axis_label_shown = text
+        self._axis_long_w = self._plot.getAxis("left").label.boundingRect().width()
+        self._fit_axis_label()
+
+    def _fit_axis_label(self, *_args) -> None:
+        spec = self._axis_label
+        if spec is None:
+            return
+        text, short, units = spec
+        room = self._plot.getAxis("left").height()
+        wanted = text if room <= 0 or self._axis_long_w <= room - 4 else short
+        if wanted != self._axis_label_shown:
+            self._axis_label_shown = wanted
+            self._plot.setLabel("left", wanted, units=units)
 
     def _frame(self, x0: float, x1: float, *, padding: float = 0.0) -> None:
         """``setXRange`` behind the :attr:`_framing` fence — OUR framing, never the user's zoom.
@@ -3456,6 +4035,27 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
                          f"({r['amplitude_method']})")
         return "   ·   ".join(parts)
 
+    def _set_event_title(self, r: pd.Series) -> None:
+        """The title, and the shorter forms a narrow plot paints instead. They drop whole
+        clauses -- the event number first (the toolbar shows it), then the dwell -- and keep
+        depth and dI/I0 to the last."""
+        full = self._event_title(r)
+        units = f" {self._units}" if self._units else ""
+        dwell_us = float(r["dwell_s"]) * 1e6 if np.isfinite(r["dwell_s"]) else float("nan")
+        event = f"Event {int(r['event_id'])}"
+        dwell = f"dwell {_fmt_dwell(dwell_us)}"
+        depth = f"depth {_fmt_num(r['depth_pA'], units, 4)}"
+        frac = f"dI/I0 {_fmt_num(r['frac_depth'], '', 3)}"
+        amp = full.split("   ·   ")[4:]
+        forms = []
+        for clauses in ((event, dwell, depth, frac, *amp), (dwell, depth, frac, *amp),
+                        (depth, frac, *amp), (depth, frac)):
+            form = " · ".join(clauses)
+            if form not in forms:
+                forms.append(form)
+        self._plot.titleLabel.set_forms(full, forms)
+        self._plot.setTitle(full)
+
     def _refresh_readout(self, row: int) -> None:
         if self._df is None:
             self._readout.setText("")
@@ -3475,7 +4075,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # height is its line count, and every line it gains is height the plot above
         # loses. See set_stale_columns.
         stale = self._stale
-        lines = [
+        head = [
             f"Event {ev_id}    [{where}]",
             f"accepted:        {'yes' if bool(r['accepted']) else 'no'}",
             f"dwell:           {_fmt_num(float(r['dwell_s']) * 1e6, ' µs', 5)}"
@@ -3483,6 +4083,12 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             f"median depth:    {_fmt_num(r['depth_pA'], units, 5)}{stale('depth_pA')}",
             f"dI/I0:           {_fmt_num(r['frac_depth'], '', 4)}"
             f"{frac_depth_flag(r['frac_depth'])}{stale('frac_depth')}",
+        ]
+        if self._host == _HOST_DOCK:
+            # A docked pane shows few lines: depth and dI/I0 right under the event's name.
+            head = [head[0], head[3], head[4], head[1], head[2]]
+        lines = [
+            *head,
             f"SNR:             {_fmt_num(r['snr'], '', 3)}{stale('snr')}",
             f"rise / fall:     {_fmt_num(float(r['rise_s']) * 1e6, ' µs', 4)}"
             f" / {_fmt_num(float(r['fall_s']) * 1e6, ' µs', 4)}{stale('rise_s', 'fall_s')}",

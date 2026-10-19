@@ -31,6 +31,28 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Added
 
+- The **Event inspector can dock beside the trace** (opt-in; it still opens as its own window by
+  default): **Dock beside trace** / **Own window** on its toolbar, or **Window ▸ Dock Event
+  inspector beside the trace**, moves the same window — event, filter and context kept — into a tab
+  beside the Inspector panel (left or right column only), and the choice is remembered. Its
+  minimum fell from 1107×827 to about 452×550 px (452×440 docked): the toolbar is two rows in a
+  wide window and five short ones in a column, the amplitude row is two, the waveform's floor is
+  180 px, and the readout scrolls and collapses under **Details ▾ / ▸** (hidden when docked, shown
+  in a window, each remembered), with the Label row in the fixed bar under the waveform. The
+  staleness sentence is a one-line chip (all of it in its tooltip, ⚠ on the Details button).
+  Docked, ⌘S / ⇧⌘S / ⌘Z / ⇧⌘Z
+  are the main window's own items (so neither copy goes dead as an ambiguous pair), a click anywhere
+  in it or on its tab takes the keyboard, a tab sent behind hands the keyboard to the trace, and Tab
+  never lands in the panel behind. In a short column the part under its toolbar scrolls, so no
+  amplitude method, note or Details state pushes the main window past a 1280×800 screen. The
+  waveform's title no longer widens the plot past its widget: a narrow plot draws a shorter form
+  that keeps depth and dI/I0 whole (all of it in the tooltip), and a short axis reads **I (pA)**.
+  The amplitude note reserves its height, so a staleness flip no longer moves the waveform.
+- A **Window** menu: Bring All to Front; the main window, Event inspector, Event gallery,
+  Analysis Explorer (and its open pages), Figure Library and the other windows NanoScope has
+  opened, checked while on screen; Dock Event inspector beside the trace; and **Reset Window
+  Layout…** (asks first). Child windows now reopen at their remembered size and place, validated
+  like the main window's and brought back onto the current screen.
 - Curation throughput in the Event inspector and the Event gallery: **Advance after decision**
   (off by default, one remembered choice for both windows) makes the A / R / Space / label keys
   move on to the next event of the filter — in the gallery only for a one-tile selection, turning

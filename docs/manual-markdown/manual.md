@@ -430,7 +430,10 @@ fits remain available on Reconciled tables.
 ### 5 · Curate
 
 Two surfaces share one event table. The **Event inspector** steps through events
-one at a time in full detail. The **Event gallery** shows them all at once as tiles, for
+one at a time in full detail, in its own window or — with `Dock beside trace` on its toolbar, or
+`Window › Dock Event inspector beside the trace` — as a tab beside the Inspector panel, so the trace
+stays in view; `Details` under its waveform hides or shows the per-event readout. The
+**Event gallery** shows them all at once as tiles, for
 when there are too many to click through. Anything you accept or reject in either lands in the same
 table, the same overlays and the same exports, and `Edit › Undo` (`Ctrl+Z`) reaches all
 of it. The inspector's toolbar has explicit `Accept` and `Reject` buttons for the
@@ -803,7 +806,7 @@ reproducible than dragging; the field keeps eight decimal places, not infinite p
 
 ![Current Event Inspector showing saved optional amplitude and sub-state structure.](images/current_event_inspector.webp)
 
-*Current-source offscreen capture of the saved apo-ferritin curation example. Event ID 146 is position 147 in the unchanged All filter. The optional manual level and fitted segments are distinct from the original median-based depth.*
+*Current-source offscreen capture of the saved apo-ferritin curation example. Event ID 146 is position 147 in the unchanged All filter. The optional manual level and fitted segments are distinct from the original median-based depth. (Captured before the inspector could dock: its toolbar now reads ◀ / ▶ for Prev / Next, and the Label row sits under the waveform beside **Details**.)*
 
 ### Worked checkpoint: one event, different legitimate definitions
 

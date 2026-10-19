@@ -65,7 +65,7 @@ from .analysis_explorer import (
     PAGE_VOLTAGE_SERIES,
 )
 from .analysis_panel import AnalysisPanel
-from .analysis_catalog import ANALYSIS_LABELS, PAGE_HOME
+from .analysis_catalog import ANALYSIS_LABELS, PAGE_HOME, PAGE_IDS
 from .analysis_worker import AnalysisController, BatchDetectController
 from ..core import clock
 from .calibration_panel import CalibrationPanel
@@ -244,6 +244,9 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     "event_inspector.redoRequested": "⇧⌘Z INSIDE the Event inspector — the same request for "
                                      "MainWindow's redo (_redo_events); it moves nothing "
                                      "itself",
+    "event_inspector.hostToggleRequested": "the inspector's Dock beside trace / Own window "
+                                           "button — moves the same window between its two "
+                                           "hosts; no frame moved",
     "event_inspector.advanceAfterDecisionChanged": "the 'Advance after decision' tick — a "
                                                    "keyboard preference mirrored onto the "
                                                    "gallery; no frame moved",
@@ -383,6 +386,38 @@ _RESULTS_MIN_DEFAULT_HEIGHT = 180
 #: Where the Results panel is reopened from, said ONCE: every hint that names it quotes this.
 _RESULTS_PANEL_PATH = "View ▸ Panels ▸ Results (⇧⌘R)"
 
+# -- the Event inspector's two hosts, and the child windows MainWindow remembers -------------
+_ROLE_INSPECTOR = "event_inspector"
+_ROLE_GALLERY = "event_gallery"
+_HOST_WINDOW = "window"
+_HOST_DOCK = "dock"
+#: Opt-in: the inspector opens as its own window until the user docks it.
+_INSPECTOR_DEFAULT_HOST = _HOST_WINDOW
+_INSPECTOR_DOCK_NAME = "EventInspectorDock"
+#: The side columns only. In the top or bottom area its minimum height would add to the
+#: trace's and force the main window taller than a laptop screen.
+_INSPECTOR_DOCK_AREAS = (QtCore.Qt.LeftDockWidgetArea, QtCore.Qt.RightDockWidgetArea)
+#: Every child window whose size and place are remembered ("windows/<key>/geometry"),
+#: in Window-menu order.
+_CHILD_WINDOW_KEYS = ("event_inspector", "event_gallery", "analysis_explorer",
+                      "figure_library", "first_analysis_guide", "about",
+                      "incubation_launcher", "incubation_reference", "manual_study")
+#: Window-menu names for the windows that are not always listed.
+_CHILD_WINDOW_LABELS = {
+    "first_analysis_guide": "Guided first analysis",
+    "about": "About NanoScope",
+    "incubation_launcher": "Incubation study",
+    "incubation_reference": "Original Zn reference recipe",
+    "manual_study": "Manual study",
+}
+_SETTING_INSPECTOR_HOST = "windows/event_inspector/host"
+_SETTING_DETAILS = {_HOST_WINDOW: "windows/event_inspector/details_window",
+                    _HOST_DOCK: "windows/event_inspector/details_dock"}
+
+
+def _geometry_setting(key: str) -> str:
+    return f"windows/{key}/geometry"
+
 
 def _with_project_suffix(path: str) -> str:
     """A chosen project path with the mandatory ``.nanoscope`` suffix.
@@ -495,6 +530,32 @@ def _string_setting(settings: QtCore.QSettings, key: str, fallback: str,
     if raw is not None:
         ignored.append(key)
     return fallback
+
+
+def _choice_setting(settings: QtCore.QSettings, key: str, allowed: tuple[str, ...],
+                    ignored: list[str]) -> str | None:
+    """One of ``allowed``, or ``None`` (absent, or a value this app did not write -- the
+    key is then named, as :func:`_string_setting` does)."""
+    if not settings.contains(key):
+        return None
+    raw = settings.value(key)
+    if isinstance(raw, str) and raw in allowed:
+        return raw
+    ignored.append(key)
+    return None
+
+
+def _bool_setting(settings: QtCore.QSettings, key: str, ignored: list[str]) -> bool | None:
+    """A bool this app wrote (an ini store hands it back as "true"/"false"), or ``None``."""
+    if not settings.contains(key):
+        return None
+    raw = settings.value(key)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.lower() in ("true", "false"):
+        return raw.lower() == "true"
+    ignored.append(key)
+    return None
 
 
 def _stored_baseline_fingerprint(provenance: object) -> str | None:
@@ -723,6 +784,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._figure_library = None
         self._event_inspector = None   # the single, lazily-built EventInspectorWindow
         self._event_gallery = None     # the single, lazily-built EventGalleryWindow
+        #: Where the inspector lives ("window" or "dock"); the dock it is put in when
+        #: docked, built once on the first dock and kept (see _inspector_dock_widget).
+        self._inspector_host = _INSPECTOR_DEFAULT_HOST
+        self._inspector_dock: QtWidgets.QDockWidget | None = None
+        #: The inspector's own window geometry, kept while it is docked.
+        self._inspector_window_geometry: QtCore.QByteArray | None = None
+        #: Read once at launch (validated) and applied on first build.
+        self._inspector_details: dict[str, bool] = {}
+        #: key -> the single child window MainWindow built for it (see _adopt_child_window),
+        #: and key -> its remembered geometry (validated at launch, refreshed on hide).
+        self._child_windows: dict[str, QtWidgets.QWidget] = {}
+        self._child_geometry: dict[str, QtCore.QByteArray] = {}
+        #: Preference keys under "windows/" that held a value this app did not write.
+        self._ignored_window_keys: list[str] = []
+        #: The dock layout before any saved one was restored: what Reset window layout
+        #: goes back to.
+        self._factory_window_state: QtCore.QByteArray | None = None
+        #: Fences: the inspector is being moved between hosts (its Hide is not a close),
+        #: and the opener itself is showing its dock (the re-feed has already run).
+        self._rehosting = False
+        self._presenting_inspector = False
         #: True only while an event-table undo/redo installs its snapshot: the re-feeds it
         #: causes may keep the curation windows' place (see _undo_events).
         self._keep_curation_place = False
@@ -1085,6 +1167,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._inspector.setObjectName("InspectorDock")
         self._inspector.setWidget(tabs)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self._inspector)
+        # Behind the docked Event inspector's tab, it must not keep the keyboard.
+        self._inspector.visibilityChanged.connect(self._queue_dock_focus)
 
         # THE RESULTS DOCK, under the trace: the event table and its Summary / Fits /
         # Quality tabs get their own height instead of splitting the Inspector's with the
@@ -1166,7 +1250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # rather than rolling back the event table (verified).
         self._act_undo.setShortcut(QtGui.QKeySequence.Undo)
         self._act_undo.setEnabled(False)
-        self._act_undo.triggered.connect(self._undo_events)
+        self._act_undo.triggered.connect(self._undo_from_menu)
         self._act_redo = edit_menu.addAction("Redo")
         self._act_redo.setShortcuts([QtGui.QKeySequence.Redo,
                                      QtGui.QKeySequence("Ctrl+Shift+Z")])
@@ -1267,6 +1351,9 @@ class MainWindow(QtWidgets.QMainWindow):
         panels = view_menu.addMenu("&Panels")
         panels.addAction(self._file_dock.toggleViewAction())
         panels.addAction(self._inspector.toggleViewAction())
+        # Re-shown as a tab behind the docked Event inspector it would seem to do nothing.
+        self._inspector.toggleViewAction().triggered.connect(
+            lambda shown: shown and QtCore.QTimer.singleShot(0, self, self._inspector.raise_))
         self._act_toggle_results = self._results_dock.toggleViewAction()
         self._act_toggle_results.setShortcut(QtGui.QKeySequence("Ctrl+Shift+R"))
         self._act_toggle_results.setStatusTip(
@@ -1661,6 +1748,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_first_analysis_guide = analysis_menu.addAction(ANALYSIS_LABELS["guided_first_analysis"] + "…")
         self._act_first_analysis_guide.setToolTip("A self-paced walkthrough with optional synthetic practice data; scientific settings are not changed automatically.")
         self._act_first_analysis_guide.triggered.connect(self._open_first_analysis_guide)
+        self._build_window_menu(menubar)
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction(self._act_first_analysis_guide)
         help_menu.addAction(self._act_analysis_home)
@@ -3148,7 +3236,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # through here.
         step("Event Inspector",
              lambda: self._refresh_event_inspector()            # may be a different detection
-             if _on_screen(self._event_inspector) else None)
+             if self.curation_surface_on_screen(_ROLE_INSPECTOR) else None)
         step("Event Gallery",
              lambda: self._refresh_event_gallery()
              if _on_screen(self._event_gallery) else None)
@@ -4395,6 +4483,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._first_analysis_guide.actionRequested.connect(self._first_analysis_action)
             self._first_analysis_guide.controlLevelRequested.connect(
                 lambda level: self._analysis_panel.detection_panel.set_control_level(level, persist=True))
+            self._adopt_child_window(self._first_analysis_guide, "first_analysis_guide")
         self._first_analysis_guide.refresh_context()
         self._first_analysis_guide.show()
         self._first_analysis_guide.raise_()
@@ -4404,6 +4493,7 @@ class MainWindow(QtWidgets.QMainWindow):
         from .build_info_dialog import BuildInfoDialog
         if self._build_info_dialog is None:
             self._build_info_dialog = BuildInfoDialog(self)
+            self._adopt_child_window(self._build_info_dialog, "about")
         self._build_info_dialog.show()
         self._build_info_dialog.raise_()
         self._build_info_dialog.activateWindow()
@@ -4495,6 +4585,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._analysis_explorer.saveBundleRequested.connect(self._export_analysis_bundle)
             self._analysis_explorer.figureLibraryRequested.connect(self._open_figure_library)
             self._analysis_explorer.launchRequested.connect(self._launch_analysis_route)
+            self._adopt_child_window(self._analysis_explorer, "analysis_explorer")
         return self._analysis_explorer
 
     def _analysis_explorer_context(self) -> str:
@@ -4534,6 +4625,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, entries=self._figure_entries, status=self._figure_status,
                 append=self._append_figure, project_token=lambda: self._figure_project_epoch)
             self._figure_library.changed.connect(self._mark_dirty)
+            self._adopt_child_window(self._figure_library, "figure_library")
         self._figure_library.show()
         self._figure_library.raise_()
         self._figure_library.activateWindow()
@@ -4972,7 +5064,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if (_on_screen(self._event_plot_window)
                 and EVENT_PLOTS_ARTIFACT_ID not in self._workspace_frozen):
             self._refresh_event_plots()     # the active detection (density / ensemble)
-        if _on_screen(self._event_inspector):
+        if self.curation_surface_on_screen(_ROLE_INSPECTOR):
             self._refresh_event_inspector() # the active detection's shared frame
         if _on_screen(self._event_gallery):
             self._refresh_event_gallery()
@@ -5314,6 +5406,9 @@ class MainWindow(QtWidgets.QMainWindow):
             insp.note_level_gap(int(event_id), note if gap else "")
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
+        kind = event.type()
+        if kind in (QtCore.QEvent.Show, QtCore.QEvent.Hide, QtCore.QEvent.Close):
+            self._child_window_event(obj, event)
         if obj is getattr(self, "_results_dock", None):
             # Explicitly hidden (✕, the toggle), not merely inside a window being hidden.
             # Hide arrives before Qt moves the focus, so parking it here wins.
@@ -5761,6 +5856,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self._incubation_study_window is None:
             self._incubation_study_window = IncubationStudyLauncher(self)
+            self._adopt_child_window(self._incubation_study_window, "incubation_launcher")
         self._incubation_study_window.show()
         self._incubation_study_window.raise_()
         self._incubation_study_window.activateWindow()
@@ -5772,6 +5868,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._incubation_reference_window is None:
             self._incubation_reference_window = IncubationStudyWindow(self)
             self._incubation_reference_window.setWindowTitle('Original Zn reference recipe — NanoScope')
+            self._adopt_child_window(self._incubation_reference_window, "incubation_reference")
         self._incubation_reference_window.show()
         self._incubation_reference_window.raise_()
         self._incubation_reference_window.activateWindow()
@@ -5786,6 +5883,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self._manual_study_shortcut is None:
             self._manual_study_shortcut = ManualStudyWindow(self)
+            self._adopt_child_window(self._manual_study_shortcut, "manual_study")
         self._manual_study_shortcut.show()
         self._manual_study_shortcut.raise_()
         self._manual_study_shortcut.activateWindow()
@@ -6182,10 +6280,29 @@ class MainWindow(QtWidgets.QMainWindow):
     # -- event inspector -----------------------------------------------------------------------
     def _open_event_inspector(self) -> None:
         """Analysis ▸ Event inspector… — open (or re-focus) the single EventInspectorWindow, fed
-        the current detection's SHARED events df. MainWindow stays the only panel-importer: it
+        the current detection's SHARED events df, in whichever host the user chose (its own
+        window, or docked beside the trace). MainWindow stays the only panel-importer: it
         builds the window, wires the two-way selection + acceptance sync to the AnalysisPanel
         (which owns the table + overlays), and (re-)feeds its contents. The df is shared, so an
-        accept/reject in the inspector writes the very frame the table edits."""
+        accept/reject in the inspector writes the very frame the table edits.
+
+        EVERY ROUTE THAT SHOWS THE INSPECTOR COMES THROUGH HERE (Ctrl+I, the Window menu, the
+        host toggle, a docked tab re-shown), because a window that was not on screen was not
+        re-fed and would otherwise come back showing the previous detection."""
+        insp = self._ensure_event_inspector()
+        insp.set_vocabulary(self._label_vocab)
+        self._refresh_event_inspector()
+        # set_events shows the first event; open on the one the user has selected instead (and,
+        # on a re-open, where they were: inspector navigation moves the panel's selection too).
+        selected = self._analysis_panel.selected_event_id()
+        if selected is not None:
+            insp.show_event_quietly(selected)
+        self._present_event_inspector()
+        # AFTER presenting: moving between hosts resets the focus chain.
+        insp.focus_curation_surface()
+
+    def _ensure_event_inspector(self):
+        """Build and wire the single EventInspectorWindow, once."""
         from .event_inspector import EventInspectorWindow
 
         if self._event_inspector is None:
@@ -6261,18 +6378,612 @@ class MainWindow(QtWidgets.QMainWindow):
             # curation done in this window used to leave the Populations and Event Plots
             # windows drawing the pre-curation fit (see SURFACE_MUTATION_SIGNALS).
             self._wire_surface_refresh("event_inspector", insp)
+            # Dock beside trace / Own window, on the window's own toolbar.
+            insp.hostToggleRequested.connect(self._toggle_inspector_host)
+            insp.restore_details_state(self._inspector_details)
             self._event_inspector = insp
-        self._event_inspector.set_vocabulary(self._label_vocab)
-        self._refresh_event_inspector()
-        # set_events shows the first event; open on the one the user has selected instead (and,
-        # on a re-open, where they were: inspector navigation moves the panel's selection too).
-        selected = self._analysis_panel.selected_event_id()
-        if selected is not None:
-            self._event_inspector.show_event_quietly(selected)
-        self._event_inspector.show()
-        self._event_inspector.raise_()
-        self._event_inspector.activateWindow()
-        self._event_inspector.focus_curation_surface()
+            self._register_child_window(insp, _ROLE_INSPECTOR)
+            insp.set_host(_HOST_WINDOW)
+        return self._event_inspector
+
+    # -- the Event inspector's two hosts ------------------------------------------------------
+    #
+    # ONE INSTANCE, REPARENTED, NEVER REBUILT: its own top-level window (built as a transient
+    # child of this window, exactly as before) or the widget of one QDockWidget built on the
+    # first dock and kept. Destroyed Qt wrappers leak in this PySide6, and the inspector's
+    # wiring above is not cheap to redo -- so moving it is a setParent, as AnalysisExplorer
+    # does with its pages. Never windowHandle() on it: its QWindow is recreated per move.
+    def curation_host(self, role: str) -> str:
+        """Where a curation surface lives: ``"window"`` or (the inspector only) ``"dock"``."""
+        return self._inspector_host if role == _ROLE_INSPECTOR else _HOST_WINDOW
+
+    def set_curation_host(self, role: str, host: str, *, present: bool | None = None) -> None:
+        """Move the Event inspector between its own window and the dock beside the trace,
+        and remember the choice. ``present`` says whether it should be on screen after;
+        by default it is if it was. The Event gallery is always a window."""
+        if role != _ROLE_INSPECTOR:
+            if role == _ROLE_GALLERY and host == _HOST_WINDOW:
+                return
+            raise ValueError(f"{role!r} cannot be hosted in {host!r}")
+        if host not in (_HOST_WINDOW, _HOST_DOCK):
+            raise ValueError(f"unknown host {host!r}")
+        changed = host != self._inspector_host
+        self._inspector_host = host
+        QtCore.QSettings().setValue(_SETTING_INSPECTOR_HOST, host)
+        if _SETTING_INSPECTOR_HOST in self._ignored_window_keys:
+            self._ignored_window_keys.remove(_SETTING_INSPECTOR_HOST)
+        insp = self._event_inspector
+        was_open = self.curation_surface_on_screen(_ROLE_INSPECTOR)
+        if present if present is not None else was_open:
+            self._open_event_inspector()
+        elif insp is not None and was_open:
+            # Moved and not shown: closed, in the host it will open in next time.
+            if insp.isWindow():
+                insp.hide()
+            elif self._inspector_dock is not None:
+                self._inspector_dock.hide()
+        if changed:
+            self.statusBar().showMessage(
+                "Event inspector docked beside the trace; Own window on its toolbar moves it "
+                "back." if host == _HOST_DOCK else "Event inspector moved to its own window.",
+                8000)
+
+    def _toggle_inspector_host(self) -> None:
+        self.set_curation_host(
+            _ROLE_INSPECTOR, _HOST_WINDOW if self._inspector_host == _HOST_DOCK else _HOST_DOCK,
+            present=True)
+
+    def curation_surface_on_screen(self, role: str) -> bool:
+        """Is this curation surface built AND shown in its host? A docked inspector behind
+        its tab counts -- it is one click away and keeps being re-fed, as an open window
+        behind another window always has."""
+        if role == _ROLE_GALLERY:
+            return _on_screen(self._event_gallery)
+        insp = self._event_inspector
+        if insp is None:
+            return False
+        if insp.isWindow():
+            return insp.isVisible()
+        dock = self._inspector_dock
+        return (dock is not None and dock.widget() is insp and not dock.isHidden()
+                and not insp.isHidden())
+
+    def _present_event_inspector(self) -> None:
+        insp = self._event_inspector
+        if self._inspector_host == _HOST_DOCK:
+            dock = self._dock_event_inspector()
+            if self.isMinimized():
+                self.showNormal()
+            self._presenting_inspector = True
+            try:
+                dock.show()
+                insp.show()
+                dock.raise_()          # brings its tab forward
+            finally:
+                self._presenting_inspector = False
+            # A transient child window stays above this one on macOS: a gallery in front
+            # of the column would hide the inspector it just opened.
+            gal = self._event_gallery
+            # A dock placed just now has no geometry until the layout runs: the main window's.
+            spot = (QtCore.QRect(dock.mapToGlobal(QtCore.QPoint(0, 0)), dock.size())
+                    if dock.width() > 1 and dock.height() > 1 else self.frameGeometry())
+            if (gal is not None and gal.isWindow() and gal.isVisible()
+                    and gal.frameGeometry().intersects(spot)):
+                gal.lower()
+            self.raise_()
+            self.activateWindow()
+        else:
+            self._undock_event_inspector()
+            if insp.isMinimized():
+                insp.showNormal()
+            insp.show()
+            insp.raise_()
+            insp.activateWindow()
+
+    def _inspector_dock_widget(self) -> QtWidgets.QDockWidget:
+        """The inspector's dock, built once. A saved layout that knew it puts it back where
+        it was (restoreState kept a placeholder); one that floats it or puts it outside the
+        side columns is treated as no layout at all."""
+        if self._inspector_dock is None:
+            dock = QtWidgets.QDockWidget("Event inspector", self)
+            dock.setObjectName(_INSPECTOR_DOCK_NAME)
+            dock.setFeatures(QtWidgets.QDockWidget.DockWidgetClosable
+                             | QtWidgets.QDockWidget.DockWidgetMovable)
+            dock.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+            self._inspector_dock = dock
+            # Out of the dock-area context menu: showing it from there would skip the
+            # opener, and with it the re-feed (Window ▸ is its door). Hidden, not removed
+            # from a menu built in Python: that menu's wrapper outlived it as a zombie.
+            dock.toggleViewAction().setVisible(False)
+            if not self.restoreDockWidget(dock) or not self._inspector_dock_placed():
+                self._place_inspector_dock()
+            dock.visibilityChanged.connect(self._queue_dock_focus)
+            dock.installEventFilter(self)
+        elif not self._inspector_dock_placed():
+            self._place_inspector_dock()
+        return self._inspector_dock
+
+    def _inspector_dock_placed(self) -> bool:
+        dock = self._inspector_dock
+        return (dock is not None and not dock.isFloating()
+                and self.dockWidgetArea(dock) in _INSPECTOR_DOCK_AREAS)
+
+    def _place_inspector_dock(self) -> None:
+        """Default place: a tab beside the Inspector panel, right of the trace."""
+        dock = self._inspector_dock
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+        if dock.isFloating():
+            # Only once it is in an area: removed from every area it cannot un-float.
+            dock.setFloating(False)
+        anchor = self._inspector
+        if (not anchor.isFloating()
+                and self.dockWidgetArea(anchor) == QtCore.Qt.RightDockWidgetArea):
+            self.tabifyDockWidget(anchor, dock)
+        else:
+            self.resizeDocks([dock], [self._inspector_default_width()], QtCore.Qt.Horizontal)
+
+    def _dock_event_inspector(self) -> QtWidgets.QDockWidget:
+        insp = self._event_inspector
+        dock = self._inspector_dock_widget()
+        if dock.widget() is not insp:
+            if insp.isWindow() and insp.property("nanoscopeGeometryShown"):
+                self._inspector_window_geometry = insp.saveGeometry()
+                self._remember_child_geometry(insp)
+            self._rehosting = True
+            try:
+                dock.setWidget(insp)
+                insp.setWindowFlags(QtCore.Qt.Widget)
+            finally:
+                self._rehosting = False
+            insp.set_host(_HOST_DOCK)
+        return dock
+
+    def _undock_event_inspector(self) -> None:
+        insp = self._event_inspector
+        if insp.isWindow():
+            self._place_child_window(insp, _ROLE_INSPECTOR)
+            return
+        self._rehosting = True
+        try:
+            insp.setParent(self, QtCore.Qt.Window)
+        finally:
+            self._rehosting = False
+        if self._inspector_dock is not None:
+            self._inspector_dock.hide()
+        insp.set_host(_HOST_WINDOW)
+        memo, self._inspector_window_geometry = self._inspector_window_geometry, None
+        if memo is not None and insp.restoreGeometry(memo):
+            self._fit_to_available_screen(insp)
+        else:
+            insp.setProperty("nanoscopeGeometryPlaced", False)
+            self._place_child_window(insp, _ROLE_INSPECTOR)
+
+    def _queue_dock_focus(self, *_args) -> None:
+        # A tab switch: once Qt has settled which dock is in front.
+        QtCore.QTimer.singleShot(0, self, self._resolve_dock_focus)
+
+    def _resolve_dock_focus(self) -> None:
+        """Never leave the keyboard in a dock nobody can see (behind its tab, or closed):
+        R there curated an event that was not on screen, and a digit or an arrow edited a
+        detection parameter that was not either. It goes to the docked Event inspector when
+        that is the tab now in front, otherwise to the trace (which takes no keys)."""
+        if not self.isVisible():
+            return
+        try:
+            focus = QtWidgets.QApplication.focusWidget()
+            if focus is None:
+                return
+            curation, insp = self._inspector_dock, self._event_inspector
+            docks = [d for d in (self._inspector, curation, self._file_dock,
+                                 getattr(self, "_results_dock", None)) if d is not None]
+            holder = next((d for d in docks if d.isAncestorOf(focus)), None)
+            if holder is None or not (holder.isHidden() or holder.visibleRegion().isEmpty()):
+                return
+            if (holder is not curation and curation is not None and insp is not None
+                    and curation.widget() is insp and not curation.isHidden()
+                    and not curation.visibleRegion().isEmpty()
+                    and curation in self.tabifiedDockWidgets(holder)):
+                insp.focus_curation_surface()
+            else:
+                self._trace_view.setFocus(QtCore.Qt.OtherFocusReason)
+        except RuntimeError:     # a teardown hide
+            return
+
+    def _docks_out_of_sight(self) -> list[QtWidgets.QDockWidget]:
+        """Docks that are open but behind another dock's tab: Qt still counts their
+        widgets as visible, so the focus chain walks into them."""
+        return [d for d in (self._inspector, self._inspector_dock, self._file_dock,
+                            getattr(self, "_results_dock", None))
+                if d is not None and not d.isHidden() and d.visibleRegion().isEmpty()]
+
+    def focusNextPrevChild(self, forward: bool) -> bool:  # noqa: N802 (Qt override)
+        # Tab walks this window's whole chain: past a dock behind its tab, as if it were
+        # not there, so no key lands in a field nobody can see.
+        moved = super().focusNextPrevChild(forward)
+        if not moved or not self.isVisible():
+            return moved
+        try:
+            focus = QtWidgets.QApplication.focusWidget()
+            hidden = self._docks_out_of_sight()
+            if focus is None or not any(d.isAncestorOf(focus) for d in hidden):
+                return moved
+            target = self._focusable_past(focus, forward, hidden)
+            if target is None:
+                self._resolve_dock_focus()
+            else:
+                target.setFocus(QtCore.Qt.TabFocusReason if forward
+                                else QtCore.Qt.BacktabFocusReason)
+        except RuntimeError:     # a teardown
+            pass
+        return moved
+
+    def _focusable_past(self, start: QtWidgets.QWidget, forward: bool,
+                        hidden: list[QtWidgets.QDockWidget]) -> QtWidgets.QWidget | None:
+        """The next widget Tab (or Shift+Tab) may land on after ``start``, skipping the
+        docks in ``hidden`` -- Qt's own test, plus that one."""
+        tab = QtCore.Qt.TabFocus.value
+        widget = start
+        for _ in range(20000):
+            widget = widget.nextInFocusChain() if forward else widget.previousInFocusChain()
+            if widget is None or widget is start:
+                return None
+            if ((widget.focusPolicy().value & tab) == tab and widget.isEnabled()
+                    and widget.isVisible() and widget.window() is self
+                    and widget.focusProxy() is None
+                    and not any(d.isAncestorOf(widget) for d in hidden)):
+                return widget
+        return None
+
+    def _park_inspector_focus(self) -> None:
+        insp, dock = self._event_inspector, self._inspector_dock
+        if insp is None or dock is None or insp.isWindow():
+            return
+        try:
+            focus = QtWidgets.QApplication.focusWidget()
+            if focus is None or not (focus is insp or insp.isAncestorOf(focus)):
+                return
+            if dock.isHidden() or insp.visibleRegion().isEmpty():
+                self._trace_view.setFocus(QtCore.Qt.OtherFocusReason)
+        except RuntimeError:     # a teardown hide
+            return
+
+    def _undo_from_menu(self) -> None:
+        """Edit ▸ Undo / ⌘Z. With the keyboard in the docked inspector it is that window's
+        own ⌘Z (the same undo, plus the walk back to the event an advance moved away from),
+        which in its own window it would have answered itself."""
+        insp = self._event_inspector
+        if insp is not None and not insp.isWindow():
+            focus = QtWidgets.QApplication.focusWidget()
+            if focus is not None and (focus is insp or insp.isAncestorOf(focus)):
+                insp.request_undo()
+                return
+        self._undo_events()
+
+    # -- child windows: remembered size and place ---------------------------------------------
+    def _register_child_window(self, window: QtWidgets.QWidget, key: str) -> None:
+        """Remember ``window`` as the one ``key`` window: the Window menu lists it and its
+        size and place are kept (on hide and at quit) in ``windows/<key>/geometry``."""
+        self._child_windows[key] = window
+        window.setProperty("nanoscopeGeometryKey", key)
+        window.installEventFilter(self)
+
+    def _adopt_child_window(self, window: QtWidgets.QWidget, key: str) -> None:
+        """Register ``window`` and give it its remembered (or default) geometry -- once,
+        before its first show."""
+        if self._child_windows.get(key) is not window:
+            self._register_child_window(window, key)
+        self._place_child_window(window, key)
+
+    def _place_child_window(self, window: QtWidgets.QWidget, key: str) -> None:
+        if window.property("nanoscopeGeometryPlaced"):
+            return
+        window.setProperty("nanoscopeGeometryPlaced", True)
+        saved = self._child_geometry.get(key)
+        if saved is not None:
+            if window.restoreGeometry(saved):
+                self._fit_to_available_screen(window)
+                return
+            # Right type, contents Qt cannot use: say so once and forget it.
+            self._child_geometry.pop(key, None)
+            QtCore.QSettings().remove(_geometry_setting(key))
+            self.statusBar().showMessage(
+                f"The remembered size and place of {window.windowTitle() or 'a window'} "
+                "could not be used, so it opened at its default.", 8000)
+        if key == _ROLE_INSPECTOR:
+            from .event_inspector import _WINDOW_DEFAULT_SIZE
+            window.resize(*_WINDOW_DEFAULT_SIZE)
+        # Defaults only for a window the user is looking at: a hidden main window (the
+        # offscreen suite) keeps every constructor size.
+        if not self.isVisible():
+            return
+        if window.testAttribute(QtCore.Qt.WA_Moved):
+            # Already placed (a window that was docked keeps the dock's offsets), so Qt
+            # will not centre it: over this window, then inside the screen.
+            frame = window.frameGeometry()
+            frame.moveCenter(self.frameGeometry().center())
+            window.move(frame.topLeft())
+            self._fit_to_available_screen(window)
+        else:
+            # Size only: a move would stop Qt placing it (a dialog centred on this window).
+            self._fit_to_available_screen(window, move=False)
+
+    def _fit_to_available_screen(self, window: QtWidgets.QWidget, *, move: bool = True) -> None:
+        """Bound ``window``'s size to its screen's available area and (unless ``move`` is
+        False) move it fully inside -- a remembered place on a monitor that is gone, or a
+        size from a bigger one."""
+        screen = window.screen() or self.screen() or QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        frame, inner = window.frameGeometry(), window.geometry()
+        if frame == inner and not window.property("nanoscopeGeometryShown"):
+            # Never shown, so its frame is not known yet: assume this window's (the title
+            # bar a remembered or default size has to leave room for).
+            ours, ours_inner = self.frameGeometry(), self.geometry()
+            frame = frame.adjusted(ours.left() - ours_inner.left(), ours.top() - ours_inner.top(),
+                                   ours.right() - ours_inner.right(),
+                                   ours.bottom() - ours_inner.bottom())
+        extra_w, extra_h = frame.width() - inner.width(), frame.height() - inner.height()
+        width = max(min(inner.width(), avail.width() - extra_w), window.minimumWidth())
+        height = max(min(inner.height(), avail.height() - extra_h), window.minimumHeight())
+        if (width, height) != (inner.width(), inner.height()):
+            window.resize(width, height)
+            frame.setSize(QtCore.QSize(width + extra_w, height + extra_h))
+        if not move:
+            return
+        x = max(avail.left(), min(frame.x(), avail.right() + 1 - frame.width()))
+        y = max(avail.top(), min(frame.y(), avail.bottom() + 1 - frame.height()))
+        if (x, y) != (frame.x(), frame.y()):
+            window.move(x, y)              # a window's pos() is its frame's
+
+    def _remember_child_geometry(self, window: QtWidgets.QWidget) -> None:
+        key = window.property("nanoscopeGeometryKey")
+        if not key or not window.isWindow() or not window.property("nanoscopeGeometryShown"):
+            return
+        geometry = window.saveGeometry()
+        self._child_geometry[str(key)] = geometry
+        QtCore.QSettings().setValue(_geometry_setting(str(key)), geometry)
+
+    def _child_window_event(self, obj, event) -> None:
+        """Show / Hide / Close of a child window or of the inspector's dock (eventFilter)."""
+        kind = event.type()
+        dock = self._inspector_dock
+        insp = self._event_inspector
+        if dock is not None and obj is dock:
+            if kind == QtCore.QEvent.Hide and dock.isHidden():
+                # Closed (✕): Hide arrives before Qt moves the focus, so park it now.
+                self._park_inspector_focus()
+            elif (kind == QtCore.QEvent.Show and not event.spontaneous()
+                  and not self._presenting_inspector and insp is not None
+                  and dock.widget() is insp):
+                # Shown by anything but the opener: it was not re-fed while hidden.
+                insp.set_vocabulary(self._label_vocab)
+                self._refresh_event_inspector()
+            return
+        if not isinstance(obj, QtWidgets.QWidget) or not obj.property("nanoscopeGeometryKey"):
+            return
+        if kind == QtCore.QEvent.Show and obj.isWindow():
+            obj.setProperty("nanoscopeGeometryShown", True)
+        elif kind == QtCore.QEvent.Hide and obj.isWindow() and not self._rehosting:
+            self._remember_child_geometry(obj)
+        elif (kind == QtCore.QEvent.Close and obj is insp and not obj.isWindow()
+              and dock is not None):
+            # close() on the docked widget would leave an empty dock behind.
+            QtCore.QTimer.singleShot(0, dock, dock.hide)
+
+    def _bring_child_to_front(self, key: str) -> None:
+        window = self._child_windows.get(key)
+        if window is None:
+            return
+        if window.isMinimized():
+            window.showNormal()
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    # -- the Window menu -----------------------------------------------------------------------
+    def _build_window_menu(self, menubar: QtWidgets.QMenuBar) -> None:
+        """Window: the windows this one opens, and where the Event inspector lives.
+
+        Its entries are built ONCE, on the first open (a window that never opens the menu
+        pays for one action, not thirty); every later open re-reads state into the same
+        actions, so nothing is created or destroyed per open. No shortcuts: ⌘M is Add
+        measurement, and a second Ctrl+I or Ctrl+G here would make the pair ambiguous."""
+        menu = menubar.addMenu("&Window")
+        menu.setObjectName("windowMenu")
+        self._window_menu = menu
+        self._act_bring_all_to_front = menu.addAction("Bring All to Front")
+        self._act_bring_all_to_front.setToolTip(
+            "Raise every open NanoScope window above other applications' windows; the "
+            "window you were working in keeps the keyboard.")
+        self._act_bring_all_to_front.triggered.connect(self._bring_all_to_front)
+        self._window_menu_entries: dict[str, QtGui.QAction] = {}
+        self._window_menu_pages: list[tuple[str, QtGui.QAction]] = []
+        menu.aboutToShow.connect(self._sync_window_menu)
+
+    def _populate_window_menu(self) -> None:
+        """The Window menu's entries, once."""
+        if self._window_menu_entries:
+            return
+        menu = self._window_menu
+        menu.addSeparator()
+
+        def entry(key: str, text: str, tip: str, slot) -> QtGui.QAction:
+            act = menu.addAction(text)
+            act.setCheckable(True)
+            act.setToolTip(tip)
+            act.triggered.connect(lambda _checked=False, s=slot: s())
+            self._window_menu_entries[key] = act
+            return act
+
+        entry("main", "NanoScope",
+              "Bring the main window — the trace, the files and the panels — to the front.",
+              self._bring_main_to_front)
+        entry(_ROLE_INSPECTOR, "Event inspector",
+              "Open the Event inspector or bring it forward, in its own window or docked — "
+              "the same as Analysis ▸ Event inspector… (⌘I).", self._open_event_inspector)
+        entry(_ROLE_GALLERY, "Event gallery",
+              "Open the Event gallery or bring it forward — the same as Analysis ▸ Event "
+              "gallery… (⌘G).", self._open_event_gallery)
+        entry("analysis_explorer", "Analysis Explorer",
+              "Open the Analysis Explorer or bring it forward on the page it is showing.",
+              self._show_analysis_explorer)
+        for page_id in PAGE_IDS:
+            act = menu.addAction("    " + ANALYSIS_LABELS[page_id])
+            act.setCheckable(True)
+            act.setVisible(False)
+            act.setToolTip(f"Bring the Analysis Explorer forward on its "
+                           f"{ANALYSIS_LABELS[page_id]} page.")
+            act.triggered.connect(lambda _checked=False, p=page_id: self._raise_explorer_page(p))
+            self._window_menu_pages.append((page_id, act))
+        entry("figure_library", "Figure Library",
+              "Open this project's Figure Library or bring it forward — the same as "
+              "Analysis ▸ Figure Library….", self._open_figure_library)
+        menu.addSeparator()
+        for key, label in _CHILD_WINDOW_LABELS.items():
+            act = entry(key, label, f"Bring the {label} window forward.",
+                        lambda k=key: self._bring_child_to_front(k))
+            act.setVisible(False)
+        menu.addSeparator()
+        self._act_dock_inspector = menu.addAction("Dock Event inspector beside the trace")
+        self._act_dock_inspector.setCheckable(True)
+        self._act_dock_inspector.setToolTip(
+            "Checked: the Event inspector is a tab in the main window's right column, beside "
+            "the trace. Unchecked: it opens as its own window. Remembered between sessions.")
+        self._act_dock_inspector.triggered.connect(
+            lambda checked: self.set_curation_host(
+                _ROLE_INSPECTOR, _HOST_DOCK if checked else _HOST_WINDOW))
+        menu.addSeparator()
+        self._act_reset_window_layout = menu.addAction("Reset Window Layout…")
+        self._act_reset_window_layout.setToolTip(
+            "Put the panels back where they open on a first launch, the Event inspector back "
+            "in its own window, and forget every remembered window size and place. Asks "
+            "first; your analysis is not changed.")
+        self._act_reset_window_layout.triggered.connect(self._reset_window_layout)
+
+    def _sync_window_menu(self) -> None:
+        """Re-read every entry: its name, whether it is open (checked) and reachable."""
+        self._populate_window_menu()
+        entries = self._window_menu_entries
+        title = self.windowTitle()
+        entries["main"].setText(title[2:] if title.startswith("• ") else title)
+        entries["main"].setChecked(self.isVisible() and not self.isMinimized())
+        insp_entry = entries[_ROLE_INSPECTOR]
+        insp_entry.setText("Event inspector — docked" if self._inspector_host == _HOST_DOCK
+                           else "Event inspector")
+        insp_entry.setChecked(self.curation_surface_on_screen(_ROLE_INSPECTOR))
+        insp_entry.setEnabled(self._act_event_inspector.isEnabled()
+                              or self._event_inspector is not None)
+        gal_entry = entries[_ROLE_GALLERY]
+        gal_entry.setChecked(self.curation_surface_on_screen(_ROLE_GALLERY))
+        gal_entry.setEnabled(self._act_event_gallery.isEnabled()
+                             or self._event_gallery is not None)
+        explorer = self._analysis_explorer
+        explorer_open = explorer is not None and explorer.isVisible()
+        entries["analysis_explorer"].setChecked(explorer_open)
+        installed = explorer.page_ids() if explorer is not None else ()
+        current = explorer.current_page_id() if explorer is not None else None
+        for page_id, act in self._window_menu_pages:
+            act.setVisible(page_id in installed)
+            act.setChecked(explorer_open and page_id == current)
+        entries["figure_library"].setChecked(_on_screen(self._figure_library))
+        for key in _CHILD_WINDOW_LABELS:
+            window = self._child_windows.get(key)
+            entries[key].setVisible(window is not None)
+            entries[key].setChecked(_on_screen(window))
+        self._act_dock_inspector.setChecked(self._inspector_host == _HOST_DOCK)
+
+    def _bring_main_to_front(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _show_analysis_explorer(self) -> None:
+        if self._analysis_explorer is None:
+            self._open_analysis_home()
+            return
+        explorer = self._analysis_explorer
+        if explorer.isMinimized():
+            explorer.showNormal()
+        explorer.show()
+        explorer.raise_()
+        explorer.activateWindow()
+
+    def _raise_explorer_page(self, page_id: str) -> None:
+        if self._analysis_explorer is not None:
+            self._analysis_explorer.raise_page(page_id)
+
+    def _bring_all_to_front(self) -> None:
+        """Every visible NanoScope window above other applications'; the active one stays
+        active (it is raised last)."""
+        active = QtWidgets.QApplication.activeWindow()
+        windows = [self, *(w for w in self._child_windows.values()
+                           if w.isWindow() and w.isVisible())]
+        explorer = self._analysis_explorer
+        if explorer is not None and explorer.isVisible() and explorer not in windows:
+            windows.append(explorer)
+        for window in windows:
+            if window is active:
+                continue
+            if window.isMinimized():
+                window.showNormal()
+            window.raise_()
+        if active is not None:
+            active.raise_()
+            active.activateWindow()
+
+    # -- Reset window layout ---------------------------------------------------------------------
+    def _confirm_reset_window_layout(self) -> bool:
+        """Ask first (a test seam, like _confirm_close_choice)."""
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setWindowTitle("Reset window layout")
+        box.setText("Put every panel and window back where it starts?")
+        box.setInformativeText(
+            "The File manager, Inspector and Results panels return to their opening places "
+            "and sizes, the Event inspector to its own window, and every remembered window "
+            "size and place is forgotten. Your analysis is not changed.")
+        reset = box.addButton("Reset", QtWidgets.QMessageBox.AcceptRole)
+        box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.exec()
+        return box.clickedButton() is reset
+
+    def _reset_window_layout(self) -> None:
+        """Window ▸ Reset Window Layout…: the docks as a first launch opens them, the Event
+        inspector in its own window, no remembered child geometry. Open windows stay open."""
+        if not self._confirm_reset_window_layout():
+            return
+        insp = self._event_inspector
+        insp_open = self.curation_surface_on_screen(_ROLE_INSPECTOR)
+        self._inspector_host = _HOST_WINDOW
+        s = QtCore.QSettings()
+        s.setValue(_SETTING_INSPECTOR_HOST, _HOST_WINDOW)
+        for key in (*_SETTING_DETAILS.values(),
+                    *(_geometry_setting(k) for k in _CHILD_WINDOW_KEYS)):
+            s.remove(key)
+        self._child_geometry.clear()
+        self._inspector_window_geometry = None
+        self._inspector_details = {}
+        if insp is not None:
+            insp.reset_details_state()
+            if not insp.isWindow():
+                self._undock_event_inspector()
+                insp.setVisible(insp_open)
+        if self._inspector_dock is not None:
+            self.removeDockWidget(self._inspector_dock)
+        if self._factory_window_state is not None:
+            self.restoreState(self._factory_window_state, _WINDOW_STATE_VERSION)
+        self._apply_dock_corners()
+        self._sync_results_title_bar()
+        self._apply_default_dock_widths()
+        self._apply_default_results_height()
+        for key, window in self._child_windows.items():
+            window.setProperty("nanoscopeGeometryPlaced", False)
+            if window.isWindow() and window.isVisible():
+                self._place_child_window(window, key)
+        self.statusBar().showMessage(
+            "Window layout reset to its defaults. Your analysis is unchanged.", 8000)
 
     def _edit_labels(self) -> None:
         """Analysis ▸ Event labels… — edit the palette.
@@ -6588,6 +7299,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # The gallery is a launcher surface now, so its show/hide has to reach the row's
             # "this window is open" tint like every other surface window's does.
             self._watch_surface_window(gal)
+            self._adopt_child_window(gal, _ROLE_GALLERY)
         self._event_gallery.set_vocabulary(self._label_vocab)
         self._refresh_event_gallery()
         # A gallery opened AFTER a subpopulation run still gets that run: the assignment
@@ -6618,7 +7330,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         self._analysis_panel.select_event(int(event_id))
         for win in (self._event_gallery, self._event_inspector):
-            if win is not None and win.isVisible():
+            # A docked inspector is already beside the trace, and keeps the keyboard.
+            if win is not None and win.isWindow() and win.isVisible():
                 win.lower()
         self.raise_()
         self.activateWindow()
@@ -11437,6 +12150,8 @@ class MainWindow(QtWidgets.QMainWindow):
         #: out loud at the end of this method — a dropped preference is a change the user
         #: will SEE (their layout is gone), so it is never dropped silently.
         ignored: list[str] = []
+        # Before any saved layout: what Window ▸ Reset Window Layout… goes back to.
+        self._factory_window_state = self.saveState(_WINDOW_STATE_VERSION)
         geo = _restorable_bytes(s, "geometry", ignored)
         if geo is not None and not self.restoreGeometry(geo):
             # Right kind, wrong contents — an empty or foreign-version byte array. Qt says
@@ -11488,6 +12203,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_dir = _string_setting(s, "lastDir", str(Path.home()), ignored)
         self._last_project_dir = _string_setting(
             s, "lastProjectDir", str(Path.home()), ignored)
+        self._read_window_preferences(s, ignored)
         self._rebuild_recent_menu()
         self._rebuild_recent_projects_menu()
         messages: list[str] = []
@@ -11843,6 +12559,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self._opening_layout_pending = False
         self._results_layout_pending = False
 
+    def _read_window_preferences(self, s: QtCore.QSettings, ignored: list[str]) -> None:
+        """The "windows/…" keys: the inspector's host and Details, and each child window's
+        geometry. Read once, validated like the rest; applied when each is first built."""
+        bad: list[str] = []
+        host = _choice_setting(s, _SETTING_INSPECTOR_HOST, (_HOST_WINDOW, _HOST_DOCK), bad)
+        self._inspector_host = host or _INSPECTOR_DEFAULT_HOST
+        self._inspector_details = {}
+        for host_name, key in _SETTING_DETAILS.items():
+            shown = _bool_setting(s, key, bad)
+            if shown is not None:
+                self._inspector_details[host_name] = shown
+        self._child_geometry = {}
+        for key in _CHILD_WINDOW_KEYS:
+            raw = _restorable_bytes(s, _geometry_setting(key), bad)
+            if raw is not None:
+                self._child_geometry[key] = QtCore.QByteArray(bytes(raw))
+        self._ignored_window_keys = bad
+        ignored.extend(bad)
+
+    def _write_window_preferences(self, s: QtCore.QSettings) -> None:
+        s.setValue(_SETTING_INSPECTOR_HOST, self._inspector_host)
+        insp = self._event_inspector
+        details = insp.details_state() if insp is not None else self._inspector_details
+        written = {_SETTING_INSPECTOR_HOST}
+        for host_name, key in _SETTING_DETAILS.items():
+            if host_name in details:
+                s.setValue(key, bool(details[host_name]))
+                written.add(key)
+        for window in self._child_windows.values():
+            self._remember_child_geometry(window)
+        for key, geometry in self._child_geometry.items():
+            s.setValue(_geometry_setting(key), geometry)
+            written.add(_geometry_setting(key))
+        # A value this app could not use is not left for the next launch to trip on.
+        for key in self._ignored_window_keys:
+            if key not in written:
+                s.remove(key)
+
     def _save_settings(self) -> None:
         s = QtCore.QSettings()
         s.setValue("geometry", self.saveGeometry())
@@ -11851,6 +12605,7 @@ class MainWindow(QtWidgets.QMainWindow):
         s.setValue("recentProjects", self._recent_projects)
         s.setValue("lastDir", self._last_dir)
         s.setValue("lastProjectDir", self._last_project_dir)
+        self._write_window_preferences(s)
         # Flush to disk HERE rather than relying on QSettings' own destructor. The quit
         # path may end in ``exit_without_destroying_live_threads`` (a worker that would
         # not stop), which runs no destructors at all — so an unsynced setting would be

@@ -392,12 +392,12 @@ def test_the_label_row_and_progress_do_not_grow_the_window(qapp, qtbot, tmp_path
                                       f"value-xxxxxxxxxxxx" for i in range(n)]))
             assert w.minimumSizeHint() == base
         assert base.width() <= 1100
-        # The Label row lives in the Event box, not in a root row of its own: the waveform
-        # keeps its 300 px floor (a root row once took 38 px of it).
-        assert w._plot_widget.minimumHeight() == insp_mod._PLOT_MIN_H == 300
-        # Updated (review B-1): the row is the readout's own bottom-right corner, so no
-        # readout line can set its x or the window's width.
-        assert w._label_row.parentWidget() is w._readout
+        # Updated (change C): the waveform's floor is lower so the window can dock beside
+        # the trace, and the Label row moved from the readout's corner to the fixed bar
+        # under the waveform, which stays on screen when Details hides the readout. No
+        # readout line can still set its x or the window's width.
+        assert w._plot_widget.minimumHeight() == insp_mod._PLOT_MIN_H == 180
+        assert w._label_row.parentWidget() is w._summary_bar
         assert w._curation_status.parentWidget() is w.statusBar()
     finally:
         qapp.setFont(old)

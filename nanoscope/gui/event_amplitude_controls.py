@@ -41,6 +41,38 @@ METHOD_LABELS = {
 }
 
 
+#: The longest note this widget stands on (a selected amplitude): its height is reserved at
+#: every width, so a shorter note never gives the room back. A legacy detection's extra
+#: sentence is not reserved -- it is a property of the detection, not of a flip.
+_NOTE_RESERVE = (
+    "Selected amplitude: -0000.000 pA (Median of selected interval / state). Original median "
+    "depth, dI/I0 and SNR are unchanged. A horizontal level uses the interval's mean "
+    "baseline; it is not a fitted plateau.")
+
+
+class _ReservedNote(QtWidgets.QLabel):
+    """A word-wrapped note that is never shorter than ``reserve`` at the same width.
+
+    The note's text follows the event and the staleness badge, and as a bare wrapped
+    label every change in its line count moved the waveform under it (a staleness flip
+    took one line away: plot 359 -> 374 px at 1000x800). Its height now changes only
+    with its width. A longer text (an error) still gets its room."""
+
+    def __init__(self, reserve: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWordWrap(True)
+        # The reserved room goes under the text, not around it.
+        self.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        self._probe = QtWidgets.QLabel(reserve, self)
+        self._probe.setWordWrap(True)
+        self._probe.hide()
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt override)
+        if self._probe.font() != self.font():
+            self._probe.setFont(self.font())
+        return max(super().heightForWidth(width), self._probe.heightForWidth(width))
+
+
 @dataclass
 class AmplitudeContext:
     current: np.ndarray
@@ -65,11 +97,16 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
+        # Two short rows rather than one 841 px row, so the Inspector can dock in a 460 px
+        # column: choose and Apply, then the gestures that reach further.
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Amplitude:"))
         self.method = QtWidgets.QComboBox()
         for key, label in METHOD_LABELS.items():
             self.method.addItem(label, key)
+        self.method.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.method.setMinimumContentsLength(12)
         self.method.setToolTip(
             "Explicit optional measurement. Apply never changes median depth_pA, "
             "dI/I0, SNR, event boundaries or fitted states.")
@@ -81,14 +118,19 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         self.edit_level.setToolTip(
             "Unlock the red line. A drag release saves a manual amplitude for this "
             "event only, separately from median depth. Undo with Edit → Undo.")
-        for widget in (self.apply_button, self.apply_all_button, self.reset_button, self.edit_level):
-            row.addWidget(widget)
+        row.addWidget(self.apply_button)
         layout.addLayout(row)
+        row2 = QtWidgets.QHBoxLayout()
+        for widget in (self.apply_all_button, self.reset_button, self.edit_level):
+            row2.addWidget(widget)
+        row2.addStretch(1)
+        layout.addLayout(row2)
 
         self.interval_row = QtWidgets.QWidget()
-        interval = QtWidgets.QHBoxLayout(self.interval_row)
+        interval = QtWidgets.QGridLayout(self.interval_row)
         interval.setContentsMargins(0, 0, 0, 0)
-        interval.addWidget(QtWidgets.QLabel("Interval samples:"))
+        interval.setVerticalSpacing(3)
+        interval.addWidget(QtWidgets.QLabel("Interval samples:"), 0, 0)
         self.start = QtWidgets.QSpinBox()
         self.end = QtWidgets.QSpinBox()
         for spin in (self.start, self.end):
@@ -96,28 +138,31 @@ class EventAmplitudeControls(QtWidgets.QWidget):
             spin.setKeyboardTracking(False)
         self.start.setToolTip("Absolute first sample, inclusive. Drag the purple interval handles.")
         self.end.setToolTip("Absolute stop sample, exclusive. Does not resize the detected event.")
-        interval.addWidget(self.start)
-        interval.addWidget(QtWidgets.QLabel("to (exclusive)"))
-        interval.addWidget(self.end)
-        interval.addSpacing(10)
-        interval.addWidget(QtWidgets.QLabel("Use fitted state:"))
+        interval.addWidget(self.start, 0, 1)
+        interval.addWidget(QtWidgets.QLabel("to (exclusive)"), 1, 0)
+        interval.addWidget(self.end, 1, 1)
+        interval.addWidget(QtWidgets.QLabel("Use fitted state:"), 2, 0)
         self.state = QtWidgets.QComboBox()
-        interval.addWidget(self.state, 1)
+        interval.addWidget(self.state, 2, 1)
+        interval.setColumnStretch(1, 1)
         layout.addWidget(self.interval_row)
 
         self.manual_row = QtWidgets.QWidget()
-        manual = QtWidgets.QHBoxLayout(self.manual_row)
+        manual = QtWidgets.QGridLayout(self.manual_row)
         manual.setContentsMargins(0, 0, 0, 0)
-        manual.addWidget(QtWidgets.QLabel("Equivalent level:"))
+        manual.setVerticalSpacing(3)
+        manual.addWidget(QtWidgets.QLabel("Equivalent level:"), 0, 0)
         self.level = QtWidgets.QDoubleSpinBox()
         self.level.setRange(-1e12, 1e12)
         self.level.setDecimals(8)
         self.level.setKeyboardTracking(False)
-        manual.addWidget(self.level)
-        manual.addWidget(QtWidgets.QLabel("Type a value and Apply, or drag the unlocked red line."), 1)
+        manual.addWidget(self.level, 0, 1)
+        self.manual_hint = QtWidgets.QLabel("Type a value and Apply, or drag the unlocked red line.")
+        self.manual_hint.setWordWrap(True)
+        manual.addWidget(self.manual_hint, 1, 0, 1, 2)
+        manual.setColumnStretch(1, 1)
         layout.addWidget(self.manual_row)
-        self.note = QtWidgets.QLabel()
-        self.note.setWordWrap(True)
+        self.note = _ReservedNote(_NOTE_RESERVE)
         self.note.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         layout.addWidget(self.note)
 

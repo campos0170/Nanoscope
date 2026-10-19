@@ -239,6 +239,22 @@ def _real_settings_store_is_never_written():
         _REAL_STORE_SIG = real_store_signature()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_window_preferences():
+    """Start every test from the default child-window preferences.
+
+    Where the Event inspector lives (its own window or docked), its Details state and every
+    child window's remembered geometry are kept under ``windows/``, and
+    ``MainWindow._save_settings`` writes them on every close. The suite shares one store
+    per process (``qapp`` clears it once), so without this one test's dock decides where
+    the next test's inspector opens. Guarded: analysis and core tests run before any
+    QApplication exists, and a QSettings built then keys on no organisation at all.
+    """
+    if QtCore.QCoreApplication.instance() is not None:
+        QtCore.QSettings().remove("windows")
+    yield
+
+
 from nanoscope.core.document import CalibratedChannel
 from nanoscope.core.types import (
     ChannelInfo,

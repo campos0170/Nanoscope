@@ -189,7 +189,7 @@ The prepared review trace is an HDF5 file inside the study workspace. Save a nor
 
 ### Exact main-window event review controls
 
-After **Curate in main workspace…**, keep the matching recording and detection table active. The persistent **Incubation study** bar identifies the exact study recording. Choose **Analysis → Event inspector…**. Use **◀ Prev** and **Next ▶** to navigate, then **Accept** or **Reject** for the current event; these actions do not advance automatically. The **Accepted** checkbox reflects its state. The A/R shortcuts perform the same decisions, and the arrow keys navigate.
+After **Curate in main workspace…**, keep the matching recording and detection table active. The persistent **Incubation study** bar identifies the exact study recording. Choose **Analysis → Event inspector…**. Use **◀** and **▶** to navigate, then **Accept** or **Reject** for the current event; these actions do not advance automatically. The **Accepted** checkbox reflects its state. The A/R shortcuts perform the same decisions, and the arrow keys navigate.
 
 For a boundary correction, drag the event mask edge in Event Inspector and wait for the edit and measurement to finish. **Revert mask**, when available, restores the recorded original bounds. The highlighted interval in the study's own trace preview is for inspection and cannot be dragged. The main Event table, Gallery and Inspector also provide their ordinary labeling, missed-event, merge and Undo tools; Reconciled tables retain their source-editing restrictions.
 
