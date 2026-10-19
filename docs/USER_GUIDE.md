@@ -375,9 +375,9 @@ Event waveforms, Event gallery, Reconcile detector results, Event labels, Noise 
 data, figures). **Analysis home** and **Guided first analysis** also have menu entries; the guide
 is available from **Help**. **Window** lists the windows NanoScope opens — the main window,
 Event inspector, Event gallery, Analysis Explorer (with one indented entry per open page), Figure
-Library, and — once opened this session — Guided first analysis, About NanoScope, the Incubation
-study launcher and the Original Zn reference recipe — with a check mark beside each
-one on screen; choosing one opens it or brings it forward through the same door as its own menu
+Library, Signal Conditioning, and — once opened this session — Guided first analysis, About
+NanoScope, the Incubation study launcher and the Original Zn reference recipe — with a check mark
+beside each one on screen; choosing one opens it or brings it forward through the same door as its own menu
 item. It also holds **Bring All to Front**, **Dock Event inspector beside the trace** (§9) and
 **Reset Window Layout…**. Child windows reopen where you last left them (size and place,
 remembered between sessions and brought back onto the screen you have now).

@@ -149,6 +149,13 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- A saved window size and place from a differently sized display (a laptop and an external
+  monitor more than about a fifth apart in width) is no longer reported as "a value this app did
+  not write": the main window, the child windows and Signal Conditioning take their saved size
+  and place, brought onto the current screen (a maximized main window stays maximized), and a
+  window's remembered place is no longer deleted. Only bytes that really are damaged are named.
+  Signal Conditioning is now listed in the **Window** menu. **Window ▸ Reset Window Layout…**
+  also puts a window that is hidden back at its default size and place.
 - A dock that is floating when you quit (Results, Inspector or File manager) now comes back
   floating and visible; quitting used to close it before the layout was saved. **Window ▸ Reset
   Window Layout…** now also forgets the Signal Conditioning window's size, place and splitter,

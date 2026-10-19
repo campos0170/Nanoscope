@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import struct
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -423,6 +424,31 @@ _SETTING_DETAILS = {_HOST_WINDOW: "windows/event_inspector/details_window",
 
 def _geometry_setting(key: str) -> str:
     return f"windows/{key}/geometry"
+
+
+#: QWidget.saveGeometry()'s header: magic, major and minor version, the frame and the normal
+#: rect (left, top, right, bottom each), the screen's index, the maximized / full-screen flags.
+_GEOMETRY_HEADER = struct.Struct(">IHH4i4iiBB")
+_GEOMETRY_MAGIC = 0x1D9D0CB
+_GEOMETRY_MAJOR = 3
+
+
+def _saved_normal_rect(blob) -> tuple[QtCore.QRect, bool] | None:
+    """The normal rect and the maximized flag of a ``saveGeometry()`` blob; None for bytes
+    Qt could never restore (empty, other magic, newer version, cut short, empty rect).
+
+    Qt also answers False to a sound blob saved on a screen whose width is far from the
+    current one (a laptop and an external monitor). That is not a damaged preference, so
+    the two are told apart here, by the header Qt itself checks."""
+    raw = bytes(blob)
+    if len(raw) < _GEOMETRY_HEADER.size:
+        return None
+    magic, major, _minor, *numbers, _screen, maximized, _full = _GEOMETRY_HEADER.unpack_from(raw)
+    if magic != _GEOMETRY_MAGIC or major > _GEOMETRY_MAJOR:
+        return None
+    left, top, right, bottom = numbers[4:8]
+    rect = QtCore.QRect(QtCore.QPoint(left, top), QtCore.QPoint(right, bottom))
+    return (rect, bool(maximized)) if rect.isValid() else None
 
 
 def _with_project_suffix(path: str) -> str:
@@ -6697,6 +6723,7 @@ class MainWindow(QtWidgets.QMainWindow):
         size and place are kept (on hide and at quit) in ``windows/<key>/geometry``."""
         self._child_windows[key] = window
         window.setProperty("nanoscopeGeometryKey", key)
+        window.setProperty("nanoscopeDefaultSize", window.size())    # what a Reset goes back to
         window.installEventFilter(self)
 
     def _adopt_child_window(self, window: QtWidgets.QWidget, key: str) -> None:
@@ -6706,13 +6733,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self._register_child_window(window, key)
         self._place_child_window(window, key)
 
+    def _restore_saved_geometry(self, window: QtWidgets.QWidget, blob) -> bool:
+        """``restoreGeometry``, but a sound blob Qt declines for a differently sized screen
+        gets its saved normal rect, fitted to this screen. False only for unusable bytes."""
+        blob = QtCore.QByteArray(bytes(blob))
+        if window.restoreGeometry(blob):
+            return True
+        saved = _saved_normal_rect(blob)
+        if saved is None:
+            return False
+        rect, maximized = saved
+        window.setGeometry(rect)
+        self._fit_to_available_screen(window)
+        if maximized:
+            window.setWindowState(window.windowState() | QtCore.Qt.WindowMaximized)
+        return True
+
     def _place_child_window(self, window: QtWidgets.QWidget, key: str) -> None:
         if window.property("nanoscopeGeometryPlaced"):
             return
         window.setProperty("nanoscopeGeometryPlaced", True)
         saved = self._child_geometry.get(key)
         if saved is not None:
-            if window.restoreGeometry(saved):
+            if self._restore_saved_geometry(window, saved):
                 self._fit_to_available_screen(window)
                 return
             # Right type, contents Qt cannot use: say so once and forget it.
@@ -6873,6 +6916,9 @@ class MainWindow(QtWidgets.QMainWindow):
         entry("figure_library", "Figure Library",
               "Open this project's Figure Library or bring it forward — the same as "
               "Analysis ▸ Figure Library….", self._open_figure_library)
+        entry("signal_conditioning", "Signal Conditioning",
+              "Open the Signal Conditioning window or bring it forward — the same as "
+              "Analysis ▸ Signal conditioning… (⇧⌘F).", self._open_signal_conditioning)
         menu.addSeparator()
         for key, label in _CHILD_WINDOW_LABELS.items():
             act = entry(key, label, f"Bring the {label} window forward.",
@@ -6921,6 +6967,7 @@ class MainWindow(QtWidgets.QMainWindow):
             act.setVisible(page_id in installed)
             act.setChecked(explorer_open and page_id == current)
         entries["figure_library"].setChecked(_on_screen(self._figure_library))
+        entries["signal_conditioning"].setChecked(_on_screen(self._signal_conditioning))
         for key in _CHILD_WINDOW_LABELS:
             window = self._child_windows.get(key)
             entries[key].setVisible(window is not None)
@@ -7019,8 +7066,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if window.isWindow() and window.isVisible():
                 self._place_child_window(window, key)
             else:
-                # Hidden: it was forgotten above, so the quit-save must not write it back.
+                # Hidden: it was forgotten above, so the quit-save must not write it back,
+                # and it reopens at its default size and place, not the ones it was left in.
                 window.setProperty("nanoscopeGeometryShown", False)
+                default = window.property("nanoscopeDefaultSize")
+                if window.isWindow() and default is not None:
+                    window.resize(default)
+                    self._place_child_window(window, key)
         self.statusBar().showMessage(
             "Window layout reset to its defaults. Your analysis is unchanged.", 8000)
 
@@ -7457,7 +7509,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         avail = self._available_screen_geometry()
         geo = _restorable_bytes(s, self._SC_GEOMETRY_KEY, ignored)
-        restored = geo is not None and ws.restoreGeometry(QtCore.QByteArray(geo))
+        restored = geo is not None and self._restore_saved_geometry(ws, geo)
         if geo is not None and not restored:
             ignored.append(self._SC_GEOMETRY_KEY)
         if restored:
@@ -12389,10 +12441,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Before any saved layout: what Window ▸ Reset Window Layout… goes back to.
         self._factory_window_state = self.saveState(_WINDOW_STATE_VERSION)
         geo = _restorable_bytes(s, "geometry", ignored)
-        if geo is not None and not self.restoreGeometry(geo):
-            # Right kind, wrong contents — an empty or foreign-version byte array. Qt says
-            # so by returning False rather than raising, and that answer is worth the same
-            # sentence as a wrong-typed value: either way the saved geometry is not applied.
+        if geo is not None and not self._restore_saved_geometry(self, geo):
+            # Right kind, wrong contents — an empty, cut-short or foreign-version byte array.
+            # Qt says so by returning False rather than raising, and that answer is worth the
+            # same sentence as a wrong-typed value: either way the saved geometry is not applied.
             ignored.append("geometry")
         state = _restorable_bytes(s, "windowState", ignored)
         # Newest version first; a layout saved before the Results dock (version 0) still
