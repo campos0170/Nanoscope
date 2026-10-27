@@ -223,6 +223,7 @@ class FileDock(QtWidgets.QDockWidget):
         session.documentClosed.connect(lambda _d: self._rebuild())
         session.layersChanged.connect(self._sync_layers)
         session.viewModeChanged.connect(self._sync_view_mode)
+        session.sampleRateChanged.connect(lambda _doc_id: self._sync_layers())  # the offset spin's gate
 
         self._rebuild()
 

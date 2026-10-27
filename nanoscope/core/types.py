@@ -29,6 +29,7 @@ class Provenance(Enum):
     MEASURED = "measured"    # read out of the signal itself
     FILE_META = "file_meta"  # declared in the file header
     FILENAME = "filename"    # parsed from the filename — UNRELIABLE. Render visibly differently.
+    USER = "user"            # declared by the user in Inspector ▸ File Info; saved with the project
     UNKNOWN = "unknown"
 
 
@@ -92,6 +93,20 @@ class RecordingMeta:
     # preserved by every ``dataclasses.replace`` after that, so a doc_id is stable for the
     # life of the load. "" means a meta that never became a document (a probe() result);
     # readers do not set it and must not.
+    time_scale_s: float = 1.0
+    # ^^ SECONDS PER UNIT OF THE FILE'S OWN TIME COLUMN, AS IT WAS READ. 1.0 for every format
+    # that declares its rate (ABF, TDMS) and for a time column read as seconds; 1e-3 when a
+    # CSV header named milliseconds (``time_ms``) and the reader scaled the column to seconds
+    # on the way in. It is how ``sample_rate_hz`` and ``t0_s`` relate to the numbers in the
+    # file, so a later declaration (core/sample_rate.py: "the column is in microseconds, not
+    # milliseconds") can be resolved against what was read rather than typed over it.
+    refused_rate_hz: float | None = None
+    # ^^ THE RATE THE READER MEASURED AND REFUSED TO REPORT: a time column stepping by
+    # 100 per sample reads as 0.01 Hz, which no recording is, so ``sample_rate_hz`` is
+    # None (io.base.MIN_PLAUSIBLE_RATE_HZ) — but the interval was measured, and it is
+    # exactly what a declaration of the column's unit re-reads ("those numbers are
+    # microseconds": 0.01 Hz x 10^6). Kept here so that remedy exists without guessing.
+    # None whenever the rate was not refused on that ground.
 
     def __post_init__(self) -> None:
         """Refuse a meta whose load window and sample count disagree.

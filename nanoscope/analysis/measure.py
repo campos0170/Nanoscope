@@ -366,6 +366,44 @@ def calibration_stamp_state(
 
 
 # ---------------------------------------------------------------------------
+# the time-base check
+# ---------------------------------------------------------------------------
+
+#: The row's seconds were computed at the recording's LIVE rate.
+RATE_STAMP_MATCH = "match"
+#: They were not: the recording's time base has been re-declared since. The row is a record
+#: and is never rescaled — re-measure the span to update it.
+RATE_STAMP_STALE = "stale"
+#: Nothing to compare: the row carries no seconds (measured on a rate-less recording), or
+#: no span.
+RATE_STAMP_UNKNOWN = "unknown"
+
+
+def rate_stamp_state(row_start_idx, row_end_idx, row_dwell_s, live_fs: float | None) -> str:
+    """Was this row's ``dwell_s`` computed at the recording's live sample rate?
+
+    A manual row carries no rate stamp and needs none: it stores its span in SAMPLES
+    (``start_idx``/``end_idx``) beside its duration in SECONDS (``dwell_s``), and the two
+    agree only under the rate the row was measured at. After the recording's time base is
+    re-declared (``Session.set_sample_rate_declaration``) every seconds column of such a row
+    is a record of the old clock, so it is marked — never rescaled — exactly as the event
+    table's time columns are. The tolerance is round-off only: the stamp is a content key,
+    not a measurement.
+    """
+    try:
+        start, end = int(row_start_idx), int(row_end_idx)
+        dwell = float(row_dwell_s)
+    except (TypeError, ValueError):
+        return RATE_STAMP_UNKNOWN
+    if not np.isfinite(dwell) or end <= start:
+        return RATE_STAMP_UNKNOWN
+    if live_fs is None or not float(live_fs) > 0:
+        return RATE_STAMP_STALE            # seconds on a recording that now has no time base
+    expected = (end - start) / float(live_fs)
+    return RATE_STAMP_MATCH if abs(dwell - expected) <= 1e-6 * expected else RATE_STAMP_STALE
+
+
+# ---------------------------------------------------------------------------
 # level estimators
 # ---------------------------------------------------------------------------
 

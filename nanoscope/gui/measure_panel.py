@@ -225,11 +225,13 @@ from ..analysis.measure import (
     CAL_STAMP_STALE,
     CAL_STAMP_UNKNOWN,
     LIVE_PREVIEW_MAX_SAMPLES,
+    RATE_STAMP_STALE,
     MEASUREMENT_DIAGNOSTIC_KEYS,
     UNKNOWN_CHANNEL_INDEX,
     NonFiniteSelection,
     append_measurement,
     calibration_stamp_state,
+    rate_stamp_state,
     coerce_measurements,
     empty_measurements_df,
     measure_selection,
@@ -320,6 +322,30 @@ _STALE_ROW_TIP = (
 _ROW_STALE = "stale"          # checked against the live calibration, and superseded
 _ROW_LAPSED = "lapsed"        # WAS superseded when last checked; no longer checkable
 _ROW_UNCHECKED = "unchecked"  # never checkable: recording closed, or no stamp at all
+_ROW_RATE_STALE = "rate_stale"  # checked against the live TIME BASE, and superseded
+_ROW_RATE_LAPSED = "rate_lapsed"  # WAS so when last checked; no longer checkable
+
+# The fourth state, for the other stamp a row carries without a column of its own: its
+# span in samples beside its duration in seconds agree only under the rate the row was
+# measured at (`analysis.measure.rate_stamp_state`). A re-declared time base (Inspector ▸
+# File Info ▸ Sample rate / time unit…) leaves every seconds column of such a row a record
+# of the old clock — marked, never rescaled, exactly as the event table's time columns are.
+_RATE_STALE_ROW_TIP = (
+    "Measured under a time base that has since been re-declared (File Info ▸ Sample rate / "
+    "time unit…). The row's t_start_s, dwell_s and area_ecd were computed at the recording's "
+    "previous sample rate (and its t0_s was read before the column's unit was re-declared, "
+    "when that is what changed); its start_idx / end_idx span is still right. Saved numbers "
+    "are the record of what was measured and are never rescaled — re-measure the span "
+    "(double-click the row to return to it, then Add to list) for a row under the declared "
+    "rate."
+)
+_RATE_LAPSED_ROW_TIP = (
+    "Measured under a time base that had already been re-declared when this row was last "
+    "checked — and its recording is no longer open, so the check cannot be repeated. The "
+    "mark is kept because the row is: the saved numbers are unchanged, and so is what was "
+    "true about them. Reopen the recording to have it checked again, and re-measure the "
+    "span for a row under the declared rate."
+)
 
 # A mark that outlived the ability to refresh it. Kept, and honest about why: the row's
 # numbers did not change when the recording closed, so neither does its warning — but the
@@ -562,7 +588,8 @@ class _MeasurementsModel(QAbstractTableModel):
             return
         self._row_states = wanted
         self._stale_ids = frozenset(k for k, v in wanted.items()
-                                    if v in (_ROW_STALE, _ROW_LAPSED))
+                                    if v in (_ROW_STALE, _ROW_LAPSED, _ROW_RATE_STALE,
+                                             _ROW_RATE_LAPSED))
         self._stale_tip = str(stale_tip)
         self.beginResetModel()   # row headers + every cell of those rows repaint
         self.endResetModel()
@@ -636,7 +663,8 @@ class _MeasurementsModel(QAbstractTableModel):
     def _row_is_stale(self, row: int) -> bool:
         """Wearing the superseded-calibration ⚠ (checked-and-stale, or a kept mark whose
         recording has since closed). The amber-and-⚠ predicate, not "has a state"."""
-        return self._row_state(row) in (_ROW_STALE, _ROW_LAPSED)
+        return self._row_state(row) in (_ROW_STALE, _ROW_LAPSED, _ROW_RATE_STALE,
+                                        _ROW_RATE_LAPSED)
 
     def _row_marker(self, row: int) -> str:
         """The non-colour glyph for a row's state — colour alone is the first thing lost
@@ -646,6 +674,8 @@ class _MeasurementsModel(QAbstractTableModel):
             return "⚠"
         if state == _ROW_LAPSED:
             return "⚠"          # the same alarm; its tooltip is the one that differs
+        if state in (_ROW_RATE_STALE, _ROW_RATE_LAPSED):
+            return "⚠"          # the same alarm again: the other stamp moved
         if state == _ROW_UNCHECKED:
             return "?"          # not an alarm: an absent verdict
         return ""
@@ -656,6 +686,10 @@ class _MeasurementsModel(QAbstractTableModel):
             return self._stale_tip
         if state == _ROW_LAPSED:
             return _LAPSED_ROW_TIP
+        if state == _ROW_RATE_STALE:
+            return _RATE_STALE_ROW_TIP
+        if state == _ROW_RATE_LAPSED:
+            return _RATE_LAPSED_ROW_TIP
         if state == _ROW_UNCHECKED:
             return _UNCHECKED_ROW_TIP
         return ""
@@ -985,6 +1019,11 @@ class MeasurePanel(QtWidgets.QWidget):
         #: once. It exists so that closing a recording downgrades a ⚠ to "marked, and no
         #: longer re-checkable" instead of erasing it — see `_refresh_stale_rows`.
         self._last_stamp_state: dict[int, str] = {}
+        #: The same memory for the OTHER stamp a row carries — its sample span against its
+        #: seconds under the recording's rate — so a row found rate-stale keeps a mark that
+        #: says what moved after its recording closes, rather than lapsing into the
+        #: calibration sentence.
+        self._last_rate_state: dict[int, str] = {}
         # Whether the active (doc, channel) has a stored detection — pushed in by the
         # owner (AnalysisPanel). Gates the "Mark selection as missed event" button, which
         # only makes sense when there is a detector output to add the missed event to.
@@ -1051,6 +1090,10 @@ class MeasurePanel(QtWidgets.QWidget):
         # would save the stale dict (the exact-commit path hands a non-preview _last_stats
         # back unchanged).
         self._session.calibrationChanged.connect(self._on_calibration_changed)
+        # A re-declared time base moves no cursor either, but every saved row's seconds
+        # were computed at the old rate: re-judge them (the live readout follows the
+        # region, which the trace view re-seeds on the new axis).
+        self._session.sampleRateChanged.connect(lambda _doc_id: self._refresh_stale_rows())
 
         self._update_enabled()
 
@@ -2744,6 +2787,8 @@ class MeasurePanel(QtWidgets.QWidget):
                 # drawn exactly like one that was checked and matched.
                 states[mid] = (_ROW_LAPSED
                                if self._last_stamp_state.get(mid) == CAL_STAMP_STALE
+                               else _ROW_RATE_LAPSED
+                               if self._last_rate_state.get(mid) == RATE_STAMP_STALE
                                else _ROW_UNCHECKED)
                 continue
             ch = self._channel_for_row(doc, row)
@@ -2754,18 +2799,29 @@ class MeasurePanel(QtWidgets.QWidget):
             state = calibration_stamp_state(
                 row.get("cal_gain"), row.get("cal_offset"), row.get("units"),
                 live_gain, live_offset, live_units)
+            # ...and the time base: the row's sample span against its seconds, under the
+            # recording's LIVE rate (a re-declared one leaves the seconds a record of the
+            # old clock). The calibration verdict is checked first because a gain change
+            # moves more columns; a row stale on both is repaired by the same re-measure.
+            rate_state = rate_stamp_state(
+                row.get("start_idx"), row.get("end_idx"), row.get("dwell_s"),
+                doc.meta.sample_rate_hz)
             # Remember the verdict WHILE it can be made, so that when the recording is
             # closed the panel can say which of the two un-judgeable cases this row is in
             # rather than silently forgetting it was ever warned about.
             self._last_stamp_state[mid] = state
+            self._last_rate_state[mid] = rate_state
             if state == CAL_STAMP_STALE:
                 states[mid] = _ROW_STALE
+            elif rate_state == RATE_STAMP_STALE:
+                states[mid] = _ROW_RATE_STALE
             elif state == CAL_STAMP_UNKNOWN:
                 states[mid] = _ROW_UNCHECKED
         # Forget rows that no longer exist (deleted, or a project restore replaced the
         # table): a remembered verdict for an id the table has reused would be a lie.
         self._last_stamp_state = {k: v for k, v in self._last_stamp_state.items()
                                   if k in seen}
+        self._last_rate_state = {k: v for k, v in self._last_rate_state.items() if k in seen}
         self._model.set_row_states(states)
 
     # -- on-trace markers -------------------------------------------------------------------------

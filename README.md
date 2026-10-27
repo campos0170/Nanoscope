@@ -72,7 +72,7 @@ external. The complete contract is documented in
 | Axon ABF (`.abf`) | `neo.rawio.AxonRawIO` | float-format ABF v1; the `CPYA` variant is refused with a specific message |
 | HDF5 (`.h5`, `.hdf5`) | `h5py` | flat `/current` `/voltage` `/conductance`; units are undeclared and reported as such |
 | TDMS (`.tdms`) | `npTDMS` | modern (rate known) and legacy (rate unknown) layouts; raw-Volts channels flagged |
-| Text (`.csv`, `.txt`) | `pandas` | trace tables; channel kind inferred from a `current`/`voltage` column name |
+| Text (`.csv`, `.txt`) | `pandas` | trace tables; channel kind inferred from a `current`/`voltage` column name; the time column's header may name its unit (`time_ms`, `Time (ms)`) |
 
 ---
 

@@ -611,8 +611,60 @@ class TraceView(pg.GraphicsLayoutWidget):
         session.viewModeChanged.connect(self.rebuild)
         session.documentClosed.connect(lambda _doc_id: self.rebuild())
         session.calibrationChanged.connect(self.refresh_channel)
+        session.sampleRateChanged.connect(self._on_sample_rate_changed)
 
         self.rebuild()
+
+    def _on_sample_rate_changed(self, doc_id: str) -> None:
+        """A document's time base was re-declared (``Session.set_sample_rate_declaration``).
+
+        Every x this view remembers is on the OLD clock: the anchor's range that
+        :meth:`rebuild` restores across a same-document rebuild, the Back/Forward trail,
+        and the Measure region. Measured before this slot existed, on a 40,000-sample CSV
+        read as 100 Hz (0.05–400 s): zoom to [119, 124] s, declare the column is in
+        milliseconds, and the rebuild restored [121.1, 121.9] s over data that now span
+        0.00005–0.4 s — a blank pane under a valid-looking seconds axis, the Measure region
+        300x off the end of the recording, and a Zoom Back that led to 400 s. A rateless
+        recording given a rate is the same defect at 10,000x (samples became seconds). So
+        when the document is on screen the old-clock state is forgotten first and the
+        view frames fresh; the region is re-seeded on the new axis by ``_reattach_measure``.
+        """
+        if doc_id not in self.session.shown_doc_ids():
+            return                              # nothing drawn changed; File Info and the
+                                                # status bar follow the signal themselves
+        # The Measure region's x-range is on the old clock, but the SPAN it covers is a fact
+        # about samples (the panel's own rate-stale tooltip says so): read the indices off
+        # the curve still on screen — its x data IS the old axis — and re-place the region
+        # from them on the new axis after the rebuild. Re-seeding would move the cursors off
+        # the blockade the user put them on and quietly measure a baseline stretch instead.
+        carry: tuple[str, int, int] | None = None
+        if (self._measure_active and self._measure_layer_id is not None
+                and self._measure_xrange is not None):
+            pane = self.pane_for_layer(self._measure_layer_id)
+            curve = pane._curves.get(self._measure_layer_id) if pane is not None else None
+            old_x = getattr(curve, "xData", None)
+            if old_x is not None and len(old_x):
+                lo, hi = sorted(self._measure_xrange)
+                # The same nearest-sample rule measure_bounds() applies, so the carried
+                # span IS the span the panel reported just before the signal.
+                i0 = self._nearest_index(old_x, float(lo))
+                i1 = self._nearest_index(old_x, float(hi))
+                carry = (self._measure_layer_id, i0, max(i0, i1))
+        self._prev_doc_ids = frozenset()       # not a toggle: never restore an old-clock range
+        self._view_hist = []                   # the trail is in the old unit; rebuild reseeds
+        self._view_ptr = 0
+        self._measure_xrange = None            # placed below from the carried indices
+        self.rebuild()
+        if carry is not None and self._measure_region is not None:
+            layer_id, i0, i1 = carry
+            layer = next((lay for lay in self.session.layers() if lay.layer_id == layer_id), None)
+            if layer is not None and self._measure_layer_id == layer_id:
+                new_x = self.session.x_axis(layer.doc_id, layer.time_offset_s).values
+                if len(new_x):
+                    x0, x1 = float(new_x[min(i0, len(new_x) - 1)]), float(new_x[min(i1, len(new_x) - 1)])
+                    if x1 <= x0:
+                        x1 = x0 + (float(new_x[1] - new_x[0]) if len(new_x) > 1 else 1.0)
+                    self._measure_region.setRegion((x0, x1))   # emits: the panel re-measures
 
     # -- construction ----------------------------------------------------------------------------
     def rebuild(self) -> None:
@@ -1786,7 +1838,13 @@ class TraceView(pg.GraphicsLayoutWidget):
     def _x_to_index(self, layer: Layer, x: float) -> int:
         """Nearest sample index for a data-x on ``layer``, clamped to [0, n]."""
         xax = self.session.x_axis(layer.doc_id, layer.time_offset_s)
-        vals = xax.values
+        return self._nearest_index(xax.values, x)
+
+    @staticmethod
+    def _nearest_index(vals: np.ndarray, x: float) -> int:
+        """THE ONE nearest-sample rule for a data-x against an axis array, clamped to
+        [0, n] — ``_x_to_index`` on the live axis, and the Measure-region carry on the axis
+        a curve was drawn with, so the two agree to the sample."""
         n = vals.size
         if n == 0:
             return 0

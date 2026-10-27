@@ -33,9 +33,13 @@ __all__ = [
     "probe_path",
     "open_document",
     "MIN_PLAUSIBLE_RATE_HZ",
+    "SUSPECT_UNDECLARED_RATE_HZ",
     "filesystem_refusal",
     "foreign_format_redirect",
     "implausible_measured_rate_issue",
+    "undeclared_rate_is_suspect",
+    "undeclared_low_rate_issue",
+    "declared_time_unit_note",
     "DowncastAudit",
     "downcast_needs_audit",
 ]
@@ -278,8 +282,10 @@ def foreign_format_redirect(path: Path) -> str | None:
 
 
 # A sample rate MEASURED from a file's own time column is only as good as that column's UNITS,
-# and no format this app reads declares them: an integer /time in microseconds and a float /time
-# in seconds are the same numbers with the same dtype rules and a 10^6 difference in meaning.
+# and no format this app reads declares them — except a CSV whose time-column HEADER names one
+# (``time_ms``; see io/text.py), which is read as declared and never reaches this floor. An
+# integer /time in microseconds and a float /time in seconds are otherwise the same numbers with
+# the same dtype rules and a 10^6 difference in meaning.
 # Below this rate the reading cannot be right — no recording this app opens takes more than a
 # second per sample — so it is refused out loud instead of being reported as a measurement.
 # Deliberately NOT applied to a DECLARED rate (the ABF header's Hz, TDMS's wf_increment): those
@@ -304,7 +310,59 @@ def implausible_measured_rate_issue(*, source: str, dt: float, hz: float,
             f"write), and this reader will not guess it: the sample rate is left unknown and "
             f"the x-axis is in samples, rather than every duration, dwell time and event rate "
             f"here being wrong by a factor of a million in silence. Re-export the time base in "
-            f"seconds to analyse this recording here.")
+            f"seconds, or declare the unit of this time base under Inspector ▸ File Info ▸ "
+            f"Sample rate / time unit…, to analyse this recording here.")
+
+
+# The SECOND tier of the same question, for the column the floor above cannot see. A time
+# column in MILLISECONDS passes it with room to spare: 10 µs steps written as 0.01 per row read
+# as 100 Hz — plausible as a number, 1,000x wrong as a rate, and the file that looks cleanest of
+# all (uniform, self-consistent, issues=()). [MEASURED] on a 'time_ms,current_pA' export of a
+# 100 kHz, 0.5 s recording: probe reported 100 Hz, Provenance.MEASURED, duration 552 s,
+# issues=(). No recording this app is written for is sampled below a kilohertz, so an
+# UNDECLARED measured rate under this bound is reported as a question the user has to settle,
+# not as a measurement to trust: the rate is KEPT as read (nothing is refused, nothing is
+# converted by a guess), and the sentence names the one fact that resolves it — the column's
+# unit — and the two places it can be declared. A rate whose unit the file DID declare is the
+# file's statement and is not second-guessed here, exactly as the floor above is not applied to
+# an ABF header's Hz.
+SUSPECT_UNDECLARED_RATE_HZ = 1000.0
+
+
+def undeclared_rate_is_suspect(hz: float) -> bool:
+    """``hz``, measured from a time column whose unit is undeclared, is below the bound.
+
+    With a float tolerance, so a column written as ``i / 1000.0`` — exactly 1 kHz up to the
+    rounding of its own decimals — sits ON the bound rather than a few ulps under it.
+    """
+    return hz < SUSPECT_UNDECLARED_RATE_HZ * (1.0 - 1e-9)
+
+
+def undeclared_low_rate_issue(*, source: str, dt: float, hz: float,
+                              header_hint: bool = False) -> str:
+    """The one sentence for "this undeclared time base may well not be in seconds".
+
+    Says the measurement, says why it is doubted, says what it would mean if the usual
+    suspects are the case, says that NOTHING was changed, and says where the unit is declared.
+    ``header_hint`` adds the CSV remedy (name the unit in the column header), which no other
+    format has.
+    """
+    where = ("Name the unit in the column header (time_ms, time_us) or declare it under "
+             if header_hint else "Declare the unit under ")
+    return (f"{source} steps by {dt:,.6g} per sample. Read as seconds that is {hz:,.6g} Hz — "
+            f"below the {SUSPECT_UNDECLARED_RATE_HZ:,.0f} Hz any recording this app is written "
+            f"for is sampled at — and the unit of this time base is not declared in the file. "
+            f"If this time base is in milliseconds the true rate is {hz * 1e3:,.6g} Hz and every "
+            f"duration, dwell time and event rate here is 1,000x wrong; in microseconds, "
+            f"{hz * 1e6:,.6g} Hz and a million. The measured rate is kept as read; nothing was "
+            f"converted by a guess. {where}Inspector ▸ File Info ▸ Sample rate / time unit….")
+
+
+def declared_time_unit_note(*, source: str, unit: str, hz: float) -> str:
+    """The one sentence for "the column header named its unit, and it was read that way"."""
+    return (f"{source} declares {unit} in its header and was read as such: {hz:,.6g} Hz. If "
+            f"the header is wrong, declare the unit under Inspector ▸ File Info ▸ Sample rate / "
+            f"time unit….")
 
 
 # =================================================================================================

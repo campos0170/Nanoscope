@@ -132,7 +132,16 @@ The four questions, each with the defect that put it there:
    first ~1000 rows and then describe the whole file with it: on a CSV whose interval changes at row
    1500, 0.0600 s was reported for a 0.3300 s recording — 5.5× wrong, `issues=()`. Changing how the
    rate is derived would move every dwell time on every well-formed file, so the fix is not the rate:
-   it is *saying that the rest of the file disagrees* (`rate_disagrees_issue`).
+   it is *saying that the rest of the file disagrees* (`rate_disagrees_issue`). The question has a
+   second half — *in what unit?* — answered in three tiers (the header rule in `io/text.py`, the
+   two rate bounds in `io/base.py`): a CSV header that names the unit (`time_ms`) is a declaration
+   and is read as such; an undeclared rate below `MIN_PLAUSIBLE_RATE_HZ` (1 Hz) is refused, not
+   guessed, but the interval is kept (`RecordingMeta.refused_rate_hz`) so the unit can be declared;
+   and an undeclared rate below `SUSPECT_UNDECLARED_RATE_HZ` (1 kHz) — the millisecond column,
+   which looks cleanest of all — is kept and put to the user as an Issue. The user settles it with
+   a `core/sample_rate.py` declaration (unit or rate), which the Session applies by rebuilding the
+   document's frozen meta so every consumer sees it (segments follow their parent), and
+   `core/sample_rate_state.py` saves in the project.
 3. **Which channels exist, and why was one rejected?** HDF5 silently dropped a `/current` stored as
    int32 raw ADC counts, or shaped `(1, N)` — absent from the Files list with nothing anywhere saying
    why. A refusal the user cannot see is indistinguishable from a file that never had the channel

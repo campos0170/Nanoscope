@@ -390,9 +390,18 @@ _NOTHING_SELECTED = ("<no recording selected>", -1)
 _STALE_CALIBRATION = "calibration"
 _STALE_BASELINE = "baseline"
 _STALE_RECONCILIATION_SOURCE = "reconciliation_source"
+_STALE_SAMPLE_RATE = "sample_rate"
+#: The columns a sample-rate change leaves wrong: everything the detector derived from
+#: ``fs`` (events.SCHEMA units of seconds, and the ECD whose dt they set). Sample indices
+#: are untouched, which is why the rows are badged rather than discarded.
+_RATE_COLUMNS: tuple[str, ...] = ("t_start_s", "dwell_s", "rise_s", "fall_s", "ecd_pA_s")
 _STALE_ACTION_TIPS = {
     _STALE_CALIBRATION: (
         "Run this SAME detection again under the new gain/offset. The event table is "
+        "replaced, so curation on the current rows does not survive."),
+    _STALE_SAMPLE_RATE: (
+        "Run this SAME detection again under the declared sample rate. The filters, the "
+        "dwell limits and every time column ran at the old rate; the event table is "
         "replaced, so curation on the current rows does not survive."),
     _STALE_BASELINE: (
         "Re-measure the amplitude columns of these events against the open-pore "
@@ -404,6 +413,7 @@ _STALE_ACTION_TIPS = {
 #: `_judge_staleness` passes a more specific verdict where the reason is narrower.
 _STALE_SUMMARIES = {
     _STALE_CALIBRATION: "Depths stale — calibration changed",
+    _STALE_SAMPLE_RATE: "Times stale — sample rate changed",
     _STALE_BASELINE: "Depths stale — estimator changed",
     _STALE_RECONCILIATION_SOURCE: "Source table changed",
 }
@@ -1461,6 +1471,7 @@ class AnalysisPanel(QtWidgets.QWidget):
     def _wire_session(self) -> None:
         self._session.resultsChanged.connect(self._on_results_changed)
         self._session.calibrationChanged.connect(self._on_calibration_changed)
+        self._session.sampleRateChanged.connect(self._on_sample_rate_changed)
         self._session.documentClosed.connect(self._on_document_closed)
 
     def _wire_trace_view(self) -> None:
@@ -2086,7 +2097,7 @@ class AnalysisPanel(QtWidgets.QWidget):
             return reason
         if self._reference_redetection_needed(res):
             return self._open_pore_reference_problem()
-        if self._stale.kind != _STALE_CALIBRATION:
+        if self._stale.kind not in (_STALE_CALIBRATION, _STALE_SAMPLE_RATE):
             return None
         if self._active_detection == _ML_MODULE_ID:
             if not res.params.get("model_path"):
@@ -2095,7 +2106,60 @@ class AnalysisPanel(QtWidgets.QWidget):
                         "press Run.")
             return None
         replay = self._rerun_params(res)
-        return self._open_pore_reference_problem(replay) or self._notch_replay_why(replay)
+        return (self._open_pore_reference_problem(replay) or self._notch_replay_why(replay)
+                or self._cutoff_replay_why(replay))
+
+    def _cutoff_replay_why(self, params: Mapping[str, Any]) -> str | None:
+        """Why the stored dict's frequencies cannot be replayed at the LIVE rate, or None.
+
+        The cutoffs' half of `_notch_replay_why`, and it exists for the same reason (CW-1):
+        a detection made at 100 kHz with a 10 kHz low-pass, re-run after the recording was
+        declared to be 10 kHz, is refused by the kernel (``filter_cutoff_hz`` must be below
+        fs/2) AFTER the click has already dismissed the banner — a stale table left standing
+        with nothing offered. Re-run replays the result's STORED dict; the door that reads
+        the box is Detect, so that is the door the sentence names.
+        """
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            return None
+        fs = self._session.document(self._sel[0]).meta.sample_rate_hz
+        if not fs:
+            return None
+        nyquist = float(fs) / 2.0
+        checks = (
+            ("filter_cutoff_hz", "low-pass cutoff", bool(params.get("filter_enabled", True))),
+            ("hp_cutoff_hz", "high-pass cutoff", bool(params.get("hp_enabled"))),
+            ("notch_freq_hz", "notch frequency",
+             bool(params.get("notch_enabled")) and params.get("notch_freqs") is None),
+        )
+        for key, name, enabled in checks:
+            if not enabled or params.get(key) is None:
+                continue
+            try:
+                value = float(params[key])
+            except (TypeError, ValueError):
+                continue
+            if value >= nyquist:
+                return (f"this run's stored {name} ({value:,.6g} Hz) is not below the Nyquist "
+                        f"frequency of the recording's declared sample rate ({nyquist:,.6g} "
+                        f"Hz). Re-run replays this run's STORED settings, never the box: set "
+                        f"a cutoff below {nyquist:,.6g} Hz on the Preprocess tab and press "
+                        f"Detect.")
+        freqs = params.get("notch_freqs")
+        if params.get("notch_enabled") and freqs is not None:
+            # The explicit list: the kernel applies only the lines strictly below Nyquist
+            # (filters.notch_frequencies) and refuses a list that leaves none.
+            try:
+                lines = [float(f) for f in freqs]
+            except (TypeError, ValueError):
+                lines = []
+            if lines and all(f >= nyquist for f in lines):
+                return (f"none of this run's stored notch lines ("
+                        f"{', '.join(f'{f:,.6g}' for f in lines)} Hz) is below the Nyquist "
+                        f"frequency of the recording's declared sample rate ({nyquist:,.6g} "
+                        f"Hz). Re-run replays this run's STORED list, never the box: fix the "
+                        f"list in Signal Conditioning (Preprocess tab ▸ Open Signal "
+                        f"Conditioning…, Notch stage) and press Detect.")
+        return None
 
     def _sync_stale_action(self, res: AnalysisResult | None = None) -> None:
         """Push the resolver's answer onto the banner's button. ``res`` is the result
@@ -3953,6 +4017,14 @@ class AnalysisPanel(QtWidgets.QWidget):
         pending = self._pending
         self._pending = None   # MainWindow shows the message box
         self._pending_sel = None
+        # Whatever raised, the result on screen is the one that was there before, and its
+        # staleness is a fact about it, not about the job: re-judge it, so a launched
+        # re-run that failed (a stored cutoff the declared rate refuses) cannot leave a
+        # stale table standing with the banner it dismissed. Idempotent on every other
+        # failure.
+        res = self._stored_detection()
+        if res is not None:
+            self._check_staleness(res)
         if pending in ("remeasure", "compare") and self._remeasure_target is not None:
             # ONE TERMINAL MESSAGE PER STARTED JOB, on the failure path too. Every
             # baseline entry point emits ``('started', "Re-measuring N events…")`` and
@@ -5775,8 +5847,32 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._table.set_stale_columns(())
             return
         doc_id, channel = self._sel
-        live = self._session.calibration(doc_id, channel).fingerprint()
         reconciled = res.module_id == CONSENSUS_MODULE_ID
+        live = self._session.calibration(doc_id, channel).fingerprint()
+        # The rate stamp first: it is the one that moves the TIME columns, and a
+        # re-detection is the only repair for a table whose filters, dwell limits and
+        # seconds all ran at a rate the document no longer has. When the calibration
+        # moved as well, the amplitude columns keep their badges too — a rate badge
+        # must not read as a certificate for depths measured under the old gain.
+        rate_reason = self._sample_rate_staleness(res)
+        if rate_reason is not None:
+            calibration_moved = tuple(res.calibration_fingerprint) != tuple(live)
+            if calibration_moved:
+                rate_reason += (" The calibration changed since this detection ran as well, "
+                                "so its amplitude columns are stale too; one re-run repairs "
+                                "both.")
+            self._stale.show_message(
+                rate_reason + (" Refresh the source detector results, then reconcile again."
+                               if reconciled else ""),
+                kind=_STALE_SAMPLE_RATE,
+                action_label="Refresh sources first" if reconciled else "Re-run",
+                summary=("Times and depths stale — rate and calibration changed"
+                         if calibration_moved else None))
+            self._sync_stale_action(res)
+            self._table.set_stale_columns(
+                _RATE_COLUMNS + tuple(c for c in REMEASURED_COLUMNS if c not in _RATE_COLUMNS)
+                if calibration_moved else _RATE_COLUMNS)
+            return
         if tuple(res.calibration_fingerprint) != tuple(live):
             reference_changed = not reconciled and self._reference_redetection_needed(res)
             self._stale.show_message(
@@ -5843,6 +5939,30 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
         self._stale.setVisible(False)
         self._table.set_stale_columns(())
+
+    def _sample_rate_staleness(self, res: AnalysisResult) -> str | None:
+        """The THIRD stamp, read where the detectors already wrote it: the ``fs`` in the
+        EventSet's provenance (``detect.py`` / ``detect_cusum.py`` / ``reconcile.py``)
+        against the document's live rate. A result with no such stamp (an older table, a
+        payload that is not an EventSet) says nothing, and so nothing is said."""
+        if self._sel is None or not isinstance(res.payload, EventSet):
+            return None
+        prov = res.payload.provenance
+        stamped = prov.get("fs") if isinstance(prov, Mapping) else None
+        try:
+            stamped = float(stamped) if stamped is not None else None
+        except (TypeError, ValueError):
+            stamped = None
+        if stamped is None:
+            return None
+        live = self._session.document(self._sel[0]).meta.sample_rate_hz
+        if live is not None and abs(live - stamped) <= 1e-9 * max(abs(live), abs(stamped)):
+            return None
+        now = "unknown" if live is None else f"{live:,.6g} Hz"
+        return (f"The sample rate changed since this detection ran ({stamped:,.6g} Hz → "
+                f"{now}): every start time, dwell, rise/fall time and ECD in this table was "
+                f"computed at the old rate, and the filters and dwell limits ran at it too. "
+                f"Re-run detection under the declared rate.")
 
     @staticmethod
     def _reconciliation_input_fingerprints(res: AnalysisResult) -> dict[str, str]:
@@ -6009,6 +6129,40 @@ class AnalysisPanel(QtWidgets.QWidget):
         except Exception:  # noqa: BLE001
             return None
         return (float(fs), n) if fs else None
+
+    def _on_sample_rate_changed(self, doc_id: str) -> None:
+        """The recording's time base was re-declared (``Session.set_sample_rate_declaration``).
+
+        The target is unchanged, so this is NOT a re-selection (which would re-seed the
+        form over whatever the user has dialled in); it is the same-target refresh
+        ``set_selection`` performs, plus the one thing that path leaves alone because
+        nothing used to move it: the live rate, pushed to the Detection form (its
+        Nyquist-bounded spins and rise-time readout) and the Baseline panel (its derived
+        decimation and the recording's duration; same target, so no reset). Then the
+        stored result is re-judged — its rows carry seconds computed at the old rate.
+        """
+        if self._sel is None or self._sel[0] != doc_id:
+            return
+        channel = self._sel[1]
+        fs = self._session.document(doc_id).meta.sample_rate_hz
+        self._detection.set_recording(fs)
+        rate_and_length = self._active_rate_and_length()
+        duration = (rate_and_length[1] / rate_and_length[0]) if rate_and_length else None
+        self._baseline.set_recording(fs, (doc_id, channel), duration_s=duration)
+        runnable, reason = self._regate()
+        self._baseline.set_gate(runnable, reason)
+        res = self._stored_detection()
+        if res is not None:
+            self._check_staleness(res)
+        # The live "processed trace" preview and the baseline comparison were computed at
+        # the old rate (a 40 Hz low-pass designed at 100 Hz is a 40 kHz one at 100 kHz, and
+        # the re-attached curve would sit on the new axis saying nothing): recompute the
+        # one and mark the other stale, exactly as a calibration edit does below.
+        if self._detection.filter_preview.isChecked():
+            self._update_filter_preview()
+        self._baseline_workspace.mark_preview_stale(
+            "Sample rate changed — refresh the baseline comparison before relying on it.")
+        self._sync_baseline_workspace()
 
     def _on_calibration_changed(self, doc_id: str, channel: int) -> None:
         if self._sel is None or self._sel[0] != doc_id:

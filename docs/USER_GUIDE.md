@@ -401,7 +401,7 @@ compared. Supported formats:
 | **Axon ABF** (`.abf`) | Read via `neo`. These are ABF‑v1 float recordings; the standard `pyabf` cannot read them. A different `CPYA` variant is detected and refused with a clear message. |
 | **HDF5** (`.h5`, `.hdf5`) | Flat `/current`, `/voltage`, `/conductance` datasets. Units are **not declared** in the file, so they are reported as unknown and you set them in Calibration. Traces are stored as float32; a float64 file whose live values sit below float32 range is not silently flushed to zeros — the downcast is audited and the Issues box names the flushed channel ("…nonzero but below float32 range"). |
 | **TDMS** (`.tdms`) | Modern LabVIEW layout (sample rate known) and a legacy layout (rate **unknown** — the x‑axis is then in samples and detection is disabled honestly). Channels stored as raw **Volts** are flagged as such. |
-| **Text** (`.csv`, `.txt`) | Trace tables: column 0 is the time base, every other column is a signal. Quoted fields are read the way Excel writes them, so a header like `time,"current, pA"` and fully quoted numbers are ordinary input, not damage. A column literally named `current`/`voltage`/`conductance` sets the channel *kind* (so a CSV's current column is analysable); units still stay unknown until you set them. |
+| **Text** (`.csv`, `.txt`) | Trace tables: column 0 is the time base, every other column is a signal. Quoted fields are read the way Excel writes them, so a header like `time,"current, pA"` and fully quoted numbers are ordinary input, not damage. A column literally named `current`/`voltage`/`conductance` sets the channel *kind* (so a CSV's current column is analysable); units still stay unknown until you set them. The **time column's header may name its unit** — `time_ms`, `t_us`, `Time (ms)`, `time_s` — and the column is then read in that unit (a Note in File Info says so). A bare `time` is read as seconds; the Issues table below says what happens when that cannot be right. |
 
 **A file with the wrong extension is told what it is.** Open an HDF5 recording named `.abf`, an ABF
 named `.csv`, or either of them under a name this app has never heard of — `.dat`, `.bin`, or no
@@ -442,8 +442,8 @@ partial load in an older build does.
 
 For a CSV the window's start time is **read out of the file's own time column** at that row, not
 computed from the sample rate — so a recording whose acquisition paused, or that was concatenated
-from segments, is still placed where the file says it was. (It is computed only when that row's
-time cannot be read, and a **Note** says so when it happens.)
+from segments, is still placed where the file says it was. (A unit the column's header declares —
+`time_ms` — scales that start time to seconds along with the rest of the column.)
 
 **Two clocks, and the app labels both.** The app does *not* put every time on one clock, on purpose,
 and reading a number off one surface into a control that wants the other is how a headline noise
@@ -478,7 +478,8 @@ What turns up there:
 | **A non-UTF-8 text file** | Which encoding was fallen back to and why — Latin-1, or UTF-16, which is what Excel's "Unicode Text" and LabVIEW write by default. A clean fallback is a **Note**; it becomes an **Issue** only when the decode was lossy, i.e. characters in your file did not survive. Either way the interval and span checks above still run on a UTF-16 file, which they did not always. |
 | **A load window that outran the file** | What was asked for, where the file actually ends, and the consequence that matters: *if this window came from a saved project, the recording is not the length it was when that project was saved.* |
 | **An HDF5 `/time` longer or shorter than the signal** | How far past (or short of) the last sample the file's own clock runs, and that the samples that exist are what every duration here is computed from. |
-| **A time base that cannot be in seconds** — an HDF5 `/time` or a CSV time column stepping by 100 or 20,000 per sample, which is what an exporter logging **microseconds or nanoseconds** writes | The step it measured, the rate that would imply (`0.01 Hz` — less than one sample per second), and that the unit is declared nowhere in the file, so it is **not guessed**: the sample rate is left *unknown*, the x-axis is in samples and detection is disabled, rather than every duration and dwell time being wrong by a factor of a million in silence. Re-export the time base in seconds. |
+| **A time base that cannot be in seconds** — an HDF5 `/time` or a CSV time column with an undeclared unit, stepping by 100 or 20,000 per sample, which is what an exporter logging **microseconds or nanoseconds** writes | The step it measured, the rate that would imply (`0.01 Hz` — less than one sample per second), and that the unit is declared nowhere in the file, so it is **not guessed**: the sample rate is left *unknown*, the x-axis is in samples and detection is disabled, rather than every duration and dwell time being wrong by a factor of a million in silence. The interval it measured is kept, so the one missing fact — the unit — can be declared under **File Info ▸ Sample rate / time unit…** (below); or re-export the time base in seconds. |
+| **A time base that may not be in seconds** — an undeclared CSV time column or HDF5 `/time` whose measured rate is below **1 kHz**, which is what a column in **milliseconds** reads as (10 µs steps written as `0.01` per row read as 100 Hz, uniform and self-consistent) | The step and the rate as read, that no recording this app is written for is sampled that slowly, what the rate is if the column is in milliseconds or microseconds (1,000× or 1,000,000× higher), and that the measured rate was **kept as read** — nothing was converted by a guess. Settle it: for a CSV, name the unit in the column header (`time_ms`); for either format, declare it under **Inspector ▸ File Info ▸ Sample rate / time unit…** (below). A header that names the unit is read as declared and never raises this. |
 | **A TDMS whose channels declare different start offsets** | Each channel's declared `wf_start_offset`, and which one the recording's t₀ was taken from. Dwell times are unaffected; only the absolute experimental time this recording is stamped with. (Different *sample rates* across channels are refused outright instead — see the TDMS row above.) |
 | **A calibration that destroyed the channel** | A gain large enough to overflow the 32-bit sample format, named with the number of samples it turned to `inf` (§3). This one is damage the *app* did, and it is listed beside the load's own findings. |
 | **An HDF5 `/time` that exists but cannot be used** — fewer than two samples, or not monotonic | That it is present and unusable, with the reason (*it holds only 1 sample(s), and at least 2 are needed to measure a sample interval*), and that the sample rate is left **unknown** rather than guessed. |
@@ -490,8 +491,28 @@ microseconds or nanoseconds, every duration and rate here is wrong by that facto
 as float seconds."* This is the one advisory in the Notes list worth reading like an Issue. The file
 opens, every shape is right, and nothing on screen looks out of range — the numbers are simply off
 by 10³, 10⁶ or 10⁹. LabVIEW and hand-written exporters are the usual sources. The app will not guess
-the unit for you; re-export `/time` as float seconds. (A clock so far out that it cannot be seconds
-at all is a different case and *is* an Issue — the row above about microseconds and nanoseconds.)
+the unit for you; re-export `/time` as float seconds, or declare the unit in File Info (below). (A
+clock so far out that it cannot be seconds at all is a different case and *is* an Issue — the row
+above about microseconds and nanoseconds; one that reads below 1 kHz is asked about, the row after.)
+
+**Declaring the time base yourself — Inspector ▸ File Info ▸ Sample rate / time unit…** When the
+file does not say what its time column is in, says it wrongly, or declares no rate at all (a legacy
+TDMS), you can say so once per recording: *the time column is in milliseconds / microseconds /
+nanoseconds / seconds* — the rate and the start time t₀ move together, so the recording's clock
+stays self-consistent; it is offered for a rate that was measured from a time column, including
+one the floor refused — or *the sample rate is N Hz*, the only option for a file whose rate came
+from a header or that has no time base at all (t₀ is left as read, except for a refused column,
+whose t₀ is in an unknown unit and becomes 0). The dialog shows the time base **as read** beside
+the declaration, previews what the recording would read as, and refuses anything that is not a
+finite positive number. Once applied, File Info prints the declared rate with the provenance
+`user` and the file's own reading beside it — `100,000 Hz · user (file: 100 Hz · measured)` — so an
+override is visibly an override; the status bar prints the declared rate and its provenance. The
+declaration is **saved with the project** and never written beside the raw file; *Use the file's
+own time base* removes it. Detections already made on the recording keep the rate they were
+measured at and are marked stale (*Times stale — sample rate changed*), never silently re-scaled:
+re-run them under the declared rate; a saved manual measurement gets the same ⚠ on its row.
+Segments cut from the recording follow its declaration, live and when the project is reopened —
+the declaration is made on the recording, never on a segment.
 
 ---
 
@@ -2201,9 +2222,10 @@ allocated. The message gives the requested size and asks you to analyse a shorte
 ## 11a. Reopening a project
 
 A project stores **references**, not signal: each recording's path plus the sample range you
-loaded, and everything you cannot cheaply recreate (calibrations, layer view state and stable
-recording colours, curated event tables, manual measurements, segments). Reopening it reopens those
-files from disk.
+loaded, and everything you cannot cheaply recreate (calibrations, the acquisition-bandwidth and
+sample-rate / time-unit declarations made in File Info, layer view state and stable recording
+colours, curated event tables, manual measurements, segments). Reopening it reopens those files
+from disk.
 
 **If a source file has changed, the app says so.** A path is a *name*, not a recording — re-exporting
 from Clampex over the same filename leaves the name identical and the data completely different. The
@@ -2595,7 +2617,8 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
   (⌘S). Closing and choosing **Discard** removes unsaved recovery data. A project written by this
   build cannot be opened by a build older than it — every older project still opens here.
 - **`CPYA`-variant ABF files** cannot be read; they are refused with a specific message.
-- **Legacy TDMS** files declare no sample rate → the x-axis is in samples and detection is disabled.
+- **Legacy TDMS** files declare no sample rate → the x-axis is in samples and detection is disabled,
+  until you declare the rate under **Inspector ▸ File Info ▸ Sample rate / time unit…** (§2).
 - **Raw-Volts TDMS** channels are stored as Volts; they need a gain to become current, so they are
   not auto-classified as a current channel.
 - **High-pass is localization-only in new Schmitt/CUSUM runs, not consequence-free.** The event

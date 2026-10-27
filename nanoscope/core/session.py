@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, Signal
 from .analysis import AnalysisResult, ResultStore
 from .acquisition import AcquisitionBandwidth
 from .cache import LruArrayCache
+from .sample_rate import SampleRateDeclaration, TimeBaseAsRead
 from .calibration import (
     SIDECAR_NONE,
     SIDECAR_RECORDING_MOVED,
@@ -25,14 +26,27 @@ from .identity import same_source
 from .layer import LAYER_INKS, ColourRegistry, Layer, ViewMode, colour_key
 from .source_style import SourceLabelRegistry, validate_source_appearance
 from .segment import (
+    follow_parent_clock,
     SegmentDocument,
     build_segment_document,
     derive_segment_uid,
     persistent_key,
 )
-from .types import CACHE_BUDGET_MB, ChannelKind, nonfinite_reason, scan_nonfinite
+from .types import CACHE_BUDGET_MB, ChannelKind, Provenance, nonfinite_reason, scan_nonfinite
 
 __all__ = ["UnknownSampleRateError", "Session"]
+
+
+def _same_clock(a: Document, b: Document) -> bool:
+    """Two documents carry one clock: rate, provenance, unit scale, refused rate and — for
+    segments — where the cut sat in the experiment."""
+    ma, mb = a.meta, b.meta
+    if (ma.sample_rate_hz, ma.rate_provenance, ma.time_scale_s, ma.refused_rate_hz) != (
+            mb.sample_rate_hz, mb.rate_provenance, mb.time_scale_s, mb.refused_rate_hz):
+        return False
+    oa, ob = getattr(a, "origin", None), getattr(b, "origin", None)
+    return (oa is None and ob is None) or (oa is not None and ob is not None
+                                           and oa.t0_abs_s == ob.t0_abs_s)
 
 
 class UnknownSampleRateError(RuntimeError):
@@ -57,6 +71,8 @@ class Session(QObject):
     resultsChanged = Signal(str, str)         # doc_id, module_id  — v2; never emitted in v1
     sourceAppearanceChanged = Signal(str)     # persistent PlotSource key; presentation only
     acquisitionBandwidthChanged = Signal(str, int)  # metadata only, never recalibration
+    sampleRateChanged = Signal(str)           # doc_id — its time base was re-declared; every
+                                              # seconds-based number (axis, dwell, PSD) moves
 
     def __init__(self, cache_budget_mb: int = CACHE_BUDGET_MB) -> None:
         super().__init__()
@@ -64,6 +80,13 @@ class Session(QObject):
         self._layers: list[Layer] = []
         self._calibration = CalibrationSet()
         self._acquisition_overrides: dict[tuple[str, int], AcquisitionBandwidth] = {}
+        # The user's sample-rate / time-unit declarations (core/sample_rate.py), keyed by LIVE
+        # doc_id, beside the time base each document was ADDED with so "use the file's own
+        # time base" can always be restored exactly. Unlike the acquisition override above,
+        # a declaration is applied by REBUILDING the document's meta (see
+        # set_sample_rate_declaration): ~80 consumers read meta.sample_rate_hz directly.
+        self._rate_declarations: dict[str, SampleRateDeclaration] = {}
+        self._time_base_as_read: dict[str, TimeBaseAsRead] = {}
         self._cache = LruArrayCache(cache_budget_mb)
         self._results = ResultStore()
         # What the CALIBRATION did to a channel, keyed exactly like the cached calibrated
@@ -162,11 +185,19 @@ class Session(QObject):
                 doc = replace(doc, meta=replace(doc.meta, issues=doc.meta.issues + tuple(issues)))
 
         self._documents[doc_id] = doc
+        self._time_base_as_read[doc_id] = TimeBaseAsRead(
+            doc.meta.sample_rate_hz, doc.meta.rate_provenance, float(doc.meta.t0_s),
+            float(doc.meta.time_scale_s), doc.meta.refused_rate_hz)
         try:
             self._path_seen_on_open[doc_id] = bool(doc.meta.path.exists())
         except (OSError, AttributeError, TypeError):   # noqa: BLE001 - a stat must never break a load
             self._path_seen_on_open[doc_id] = False
         self.documentOpened.emit(doc_id)
+        # A segment whose parent was closed kept the clock it was cut with; the parent
+        # landing again (a file with its own clock, or a segment re-cut at the same window
+        # and so the same uid) is what it follows now — as it would after a project reopen.
+        # Free for a document with no orphans: nothing is found, nothing fires.
+        self._follow_parent_clock(doc_id)
         return doc_id
 
     def close_document(self, doc_id: str) -> None:
@@ -184,6 +215,8 @@ class Session(QObject):
         self._calibration.drop_doc(doc_id)
         for key in [k for k in self._acquisition_overrides if k[0] == doc_id]:
             del self._acquisition_overrides[key]
+        self._rate_declarations.pop(doc_id, None)
+        self._time_base_as_read.pop(doc_id, None)
         for key in [k for k in self._calibration_issues if k[0] == doc_id]:
             del self._calibration_issues[key]
         self._path_seen_on_open.pop(doc_id, None)
@@ -324,6 +357,92 @@ class Session(QObject):
         else:
             self._acquisition_overrides[key] = value
         self.acquisitionBandwidthChanged.emit(doc_id, ch)
+
+    # -- the time base: what the file said, and what the user declared --------------------------
+    def time_base_as_read(self, doc_id: str) -> TimeBaseAsRead:
+        """The document's clock as the reader reported it (as the cut made it, for a segment):
+        what a declaration is resolved against and what ``None`` restores."""
+        if doc_id not in self._documents:
+            raise KeyError(doc_id)
+        return self._time_base_as_read[doc_id]
+
+    def sample_rate_declaration(self, doc_id: str) -> SampleRateDeclaration | None:
+        if doc_id not in self._documents:
+            raise KeyError(doc_id)
+        return self._rate_declarations.get(doc_id)
+
+    def set_sample_rate_declaration(self, doc_id: str,
+                                    value: SampleRateDeclaration | None) -> None:
+        """Declare this recording's time base — its column's unit, or its rate — or, with
+        ``None``, return to the file's own. Emits ``sampleRateChanged`` once per change.
+
+        THE DOCUMENT IS REBUILT. A rate is not a side-table value like an acquisition
+        override: ``Session.calibrated`` snapshots ``meta.sample_rate_hz`` onto every
+        channel a worker is handed, ``x_axis`` builds the axis from it, segments inherit it,
+        and some eighty callers read it off the document directly. So the frozen meta is
+        replaced (``dataclasses.replace`` — the one sanctioned way, and the same move
+        ``add_document`` makes to fold sidecar issues in), which keeps ``load_uid`` and
+        therefore the ``doc_id``, and the cached x-axis and calibrated arrays for the
+        document are dropped so nothing serves the old clock. Every seconds-based number on
+        screen moves; stored results do NOT — they keep the rate they were measured at and
+        are judged stale against the live one (``analysis_panel._judge_staleness``), never
+        silently re-scaled. Saved in projects, never written beside raw recordings.
+
+        SEGMENTS FOLLOW. A segment is a window of its parent, so a declaration is made on
+        the parent recording (a segment refuses one) and every segment cut from it — live
+        ones here, re-derived ones on a project restore — is re-made on the parent's new
+        clock (:func:`~nanoscope.core.segment.follow_parent_clock`), each announced by
+        its own ``sampleRateChanged``.
+        """
+        doc = self._documents[doc_id]
+        if isinstance(doc, SegmentDocument):
+            raise ValueError("a segment follows the time base of the recording it was cut "
+                             "from; declare it on that recording")
+        if value is not None and (not isinstance(value, SampleRateDeclaration)
+                                  or value.source != "user"):
+            raise ValueError("a sample-rate declaration must be user-provided metadata")
+        if self._rate_declarations.get(doc_id) == value:
+            return
+        read = self._time_base_as_read[doc_id]
+        if value is None:
+            rate, prov, t0, scale = (read.sample_rate_hz, read.rate_provenance, read.t0_s,
+                                     read.time_scale_s)
+        else:
+            rate, t0, scale = value.resolve(read)   # ValueError if it cannot be
+            prov = Provenance.USER
+        self._documents[doc_id] = replace(doc, meta=replace(
+            doc.meta, sample_rate_hz=rate, rate_provenance=prov, t0_s=t0, time_scale_s=scale))
+        if value is None:
+            self._rate_declarations.pop(doc_id, None)
+        else:
+            self._rate_declarations[doc_id] = value
+        self._cache.invalidate_doc(doc_id)
+        self.sampleRateChanged.emit(doc_id)
+        self._follow_parent_clock(doc_id)
+
+    def _follow_parent_clock(self, parent_id: str) -> None:
+        """Re-make every segment cut from ``parent_id`` on the parent's current clock, and
+        theirs in turn (a segment of a segment follows the same rule)."""
+        parent = self._documents[parent_id]
+        parent_key = persistent_key(parent)
+        for seg_id, seg in list(self._documents.items()):
+            # same_source, not ==: a reopened parent may spell its path differently
+            # (/Case.csv vs /case.csv on the owner's case-insensitive disk); for a segment
+            # uid it is plain string equality.
+            if (not isinstance(seg, SegmentDocument)
+                    or not same_source(seg.origin.parent_key, parent_key)):
+                continue
+            followed = follow_parent_clock(seg, parent)
+            if _same_clock(followed, seg):
+                continue                    # already on this clock: nothing moves, nothing fires
+            self._documents[seg_id] = followed
+            self._time_base_as_read[seg_id] = TimeBaseAsRead(
+                followed.meta.sample_rate_hz, followed.meta.rate_provenance,
+                float(followed.meta.t0_s), float(followed.meta.time_scale_s),
+                followed.meta.refused_rate_hz)
+            self._cache.invalidate_doc(seg_id)
+            self.sampleRateChanged.emit(seg_id)
+            self._follow_parent_clock(seg_id)
 
     # -- what a channel IS: the one resolver ----------------------------------------------------
     def effective_kind(self, doc_id: str, ch: int) -> ChannelKind:

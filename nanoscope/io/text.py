@@ -31,10 +31,13 @@ from .base import (
     ProgressFn,
     CancelFn,
     RecordingProbe,
+    declared_time_unit_note,
     filesystem_refusal,
     foreign_format_redirect,
     implausible_measured_rate_issue,
     register,
+    undeclared_low_rate_issue,
+    undeclared_rate_is_suspect,
 )
 from .contract import (
     ReaderReport,
@@ -56,7 +59,7 @@ FORMAT_NAME = "Text trace"
 # column name, exactly as the HDF5 reader maps a `/current` dataset to CURRENT: a column literally
 # named "current" is the ionic-current signal regardless of its (unknown) units, and labelling it so
 # is what lets event detection run on a CSV. Names that match nothing stay UNKNOWN.
-_UNITS_NOTE = "Units are not declared in this file. Set them in the Calibration panel."
+_UNITS_NOTE = "Signal units are not declared in this file. Set them in the Calibration panel."
 
 _NAME_KIND_TOKENS: tuple[tuple[tuple[str, ...], ChannelKind], ...] = (
     (("conductance", "cond"), ChannelKind.CONDUCTANCE),   # before 'current' (neither substrings the other, but explicit)
@@ -74,6 +77,43 @@ def _kind_from_name(name: str) -> ChannelKind:
             return kind
     return {"i": ChannelKind.CURRENT, "v": ChannelKind.VOLTAGE,
             "g": ChannelKind.CONDUCTANCE}.get(n, ChannelKind.UNKNOWN)
+
+
+# THE ONE EXCEPTION to "units are never inferred from a column name", and a narrow one: the TIME
+# column's header may name its unit — `time_ms`, `t_us`, `Time (ms)`, `time[s]`, `seconds` — and
+# when it does, that is the file's own declaration, exactly as an ABF header's Hz is, and the
+# column is read in that unit. [MEASURED] before this existed: a 'time_ms,current_pA' export of
+# a 100 kHz recording probed and loaded as 100 Hz, Provenance.MEASURED, issues=() — the header
+# said milliseconds in so many letters and nothing read it. Matching is by whole TOKEN (the
+# header split on everything that is not a letter or digit), never by substring, so `ms` cannot
+# be found inside `items`, a bare `time` or `timestamp` stays undeclared, and a header naming two
+# units declares nothing. Nothing here touches a SIGNAL column: raw_units stays "" (see above).
+_TIME_UNIT_TOKENS: dict[str, tuple[str, float]] = {
+    "s": ("seconds", 1.0), "sec": ("seconds", 1.0), "secs": ("seconds", 1.0),
+    "second": ("seconds", 1.0), "seconds": ("seconds", 1.0),
+    "ms": ("milliseconds", 1e-3), "msec": ("milliseconds", 1e-3),
+    "millisecond": ("milliseconds", 1e-3), "milliseconds": ("milliseconds", 1e-3),
+    "us": ("microseconds", 1e-6), "usec": ("microseconds", 1e-6),
+    "microsecond": ("microseconds", 1e-6), "microseconds": ("microseconds", 1e-6),
+    "ns": ("nanoseconds", 1e-9), "nsec": ("nanoseconds", 1e-9),
+    "nanosecond": ("nanoseconds", 1e-9), "nanoseconds": ("nanoseconds", 1e-9),
+}
+_UNIT_TOKEN_SPLIT = re.compile(r"[^0-9a-z]+")
+
+
+def _time_unit_from_header(name: str) -> tuple[str, float] | None:
+    """``(unit name, seconds per unit)`` declared by the time column's header, or None.
+
+    None is "undeclared" — a bare ``time``, an unknown token, or two different units named
+    at once (which is refused rather than guessed between). Both the micro sign (U+00B5) and
+    Greek mu (U+03BC) spell ``u``; a header like ``Time (µs)`` is what instrument software
+    writes.
+    """
+    n = (name or "").strip().lower().replace("\u00b5", "u").replace("\u03bc", "u")
+    hits = {_TIME_UNIT_TOKENS[t] for t in _UNIT_TOKEN_SPLIT.split(n) if t in _TIME_UNIT_TOKENS}
+    if len(hits) != 1:
+        return None
+    return next(iter(hits))
 
 # The ONE place a filename is consulted, and only when no VOLTAGE channel exists (which — since
 # every text signal column is kind UNKNOWN — is always). Single match only; 0 or >1 => None.
@@ -125,6 +165,9 @@ class _Scan:
     t0_s: float
     sample_rate_hz: float | None       # None: the column's own units make it unreadable as one
     rate_provenance: Provenance
+    time_unit: str | None           # the unit the time column's header declares, or None
+    time_scale_s: float             # seconds per unit of the column as written: 1.0, 1e-3, …
+    refused_rate_hz: float | None   # the measured rate the floor refused (RecordingMeta.refused_rate_hz)
     est_n_samples: int
     header_bytes: int               # bytes consumed by a header line (0 if none)
     notes: tuple[str, ...]
@@ -363,6 +406,13 @@ def _scan_impl(path: Path, encoding: str | None = None) -> _Scan:
     first_fields = rows[0]
     has_header = not _looks_numeric(first_fields)
 
+    # The time column's own unit, if its header names one (see _time_unit_from_header — the one
+    # header this reader reads a unit from). Decided HERE, before the time base is measured, so
+    # every number below — t0, dt, the tail seek, and load()'s per-sample clock audit — is in
+    # seconds, and probe() and load() agree through the one _Scan.
+    declared = _time_unit_from_header(first_fields[0]) if has_header else None
+    time_unit, time_scale = declared if declared is not None else (None, 1.0)
+
     # --- RAGGEDNESS GUARD (guard #1) --------------------------------------------------------
     widths = [len(r) for r in rows]
     width_counts = Counter(widths)
@@ -387,6 +437,8 @@ def _scan_impl(path: Path, encoding: str | None = None) -> _Scan:
     except (ValueError, IndexError):
         raise UnsupportedFormatError(
             f"{path.name}: column 0 is not numeric, so it is not a time column.")
+    if time_scale != 1.0:
+        col0 = col0 * time_scale          # the header's unit, read as seconds
 
     # --- MONOTONICITY GUARD (guard #2) ------------------------------------------------------
     if not np.all(np.diff(col0) > 0):
@@ -417,14 +469,30 @@ def _scan_impl(path: Path, encoding: str | None = None) -> _Scan:
     # The same question the HDF5 reader asks of /time, for the same reason and with the same
     # answer: a time column logged in microseconds is perfectly uniform, spans exactly what its
     # own step implies, and passes every check below — so the file that is most wrong is the
-    # one that looks cleanest, and the rate comes out 10^6x low with issues=(). The unit is
-    # declared nowhere in a CSV, so it is refused rather than guessed. See
-    # io.base.MIN_PLAUSIBLE_RATE_HZ.
-    if sample_rate_hz < MIN_PLAUSIBLE_RATE_HZ:
+    # one that looks cleanest, and the rate comes out 10^6x low with issues=(). Three cases:
+    #
+    # * the header DECLARED the unit (`time_ms`): the column was scaled above, the rate is a
+    #   declared one and is not second-guessed (io.base.MIN_PLAUSIBLE_RATE_HZ's own rule for
+    #   an ABF header's Hz), and File Info says what was read and from where;
+    # * undeclared and below one sample per second: refused, not guessed (the floor);
+    # * undeclared and below a kilohertz: the millisecond case the floor cannot see — [MEASURED]
+    #   100 Hz, issues=(), for a 'time_ms' column before the header was read, and the same for
+    #   a bare 'time' column in ms today. The rate is KEPT and the question is put to the user
+    #   (io.base.SUSPECT_UNDECLARED_RATE_HZ), who can answer it in File Info.
+    refused_rate: float | None = None
+    if time_unit is not None:
+        report.note(declared_time_unit_note(
+            source=f"the time column '{first_fields[0].strip()}'", unit=time_unit,
+            hz=sample_rate_hz))
+    elif sample_rate_hz < MIN_PLAUSIBLE_RATE_HZ:
         report.issue(implausible_measured_rate_issue(
             source="this file's time column", dt=dt, hz=sample_rate_hz))
+        refused_rate = sample_rate_hz       # kept, so a declared UNIT can re-read it
         sample_rate_hz = None
         rate_provenance = Provenance.UNKNOWN
+    elif undeclared_rate_is_suspect(sample_rate_hz):
+        report.issue(undeclared_low_rate_issue(
+            source="this file's time column", dt=dt, hz=sample_rate_hz, header_hint=True))
 
     rel_jitter = float(np.std(diffs) / dt) if dt else 0.0
     if rel_jitter > 1e-3 and sample_rate_hz is not None:
@@ -441,6 +509,8 @@ def _scan_impl(path: Path, encoding: str | None = None) -> _Scan:
     # the rest of the file disagrees"), and a rate this reader has already refused to report is
     # not a thing to then argue with. The refusal itself is the louder statement.
     tail = _tail_times(path, encoding, delim, ncols)
+    if time_scale != 1.0:
+        tail = [v * time_scale for v in tail]   # same unit as col0 above
     last_t: float | None = None
     if len(tail) >= 3:
         last_t = float(tail[-1])
@@ -480,6 +550,9 @@ def _scan_impl(path: Path, encoding: str | None = None) -> _Scan:
         t0_s=t0_s,
         sample_rate_hz=sample_rate_hz,
         rate_provenance=rate_provenance,
+        time_unit=time_unit,
+        time_scale_s=time_scale,
+        refused_rate_hz=refused_rate,
         est_n_samples=est_n,
         header_bytes=header_bytes,
         notes=report.notes,
@@ -533,6 +606,8 @@ class TextTraceReader(BaseReader):
             voltage_provenance=scan.voltage_provenance,
             notes=scan.notes + (scan.estimate_note,),
             issues=scan.issues,
+            time_scale_s=scan.time_scale_s,
+            refused_rate_hz=scan.refused_rate_hz,
         )
         return RecordingProbe(meta=meta)
 
@@ -582,7 +657,10 @@ class TextTraceReader(BaseReader):
                 for chunk in reader:
                     if cancel is not None and cancel():
                         raise LoadCancelled(f"{self.path.name}: load cancelled.")
-                    clock.observe(chunk.iloc[:, 0].to_numpy(dtype=np.float64, copy=False))
+                    col0 = chunk.iloc[:, 0].to_numpy(dtype=np.float64, copy=False)
+                    if scan.time_scale_s != 1.0:
+                        col0 = col0 * scan.time_scale_s   # the header's unit, as in _scan
+                    clock.observe(col0)
                     for j, file_col in enumerate(signal_cols):
                         src = chunk.iloc[:, file_col].to_numpy(dtype=np.float64, copy=False)
                         dst = src.astype(np.float32)
@@ -716,7 +794,7 @@ class TextTraceReader(BaseReader):
                     if data_seen == start:
                         fields = _split_rows([raw.rstrip("\r\n")], scan.delimiter)[0]
                         try:
-                            t_at_start = float(fields[0])
+                            t_at_start = float(fields[0]) * scan.time_scale_s
                         except (ValueError, IndexError):
                             t_at_start = None    # caller falls back to the rate, and says so
                         break
@@ -927,6 +1005,8 @@ class TextTraceReader(BaseReader):
             voltage_provenance=scan.voltage_provenance,
             notes=report.notes,
             issues=report.issues,
+            time_scale_s=scan.time_scale_s,
+            refused_rate_hz=scan.refused_rate_hz,
         )
         document = TraceDocument(meta=meta, channels=tuple(channels))
         if progress is not None:

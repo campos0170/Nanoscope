@@ -341,6 +341,37 @@ def build_segment_document(parent_doc: TraceDocument, i0: int, i1: int, *,
     return SegmentDocument(meta=meta, channels=channels, origin=origin)
 
 
+def follow_parent_clock(seg: "SegmentDocument", parent_doc: TraceDocument) -> "SegmentDocument":
+    """``seg`` re-made on its parent's CURRENT clock — what a fresh cut of the same window
+    would carry (rate, provenance, unit scale, ``t0_abs_s``, the note that names it).
+
+    A segment is a window of its parent, so when the parent's time base is re-declared
+    (:meth:`~nanoscope.core.session.Session.set_sample_rate_declaration`) the segment's
+    clock follows — live, exactly as it does on a project restore, where segments are
+    re-derived from the restored parent. Without this the two disagreed: a segment cut
+    before the declaration kept the old clock until the project was reopened, and then
+    silently came back on the new one. Samples are untouched; only the meta and origin
+    move, by the same arithmetic as :func:`build_segment_document`.
+    """
+    a, b = int(seg.origin.i0), int(seg.origin.i1)
+    fs = parent_doc.meta.sample_rate_hz
+    parent_origin_s = clock.instrument_origin_s(parent_doc.meta)
+    if parent_origin_s is None:
+        parent_origin_s = float(parent_doc.meta.t0_s)
+    t0_abs_s = parent_origin_s + (a / fs if fs else 0.0)
+    where = f"samples {a:,}–{b:,}" + (f"  ·  t₀={t0_abs_s:.6g}s" if fs else "")
+    meta = replace(
+        seg.meta,
+        sample_rate_hz=fs,
+        rate_provenance=parent_doc.meta.rate_provenance,
+        time_scale_s=parent_doc.meta.time_scale_s,
+        refused_rate_hz=parent_doc.meta.refused_rate_hz,
+        notes=(f"Derived segment of {parent_doc.display_name} ({where}).",),
+    )
+    meta = _rebased_meta(meta, t0_abs_s)
+    return replace(seg, meta=meta, origin=replace(seg.origin, t0_abs_s=t0_abs_s))
+
+
 def _segment_path(parent_path: Path, segment_uid: str) -> Path:
     """A UNIQUE synthetic path for a segment — the parent path with the uid folded into the
     STEM (before the extension), so ``str(path.resolve())`` is a stable, unique ``doc_id``

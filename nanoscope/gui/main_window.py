@@ -191,8 +191,11 @@ SURFACE_MUTATION_SIGNALS: dict[str, tuple[str, ...]] = {
     # A detection appears, is replaced, merged or cleared; a recording opens or closes
     # (Populations reads across EVERY open recording, and the I-V / V-dep windows gain
     # and lose a point with the document); a gain is edited, which re-scales the
-    # calibrated signal that PSD, I-V and V-dep all measure.
-    "session": ("resultsChanged", "documentOpened", "documentClosed", "calibrationChanged"),
+    # calibrated signal that PSD, I-V and V-dep all measure; the recording's time base is
+    # re-declared (Session.set_sample_rate_declaration), which moves every seconds-based
+    # axis, dwell, duration and spectrum those windows draw.
+    "session": ("resultsChanged", "documentOpened", "documentClosed", "calibrationChanged",
+                "sampleRateChanged"),
     # One event's accept/reject, and one event's curator flag — both re-decide which rows
     # an "accepted only" histogram, density map or ensemble average is built from.
     "analysis_panel": ("eventAcceptanceChanged", "eventFlagChanged"),
@@ -309,6 +312,13 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     "session.cursorMoved": "the trace cursor",
     "session.viewModeChanged": "stacked/overlaid trace layout",
     "session.layersChanged": "which traces are drawn in the main viewer",
+    "session.sourceAppearanceChanged": "a source's colour or label, set from the File Manager "
+                                       "— presentation the surface windows read at their "
+                                       "next redraw; no array, axis or table moves",
+    "session.acquisitionBandwidthChanged": "declared acquisition low-pass METADATA "
+                                           "(Session.set_acquisition_bandwidth: 'metadata "
+                                           "only, never recalibration') — nothing drawn "
+                                           "moves; File Info re-renders on it itself",
 }
 
 #: The two tables Edit ▸ Undo can act on. There is ONE Undo in this application and there
@@ -2222,6 +2232,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session.calibrationChanged.connect(lambda *_: self._mark_dirty())
         self._session.sourceAppearanceChanged.connect(lambda *_: self._mark_dirty())
         self._session.acquisitionBandwidthChanged.connect(lambda *_: self._mark_dirty())
+        # A sample-rate / time-unit declaration is ProjectState (core/sample_rate_state.py),
+        # and the status bar's rate label reads the document it describes.
+        self._session.sampleRateChanged.connect(lambda *_: self._mark_dirty())
+        self._session.sampleRateChanged.connect(self._update_rate_label)
         # Overlay/Stacked is part of ProjectState. Unlike ``layersChanged`` this signal is
         # not emitted by opening, closing or merely selecting a recording: it represents a
         # deliberate view-mode edit (and restore is already protected by ``_restoring``).
@@ -10988,6 +11002,13 @@ class MainWindow(QtWidgets.QMainWindow):
         prepare_acquisition_workspace(workspace.extra)
         workspace.extra[WORKSPACE_KEY] = capture_acquisition_overrides(
             session, workspace.extra.get(WORKSPACE_KEY, []))
+        from ..core.sample_rate_state import (
+            WORKSPACE_KEY as RATE_KEY, capture_sample_rate_declarations,
+            prepare_sample_rate_workspace,
+        )
+        prepare_sample_rate_workspace(workspace.extra)
+        workspace.extra[RATE_KEY] = capture_sample_rate_declarations(
+            session, workspace.extra.get(RATE_KEY, []))
         state = ProjectState(
             documents=documents, segments=segments, calibrations=calibrations, layers=layers,
             view_mode=self._session.view_mode.value, results=results,
@@ -11607,7 +11628,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restore_lost_segments = []
         self._restore_bad_calibrations = []
         from ..core.acquisition_state import prepare_acquisition_workspace
+        from ..core.sample_rate_state import prepare_sample_rate_workspace
         self._restore_notes = list(prepare_acquisition_workspace(self._analytical_workspace.extra))
+        self._restore_notes.extend(prepare_sample_rate_workspace(self._analytical_workspace.extra))
         self._restore_channel_moved = []
         self._restore_channel_lost = []
         self._restore_path_moved = []
@@ -11844,6 +11867,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session, doc_id, state.workspace.extra.get(WORKSPACE_KEY, []), match_key=key,
             clear_existing=WORKSPACE_KEY in state.workspace.extra)
         for message in bandwidth_messages:
+            if message not in self._restore_notes:
+                self._restore_notes.append(message)
+        # The time base next, still BEFORE layers and results: a restored result's stamps
+        # are judged against the rate the document has once the project's declaration is
+        # back on it, and a segment re-derived later (_rederive_segments) inherits it.
+        from ..core.sample_rate_state import (
+            WORKSPACE_KEY as RATE_KEY, restore_sample_rate_declarations,
+        )
+        for message in restore_sample_rate_declarations(
+                self._session, doc_id, state.workspace.extra.get(RATE_KEY, []), match_key=key,
+                clear_existing=RATE_KEY in state.workspace.extra):
             if message not in self._restore_notes:
                 self._restore_notes.append(message)
 

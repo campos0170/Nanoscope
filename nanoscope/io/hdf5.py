@@ -31,6 +31,8 @@ from .base import (
     implausible_measured_rate_issue,
     read_magic,
     register,
+    undeclared_low_rate_issue,
+    undeclared_rate_is_suspect,
 )
 from .contract import (
     ReaderReport,
@@ -310,7 +312,8 @@ class Hdf5Reader(BaseReader):
                     loaded_range: SampleRange | None,
                     channels: tuple[ChannelInfo, ...],
                     report: ReaderReport,
-                    physical_reference_unavailable: bool = False) -> RecordingMeta:
+                    physical_reference_unavailable: bool = False,
+                    refused_rate_hz: float | None = None) -> RecordingMeta:
         return RecordingMeta(
             path=self.path,
             format_name=self.format_name,
@@ -325,11 +328,14 @@ class Hdf5Reader(BaseReader):
             notes=(_UNITS_NOTE,) + report.notes,
             issues=report.issues,
             physical_reference_unavailable=physical_reference_unavailable,
+            refused_rate_hz=refused_rate_hz,
         )
 
     def _timebase(self, h: h5py.File, start: int, n_signal: int,
-                  report: ReaderReport) -> tuple[float | None, Provenance, float]:
-        """Derive (sample_rate_hz, provenance, t0_s) from /time WITHOUT loading it whole.
+                  report: ReaderReport) -> tuple[float | None, Provenance, float, float | None]:
+        """Derive (sample_rate_hz, provenance, t0_s, refused_rate_hz) from /time WITHOUT
+        loading it whole. The fourth value is the measured rate the plausibility floor
+        refused (``RecordingMeta.refused_rate_hz``), None otherwise.
 
         Reads only the first ~1000 samples for dt, one sample at `start` for t0, and the
         last sample for a preliminary span check. load() then validates every loaded
@@ -356,7 +362,7 @@ class Hdf5Reader(BaseReader):
         if obj is None:
             if link_problem:
                 report.issue(f"/time is present but unusable ({link_problem}); sample rate unknown")
-            return None, Provenance.UNKNOWN, 0.0
+            return None, Provenance.UNKNOWN, 0.0, None
         tsig = self._time_signal(h)
         if tsig is None:
             partial = self._as_signal("time", obj)
@@ -365,7 +371,7 @@ class Hdf5Reader(BaseReader):
                    if partial is not None else self._reject_reason(obj))
             report.issue(f"/time is present in this file but is not usable as a time base "
                          f"({why}); sample rate unknown")
-            return None, Provenance.UNKNOWN, 0.0
+            return None, Provenance.UNKNOWN, 0.0, None
         n_time = tsig.length
         head = np.asarray(tsig.read(0, 1000), dtype=np.float64)
         d = np.diff(head)
@@ -383,11 +389,11 @@ class Hdf5Reader(BaseReader):
             report.issue("/time is not usable as a monotonic time base; sample rate unknown")
             report.issue("/time is not usable as a monotonic time base, so it cannot supply "
                          "this window's start time either; t0 is unavailable and was set to 0.")
-            return None, Provenance.UNKNOWN, 0.0
+            return None, Provenance.UNKNOWN, 0.0, None
         dt = float(d.mean())
         if not np.isfinite(dt) or dt <= 0:
             report.issue("/time has no finite positive sample interval; sample rate unknown")
-            return None, Provenance.UNKNOWN, 0.0
+            return None, Provenance.UNKNOWN, 0.0, None
         sample_rate_hz = 1.0 / dt
 
         # --- IS THIS CLOCK IN SECONDS AT ALL? ---------------------------------------------------
@@ -404,7 +410,17 @@ class Hdf5Reader(BaseReader):
             report.issue(implausible_measured_rate_issue(
                 source="/time", dt=dt, hz=sample_rate_hz,
                 stored_as=str(tsig.dataset.dtype) if tsig.is_integer else None))
-            return None, Provenance.UNKNOWN, 0.0
+            # The rate is refused; the /time value at `start` is kept AS WRITTEN (in the
+            # column's own unit, exactly as the text reader keeps its column-0 value), so a
+            # unit declared later re-reads t0 along with the rate — 2,500,000 µs is 2.5 s, not
+            # 0 — and a window's clock stays start/fs apart from the file's (contract.window_t0).
+            # With the rate None no clock is built from it (the axis is in samples); File Info
+            # prints it as written, in the undeclared unit, never as seconds.
+            raw_t0 = (float(tsig.read(start, start + 1)[0]) if start < n_time
+                      else float(head[0]) + start * dt)
+            if not np.isfinite(raw_t0):
+                raw_t0 = 0.0
+            return None, Provenance.UNKNOWN, raw_t0, sample_rate_hz   # refused, kept for a declared unit
         if tsig.is_integer:
             # The mirror of the sentence _signals() already gives an integer SIGNAL dataset
             # ("/current is stored as int32 — raw ADC counts…"). Same fact, same file, same
@@ -415,6 +431,12 @@ class Hdf5Reader(BaseReader):
                 f"whole seconds ({sample_rate_hz:,.6g} Hz). If this file's clock is in "
                 f"milliseconds, microseconds or nanoseconds, every duration and rate here is "
                 f"wrong by that factor: re-export /time as float seconds.")
+        if undeclared_rate_is_suspect(sample_rate_hz):
+            # The millisecond case, which the floor above cannot see and the text reader
+            # asks about in the same words (io.base.SUSPECT_UNDECLARED_RATE_HZ): a float
+            # /time in ms at 100 kHz reads as 100 Hz, uniform, self-consistent, issues=().
+            # The rate is kept; the question is put to the user.
+            report.issue(undeclared_low_rate_issue(source="/time", dt=dt, hz=sample_rate_hz))
         std = float(d.std())
         if std > 1e-6 * dt:
             report.issue(f"/time is non-uniform (std/dt = {std / dt:.3g})")
@@ -450,7 +472,7 @@ class Hdf5Reader(BaseReader):
             # readout, x-axis value and segment rebase of such a window start/fs seconds
             # early, the precise defect class contract.window_t0 was built to end.
             t0_s = float(head[0]) + start * dt
-        return sample_rate_hz, Provenance.MEASURED, self._finite_t0(t0_s, report)
+        return sample_rate_hz, Provenance.MEASURED, self._finite_t0(t0_s, report), None
 
     @staticmethod
     def _finite_t0(value: float, report: ReaderReport) -> float:
@@ -478,7 +500,7 @@ class Hdf5Reader(BaseReader):
                         self._reject_message(h, signals, report.issues))
 
                 n = self._common_length(signals)
-                sample_rate_hz, rate_prov, t0_s = self._timebase(h, 0, n, report)
+                sample_rate_hz, rate_prov, t0_s, refused_rate = self._timebase(h, 0, n, report)
 
                 channels = tuple(
                     ChannelInfo(index=i, name=s.name, raw_units="", kind=_NAME_KIND[s.name])
@@ -486,7 +508,7 @@ class Hdf5Reader(BaseReader):
                 )
                 meta = self._build_meta(
                     n_samples=n, sample_rate_hz=sample_rate_hz,
-                    rate_provenance=rate_prov, t0_s=t0_s, loaded_range=None,
+                    rate_provenance=rate_prov, t0_s=t0_s, refused_rate_hz=refused_rate, loaded_range=None,
                     channels=channels, report=report,
                     physical_reference_unavailable=bool(h.attrs.get(STUDY_BRIDGE_ATTR_KEY)),
                 )
@@ -520,7 +542,7 @@ class Hdf5Reader(BaseReader):
 
                 # full_n, not n: whether /time covers the RECORDING is a fact about the file,
                 # and must not change depending on how much of it the user chose to load.
-                sample_rate_hz, rate_prov, t0_s = self._timebase(h, start, full_n, report)
+                sample_rate_hz, rate_prov, t0_s, refused_rate = self._timebase(h, start, full_n, report)
 
                 # Endpoints can agree even when intervals in the middle are 2x too long
                 # and then 2x too short. Validate the entire loaded clock with bounded
@@ -624,7 +646,7 @@ class Hdf5Reader(BaseReader):
 
                 meta = self._build_meta(
                     n_samples=n, sample_rate_hz=sample_rate_hz,
-                    rate_provenance=rate_prov, t0_s=t0_s,
+                    rate_provenance=rate_prov, t0_s=t0_s, refused_rate_hz=refused_rate,
                     loaded_range=window_loaded(sample_range, start, n),
                     channels=tuple(channels), report=report,
                     physical_reference_unavailable=bool(h.attrs.get(STUDY_BRIDGE_ATTR_KEY)),

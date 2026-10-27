@@ -401,6 +401,7 @@ def test_the_registry_is_what_actually_wires_the_refresher(detected, qtbot):
     args = {
         "resultsChanged": (doc_id, "detect.schmitt"), "documentOpened": (doc_id,),
         "documentClosed": (doc_id,), "calibrationChanged": (doc_id, channel),
+        "sampleRateChanged": (doc_id,),
         "eventAcceptanceChanged": (0, True), "eventFlagChanged": (0, ""),
         "eventEdited": (0,), "amplitudeEdited": (0,),
     }

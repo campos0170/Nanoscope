@@ -31,6 +31,20 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Added
 
+- **Inspector ▸ File Info ▸ Sample rate / time unit…** declares a recording's time base when the
+  file does not say, or says it wrongly: the unit its time column is written in (the rate and t₀
+  move together) or the sample rate it was acquired at (the only option for a legacy TDMS, which
+  declares none). A column the 1 Hz floor refuses keeps the interval it measured, so its unit
+  can be declared the same way. The declaration is saved with the project under a new
+  workspace key (older v11 builds preserve it; no format bump), never written beside the raw
+  file, shown in File Info as `100,000 Hz · user (file: 100 Hz · measured)` (the status bar
+  prints the declared rate and its provenance), and followed by the recording's segments.
+  Detections made at the old rate are marked stale (*Times stale — sample rate changed*) and
+  offered a re-run — refused before the click when a stored cutoff is above the new Nyquist —
+  and a saved manual measurement gets the same mark on its row; nothing is re-scaled in place.
+- A CSV time column whose **header names its unit** — `time_ms`, `t_us`, `Time (ms)`, `time_s` —
+  is read in that unit, with a Note in File Info saying so. A bare `time` is still read as
+  seconds.
 - The **Event inspector can dock beside the trace** (opt-in; it still opens as its own window by
   default): **Dock beside trace** / **Own window** on its toolbar, or **Window ▸ Dock Event
   inspector beside the trace**, moves the same window — event, filter and context kept — into a tab
@@ -149,6 +163,17 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- A CSV time column in **milliseconds** loaded silently at a rate 1,000× too low: 10 µs steps
+  written as `0.01` per row read as 100 Hz, `Provenance.MEASURED`, duration 552 s for 0.5 s of
+  samples, with an empty Issues box — the only guard was the 1 Hz floor that catches microsecond
+  columns, and no sample-rate override existed anywhere to correct it. An undeclared time column
+  (a CSV's, or an HDF5 `/time`) whose measured rate is below 1 kHz now raises an Issue naming the
+  step, the rate as read, what the rate is if the time base is in milliseconds or microseconds,
+  and how to settle it (for a CSV, a unit in the column header; for either, the File Info
+  declaration); the measured
+  rate is kept, nothing is converted by a guess, and a header-declared unit never raises it. The
+  user guide's Issues row claimed every non-seconds column was refused; it now says what is
+  caught, what is asked, and what is read as declared.
 - A saved window size and place from a differently sized display (a laptop and an external
   monitor more than about a fifth apart in width) is no longer reported as "a value this app did
   not write": the main window, the child windows and Signal Conditioning take their saved size

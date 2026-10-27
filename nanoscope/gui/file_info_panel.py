@@ -35,6 +35,7 @@ class FileInfoPanel(QtWidgets.QWidget):
         session.documentClosed.connect(self._on_document_closed)
         session.calibrationChanged.connect(lambda d, _c: self._refresh_if(d))
         session.acquisitionBandwidthChanged.connect(lambda d, _c: self._refresh_if(d))
+        session.sampleRateChanged.connect(self._refresh_if)
         self._show_empty()
 
     def _build_ui(self) -> None:
@@ -90,6 +91,13 @@ class FileInfoPanel(QtWidgets.QWidget):
         self._edit_bandwidth = QtWidgets.QPushButton("Acquisition bandwidth…")
         self._edit_bandwidth.clicked.connect(self._open_bandwidth)
         root.addWidget(self._edit_bandwidth)
+        self._edit_rate = QtWidgets.QPushButton("Sample rate / time unit…")
+        self._edit_rate.setToolTip(
+            "Declare this recording's time base — the unit its time column is in, or its "
+            "sample rate — when the file does not say or says it wrongly. Saved with the "
+            "project; the raw file is never modified.")
+        self._edit_rate.clicked.connect(self._open_rate)
+        root.addWidget(self._edit_rate)
 
         self._notes_head = self._section("Notes")
         root.addWidget(self._notes_head)
@@ -137,9 +145,15 @@ class FileInfoPanel(QtWidgets.QWidget):
             self._fields["Sample rate"].setText("unknown  ·  x-axis is in samples")
         else:
             self._fields["Sample rate"].setText(
-                f"{meta.sample_rate_hz:,.6g} Hz  ·  {_prov(meta.rate_provenance)}")
+                f"{meta.sample_rate_hz:,.6g} Hz  ·  {_prov(meta.rate_provenance)}"
+                + self._rate_as_read_suffix(meta))
 
-        self._fields["t₀"].setText(f"{meta.t0_s:.6g} s")
+        if meta.sample_rate_hz is None and meta.refused_rate_hz is not None:
+            # The time base was refused as a clock, so this number is the column's first
+            # value AS WRITTEN, in a unit the file does not declare — never 'seconds'.
+            self._fields["t₀"].setText(f"{meta.t0_s:,.6g} as written (unit undeclared)")
+        else:
+            self._fields["t₀"].setText(f"{meta.t0_s:.6g} s")
 
         if meta.loaded_range is None:
             self._fields["Loaded range"].setText("whole file")
@@ -176,6 +190,7 @@ class FileInfoPanel(QtWidgets.QWidget):
         self._notes.setPlainText("\n".join(meta.notes) if meta.notes else "(none)")
         from ..core.acquisition import describe_bandwidth
         self._edit_bandwidth.setEnabled(self._doc_id is not None)
+        self._edit_rate.setEnabled(self._doc_id is not None)
         self._bandwidth.setText("Acquisition low-pass (metadata only):\n" + "\n".join(
             f"{info.name}: {describe_bandwidth(self._session.acquisition_bandwidth(self._doc_id, info.index))}"
             for info in meta.channels))
@@ -226,6 +241,29 @@ class FileInfoPanel(QtWidgets.QWidget):
         from .acquisition_dialog import AcquisitionBandwidthDialog
         AcquisitionBandwidthDialog(self._session, self._doc_id, self).exec()
 
+    def _open_rate(self) -> None:
+        if self._doc_id is None or not self._session.has_document(self._doc_id):
+            return
+        from .sample_rate_dialog import SampleRateDialog
+        SampleRateDialog(self._session, self._doc_id, self).exec()
+
+    def _rate_as_read_suffix(self, meta: RecordingMeta) -> str:
+        """``  (file: 100 Hz · measured)`` after a user-declared rate — the same shape as
+        the Kind column's ``current (file says unknown)``: the override is visibly an
+        override, and the reader's own word is never off the screen."""
+        if (meta.rate_provenance is not Provenance.USER or self._doc_id is None
+                or not self._session.has_document(self._doc_id)):
+            return ""
+        from ..core.segment import SegmentDocument
+        if isinstance(self._session.document(self._doc_id), SegmentDocument):
+            # Cut from a declared parent: its "as read" IS the declared clock, so the
+            # suffix would repeat the override and claim a file said "user".
+            return "  (follows the recording it was cut from)"
+        read = self._session.time_base_as_read(self._doc_id)
+        if read.sample_rate_hz is None:
+            return "  (file: unknown)"
+        return f"  (file: {read.sample_rate_hz:,.6g} Hz · {_prov(read.rate_provenance)})"
+
     def _calibration_issues(self) -> tuple[str, ...]:
         """What the current calibration did to each channel of the shown document."""
         if self._doc_id is None or not self._session.has_document(self._doc_id):
@@ -258,5 +296,6 @@ class FileInfoPanel(QtWidgets.QWidget):
         self._table.setRowCount(0)
         self._bandwidth.clear()
         self._edit_bandwidth.setEnabled(False)
+        self._edit_rate.setEnabled(False)
         self._notes.setPlainText("")
         self._issues.setPlainText("")
