@@ -72,7 +72,7 @@ from ..analysis.conditioning_recipes import (
     read_protocols_file,
     write_protocols_file,
 )
-from ..analysis.events import EventSet, mark_reviewed
+from ..analysis.events import EventSet, mark_reviewed, stale_rate_reason
 from ..analysis.measurement_quality import report_recording_messages
 from ..core.acquisition import acquisition_snapshot_messages
 from ..analysis.merge import (
@@ -84,6 +84,11 @@ from ..analysis.merge import (
 from ..analysis.modules import (
     DETREND_PARAM_KEYS,
     FILTER_PARAM_KEYS,
+    FIT_CALIBRATION_MOVED,
+    FIT_EVENTS_CHANGED,
+    FIT_OTHER_TABLE,
+    FIT_UNRECORDED,
+    FitVerdict,
     any_preprocess_enabled,
     detection_params_from_provenance,
     detection_signal,
@@ -91,6 +96,7 @@ from ..analysis.modules import (
     detrend_method_kwargs,
     fit_depth,
     fit_dwell,
+    judge_stored_fit,
     preprocess_for_detection,
     reconcile_result,
 )
@@ -142,8 +148,10 @@ class MergeReport(NamedTuple):
     window / region), ``"low_occupancy"`` (something WAS within the window / region and
     every candidate was refused — see :data:`~nanoscope.analysis.merge.MIN_MERGE_OCCUPANCY`),
     ``"no_detection"`` (no active detection to merge), ``"reconciled"`` (the active
-    derived table is curation-only), or ``"no_selection"`` (a region merge with no
-    usable on-trace Measure selection). ``focus_id`` is the ``event_id``
+    derived table is curation-only), ``"no_selection"`` (a region merge with no
+    usable on-trace Measure selection), or ``"stale_rate"`` (the table was detected at
+    a rate the recording no longer has, so it is not edited in place -- the sentence is
+    in ``refusal``). ``focus_id`` is the ``event_id``
     the Event Inspector should advance to after a "Merge with next" (``-1`` when not
     applicable)."""
 
@@ -164,6 +172,9 @@ class MergeReport(NamedTuple):
     #: the complaint the floor exists to answer — so MainWindow's ``_post_merge_status``
     #: says so in both cases.
     n_refused_low_occupancy: int = 0
+    #: What a refused merge says on the status bar -- non-empty with ``status ==
+    #: "stale_rate"`` only. It names the two rates, which a status token cannot.
+    refusal: str = ""
 
 _MODULE_ID = "detect.schmitt"
 _ML_MODULE_ID = "detect.keras"
@@ -213,6 +224,15 @@ _ML_CONFIG_KEYS = (
 _BASELINE_WORKSPACE_PREVIEW_POINTS = 6_000
 _BASELINE_WORKSPACE_ZERO = BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY
 _BASELINE_WORKSPACE_RETAINED = BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME
+
+#: The controller labels (the ``label=`` each launch passes to ``run_callable``) of the jobs that
+#: own a "busy" button: the Baseline panel's "Measuring…" (the open-pore probe and the reference
+#: preview) and the Baseline-correction workspace's "Refreshing comparison…". Both buttons are
+#: switched on BEFORE the launch (the widget does it on the click), so when a job REPLACES
+#: another, :meth:`AnalysisPanel._on_controller_replaced` may release a button only if the job
+#: taking over is not one of the jobs that needs it lit.
+_BASELINE_BUSY_JOBS = frozenset({"baseline_probe", "open_pore_reference_preview"})
+_WORKSPACE_BUSY_JOBS = frozenset({"baseline_correction_preview", "baseline_correction_export"})
 
 
 def _baseline_workspace_arrays(
@@ -944,6 +964,13 @@ class AnalysisPanel(QtWidgets.QWidget):
     #: FULL new flag set, because the cell is a set of reasons and the interesting fact is
     #: what it now says, not what was added to it.
     eventFlagChanged = QtCore.Signal(int, str)
+    #: The table ON SCREEN was swapped for another stored detection of the same recording
+    #: and channel -- by the Results dock's Table selector or by the Detection tab's detector
+    #: combo (which can also leave no table at all: that detector has not run here). Nothing
+    #: was written and the target did not change, so neither ``resultsChanged`` nor a
+    #: retarget tells anyone. Carries nothing: the receiver reads :meth:`current_detection`.
+    #: MainWindow (the sole wirer) re-feeds the surfaces that hold the frame (S8-XS1).
+    resultSwitched = QtCore.Signal()
     #: A baseline re-measure / comparison refused, started, or finished. One token
     #: per outcome, so MainWindow (the sole wirer) can post ONE honest status line
     #: whether the job was launched from the menu or from the stale banner's button.
@@ -1374,7 +1401,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         for index, tip in enumerate((
                 "The event table: one row per event, curated with the checkbox or a/r/f.",
                 "Counts, rates and distributions of this table, with its advisories.",
-                "Dwell and depth fits of the accepted events.",
+                "Dwell and depth fits of the accepted events of the table shown. A fit "
+                "made on another table, or before this one changed, is not shown.",
                 "How the detector scores against your curation.")):
             self.results_tabs.setTabToolTip(index, tip)
         root.addWidget(self._detection, 1)
@@ -1493,6 +1521,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._controller.finished.connect(self._on_controller_finished)
         self._controller.failed.connect(self._on_controller_failed)
         self._controller.cancelled.connect(self._on_controller_cancelled)
+        # A job the controller REPLACES reports none of the three above (abort() emits nothing),
+        # so what this panel recorded about it is forgotten on the controller's own say-so.
+        self._controller.replaced.connect(self._on_controller_replaced)
 
     # -- selection -------------------------------------------------------------------------------
     def set_selection(self, doc_id: str, channel: int) -> None:
@@ -1716,6 +1747,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._show_result(res)
         finally:
             self._switching_result = False
+        # AFTER the guard is down, and said once the table really is on screen: what listens
+        # re-reads ``current_detection()`` and may call back into this panel.
+        self.resultSwitched.emit()
 
     def _show_detector_choice(self, module_id: str) -> None:
         """The user moved the detector combo: show THAT detector's stored run, or nothing.
@@ -1754,6 +1788,9 @@ class AnalysisPanel(QtWidgets.QWidget):
                 self._clear_results()
         finally:
             self._switching_detector = False
+        # The second door that swaps the table on screen without writing anything -- and the
+        # one that can leave NO table on screen, which the surfaces must be told as well.
+        self.resultSwitched.emit()
 
     def _stored_to_show(self, doc_id: str, channel: int) -> AnalysisResult | None:
         """WHICH stored detection this target shows: the previously-active detector, then
@@ -4065,6 +4102,41 @@ class AnalysisPanel(QtWidgets.QWidget):
     def _on_controller_cancelled(self) -> None:
         self.forget_pending_job()
 
+    def _on_controller_replaced(self, label: str) -> None:
+        """The controller dropped the job in flight to start ``label``: forget what was
+        recorded about the dropped one.
+
+        A replaced job reaches none of the terminal slots above, so without this its records
+        outlived it. The Merge-all check-list and the re-measure target are what
+        ``study_event_bridge._assert_idle`` reads as "an operation is running": after Detect
+        replaced a Merge-all or a Re-measure the Manual and Acid studies refused to prepare a
+        review for the rest of the session with nothing running (S8-THREAD2), and a probe
+        replaced by Detect left its button reading "Measuring…" for as long as the recording
+        stayed selected (S8-THREAD1).
+
+        Runs inside the controller's ``start()`` / ``run_callable()``, before the caller has
+        recorded the NEW job — it does that once the controller has said yes — so clearing
+        the records cannot touch the new job's. The two busy buttons are the exception: the
+        launch lights them BEFORE it asks the controller (the widget does so on the click),
+        so a button is released only when the job taking over does not need it lit. A
+        comparison replaced by an export keeps its button; a probe replaced by Detect loses it.
+
+        Nothing the dropped job still says can undo this: the controller's sender guard
+        discards its stale terminal signals (see ``AnalysisController._stop``), so none reaches
+        :meth:`_on_controller_finished` to take the new job's ``_pending`` for its own."""
+        dropped = self._pending
+        self._forget_job_records()
+        if label not in _BASELINE_BUSY_JOBS:
+            self._baseline.set_busy(False)
+        if label not in _WORKSPACE_BUSY_JOBS and hasattr(self, "_baseline_workspace"):
+            self._baseline_workspace.set_busy(False)
+            if dropped in ("baseline_workspace_preview", "baseline_workspace_export"):
+                # set_busy(False) leaves the line it lit ("Calculating comparison in the
+                # background…") standing; say what became of the comparison instead.
+                self._baseline_workspace.mark_preview_stale(
+                    "Another analysis took over before this finished — refresh comparison "
+                    "to run it again.")
+
     def forget_pending_job(self) -> None:
         """Drop the record of the in-flight controller job. Public because
         ``AnalysisController.abort()`` deliberately emits NOTHING, so a Cancel driven
@@ -4072,7 +4144,19 @@ class AnalysisPanel(QtWidgets.QWidget):
         :meth:`_on_controller_cancelled` — and a ``_pending`` left pointing at an
         abandoned sweep is exactly the state in which a later answer gets routed to the
         wrong study. MainWindow calls this from its cancel path; the panel does not
-        reach for the window."""
+        reach for the window. A job REPLACED by another is announced by the controller
+        itself: see :meth:`_on_controller_replaced`."""
+        self._forget_job_records()
+        # Same reason as in :meth:`_on_controller_failed`: an abandoned probe must
+        # release the button, or Cancel leaves it saying "Measuring…" indefinitely.
+        self._baseline.set_busy(False)
+        if hasattr(self, "_baseline_workspace"):
+            self._baseline_workspace.set_busy(False)
+
+    def _forget_job_records(self) -> None:
+        """Everything recorded about the in-flight job — the records only, not the busy
+        buttons. Split out because a REPLACEMENT must clear these but may not clear a button
+        the incoming job has already lit."""
         self._pending = None
         self._pending_sel = None
         self._remeasure_target = None
@@ -4082,12 +4166,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         # to be validated against — the same rule, for the same reason, as the
         # re-measure snapshots above it.
         self._merge_job = None
-        # Same reason as in :meth:`_on_controller_failed`: an abandoned probe must
-        # release the button, or Cancel leaves it saying "Measuring…" indefinitely.
-        self._baseline.set_busy(False)
         self._baseline_workspace_job = None
-        if hasattr(self, "_baseline_workspace"):
-            self._baseline_workspace.set_busy(False)
 
     def _show_sweep(self, sweep_df) -> None:
         try:
@@ -4452,6 +4531,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         if res is not None and isinstance(res.payload, EventSet):
             self._fill_summary(res.payload)
             self._show_result_advisories(res)
+            # The accepted count is what a stored fit is judged against, and this is the one
+            # place every in-place curation lands (table click, key, Inspector, Gallery).
+            self._refresh_fit_text()
 
     def _on_acceptance_changed(self, *args) -> None:
         """Any curation edit (from the table or a routed Event Inspector decision on the shared df)
@@ -4688,6 +4770,15 @@ class AnalysisPanel(QtWidgets.QWidget):
         if res.module_id == CONSENSUS_MODULE_ID:
             self.runRefused.emit(_RECONCILED_EDIT_REFUSAL)
             return None
+        # A table the amber line calls stale is on the OLD clock, and this reads the live one
+        # (``ch.sample_rate_hz`` below): the new row would be the second clock in the table
+        # (S8-DATA1). Refused before anything is read or written; MainWindow's shortcut path
+        # reads ``last_missed_refusal`` and stays quiet, as it does for the overlap refusal.
+        stale = self._stale_edit_refusal(res, "Nothing was added.")
+        if stale is not None:
+            self.last_missed_refusal = stale
+            self.runRefused.emit(stale)
+            return None
         if self._sel is None:
             return None
         doc_id, channel = self._sel
@@ -4887,6 +4978,19 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._cond_cache = (key, out)
         return out, float(fs)
 
+    def _stale_merge_report(self, res: AnalysisResult,
+                            window_s: float | None = None) -> MergeReport | None:
+        """The report a merge returns INSTEAD of merging a table that is on another clock than
+        its recording (``None``: go ahead). All three entry points ask this first, before
+        ``_active_signal`` -- a merge re-characterizes the union spans at the LIVE rate, so the
+        merged rows would be a second clock inside a table the amber line calls entirely the
+        old one (S8-DATA1). Nothing runs, nothing moves, no undo step."""
+        refusal = self._stale_edit_refusal(res, "Nothing was merged.")
+        if refusal is None:
+            return None
+        n = len(res.payload.df)
+        return MergeReport("stale_rate", n, n, window_s=window_s, refusal=refusal)
+
     def _install_merged(self, res: AnalysisResult, new_events: EventSet) -> None:
         """Re-install a merged EventSet under the SAME (doc, channel, module) key. The resulting
         ``resultsChanged`` drives ``_show_result`` (table + spans + summary + score) and MainWindow
@@ -4936,6 +5040,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         if res.module_id == CONSENSUS_MODULE_ID:
             n = len(res.payload.df)
             return MergeReport("reconciled", n, n, window_s=float(window_s))
+        stale = self._stale_merge_report(res, float(window_s))
+        if stale is not None:
+            return stale
         signal, fs = self._active_signal(res.payload.provenance)
         if signal is None or fs is None:
             return MergeReport("no_detection", 0, 0, window_s=float(window_s))
@@ -5047,6 +5154,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         if res.module_id == CONSENSUS_MODULE_ID:
             n = len(res.payload.df)
             return MergeReport("reconciled", n, n)
+        stale = self._stale_merge_report(res)
+        if stale is not None:
+            return stale
         target = self._trace_view.measure_target()
         bounds = self._trace_view.measure_bounds()
         if bounds is None or target is None or self._sel is None or target != self._sel:
@@ -5090,6 +5200,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         if res.module_id == CONSENSUS_MODULE_ID:
             n = len(res.payload.df)
             return MergeReport("reconciled", n, n, window_s=float(window_s))
+        stale = self._stale_merge_report(res, float(window_s))
+        if stale is not None:
+            return stale
         signal, fs = self._active_signal(res.payload.provenance)
         if signal is None or fs is None:
             return MergeReport("no_detection", 0, 0)
@@ -5179,6 +5292,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             return self._refuse_baseline_job("no_detection")
         if res.module_id == CONSENSUS_MODULE_ID:
             return self._refuse_baseline_job("reconciled")
+        stale = self._stale_edit_refusal(res, "Nothing was re-measured.")
+        if stale is not None:
+            return self._refuse_baseline_job("stale_rate", stale)
         if self._reference_redetection_needed(res):
             return self._refuse_baseline_job("reference_redetect")
         signal, fs = self._active_signal(res.payload.provenance)
@@ -5210,6 +5326,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             return self._refuse_baseline_job("no_detection")
         if res.module_id == CONSENSUS_MODULE_ID:
             return self._refuse_baseline_job("reconciled")
+        stale = self._stale_edit_refusal(res, "Nothing was re-measured.")
+        if stale is not None:
+            return self._refuse_baseline_job("stale_rate", stale)
         if self._reference_redetection_needed(res):
             return self._refuse_baseline_job("reference_redetect")
         signal, fs = self._active_signal(res.payload.provenance)
@@ -5251,10 +5370,16 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._baseline_said = True
         self.baselineJobStatus.emit(token, message)
 
-    def _refuse_baseline_job(self, token: str) -> str:
+    def _refuse_baseline_job(self, token: str, message: str | None = None) -> str:
         """Say why, then return the token. Never a silent no-op: a click that does
-        nothing and explains nothing is indistinguishable from a hang."""
-        self._say_baseline(token, self._BASELINE_REFUSALS.get(token, ""))
+        nothing and explains nothing is indistinguishable from a hang.
+
+        ``message`` is for the one refusal whose sentence names numbers (``stale_rate``: the
+        two rates), which a table of fixed sentences cannot hold. The kernel's own refusal of
+        the same table (``remeasure._require_same_rate``) used to be the only one, and reached
+        the user as a ``ValueError`` modal (S8-DATA4)."""
+        self._say_baseline(
+            token, self._BASELINE_REFUSALS.get(token, "") if message is None else message)
         return token
 
     def _launch_remeasure(self, res: AnalysisResult, signal: np.ndarray, fs: float,
@@ -5503,8 +5628,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._refresh_summary_from_table()
         self._refresh_score()
 
-    def _refresh_fit_text(self) -> None:
-        """Show the fits THE SELECTED TARGET has stored — and nothing when it has none.
+    def _refresh_fit_text(self, failed: Mapping[str, str] | None = None) -> None:
+        """Show the fits THE TABLE ON SCREEN has stored — and, for a stored fit that is not
+        its own, one sentence saying so. Nothing when there is nothing to say.
 
         WRITES ON EVERY EXIT, including the empty one. It used to write only when the
         target had a fit (``if parts:``, no else), and the only writer of the empty
@@ -5519,18 +5645,101 @@ class AnalysisPanel(QtWidgets.QWidget):
 
         The empty box is the honest answer for a target with no fit: the Fit button
         beside it is live and says so. A fit that FAILED is a different sentence, written
-        by :meth:`_on_fit_requested` from the exception it caught — that path computes
-        text this one cannot re-derive from the store, which is why it stays its own
-        writer and always runs after the ``add_result`` that lands here.
+        by :meth:`_on_fit_requested` from the exception it caught — text this method
+        cannot re-derive from the store, so the press hands it in as ``failed``
+        (``{"dwell": "dwell fit failed: ...", ...}``) and it is laid out in the failed
+        half's place, beside whatever the store holds for the other.
+
+        THE SAME RULE ONE LEVEL DOWN (S8-RD1): "the target" is a recording AND a table.
+        The store keeps one dwell fit and one depth fit per recording and channel, so the
+        Schmitt, CUSUM and Reconciled tables of a recording share one slot, and this box
+        printed whatever sat in it beside whichever table the Table selector named —
+        Schmitt's n = 316 under CUSUM's 370 candidates, the same fit beside a merged
+        table (246 accepted), a re-run (44 events) and an Undo of either, and after a
+        half-failed Fit one detector's dwell fit beside another's depth fit. A fit is
+        printed only when ``judge_stored_fit`` says it belongs to the table shown — the
+        export's own two guards plus the table the fit records — and the rest are named
+        in :meth:`_fit_not_shown_notes` with the way out. ONE helper, because the box has
+        to be redrawn from every route that changes what it sits beside: a table shown
+        (the selector, a merge, a re-run, Undo, a reopened project), a fit landing, and
+        an accept/reject (:meth:`_refresh_summary_from_table`). Patching each route left
+        the next one out.
         """
         parts: list[str] = []
-        if self._sel is not None:
+        res = self._stored_detection()
+        if self._sel is not None and res is not None and isinstance(res.payload, EventSet):
             doc_id, channel = self._sel
-            for mid in ("fit.dwell", "fit.depth"):
-                r = self._session.results.get(doc_id, channel, mid)
-                if r is not None and hasattr(r.payload, "summary"):
-                    parts.append(r.payload.summary())
+            elsewhere: list[tuple[str, FitVerdict]] = []
+            for mid, kind in (("fit.dwell", "dwell"), ("fit.depth", "depth")):
+                if failed and kind in failed:
+                    parts.append(failed[kind])
+                    continue
+                stored = self._session.results.get(doc_id, channel, mid)
+                if stored is None or not hasattr(stored.payload, "summary"):
+                    continue
+                verdict = judge_stored_fit(stored, res)
+                if verdict.current:
+                    parts.append(stored.payload.summary())
+                else:
+                    elsewhere.append((kind, verdict))
+            parts.extend(self._fit_not_shown_notes(res, elsewhere))
         self._stats.set_fit_text("\n\n".join(parts))
+
+    def _fit_not_shown_notes(
+        self, res: AnalysisResult, elsewhere: list[tuple[str, FitVerdict]],
+    ) -> list[str]:
+        """One sentence per reason a stored fit is NOT printed beside the table ``res``, each
+        saying what is wrong with it and what to do (every one ends in "press Fit": a fit of
+        the table as it stands is one click and a second away, and the stored one is neither
+        wrong nor lost — it simply is not about this table).
+
+        Fits that share a reason and a source are named in one sentence, so a Schmitt pair
+        sitting under CUSUM reads as one fact rather than two copies of it.
+        """
+        if not elsewhere:
+            return []
+        groups: dict[tuple[str, str, int | None], list[str]] = {}
+        for kind, v in elsewhere:
+            groups.setdefault((v.reason, v.made_on, v.n_fit), []).append(kind)
+        n_now = elsewhere[0][1].n_now             # the same table, so the same count, for all
+        this = f"this {detector_name(res.module_id)} table"
+        notes: list[str] = []
+        for (reason, made_on, n_fit), kinds in groups.items():
+            one = len(kinds) == 1
+            subject = f"The stored {' and '.join(kinds)} {'fit' if one else 'fits'}"
+            was = "was" if one else "were"
+            if reason == FIT_OTHER_TABLE:
+                where = f"the {detector_name(made_on)} table"
+                if n_fit is not None:
+                    where += f" ({n_fit:,} accepted events)"
+                notes.append(f"{subject} belong{'s' if one else ''} to {where}, not to {this} "
+                             f"— press Fit to fit this one.")
+            elif reason == FIT_EVENTS_CHANGED:
+                notes.append(
+                    f"{subject} predate{'s' if one else ''} a change to {this}: "
+                    f"{'it' if one else 'they'} {was} made on {n_fit:,} accepted events and the "
+                    f"table has {n_now:,} now (curated, merged, re-run or changed by Undo "
+                    f"since) — press Fit to fit it as it stands.")
+            elif reason == FIT_CALIBRATION_MOVED:
+                doc_id, channel = self._sel
+                live = self._session.calibration(doc_id, channel).fingerprint()
+                if tuple(res.calibration_fingerprint) != tuple(live):
+                    # The TABLE is the outdated one (its amber line says so): another Fit
+                    # would land under the new calibration on events measured under the old.
+                    tail = (", and the calibration has changed since the table was detected "
+                            "— re-run detection, then press Fit.")
+                else:
+                    tail = " — press Fit to fit this one."
+                notes.append(f"{subject} {was} made under a different calibration than {this} "
+                             f"was measured under{tail}")
+            elif reason == FIT_UNRECORDED:
+                they = "it" if one else "they"
+                notes.append(
+                    f"{subject} record{'s' if one else ''} no table (an earlier NanoScope or "
+                    f"the Plots window saved {'it' if one else 'them'}), so {they} "
+                    f"{'is' if one else 'are'} not shown beside {this} — press Fit to fit "
+                    f"this one.")
+        return notes
 
     # -- event navigation ------------------------------------------------------------------------
     def _on_event_selected(self, event_id: int) -> None:
@@ -5798,26 +6007,37 @@ class AnalysisPanel(QtWidgets.QWidget):
         # and their dwell biased long); the toggle in the Fits box puts them back.
         use_fl = bool(opts.get("use_filter_limited", False))
 
-        parts: list[str] = []
+        # A Fit press replaces the PAIR. Each fit records the table it was made on
+        # (``detection_module_id``), and a half that FAILS retires its predecessor from the
+        # store: that one came from an earlier press — of another table, or of this one under
+        # other settings — and left in the slot it was printed beside the other half's fresh
+        # fit (one detector's dwell fit next to another's depth fit, measured on the -600 mV
+        # recording) and handed to the figure export as "your saved fit".
+        failed: dict[str, str] = {}
         try:
             dwell_res = fit_dwell(events, doc_id=doc_id, channel=channel,
                                   n_components=int(opts.get("n_components_dwell", 1)),
                                   efficiency=eff, use_filter_limited=use_fl,
-                                  calibration_fingerprint=fp)
+                                  calibration_fingerprint=fp,
+                                  detection_module_id=res.module_id)
             self._session.add_result(dwell_res)
-            parts.append(dwell_res.payload.summary())
         except Exception as exc:  # noqa: BLE001 — surface the failure in the readout
-            parts.append(f"dwell fit failed: {exc}")
+            self._session.results.drop(doc_id, channel, "fit.dwell")
+            failed["dwell"] = f"dwell fit failed: {exc}"
         try:
             depth_res = fit_depth(events, doc_id=doc_id, channel=channel,
                                   n_components=int(opts.get("n_components_depth", 1)),
                                   use_filter_limited=use_fl,
-                                  calibration_fingerprint=fp)
+                                  calibration_fingerprint=fp,
+                                  detection_module_id=res.module_id)
             self._session.add_result(depth_res)
-            parts.append(depth_res.payload.summary())
         except Exception as exc:  # noqa: BLE001
-            parts.append(f"depth fit failed: {exc}")
-        self._stats.set_fit_text("\n\n".join(parts))
+            self._session.results.drop(doc_id, channel, "fit.depth")
+            failed["depth"] = f"depth fit failed: {exc}"
+        # The box is laid out by the one helper every other route uses — a fit the press has
+        # just made on a table whose calibration has since moved is judged exactly as the next
+        # redraw would judge it, rather than shown now and withdrawn then.
+        self._refresh_fit_text(failed)
 
     # -- staleness -------------------------------------------------------------------------------
     def _check_staleness(self, res: AnalysisResult) -> None:
@@ -5944,25 +6164,31 @@ class AnalysisPanel(QtWidgets.QWidget):
         """The THIRD stamp, read where the detectors already wrote it: the ``fs`` in the
         EventSet's provenance (``detect.py`` / ``detect_cusum.py`` / ``reconcile.py``)
         against the document's live rate. A result with no such stamp (an older table, a
-        payload that is not an EventSet) says nothing, and so nothing is said."""
+        payload that is not an EventSet) says nothing, and so nothing is said.
+
+        The rule and the sentence are :func:`~nanoscope.analysis.events.stale_rate_reason`'s,
+        and this is also THE QUESTION THE EDITING DOORS ASK (:meth:`_stale_edit_refusal`):
+        what the amber line says is stale is what hand-add, the merges and the re-measure
+        entry points refuse to write into, so no door can edit where the line is up or
+        refuse where it offers no Re-run (S8-DATA1)."""
         if self._sel is None or not isinstance(res.payload, EventSet):
             return None
-        prov = res.payload.provenance
-        stamped = prov.get("fs") if isinstance(prov, Mapping) else None
-        try:
-            stamped = float(stamped) if stamped is not None else None
-        except (TypeError, ValueError):
-            stamped = None
-        if stamped is None:
-            return None
-        live = self._session.document(self._sel[0]).meta.sample_rate_hz
-        if live is not None and abs(live - stamped) <= 1e-9 * max(abs(live), abs(stamped)):
-            return None
-        now = "unknown" if live is None else f"{live:,.6g} Hz"
-        return (f"The sample rate changed since this detection ran ({stamped:,.6g} Hz → "
-                f"{now}): every start time, dwell, rise/fall time and ECD in this table was "
-                f"computed at the old rate, and the filters and dwell limits ran at it too. "
-                f"Re-run detection under the declared rate.")
+        return stale_rate_reason(
+            res.payload.provenance, self._session.document(self._sel[0]).meta.sample_rate_hz)
+
+    def _stale_edit_refusal(self, res: AnalysisResult, outcome: str) -> str | None:
+        """What an in-place door says INSTEAD of writing into ``res``: ``outcome`` ("Nothing
+        was added.") and then the amber line's own sentence -- or ``None`` when the table is on
+        its recording's live clock and the door goes ahead exactly as it always did.
+
+        A door that writes ``t_start_s`` / ``dwell_s`` reads the LIVE rate; a table stamped at
+        another one would hold two clocks, with the line above it still saying every time in it
+        is on the old one. Detections keep the rate they were measured at and are never silently
+        re-scaled (USER_GUIDE section 2), so the way forward is the line's Re-run. Every door
+        calls this BEFORE it reads or writes anything, so a refusal leaves no half-applied
+        state and no undo step."""
+        reason = self._sample_rate_staleness(res)
+        return None if reason is None else f"{outcome} {reason}"
 
     @staticmethod
     def _reconciliation_input_fingerprints(res: AnalysisResult) -> dict[str, str]:

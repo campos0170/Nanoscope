@@ -7864,8 +7864,10 @@ class EventTable(QWidget):
     """Sortable, curatable table over an EventSet.
 
     Keyboard curation: click a row, then j/k move the current row, 'a' accepts, 'r'
-    rejects and 'f' marks it with the curator's own flag. Selecting a row emits
-    eventSelected so the trace view can jump to it.
+    rejects and 'f' marks it with the curator's own flag — the BARE keys only: a chord
+    (Cmd+A, Cmd+R, Option+F, …) is not curation, and Cmd+A selects every row
+    (:meth:`_handle_curation_event`). Selecting a row emits eventSelected so the trace
+    view can jump to it.
 
     THOSE KEYS WERE DOCUMENTED AND DEAD. The handler was ``keyPressEvent`` on THIS
     widget, which is a plain container: the focus goes to the ``QTableView`` inside it,
@@ -8843,15 +8845,48 @@ class EventTable(QWidget):
         type-to-search from stealing a/r/f/j/k to jump to a row whose text starts with
         that letter."""
         if obj is self.view and event.type() == QEvent.KeyPress:
-            if self._handle_curation_key(event.key()):
+            if self._handle_curation_event(event):
                 return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:
-        """The same keys if they reach the container (a synthesised event, or a future
-        layout in which this widget takes focus)."""
-        if not self._handle_curation_key(event.key()):
+        """The same keys if they reach the container (a synthesised event, a future layout
+        in which this widget takes focus, or any key a child control ignores and Qt
+        therefore climbs to its parent)."""
+        if not self._handle_curation_event(event):
             super().keyPressEvent(event)
+
+    def _handle_curation_event(self, event) -> bool:
+        """The one gate in front of :meth:`_handle_curation_key`: ONLY AN UNMODIFIED KEY
+        CURATES. Returns True if the key was ours.
+
+        THE CHORDS THAT WERE READ AS THE BARE LETTER. Both doors used to hand the handler
+        ``event.key()`` and nothing else, so a chord on a curation letter WAS the letter.
+        Measured in the wired app on the owner's -600 mV run (317 events) with the keyboard
+        in the Results table — which Shift+Cmd+R puts it in on purpose, "so a/r/f keep
+        working": Cmd+A (Qt: Ctrl+A) accepted the selected row, Cmd+R rejected it, Cmd+F
+        flagged it, and Ctrl+A, Option+R, Option+F and Cmd+Shift+A did the same — each a
+        silent write to curation, with Edit ▸ Undo then reading "Undo Curate event" — while
+        Select All, the gesture ExtendedSelection was given to this table for, selected
+        nothing (one row of 317 stayed selected). The container door had it too: Cmd+R
+        pressed on the focused "Columns…" button, which ignores it, climbed here and
+        rejected the row.
+
+        So a key with any Ctrl, Meta, Alt or Shift held is not ours: it is left UNHANDLED
+        and goes on to QTableView — Cmd+A selects every row, the other chords are ignored
+        and keep climbing to the window, where Shift+Cmd+F and Shift+Cmd+R are menu actions
+        that win before the table is asked. That is the gallery's rule for the same keys
+        (``_handle_own_key`` compares the whole key combination, not the key). The keypad
+        flag is the one modifier that does not count — macOS raises it on the arrow keys,
+        and it is the idiom the gallery's own arrow handling already uses — and Caps Lock is
+        not a modifier to Qt at all, so a letter typed with it on still curates.
+
+        Qt names the Mac keys the other way round (Cmd is ``ControlModifier``, Ctrl is
+        ``MetaModifier``), which is why this asks for none of them rather than for one.
+        """
+        if event.modifiers() & ~Qt.KeypadModifier:
+            return False
+        return self._handle_curation_key(event.key())
 
     def _handle_curation_key(self, key) -> bool:
         """Apply one curation key. Returns True if it was ours. THE one handler.

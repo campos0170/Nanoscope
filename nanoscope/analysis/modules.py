@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, NamedTuple, Sequence
 
 import numpy as np
 import pandas as pd
@@ -126,6 +126,15 @@ __all__ = [
     "resolve_t_min",
     "depth_floor_from_provenance",
     "stamp_fit_provenance",
+    "FIT_DETECTION_KEY",
+    "FIT_CURRENT",
+    "FIT_OTHER_TABLE",
+    "FIT_CALIBRATION_MOVED",
+    "FIT_EVENTS_CHANGED",
+    "FIT_UNRECORDED",
+    "FitVerdict",
+    "judge_stored_fit",
+    "stored_fit_problem",
     "NO_TMIN_WARNING",
 ]
 
@@ -2624,6 +2633,7 @@ def fit_dwell(
     calibration_fingerprint: tuple[float, float] = _DEFAULT_FINGERPRINT,
     n_boot: int = 1000,
     seed: int | None = 0,
+    detection_module_id: str | None = None,
 ) -> AnalysisResult:
     """Fit dwell times of the accepted events with a censored exponential MLE.
 
@@ -2634,6 +2644,11 @@ def fit_dwell(
     puts them back), and every choice that moved a number lands in
     ``FitResult.meta`` and in ``AnalysisResult.warnings``.
 
+    ``detection_module_id`` is the ``module_id`` of the stored detection ``events`` came
+    from; the fit records it (:data:`FIT_DETECTION_KEY`) so it can later be told apart from
+    the fit of another table. Left out, the fit records none and
+    :func:`judge_stored_fit` will not vouch for it.
+
     Returns a derived ``AnalysisResult`` (``module_id='fit.dwell'``) whose payload
     is the :class:`~nanoscope.analysis.stats.FitResult`; the controller stores it
     via ``Session.add_result``.
@@ -2643,7 +2658,7 @@ def fit_dwell(
         inp.dwell, t_min=inp.t_min, t_max=inp.t_max, n_components=n_components,
         efficiency=efficiency, n_boot=n_boot, seed=seed,
     )
-    stamp_fit_provenance(fit, inp)
+    stamp_fit_provenance(fit, inp, detection_module_id=detection_module_id)
     return _fit_result("fit.dwell", fit, doc_id, channel,
                        {"t_min": float(inp.t_min), "t_max": inp.t_max,
                         "n_components": int(n_components),
@@ -2661,6 +2676,7 @@ def fit_depth(
     calibration_fingerprint: tuple[float, float] = _DEFAULT_FINGERPRINT,
     n_boot: int = 400,
     seed: int | None = 0,
+    detection_module_id: str | None = None,
 ) -> AnalysisResult:
     """Fit a Gaussian mixture to the accepted events' ``frac_depth``.
 
@@ -2670,13 +2686,15 @@ def fit_depth(
     fit, which warns when the shallowest component sits on it -- an untruncated
     mixture fit to a floor-truncated sample returns mu too high and sigma too low.
 
+    ``detection_module_id`` is recorded as it is by :func:`fit_dwell`.
+
     Returns a derived ``AnalysisResult`` (``module_id='fit.depth'``) carrying the
     :class:`~nanoscope.analysis.stats.FitResult`.
     """
     inp = depth_fit_inputs(events, use_filter_limited=use_filter_limited)
     fit = fit_depth_gaussians(inp.values, n_components=n_components,
                               depth_floor=inp.depth_floor, n_boot=n_boot, seed=seed)
-    stamp_fit_provenance(fit, inp)
+    stamp_fit_provenance(fit, inp, detection_module_id=detection_module_id)
     return _fit_result("fit.depth", fit, doc_id, channel,
                        {"n_components": int(n_components),
                         "use_filter_limited": bool(use_filter_limited)},
@@ -2776,19 +2794,44 @@ def fit_levels(
     )
 
 
-def stamp_fit_provenance(fit: FitResult, inp: DwellFitInputs | DepthFitInputs) -> None:
+#: ``FitResult.meta`` key naming the STORED DETECTION a distribution fit was made on: the
+#: ``module_id`` of the table (``detect.schmitt``, ``detect.cusum``, ``detect.keras``,
+#: ``detect.reconciled``, ...) whose accepted events were handed to the fitter.
+#:
+#: The result store keeps ONE ``fit.dwell`` and ONE ``fit.depth`` per (recording, channel), so
+#: every table of a recording shares one fit slot, and until this key existed nothing recorded
+#: which of them a fit belonged to: the Results dock's Fits tab printed Schmitt's n = 316 under
+#: CUSUM's table, and a Fit that half-failed left one table's dwell fit beside another's depth
+#: fit. It is an ADDED ``meta`` key, not a new store key or module id: ``fit_to_json`` writes
+#: ``meta`` wholesale, so the project file carries it, while an older build reading that file
+#: carries the unknown entry through untouched and finds its fits where it always did. A fit
+#: WITHOUT the key (written by an earlier build, or filed by the Plots window) is "unrecorded".
+FIT_DETECTION_KEY = "detection_module_id"
+
+
+def stamp_fit_provenance(
+    fit: FitResult,
+    inp: DwellFitInputs | DepthFitInputs,
+    *,
+    detection_module_id: str | None = None,
+) -> None:
     """Fold the resolution's provenance + notes into the FitResult.
 
     The notes go FIRST: an exclusion or a right-censoring warning is the reason
     the number moved, so it must be the first thing under the estimate in
     ``summary()``. A right-censoring warning also amends ``censoring`` -- the fit
     must stop claiming left-truncation-only the moment the data say otherwise.
+
+    ``detection_module_id`` is the stored detection the sample was taken from
+    (:data:`FIT_DETECTION_KEY`); a caller that does not say leaves the fit unrecorded.
     """
     meta = fit.meta
     for key, value in inp.meta().items():
         meta.setdefault(key, value)
     meta["n_excluded_filter_limited"] = int(inp.n_excluded_filter_limited)
     meta["use_filter_limited"] = bool(inp.use_filter_limited)
+    if detection_module_id:
+        meta[FIT_DETECTION_KEY] = str(detection_module_id)
     if isinstance(inp, DwellFitInputs):
         meta["t_min"] = float(inp.t_min)
         meta["t_min_source"] = inp.t_min_source
@@ -2801,6 +2844,115 @@ def stamp_fit_provenance(fit: FitResult, inp: DwellFitInputs | DepthFitInputs) -
                 cens + " -- but the SAMPLE is also right-censored by curation "
                 "(see the warning below); the model does not correct for that"
             )
+
+
+#: The answers of :func:`judge_stored_fit`.
+FIT_CURRENT = "current"                        # it belongs to this table, as the table stands
+FIT_OTHER_TABLE = "other_table"                # it names a different table
+FIT_CALIBRATION_MOVED = "calibration_moved"    # fitted under another gain/offset than the table
+FIT_EVENTS_CHANGED = "events_changed"          # the table's accepted count is not the one fitted
+FIT_UNRECORDED = "unrecorded"                  # it names no table, so nothing can vouch for it
+
+#: What Export figure says for each of the two guards it has always had -- the wording of its
+#: status line, which tests pin, so it lives beside the rule instead of at the call site.
+_EXPORT_WORDS = {
+    FIT_CALIBRATION_MOVED: "saved fit predates a calibration change",
+    FIT_EVENTS_CHANGED: "saved fit is stale (the accepted events changed since it ran)",
+}
+
+
+class FitVerdict(NamedTuple):
+    """What :func:`judge_stored_fit` found, with the numbers a sentence about it needs.
+
+    ``made_on`` is the table the fit names (``""`` when it names none), ``n_fit`` the accepted
+    events it says it was fitted to (None when it did not record the count) and ``n_now`` the
+    accepted events the table holds now.
+    """
+
+    reason: str
+    made_on: str = ""
+    n_fit: int | None = None
+    n_now: int = 0
+
+    @property
+    def current(self) -> bool:
+        return self.reason == FIT_CURRENT
+
+
+def _fit_counts(stored: AnalysisResult, table: AnalysisResult) -> tuple[int | None, int]:
+    """``(accepted events the fit says it used, accepted events ``table`` has now)``."""
+    n_fit = (getattr(stored.payload, "meta", None) or {}).get("n_input_events")
+    n_now = int(table.payload.df["accepted"].to_numpy(dtype=bool).sum())
+    return (None if n_fit is None else int(n_fit)), n_now
+
+
+def _fit_staleness(stored: AnalysisResult, table: AnalysisResult) -> str:
+    """The two guards Export figure has always applied: ``FIT_CALIBRATION_MOVED``,
+    ``FIT_EVENTS_CHANGED`` or ``""``. Calibration first, and a fit that carries no
+    ``n_input_events`` cannot disagree on the count -- the order and the leniency are the
+    export's, kept verbatim."""
+    if tuple(stored.calibration_fingerprint) != tuple(table.calibration_fingerprint):
+        return FIT_CALIBRATION_MOVED
+    n_fit, n_now = _fit_counts(stored, table)
+    if n_fit is not None and n_fit != n_now:
+        return FIT_EVENTS_CHANGED
+    return ""
+
+
+def stored_fit_problem(stored: AnalysisResult, table: AnalysisResult) -> str:
+    """Why ``stored`` cannot stand for the events ``table`` holds now, in the figure export's
+    own words -- or ``""`` when neither of its two guards objects.
+
+    This is the rule ``MainWindow._stored_fit`` applies before a saved fit is allowed onto an
+    exported histogram: a fit taken under another gain/offset describes different depths, and a
+    fit of a different number of accepted events (the table was curated, merged or re-run
+    since) is "worse than a documented refit". It says nothing about WHICH table the fit was
+    made on -- that is :func:`judge_stored_fit`, which applies these same two guards and the
+    lineage on top.
+    """
+    return _EXPORT_WORDS.get(_fit_staleness(stored, table), "")
+
+
+def judge_stored_fit(stored: AnalysisResult, table: AnalysisResult) -> FitVerdict:
+    """Does the stored dwell/depth fit ``stored`` describe the table ``table`` on screen?
+
+    THE RULE THE RESULTS DOCK'S FITS TAB PRINTS BY: the export's own two guards
+    (:func:`stored_fit_problem`) extended with the lineage the fit records
+    (:data:`FIT_DETECTION_KEY`). Checked in this order, because each answer is more specific
+    than the next and says what to do:
+
+    1. ``FIT_OTHER_TABLE`` -- it names a different table than ``table``, whatever the counts
+       (two tables can hold the same number of accepted events by coincidence);
+    2. ``FIT_CALIBRATION_MOVED`` -- fitted under another gain/offset than the table was measured
+       under;
+    3. ``FIT_EVENTS_CHANGED`` -- the accepted count is not the one the fit used (curation, a
+       merge, a re-run with other settings, or an Undo of any of them since);
+    4. ``FIT_UNRECORDED`` -- it names no table at all;
+    5. ``FIT_CURRENT`` -- otherwise.
+
+    THE CONSERVATIVE RULE FOR A FIT THAT NAMES NO TABLE. Saved projects written before the stamp
+    existed hold fits with no lineage, and so does anything the Plots window files. Which table
+    such a fit was made on is not recoverable from the file: a Schmitt fit and a CUSUM fit of the
+    same recording carry the same keys, and the count that the export trusts can coincide across
+    tables. So an unrecorded fit is never ASSUMED to match -- it is ``FIT_UNRECORDED`` even when
+    the calibration and the count agree, and the caller is expected to show nothing and say why.
+    It is not discarded: it stays in the store and in the project, and the export (whose rule
+    ``stored_fit_problem`` is unchanged) keeps using it exactly as before. Pressing Fit makes a
+    fit that records its table.
+    """
+    meta = getattr(stored.payload, "meta", None) or {}
+    made_on = str(meta.get(FIT_DETECTION_KEY) or "")
+    n_fit, n_now = _fit_counts(stored, table)
+
+    def verdict(reason: str) -> FitVerdict:
+        return FitVerdict(reason, made_on, n_fit, n_now)
+
+    if made_on and made_on != table.module_id:
+        return verdict(FIT_OTHER_TABLE)
+    moved = _fit_staleness(stored, table)
+    if moved:
+        return verdict(moved)
+    return verdict(FIT_CURRENT if made_on else FIT_UNRECORDED)
 
 
 def _fit_result(

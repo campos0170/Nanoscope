@@ -108,6 +108,24 @@ a test that walks the `gui/` ASTs.
   merely-hidden channel came back — and that took the layer's colour and its `time_offset_s`
   alignment with it, both of which are persisted. `excluded` is an additive, optional manifest key:
   absent means False, which is exactly what an older project meant.
+- **A stored fit names the table it was made on.** The `ResultStore` keeps ONE `fit.dwell` and ONE
+  `fit.depth` per `(doc_id, channel)`, so every table of a recording (Schmitt, CUSUM, Keras,
+  Reconciled) shares one fit slot, and a fit used to carry nothing that said which of them it
+  described: the Results dock's Fits tab printed Schmitt's n = 316 under CUSUM's table, beside a
+  merged table and under a re-run, while Export figure refused the same object as stale.
+  `fit_dwell` / `fit_depth` now record the `module_id` of the table they were handed in
+  `FitResult.meta['detection_module_id']` — an added key in a dict the project already writes
+  wholesale, so no version bump and an older build carries it through untouched — and
+  `modules.judge_stored_fit` is the ONE rule for "does this fit describe the table on screen": the
+  export's two guards (`stored_fit_problem`: calibration stamp, accepted count) plus that lineage.
+  A Fit press replaces the PAIR (a half that fails retires its predecessor from the store), and the
+  Fits tab is redrawn by one helper from every route that changes what it sits beside. **The
+  conservative rule for a fit that names no table** — anything a project saved before the stamp,
+  anything the Plots window files — is that it is *kept* (store, project, and the figure export,
+  exactly as before) but never *assumed* to match: the tab shows a sentence in place of its numbers
+  until Fit is pressed. The accepted COUNT is the export's proxy for "the same events", so a
+  curation that swaps one accepted event for another, or an event resized in place, leaves a fit
+  standing; a sample digest would close that and is a separate decision.
 - **What the analysis windows may plot** is `core/sources.discover_plot_sources` — a PURE (Qt-free,
   Session-free) rule that turns the open documents plus a result lookup into a list of `PlotSource`
   value objects: one per `(document, channel)` with a stored detection, segments included, plus the
@@ -222,7 +240,15 @@ times over in the three controllers:
    controller written later cannot fall outside the gate by omission); `blocking_job` decides, and
    `refusal_text` writes the sentence. A refused start emits `refused(str)`, returns `False`, and
    **stops nothing**. Two jobs of the same domain with the same owner are allowed — a controller's
-   own `start()` aborts its predecessor first, which drops its answer.
+   own `start()` aborts its predecessor first, which drops its answer. `abort()` emits no terminal
+   signal, so the controller says so itself: `AnalysisController.replaced(label)` goes out from the
+   one place a job is replaced, after the old job is gone and before the caller has recorded the new
+   one, and `AnalysisPanel` forgets what it recorded about the dropped job there. Left behind, a
+   Merge-all check-list or a re-measure target reads as "an operation is running" to
+   `study_event_bridge._assert_idle` for the rest of the session, and a probe button keeps
+   saying "Measuring…". The dropped worker is kept alive until the signals it had already queued
+   have been delivered: the sender guard compares objects, and a recycled address would let a
+   stale answer end the job that replaced it.
    Loads are a separate domain and are deliberately not exclusive with analyses.
 4. **Quitting never aborts the process.** `MainWindow._teardown` aborts every controller, syncs
    `QSettings`, and *uses* `drain_detached`'s return value; `gui/app.main` gives anything still

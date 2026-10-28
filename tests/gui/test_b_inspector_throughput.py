@@ -99,7 +99,8 @@ def test_advance_is_off_by_default_and_keys_do_not_navigate(insp):
     assert insp.advance_after_decision() is False
     assert not insp._advance_check.isChecked()
     assert insp._advance_check.objectName() == "advanceAfterDecision"
-    assert insp._advance_check.focusPolicy() == Qt.NoFocus
+    # Tab reaches it and Space ticks it (S8-KEYS2); a click still leaves the keyboard alone.
+    assert insp._advance_check.focusPolicy() == Qt.TabFocus
     ids = _ids(insp)
     insp.show_event(ids[2])
     assert _key(insp, Qt.Key_R, "r") is True

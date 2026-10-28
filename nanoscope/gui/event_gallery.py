@@ -86,6 +86,7 @@ from ..analysis.reconcile import clear_curation_conflicts
 from ..core.session import Session
 from ..plot.style import LEVEL_INK
 from .categorical import NOISE_HEX, category_colour
+from .curation_keys import CurationKeyGuard
 
 __all__ = ["TRACE_CALIBRATED", "TRACE_DETRENDED", "EventGalleryWindow"]
 
@@ -1656,6 +1657,10 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._install_project_save_controls()
         self._install_curation_status()
+        # The keys the window binds go to the control that USES them -- Space to a focused
+        # button, any bare key to an open dropdown or menu -- not to the tiles behind it
+        # (gui/curation_keys.py). Built last: it hooks every dropdown and menu made above.
+        self._key_guard = CurationKeyGuard(self)
         self._sync_controls()
 
     # -- construction ----------------------------------------------------------------------------
@@ -1952,7 +1957,10 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # Right-aligned, so a page count that changes width never slides it.
         self._advance_check = QtWidgets.QCheckBox("Advance after decision")
         self._advance_check.setObjectName("advanceAfterDecision")
-        self._advance_check.setFocusPolicy(Qt.NoFocus)
+        # Tab only. It was NoFocus so that Space could not hit it, which left it no keyboard
+        # route at all; Space now belongs to a focused button (gui/curation_keys.py), and a
+        # click still leaves the keyboard on the tiles.
+        self._advance_check.setFocusPolicy(Qt.TabFocus)
         self._advance_check.setChecked(_read_advance_setting())
         self._advance_check.setToolTip(
             "A keyboard decision on ONE selected tile — A, R, Space or a label key — moves "
@@ -2190,7 +2198,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
                    module_id: str | None = None,
                    provenance: dict[str, Any] | None = None,
                    refusals: "_RefusalLedger | None" = None,
-                   keep_place: bool = False) -> None:
+                   keep_place: bool = False, quiet: bool = False) -> None:
         """Install the CURRENT detection's shared frame (a reference, never a copy).
 
         ``keep_place`` is MainWindow saying this re-feed is an undo or redo. When the new
@@ -2198,6 +2206,12 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         selection and the cursor are put back -- quietly, emitting nothing -- instead of
         the cursor landing on tile 0, which announced a selection and moved the trace, the
         table and the inspector with it. Anything else gets today's reset.
+
+        ``quiet`` is MainWindow saying this re-feed is a VIEW switch (the Results dock's
+        Table selector put another stored table on screen): a different frame, so the
+        cursor still starts on tile 0, but nothing is announced -- the trace, the table and
+        the inspector stay where the curator left them, as they do for an edit the app made
+        itself (the same-lineage branch below).
 
         ``refusals`` is the refusal ledger to adopt WITH the frame — in the wired app,
         MainWindow's per-detection-lineage ledger, shared with the inspector and the
@@ -2269,12 +2283,12 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             # An edit the app made itself is not a gesture: announcing tile 0 would move the
             # trace, the table and the inspector off the place the curator left them.
             prev = self._updating
-            self._updating = prev or same_lineage
+            self._updating = prev or same_lineage or quiet
             try:
                 self.view.select_only(self._model.index(0, 0))
             finally:
                 self._updating = prev
-            if same_lineage:
+            if same_lineage or quiet:
                 self._sync_controls()
 
     def clear(self) -> None:

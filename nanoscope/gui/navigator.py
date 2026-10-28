@@ -112,6 +112,7 @@ class Navigator(pg.PlotWidget):
         session.viewModeChanged.connect(self._refresh)
         session.documentClosed.connect(lambda _doc_id: self._refresh())
         session.calibrationChanged.connect(lambda _d, _c: self._refresh())
+        session.sampleRateChanged.connect(self._on_sample_rate_changed)
         view.sigVisibleRangeChanged.connect(self._view_to_region)
         if hasattr(view, "sigMeasureChanged"):
             view.sigMeasureChanged.connect(lambda *_a: self._sync_measure_band())
@@ -184,6 +185,34 @@ class Navigator(pg.PlotWidget):
         item.setClipToView(True)
         item.setPen(pg.mkPen(color, width=1))
         return item
+
+    def _on_sample_rate_changed(self, doc_id: str) -> None:
+        """A document's time base was re-declared (``Session.set_sample_rate_declaration``).
+
+        The strip keeps a copy of the recording's x-axis that only :meth:`_refresh` re-reads: its
+        curve is plotted against the axis it was handed, and its region's bounds and its lens
+        are cut from the extent read off the same axis. The trace re-frames on this signal and
+        the scan bar, File Info and the status bar follow it; the strip stayed on the old clock,
+        so the view it mirrors and the strip it is mirrored on disagreed. Measured on a CSV
+        whose column is in milliseconds (read as 50 Hz, from t = 10,000 s) after declaring the
+        milliseconds: 'Local context · 9× view' over a 2 s recording, none of its 100,000
+        samples inside the strip's own x-range, and a drag of the shaded window to 13–15 s took
+        the trace there too — past the last sample, a blank pane. 'Use the file's own time
+        base', a rate-only declaration and an axis in samples declared in microseconds are the
+        same defect.
+
+        Re-fed from the Session, not from the trace view: the curve and the extent come off
+        ``Session.x_axis``, and the view's range reaches the strip through
+        ``sigVisibleRangeChanged``, so it does not matter whether this slot runs before the
+        trace view's own (which forgets the old-clock zoom and re-frames) or after it. Run
+        first, the region is seeded from a range that is about to be replaced and the re-frame
+        replaces it; run second, it reads the new one. A recording that is not drawn changes
+        nothing the strip shows (the trace view makes the same call), and with nothing open
+        there is nothing to re-feed.
+        """
+        if self._session is None or doc_id not in self._session.shown_doc_ids():
+            return
+        self._refresh()
 
     def _refresh(self) -> None:
         if self._curve is not None:

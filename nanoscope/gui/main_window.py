@@ -277,6 +277,15 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
                                        "separately to _push_stale_columns (S7-POP1), which "
                                        "pushes the table's badge tuple + the banner sentence "
                                        "onto the gallery and inspector; no frame moved",
+    "analysis_panel.resultSwitched": "the Table selector / detector combo put ANOTHER stored "
+                                     "table of the same recording on screen — nothing was "
+                                     "written. A navigation, wired as a recording switch is: "
+                                     "_on_result_switched re-feeds the inspector and the "
+                                     "gallery with the table now shown, then the "
+                                     "subpopulation colouring that rides on the gallery's "
+                                     "frame. Not through the refresher, which answers an "
+                                     "EDIT (it re-reads every window and reconciles the "
+                                     "level fit against the table on screen)",
     "analysis_panel.resultsRevealRequested": "asks MainWindow to show/raise the Results dock "
                                              "— layout only, no frame moved",
     "analysis_panel.staleLineShownChanged": "the amber stale line came or went; drives only "
@@ -307,6 +316,9 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     #    mirroring the table's own acceptanceRefused hop) — never to the full refresher.
     "event_inspector.acceptanceRefused": "no-write refusal — repaint-only hop for the "
                                          "three refusal notes; no frame changed",
+    "event_inspector.editRefused": "no-write refusal — a mask drag or Revert on a table that "
+                                   "is on another clock than its recording (S8-DATA1); wired "
+                                   "to the status bar, nothing was written, no frame changed",
     "event_gallery.acceptanceRefused": "no-write refusal — same repaint-only hop",
     # -- session signals about the VIEW, not the data ------------------------------------
     "session.cursorMoved": "the trace cursor",
@@ -2356,6 +2368,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # banner. Neither the knob path nor the calibration path reaches a surface refresh,
         # so this is the only door that catches them (see _push_stale_columns).
         self._analysis_panel.stalenessChanged.connect(self._push_stale_columns)
+        # The Table selector and the detector combo swap the table ON SCREEN without writing a
+        # result or moving the target: no ``resultsChanged``, no retarget. This is the door
+        # that tells the two curation surfaces (S8-XS1; see _on_result_switched).
+        self._analysis_panel.resultSwitched.connect(self._on_result_switched)
         # The Results dock: the panel asks, MainWindow (which owns the dock) shows it; and
         # while the user has it closed, a new table or a stale one is said on the status
         # bar instead of re-opening anything under the pointer.
@@ -6388,12 +6404,18 @@ class MainWindow(QtWidgets.QMainWindow):
             # curation windows have ONE way of saying "put the trace on this event", and
             # both get the child-lowering that makes it visible on macOS.
             insp.traceRequested.connect(self._goto_event_in_trace)
-            # Acceptance sync (both ways) on the SHARED events df.
-            insp.acceptanceChanged.connect(self._analysis_panel.set_event_accepted)
+            # Acceptance sync (both ways) on the SHARED events df -- outbound through
+            # _relay_acceptance, which checks the surface holds the table the dock shows.
+            insp.acceptanceChanged.connect(
+                lambda eid, acc, s=insp: self._relay_acceptance(s, "Event inspector", eid, acc))
             self._analysis_panel.eventAcceptanceChanged.connect(insp.reflect_acceptance)
             # Mask edits + batch curation write the shared df; the panel (owner of the table +
             # overlays) refreshes the affected row / whole table, the span overlays and the summary.
             insp.eventEdited.connect(self._analysis_panel.refresh_after_edit)
+            # ...and a mask edit the window would not make (a table on another clock than its
+            # recording, S8-DATA1) wrote nothing: its sentence goes to the status bar, in the
+            # voice of the panel's own refusals, and no data signal follows.
+            insp.editRefused.connect(lambda msg: self.statusBar().showMessage(msg, 12000))
             insp.curationBatchChanged.connect(self._analysis_panel.resync_curation)
             # Both of these write the SHARED frame in place, so neither reaches
             # ``add_result``: they are announced to the undo recorder here, and through
@@ -7328,7 +7350,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # select the event THROUGH the panel — the same relay a table-row click uses,
             # so the inspector, the table and the trace all land on it together.
             gal.inspectRequested.connect(self._open_inspector_at_event)
-            gal.acceptanceChanged.connect(self._analysis_panel.set_event_accepted)
+            gal.acceptanceChanged.connect(
+                lambda eid, acc, s=gal: self._relay_acceptance(s, "Event gallery", eid, acc))
             self._analysis_panel.eventAcceptanceChanged.connect(gal.reflect_acceptance)
             # Bulk curation writes the shared frame in place, so — as with the inspector's
             # Accept all — it reaches the table, the overlays, the summary, the surface
@@ -7442,6 +7465,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session.calibrationChanged.connect(
             lambda *_: self._push_conditioning_source()
             if _on_screen(self._signal_conditioning) else None)
+        self._session.sampleRateChanged.connect(self._follow_conditioning_time_base)
 
     def _ensure_signal_conditioning(self):
         """Build the window ONCE (it is never deleted; closing hides it)."""
@@ -7559,6 +7583,31 @@ class MainWindow(QtWidgets.QMainWindow):
             ws.clear_view_window()
         self._signal_conditioning_source = key
         self._push_conditioning_window(force=True)
+
+    def _follow_conditioning_time_base(self, doc_id: str) -> None:
+        """A recording's time base was declared, or handed back to the file's own
+        (``Session.sampleRateChanged``): an OPEN window reads its recording at the new rate.
+
+        The window holds the rate twice — in its source (the Time and Spectrum previews, the
+        x axis, the exactness verdict) and in its chain (the stage rows, the response views,
+        the notch markers) — and both come from the recording, so both are re-pushed together
+        through the door a recording switch and a calibration edit already use. Measured
+        before this was wired: after a millisecond column was declared (50 Hz → 50 kHz) the
+        window went on previewing at 50 Hz under "Exact for these stages · window 2000.00 s",
+        refused a 10 kHz low-pass the form had accepted as "above Nyquist (25 Hz)", and a
+        later detection pushed the new rate into a chain whose source was still at the old one.
+
+        Only the recording the window shows concerns it (a segment of the declared recording
+        announces its own change after its parent's), and only while it is on screen: a hidden
+        window computes nothing, and its opener pushes the source and the chain before it shows
+        it. The Detection form, which the chain is read from, took the new rate in
+        ``AnalysisPanel._on_sample_rate_changed`` — connected first, so already run.
+        """
+        if not _on_screen(self._signal_conditioning):
+            return
+        key = self._analysis_panel.conditioning_source_key()
+        if key is not None and key[0] == doc_id:
+            self._push_conditioning_source()
 
     def _drop_conditioning_document(self, doc_id: str) -> None:
         """A closed document leaves nothing behind in the window's preview memo."""
@@ -7694,7 +7743,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._event_gallery is not None:
             self._event_gallery.show_event(int(event_id))
 
-    def _refresh_event_gallery(self) -> None:
+    def _refresh_event_gallery(self, *, quiet: bool = False) -> None:
         """(Re-)feed the open EventGalleryWindow the current detection's shared df.
 
         RE-FEEDING THE SAME FRAME IS A RE-READ, NOT AN INSTALL. ``set_events`` rebuilds the
@@ -7708,6 +7757,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         This matters more now than it did: the refresher is reached from every signal in
         :data:`SURFACE_MUTATION_SIGNALS`, including the gallery's own ``labelsChanged``.
+
+        ``quiet`` is the Table selector's re-feed (:meth:`_on_result_switched`): a different
+        frame, installed without the gallery announcing its first tile to the trace.
         """
         if self._event_gallery is None:
             return
@@ -7743,7 +7795,7 @@ class MainWindow(QtWidgets.QMainWindow):
             res.doc_id, res.channel, res.payload.df, res.module_id,
             dict(res.payload.provenance or {}),
             refusals=self._refusal_ledger_for(res),
-            keep_place=self._keep_curation_place)
+            keep_place=self._keep_curation_place, quiet=quiet)
         self._event_gallery.set_levels(levels)
         # ...and the staleness badges, on EVERY branch: the table's judgement is about
         # the frame just fed, and a window fed a frame without its badges repeats a
@@ -7809,10 +7861,32 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         if fit.doc_id != res.doc_id or int(fit.channel) != int(res.channel):
             return None
+        # ...and on exactly that TABLE. One recording and channel can hold several detectors'
+        # tables side by side, and the Table selector now re-feeds the surfaces with whichever
+        # is on screen: the fit stays PARKED beside the table it was measured on (the same
+        # rule `_sync_export_action` keeps it alive by) and is not printed under another
+        # table's events, which it would be matched to by event id.
+        if self._level_fit_is_parked_beside_another_table(res):
+            return None
         payload = getattr(fit, "payload", None)
         if payload is None or getattr(payload, "empty", True):
             return None
         return payload
+
+    def _level_fit_is_parked_beside_another_table(self, res) -> bool:
+        """Was the standing level fit measured on a stored table OTHER than ``res``'s?
+
+        The fit's anchor is the frame it was fitted on (:attr:`_level_fit_frame`). It is
+        parked when that frame is still stored under another detector; a frame that is no
+        longer stored was REPLACED (a re-run, a merge, an undo's snapshot), which is the
+        other case -- the reconcile and the export gate decide that one, as they always did."""
+        anchor, fit = self._level_fit_frame, self._level_fit
+        if anchor is None or fit is None or anchor is res.payload.df:
+            return False
+        return any(
+            getattr(getattr(stored, "payload", None), "df", None) is anchor
+            for stored in self._session.results.for_doc(fit.doc_id)
+            if int(getattr(stored, "channel", -1)) == int(fit.channel))
 
     def _refresh_event_inspector(self) -> None:
         """(Re-)feed the open EventInspectorWindow the current detection's shared df, or clear it
@@ -7836,6 +7910,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self._event_inspector.set_levels(self._levels_for_detection(res))
         # ...and so are the staleness badges (S7-POP1; see _push_stale_columns).
         self._push_stale_columns()
+
+    def _on_result_switched(self) -> None:
+        """The Results dock now shows ANOTHER stored table of this recording and channel (the
+        Table selector or the detector combo moved; nothing was written): re-feed what holds
+        the frame.
+
+        *** A SURFACE ON THE TABLE THE DOCK HAS STOPPED SHOWING IS A SURFACE THAT STILL
+        WRITES IT. *** Measured on the -600 mV recording with Schmitt (317 rows) and CUSUM
+        (370) stored: the inspector on Schmitt event 159, the selector moved to CUSUM, the
+        inspector still printing "Reviewed 0 / 317". One R rejected Schmitt 159 in the
+        inspector's own frame AND -- through ``acceptanceChanged``, which names an event and
+        no table -- CUSUM 159 by id, a different event. Edit ▸ Undo took back the CUSUM one;
+        the Schmitt rejection, "reviewed" and all, stayed, and travelled into the saved
+        project and every export. A CUSUM row clicked afterwards showed Schmitt's event under
+        that id, and the gallery did the same to a tile. A switch is neither a mutation
+        (``resultsChanged`` never fires) nor a retarget (the recording did not change), so
+        nothing re-fed the surfaces; only a hidden one was ever right, because every opener
+        re-feeds it.
+
+        Re-fed the way a recording switch re-feeds them (the tail of :meth:`_on_selection`),
+        in its order: the inspector, then the gallery, then the subpopulation colouring that
+        rides the gallery's frame -- ``set_events`` drops the map, and
+        :meth:`_refresh_subpop_views` withdraws it while another table is on screen and hands
+        it back with its own. A surface that is not on screen is left alone: its opener (and
+        the dock's show filter) re-feeds it.
+
+        WHAT A SURFACE DOES WITH A FRAME IT WAS NOT HOLDING is its own rule for any different
+        detection (``set_events``): the inspector goes back to All and the first event, the
+        gallery to its first tile, and NEITHER announces it -- a view switch moves neither the
+        trace nor the Results selection, the rule the changelog already gives a hand-add or a
+        merge with the gallery open. Neither remembers a place per table.
+
+        Not wired through :data:`SURFACE_MUTATION_SIGNALS`: that refresher answers an edit and
+        reconciles the CUSUM level fit against the table on screen, which is not a question a
+        view switch should ask of a fit parked beside another table. (The Event-plots window
+        and the Populations window's current-source tick also read the table on screen, and no
+        switch has ever refreshed them; they follow the next edit or retarget, as before.)"""
+        if self.curation_surface_on_screen(_ROLE_INSPECTOR):
+            self._refresh_event_inspector()
+        if _on_screen(self._event_gallery):
+            self._refresh_event_gallery(quiet=True)
+        self._refresh_subpop_views()
 
     # -- the shared refusal ledger (one record per detection lineage) ---------------------------
     def _refusal_ledger_for(self, res) -> Any:
@@ -8056,6 +8172,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_panel._table._sync_refusal_note()
         self._refresh_event_gallery()
 
+    def _relay_acceptance(self, surface, name: str, event_id: int, accepted: bool) -> None:
+        """A curation surface has just written ``event_id`` on ITS frame: mirror the decision
+        onto the table the Results dock shows -- but only when that IS the frame it wrote.
+
+        ``acceptanceChanged(event_id, accepted)`` names an event and no table, and
+        :meth:`AnalysisPanel.set_event_accepted` writes whichever table the dock shows, by
+        that id. An id means nothing across tables, so a surface holding any frame but the
+        dock's made ONE keypress write TWO tables (S8-XS1; see :meth:`_on_result_switched`).
+        Re-feeding on every switch is what keeps that from being reachable; this is the
+        property that does not depend on every present and future door that swaps the table
+        remembering to. Frame identity is the one thing that does name a table, so when it
+        differs the mirror is REFUSED: the decision stays on the table the surface showed,
+        the surface is brought back in step with the dock, and the status bar says so -- a
+        decision landing on a table the user was not looking at is not left unsaid."""
+        panel = self._analysis_panel
+        held, shown = surface.frame(), panel.current_events_df()
+        if held is None or held is shown:
+            panel.set_event_accepted(event_id, accepted)
+            return
+        held_module = next((stored.module_id
+                            for doc in self._session.documents()
+                            for stored in self._session.results.for_doc(doc.doc_id)
+                            if getattr(getattr(stored, "payload", None), "df", None) is held),
+                           None)
+        on_dock = panel.current_detection()
+        was = (f"the {self._detector_display_name(held_module)} table" if held_module
+               else "a table that is no longer stored")
+        now = (f"the {self._detector_display_name(on_dock.module_id)} table" if on_dock
+               else "no table")
+        self._on_result_switched()
+        self.statusBar().showMessage(
+            f"The {name} was showing {was} while the Results dock shows {now}: your decision "
+            f"stayed on {was}, and the {name} now follows the Results dock.", 12000)
+
     # -- post-detection sub-event merge (MainWindow is the sole wirer) --------------------------
     def _on_merge_all_requested(self, window_s: float) -> None:
         """'Merge all' — collapse every run of fragments within the window across the whole active
@@ -8113,6 +8263,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "The Reconciled table is curation-only. Switch to a source detector "
                 "table, add or merge there, then reconcile again."
             )
+        elif report.status == "stale_rate":
+            # The panel composed it (it names the two rates) and refused before anything ran.
+            msg = report.refusal
         elif report.status == "no_selection":
             msg = ("Select a region on the trace first — turn on the Measure tool and drag, "
                    "then Merge events in selection.")
@@ -8181,6 +8334,51 @@ class MainWindow(QtWidgets.QMainWindow):
         # version of the sentence.
         self._analysis_panel.compare_baseline_estimators()
 
+    def _refuse_stale_export(self, res) -> bool:
+        """``True`` -- the refusal already said on the status bar -- when ``res``, the table an
+        export is about to write, was detected at a sample rate the recording no longer has.
+
+        *** A TABLE THE AMBER LINE CALLS STALE IS NOT WRITTEN BESIDE A CLOCK IT WAS NOT
+        MEASURED ON. *** After Inspector ▸ File Info ▸ Sample rate / time unit… the table on
+        screen keeps the rate it was detected at (``t_start_s`` and ``dwell_s`` are
+        ``start_idx / fs`` at that rate) and wears "Times stale — sample rate changed". The
+        scoring exports then built their sidecar from two places: ``fs`` from the table's own
+        provenance (the OLD rate) and ``t0_s`` plus the clock sentence from the LIVE recording
+        (``scoring.clock_stamp(meta=...)``, the declared one). That sentence says "add t₀ to a
+        number here to find it on the trace", which for old-rate seconds lands on another
+        sample (2599 samples off for 40 kHz declared over a 50 kHz detection), and a time-unit
+        declaration moved ``t0_s`` itself (10000.0 → 10.0) under an unchanged CSV. Neither
+        file said the table was stale, that a declaration existed, or what the live rate was.
+
+        The question is the amber line's own -- ``AnalysisPanel._sample_rate_staleness``, the
+        ``fs`` the detector stamped in the table's provenance against the recording's live rate
+        -- so a door and the screen cannot disagree; a table with no stamp has nothing to be
+        judged against and is exported as it always was. Only the RATE is refused here: a
+        calibration or estimator change leaves ``fs`` and the clock block on one time base (and
+        the sidecar already names the open-pore estimator the depths were measured against).
+        And only while the recording still HAS a rate: one handed back to a file that declares
+        none has no clock to splice -- the sidecar says its origin is unknown
+        (``t0_s_known: false``) rather than stamping another -- and "re-run under the declared
+        rate" would send the user to a rate that no longer exists.
+
+        Asked at the TOP of each door, before its file dialog or selection box (the answer does
+        not depend on a path, and a refusal after three questions is the worst place to learn
+        it), and said on the status bar rather than in a modal: a scripted or batch export has
+        no one to press the button. Nothing is repaired or re-scaled -- the one true repair is a
+        re-run, which is one click on the banner.
+        """
+        live = self._session.document(res.doc_id).meta.sample_rate_hz
+        if live is None or self._analysis_panel._sample_rate_staleness(res) is None:
+            return False
+        stamped = float(res.payload.provenance["fs"])
+        # The way forward FIRST: the status bar clips a long line at its right edge, and the
+        # rates are also on the amber line, which keeps the whole story.
+        self.statusBar().showMessage(
+            f"Nothing was exported — re-run detection under the declared rate first. This "
+            f"table was detected at {stamped:,.6g} Hz and the recording now reads "
+            f"{live:,.6g} Hz, so its times are on a clock the trace no longer has.", 12000)
+        return True
+
     def _export_source(self, doc_id: str) -> "tuple[str, object | None]":
         """``(the FILE these rows came from, that document's meta)`` for an export.
 
@@ -8220,6 +8418,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, "Export events",
                 "Run detection on a current channel first — there are no events to export.")
+            return
+        if self._refuse_stale_export(res):
             return
         events = res.payload
 
@@ -9426,6 +9626,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Run Analysis ▸ Fit sub-state levels (CUSUM)… first — there are no "
                 "fitted levels to export.")
             return
+        # The sidecar's ``fs`` is the detection on screen's, its origin the recording's.
+        shown = self._analysis_panel.current_detection()
+        if shown is not None and self._refuse_stale_export(shown):
+            return
 
         path = ask_export_path(
             self, title="Export sub-state levels", suggestion="levels.csv",
@@ -9684,6 +9888,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, "Export events for training",
                 "Run detection on a current channel first — there are no events to export.")
+            return
+        if self._refuse_stale_export(res):
             return
 
         df = res.payload.df
@@ -10163,19 +10369,22 @@ class MainWindow(QtWidgets.QMainWindow):
         * sample size — re-running detection (or curating events) leaves the old
           fit in the store, and stamping a fit of yesterday's events onto today's
           histogram is worse than a documented refit.
+
+        The two guards live in ``modules.stored_fit_problem`` so the Results dock's Fits
+        tab applies the very same rule (``modules.judge_stored_fit`` adds the table a fit
+        records to them); what this method returns, and says, is what it always did.
         """
+        from ..analysis.modules import stored_fit_problem
+
         try:
             stored = self._session.results.get(res.doc_id, res.channel, module_id)
         except Exception:
             return None, "no saved fit"
         if stored is None or not hasattr(stored.payload, "predict"):
             return None, "no saved fit"
-        if tuple(stored.calibration_fingerprint) != tuple(res.calibration_fingerprint):
-            return None, "saved fit predates a calibration change"
-        n_now = int(res.payload.df["accepted"].to_numpy(dtype=bool).sum())
-        n_fit = stored.payload.meta.get("n_input_events")
-        if n_fit is not None and int(n_fit) != n_now:
-            return None, "saved fit is stale (the accepted events changed since it ran)"
+        problem = stored_fit_problem(stored, res)
+        if problem:
+            return None, problem
         return stored.payload, ""
 
     @staticmethod

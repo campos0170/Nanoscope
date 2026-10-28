@@ -97,9 +97,20 @@ class ConditioningSource:
 
     @property
     def key(self) -> tuple:
-        """What identifies these samples: document, channel, calibration, length."""
+        """What identifies these samples: document, channel, calibration, length — and the
+        rate they are read at.
+
+        THE RATE IS PART OF THE IDENTITY, though no sample of the array depends on it. A
+        time-base declaration (``Session.set_sample_rate_declaration``) re-reads the SAME
+        samples on another clock, and everything the window makes of them does depend on
+        it: the seconds on the x axis, the Welch grid and the Nyquist a refusal quotes, the
+        settling pad that decides "exact", and the whole-recording pass. Left out, a source
+        pushed after a declaration compared equal to the one the window held, so the window
+        neither rescheduled nor discarded an answer still on its way back from the worker at
+        the old rate, and the exact-pass memo (keyed ``(*key, chain signature)``) served a
+        pass computed at one rate as the exact trace of another."""
         return (self.doc_id, int(self.channel), float(self.cal_gain), float(self.cal_offset),
-                self.n)
+                self.n, float(self.fs) if self.fs else None)
 
 
 def _f(p: Mapping[str, Any], key: str, default: float) -> float:
@@ -624,8 +635,21 @@ def compute_preview(req: PreviewRequest) -> PreviewResult:
 # the memo of exact passes
 # ---------------------------------------------------------------------------
 def memo_key(source_key: tuple, params: Mapping[str, Any], fs: float | None) -> tuple:
-    """``source_key`` (doc, channel, calibration, length) plus the chain's signature."""
-    return (*tuple(source_key), chain_signature(conditioning_params(params), fs))
+    """``source_key`` (doc, channel, calibration, length, rate), the rate the pass is run at,
+    and the chain's signature.
+
+    THE RATE IS NAMED HERE AS WELL, though ``ConditioningSource.key`` already ends with it. A
+    pass is the chain run through the whole recording AT a rate, and the signature cannot say
+    which: it is the chain's values in Hz and seconds, and ``fs`` only prunes a notch's lines at
+    Nyquist (``effective_chain``), so a baseline drift, a median or a low-pass is "the same
+    chain" at 50 kHz and at 25 kHz while the array it makes is not (S8-NUM1: 26 pA apart on a
+    4.5 pA noise sigma, the 50 kHz pass shown as "Whole recording (exact)" after the recording
+    was declared at 25 kHz). ``fs`` used to be accepted here and spent on that pruning alone, which
+    left the key exactly as good as the source key its caller handed in; the rate is now part of
+    it by construction. It follows the source key so that ``ConditionedTraceMemo.drop_doc``
+    still finds a document's passes by the first element."""
+    rate = float(fs) if fs else None
+    return (*tuple(source_key), rate, chain_signature(conditioning_params(params), fs))
 
 
 class ConditionedTraceMemo:

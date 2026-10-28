@@ -163,6 +163,145 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- Event inspector and Event gallery: A, R and Space no longer take the key from the control that
+  has the keyboard. Space on a Tab-focused button (Show in trace, Gallery…, Accept all / Reject
+  all, Accept selected / Reject selected, Apply…) or check box presses it instead of toggling
+  the event on screen or flipping every selected tile. The letters, Space and page keys typed
+  into an open Filter, Show or other dropdown, or the gallery's Select menu, go to the list
+  instead of accepting, rejecting or paging (typing "r" in the open Show list rejected the
+  selected tiles, and PgDn turned the page and dropped the selection). Advance after decision
+  (both windows), Dock beside trace, the Label combo with Apply and Clear, and Details had been
+  taken out of the Tab chain so Space could not hit them; Tab reaches them again and Space
+  presses them, while a mouse click on them still leaves the keyboard on the waveform or tiles.
+  A, R and Space still curate from the waveform, the tile view and the window background.
+- Pressing **Detect** (or any other analysis) while a **Merge all**, **Re-measure** or **Compare
+  baseline estimators** was running replaced that job, and from then on the Manual study's and
+  the Acid study's "prepare review" actions and the study import refused with "Wait for
+  main-workspace analysis and editing operations to finish first." although nothing was running;
+  selecting another recording, a second Detect or closing every recording did not clear it. The
+  job it had replaced left its bookkeeping behind, and the same left "Measure this recording"
+  reading "Measuring…" (and refusing a second click) and the Baseline-correction workspace's
+  Refresh reading "Refreshing comparison…" until the recording changed. The analysis controller
+  now announces a replaced job and the panel forgets everything it recorded about it, releasing
+  the busy button that job owned (a job that needs the same button, such as an export replacing
+  a comparison, keeps it); a comparison that was replaced says so in its status line instead of
+  "Calculating…". The study guard still refuses while a job really runs. Also fixed: the answer
+  or failure of a job that ended just as another replaced it could be taken for the NEW job's,
+  ending it and losing its result (about a third of replacements in a tight loop); a replaced
+  job's worker is now kept until its queued signals have been delivered and dropped.
+- After **Inspector ▸ File Info ▸ Sample rate / time unit…**, a hand-added event (Ctrl+Shift+M
+  or the Measure tab's button), a span edge dragged or Reverted in the Event inspector, and the
+  three merges (Merge all, Merge events in selection, the inspector's Merge with next) wrote
+  rows on the NEW clock into the detection table the amber line had just called entirely the old
+  one: on a 2 s, 50 kHz slice declared to be 40 kHz a 300-sample event got a dwell of 7.5 ms
+  beside nine neighbours measured at 50 kHz, and Merge all left four old-clock and four
+  new-clock rows under a line that still said every time in the table was computed at the old
+  rate. Stored detections keep the rate they were measured at (never silently re-scaled), so
+  these doors now refuse such a table before reading or writing anything, so no row, no stamp
+  and no Undo step moves. The status bar says what did not happen (*Nothing was added.* /
+  *Nothing was merged.* / *The event's bounds were not changed.*) followed by the amber line's
+  own sentence, whose Re-run is the way forward; Analysis ▸ Compare baseline estimators and
+  Re-measure depths say it the same way (*Nothing was re-measured.*) instead of opening a
+  `ValueError` box. A table that is not stale (no declaration, the declaration taken back, a
+  fresh run under the declared rate, or a table with no rate stamp) is edited exactly as before.
+  One rule, `analysis.events.stale_rate_hz`, now decides this for the amber line, the editing
+  doors and the re-measure kernel's own guard.
+- **Analysis ▸ Export events…**, **Export events for training…** and **Export sub-state
+  levels…** no longer write a table the amber line has marked stale. After a sample rate or time
+  unit was declared, the table kept the rate it was detected at, yet the export went ahead: the
+  CSV's times stayed on the old clock while the `.meta.json` took `fs` from the table (the old
+  rate) and `t0_s` with its "add t₀ to find it on the trace" sentence from the new one. For 40
+  kHz declared over a 50 kHz detection that sentence put the first event 2599 samples off, and a
+  time-unit declaration moved `t0_s` (10000.0 → 10.0) under an unchanged CSV, with nothing in
+  either file saying a declaration existed. The three exports now refuse such a table before
+  asking for a file, write nothing, and say on the status bar to re-run detection under the
+  declared rate, naming the rate the table was detected at and the one the recording reads now;
+  after the re-run the export goes through and its `t0_s + t_start_s` lands on the trace sample.
+  A table that is current, one with no rate stamp, and one whose recording has no rate any more
+  export exactly as before.
+- A pass made by Signal Conditioning ▸ **Compute exact** at one sample rate is no longer shown
+  as the exact trace of another. After a rate was declared (Inspector ▸ File Info ▸ Sample rate
+  / time unit…) and Signal Conditioning opened again, the cache of whole-recording passes found
+  the pass made at the file's 50,000 Hz under the key of the chain at the declared 25,000 Hz and
+  drew it under *Whole recording (exact)* with the button reading *Done: the preview shows this
+  chain's whole-recording (exact) samples* — 26 pA from what the chain makes of the same samples
+  at the declared rate, on a recording whose noise is 4.5 pA. The cache key now names the rate
+  the pass was run at (the chain's signature never did: it uses the rate only to drop notch
+  lines above Nyquist), so a pass belongs to one rate: after a declaration, or after taking it
+  away, the window says *Window estimate … · press Compute exact for the true trace* with the
+  button enabled until the pass has been made at the rate in force, and a pass made earlier at
+  the other rate is found again when the declaration is taken away. Calibration edits still drop
+  the pass, and the cache still holds the two most recent.
+- In the Results table, ⌘A, ⌘R, ⌘F and every Ctrl / Option / Shift chord on a, r, f, j or k were
+  read as the bare curation key: ⌘A accepted the selected row instead of selecting all of them,
+  ⌘R rejected it and ⌘F flagged it (Edit ▸ Undo then read "Undo Curate event", the status bar
+  said nothing), and Select All never selected anything. The same happened to a chord pressed on
+  a control inside the table's panel, such as ⌘R on the focused Columns… button. Only an
+  unmodified a / r / f / j / k curates now: ⌘A selects every row (the caption reads "N of N rows
+  selected · A accepts / R rejects all N"), the other chords do nothing in the table, and ⇧⌘F
+  and ⇧⌘R still reach their menu items.
+- A sample rate or time unit declared under **Inspector ▸ File Info ▸ Sample rate / time
+  unit…**, or taken away again with *Use the file's own time base*, now reaches an open **Signal
+  Conditioning** window. It used to go on previewing at the old rate: after a CSV whose time
+  column is in milliseconds was declared (50 Hz → 50 kHz) its Time tab spanned 0–2000 s against
+  the trace's 0–2 s under "Exact for these stages · window 2000.00 s", its Spectrum tab stopped
+  at the old Nyquist, a 10 kHz low-pass the form had accepted was refused as "at or above
+  Nyquist (25 Hz) for fs=50 Hz", and a detection run afterwards left the window holding two
+  rates at once (source 50,000 Hz, chain 25,000 Hz on a recording declared at 25 kHz). Only
+  closing and reopening the window or re-selecting the channel healed it, and nothing said it
+  was stale. The window now re-reads its source and its chain together whenever the recording it
+  shows is re-declared (a segment follows its parent's declaration), drops a preview that was
+  still coming back at the old rate, cancels a running *Compute exact*, and re-frames a Time
+  plot you had panned; a stage that no longer fits (a notch list above the new Nyquist, a
+  baseline-drift window longer than the declared recording) is refused in the new rate's words.
+  The source's identity now includes its sample rate, so a *Compute exact* pass computed at the
+  old rate is no longer served as the exact trace of the new one when the window is reopened (26
+  pA off a 4.5 pA noise sigma, labelled "Whole recording (exact)").
+- The **Navigator strip** stayed on the old clock after **Inspector ▸ File Info ▸ Sample rate /
+  time unit…** declared a recording's time base (or *Use the file's own time base* took the
+  declaration away): the trace re-framed, the strip kept its curve, extent and shaded-window
+  bounds. Declaring a CSV's millisecond column left it reading **Local context · 9× view** over
+  a 2 s recording, drawing none of its 100,000 samples, and letting a drag of the shaded window
+  to 13–15 s take the trace there too, past the last sample, so the pane went blank; a
+  sample-rate-only declaration left the curve filling half the strip, or the window unable to
+  reach the end of a recording it had made longer; a refused column declared in microseconds
+  kept the strip in samples; Zoom-to-full repaired none of it, only re-selecting the recording.
+  The strip now re-reads the recording whenever a drawn recording's time base is declared or
+  removed — curve, extent, window bounds, the nine-view lens, its label and the Measure band —
+  whichever of it and the trace hears the change first; a declaration on a recording that is not
+  drawn leaves it alone.
+- The Results dock's **Fits** tab now shows a fit only beside the table it was made on. The
+  result store keeps one dwell fit and one depth fit per recording and channel, so a recording's
+  Schmitt, CUSUM and Reconciled tables shared one slot and the tab printed whatever it held:
+  Schmitt's `n = 316` under CUSUM's 370 candidates, the same fit beside a merged table (246
+  accepted), a re-run (44 events), a table with one event rejected and the table an Undo
+  restored — while Export figure refused that very fit as "saved fit is stale" — and a Fit whose
+  dwell half failed left one table's dwell fit beside another's depth fit. Each fit now records
+  the table it was made on (`detection_module_id`, a new key in the fit's saved metadata; no
+  project format change, and older builds read the project as before). The tab prints a fit only
+  when that table is the one on screen, with the calibration and accepted events it was fitted
+  to (the figure export's two checks plus the table). Otherwise it says which table the fit
+  belongs to, or that the table has changed since (curated, merged, re-run or undone), or that
+  the calibration differs, and to press **Fit**. A Fit press replaces the pair: a half that
+  fails drops its predecessor. A fit that records no table — saved by an earlier build, or filed
+  by the Plots window — stays in the project and is still used by Export figure exactly as
+  before, but is not printed beside any table until you press **Fit**. The accepted count still
+  stands in for "the same events" (as it does for the export), so swapping one accepted event
+  for another leaves a fit standing.
+- Switching the Results dock's **Table** selector (or the Detection tab's detector) now takes
+  the open **Event inspector**, docked or in its own window, and the **Event gallery** with it.
+  They used to keep the table the dock had just stopped showing, so one R rejected the event in
+  that table **and**, by event number, a different event of the table on screen: two tables
+  written, one Edit ▸ Undo step that took back only the second (the first kept a "reviewed"
+  rejection that travelled into the saved project and every export, and the menu read "Undo —
+  nothing on this table; the threshold detector (1 step) on this channel"), and a click on a
+  Results row showed the other table's event under the same number. Each surface now shows the
+  table on screen from its first event (the inspector back to All, the gallery on its first
+  tile, the trace and the Results selection left where they were), one keypress writes one table
+  as one undo step, and a surface that is ever out of step with the dock keeps its decision on
+  its own table, says so in the status bar and re-syncs instead of mirroring it onto the dock's
+  table by event number. A CUSUM sub-state fit stays with the table it was measured on rather
+  than being drawn under another table's events.
 - A CSV time column in **milliseconds** loaded silently at a rate 1,000× too low: 10 µs steps
   written as `0.01` per row read as 100 Hz, `Provenance.MEASURED`, duration 552 s for 0.5 s of
   samples, with an empty Issues box — the only guard was the 1 Hz floor that catches microsecond

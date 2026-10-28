@@ -3,7 +3,9 @@
 Docked, the inspector is inside the main window, so its Ctrl+S and the main window's
 Ctrl+S would both match and Qt would fire NEITHER (an ambiguous pair). Docked, it gives
 those keys (Save, Save As, Undo, Redo) to the main window's own actions; every curation
-key stays its own, in both hosts, with any of its own widgets focused. A click in the
+key stays its own, in both hosts, with any of its own widgets focused -- except the one key
+a focused button uses itself: Space presses it (S8-KEYS2; see
+test_s8_keys2_curation_keys_yield_to_the_focused_control). A click in the
 docked inspector takes the keyboard, a click elsewhere never sends keys to it.
 """
 
@@ -82,7 +84,12 @@ def test_every_curation_key_reaches_the_inspector_whatever_of_its_own_has_focus(
         _press(insp, target, Qt.Key_A)
         assert accepted(window, ids[2]), name
         _press(insp, target, Qt.Key_Space)
-        assert not accepted(window, ids[2]), name
+        if isinstance(target, QtWidgets.QAbstractButton):
+            # A focused button is pressed by Space: "next" moves on and the decision stays.
+            assert accepted(window, ids[2]) and insp.current_event_id() == ids[3], name
+            insp.show_event(ids[2])
+        else:
+            assert not accepted(window, ids[2]), name
         _press(insp, target, Qt.Key_1)
         assert "type=translocation" in _flag(window, ids[2]), name
         _press(insp, target, Qt.Key_T)

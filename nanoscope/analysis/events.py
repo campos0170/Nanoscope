@@ -502,6 +502,67 @@ def analysed_span(provenance: Any, n_fallback: int) -> tuple[int, int]:
     return 0, n_fallback
 
 
+#: How far (relative) the rate a table was detected at may sit from its recording's rate NOW
+#: before the table counts as measured on another clock. Not instrument accuracy: both numbers
+#: are read off the same header or time column, so a gap wider than rounding means the time
+#: base was declared (or taken back) after the detection ran.
+RATE_STAMP_RTOL = 1e-9
+
+
+def _usable_rate(value: Any) -> float | None:
+    """``value`` as a finite positive rate in Hz, else ``None``."""
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return None
+    return rate if np.isfinite(rate) and rate > 0 else None
+
+
+def stale_rate_hz(provenance: Any, live_fs: float | None) -> float | None:
+    """The rate (Hz) a table was DETECTED at when that is not its recording's rate now, else
+    ``None``. THE ONE RULE for "is this table on another clock?" (S8-DATA1).
+
+    ``t_start_s`` and ``dwell_s`` are ``start_idx / fs`` and ``(end - start) / fs``, so a table
+    whose ``provenance['fs']`` is not the live rate lies entirely on another clock, and the app's
+    contract is that it stays there -- stored detections "keep the rate they were measured at
+    ... never silently re-scaled". Every door that would write a number measured at the LIVE rate
+    into such a table asks here first: a hand-added event, an Event-inspector edge drag, a merge,
+    a re-measure; so does the amber line that says the table is stale. It is one function because
+    it used to be three copies of one tolerance, and that is how a door comes to edit where the
+    banner is up (two clocks in one table) or to refuse where the banner offers no Re-run.
+
+    ``None`` is also the answer for a table with no usable stamp (an older table, a payload that is
+    not an EventSet, a stamp that is not a finite positive rate): there is nothing to compare, so
+    nothing is said and nothing is refused. A recording that has lost its rate (``live_fs`` of
+    ``None``) is not the rate a table was stamped with.
+    """
+    stamped = _usable_rate(provenance.get("fs")) if isinstance(provenance, Mapping) else None
+    if stamped is None:
+        return None
+    live = _usable_rate(live_fs)
+    if live is not None and abs(live - stamped) <= RATE_STAMP_RTOL * max(live, stamped):
+        return None
+    return stamped
+
+
+def stale_rate_reason(provenance: Any, live_fs: float | None) -> str | None:
+    """Why a table is on another clock than its recording -- the amber line's own sentence -- or
+    ``None`` when it is not (see :func:`stale_rate_hz`, the rule this words).
+
+    The editing doors that refuse repeat THIS sentence after their own outcome ("Nothing was
+    added."), so the line that explains the staleness and the refusal that cites it cannot be two
+    stories, and both end on the way forward: Re-run."""
+    stamped = stale_rate_hz(provenance, live_fs)
+    if stamped is None:
+        return None
+    live = _usable_rate(live_fs)
+    now = "unknown" if live is None else f"{live:,.6g} Hz"
+    return (f"The sample rate changed since this detection ran ({stamped:,.6g} Hz → "
+            f"{now}): every start time, dwell, rise/fall time and ECD in this table was "
+            f"computed at the old rate, and the filters and dwell limits ran at it too. "
+            f"Re-run detection under the declared rate.")
+
+
 #: Provenance key holding how many rows are boundary-clipped. Spelled once so the
 #: producers and :class:`EventSet`'s reconciliation cannot drift apart.
 CLIPPED_COUNT_KEY = "n_clipped_boundary"

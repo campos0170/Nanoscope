@@ -402,12 +402,20 @@ def test_j_does_not_extend_the_selection_when_a_modifier_is_latched(qapp, qtbot)
     which consults the LIVE keyboard modifiers, so under ExtendedSelection a Ctrl still
     held turns a j into an extend. ``measure_panel`` measured exactly this and it is
     reproducible in a suite, where a synthetic modified key leaves
-    ``keyboardModifiers()`` latched for the whole process."""
+    ``keyboardModifiers()`` latched for the whole process.
+
+    The latch used to be made with ``Ctrl+J`` itself, because a chord on a curation letter
+    was read as the bare letter. Only an UNMODIFIED key curates now (S8-KEYS1), so Ctrl is
+    latched by a chord the table does not read, and the j is the handler's own — delivered
+    without a key event, which would reset the latched state before the handler ran."""
     t = _table(qtbot)
     QTest.mouseClick(t.view.viewport(), Qt.LeftButton, Qt.NoModifier, _row_center(t, 0))
     t.view.setFocus()
-    QTest.keyClick(t.view, Qt.Key_J, Qt.ControlModifier)
-    QTest.keyClick(t.view, Qt.Key_J, Qt.ControlModifier)
+    QTest.keyClick(t.view, Qt.Key_X, Qt.ControlModifier)
+    assert QtWidgets.QApplication.keyboardModifiers() & Qt.ControlModifier, \
+        "the trap is not armed: Ctrl is not latched"
+    t._handle_curation_key(Qt.Key_J)
+    t._handle_curation_key(Qt.Key_J)
     assert _selected_view_rows(t) == [2], "j extended the selection instead of moving it"
 
 

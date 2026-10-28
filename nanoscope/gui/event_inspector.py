@@ -83,11 +83,13 @@ from ..analysis.events import (
     mark_reviewed,
     original_bounds,
     reviewed_mask,
+    stale_rate_reason,
 )
 from ..analysis.modules import detection_signal, detection_signal_key
 from ..analysis.labels import LabelVocabulary, format_labels
 from ..analysis.reconcile import CONSENSUS_MODULE_ID, clear_curation_conflicts
 from ..core.session import Session
+from .curation_keys import CurationKeyGuard
 from .overlays import STEP_LEVEL_HEX
 from .trace_view import ChannelPane
 from .event_amplitude_controls import EventAmplitudeControls
@@ -1147,6 +1149,10 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
     traceRequested = Signal(int)             # show this event in the main trace (event_id)
     acceptanceChanged = Signal(int, bool)    # the user curated an event (id, accepted)
     eventEdited = Signal(int)                # the user resized an event's mask (event_id)
+    # A mask drag or a Revert the window would not make, with the sentence that says why (the
+    # table is on another clock than its recording: S8-DATA1). NOTHING was written, so it is
+    # the status bar's to show and no data signal follows.
+    editRefused = Signal(str)
     amplitudeEdited = Signal(int)            # optional amplitude only; -1 means batch; NEVER refit
     curationBatchChanged = Signal()          # Accept all / Reject all rewrote 'accepted'
     mergeWithNextRequested = Signal(int)     # stitch this event to the following one(s) (event_id)
@@ -1268,6 +1274,9 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._install_project_save_controls()
         self._install_curation_status()
         self._install_shortcuts()
+        # The keys above go to the control that USES them (Space to a focused button, any
+        # bare key to an open dropdown or menu); see gui/curation_keys.py.
+        self._key_guard = CurationKeyGuard(self)
         self._show_empty(_NO_DETECTION_MSG)
         self._apply_details()
 
@@ -1288,7 +1297,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # and the strip scrolls sideways rather than flooring a narrower one.
         def _tool(text: str, tip: str, name: str = "") -> QtWidgets.QToolButton:
             # A QToolButton is 30-70 px where a QPushButton is at least 80; StrongFocus so a
-            # click takes the keyboard into this window in either host.
+            # click takes the keyboard into this window in either host. (Like any button, a
+            # focused one is pressed by Space: gui/curation_keys.py.)
             btn = QtWidgets.QToolButton()
             btn.setText(text)
             btn.setToolTip(tip)
@@ -1328,7 +1338,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # unless the user opts in. Buttons never move on, whatever this says.
         self._advance_check = QtWidgets.QCheckBox("Advance after decision")
         self._advance_check.setObjectName("advanceAfterDecision")
-        self._advance_check.setFocusPolicy(Qt.NoFocus)
+        self._advance_check.setFocusPolicy(Qt.TabFocus)      # Tab only: _click_without_focus
         self._advance_check.setChecked(_read_advance_setting())
         self._advance_check.setToolTip(
             "Keyboard decisions — A, R, Space and the label keys — move to the next event "
@@ -1452,7 +1462,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # window has nobody to move it.
         self._host_btn = _tool("Dock beside trace", "", "Event inspector host")
         self._host_btn.setObjectName("inspectorHostToggle")
-        self._host_btn.setFocusPolicy(Qt.NoFocus)
+        self._host_btn.setFocusPolicy(Qt.TabFocus)           # Tab only: _click_without_focus
         self._host_btn.setMinimumWidth(max(
             self._host_btn.fontMetrics().horizontalAdvance(t)
             for t in ("Dock beside trace", "Own window")) + 18)
@@ -1528,7 +1538,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._label_combo.setSizeAdjustPolicy(
             QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._label_combo.setMinimumContentsLength(9)
-        self._label_combo.setFocusPolicy(Qt.NoFocus)
+        self._label_combo.setFocusPolicy(Qt.TabFocus)        # Tab only: _click_without_focus
         self._label_combo.setToolTip(
             "The label Apply writes onto the event on screen, and whose KEY Clear removes "
             "from it. 1–9 (and any custom label keys) do the same from the keyboard. The "
@@ -1538,14 +1548,14 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             "Apply",
             "Write the chosen label onto THIS event and record that a person reviewed it. "
             "Never moves on. Reversed by ⌘Z in this window or Edit ▸ Undo.")
-        self._label_apply_btn.setFocusPolicy(Qt.NoFocus)
+        self._label_apply_btn.setFocusPolicy(Qt.TabFocus)    # Tab only: _click_without_focus
         self._label_apply_btn.clicked.connect(self.apply_chosen_label)
         label_bar.addWidget(self._label_apply_btn)
         self._label_clear_btn = _tool(
             "Clear",
             "Remove the chosen label's KEY from THIS event — its other labels and every "
             "flag stay. Never moves on.")
-        self._label_clear_btn.setFocusPolicy(Qt.NoFocus)
+        self._label_clear_btn.setFocusPolicy(Qt.TabFocus)    # Tab only: _click_without_focus
         self._label_clear_btn.clicked.connect(self.clear_chosen_label)
         label_bar.addWidget(self._label_clear_btn)
         _policy = self._label_row.sizePolicy()
@@ -1686,7 +1696,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._details_btn.setObjectName("eventInspectorDetails")
         self._details_btn.setCheckable(True)
         self._details_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        self._details_btn.setFocusPolicy(Qt.NoFocus)
+        self._details_btn.setFocusPolicy(Qt.TabFocus)        # Tab only: _click_without_focus
         self._details_btn.setAccessibleName("Details")
         self._details_btn.setMinimumWidth(max(
             self._details_btn.fontMetrics().horizontalAdvance(t)
@@ -2166,6 +2176,12 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         widget at all, and a key delivered by ``QApplication.sendEvent`` rather than by the
         platform never reaches the shortcut map. The fallback restores exactly the reach the
         window-context shortcut had, without taking the events table's keys.
+
+        THE SAME REACH HAS TO GIVE WAY to the control that holds the keyboard: a shortcut that
+        fires anywhere inside the window also fired from a focused button (Space toggled the
+        event instead of pressing the button) and from an open dropdown (typing "r" in the
+        Filter list rejected the event). ``CurationKeyGuard``, built in ``__init__``, accepts
+        the ShortcutOverride for exactly those keys; see ``gui/curation_keys.py``.
         """
         self._shortcuts: list[QtGui.QShortcut] = []
 
@@ -2620,6 +2636,14 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
     def current_event_id(self) -> int | None:
         return self._current_id
 
+    def frame(self) -> pd.DataFrame | None:
+        """The events frame this window holds (a reference, never a copy), or ``None``.
+
+        The gallery's accessor of the same name: ``acceptanceChanged`` names an EVENT and no
+        table, so the owner compares this against the table the Results dock shows before it
+        lets a decision be mirrored there by event id."""
+        return self._df
+
     def show_event_quietly(self, event_id: int) -> None:
         """Display ``event_id`` WITHOUT emitting ``eventSelected``.
 
@@ -2774,6 +2798,15 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._stale_label.setVisible(self._host != _HOST_DOCK or bool(self._stale_columns))
 
     def _click_without_focus(self) -> tuple[QtWidgets.QWidget, ...]:
+        """The controls that take a press without taking the keyboard: a click on one leaves
+        the keyboard where it was (docked, outside this window, it comes to the waveform).
+
+        Most of them are ``TabFocus``, not ``NoFocus``. ``NoFocus`` kept Space from landing on
+        them -- the window's Space is "toggle" -- and left Advance after decision, Dock beside
+        trace, the Label combo with Apply and Clear, and Details with no keyboard route at
+        all. Space now goes to the control that holds the keyboard (``curation_keys``), so Tab
+        reaches them and Space presses them while a CLICK still takes no focus. First
+        unreviewed stays out of the chain; it has Ctrl+U."""
         return (self._advance_check, self._label_combo, self._label_apply_btn,
                 self._label_clear_btn, self._details_btn, self._host_btn,
                 self._first_unreviewed_btn, self._project_save_button)
@@ -3347,7 +3380,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         The mask drag (:meth:`_on_region_edited`, which contributes the x-to-sample mapping)
         and Revert (:meth:`_revert_current`, which contributes the detector's own bounds).
         Everything after "which two samples" is identical for both and is here: the neighbour
-        clamp, the degenerate-drag refusal, the re-characterisation through
+        clamp, the degenerate-drag refusal, the refusal of a table that is on another clock
+        than its recording (``editRefused``, S8-DATA1), the re-characterisation through
         :meth:`_recharacterize_row`, the redraw and the ``eventEdited`` emission.
 
         It is factored rather than duplicated because a SECOND writer is precisely how the
@@ -3388,6 +3422,16 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             return
         if new_start == cur_start and new_end == cur_end:
             return                          # rounded back onto the same samples — nothing to do
+        # A TABLE ON ANOTHER CLOCK IS NOT RE-MEASURED IN PLACE (S8-DATA1). The row below is
+        # rebuilt with ``start / fs`` at the LIVE rate; in a table the amber line calls entirely
+        # the old one that is a second clock (a Revert goes through here too, and writes the
+        # same). Nothing has been read or written yet: the handles go back where the row says
+        # they are, and the owner is told why -- no ``eventEdited``, so no undo step.
+        stale = stale_rate_reason(self._provenance, self._sample_rate())
+        if stale is not None:
+            self._render_event(row)
+            self.editRefused.emit(f"The event's bounds were not changed. {stale}")
+            return
         fs = self._sample_rate()
         if fs is not None:
             # Re-measure on the trace the DETECTOR measured on, not the raw channel.

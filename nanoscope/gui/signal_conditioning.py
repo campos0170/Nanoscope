@@ -583,6 +583,9 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self._last_error = ""
         self._dirty = True
         self._time_choice = "overlay"
+        #: The rate changed under the Time plot: the next draw shows the window, not the range
+        #: the user panned to (that range is in seconds of the clock the window has left).
+        self._reframe_time = False
         self._line_rows: list[Any] = []
         self._axis_labels: dict[int, tuple[pg.ViewBox, pg.AxisItem, str, str, str]] = {}
 
@@ -1226,13 +1229,21 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         new = source.key if source is not None else None
         self._source = source
         if old == new:
-            # The same samples (the key holds the calibration): a re-cached array, a moved
-            # clock or a renamed unit needs no recompute, only a redraw.
+            # The same samples at the same rate (the key holds the calibration and the
+            # rate): a re-cached array, a moved clock origin or a renamed unit needs no
+            # recompute, only a redraw.
             if source is not None and (source.x_offset_s, source.units) != (
                     previous.x_offset_s, previous.units):
                 self._refresh_time_controls()
                 self._render_time()
             return
+        # A new key is a new source, and that includes the SAME samples on another clock (a
+        # time-base declaration, or taking it away): what was shown or awaited at the old rate
+        # is dropped below, and an answer still on its way back for it is turned away by the
+        # key (_on_outcome). A Time plot the user had panned is on the old clock's seconds
+        # too, so its next draw frames the window afresh.
+        if previous is not None and source is not None and previous.fs != source.fs:
+            self._reframe_time = True
         if self._exact_key is not None:
             self._cancel_exact()
         self._last = None
@@ -1791,9 +1802,11 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         for item in items:
             v0, v1 = item.getViewBox().viewRange()[0]
             # A range the user panned to stays theirs; only Follow (or a view that no
-            # longer overlaps the data) moves it.
-            if self.follows_main() or v1 < lo or v0 > hi:
+            # longer overlaps the data, or a clock it was panned on that has since changed)
+            # moves it.
+            if self.follows_main() or self._reframe_time or v1 < lo or v0 > hi:
                 item.setXRange(lo, hi, padding=0.0)
+        self._reframe_time = False
 
     def _set_axis_label(self, item: pg.PlotItem, side: str, full: str, *shorter: str) -> None:
         """``full`` on the axis when it fits its length, else the first of ``shorter``

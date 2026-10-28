@@ -206,7 +206,9 @@ class AnalysisController(QtCore.QObject):
     is forbidden to touch) to resolve the selected ``(doc_id, channel)`` and to
     inject the calibration fingerprint + pore_id. Emits
     ``started``/``progressed``/``finished(AnalysisResult)``/``failed``/``cancelled``;
-    the caller stores the result on the main thread via ``Session.add_result``.
+    the caller stores the result on the main thread via ``Session.add_result``. A run
+    aborted that way reports none of the terminal signals, so ``replaced(label)`` says
+    that it happened -- once, from the one place a job is replaced.
 
     ONE ANALYSIS IN THE WHOLE APP, not merely one per controller. Both entry points
     consult the run gate (:mod:`nanoscope.gui.worker_thread`) before they spin a
@@ -223,12 +225,19 @@ class AnalysisController(QtCore.QObject):
     failed = QtCore.Signal(str)
     cancelled = QtCore.Signal()
     refused = QtCore.Signal(str)            # nothing started; the sentence says why
+    #: A live job was dropped to make room for the one named here (its label). The dropped job
+    #: reports nothing itself -- ``abort()`` emits no terminal signal -- so this is the only way
+    #: its owner learns that whatever it recorded about it is void. See :meth:`_supersede`.
+    replaced = QtCore.Signal(str)
 
     def __init__(self, session: Any, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._session = session
         self._thread: QtCore.QThread | None = None
         self._worker: QtCore.QObject | None = None
+        #: Workers :meth:`_stop` has retired whose queued signals may not have been delivered
+        #: yet, oldest first. See :meth:`_stop` for why they are kept.
+        self._retired: list[QtCore.QObject] = []
 
     # -- public API ------------------------------------------------------------------------------
     def start(
@@ -252,11 +261,13 @@ class AnalysisController(QtCore.QObject):
         Refused (``False``, ``refused`` emitted, nothing aborted and nothing started)
         when another owner already holds the analysis domain -- a batch pass, in
         practice. The refusal is checked BEFORE ``abort()`` on purpose: a start that
-        is not going to happen must not stop the run that is already happening.
+        is not going to happen must not stop the run that is already happening. A run that IS
+        stopped to make room is announced on :attr:`replaced`.
         """
-        if not self._admit(module if isinstance(module, str) else module.id):
+        label = module if isinstance(module, str) else module.id
+        if not self._admit(label):
             return False
-        self.abort()
+        self._supersede(label)
 
         if isinstance(module, str):
             module = ANALYSIS_REGISTRY[module]
@@ -301,7 +312,7 @@ class AnalysisController(QtCore.QObject):
         True when a job actually started; see :meth:`start` for the refusal."""
         if not self._admit(label):
             return False
-        self.abort()
+        self._supersede(label)
         worker = CallableWorker(fn, wants_progress=wants_progress)
         worker.progress.connect(self._on_progress)
         worker.finished.connect(self._on_finished)
@@ -319,6 +330,23 @@ class AnalysisController(QtCore.QObject):
             return True
         self.refused.emit(refusal_text(blocker, label))
         return False
+
+    def _supersede(self, label: str) -> None:
+        """Stop the run in flight, if any, to make room for the job named ``label`` -- and SAY SO.
+
+        ``abort()`` emits nothing, by design (a Cancel or a project reset reports itself), so a
+        job dropped here reaches nobody's terminal slot, and whatever its owner recorded about
+        it -- the Merge-all check-list, the re-measure target, a button reading "Measuring…" --
+        would outlive it for the rest of the session. Both entry points come through here, so
+        this is the ONE place a job is replaced and the one place to announce it. ``replaced`` goes
+        out synchronously, after the old job is detached (``is_busy()`` is False) and before the
+        new one exists, so a listener forgets the old job's records before the caller records
+        the new job's (it does that when ``start()`` returns). Nothing is announced when
+        nothing was running."""
+        was_running = self.is_busy()
+        self.abort()
+        if was_running:
+            self.replaced.emit(label)
 
     def abort(self, wait_ms: int = DEFAULT_JOIN_MS) -> None:
         """Ask the in-flight run to stop, detach it, and return. EMITS NOTHING.
@@ -357,10 +385,32 @@ class AnalysisController(QtCore.QObject):
 
         Shared by abort() (which first sets the cancel Event) and the terminal slots
         (which run once ``run()`` has already returned, so the join is immediate).
-        Emits nothing."""
+        Emits nothing.
+
+        THE RETIRED WORKER IS KEPT ALIVE until the signals it already queued have been
+        delivered. A worker that finished just as it was replaced has its answer sitting in the
+        main thread's queue, and :meth:`_is_active` tells that stale answer from the new job's by
+        ``sender()``. Freed at once, the old worker's address can be handed to the NEW worker,
+        and the stale answer then names the new worker as its sender: it passes the guard, ends
+        the new job and detaches it, so the new job's own result is lost. Measured, a callable
+        replacing a callable whose answer was queued, 300 times over: 106, 98 and 109 stale
+        answers got through. The release is queued behind the signals the worker posted before it
+        was retired, so by the time it runs they have been delivered -- and dropped."""
         worker, thread = self._worker, self._thread
         self._worker, self._thread = None, None
-        return retire_worker_thread(worker, thread, wait_ms=wait_ms)
+        stopped = retire_worker_thread(worker, thread, wait_ms=wait_ms)
+        if worker is not None:
+            self._retired.append(worker)
+            QtCore.QMetaObject.invokeMethod(
+                self, "_release_retired", QtCore.Qt.ConnectionType.QueuedConnection)
+        return stopped
+
+    @QtCore.Slot()
+    def _release_retired(self) -> None:
+        """Let go of the oldest retired worker: one release is queued per retirement, in order,
+        so this one runs after the signals of exactly the worker it frees."""
+        if self._retired:
+            del self._retired[0]
 
     # -- internals -------------------------------------------------------------------------------
     def _spin_up(self, worker: QtCore.QObject, label: str = "callable") -> None:
@@ -379,7 +429,8 @@ class AnalysisController(QtCore.QObject):
         already been collected (``sender()`` then returns None too), and ``None is
         None`` let a cancelled run through -- which is how abort(), documented to emit
         nothing, ended up emitting ``cancelled`` and hiding the progress bar in the
-        middle of a project restore (C40)."""
+        middle of a project restore (C40). The check compares OBJECTS, so it needs a retired
+        worker's object to still exist when its stale signal arrives: see :meth:`_stop`."""
         return self._worker is not None and self.sender() is self._worker
 
     @QtCore.Slot(float, str)

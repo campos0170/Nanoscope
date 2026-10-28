@@ -77,6 +77,7 @@ from .events import (
     flag_tokens,
     is_automatic_rejection,
     reconcile_row_counts,
+    stale_rate_hz,
 )
 
 __all__ = [
@@ -1059,18 +1060,13 @@ def _require_same_rate(provenance: Mapping[str, Any], fs: float) -> None:
 
     The tolerance is relative and tight (1e-9): this is not about instrument
     accuracy, it is about the caller having read the rate off a different object
-    from the one the detector used.
+    from the one the detector used. The rule itself is not written here: it is
+    :func:`~nanoscope.analysis.events.stale_rate_hz`, the same question the amber
+    line and every in-place editing door ask (S8-DATA1), so this refusal -- the
+    kernel's, worded for a caller of this function -- cannot disagree with them.
     """
-    stated = provenance.get("fs")
-    if stated is None:
-        return
-    try:
-        stated = float(stated)
-    except (TypeError, ValueError):
-        return
-    if not np.isfinite(stated) or stated <= 0:
-        return
-    if abs(stated - fs) > 1e-9 * max(abs(stated), abs(fs)):
+    stated = stale_rate_hz(provenance, fs)
+    if stated is not None:
         raise ValueError(
             f"these events were detected at {stated!r} Hz but this re-measure was "
             f"handed {fs!r} Hz. t_start_s and dwell_s are derived from the rate, so "

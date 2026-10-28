@@ -993,15 +993,23 @@ def test_the_new_callers_ask_the_shared_map_and_do_not_spell_a_palette(module_na
 
 def test_the_gallery_still_reaches_no_sibling_panel():
     """The gallery is a standalone window and MainWindow stays the sole wirer. It may now
-    reach ``categorical`` — the shared leaf — and nothing else in ``gui/``."""
+    reach ``categorical`` — the shared colour leaf — and ``curation_keys`` — the shared
+    keyboard leaf (S8-KEYS2: one event filter, Qt only, shared with the inspector so that
+    neither window carries its own copy) — and nothing else in ``gui/``."""
+    import nanoscope.gui.curation_keys as keys_mod
     import nanoscope.gui.event_gallery as gal_mod
 
     tree = ast.parse(pathlib.Path(gal_mod.__file__).read_text())
     siblings = {n.module for n in ast.walk(tree)
                 if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module}
-    assert siblings == {"categorical"}, (
-        f"the Event gallery reaches {sorted(siblings)}; only the shared colour leaf is "
-        f"allowed, and the next addition has to argue for itself here")
+    assert siblings == {"categorical", "curation_keys"}, (
+        f"the Event gallery reaches {sorted(siblings)}; only the shared colour and keyboard "
+        f"leaves are allowed, and the next addition has to argue for itself here")
+    # A leaf stays one: the keyboard guard reaches no sibling panel itself.
+    keys_tree = ast.parse(pathlib.Path(keys_mod.__file__).read_text())
+    assert not [n.module for n in ast.walk(keys_tree)
+                if isinstance(n, ast.ImportFrom) and n.level >= 1], (
+        "curation_keys is the shared keyboard leaf; it may not import a sibling in gui/")
 
 
 def test_the_report_window_offers_the_entry_points_without_importing_a_surface():
