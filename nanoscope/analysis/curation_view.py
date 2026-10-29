@@ -19,7 +19,16 @@ from typing import Any, Callable, Iterable
 import numpy as np
 import pandas as pd
 
-from .events import REVIEW_COL, _normalise_review, mark_reviewed, reviewed_mask
+from .events import (
+    KIND_MANUAL,
+    KIND_MIXED,
+    REVIEW_COL,
+    SOURCE_COL,
+    _normalise_review,
+    mark_reviewed,
+    reviewed_mask,
+    source_kind,
+)
 from .labels import CONFLICT_SEP, LabelVocabulary, apply_label, clear_labels, parse_labels
 
 __all__ = [
@@ -28,6 +37,11 @@ __all__ = [
     "FILTER_REJECTED",
     "FILTER_UNREVIEWED",
     "FILTER_UNLABELLED",
+    "FILTER_HAND_MADE",
+    "FILTER_DETECTED",
+    "FILTER_MIXED",
+    "SOURCE_FILTERS",
+    "source_masks",
     "LABEL_FILTER_PREFIX",
     "FIXED_FILTERS",
     "label_filter",
@@ -61,6 +75,13 @@ FILTER_ACCEPTED = "Accepted only"
 FILTER_REJECTED = "Rejected only"
 FILTER_UNREVIEWED = "Unreviewed"
 FILTER_UNLABELLED = "Unlabelled"
+#: The source filters: rows a person drew, rows a detector found, rows merged from both. Offered
+#: only once the table holds a hand-made (or merged) row, so a plain detection's combo is the
+#: four it always was.
+FILTER_HAND_MADE = "Hand-made only"
+FILTER_DETECTED = "Detected only"
+FILTER_MIXED = "Merged (hand + detected)"
+SOURCE_FILTERS = (FILTER_HAND_MADE, FILTER_DETECTED, FILTER_MIXED)
 #: A label filter's display text is this prefix plus the ``key=value`` token. The text IS
 #: the filter's identity: both windows select filters by their combo text.
 LABEL_FILTER_PREFIX = "Labelled: "
@@ -74,6 +95,9 @@ _KIND_BY_NAME = {
     FILTER_REJECTED: "rejected",
     FILTER_UNREVIEWED: "unreviewed",
     FILTER_UNLABELLED: "unlabelled",
+    FILTER_HAND_MADE: "hand_made",
+    FILTER_DETECTED: "detected",
+    FILTER_MIXED: "mixed",
 }
 
 
@@ -155,6 +179,40 @@ def token_mask(df: pd.DataFrame, key: str, value: str) -> np.ndarray:
         _flags(df), lambda f: v in parse_labels(f).get(k, "").split(CONFLICT_SEP))
 
 
+def source_masks(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(hand_made, detected, mixed)`` boolean masks over ``df``'s rows.
+
+    Hand-made is ``source`` reading manual, falling back to ``added`` only where ``source`` was
+    never recorded; mixed is a merge across sources (``source`` reads mixed); detected is
+    everything else."""
+    n = len(df)
+    if n == 0:
+        z = np.zeros(0, dtype=bool)
+        return z, z.copy(), z.copy()
+    if SOURCE_COL in df.columns:
+        src = df[SOURCE_COL].to_numpy(dtype=object)
+        kind = np.array(_per_distinct_value(src, source_kind), dtype=object)
+        known = np.array(_per_distinct_value(src, lambda v: v is not None and not pd.isna(v)),
+                         dtype=bool)
+    else:
+        kind = np.full(n, "unknown", dtype=object)
+        known = np.zeros(n, dtype=bool)
+    added = (df["added"].to_numpy(dtype=bool) if "added" in df.columns
+             else np.zeros(n, dtype=bool))
+    hand = np.where(known, kind == KIND_MANUAL, added)
+    mixed = known & (kind == KIND_MIXED)
+    return hand, ~(hand | mixed), mixed
+
+
+def _per_distinct_value(values: Any, fn: Callable[[Any], Any]) -> list[Any]:
+    """``fn`` over every cell, evaluated once per distinct value."""
+    codes, uniques = pd.factorize(pd.Series(np.asarray(values, dtype=object)),
+                                  use_na_sentinel=True)
+    results = [fn(u) for u in uniques]
+    na_result = fn(pd.NA)
+    return [results[c] if c >= 0 else na_result for c in codes]
+
+
 def filter_mask(df: pd.DataFrame, mode: str) -> np.ndarray:
     """The rows ``mode`` keeps, in row order. Raises ValueError for an unknown filter."""
     parsed = parse_filter(mode)
@@ -172,6 +230,9 @@ def filter_mask(df: pd.DataFrame, mode: str) -> np.ndarray:
         return ~reviewed_mask(df)
     if kind == "unlabelled":
         return ~labelled_mask(df)
+    if kind in ("hand_made", "detected", "mixed"):
+        hand, detected, mixed = source_masks(df)
+        return {"hand_made": hand, "detected": detected, "mixed": mixed}[kind]
     return token_mask(df, key, value)
 
 
@@ -207,6 +268,42 @@ def same_events(a: pd.DataFrame | None, b: pd.DataFrame | None) -> bool:
         if col in a.columns and not np.array_equal(a[col].to_numpy(), b[col].to_numpy()):
             return False
     return "event_id" in a.columns
+
+
+def superset_by_id(old: pd.DataFrame | None, new: pd.DataFrame | None) -> bool:
+    """Does ``new`` hold every event ``old`` held, each still at its ``start_idx``?
+
+    The test a re-feed passes after a hand-made event joins a table: ids are never reused
+    by an add, so a kept id still names the same event, and a window may keep its filter,
+    its current event and its selection (``same_events`` demands an identical frame, which
+    an add never is). Event ids must be unique in ``new``."""
+    if old is None or new is None or "event_id" not in old.columns or "event_id" not in new.columns:
+        return False
+    if "start_idx" not in old.columns or "start_idx" not in new.columns:
+        return False
+    if len(new) < len(old):
+        return False
+    new_ids = pd.Index(new["event_id"].to_numpy())
+    if not new_ids.is_unique:
+        return False
+    pos = new_ids.get_indexer(old["event_id"].to_numpy())
+    if (pos < 0).any():
+        return False
+    return bool(np.array_equal(new["start_idx"].to_numpy()[pos], old["start_idx"].to_numpy()))
+
+
+def can_keep_place(old: pd.DataFrame | None, new: pd.DataFrame | None,
+                   current_id: int | None = None) -> bool:
+    """May a window that was showing ``old`` keep its place when ``new`` arrives?
+
+    Yes for the very same events (an edit), for ``new`` holding all of ``old`` (a hand-made
+    event joined), and for ``new`` being ``old`` less some events (the undo of that add)
+    provided the event the window stands on survived."""
+    if same_events(old, new) or superset_by_id(old, new):
+        return True
+    if current_id is not None and superset_by_id(new, old):
+        return bool(new is not None and (new["event_id"].to_numpy() == int(current_id)).any())
+    return False
 
 
 def row_unchanged(a: pd.DataFrame, b: pd.DataFrame, row: int) -> bool:
@@ -274,6 +371,9 @@ class CurationProgress:
     n_labelled: int = 0
     n_conflicted: int = 0
     has_palette: bool = False
+    #: Rows a person drew / rows merged across sources (0 for a plain detection).
+    n_hand_made: int = 0
+    n_mixed: int = 0
 
     @property
     def n_unreviewed(self) -> int:
@@ -320,10 +420,12 @@ def curation_progress(df: pd.DataFrame | None,
                         seen.append(token)
     label_counts = tuple((t, counts.get(t, 0)) for t in palette) + tuple(
         (t, counts[t]) for t in seen)
+    hand, _detected, mixed = source_masks(df)
     return CurationProgress(
         n_total=n, n_reviewed=reviewed, n_unknown_review=unknown, n_accepted=accepted,
         label_counts=label_counts, orphan_tokens=tuple(seen), n_labelled=n_labelled,
-        n_conflicted=n_conflicted, has_palette=bool(palette))
+        n_conflicted=n_conflicted, has_palette=bool(palette),
+        n_hand_made=int(np.count_nonzero(hand)), n_mixed=int(np.count_nonzero(mixed)))
 
 
 def format_progress(p: CurationProgress) -> str:
@@ -347,6 +449,10 @@ def describe_progress(p: CurationProgress) -> str:
                   "as unreviewed here")
     lines.append(unrev + ".")
     lines.append(f"Accepted: {p.n_accepted} of {p.n_total}.")
+    if p.n_hand_made or p.n_mixed:
+        lines.append(f"Hand-made: {p.n_hand_made} · detected: "
+                     f"{p.n_total - p.n_hand_made - p.n_mixed}"
+                     + (f" · merged from both: {p.n_mixed}" if p.n_mixed else "") + ".")
     palette = [(t, k) for t, k in p.label_counts if t not in p.orphan_tokens]
     orphans = [(t, k) for t, k in p.label_counts if t in p.orphan_tokens]
     if palette:
@@ -370,6 +476,10 @@ def filter_options(progress: CurationProgress | None, vocab: LabelVocabulary | N
     the frame. ``current`` is appended when it is a filter and not already offered -- a
     window never drops the filter the user is browsing."""
     out = list(FIXED_FILTERS)
+    if progress is not None and (progress.n_hand_made or progress.n_mixed):
+        out.extend((FILTER_HAND_MADE, FILTER_DETECTED))
+        if progress.n_mixed:
+            out.append(FILTER_MIXED)
     tokens = [e.token for e in (vocab.entries if vocab is not None else [])]
     if progress is not None:
         tokens += [t for t in progress.orphan_tokens if t not in tokens]

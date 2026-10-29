@@ -117,6 +117,10 @@ def _bracket(window: MainWindow, doc_id: str, channel: int, i0: int, i1: int) ->
 def window(qapp, qtbot):
     w = MainWindow()
     qtbot.addWidget(w)
+    # These tests pin the panel's OWN measure-on choice. In the app the Analysis panel supplies
+    # the target table's basis instead and the choice is hidden (test_measure_tab_preview.py), so
+    # the owner is detached to reach the panel as it stands on its own.
+    w._analysis_panel.measure_panel.set_basis_provider(None)
     w.resize(*WINDOW_SIZE)          # the owner's display, for every reach measurement
     w.show()
     yield w

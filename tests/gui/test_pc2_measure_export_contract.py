@@ -103,6 +103,9 @@ def _bracket(window: MainWindow, doc_id: str, channel: int, i0: int, i1: int) ->
 def window(qapp, qtbot):
     w = MainWindow()
     qtbot.addWidget(w)
+    # The csv tests below pin the panel's OWN measure-on choice; in the app the Analysis panel
+    # supplies the table's basis instead (test_measure_tab_preview.py), so detach it here.
+    w._analysis_panel.measure_panel.set_basis_provider(None)
     w.resize(1512, 900)          # the owner's display
     w.show()
     yield w
@@ -244,16 +247,12 @@ def test_the_door_costs_the_dock_no_width_and_moves_nothing_above_it(window, tmp
     QtWidgets.QApplication.processEvents()
     button = mp._export_processed_button
 
-    # It sits BELOW every pre-existing control: nothing above it could have moved.
-    assert button.geometry().top() >= mp._goto_button.geometry().bottom()
-    assert button.geometry().top() >= mp._markers_check.geometry().bottom()
-    # ...and it asks for no width the row above did not already ask for.
-    row_above = (mp._add_button.width() + mp._remove_button.width()
-                 + mp._export_button.width())
-    assert button.minimumSizeHint().width() <= row_above
-    assert mp.minimumSizeHint().width() <= 440      # the measured floor, unchanged
-    # The table still has rows to show.
-    assert mp._table_view.height() >= 150
+    # It sits BELOW the cursor tools and the statistics, in the main column (the old
+    # measurement list is a group of its own, shown only while it holds rows).
+    assert button.geometry().top() >= mp.action_widget.geometry().bottom()
+    # ...and it asks for no width the panel did not already ask for.
+    assert button.minimumSizeHint().width() <= mp.minimumSizeHint().width()
+    assert mp.minimumSizeHint().width() <= 440      # the old measured floor, which only fell
 
 
 # ================================================================================================

@@ -297,6 +297,7 @@ _JOB_PROSE: dict[str, str] = {
     "baseline_probe": "An open-pore probe",
     "baseline_remeasure": "A re-measure of the event depths",
     "baseline_compare": "An estimator comparison",
+    "manual_rebuild": "A rebuild of the Manual table",
     "batch.detect": "A batch detection",
     "callable": "A background analysis",
     "load": "A file load",

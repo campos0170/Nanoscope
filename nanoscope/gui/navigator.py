@@ -120,6 +120,10 @@ class Navigator(pg.PlotWidget):
             view.sigMeasureFinished.connect(lambda *_a: self._sync_measure_band())
         if hasattr(view, "sigMeasureActiveChanged"):
             view.sigMeasureActiveChanged.connect(lambda *_a: self._sync_measure_band())
+        if hasattr(view, "sigMeasureCleared"):
+            # Measure is ON with no mask: no bounds signal can say that, and the band would
+            # otherwise stay drawn over the event that was just added or discarded.
+            view.sigMeasureCleared.connect(lambda *_a: self._sync_measure_band())
         self._refresh()
 
     def set_target(self, doc_id: str, channel: int) -> None:

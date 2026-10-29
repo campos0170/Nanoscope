@@ -158,7 +158,8 @@ __all__ = [
 #: is offered and the window can overlay two detectors on one recording -- which is
 #: detector comparison, and it costs no new surface.
 DETECTION_MODULE_IDS: tuple[str, ...] = (
-    "detect.schmitt", "detect.cusum", "detect.keras", "detect.reconciled", "detect.study"
+    "detect.schmitt", "detect.cusum", "detect.keras", "detect.reconciled", "detect.study",
+    "detect.manual",
 )
 
 #: The detector whose source key carries NO module suffix -- see :func:`source_key`.
@@ -178,6 +179,7 @@ DETECTOR_NAMES: Mapping[str, str] = MappingProxyType({
     "detect.reconciled": "Reconciled",
     "detect.study": "Study candidates",
     "detect.study.schmitt": "Study Schmitt",
+    "detect.manual": "Manual",
 })
 
 

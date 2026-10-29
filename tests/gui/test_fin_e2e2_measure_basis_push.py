@@ -108,6 +108,10 @@ def build(qapp, qtbot, tmp_path):
         built.append(controller)
         p = AnalysisPanel(session, controller, tv)
         qtbot.addWidget(p)
+        # This file pins the push of the Preprocess form into the panel's OWN measure-on choice.
+        # In the app the Analysis panel also supplies the target table's basis, which hides that
+        # choice (test_measure_tab_preview.py), so the owner's basis is detached here.
+        p.measure_panel.set_basis_provider(None)
         doc_id = session.add_document(_doc(tmp_path, sig, name, rate=rate))
         session.add_layer(doc_id, 0)
         p.set_selection(doc_id, 0)

@@ -20,7 +20,7 @@ What these tests exist to stop coming back — each is a bug that was fixed once
   is the exact bound ``QDockAreaLayout`` will not drag a separator past. Unwrapped it pinned
   the Inspector at 458 px. It is installed SCROLL-WRAPPED, and the dock still shrinks to its
   ~137 px floor.
-* **the wiring.** Every signal (``measureActiveChanged`` / ``markMissedRequested`` /
+* **the wiring.** Every signal (``measureActiveChanged`` / ``addRequested`` /
   ``measurementsChanged`` / ``navigateRequested``), every pushed setter and the
   ``AnalysisPanel.measure_panel`` property survive the move, exercised end to end rather
   than merely asserted to exist.
@@ -31,9 +31,9 @@ What these tests exist to stop coming back — each is a bug that was fixed once
   working on. Hiding a tab is layout, not state.
 * **the menu action reveals what it turns on.** ``Analysis ▸ Measure event`` now raises the
   Inspector's Analysis tab AND this inner tab, on the way IN only.
-* **"Mark selection as missed event" spans two tabs.** The detection is produced on the
-  Detection / ML tab and the missed event is bracketed on this one; the gate and the append
-  still work across that seam.
+* **The Add button spans two tabs.** The detection is produced on the Detection / ML tab and
+  the missed event is bracketed on this one; the button files it into the shown table across
+  that seam. (It replaced "Mark selection as missed event", which fed only a detector's table.)
 """
 
 from __future__ import annotations
@@ -221,14 +221,14 @@ def test_manual_measurement_is_the_fourth_mode_tab(window):
 
 
 def test_the_measure_tab_holds_the_real_measure_widgets(window, tmp_path):
-    """Not a placeholder: the live toggle, the readout, the mark-missed button and the
+    """Not a placeholder: the live toggle, the readout, the Add button and the
     saved-measurements table are all on that page."""
     _install(window, _doc(tmp_path))
     mp = window._analysis_panel.measure_panel
     page = _measure_page(window)
 
     assert page in _ancestors(mp, window)
-    for widget in (mp._toggle, mp._snap_view_btn, mp._mark_missed_btn,
+    for widget in (mp._toggle, mp._snap_view_btn, mp._add_button,
                    mp._table_view, mp._goto_button):
         assert page in _ancestors(widget, window), f"{widget} is not on the measure page"
 
@@ -302,8 +302,10 @@ def test_the_measure_page_imposes_no_width_floor(window):
     is fine: the ``controls_scroll`` above it is what clamps the whole stack. What matters
     is that the NEW page contributes nothing to that number."""
     mp = window._analysis_panel.measure_panel
-    assert mp.minimumSizeHint().width() > _SMALL_ENOUGH_TO_SHRINK, (
-        "if the panel itself got narrow this test stopped proving anything")
+    # The panel's own floor fell below 220 px when the un-wrappable Mark-missed button went;
+    # what this test pins is that the PAGE is narrower than the panel it wraps.
+    assert mp.minimumSizeHint().width() > _measure_page(window).minimumSizeHint().width(), (
+        "if the page is no narrower than the panel this test stopped proving anything")
     assert _measure_page(window).minimumSizeHint().width() <= _SMALL_ENOUGH_TO_SHRINK
     assert (_measure_page(window).minimumSizeHint().width()
             < _mode_tabs(window).minimumSizeHint().width()), (
@@ -349,7 +351,7 @@ def test_the_measure_panel_property_still_returns_the_owned_widget(window):
     assert mp is window._analysis_panel._measure
 
 
-@pytest.mark.parametrize("name", ["measureActiveChanged", "markMissedRequested",
+@pytest.mark.parametrize("name", ["measureActiveChanged", "addRequested",
                                   "measurementsChanged", "navigateRequested"])
 def test_the_four_signals_still_exist_on_the_moved_panel(window, name):
     assert hasattr(window._analysis_panel.measure_panel, name)
@@ -424,14 +426,18 @@ def test_set_selected_event_still_lands_from_a_table_row(window, qtbot, tmp_path
     assert mp._selected_event[0] == doc_id and mp._selected_event[1] == channel
 
 
-def test_set_detection_present_still_gates_the_mark_missed_button(window, qtbot, tmp_path):
+def test_the_add_button_needs_cursors_not_a_detection(window, qtbot, tmp_path):
+    """An event can be added to a channel with no detection: it files into the Manual table.
+    The button is armed by a live region and by nothing else."""
     doc_id, _ch = _install(window, _doc(tmp_path))
+    mp = window._analysis_panel.measure_panel
+    assert not mp._add_button.isEnabled(), "no region yet"
     mp = _bracket(window, doc_id, _MISSED)
-    assert not mp._mark_missed_btn.isEnabled(), "no detection yet -> nothing to add to"
+    assert mp._add_button.isEnabled(), "a region and no detection: the Manual table takes it"
 
     _run_detection(window, qtbot)
     _bracket(window, doc_id, _MISSED)
-    assert mp._mark_missed_btn.isEnabled()
+    assert mp._add_button.isEnabled()
 
 
 def test_navigate_requested_still_routes_through_main_window(window, tmp_path):
@@ -616,7 +622,7 @@ def test_the_panels_own_toggle_does_not_yank_the_tab(window, tmp_path):
 
 
 # ================================================================================================
-# 6. "Mark selection as missed event" across the two tabs
+# 6. the Add button across the two tabs
 # ================================================================================================
 
 def test_mark_missed_reaches_the_detection_produced_on_another_tab(window, qtbot, tmp_path):
@@ -633,9 +639,9 @@ def test_mark_missed_reaches_the_detection_produced_on_another_tab(window, qtbot
 
     dp.show_measure_tab()
     mp = _bracket(window, doc_id, _MISSED)
-    assert mp._mark_missed_btn.isEnabled()
+    assert mp._add_button.isEnabled()
     with qtbot.waitSignal(window._session.resultsChanged, timeout=5_000):
-        mp._mark_missed_btn.click()
+        mp._add_button.click()
     qtbot.wait(20)
 
     after = panel.current_events_df()

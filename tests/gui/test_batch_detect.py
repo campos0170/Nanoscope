@@ -263,3 +263,36 @@ def test_vdep_lights_up_after_batch_detect(qapp, qtbot, tmp_path):
 
     win._sync_vdep_action()
     assert win._act_vdep.isEnabled()              # two recordings with voltage + detection
+
+
+def test_a_batch_rerun_keeps_the_hand_made_events_and_says_so(qapp, qtbot, tmp_path):
+    """The batch sink and the single Run share one install door: a re-run does not throw away
+    what a person drew."""
+    from nanoscope.analysis.detect import detect_events
+    from nanoscope.analysis.manual_events import hand_made_mask
+    from nanoscope.gui.analysis_worker import BatchOutcome
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    doc_id = _install(win, _current_doc(tmp_path, nominal_mV=-500.0, name="keep.dat"))
+    win._batch_detect()
+    qtbot.waitUntil(
+        lambda: win._session.results.get(doc_id, 0, "detect.schmitt") is not None,
+        timeout=60_000)
+    win._on_selection(doc_id, 0)
+    added = win._analysis_panel.add_manual_event(doc_id, 0, 20_000, 20_300)
+    assert added.ok
+    first = win._session.results.get(doc_id, 0, "detect.schmitt")
+    assert int(hand_made_mask(first.payload.df).sum()) == 1
+
+    df, prov = detect_events(_event_trace(), FS, min_dwell_s=1e-4)
+    prov["detected_at"] = "2099-01-01T00:00:00+00:00"          # a NEW run, as the stamp says
+    rerun = AnalysisResult(
+        module_id="detect.schmitt", module_version="1.0", doc_id=doc_id, channel=0, params={},
+        calibration_fingerprint=first.calibration_fingerprint, payload=EventSet(df, prov))
+    win._on_batch_finished(BatchOutcome(results=(rerun,)))
+
+    stored = win._session.results.get(doc_id, 0, "detect.schmitt").payload.df
+    assert len(stored) == len(_EVENTS) + 1
+    assert int(hand_made_mask(stored).sum()) == 1
+    assert "Kept 1 hand-made event(s)" in win.statusBar().currentMessage()

@@ -219,7 +219,10 @@ def test_a_re_detection_over_curated_events_says_so_and_names_the_remedy(detecte
         window._analysis_panel.trigger_detection()
     qtbot.wait(30)
     msg = window.statusBar().currentMessage()
-    assert "2 rejected" in msg and "1 hand-added" in msg
+    # The 2 hand rejections are what this re-run destroys. The hand-ADDED event is not: it is
+    # carried into the new table, and the same line says so.
+    assert "2 rejected" in msg and "1 hand-added" not in msg
+    assert "Kept 1 hand-made event" in msg
     assert "Undo" in msg
 
 

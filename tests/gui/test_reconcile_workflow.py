@@ -285,7 +285,6 @@ def test_reconciled_table_is_curation_only_and_refuses_geometry_changes(
     panel = win._analysis_panel
     before = panel.current_events_df().copy(deep=True)
 
-    assert not panel.measure_panel._mark_missed_btn.isEnabled()
     assert not panel.merge_controls.merge_all_btn.isEnabled()
     assert not panel.merge_controls.merge_region_btn.isEnabled()
     assert not win._act_compare_baseline.isEnabled()
@@ -293,7 +292,7 @@ def test_reconciled_table_is_curation_only_and_refuses_geometry_changes(
     refused: list[str] = []
     panel.runRefused.connect(refused.append)
     assert panel.add_current_selection_as_event() is None
-    assert refused and "source detector table" in refused[-1]
+    assert refused and "Reconciled is derived" in refused[-1]
     assert panel.merge_all_subevents(0.001).status == "reconciled"
     assert panel.merge_selection_subevents().status == "reconciled"
     event_id = int(before.iloc[0]["event_id"])
@@ -329,14 +328,14 @@ def test_mark_missed_action_on_reconciled_table_stays_reachable_and_refuses_out_
     win._session.resultsChanged.connect(lambda *args: writes.append(args))
 
     assert panel.current_detection() is reconciled
-    assert win._act_mark_missed.isEnabled()
-    win._act_mark_missed.trigger()
+    assert win._act_add_event.isEnabled()
+    win._act_add_event.trigger()
 
     assert writes == []
     pd.testing.assert_frame_equal(reconciled.payload.df, before)
     status = win.statusBar().currentMessage().lower()
-    assert "source detector table" in status
-    assert "reconcile again" in status
+    assert "reconciled is derived" in status
+    assert "show schmitt or cusum" in status
 
 
 def test_reconciled_table_disables_and_defensively_refuses_trace_reconstruction(

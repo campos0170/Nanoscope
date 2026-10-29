@@ -304,6 +304,8 @@ def _detection_eventset(session: "Session", doc_id: str, channel: int) -> EventS
     for mid in DETECTION_MODULE_IDS:
         res = session.results.get(doc_id, channel, mid)
         if res is not None and isinstance(res.payload, EventSet):
+            if mid == "detect.manual" and not len(res.payload.df):
+                continue        # an empty Manual table is not a detection the rail should claim
             return res.payload
     for res in session.results.for_doc(doc_id):
         if res.channel == channel and isinstance(res.payload, EventSet):

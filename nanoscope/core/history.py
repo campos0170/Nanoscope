@@ -349,6 +349,38 @@ def _n_rows_differing(a: pd.DataFrame, b: pd.DataFrame, columns: Iterable[str]) 
     return int(diff.sum())
 
 
+def _all_hand_made(df: pd.DataFrame) -> bool:
+    """Is every row of ``df`` one a person drew (``source`` manual, ``added`` where unrecorded)?"""
+    if not len(df):
+        return False
+    from ..analysis.manual_events import hand_made_mask
+    return bool(hand_made_mask(df).all())
+
+
+def _deleted_hand_made(before: pd.DataFrame, after: pd.DataFrame) -> int:
+    """How many rows ``after`` lost that were hand-made, when that is ALL it lost and the
+    survivors kept their ids (a delete) -- 0 for a merge, which renumbers the survivors."""
+    if "event_id" not in before.columns or "event_id" not in after.columns:
+        return 0
+    ids_b = before["event_id"].to_numpy()
+    ids_a = after["event_id"].to_numpy()
+    if not np.isin(ids_a, ids_b).all():
+        return 0
+    gone = ~np.isin(ids_b, ids_a)
+    if not gone.any() or int(gone.sum()) != len(before) - len(after):
+        return 0
+    # The survivors must be the very same events. A merge renumbers its survivors, so its ids
+    # can also be a subset of the old ones; only a delete leaves every survivor's span alone.
+    where = pd.Index(ids_b).get_indexer(ids_a)
+    for col in ("start_idx", "end_idx"):
+        if col not in before.columns or col not in after.columns:
+            return 0
+        if not np.array_equal(before[col].to_numpy()[where], after[col].to_numpy()):
+            return 0
+    from ..analysis.manual_events import hand_made_mask
+    return int(gone.sum()) if bool(hand_made_mask(before)[gone].all()) else 0
+
+
 def describe_change(before: pd.DataFrame | None, after: pd.DataFrame) -> str:
     """Name the operation that turned ``before`` into ``after``.
 
@@ -374,6 +406,9 @@ def describe_change(before: pd.DataFrame | None, after: pd.DataFrame) -> str:
     if n0 == 0 and n1 == 0:
         return "Edit events"
     if n1 < n0:
+        gone = _deleted_hand_made(before, after)
+        if gone:
+            return "Delete event" if gone == 1 else f"Delete {gone} events"
         return "Merge events" if n0 - n1 == 1 else f"Merge events ({n0} → {n1})"
 
     ba, aa = _aligned(before, after)
@@ -382,7 +417,10 @@ def describe_change(before: pd.DataFrame | None, after: pd.DataFrame) -> str:
     if n1 > n0:
         added = n1 - n0
         # An empty table growing is a detector that found something this time, not the
-        # user hand-adding N missed events one click at a time.
+        # user hand-adding N missed events one click at a time -- unless every row it grew by
+        # is hand-made, which is how a Manual table starts.
+        if n0 == 0 and _all_hand_made(after):
+            return "Add event" if added == 1 else f"Add {added} events"
         if n0 and moved_geometry == 0 and len(ba) == n0:
             return "Add event" if added == 1 else f"Add {added} events"
         return "Re-run detection"
@@ -415,6 +453,8 @@ def describe_change(before: pd.DataFrame | None, after: pd.DataFrame) -> str:
                 else f"Edit {n_amplitudes} event amplitudes")
 
     changed = _n_rows_differing(ba, aa, _CURATION)
+    if not changed and _n_rows_differing(ba, aa, ("note",)):
+        return "Edit note"
     if changed:
         if "accepted" in aa.columns and changed == n0 and n0 > 1:
             values = aa["accepted"].to_numpy(dtype=bool)
@@ -508,11 +548,14 @@ def _hand_curation(df: pd.DataFrame) -> dict[str, int]:
     holds a handful of distinct flag strings, and this runs on every recorded step.
     """
     from ..analysis.events import DERIVED_FLAGS, flag_tokens, is_automatic_rejection
+    from ..analysis.manual_events import hand_made_mask
 
     out = {"n_hand_rejected": 0, "n_notes": 0, "n_added": 0,
            "n_amplitude_curated": 0}
     if len(df) == 0:
         return out
+    # Hand-MADE rows are carried into a re-run, so they are nobody's loss to quote.
+    mine = ~hand_made_mask(df)
     if "flag" in df.columns:
         cells = df["flag"].astype("string").fillna("")
         parsed = {v: set(flag_tokens(v)) for v in cells.unique()}
@@ -538,13 +581,13 @@ def _hand_curation(df: pd.DataFrame) -> dict[str, int]:
         derived_only = np.zeros(len(df), dtype=bool)
     accepted = (df["accepted"].to_numpy(dtype=bool) if "accepted" in df.columns
                 else np.ones(len(df), dtype=bool))
-    out["n_notes"] = int(notes.sum())
-    out["n_hand_rejected"] = int((~accepted & ~derived_only).sum())
+    out["n_notes"] = int((notes & mine).sum())
+    out["n_hand_rejected"] = int((~accepted & ~derived_only & mine).sum())
     if "added" in df.columns:
-        out["n_added"] = int(df["added"].to_numpy(dtype=bool).sum())
+        out["n_added"] = int((df["added"].to_numpy(dtype=bool) & mine).sum())
     if "amplitude_method" in df.columns:
         choices = df["amplitude_method"].astype("string").fillna("").str.strip()
-        out["n_amplitude_curated"] = int(choices.ne("").sum())
+        out["n_amplitude_curated"] = int((choices.ne("").to_numpy(dtype=bool) & mine).sum())
     return out
 
 
@@ -573,6 +616,17 @@ def _curation_was_reset(before: pd.DataFrame, after: pd.DataFrame) -> bool:
         return False
     a = _hand_curation(after)
     return not any(a.values())
+
+
+def _is_carried_rerun(before: AnalysisResult, after: AnalysisResult) -> bool:
+    """Is ``after`` a NEW run that carried the hand-made rows of ``before`` into itself?
+
+    The carry-over stamps ``carried_hand_rows`` on the new run's provenance. A re-run is told
+    from a later edit of that same table by the run stamp: ``detected_at`` is new on every run
+    and copied intact by every edit."""
+    pa = after.payload.provenance or {}
+    pb = before.payload.provenance or {}
+    return bool(pa.get("carried_hand_rows")) and pa.get("detected_at") != pb.get("detected_at")
 
 
 def _params_moved_outside_baseline(before: AnalysisResult, after: AnalysisResult) -> bool:
@@ -875,6 +929,7 @@ class EventHistory(QObject):
         # re-detection landing on the same spans are the same problem one level down.
         # The RESULT object separates all of them, so the last word belongs to it.
         detection = replaced and (_params_moved_outside_baseline(prior, res)
+                                  or _is_carried_rerun(prior, res)
                                   or _curation_was_reset(prior.payload.df, res.payload.df)
                                   or (len(prior.payload.df) != len(res.payload.df)
                                       and not _values_equal(prior.params, res.params)))

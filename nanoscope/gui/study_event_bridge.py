@@ -250,6 +250,9 @@ def snapshot_events(window, record):
     result = window._analysis_panel.current_detection()
     if result is None or not isinstance(result.payload, EventSet):
         raise ValueError("Select a detection result in the main workspace first.")
+    if result.module_id == "detect.manual":
+        raise ValueError(
+            "Manual events are not a study detection; add them to the study table instead.")
     session = window._session
     doc = session.document(result.doc_id)
     prepared = record.get("prepared")

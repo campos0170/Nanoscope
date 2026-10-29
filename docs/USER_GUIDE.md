@@ -323,10 +323,9 @@ The Inspector's **Analysis** tab is where the work happens, and it has its own f
 and ML produce results shown in the **Results** panel under the trace, on its **Events** tab;
 it also has **Summary**, **Fits** and **Quality** tabs. Essential/Advanced changes control
 visibility only.
-Manual measurements have their own measurement list. **Add measurement to list** appends there;
-**Mark selection as missed event** instead adds a reviewed candidate to the active source detector
-table. These are different destinations. When the recording holds more than one detector
-result, the **Event table** selector — **Table**, at the left of the Results panel's toolbar —
+**Add event** (Ctrl+M, or **D** on the trace) files the region selected on the trace as a hand-made
+event in the table shown in the Results panel, or in the channel's own **Manual** table when there
+is none (§8). When the recording holds more than one table, the **Event table** selector — **Table**, at the left of the Results panel's toolbar —
 chooses which stored table is shown; changing that selector changes only the view and does not
 replace or merge any result.
 
@@ -510,7 +509,8 @@ override is visibly an override; the status bar prints the declared rate and its
 declaration is **saved with the project** and never written beside the raw file; *Use the file's
 own time base* removes it. Detections already made on the recording keep the rate they were
 measured at and are marked stale (*Times stale — sample rate changed*), never silently re-scaled:
-re-run them under the declared rate; a saved manual measurement gets the same ⚠ on its row.
+re-run them under the declared rate. A Manual table is marked the same way and its **Rebuild**
+re-measures every event under the declared rate; an old saved measurement gets the same ⚠ on its row.
 Segments cut from the recording follow its declaration, live and when the project is reopened —
 the declaration is made on the recording, never on a segment.
 
@@ -1230,67 +1230,127 @@ whenever it produces such rows.
 
 ## 8. Manual measurement
 
-For events you want to measure by hand (or to check the detector), use the **Manual measurement**
-section of the Analysis tab.
+Mark an event the detector missed, check one it found, or annotate a whole recording by hand. Every
+hand-made event is a row in an **event table**, the same kind of row a detector writes, so the
+gallery, the inspector, the Distributions page and every export see it, and **Edit ▸ Undo** takes
+it back.
 
-1. Zoom to a useful inspection scale with box-zoom or the **− / +** buttons in the
-   Scan strip. At event scale the Navigator changes from **Full recording** to a **9× local-context**
-   lens, so you can still pan precisely without zooming all the way out.
-2. **Double-click the trace at the event**. This activates Measure and places a mask centred at the
-   click, clamped fully on screen and no wider than **20% of the visible view**. Alternatively use
-   **Measure event (cursors)**, **Snap to view**, or **Snap to selected event**.
-3. Drag either circular edge handle to resize the mask, or drag its shaded body to move the whole
-   mask; everything recomputes live. The blue band in the Navigator
-   mirrors this working selection, while the shaded region shows the visible trace window.
-4. Choose the **amplitude method**: `median`, `mean`, `min` (deepest/peak), `max`, or `mode`. Amplitude
-   is `baseline − level`, where the baseline is the robust median of the current just *outside* your
-   cursors, and *level* is the chosen statistic of the in-cursor samples.
-5. The **Live statistics** read out: dwell, amplitude, ΔI/I₀, level, baseline, mean, median, std, min,
-   max, RMS, skewness, **kurtosis** (excess), area/ECD, SNR, and n samples.
-6. Record the selection in the right place:
+**Which table.** The event goes into the table named beside the **Add event** button and in the
+label on the trace (`→ Manual · 37 hand-made · 2 in view`). That is the table chosen in the Results
+panel's **Table** selector for this channel: Schmitt, CUSUM, a study table, or **Manual**. A channel
+with no table yet offers **Manual — no events yet** in the selector, and the first event you add
+creates it. A Reconciled table is derived, so it refuses an add and the status bar says to add to a
+source table and reconcile again. The selector remembers its choice for each channel, and the choice
+is saved with the project.
 
-   - **Add to list** (or **Ctrl+M**, from any tab) saves an independent manual measurement.
-   - If a **source detector table** is selected and the detector missed this event, **Mark selection
-     as missed event** (or **Ctrl+Shift+M**, from any tab) adds it to that event table as a reviewed,
-     accepted, hand-added candidate. The shortcut stays enabled whenever a recording is selected:
-     if no source result exists or Reconciled is selected, it gives a clear refusal telling you to
-     run or select a source detector rather than failing silently. A span that overlaps an event
-     the table already has is refused too (the status bar names the event): select that event to
-     curate it instead, so nothing is counted twice.
+**One event, three gestures.**
 
-7. Continue without losing your scale: press **Scan ▶** (or **Shift+→**) to move forward by 90% of
-   the current view. The 10% overlap keeps boundary events visible, and active Measure cursors move
-   with the view. Refine the cursors around the next event and repeat. **Scan ◀** / **Shift+←** moves
-   back; **+ / −** or **Shift+↑ / Shift+↓** adjusts the working zoom incrementally.
+1. Zoom to a useful inspection scale with box-zoom or the **− / +** buttons in the Scan strip. At
+   event scale the Navigator changes from **Full recording** to a **9× local-context** lens.
+2. **Point at the event and press C.** NanoScope finds the event under the pointer and fits both
+   edges to its steps; the mask appears on them. (Or double-click the trace to place a mask at the
+   click, or press **E** and drag a span: both are below.)
+3. Read the **preview** on the Measure tab, then press **D**. Return, Enter, **Ctrl+M** (from any
+   tab) and the **Add event** button do the same. **Shift+D** adds and moves to the next window.
 
-**Export CSV…** saves the manual-measurement list (the full 32-column measurement schema, provenance
-stamps included); **Remove selected** drops a row, after asking.
+After an add the mask is cleared and the table, gallery and inspector keep their place, so the next
+event starts clean. For a clean event the whole gesture is: point, **C**, **D**.
 
-**A saved row records what it was measured under.** *Add to list* stamps each row with the channel's
-`units`, the calibration `cal_gain` and `cal_offset` (the same fingerprint a detection stamps), and
-`t0_s`, the recording's instrument-clock origin. Edit the calibration afterwards and the affected
-rows are **marked, never rescaled** — the saved numbers are the record of what was measured, exactly
-as the analysis panel treats a stale detection.
+**Keys on the trace.** They act while the trace has keyboard focus, which follows the pointer onto
+the trace unless something that takes keys itself (a table, a text field, a menu) holds it.
 
-The mark has **three** states, not two:
-
-| Mark | Meaning |
+| Key | Does |
 |---|---|
-| *(nothing)* | Checked against the live calibration, and current. |
-| **⚠** amber | Measured under a calibration that has since changed. Double-click the row to return to the span, then **Add to list** for a row under the current calibration. |
-| **?** | No verdict. The row's recording is not open (or the row predates the stamp columns), so the app **cannot** compare. It is *not* known to match. |
+| **C** | Catch the event under the pointer: find it and fit both edges. Turns Measure on if it is off. |
+| **S** / **F** | Put the start / finish edge at the pointer, fitted to the step nearest it. |
+| **Shift+S** / **Shift+F** | Put that edge exactly at the pointer. |
+| **D** | Add the mask as an event. |
+| **Shift+D** | Add, then go to the next window. |
+| **G** / **Shift+G** | Next / previous window at the current zoom (the Scan step). |
+| **X** | Discard the mask; Measure stays on. |
+| **E** | Draw mode on or off (also **View ▸ Drag draws an event span (draw mode)**, Ctrl+Shift+E). |
+| Return / Enter, **Esc** | Add, and cancel a draw or discard the mask. These two act only when the trace got focus from a click or the pointer arriving, so a habitual Return or Esc after closing a dock does nothing. |
 
-The `?` is the one worth knowing about: without it, "nobody can check this" would be drawn exactly
-like "checked, and current." And a row that was already **⚠** when you closed its recording **keeps**
-its ⚠, with a tooltip saying the check can no longer be repeated — the numbers did not change when
-the document closed, so neither does what was true about them.
+**Draw mode.** With draw mode on, a plain left-drag on the trace draws a span instead of box-zooming,
+and releasing fits its edges. Holding **Option** while you start a drag does the opposite of the
+mode, so a one-off span needs no mode and a quick zoom needs no switch. The label on the trace says
+`draw` while it is on.
 
-One more thing worth knowing: the live readout may be a strided preview on a very large selection
-(and says *approx* when it is), but *Add to list* re-measures the span over **every** sample before
-it stores a row. Nothing approximate is ever saved.
+**Fitted edges.** A fitted edge sits on the step, not where the pointer happened to be. If an edge
+cannot be fitted (a ramp, a noisy shoulder), the mask keeps the placement, the label says
+`start not fitted` or `finish not fitted`, and the status line says which key to press: **S** / **F**
+to try again, **Shift+S** / **Shift+F** to set it exactly, or **D** twice to add it as placed. Each
+row records how its bounds were made (the `bounds_source` column: `drawn`, `placed` or
+`fit:step`) and the span you drew.
 
-Manual measurements are kept as their own list, separate from the auto-detected events — but
-**Edit ▸ Undo reaches them too** (§9b): deleting rows here is recoverable.
+**The preview and the statistics.** The Measure tab (**Cursors (add events by hand)**) shows two
+different things:
+
+- The **preview** is the row the add would store, measured the way the chosen table measures its own
+  events: dwell, depth, baseline, and whether the automatic rules would flag it. It says what signal
+  that is (*Measured on the raw signal*, or *Schmitt's signal (low-pass bessel 5000 Hz)*) and how many
+  hand-made events the channel has in each table. If the add would be refused (the span overlaps an
+  event, or lies outside the stretch the detector searched) the preview says so before you press
+  anything. Above 200,000 samples it says the span is too long to preview live; the stored row is
+  still measured on every sample.
+- **Statistics (not stored)** are the unstored readout: dwell, amplitude, ΔI/I₀, level, baseline, mean,
+  median, std, variance, min, max, peak-to-peak, RMS, skewness, **kurtosis** (excess), area/ECD and SNR.
+  They are measured on the same signal as the preview and against the **table's own baseline and
+  noise**, so the baseline here is the baseline the stored row will carry. Choose the **amplitude
+  method** (`median`, `mean`, `min`, `max`, `mode`); amplitude is the signed distance from the baseline
+  to that level, positive when the current moves the way the table's events do. There is no *measure
+  on* choice any more: the table decides (Manual measures the raw calibrated signal; a detector table
+  measures its own processed signal).
+
+Drag either circular edge handle to resize the mask, or its shaded body to move it; both update live.
+
+**What an add is refused for**, each with a sentence that names the way forward: no sample rate
+declared (an event needs a dwell time; declare one in File Info), a channel that is not a current
+channel, a table on another clock or calibration than its recording (*Rebuild the Manual table*, or
+re-run the detector), a span outside the stretch the detector searched (add it to Manual, or re-run
+over the whole recording), a span that overlaps an event the table already has (select that event to
+curate it, so nothing is counted twice), and a Reconciled table.
+
+**Moving along the recording.** **G** / **Shift+G** (or **Scan ▶** / **Shift+→**) move by 90% of the
+view; the 10% overlap keeps boundary events visible. A horizontal two-finger swipe, or a horizontal
+wheel notch, or **Shift** with the wheel, slides the view along time by a tenth of the visible span; a
+vertical swipe or notch moves the signal up or down. A trackpad swipe picks one axis and keeps it
+until you lift your fingers. **Shift+↑** / **Shift+↓** zoom in and out around the pointer when it is
+over the trace (around the centre otherwise); **+ / −** adjust the working zoom.
+
+**Working with hand-made events.**
+
+- They show an **M** on their gallery tile and a *Hand-made* line in the inspector; the filters
+  *Hand-made only*, *Detected only* and *Merged (hand + detected)* appear when the table has them.
+- **Delete** a hand-made event from the inspector's **Delete** button, or right-click it in the
+  table or the gallery. Delete is one undo step, and offered only for hand-made rows: a detected
+  event is rejected, not deleted.
+- **Re-running detection keeps them.** Each hand-made event is re-measured under the new run, a
+  label moves onto a detection of the same event, and the status line says what was kept, what is
+  now detected, and what was left out because the run did not search there. **Edit ▸ Undo** brings
+  the previous table back.
+- **Analysis ▸ Copy hand-made events to…** copies the events you drew in the table on screen into
+  another table of this channel, measured the way that table measures; running it twice copies
+  nothing twice.
+- **Analysis ▸ Include hand-made events in exports** (on by default) decides whether the events
+  export and the training export carry them; the export's sidecar records how many were left out.
+- **Analysis ▸ Export event statistics…** writes the unstored statistics above for every event of the
+  table on screen, every table on the channel, or every Manual table in the project, to one CSV with
+  a `signal_basis` column naming each table's signal.
+
+**A hand-made row records what it was measured under**: the table's baseline estimator, polarity and
+noise level, the calibration, and the sample rate. Change the calibration or declare a different
+sample rate afterwards and the table is **marked stale, never rescaled**, exactly as a detection is;
+**Rebuild** on the amber line re-measures every Manual event under the live basis and keeps your
+accept / reject decisions.
+
+**Old measurements.** Earlier versions saved measurements to a separate list. If a project holds
+any, the Measure tab shows them as **Old measurements (N)**: you can still go to one, remove one and
+**Export CSV…** (the 32-column measurement schema, provenance stamps included), but they are no longer
+added to or edited. **Analysis ▸ Convert old measurements to events…** turns the ones you tick into
+accepted, reviewed events in this channel's Manual table (their numbers are re-measured as events, so
+they can differ from the measurement's). Converted originals stay in the list and are hidden from the
+Distributions plot source so nothing is counted twice. **Edit ▸ Undo** reaches both lists (§9b).
 
 ---
 
@@ -1546,8 +1606,8 @@ this session, and the menu names the step it will undo — *"Undo Re-run detecti
 events"*, *"Undo Resize event mask"*, *"Undo Edit event amplitude"*, *"Undo Accept all events"*.
 **Redo** is Ctrl+Shift+Z / ⇧⌘Z.
 Everything that can change an event table is covered: a re-detection, a merge, an accept/reject, a
-batch Accept-all / Reject-all, a mask resize in the Event Inspector, a hand-added missed event and
-a re-measure, and amplitude choices, red-level edits and resets. An undo restores the table
+batch Accept-all / Reject-all, a mask resize in the Event Inspector, a hand-made event (added,
+deleted, copied or carried into a re-run) and a re-measure, and amplitude choices, red-level edits and resets. An undo restores the table
 **exactly** — the accept/reject decisions, optional amplitude audit fields, any flag token
 you typed, and the hand-added markers.
 
@@ -1619,14 +1679,13 @@ the exported table and sidecar in the StudentModel notebook or another external 
    detector table containing both automatic candidates and `added=True` missed events is eligible,
    so a manual mark can converge with an overlapping detector candidate.
 2. Use the **Event table** selector above the table to choose a **source detector table**. If a
-   detector missed a real event, turn on **Analysis ▸ Measure event**, bracket it on the trace, and
-   press **Mark selection as missed event**. Do this *before* reconciliation. A Reconciled table is
-   a derived, curation-only view: add, merge, resize/revert a mask, or re-measure a baseline in a
-   source table, then reconcile again. **Add to list / Ctrl+M** writes to the separate manual
-   measurement list; it is not a reconciliation source. Use **Mark selection as missed event /
-   Ctrl+Shift+M** in a detector table when the region is intended to become a reviewed
-   detector-training candidate. The shortcut remains callable with a recording selected so it can
-   explicitly tell you when there is no source detector or Reconciled is the current table.
+   detector missed a real event, point at it on the trace and press **C** then **D** (or bracket it
+   with **Analysis ▸ Measure event** and press **Ctrl+M**). Do this *before* reconciliation. A
+   Reconciled table is a derived, curation-only view: add, merge, resize/revert a mask, or re-measure
+   a baseline in a source table, then reconcile again. An event added while a source table is shown
+   goes into that table as a reviewed, accepted, hand-added candidate, so it takes part in
+   reconciliation. An event added to a channel's **Manual** table is a source too, as one more table.
+   Adding while Reconciled is shown is refused with a sentence that says so.
 3. Choose **Analysis ▸ Reconcile detector results…** and tick the source detection(s). The command
    is available with either two source detector tables, or one table containing both automatic and
    hand-added candidates. Multiple sources must agree on calibration, baseline measurement
@@ -1726,7 +1785,8 @@ Those steps need an external dataset/versioning pipeline.
 **Analysis ▸ Distributions…** opens the **Distributions** page of the Analysis Explorer over the per-event
 tables the app holds:
 **one source per (recording, channel, detector result) with at least one row** — Schmitt, CUSUM, ML,
-and Reconciled tables are offered separately, segments included — plus your **manual measurements**.
+Manual and Reconciled tables are offered separately, segments included — plus any **old manual
+measurements** not yet converted to events.
 **Use accepted events only** is ticked by default; untick it to plot the rejected rows alongside the
 kept ones.
 
@@ -2374,7 +2434,7 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   not at all — a table from today beside a sidecar from last month is not a partial export, it is an
   export with a confidently wrong provenance record. CSVs exported before that sidecar existed cannot
   be repaired in place — see `docs/RELEASE_NOTE_BASELINE.md` for the note to attach to them.
-- **Manual measurement ▸ Export CSV…** — the manual-measurement list, **32 columns**, including
+- **Old measurements ▸ Export CSV…** (Measure tab) — the old manual-measurement list, **32 columns**, including
   kurtosis, the amplitude method, and four provenance stamps that make a pooled table safe to read
   downstream: `units`, `cal_gain` and `cal_offset` (the calibration each row was measured under — a
   table may legitimately mix pA and nA rows from different recordings, and these are what tell them
@@ -2526,17 +2586,23 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | Ctrl+D | Run detection |
 | **Ctrl+I** | **Open the Event inspector** |
 | **Ctrl+G** | **Open the Event gallery** |
-| **Ctrl+M** | **Save the current cursor region as an independent manual measurement (works from any tab; not a detector-training candidate)** |
-| **Ctrl+Shift+M** | **Write the current cursor region as a reviewed, accepted, hand-added event in the selected source detector table; loudly refuses without a source or on Reconciled** |
+| **Ctrl+M** | **Add the current cursor region as a hand-made event in the table named beside the Add button (Schmitt, CUSUM, Manual...); works from any tab; refuses on Reconciled** |
+| **Ctrl+Shift+E** | **Draw mode: a plain left-drag on the trace draws an event span instead of box-zooming (Option inverts it for one drag)** |
+| **Trace focused: C** | **Catch the event under the pointer and fit both edges** |
+| **Trace focused: S / F** | **Put the start / finish edge at the pointer, fitted (Shift+S / Shift+F: exactly)** |
+| **Trace focused: D** | **Add the mask as an event (Return and Enter too); Shift+D adds and moves to the next window** |
+| **Trace focused: G / Shift+G** | **Next / previous window at the current zoom** |
+| **Trace focused: X / Esc** | **Discard the mask (Esc first cancels a draw in progress)** |
+| **Trace focused: E** | **Draw mode on or off** |
 | **Ctrl+Shift+F** | **Open the Signal Conditioning window (the classical detectors' signal chain)** |
 | **Signal Conditioning:** Ctrl+1 / Ctrl+2 / Ctrl+3 | Time / Spectrum / Response preview tab |
 | Ctrl+0 / trace-focused Home / **Full** button | Reset zoom to the complete trace |
 | Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history) |
 | Ctrl+E | Centre the view on the current selection |
 | **Trace focused: Shift+← / Shift+→** | **Scan to the previous / next view at the current zoom, with 10% overlap; carry active Measure cursors with it** |
-| **Trace focused: Shift+↑ / Shift+↓** | **Zoom in / out one incremental step around the centre** |
+| **Trace focused: Shift+↑ / Shift+↓** | **Zoom in / out one incremental step around the pointer (the centre when the pointer is off the trace)** |
 | Double-click trace | Place/activate a Measure mask at the click, capped at 20% of the visible view |
-| Mouse wheel on trace | Move the signal vertically only (up moves up; down moves down) |
+| Wheel / two-finger swipe on trace | Vertical notch or swipe moves the signal up or down; horizontal notch, Shift+wheel or horizontal swipe slides the view along time (a swipe keeps the axis it started on) |
 | **Event inspector:** ←/→ | Previous / Next event |
 | **Event inspector:** A / R / Space | Accept / Reject / toggle (then the next event of the filter when **Advance after decision** is on) |
 | **Event inspector:** T | Centre the main trace on the event on screen |

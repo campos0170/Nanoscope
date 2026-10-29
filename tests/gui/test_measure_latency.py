@@ -365,6 +365,10 @@ def test_add_current_stores_exact_values_after_an_approximate_preview(panel, win
     """The invariant, end to end: the readout was a 1:3 preview; the stored row must equal a
     full-precision measure_selection over EVERY sample of the same span."""
     mp, doc_id = panel
+    # The truth below is a bare `measure_selection` (local flank baseline); in the app the
+    # Analysis panel supplies the target table's baseline instead, which test_measure_tab_preview
+    # covers. This test pins the exact-commit invariant of the panel's own measurement.
+    mp.set_basis_provider(None)
     _place(window, doc_id, *_BIG)
     assert mp.current_measurement()["approximate"] is True
 

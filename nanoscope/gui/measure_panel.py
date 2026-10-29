@@ -13,15 +13,24 @@ Phase 1) driven by the :class:`~nanoscope.gui.trace_view.TraceView` Measure regi
    filling a rich readout (dwell, amplitude, dI/I0, moments, skew, KURTOSIS,
    area/ECD, SNR, …).
 3. The **amplitude method** combo (median/mean/min/max/mode) recomputes live.
-4. **Add to list** (or ``Ctrl+M``) stamps the current measurement — a running
-   ``measurement_id``, the recording + channel names AND the durable identity pair
+4. **Add event** (or ``Ctrl+M``) ASKS the owner to file the cursor region as an event
+   (``addRequested``); the owner's door measures it under the chosen table's provenance. The
+   saved-measurement list this panel used to add to is now the **Old measurements** group,
+   shown only while it holds rows: :meth:`add_current` still stamps the current measurement —
+   a running ``measurement_id``, the recording + channel names AND the durable identity pair
    ``doc_key``/``channel_index`` — into a :class:`_MeasurementsModel` over
-   :data:`~nanoscope.analysis.measure.MEASUREMENT_SCHEMA`; rows can be labelled,
-   sorted, multi-selected, copied as TSV and removed. **Export CSV…** writes the
+   :data:`~nanoscope.analysis.measure.MEASUREMENT_SCHEMA`, but no control calls it. Rows can be
+   labelled, sorted, multi-selected, copied as TSV and removed. **Export CSV…** writes the
    whole table via :func:`write_measurements_with_basis` — ``MEASUREMENT_SCHEMA``'s
    32 columns exactly as
    :func:`~nanoscope.analysis.measure.write_measurements_csv` writes them, plus the
    additive ``signal_basis`` stamp as a 33rd, last column.
+5. :meth:`set_basis_provider`: the owner answers, for the span under the cursors, which table
+   the next event goes to, the signal that table measures on and the row it would store.
+   The **preview** line shows that row; the statistics answer against that signal, the mean of
+   the table's baseline track over the span and the table's noise, so the baseline read here is
+   the baseline stored. Without a provider (a panel on its own) steps 2 and 3 measure as they
+   always did, on the *measure on* choice below.
 
 LIVE IS BOUNDED; SAVED IS EXACT (why step 2 and step 4 do not compute the same thing)
 --------------------------------------------------------------------------------------
@@ -46,13 +55,13 @@ rule keeps it honest:
   selection with ``max_samples=None`` before stamping a row, so a saved measurement is
   computed over EVERY sample of its span whatever the readout happened to be showing. The
   live dict (:meth:`current_measurement`) may be a preview and says so; the stored row
-  cannot be. *Mark selection as missed event* needs nothing here — its owner
-  (``AnalysisPanel.add_current_selection_as_event``) reads the cursor bounds off the shared
-  TraceView and characterizes the raw samples itself, so it never sees a preview at all.
+  cannot be. Adding an EVENT needs nothing here — its owner
+  (``AnalysisPanel.add_manual_event``) reads the cursor bounds off the shared TraceView and
+  measures the stored row itself, so it never sees a preview at all.
 
 Because a preview can be visibly incomplete, it is LABELLED: an "approx" note under the
 readout gives the sampling ratio and the statistics that were blanked, and it clears the
-instant an exact value is in hand (including right after *Add to list*, which refreshes the
+instant an exact value is in hand (including right after :meth:`add_current`, which refreshes the
 readout with the exact numbers it just stored).
 
 WHICH SIGNAL IS BEING MEASURED — RAW OR PROCESSED (the *measure on* row)
@@ -165,7 +174,7 @@ row is a LIVE handle on its span:
 * if the row belongs to a DIFFERENT open document/channel, the panel emits
   :attr:`navigateRequested` and lets its owner switch the app selection first (it never
   reaches into the Files dock itself — same routing pattern as
-  :attr:`markMissedRequested`);
+  :attr:`addRequested`);
 * if the row's recording is not open at all, the status line says so.
 
 Identity is the row's ``doc_key`` (``core.segment.persistent_key``) + ``channel_index``,
@@ -246,6 +255,7 @@ from ..core.sources import DETECTION_MODULE_IDS
 from ..core.types import ChannelKind
 from .busy_cursor import begin_wait_cursor, end_wait_cursor
 from .export_paths import ask_export_path
+from .hand_row_preview import HandRowPreview
 from .trace_view import MEASURE_MAX_VIEW_FRACTION, TraceView
 
 __all__ = ["MeasurePanel"]
@@ -308,8 +318,8 @@ _STALE_ROW_TIP = (
     "Measured under a calibration that has since changed. The row's units / cal_gain / "
     "cal_offset columns hold the gain, offset and units it was measured under; the "
     "Calibration panel holds the current ones. Saved numbers are the record of what was "
-    "measured and are never rescaled — re-measure the span (double-click the row to "
-    "return to it, then Add to list) for a row under the current calibration."
+    "measured and are never rescaled. Analysis ▸ Convert old measurements to events… "
+    "re-measures the span, as an event, under the current calibration."
 )
 
 # THE THREE STATES A SAVED ROW'S CALIBRATION STAMP CAN BE IN, and why there are three
@@ -335,9 +345,8 @@ _RATE_STALE_ROW_TIP = (
     "time unit…). The row's t_start_s, dwell_s and area_ecd were computed at the recording's "
     "previous sample rate (and its t0_s was read before the column's unit was re-declared, "
     "when that is what changed); its start_idx / end_idx span is still right. Saved numbers "
-    "are the record of what was measured and are never rescaled — re-measure the span "
-    "(double-click the row to return to it, then Add to list) for a row under the declared "
-    "rate."
+    "are the record of what was measured and are never rescaled. Analysis ▸ Convert old "
+    "measurements to events… re-measures the span, as an event, under the declared rate."
 )
 _RATE_LAPSED_ROW_TIP = (
     "Measured under a time base that had already been re-declared when this row was last "
@@ -950,10 +959,6 @@ class MeasurePanel(QtWidgets.QWidget):
     Emits:
         measureActiveChanged(bool): the Measure toggle flipped (any cause) — lets
             MainWindow keep its ``Analysis ▸ Measure event`` menu check in sync.
-        markMissedRequested(): the user asked to mark the current cursor selection as
-            an event the DETECTOR missed. The owner (AnalysisPanel) characterizes the
-            bracketed span and appends it to the active detection as an ``added`` event
-            — the panel itself never touches the detection, only announces the request.
         measurementsChanged(): the saved-measurements table gained, lost, or replaced a row through
             a user edit (Add to list / Update selected / Remove selected / a label edit) — lets MainWindow
             treat manual measurements as unsaved work. NOT emitted by
@@ -963,15 +968,25 @@ class MeasurePanel(QtWidgets.QWidget):
             that belongs to a DIFFERENT open document/channel than the one selected. The
             panel cannot select a document itself (that is the Files dock's job and no panel
             imports another panel), so it announces the target and its owner routes the
-            selection — the same shape as ``markMissedRequested``. Once the app selection
+            selection — the same shape as ``addRequested``. Once the app selection
             lands back on this panel through ``set_selection`` the panel finishes the jump
             (cursors + zoom) itself.
+        addRequested(): the user pressed the Add button. The panel no longer decides where
+            the row goes: its owner answers (the event add door), and ``set_add_target_text``
+            says next to the button where that is. :meth:`add_current` stays a plain method
+            for the legacy measurement-list path and for tests.
+
+    The owner also installs :meth:`set_basis_provider`. For the span under the cursors the panel
+    asks it which table the next event would go to, the signal that table measures on and the row
+    it would store: the preview line shows the row, and the unstored statistics answer against
+    that signal and the table's own baseline and noise, so what the tab shows is what Ctrl+M
+    stores. With no provider (a panel on its own) it measures as it always did.
     """
 
     measureActiveChanged = Signal(bool)
-    markMissedRequested = Signal()
     measurementsChanged = Signal()
     navigateRequested = Signal(str, int)
+    addRequested = Signal()
 
     # (row label, MEASUREMENT_SCHEMA key). Order = the live readout's rows.
     _READOUT_ROWS: tuple[tuple[str, str], ...] = (
@@ -1009,6 +1024,9 @@ class MeasurePanel(QtWidgets.QWidget):
         self._target: tuple[str, int] | None = None   # (doc_id, channel) — the CURRENT channel
         self._selected_event: tuple[str, int, int, int] | None = None  # doc,ch,start,end
         self._last_stats: dict[str, Any] | None = None
+        #: Whether the toggle now being flipped may seed a mask. Read by `_on_toggle`; set only
+        #: for the duration of a `set_active(..., seed=False)` call.
+        self._toggle_seed: bool = True
         # Why the last measurement attempt produced nothing, when the reason is a defect
         # in the DATA rather than an ordinary gesture. See `_measure` / `refusal_note`.
         self._refusal: str | None = None
@@ -1024,11 +1042,17 @@ class MeasurePanel(QtWidgets.QWidget):
         #: says what moved after its recording closes, rather than lapsing into the
         #: calibration sentence.
         self._last_rate_state: dict[int, str] = {}
-        # Whether the active (doc, channel) has a stored detection — pushed in by the
-        # owner (AnalysisPanel). Gates the "Mark selection as missed event" button, which
-        # only makes sense when there is a detector output to add the missed event to.
+        # Whether the active (doc, channel) has a stored detection — pushed in by the owner
+        # (AnalysisPanel). It gates nothing here: an event can always be added, because a
+        # channel with no table files into its Manual table.
         self._detection_present: bool = False
         self._missed_gate_reason: str = ""
+        #: ``provider(doc_id, channel, start, stop, *, want_row) -> HandRowPreview``, see
+        #: :meth:`set_basis_provider`; ``_preview`` is its answer for the span on screen and
+        #: ``_measured_basis_kind`` the basis ('raw' / 'processed') the last measurement used.
+        self._basis_provider = None
+        self._preview: HandRowPreview | None = None
+        self._measured_basis_kind: str | None = None
         # The LIVE Preprocess-form parameters, pushed in by the owner (AnalysisPanel)
         # through `set_conditioning`. None / an empty dict means "no processing is
         # configured" FROM THE FORM, and the panel then asks `_stored_detection_chain`
@@ -1073,6 +1097,7 @@ class MeasurePanel(QtWidgets.QWidget):
         self._trace_view.sigMeasureChanged.connect(self._on_measure_changed)
         self._trace_view.sigMeasureFinished.connect(self._on_measure_finished)
         self._trace_view.sigMeasureActiveChanged.connect(self._on_trace_measure_active_changed)
+        self._trace_view.sigMeasureCleared.connect(self._on_trace_measure_cleared)
         self._trace_view.sigMeasurePlacementRequested.connect(
             self._on_trace_measure_placement_requested)
         # A layer toggle / view-mode change REBUILDS the TraceView, destroying every overlay
@@ -1103,7 +1128,7 @@ class MeasurePanel(QtWidgets.QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        title = QtWidgets.QLabel("Manual measurement (cursors)")
+        title = QtWidgets.QLabel("Cursors (add events by hand)")
         title.setStyleSheet("font-weight:600; font-size:13px;")
         root.addWidget(title)
 
@@ -1131,28 +1156,51 @@ class MeasurePanel(QtWidgets.QWidget):
             "Remove the live cursor mask. This never deletes a saved measurement or event.")
         self._clear_mask_btn.setEnabled(False)
         self._clear_mask_btn.clicked.connect(self.clear_mask)
+        # The Add button ASKS the owner to file the cursor region as an EVENT (`addRequested`);
+        # "→ Manual" / "→ Schmitt" beside it says where the row will go (`set_add_target_text`).
+        # The caption is IGNORED horizontally, with stretch, so it asks for no width at all: this
+        # row's un-wrappable width is what floored the whole Inspector dock once, and a caption
+        # must not do that again. It takes what the cell has to spare and shows nothing when it
+        # has none; the full text is always the tooltip.
+        self._add_button = QtWidgets.QPushButton("Add event")
+        self._add_button.setToolTip(
+            "Add the cursor region as an event in the chosen table.  (Ctrl+M)")
+        self._add_button.setEnabled(False)
+        self._add_button.clicked.connect(self._on_add_clicked)
+        self._add_target_label = QtWidgets.QLabel("")
+        self._add_target_label.setObjectName("addTargetLabel")
+        self._add_target_label.setStyleSheet("color:#8b9199; font-size:11px; padding-left:5px;")
+        self._add_target_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                             QtWidgets.QSizePolicy.Preferred)
+        self._add_target_label.setVisible(False)
+        add_cell = QtWidgets.QHBoxLayout()
+        add_cell.setContentsMargins(0, 0, 0, 0)
+        add_cell.setSpacing(0)
+        add_cell.addWidget(self._add_button, 1)
+        add_cell.addWidget(self._add_target_label, 1)
         tools.addWidget(self._toggle, 0, 0, 1, 2)
         tools.addWidget(self._snap_view_btn, 1, 0)
         tools.addWidget(self._snap_event_btn, 1, 1)
-        tools.addWidget(self._clear_mask_btn, 2, 0, 1, 2)
+        tools.addLayout(add_cell, 2, 0)
+        tools.addWidget(self._clear_mask_btn, 2, 1)
         tools.setColumnStretch(0, 1)
         tools.setColumnStretch(1, 1)
         root.addWidget(self.action_widget)
 
-        # -- mark the current cursor selection as an event the DETECTOR missed --
-        # A distinct action (own row) because it feeds the DETECTION event set, not the
-        # manual-measurement list below: it appends the bracketed span to the active
-        # detection as an ``added`` event so recall (and the training export) count it.
-        self._mark_missed_btn = QtWidgets.QPushButton("Mark selection as missed event")
-        self._mark_missed_tip = (
-            "Add the current cursor selection to the active detection as an event the "
-            "detector MISSED. It is characterized like a detected event, marked "
-            "accepted + added, and counts as a miss (FN) in the detector score. "
-            "Ctrl+Shift+M works while this tab is hidden.")
-        self._mark_missed_btn.setToolTip(self._mark_missed_tip)
-        self._mark_missed_btn.setEnabled(False)
-        self._mark_missed_btn.clicked.connect(self._on_mark_missed)
-        root.addWidget(self._mark_missed_btn)
+        # -- the event Ctrl+M would store -----------------------------------
+        # ALWAYS three lines tall, whatever it says, for the reason the basis line below is: a
+        # label that appears and disappears shoves the readout up and down under the pointer.
+        # Hidden outright only on a panel with no owner to ask (`set_basis_provider`).
+        self._event_preview = QtWidgets.QLabel("")
+        self._event_preview.setObjectName("eventPreview")
+        self._event_preview.setWordWrap(True)
+        self._event_preview.setTextFormat(Qt.PlainText)
+        self._event_preview.setStyleSheet("font-size:11px;")
+        self._event_preview.setFixedHeight(3 * self._event_preview.fontMetrics().height() + 6)
+        self._event_preview.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                          QtWidgets.QSizePolicy.Fixed)
+        self._event_preview.setVisible(False)
+        root.addWidget(self._event_preview)
 
         # -- amplitude method ---------------------------------------------
         method_row = QtWidgets.QFormLayout()
@@ -1191,6 +1239,7 @@ class MeasurePanel(QtWidgets.QWidget):
             lambda *_a: (self._stop_pending_recompute(),
                          self._render_basis_note(), self._recompute()))
         method_row.addRow("measure on", self._basis_combo)
+        self._method_form = method_row
         root.addLayout(method_row)
 
         # The basis line: ALWAYS present, ALWAYS two lines tall, whatever it says. It is
@@ -1209,7 +1258,11 @@ class MeasurePanel(QtWidgets.QWidget):
         self._sync_basis_controls()
 
         # -- live readout of every stat -----------------------------------
-        readout_box = QtWidgets.QGroupBox("Live statistics")
+        readout_box = QtWidgets.QGroupBox("Statistics (not stored)")
+        readout_box.setToolTip(
+            "Statistics of the span under the cursors, measured on the signal and against the "
+            "baseline and noise of the table the next event goes to. Nothing here is stored: "
+            "Add event stores the row shown above.")
         rlay = QtWidgets.QVBoxLayout(readout_box)
         rlay.setContentsMargins(6, 6, 6, 6)
         self._readout_table = QtWidgets.QTableWidget(len(self._READOUT_ROWS), 1)
@@ -1244,17 +1297,21 @@ class MeasurePanel(QtWidgets.QWidget):
         rlay.addWidget(self._refusal_label)
         root.addWidget(readout_box)
 
-        # -- add / remove / export / go-to --------------------------------
+        # -- the old measurement list ---------------------------------------
+        # Measurements saved before an event could be added by hand. Shown only while the list
+        # is not empty, labelled old, and no longer added to from here: Ctrl+M files an event.
+        # Go to, Remove, Export CSV and Analysis ▸ Convert old measurements to events stay.
         # A GRID, not one long row: the un-wrappable 3-button row is exactly what used to
-        # floor the whole Inspector dock's width, so the new actions go on a SECOND line
-        # instead of widening it further.
+        # floor the whole Inspector dock's width.
+        self._legacy_box = QtWidgets.QGroupBox("Old measurements (0)")
+        self._legacy_box.setToolTip(
+            "Measurements saved before events could be added by hand. They are kept and can "
+            "be exported or removed; Analysis ▸ Convert old measurements to events turns "
+            "them into events.")
+        legacy_lay = QtWidgets.QVBoxLayout(self._legacy_box)
+        legacy_lay.setContentsMargins(6, 6, 6, 6)
         btn_grid = QtWidgets.QGridLayout()
         btn_grid.setContentsMargins(0, 0, 0, 0)
-        self._add_button = QtWidgets.QPushButton("Add to list")
-        self._add_button.setToolTip(
-            "Append the current measurement to the table below.  (Ctrl+M)")
-        self._add_button.setEnabled(False)
-        self._add_button.clicked.connect(self.add_current)
         self._update_button = QtWidgets.QPushButton("Update selected")
         self._update_tip = (
             "Replace one selected saved measurement with the current cursor span and "
@@ -1306,17 +1363,17 @@ class MeasurePanel(QtWidgets.QWidget):
         # app already fixed once for the detection actions.
         self._export_processed_button = QtWidgets.QPushButton("Export processed trace…")
         self._export_processed_button.clicked.connect(lambda: self.export_processed_trace())
-        btn_grid.addWidget(self._add_button, 0, 0)
+        btn_grid.addWidget(self._goto_button, 0, 0)
         btn_grid.addWidget(self._remove_button, 0, 1)
-        btn_grid.addWidget(self._export_button, 2, 0)
-        btn_grid.addWidget(self._goto_button, 1, 0)
+        btn_grid.addWidget(self._export_button, 1, 0)
         btn_grid.addWidget(self._update_button, 1, 1)
-        btn_grid.addWidget(self._scope_check, 3, 0)
-        btn_grid.addWidget(self._markers_check, 3, 1)
-        btn_grid.addWidget(self._export_processed_button, 2, 1)
+        self._update_button.setVisible(False)   # the old list is not edited; the method remains
+        btn_grid.addWidget(self._scope_check, 2, 0)
+        btn_grid.addWidget(self._markers_check, 2, 1)
         btn_grid.setColumnStretch(0, 1)
         btn_grid.setColumnStretch(1, 1)
-        root.addLayout(btn_grid)
+        legacy_lay.addLayout(btn_grid)
+        root.addWidget(self._export_processed_button)
         self._sync_processed_export()
 
         # -- the saved-measurements table ---------------------------------
@@ -1347,7 +1404,11 @@ class MeasurePanel(QtWidgets.QWidget):
             lambda *_a: self._on_row_selection_changed())
         # A typed annotation is unsaved work exactly like an added row.
         self._model.dataChanged.connect(lambda *_a: self.measurementsChanged.emit())
-        root.addWidget(self._table_view, 1)
+        legacy_lay.addWidget(self._table_view, 1)
+        root.addWidget(self._legacy_box, 1)
+        self._model.rowsInserted.connect(lambda *_a: self._sync_legacy_box())
+        self._model.modelReset.connect(self._sync_legacy_box)
+        self._sync_legacy_box()
 
         # Keyboard: Ctrl+C copies the selected rows as TSV for a lab notebook, scoped to the
         # table so it never fights the Event Inspector's own window keys (←/→/A/R/Space) or
@@ -1452,11 +1513,11 @@ class MeasurePanel(QtWidgets.QWidget):
         """Tell the panel whether the active (doc, channel) has a stored detection.
 
         Pushed by the owner (:class:`~nanoscope.gui.analysis_panel.AnalysisPanel`) on
-        every result / selection change; it is the gate (together with a live cursor
-        selection) for the *Mark selection as missed event* button."""
+        every result / selection change. Adding an event does not depend on it (a channel with
+        no table files into its Manual table); it matters here because a detection arriving or
+        leaving is a chain arriving or leaving."""
         self._detection_present = bool(present)
         self._missed_gate_reason = "" if present else str(reason)
-        self._sync_mark_missed()
         # A detection arriving (or being dropped) is also a CHAIN arriving or leaving —
         # see :meth:`_stored_detection_chain`. This push already runs on every result /
         # selection change, so it is the hook that keeps the fallback chain live without
@@ -1653,6 +1714,13 @@ class MeasurePanel(QtWidgets.QWidget):
         if item is not None:
             item.setEnabled(self.processed_basis_available())
         self._render_basis_note()
+        # With an owner that supplies the table's own basis there is nothing left to choose:
+        # the preview line names the signal. A panel on its own keeps the choice.
+        owned = getattr(self, "_basis_provider", None) is not None
+        form = getattr(self, "_method_form", None)
+        if form is not None:
+            form.setRowVisible(self._basis_combo, not owned)
+        self._basis_note.setVisible(not owned)
         # The same chain change opens or closes the export's gate; its tooltip is the one
         # surface that has to re-say why.
         self._sync_processed_export()
@@ -1688,6 +1756,98 @@ class MeasurePanel(QtWidgets.QWidget):
                          "dimensionless scale, not in the channel's units.")
         self._basis_note.setText(text)
         self._basis_note.setToolTip(text)   # the two reserved lines can clip a long chain
+
+    def set_basis_provider(self, provider) -> None:
+        """Install the owner's answer to "what would an event here be measured under?".
+
+        ``provider(doc_id, channel, start, stop, *, want_row) -> HandRowPreview``. With one, the
+        unstored statistics follow the TABLE the next event goes to (its signal, baseline and
+        noise) and the preview line shows the row Ctrl+M would store, so the *measure on*
+        choice has nothing left to choose and goes away. ``None`` puts the panel back to
+        measuring on its own."""
+        self._basis_provider = provider
+        self._sync_basis_controls()
+        self._event_preview.setVisible(provider is not None)
+        self._stop_pending_recompute()
+        self._recompute()
+
+    def refresh_preview(self) -> None:
+        """Re-ask the provider for the span on screen: the table, its rows or the chosen table
+        moved under cursors that did not. A no-op with Measure off or no mask."""
+        if self._basis_provider is None or not self.is_active():
+            return
+        self._stop_pending_recompute()
+        self._recompute()
+
+    def event_preview(self) -> HandRowPreview | None:
+        """The provider's last answer for the span on screen, or ``None`` (no mask, no provider)."""
+        return self._preview
+
+    def event_preview_text(self) -> str:
+        """The preview line's TEXT (not its visibility, which a closed dock makes untrue)."""
+        return self._event_preview.text()
+
+    def _preview_text(self, preview: HandRowPreview | None) -> str:
+        """Three lines at most: the row that would be stored (or why not), then the basis."""
+        if preview is None:
+            return ("Drag a region on the trace, or press C over an event, to see the event "
+                    "Ctrl+M would store.")
+        if preview.reason:
+            return (f"No event can be stored here: {preview.reason}\n"
+                    "The statistics below are measured on this span alone.")
+        basis = f"Measured on {preview.basis_text}." if preview.basis_text else ""
+        tail = f"{basis} {preview.hand_counts}.".strip()
+        if preview.refusal:
+            return f"Would not be added to {preview.table}: {preview.refusal}\n{tail}"
+        row = preview.row
+        if row is None:
+            return (f"→ {preview.table}: too long to preview live; the stored row is measured "
+                    f"on every sample.\n{tail}")
+        units = self._units()
+        get = row.get
+        parts = [f"dwell {self._fmt_time(float(get('dwell_s', float('nan'))))}"
+                 if np.isfinite(float(get("dwell_s", float("nan")))) else "dwell —"]
+        depth = float(get("depth_pA", float("nan")))
+        frac = float(get("frac_depth", float("nan")))
+        if np.isfinite(depth):
+            parts.append(f"depth {depth:.4g}{(' ' + units) if units else ''}"
+                         + (f" ({frac * 100:.0f}%)" if np.isfinite(frac) else ""))
+        base = float(get("baseline_pA", float("nan")))
+        if np.isfinite(base):
+            parts.append(f"baseline {base:.4g}{(' ' + units) if units else ''}")
+        head = f"→ {preview.table}: " + " · ".join(parts)
+        if not bool(get("accepted", True)):
+            head += f" · would be flagged {get('flag') or 'by the automatic rules'}"
+        return f"{head}\n{tail}"
+
+    def _render_preview(self) -> None:
+        if self._basis_provider is None:
+            self._event_preview.setText("")
+            return
+        text = self._preview_text(self._preview)
+        self._event_preview.setText(text)
+        self._event_preview.setToolTip(text)
+
+    def _basis_for(self, start: int, stop: int, *, want_row: bool) -> HandRowPreview | None:
+        """The owner's answer for ``[start, stop)`` on the current target, or ``None``."""
+        if self._basis_provider is None or self._target is None:
+            return None
+        doc_id, channel = self._target
+        try:
+            return self._basis_provider(doc_id, int(channel), int(start), int(stop),
+                                        want_row=want_row)
+        except Exception as exc:  # noqa: BLE001 — the readout must survive its owner's trouble
+            # ...but not silently: a preview that fails must say so on the preview line, or it
+            # would read as "nothing to show" and the failure would never be found.
+            return HandRowPreview(
+                reason=f"the preview failed ({type(exc).__name__}: {exc}). "
+                       "Please report this; the event can still be added.")
+
+    def _sync_legacy_box(self) -> None:
+        """The old list shows only while it holds something, and says how much."""
+        n = len(self._model.df)
+        self._legacy_box.setTitle(f"Old measurements ({n})")
+        self._legacy_box.setVisible(n > 0)
 
     def _signal_for_basis(self, doc_id: str, channel: int, chan: Any) -> np.ndarray | None:
         """The array to measure for the CHOSEN basis, or None (refusing out loud).
@@ -1733,37 +1893,6 @@ class MeasurePanel(QtWidgets.QWidget):
         self._cond_cache = (key, data)
         return data
 
-    def _on_mark_missed(self) -> None:
-        """Announce that the current cursor selection should be added to the active
-        detection as a missed event. Guarded by the same condition that enables the
-        button; the owner reads the cursor bounds off the shared TraceView and does the
-        characterization + append.
-
-        Nothing about the live preview reaches the event: the owner characterizes the RAW
-        samples of the bracketed span itself, so a hand-added event is exact by construction
-        however approximate the readout was. It is also unbounded, so a big span gets the
-        same wait cursor an exact re-measurement does — the routing is a direct connection,
-        so the work happens inside this emit."""
-        if not self._can_mark_missed():
-            return
-        n = int((self._last_stats or {}).get("n_samples", 0))
-        with self._busy(n, f"Characterizing all {n:,} samples…"):
-            self.markMissedRequested.emit()
-
-    def _can_mark_missed(self) -> bool:
-        """A detection exists, the cursors are active on this target, and there is a
-        valid live selection to bracket."""
-        return (self._detection_present and self.is_active()
-                and self.can_measure() and self._last_stats is not None)
-
-    def _sync_mark_missed(self) -> None:
-        self._mark_missed_btn.setEnabled(self._can_mark_missed())
-        self._mark_missed_btn.setToolTip(
-            self._mark_missed_tip
-            + (("\n\n" + self._missed_gate_reason)
-               if not self._detection_present and self._missed_gate_reason else "")
-        )
-
     # -- public state ----------------------------------------------------------------------------
     def has_open_target(self) -> bool:
         """Whether the resolved target recording is still open, drawn or not."""
@@ -1780,13 +1909,39 @@ class MeasurePanel(QtWidgets.QWidget):
     def is_active(self) -> bool:
         return self._toggle.isChecked()
 
-    def set_active(self, on: bool) -> None:
-        """Programmatically flip the Measure toggle (MainWindow's menu action)."""
+    def set_active(self, on: bool, *, seed: bool = True) -> None:
+        """Programmatically flip the Measure toggle (MainWindow's menu action).
+
+        ``seed=False`` arms Measure WITHOUT the seeded 20% mask: Measure on, no mask yet
+        (``TraceView.measure_empty()``). That is how a caller that is about to place the mask
+        itself -- a catch, a drawn span, an edge key -- turns the tool on, so nothing is seeded
+        and measured first only to be thrown away. It only matters on the way ON, and only when
+        the toggle actually flips."""
         on = bool(on)
         if on and not self.can_measure():
             return
         if self._toggle.isChecked() != on:
-            self._toggle.setChecked(on)
+            self._toggle_seed = bool(seed)
+            try:
+                self._toggle.setChecked(on)
+            finally:
+                self._toggle_seed = True
+
+    def set_add_target_text(self, text: str) -> None:
+        """Say, next to the Add button, where the row it adds will go ("→ Manual", "→ Schmitt").
+        Empty hides it. The destination is the owner's; this only shows it."""
+        text = str(text or "").strip()
+        self._add_target_label.setText(text)
+        self._add_target_label.setToolTip(text)
+        self._add_target_label.setVisible(bool(text))
+
+    def add_target_text(self) -> str:
+        return self._add_target_label.text()
+
+    def _on_add_clicked(self, *_args) -> None:
+        """The Add button ASKS; the owner answers (`addRequested`). `add_current` is still the
+        plain method behind the legacy measurement list."""
+        self.addRequested.emit()
 
     def clear_mask(self) -> bool:
         """Remove the transient cursor mask without touching anything saved.
@@ -1858,15 +2013,16 @@ class MeasurePanel(QtWidgets.QWidget):
         if self._target is not None and self._session.has_document(self._target[0]):
             doc_id, channel = self._target
             # set_measure_active(True) seeds the region and emits sigMeasureChanged,
-            # which drives the first _recompute; (False) tears it down.
-            self._trace_view.set_measure_active(doc_id, channel, checked)
+            # which drives the first _recompute; (False) tears it down. With seed=False
+            # (`set_active(True, seed=False)`) it seeds nothing: Measure on, no mask.
+            self._trace_view.set_measure_active(
+                doc_id, channel, checked, seed=self._toggle_seed)
         if not checked:
             self._stop_pending_recompute()   # the region is gone; nothing left to measure
             self._refusal = None             # ... and so is the selection it described
             self._install_stats(None)
         self._clear_mask_btn.setEnabled(checked)
         self._sync_snaps()
-        self._sync_mark_missed()
         self._sync_update_button()
         self.measureActiveChanged.emit(checked)
 
@@ -1876,6 +2032,15 @@ class MeasurePanel(QtWidgets.QWidget):
             self._toggle.setChecked(False)
         self._clear_mask_btn.setEnabled(bool(active and self._toggle.isChecked()))
         self._sync_update_button()
+
+    def _on_trace_measure_cleared(self) -> None:
+        """Measure is still ON but the mask is gone (an add discarded it, the X key, a cancelled
+        draw). Drop the readout and the statistics with it: ``_last_stats`` describes a span that
+        no longer exists, and left standing it is what Add / Ctrl+M would go on saving -- the
+        event just added, a second time."""
+        self._stop_pending_recompute()      # a queued frame would measure the mask that is gone
+        self._refusal = None
+        self._install_stats(None)
 
     def _snap_to_view(self) -> None:
         self._place_mask_in_view()
@@ -2069,16 +2234,24 @@ class MeasurePanel(QtWidgets.QWidget):
         the open-pore reference), so the panel passes only the geometry + method + the cost
         bound. Anything that PERSISTS the result must go through ``_exact_stats`` instead."""
         stats: dict[str, Any] | None = None
+        preview: HandRowPreview | None = None
         if self.is_active() and self.can_measure():
             bounds = self._trace_view.measure_bounds()
             if bounds is not None:
+                # The row Ctrl+M would store is measured only while it is cheap (the same bound
+                # the live statistics use); a longer span is still described against the table's
+                # basis, and the stored row is exact.
+                preview = self._basis_for(
+                    bounds[0], bounds[1],
+                    want_row=(int(bounds[1]) - int(bounds[0])) <= _LIVE_MAX_SAMPLES)
                 stats = self._measure(bounds[0], bounds[1],
                                       self._method_combo.currentText(),
-                                      max_samples=_LIVE_MAX_SAMPLES)
-        self._install_stats(stats)
+                                      max_samples=_LIVE_MAX_SAMPLES, basis=preview)
+        self._install_stats(stats, preview)
 
     def _measure(self, start: int, stop: int, method: str,
-                 *, max_samples: int | None) -> dict[str, Any] | None:
+                 *, max_samples: int | None,
+                 basis: HandRowPreview | None = None) -> dict[str, Any] | None:
         """One ``measure_selection`` call on the current target, or None if it cannot run.
 
         The single seam both the live path and the exact-commit path go through, so they can
@@ -2093,11 +2266,32 @@ class MeasurePanel(QtWidgets.QWidget):
         doc_id, channel = self._target
         try:
             chan = self._session.calibrated(doc_id, channel)
-            # WHICH ARRAY — the one question this method used to answer implicitly, and
-            # wrongly whenever the processed curve was on screen (audit, 2026-09-02).
-            # None means the chosen basis is unavailable and `_signal_for_basis` has
-            # already written the reason into `_refusal`: blank readout, visible cause.
-            data = self._signal_for_basis(doc_id, channel, chan)
+            if basis is None:
+                basis = self._basis_for(start, stop, want_row=False)
+            # THE TABLE'S OWN BASIS when the owner supplies one: its signal, the mean of its
+            # baseline track over the span (what the stored row's `baseline_pA` will be) and its
+            # noise, so these numbers are not a second set of amplitudes on a local flank
+            # baseline. `measure_selection` counts polarity the other way round (positive when
+            # the selection sits BELOW the open pore), hence the sign.
+            owned = basis is not None and basis.signal is not None
+            if owned:
+                data = basis.signal
+                extra: dict[str, Any] = {}
+                if np.isfinite(basis.baseline):
+                    extra["baseline"] = float(basis.baseline)
+                if np.isfinite(basis.noise_rms) and basis.noise_rms > 0:
+                    extra["noise_rms"] = float(basis.noise_rms)
+                if basis.polarity in (-1, 1):
+                    extra["polarity"] = -int(basis.polarity)
+                self._measured_basis_kind = basis.basis_kind
+            else:
+                # WHICH ARRAY — the one question this method used to answer implicitly, and
+                # wrongly whenever the processed curve was on screen (audit, 2026-09-02).
+                # None means the chosen basis is unavailable and `_signal_for_basis` has
+                # already written the reason into `_refusal`: blank readout, visible cause.
+                data = self._signal_for_basis(doc_id, channel, chan)
+                extra = {}
+                self._measured_basis_kind = self.measurement_basis()
             if data is None:
                 return None
             return measure_selection(
@@ -2108,6 +2302,7 @@ class MeasurePanel(QtWidgets.QWidget):
                 amplitude_method=method,
                 units=chan.units or "",
                 max_samples=max_samples,
+                **extra,
             )
         except NonFiniteSelection as exc:
             # The ONE refusal the user has to be told about: it means the samples under
@@ -2120,14 +2315,19 @@ class MeasurePanel(QtWidgets.QWidget):
         except (ValueError, TypeError, KeyError):
             return None
 
-    def _install_stats(self, stats: dict[str, Any] | None) -> None:
-        """Adopt ``stats`` as the current measurement and refresh everything that shows it."""
+    def _install_stats(self, stats: dict[str, Any] | None,
+                       preview: HandRowPreview | None = None) -> None:
+        """Adopt ``stats`` as the current measurement and refresh everything that shows it.
+
+        ``preview`` is the owner's answer for the same span; anything that installs ``None``
+        (Measure off, the mask gone) clears it with the numbers it described."""
         self._last_stats = stats
+        self._preview = preview if stats is not None else None
         self._render_readout(stats)
         self._render_approx_note(stats)
         self._render_refusal_note()
+        self._render_preview()
         self._add_button.setEnabled(stats is not None)
-        self._sync_mark_missed()
         self._sync_update_button()
 
     def _stop_pending_recompute(self) -> None:
@@ -2341,7 +2541,7 @@ class MeasurePanel(QtWidgets.QWidget):
         # row can only exist if that basis was reachable. A pooled table of 30 pA rows
         # some of which were low-passed and normalized and some of which were not is
         # permanently ambiguous without this column; see analysis/conditioning.py.
-        row[SIGNAL_BASIS_COLUMN] = self.measurement_basis()
+        row[SIGNAL_BASIS_COLUMN] = self._measured_basis_kind or self.measurement_basis()
         # The provenance stamps (see analysis.measure's module docstring). `units` is
         # already in `exact` — the measurement echoes the calibrated channel's label —
         # so only the calibration fingerprint and the recording's clock origin are
@@ -2379,15 +2579,32 @@ class MeasurePanel(QtWidgets.QWidget):
         Stamps BOTH the human labels (``recording`` / ``channel``) and the durable identity
         (``doc_key`` = :func:`~nanoscope.core.segment.persistent_key`, ``channel_index``)
         that *Go to measurement* resolves against — a display name is not an identity (a
-        segment can carry its parent's name verbatim)."""
-        if self._last_stats is None or self._target is None:
+        segment can carry its parent's name verbatim).
+
+        THE GEOMETRY IS READ FRESH from the trace (``measure_bounds()``), not trusted from the
+        readout: the readout lags a moving mask by the debounce, and after the mask was discarded
+        it describes a span that no longer exists. No mask, no row. A readout that disagrees with
+        the mask is settled first, so what is saved is what the mask brackets NOW."""
+        if self._target is None:
+            return False
+        bounds = self._trace_view.measure_bounds() if self.is_active() else None
+        if bounds is None:
+            if self._last_stats is not None:
+                self._install_stats(None)       # a stale readout must not stay on offer
+            return False
+        stats = self._last_stats
+        if (stats is None or int(stats["start_idx"]) != int(bounds[0])
+                or int(stats["end_idx"]) != int(bounds[1])):
+            self._stop_pending_recompute()
+            self._recompute()
+        if self._last_stats is None:
             return False
         exact = self._exact_stats()
         if exact is None:
             self._set_status("Could not re-measure the selection exactly; nothing was added.")
             return False
         if exact is not self._last_stats:
-            self._install_stats(exact)   # the readout now shows what is about to be stored
+            self._install_stats(exact, self._preview)   # the readout now shows what is stored
         row = self._saved_row_from_exact(
             exact, label="", measurement_id=self._next_id)
         if row is None:
@@ -2945,7 +3162,8 @@ class MeasurePanel(QtWidgets.QWidget):
             if path is None:
                 QtWidgets.QMessageBox.information(
                     self, "Export measurements",
-                    "No measurements to export yet — use “Add to list” first.")
+                    "There are no old measurements to export. Events are exported from "
+                    "Analysis ▸ Export events… (every hand-made event included).")
             return None
         if path is None:
             chosen = ask_export_path(
@@ -3200,7 +3418,6 @@ class MeasurePanel(QtWidgets.QWidget):
         if not ok and self._toggle.isChecked():
             self._toggle.setChecked(False)
         self._sync_snaps()
-        self._sync_mark_missed()
         self._clear_mask_btn.setEnabled(bool(ok and self.is_active()))
         self._sync_update_button()
 

@@ -46,6 +46,7 @@ from ..analysis.baseline import (
     FALLBACK_CLAMPED,
     ConstantBaselineWarning,
     adapt_to_length,
+    baseline_config_from_params,
     baseline_subtracted,
     characterisation_baseline,
     collect_baseline_warnings,
@@ -59,6 +60,7 @@ from ..analysis.conditioning import (
     BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME,
     BASELINE_CORRECTION_ZERO_CENTERED_DISPLAY,
     baseline_correction_export_paths,
+    chain_description,
     characterization_trace,
     conditioned_trace,
     conditioning_params,
@@ -72,7 +74,35 @@ from ..analysis.conditioning_recipes import (
     read_protocols_file,
     write_protocols_file,
 )
-from ..analysis.events import EventSet, mark_reviewed, stale_rate_reason
+from ..analysis.events import (
+    MANUAL_MODULE_ID,
+    EventSet,
+    analysed_span,
+    mark_reviewed,
+    stale_rate_hz,
+    stale_rate_reason,
+)
+from ..analysis.edge_fit import Catch, EdgeFit, catch_event, estimate_open_pore_tau, fit_edges
+from ..analysis.measurement_conversion import ConversionRow, TargetChannel, plan_conversion
+from ..analysis.event_statistics import event_statistics_frame
+from ..core.atomic_write import staged_path
+from ..analysis.manual_events import (
+    MANUAL_MODULE_VERSION,
+    EdgeRecord,
+    ManualContract,
+    CarryReport,
+    CopyReport,
+    build_contract,
+    carry_hand_rows,
+    contract_key,
+    copy_hand_rows,
+    delete_hand_rows,
+    hand_made_mask,
+    empty_manual_events,
+    insert_hand_row,
+    measure_hand_row,
+    rebuild_manual_events,
+)
 from ..analysis.measurement_quality import report_recording_messages
 from ..core.acquisition import acquisition_snapshot_messages
 from ..analysis.merge import (
@@ -132,6 +162,7 @@ from .baseline_panel import BaselinePanel
 from .baseline_workspace import BaselineCorrectionWorkspace
 from .categorical import category_colour
 from .export_paths import ask_export_path
+from .hand_row_preview import HandRowPreview
 from .measure_panel import MeasurePanel
 from .merge_panel import MergePanel
 from .panels import DetectionPanel, EventTable, ScorePanel, StatsPanel, SweepDialog
@@ -176,6 +207,77 @@ class MergeReport(NamedTuple):
     #: "stale_rate"`` only. It names the two rates, which a status token cannot.
     refusal: str = ""
 
+class AddOutcome(NamedTuple):
+    """What :meth:`AnalysisPanel.add_manual_event` did, so every gesture reports the same way.
+
+    ``message`` is the sentence for the status bar either way: a refusal names the reason and
+    the way forward, a success names the table the event landed in and how to undo it."""
+
+    ok: bool
+    message: str
+    event_id: int | None = None
+    module_id: str | None = None
+    #: True when this add also created the channel's Manual table.
+    created_table: bool = False
+
+
+class ConversionReport(NamedTuple):
+    """What :meth:`AnalysisPanel.convert_measurements` did, by measurement id."""
+
+    #: ``(measurement_id, event_id)`` of each row that became an event.
+    converted: tuple[tuple[int, int], ...] = ()
+    #: ``(measurement_id, reason)`` of each row left out.
+    skipped: tuple[tuple[int, str], ...] = ()
+    created_table: bool = False
+
+    def sentence(self) -> str:
+        n = len(self.converted)
+        text = f"Converted {n} measurement{'s' if n != 1 else ''} to Manual event{'s' if n != 1 else ''}."
+        if self.skipped:
+            m = len(self.skipped)
+            text += (f" {m} left out: {self.skipped[0][1]}"
+                     + ("." if m == 1 else " (and others)."))
+        return text
+
+
+class _FitContext(NamedTuple):
+    """Everything the edge fit and the catch need about the table a hand-made event is going
+    into, gathered once per gesture from the table's own provenance."""
+
+    module_id: str
+    signal: np.ndarray
+    fs: float
+    polarity: int
+    noise_rms: float
+    tau: float
+    baseline: Any            # per-sample track, or None for a legacy table
+    filter_rise_s: float | None
+    rise_s: float | None
+    starts: np.ndarray       # the table's events, sorted by start
+    ends: np.ndarray
+    accepted: np.ndarray
+    n: int
+    #: What a hand-made row of this table is stamped and measured under (the add door and the
+    #: Measure tab's preview read the same fields, so they cannot disagree).
+    provenance: Any = None
+    units: str = "pA"
+    recording: str = ""
+    pore_id: str = ""
+    next_id: int = 0
+    basis_kind: str = "raw"
+    basis_text: str = "the raw signal"
+
+
+class _ManualRebuild(NamedTuple):
+    """What the Manual-table rebuild job hands back: the recomputed contract and the table
+    re-measured under it. A plain value: the worker never touches the session."""
+
+    doc_id: str
+    channel: int
+    contract: ManualContract
+    events: EventSet
+
+
 _MODULE_ID = "detect.schmitt"
 _ML_MODULE_ID = "detect.keras"
 #: The owner's one-sided sequential CUSUM detector, selected by the Detection tab's own
@@ -192,6 +294,10 @@ _DETECTION_MODULE_IDS = tuple(STORED_DETECTION_MODULE_IDS)
 _RECONCILED_EDIT_REFUSAL = (
     "The Reconciled table is curation-only. Switch to a source detector table, "
     "add or merge there, then reconcile again."
+)
+_RECONCILED_ADD_REFUSAL = (
+    "Nothing was added: Reconciled is derived. Show Schmitt or CUSUM and add the event "
+    "there, or show the Manual table."
 )
 _RECONCILED_BASELINE_REFUSAL = (
     "The Reconciled table can contain rows from different detector conditioning and "
@@ -1028,6 +1134,10 @@ class AnalysisPanel(QtWidgets.QWidget):
     conditioningStateChanged = QtCore.Signal()
     #: A sentence for the status bar (protocol import/export, Copy as Python).
     statusMessage = QtCore.Signal(str)
+    #: A hand-made event was filed: its ``event_id`` and the table's module id. The windows that
+    #: show the table land on it quietly (no zoom, no pan), which `resultsChanged` cannot tell
+    #: them to do.
+    eventAdded = QtCore.Signal(int, str)
     #: Open the Signal Conditioning window on this stage key ("" = the current one).
     openSignalConditioningRequested = QtCore.Signal(str)
 
@@ -1151,6 +1261,31 @@ class AnalysisPanel(QtWidgets.QWidget):
         #: thrown away (C24). A different object here means a genuinely different table:
         #: a project restore installing the saved run, a detector switch, a re-detection.
         self._seeded_from: AnalysisResult | None = None
+        #: The table the user chose in the Table selector, per (doc_id, channel). A hand-made
+        #: event is filed in THIS table, so where Ctrl+M lands never depends on a side effect
+        #: (a detector run, a switch of recording, a reopen). A channel nobody chose a table
+        #: for files into whatever table is shown. See :meth:`target_module_id`.
+        self._chosen_table: dict[tuple[str, int], str] = {}
+        #: Manual-table contracts already built, by `manual_events.contract_key`. A contract
+        #: costs a whole-recording baseline, so it is built once per (recording, channel,
+        #: rate, calibration, estimator) and reused by every add and by the selector.
+        self._manual_contracts: dict[tuple[Any, ...], ManualContract] = {}
+        #: One-entry memo of the float32 array a Manual table is measured on. The baseline
+        #: memo is keyed on the IDENTITY of the array it is handed, so the contract and every
+        #: row must be handed the same object.
+        self._raw_cache: tuple[tuple[Any, ...], np.ndarray] | None = None
+        #: ``(doc_id, channel, frozen EventSet)`` of an in-flight Manual rebuild: what the
+        #: install compares the live table against, so a row added or curated while the job
+        #: ran is not overwritten by a three-second-old view of it.
+        self._manual_job: tuple[str, int, EventSet] | None = None
+        #: Open-pore autocorrelation times already measured for a detector table, by
+        #: (doc_id, channel, module_id, fs, baseline fingerprint): tau barely depends on the
+        #: rows, and measuring it is a pass over the recording.
+        self._tau_cache: dict[tuple[Any, ...], float] = {}
+        #: ``(doc_id, channel, module_id)`` of a table the panel must keep on screen while it
+        #: writes ANOTHER table (a copy into Manual): a write makes its table the shown one,
+        #: and a copy is not a request to move.
+        self._hold_shown: tuple[str, int, str] | None = None
 
         self._build_ui()
         self._wire_session()
@@ -1459,9 +1594,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         # itself the same way — otherwise the only thing that would notice is the
         # history's next comparison, and the dirty flag would wait for it.
         self._table.flagChanged.connect(self.eventFlagChanged)
-        # The measure tool's "Mark selection as missed event" — the owner reads the
-        # cursor bounds and appends the characterized span to the active detection.
-        self._measure.markMissedRequested.connect(self.add_current_selection_as_event)
+        # The Measure tab asks this panel what an event under its cursors would be: the table it
+        # goes to, the signal that table measures on, and the row it would store.
+        self._measure.set_basis_provider(self.preview_hand_row)
         # The baseline controls emit intent only; this panel runs the probe off-thread
         # (the whole job -- conditioning + probe + health pass -- measured 2 s on the
         # owner's 3 M-sample recording and 6 s on 9 M samples; see _on_probe_requested)
@@ -1704,7 +1839,13 @@ class AnalysisPanel(QtWidgets.QWidget):
         Its entries are rebuilt from ResultStore, so switching away never strands a result.
         """
         results = self._available_detection_results()
-        active_present = any(r.module_id == self._active_detection for r in results)
+        # The Manual table is ALWAYS on offer on a channel that can hold an event, even
+        # before one exists: choosing it is how a user starts working by hand with no
+        # detector run first. It is created when it is chosen (or on the first Ctrl+M).
+        manual_stored = any(r.module_id == MANUAL_MODULE_ID for r in results)
+        offer_manual = (not manual_stored) and self._manual_offered()
+        active_present = (any(r.module_id == self._active_detection for r in results)
+                          or (offer_manual and self._active_detection == MANUAL_MODULE_ID))
         self._result_selector.blockSignals(True)
         try:
             self._result_selector.clear()
@@ -1713,16 +1854,33 @@ class AnalysisPanel(QtWidgets.QWidget):
                     f"{detector_name(self._active_detection)} — no stored result", None)
             for res in results:
                 n = len(res.payload.df)
-                suffix = "candidate" if n == 1 else "candidates"
-                self._result_selector.addItem(
-                    f"{detector_name(res.module_id)} — {n:,} {suffix}", res.module_id)
-            if not results and self._sel is None:
+                if res.module_id == MANUAL_MODULE_ID:
+                    # Hand-drawn rows are events, not candidates a detector proposed.
+                    label = ("Manual — no events yet" if n == 0 else
+                             f"Manual — {n:,} event{'s' if n != 1 else ''}")
+                else:
+                    suffix = "candidate" if n == 1 else "candidates"
+                    label = f"{detector_name(res.module_id)} — {n:,} {suffix}"
+                self._result_selector.addItem(label, res.module_id)
+            if offer_manual:
+                self._result_selector.addItem("Manual — no events yet", MANUAL_MODULE_ID)
+            if not results and not offer_manual and self._sel is None:
                 self._result_selector.addItem("No event table", None)
             idx = self._result_selector.findData(self._active_detection)
             self._result_selector.setCurrentIndex(idx if idx >= 0 else 0)
-            self._result_selector.setEnabled(bool(results))
+            self._result_selector.setEnabled(bool(results) or offer_manual)
         finally:
             self._result_selector.blockSignals(False)
+
+    def _manual_offered(self) -> bool:
+        """Whether the Table selector offers the Manual table for the shown target: a current
+        channel with a sample rate, the same two facts the add door needs."""
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            return False
+        try:
+            return bool(self._gate_for(*self._sel)[0])
+        except Exception:  # noqa: BLE001 — a half-built selection offers nothing
+            return False
 
     @QtCore.Slot(int)
     def _show_result_choice(self, index: int) -> None:
@@ -1734,9 +1892,17 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
         doc_id, channel = self._sel
         res = self._session.results.get(doc_id, channel, module_id)
+        if res is None and module_id == MANUAL_MODULE_ID and self._manual_offered():
+            # Choosing Manual before it exists creates it empty: that is the user's choice.
+            self._chosen_table[(doc_id, channel)] = module_id
+            if self._create_manual_table(doc_id, channel) is None:
+                self._chosen_table.pop((doc_id, channel), None)
+                self._sync_result_selector()
+            return
         if res is None or not isinstance(res.payload, EventSet):
             self._sync_result_selector()
             return
+        self._chosen_table[(doc_id, channel)] = module_id
         if module_id == self._active_detection and res is self._seeded_from:
             return
         self._switching_result = True
@@ -1776,6 +1942,7 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
         doc_id, channel = self._sel
         res = self._session.results.get(doc_id, channel, module_id)
+        self._chosen_table[(doc_id, channel)] = module_id
         self._switching_detector = True
         try:
             self._active_detection = module_id
@@ -1796,8 +1963,13 @@ class AnalysisPanel(QtWidgets.QWidget):
         """WHICH stored detection this target shows: the previously-active detector, then
         Schmitt, then ML. The one place that order is written down — :meth:`set_selection`
         asks it to decide whether anything has changed, and :meth:`_load_stored_detection`
-        asks it to decide what to display, and the two must never disagree."""
-        for mid in dict.fromkeys((self._active_detection, *_DETECTION_MODULE_IDS)):
+        asks it to decide what to display, and the two must never disagree.
+
+        A table the user CHOSE for this target comes first: the choice is per channel and
+        survives a switch of recording, which the panel-wide ``_active_detection`` does not."""
+        chosen = self._chosen_table.get((doc_id, int(channel)))
+        for mid in dict.fromkeys(
+                (*((chosen,) if chosen else ()), self._active_detection, *_DETECTION_MODULE_IDS)):
             res = self._session.results.get(doc_id, channel, mid)
             if res is not None:
                 return res
@@ -2132,6 +2304,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         runnable, reason = self._gate_for(doc_id, channel)
         if not runnable:
             return reason
+        if res.module_id == MANUAL_MODULE_ID:
+            # A Manual table is repaired by Rebuild, never re-run; the gate above is its
+            # only precondition (a rate, on a current channel).
+            return None
         if self._reference_redetection_needed(res):
             return self._open_pore_reference_problem()
         if self._stale.kind not in (_STALE_CALIBRATION, _STALE_SAMPLE_RATE):
@@ -2397,15 +2573,22 @@ class AnalysisPanel(QtWidgets.QWidget):
             derived_only = np.zeros(len(df), dtype=bool)
         accepted = (df["accepted"].to_numpy(dtype=bool)
                     if "accepted" in df.columns else np.ones(len(df), dtype=bool))
-        out["n_hand_rejected"] = int((~accepted & ~derived_only).sum())
+        # Hand-MADE events are carried into the new run (`install_detection_result`), so
+        # nothing about them is at stake: counted here they would raise a prompt about work
+        # the re-run keeps. Everything else a person did to a DETECTED row still is.
+        mine = ~hand_made_mask(df)
+        if "flag" in df.columns:
+            out["n_notes"] = int((cells.map(notes).to_numpy(dtype=bool) & mine).sum())
+        out["n_hand_rejected"] = int((~accepted & ~derived_only & mine).sum())
         if ADDED_COLUMN in df.columns:
-            out["n_added"] = int(df[ADDED_COLUMN].to_numpy(dtype=bool).sum())
+            out["n_added"] = int((df[ADDED_COLUMN].to_numpy(dtype=bool) & mine).sum())
         if REVIEW_COL in df.columns:
             reviewed = (df[REVIEW_COL].astype("string") == REVIEW_DONE).fillna(False)
-            out["n_reviewed"] = int(reviewed.sum())
+            out["n_reviewed"] = int((reviewed.to_numpy(dtype=bool) & mine).sum())
         if "amplitude_method" in df.columns:
             choices = df["amplitude_method"].astype("string").fillna("").str.strip()
-            out["n_amplitude_curated"] = int(choices.ne("").sum())
+            out["n_amplitude_curated"] = int(
+                (choices.ne("").to_numpy(dtype=bool) & mine).sum())
         return out
 
     @staticmethod
@@ -2931,6 +3114,9 @@ class AnalysisPanel(QtWidgets.QWidget):
                 else _RECONCILED_STALE_REFUSAL
             )
             return
+        if res is not None and res.module_id == MANUAL_MODULE_ID:
+            self.rebuild_manual_table()
+            return
         if self._reference_redetection_needed(res):
             self._on_detect_requested(self._detection.params())
             return
@@ -2973,6 +3159,13 @@ class AnalysisPanel(QtWidgets.QWidget):
                 "Study candidates were imported from the manual study workspace. "
                 "Rerun its detection stages there, or run a source detector here and "
                 "explicitly return those detections to the study.")
+            return
+        if res is not None and res.module_id == MANUAL_MODULE_ID:
+            # A Manual table was never produced by a detector: re-running one over it would
+            # replace the user's work with an unrelated Schmitt table.
+            self.runRefused.emit(
+                "The Manual table is never re-run. Use Rebuild to re-measure its events under "
+                "the current rate, calibration and baseline.")
             return
         if res is not None and res.module_id == CONSENSUS_MODULE_ID:
             # Never reinterpret the derived table as the panel's ordinary Schmitt result.
@@ -3980,7 +4173,7 @@ class AnalysisPanel(QtWidgets.QWidget):
             # ``analyzed_duration_s`` 1.0 s against a true 0.04 s, so the capture rate was
             # wrong by 25x with nothing on screen to say so.
             if self._session.has_document(obj.doc_id):
-                self._session.add_result(obj)
+                self.install_detection_result(obj)
             else:
                 self._announce_discarded(obj)
             return
@@ -4031,6 +4224,10 @@ class AnalysisPanel(QtWidgets.QWidget):
                 self._remeasure_target = None
                 self._remeasure_curation = None
                 self._remeasure_params = None
+        elif pending == "manual_rebuild":
+            # Belongs to the TABLE it was launched for, not to the selection (see
+            # `_finish_manual_rebuild`), exactly like the re-measure above.
+            self._finish_manual_rebuild(obj)
         elif pending == "merge_all":
             # NOT gated on ``target``/``self._sel``, for the reason the re-measure
             # branch above is not: the merge belongs to the RESULT it was launched for,
@@ -4049,6 +4246,62 @@ class AnalysisPanel(QtWidgets.QWidget):
                 self._recovery[target] = obj
                 if self._sel == target:
                     self._stats.set_recovery_available(True)
+
+    #: What the last install carried over from the table it replaced (tests and the batch
+    #: summary read it); ``None`` when nothing was carried.
+    last_carry_report: CarryReport | None = None
+    #: ``last_carry_report`` in words, for the line that names what a re-run destroyed.
+    last_carry_sentence: str = ""
+
+    def install_detection_result(self, res: AnalysisResult, *, announce: bool = True
+                                 ) -> CarryReport | None:
+        """Store a finished detection, keeping the hand-made events of the table it replaces.
+
+        THE one door a detector's answer goes through (the single Run and the batch pass), so a
+        re-run no longer throws away what a person drew: each hand-made row is re-measured under
+        the new run, labels move onto a detection of the same event, and the status line says
+        what was kept and what was left out (`manual_events.carry_hand_rows`). It runs on the GUI
+        thread, once, only when the old table holds hand-made rows; the cost is one
+        whole-recording baseline for the new run's signal (about 0.3 s per 3 M samples)."""
+        report = None
+        installed = res
+        old = (None if res.module_id in (MANUAL_MODULE_ID, CONSENSUS_MODULE_ID)
+               else self._session.results.get(res.doc_id, res.channel, res.module_id))
+        if (old is not None and isinstance(old.payload, EventSet)
+                and isinstance(res.payload, EventSet)
+                and hand_made_mask(old.payload.df).any()):
+            name = detector_name(res.module_id)
+            try:
+                signal, fs = self._active_signal(
+                    res.payload.provenance, strict=True, key=(res.doc_id, res.channel))
+                if signal is None or fs is None:
+                    raise ValueError("this channel has no samples or no sample rate")
+                units = self._session.calibrated(res.doc_id, res.channel).units or "pA"
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                try:
+                    events, report = carry_hand_rows(
+                        res.payload, old.payload.df, signal, fs=float(fs), units=units,
+                        old_module_id=res.module_id)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                installed = reconcile_result(res, events)
+            except Exception as exc:  # noqa: BLE001 — the run's answer must still land
+                report = None
+                installed = res
+                self.runRefused.emit(
+                    f"The hand-made events in the previous {name} table could not be carried "
+                    f"into the new one ({exc}). Undo brings the previous table back.")
+        self.last_carry_report = report
+        self.last_carry_sentence = (
+            "" if report is None else
+            report.sentence(detector_name(res.module_id), len(installed.payload.df)))
+        # BEFORE the install: the history's own line about what this run destroyed arrives
+        # during `add_result` and appends this sentence to itself (MainWindow), so it must not
+        # be overwritten afterwards. With nothing destroyed, this stays the status line.
+        if announce and report is not None:
+            self.statusMessage.emit(self.last_carry_sentence)
+        self._session.add_result(installed)
+        return report
 
     def _on_controller_failed(self, _msg: str) -> None:
         pending = self._pending
@@ -4079,6 +4332,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._remeasure_target = None
         self._remeasure_curation = None
         self._remeasure_params = None
+        if pending == "manual_rebuild":
+            self._manual_job = None
+            self.runRefused.emit("The Manual table could not be rebuilt. It is unchanged.")
         # A 'Merge all' that raised says so ONCE, on this path as on the finishing one:
         # MainWindow leaves the "Merging N events…" line in the status bar until
         # something replaces it, so a silent exit reads as a job still running.
@@ -4167,6 +4423,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         # re-measure snapshots above it.
         self._merge_job = None
         self._baseline_workspace_job = None
+        self._manual_job = None
 
     def _show_sweep(self, sweep_df) -> None:
         try:
@@ -4195,6 +4452,23 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
         if module_id in _DETECTION_MODULE_IDS:
             res = self._session.results.get(doc_id, self._sel[1], module_id)
+            if (self._hold_shown is not None and shown is not None
+                    and self._hold_shown == (shown.doc_id, shown.channel, shown.module_id)
+                    and module_id != shown.module_id):
+                self._sync_result_selector()
+                return
+            if (res is not None and module_id != MANUAL_MODULE_ID and shown is not None
+                    and shown.module_id == MANUAL_MODULE_ID
+                    and self._chosen_table.get(self._sel) == MANUAL_MODULE_ID):
+                # The user chose Manual for this channel and is working in it: a detector
+                # finishing (or a Schmitt undo) must not pull the table out from under
+                # their cursor. The selector learns the new table; the status line says so.
+                self._sync_result_selector()
+                n = len(res.payload.df) if isinstance(res.payload, EventSet) else 0
+                self.statusMessage.emit(
+                    f"{detector_name(module_id)} finished: {n:,} "
+                    f"event{'s' if n != 1 else ''}. Choose it in the Table selector to see it.")
+                return
             if res is not None:
                 # A freshly (re-)computed detection becomes the active one shown, so
                 # its events populate the table/overlays regardless of which detector
@@ -4737,7 +5011,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         to the ScorePanel (or blank it when there is no detection). Called on every result
         change, curation edit, mask edit, batch curation and hand-added missed event."""
         res = self._stored_detection()
-        if res is None or not isinstance(res.payload, EventSet):
+        if (res is None or not isinstance(res.payload, EventSet)
+                or res.module_id == MANUAL_MODULE_ID):
+            # A Manual table has no detector behind it: every row is "added", so scoring it
+            # would print a recall of 0 against a detector that never ran.
             self._score.clear()
             return
         self._score.set_score(score_detection(res.payload.df))
@@ -4750,123 +5027,1010 @@ class AnalysisPanel(QtWidgets.QWidget):
             return None
         return score_detection(res.payload.df)
 
-    # -- add a missed event (the detector missed it; the user brackets it with cursors) ----------
-    def add_current_selection_as_event(self) -> int | None:
-        """Append the MeasurePanel's current cursor selection to the active detection as an
-        event the detector MISSED.
+    # -- manual events: the one add door -----------------------------------------------------------
+    #: Where :meth:`add_manual_event` last stood, for MainWindow's status line.
+    last_add_outcome: AddOutcome | None = None
 
-        The bracketed span ``[start, end)`` on the active (doc_id, channel) is characterized
-        exactly like a detected event — a local open-pore baseline (median of the flanks) and
-        flank noise, with the detector's polarity / filter-rise taken from the result
-        provenance — then appended to the detection's ``EventSet.df`` with ``accepted=True``,
-        ``added=True`` and a fresh unique ``event_id``. The result is re-installed (so the
-        table, span overlays, score, inspector and exports all pick up the new row) and the new
-        ``event_id`` is returned, or ``None`` when there is nothing to add.
-        """
-        self.last_missed_refusal = ""
+    def target_module_id(self, doc_id: str, channel: int) -> str:
+        """The table a hand-made event on ``(doc_id, channel)`` is filed in.
+
+        The channel's CHOSEN table (the Table selector remembers one per channel), else the
+        table on screen, else Manual: a channel with no table at all files into the Manual
+        table, which the door creates. Never depends on which detector ran last."""
+        chosen = self._chosen_table.get((doc_id, int(channel)))
+        if chosen:
+            return chosen
+        shown = self._stored_to_show(doc_id, int(channel))
+        return shown.module_id if shown is not None else MANUAL_MODULE_ID
+
+    def chosen_tables(self) -> dict[tuple[str, int], str]:
+        """A copy of the per-channel table choices, ``{(doc_id, channel): module_id}``."""
+        return dict(self._chosen_table)
+
+    def apply_chosen_table(self, doc_id: str, channel: int, module_id: str) -> None:
+        """Record a restored choice. Quiet: it changes where the NEXT hand-made event is filed
+        and which stored table is shown when the channel is selected, nothing on screen now."""
+        self._chosen_table[(doc_id, int(channel))] = str(module_id)
+
+    def stored_to_show(self, doc_id: str, channel: int) -> AnalysisResult | None:
+        """The stored table the panel shows (or would show) for ``(doc_id, channel)``: the
+        user's choice for that channel, else the table on screen. Public so a figure that wants
+        ONE table per recording and channel asks the same question the panel answers."""
+        return self._stored_to_show(doc_id, int(channel))
+
+    def target_table_name(self, doc_id: str, channel: int) -> str:
+        """The short name of :meth:`target_module_id` ("Schmitt", "Manual"), for the trace label."""
+        return detector_name(self.target_module_id(doc_id, channel))
+
+    def _undo_hint(self) -> str:
+        from PySide6 import QtGui
+        return QtGui.QKeySequence("Ctrl+Z").toString(QtGui.QKeySequence.NativeText)
+
+    def _row_identity(self, df: pd.DataFrame, doc_id: str) -> tuple[str, str]:
+        """The ``recording`` and ``pore_id`` for a hand-made row: the table's own (from any
+        existing row, so the event is never a lone stranger), else the recording's file name
+        and stem key, which is what a detector stamps. Not the in-memory ``doc_id`` the
+        old empty-table fallback wrote."""
+        if len(df):
+            return str(df["recording"].iloc[0]), str(df["pore_id"].iloc[0])
+        meta = self._session.document(doc_id).meta
+        return meta.path.name, meta.stem_key
+
+    def _manual_contract(self, doc_id: str, channel: int) -> ManualContract:
+        """The measurement contract of the Manual table on ``(doc_id, channel)``: built once per
+        recording, channel, rate, calibration and estimator, then reused.
+
+        Runs the whole-recording baseline (about 0.3 s per 3 M samples), so a caller on the GUI
+        thread owns the wait cursor. Raises ``ValueError`` with a sentence a person can act on."""
+        got = self._raw_signal(doc_id, channel)
+        if got is None:
+            raise ValueError("this recording has no samples or no sample rate")
+        signal, fs = got
+        meta = self._session.document(doc_id).meta
+        ch = self._session.calibrated(doc_id, channel)
+        cfg, source = baseline_config_from_params(self._baseline.params())
+        resolved, _token = adapt_to_length(cfg, int(signal.size), fs)
+        calibration = tuple(float(v) for v in self._session.calibration(doc_id, channel).fingerprint())
+        key = contract_key(doc_id, channel, signal.size, fs, calibration,
+                           resolved.fingerprint(fs))
+        hit = self._manual_contracts.get(key)
+        if hit is not None:
+            return hit
+        contract = build_contract(
+            signal, fs, ch.units, config=cfg, param_source=source,
+            recording=meta.path.name, calibration_fingerprint=calibration,
+            doc_id=doc_id, channel=channel)
+        if len(self._manual_contracts) >= 8:
+            self._manual_contracts.pop(next(iter(self._manual_contracts)))
+        self._manual_contracts[contract.key] = contract
+        self._manual_contracts[key] = contract
+        return contract
+
+    def _manual_result(self, doc_id: str, channel: int, contract: ManualContract,
+                       events: EventSet) -> AnalysisResult:
+        """A Manual table over ``events``, stamped with the contract's calibration and estimator."""
+        return AnalysisResult(
+            module_id=MANUAL_MODULE_ID, module_version=MANUAL_MODULE_VERSION,
+            doc_id=doc_id, channel=int(channel), params={},
+            calibration_fingerprint=contract.calibration_fingerprint,
+            payload=events, baseline_fingerprint=contract.baseline_fingerprint)
+
+    def _create_manual_table(self, doc_id: str, channel: int) -> AnalysisResult | None:
+        """Install the channel's EMPTY Manual table and show it, or say why it cannot exist.
+
+        Returns the stored result, or ``None`` after announcing the reason."""
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            contract = self._manual_contract(doc_id, channel)
+        except Exception as exc:  # noqa: BLE001 — a key press must never raise into Qt
+            self.runRefused.emit(f"The Manual table could not be created: {exc}")
+            return None
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        res = self._manual_result(doc_id, channel, contract, empty_manual_events(contract))
+        self._session.add_result(res)
+        return self._session.results.get(doc_id, channel, MANUAL_MODULE_ID)
+
+    def _manual_stale_reason(self, res: AnalysisResult) -> str | None:
+        """Why a Manual table cannot take another row as it stands, in its own words, or
+        ``None``. The three stamps a detector table is judged by, with "Rebuild" for the
+        way forward: a Manual table is never re-run."""
+        if self._sel is None or not isinstance(res.payload, EventSet):
+            return None
+        doc_id, channel = self._sel
+        live_fs = self._session.document(doc_id).meta.sample_rate_hz
+        stamped = stale_rate_hz(res.payload.provenance, live_fs)
+        if stamped is not None:
+            now = "unknown" if not live_fs else f"{float(live_fs):,.6g} Hz"
+            return (f"The sample rate changed since this Manual table was built "
+                    f"({stamped:,.6g} Hz → {now}): every time in it is on the old rate. "
+                    "Rebuild the Manual table first.")
+        live = tuple(self._session.calibration(doc_id, channel).fingerprint())
+        if tuple(res.calibration_fingerprint) != live:
+            return ("The calibration changed since this Manual table was built, so its depths "
+                    "are on the old gain. Rebuild the Manual table first.")
+        if self._baseline_staleness(res) is not None:
+            return ("The open-pore estimator changed since this Manual table was built, so "
+                    "its depths are stale. Rebuild the Manual table first.")
+        return None
+
+    def rebuild_manual_table(self) -> str:
+        """Re-measure every event of the shown Manual table under the live rate, calibration
+        and open-pore estimator. The repair for a Manual table whose basis moved.
+
+        Re-measure cannot do this: it refuses a table on another clock and holds ``t_start_s``
+        and ``dwell_s`` fixed. Rebuild keeps the indices and the ids, recomputes the contract
+        from the live recording and re-measures each row from its stored span, so times move
+        with a declared rate and amplitudes follow the calibration. A hand rejection and the
+        curator's own flags survive; automatic tokens are re-derived. Off the GUI thread.
+
+        Returns ``'started'``, or a token naming why not (the sentence is on ``runRefused``)."""
+        res = self._stored_detection()
+        if res is None or res.module_id != MANUAL_MODULE_ID or not isinstance(res.payload, EventSet):
+            self.runRefused.emit("Show the Manual table first, then rebuild it.")
+            return "no_table"
+        if self._pending is not None:
+            self.runRefused.emit("Another analysis is still running — wait for it to finish, "
+                                 "or cancel it.")
+            return "busy"
+        doc_id, channel = self._sel
+        runnable, why = self._gate_for(doc_id, channel)
+        got = self._raw_signal(doc_id, channel) if runnable else None
+        if got is None:
+            self.runRefused.emit(f"Nothing was rebuilt: {why or 'this channel has no samples.'}")
+            return "no_signal"
+        signal, fs = got
+        meta = self._session.document(doc_id).meta
+        units = self._session.calibrated(doc_id, channel).units or "pA"
+        cfg, source = baseline_config_from_params(self._baseline.params())
+        calibration = tuple(float(v) for v in self._session.calibration(doc_id, channel).fingerprint())
+        frozen = frozen_for_dispatch(res.payload)
+
+        def job() -> _ManualRebuild:
+            contract = build_contract(
+                signal, fs, units, config=cfg, param_source=source,
+                recording=meta.path.name, calibration_fingerprint=calibration,
+                doc_id=doc_id, channel=channel)
+            return _ManualRebuild(doc_id, channel, contract,
+                                  rebuild_manual_events(frozen, signal, contract, units=units))
+
+        if not self._controller.run_callable(job, label="manual_rebuild"):
+            return "busy"
+        self._pending, self._pending_sel = "manual_rebuild", self._sel
+        self._manual_job = (doc_id, channel, frozen)
+        self.statusMessage.emit(
+            f"Rebuilding the Manual table ({len(frozen.df):,} event"
+            f"{'s' if len(frozen.df) != 1 else ''})…")
+        return "started"
+
+    def _finish_manual_rebuild(self, obj: object) -> None:
+        """Install a finished rebuild, or say why it was not installed. Exactly one sentence."""
+        job, self._manual_job = self._manual_job, None
+        if job is None or not isinstance(obj, _ManualRebuild):
+            return
+        doc_id, channel, frozen = job
+        live = (self._session.results.get(doc_id, channel, MANUAL_MODULE_ID)
+                if self._session.has_document(doc_id) else None)
+        if live is None or not isinstance(live.payload, EventSet):
+            self.statusMessage.emit("The Manual table was closed while it was rebuilt. "
+                                    "Nothing changed.")
+            return
+        cols = [c for c in ("event_id", "start_idx", "end_idx", "accepted", "flag", "note", "review")
+                if c in frozen.df.columns]
+        cur = live.payload.df
+        if (len(cur) != len(frozen.df) or any(c not in cur.columns for c in cols)
+                or not cur[cols].reset_index(drop=True).equals(
+                    frozen.df[cols].reset_index(drop=True))):
+            self.runRefused.emit("The Manual table changed while it was being rebuilt (an event "
+                                 "was added or curated), so the rebuild was not applied. "
+                                 "Nothing changed; rebuild again.")
+            return
+        contract = obj.contract
+        self._manual_contracts[contract.key] = contract
+        new_res = reconcile_result(
+            live, obj.events, calibration_fingerprint=contract.calibration_fingerprint,
+            baseline_fingerprint=contract.baseline_fingerprint)
+        self._session.add_result(new_res)
+        n = len(obj.events.df)
+        self.statusMessage.emit(
+            f"Rebuilt the Manual table: {n:,} event{'s' if n != 1 else ''} re-measured at "
+            f"{float(contract.provenance['fs']):,.6g} Hz. {self._undo_hint()} undoes it.")
+
+    def _judge_manual_staleness(self, res: AnalysisResult) -> None:
+        """The amber line for a Manual table: the three stamps, each repaired by Rebuild."""
+        doc_id, channel = self._sel
+        live_fs = self._session.document(doc_id).meta.sample_rate_hz
+        calibration_moved = (tuple(res.calibration_fingerprint)
+                             != tuple(self._session.calibration(doc_id, channel).fingerprint()))
+        if stale_rate_hz(res.payload.provenance, live_fs) is not None:
+            self._stale.show_message(
+                self._manual_stale_reason(res), kind=_STALE_SAMPLE_RATE,
+                action_label="Rebuild",
+                summary="Times and depths stale — the sample rate changed")
+            self._sync_stale_action(res)
+            self._table.set_stale_columns(
+                _RATE_COLUMNS + tuple(c for c in REMEASURED_COLUMNS if c not in _RATE_COLUMNS)
+                if calibration_moved else _RATE_COLUMNS)
+            return
+        reason = self._manual_stale_reason(res)
+        if reason is not None:
+            self._stale.show_message(
+                reason, kind=_STALE_CALIBRATION if calibration_moved else _STALE_BASELINE,
+                action_label="Rebuild",
+                summary=("Depths stale — the calibration changed" if calibration_moved
+                         else "Depths stale — the open-pore estimator changed"))
+            self._sync_stale_action(res)
+            self._table.set_stale_columns(REMEASURED_COLUMNS)
+            return
+        self._stale.setVisible(False)
+        self._table.set_stale_columns(())
+
+    # -- converting the old measurement list ----------------------------------------------------------
+    def converted_measurement_ids(self) -> set[int]:
+        """Measurement ids some live table already holds as events (``legacy_measurement_ids``)."""
+        out: set[int] = set()
+        for res in self._session.results.all():
+            if not isinstance(res.payload, EventSet):
+                continue
+            df = res.payload.df
+            if "legacy_measurement_ids" not in df.columns:
+                continue
+            for cell in df["legacy_measurement_ids"].dropna().astype(str):
+                for part in cell.split(","):
+                    part = part.strip()
+                    if part.isdigit():
+                        out.add(int(part))
+        return out
+
+    def conversion_target(self) -> TargetChannel | None:
+        """The channel a conversion would place rows on: the one the panel has selected, if it
+        is a current channel with samples."""
+        if self._sel is None or not self._session.has_document(self._sel[0]):
+            return None
+        doc_id, channel = self._sel
+        if not self._gate_for(doc_id, channel)[0]:
+            return None
+        doc = self._session.document(doc_id)
+        meta = doc.meta
+        cal = self._session.calibration(doc_id, channel)
+        return TargetChannel(
+            doc_key=persistent_key(doc), channel_index=channel,
+            channel_name=meta.channels[channel].name, n_samples=int(meta.n_samples),
+            fs=meta.sample_rate_hz,
+            units=self._session.calibrated(doc_id, channel).units or "",
+            cal_gain=float(cal.gain), cal_offset=float(cal.offset))
+
+    def conversion_plan(self) -> list[ConversionRow]:
+        """Every row of the saved measurement list, with whether it can be converted now."""
+        return plan_conversion(
+            self._measure.measurements_df, self.conversion_target(),
+            converted_ids=self.converted_measurement_ids(),
+            open_doc_keys=[persistent_key(d) for d in self._session.documents()])
+
+    def convert_measurements(self, measurement_ids) -> ConversionReport:
+        """Make the chosen measurements accepted, reviewed hand-made events in this channel's
+        Manual table, in ONE undo step. Rows that cannot be placed, or overlap an event already
+        there, are left out with the reason; the measurement list is not touched. The note of an
+        event is the measurement's label, and ``legacy_measurement_ids`` records which
+        measurement it came from."""
+        plan = {r.measurement_id: r for r in self.conversion_plan()}
+        target = self.conversion_target()
+        skipped: list[tuple[int, str]] = []
+        rows = []
+        for mid in sorted({int(i) for i in measurement_ids}):
+            row = plan.get(mid)
+            if row is None:
+                skipped.append((mid, "it is not in the measurement list"))
+            elif not row.placeable:
+                skipped.append((mid, row.reason))
+            else:
+                rows.append(row)
+        if target is None or not rows:
+            if not rows and not skipped:
+                self.runRefused.emit("Nothing was converted: no measurement was chosen.")
+            elif skipped:
+                self.runRefused.emit("Nothing was converted: " + skipped[0][1] + ".")
+            return ConversionReport((), tuple(skipped))
+        doc_id, channel = self._sel
+        created = False
+        try:
+            res = self._session.results.get(doc_id, channel, MANUAL_MODULE_ID)
+            if res is None:
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                try:
+                    contract = self._manual_contract(doc_id, channel)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                res = self._manual_result(doc_id, channel, contract, empty_manual_events(contract))
+                created = True
+            else:
+                stale = self._manual_stale_reason(res)
+                if stale is not None:
+                    self.runRefused.emit(f"Nothing was converted. {stale}")
+                    return ConversionReport((), tuple(skipped))
+            prov = dict(res.payload.provenance or {})
+            signal, fs = self._active_signal(prov, strict=True)
+        except Exception as exc:  # noqa: BLE001
+            self.runRefused.emit(f"Nothing was converted: {exc}")
+            return ConversionReport((), tuple(skipped))
+        units = self._session.calibrated(doc_id, channel).units or "pA"
+        df = res.payload.df
+        recording, pore_id = self._row_identity(df, doc_id)
+        next_id = (int(df["event_id"].max()) + 1) if len(df) else 0
+        converted: list[tuple[int, int]] = []
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for row in sorted(rows, key=lambda r: (r.start, r.end)):
+                hit = self._events_overlapping(df, row.start, row.end)
+                if hit:
+                    skipped.append((row.measurement_id, f"it overlaps event {hit[0]}"))
+                    continue
+                try:
+                    fresh = measure_hand_row(
+                        signal, float(fs), row.start, row.end, provenance=prov, units=units,
+                        recording=recording, pore_id=pore_id, event_id=next_id,
+                        note=row.label or None, legacy_ids=str(row.measurement_id),
+                        edge=EdgeRecord(bounds_source="start=drawn;end=drawn",
+                                        drawn_start=row.start, drawn_end=row.end))
+                except (ValueError, IndexError) as exc:
+                    skipped.append((row.measurement_id, f"it could not be measured ({exc})"))
+                    continue
+                df = insert_hand_row(df, fresh)
+                converted.append((row.measurement_id, next_id))
+                next_id += 1
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        report = ConversionReport(tuple(converted), tuple(skipped), created)
+        if converted:
+            self._chosen_table[(doc_id, channel)] = MANUAL_MODULE_ID
+            if created:
+                self._session.add_result(res)
+                res = self._session.results.get(doc_id, channel, MANUAL_MODULE_ID) or res
+            self._session.add_result(reconcile_result(res, EventSet(df, prov)))
+        self.statusMessage.emit(report.sentence() + (f" {self._undo_hint()} undoes it."
+                                                    if converted else ""))
+        return report
+
+    def copy_targets(self) -> list[str]:
+        """The module ids the shown table's hand-made events could be copied to: every other
+        stored table on this recording and channel except the derived Reconciled one, and the
+        Manual table (made on the way if it does not exist yet)."""
+        shown = self._stored_detection()
+        if shown is None or self._sel is None:
+            return []
+        out = [r.module_id for r in self._available_detection_results()
+               if r.module_id not in (shown.module_id, CONSENSUS_MODULE_ID)]
+        if (MANUAL_MODULE_ID not in out and shown.module_id != MANUAL_MODULE_ID
+                and self._manual_offered()):
+            out.append(MANUAL_MODULE_ID)
+        return out
+
+    def copy_hand_made_events(self, target_module_id: str) -> CopyReport | None:
+        """Copy the hand-made events of the shown table into another table of this channel.
+
+        The copies are measured under the TARGET's provenance (so they are comparable with its
+        detected rows), carry an ``origin`` so running this twice copies nothing twice, and are
+        independent of the originals from here on. One undo step on the target; the source is
+        untouched. Returns the report (also said on the status line), or ``None`` when nothing
+        could be attempted (the reason is on ``runRefused``)."""
+        source = self._stored_detection()
+        if source is None or not isinstance(source.payload, EventSet) or self._sel is None:
+            self.runRefused.emit("Nothing to copy: there is no table on screen.")
+            return None
+        doc_id, channel = self._sel
+        if not hand_made_mask(source.payload.df).any():
+            self.runRefused.emit(
+                f"Nothing to copy: {detector_name(source.module_id)} holds no hand-made events.")
+            return None
+        if target_module_id in (source.module_id, CONSENSUS_MODULE_ID):
+            self.runRefused.emit(
+                "Choose another table to copy into: Reconciled is derived, and a table "
+                "cannot be copied into itself.")
+            return None
+        target = self._session.results.get(doc_id, channel, target_module_id)
+        created = False
+        try:
+            if target is None:
+                if target_module_id != MANUAL_MODULE_ID:
+                    self.runRefused.emit(
+                        f"{detector_name(target_module_id)} has no stored table on this channel.")
+                    return None
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                try:
+                    contract = self._manual_contract(doc_id, channel)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                target = self._manual_result(doc_id, channel, contract,
+                                             empty_manual_events(contract))
+                created = True
+            elif target_module_id == MANUAL_MODULE_ID:
+                stale = self._manual_stale_reason(target)
+                if stale is not None:
+                    self.runRefused.emit(f"Nothing was copied. {stale}")
+                    return None
+            else:
+                stale = self._stale_edit_refusal(target, "Nothing was copied.")
+                if stale is not None:
+                    self.runRefused.emit(stale)
+                    return None
+            signal, fs = self._active_signal(target.payload.provenance, strict=True)
+            if signal is None or fs is None:
+                self.runRefused.emit("Nothing was copied: this channel has no samples.")
+                return None
+        except Exception as exc:  # noqa: BLE001 — a degenerate trace must not raise into Qt
+            self.runRefused.emit(f"Nothing was copied: {exc}")
+            return None
+        units = self._session.calibrated(doc_id, channel).units or "pA"
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            new_events, report = copy_hand_rows(
+                source.payload.df, target.payload, signal, fs=float(fs), units=units,
+                source_module_id=source.module_id)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        said = report.sentence(detector_name(source.module_id), detector_name(target_module_id))
+        if report.copied:
+            self._hold_shown = (doc_id, channel, source.module_id)
+            try:
+                if created:
+                    self._session.add_result(target)
+                    target = (self._session.results.get(doc_id, channel, target_module_id)
+                              or target)
+                self._session.add_result(reconcile_result(target, new_events))
+            finally:
+                self._hold_shown = None
+        self.statusMessage.emit(said)
+        return report
+
+    # -- edge fitting and catching (the cursor keys' analysis) ----------------------------------
+    def fit_context(self, doc_id: str, channel: int) -> "_FitContext | str":
+        """The basis an edge fit or a catch on ``(doc_id, channel)`` runs on, or the sentence
+        saying why there is none. The TARGET table's own signal, polarity, noise and baseline
+        track, so a fitted bound is a bound of the same measurement the row will get."""
+        channel = int(channel)
+        if self._sel != (doc_id, channel) or not self._session.has_document(doc_id):
+            return "The cursors are not on the channel shown in the Analysis panel."
+        runnable, _why = self._gate_for(doc_id, channel)
+        if not runnable:
+            meta = self._session.document(doc_id).meta
+            if meta.sample_rate_hz is None:
+                return ("An event needs a sample rate for its dwell time: declare one in "
+                        "File Info.")
+            return "Events are added on a current channel."
+        module_id = self.target_module_id(doc_id, channel)
+        if module_id == CONSENSUS_MODULE_ID:
+            return _RECONCILED_ADD_REFUSAL.replace("Nothing was added: ", "")
+        res = self._session.results.get(doc_id, channel, module_id)
+        try:
+            if res is None and module_id == MANUAL_MODULE_ID:
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                try:
+                    contract = self._manual_contract(doc_id, channel)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                prov = contract.events_provenance()
+                df = empty_manual_events(contract).df
+            elif res is None or not isinstance(res.payload, EventSet):
+                return f"{detector_name(module_id)} has no stored table on this channel."
+            else:
+                prov = dict(res.payload.provenance or {})
+                df = res.payload.df
+                if module_id == MANUAL_MODULE_ID:
+                    stale = self._manual_stale_reason(res)
+                    if stale is not None:
+                        return stale
+                else:
+                    stale = self._stale_edit_refusal(res, "")
+                    if stale is not None:
+                        return stale.strip()
+            signal, fs = self._active_signal(prov, strict=True)
+        except Exception as exc:  # noqa: BLE001 — the reason, not a traceback, in the status bar
+            return f"This table's signal could not be rebuilt ({exc})."
+        if signal is None or fs is None:
+            return "This channel has no samples."
+        polarity = prov.get("polarity")
+        noise = prov.get("noise_rms_pA")
+        try:
+            noise = float(noise)
+        except (TypeError, ValueError):
+            noise = float("nan")
+        if polarity not in (-1, 1) or not np.isfinite(noise) or noise <= 0:
+            return ("This table recorded no polarity or noise level, so its edges cannot be "
+                    "fitted: place them by hand (Shift+S, Shift+F).")
+        from ..analysis.baseline import BaselineConfig
+
+        baseline = None
+        try:
+            cfg = BaselineConfig.reproducible_from(prov)
+            if cfg is not None:
+                baseline = characterisation_baseline(
+                    signal, float(fs), config=cfg, polarity=int(polarity), health=False,
+                    on_nonfinite="interpolate").baseline
+        except Exception:  # noqa: BLE001 — no track: the fit estimates a level from the flanks
+            baseline = None
+        starts = np.array([], dtype=np.int64)
+        ends = np.array([], dtype=np.int64)
+        accepted = np.array([], dtype=bool)
+        rise_s = None
+        if len(df):
+            order = np.argsort(df["start_idx"].to_numpy(dtype=np.int64), kind="stable")
+            starts = df["start_idx"].to_numpy(dtype=np.int64)[order]
+            ends = df["end_idx"].to_numpy(dtype=np.int64)[order]
+            accepted = df["accepted"].to_numpy(dtype=bool)[order]
+            rises = df["rise_s"].to_numpy(dtype=float)
+            rises = rises[np.isfinite(rises) & (rises > 0)]
+            if rises.size >= 5:
+                rise_s = float(np.median(rises))
+        filter_rise = prov.get("filter_rise_s")
+        try:
+            filter_rise = float(filter_rise) if filter_rise is not None else None
+        except (TypeError, ValueError):
+            filter_rise = None
+        tau = self._open_pore_tau(doc_id, channel, module_id, prov, signal, float(fs), baseline,
+                                  noise, starts, ends)
+        recording, pore_id = self._row_identity(df, doc_id)
+        chain = "" if module_id == MANUAL_MODULE_ID else chain_description(prov)
+        name = detector_name(module_id)
+        return _FitContext(
+            module_id, signal, float(fs), int(polarity), noise, tau, baseline,
+            filter_rise, rise_s, starts, ends, accepted, int(signal.size),
+            provenance=prov,
+            units=self._session.calibrated(doc_id, channel).units or "pA",
+            recording=recording, pore_id=pore_id,
+            next_id=(int(df["event_id"].max()) + 1) if len(df) else 0,
+            basis_kind="processed" if chain else "raw",
+            basis_text=(f"{name}'s signal ({chain})" if chain else "the raw signal"))
+
+    def hand_made_summary(self, doc_id: str, channel: int) -> str:
+        """``"Hand-made here: Manual 3, Schmitt 2"`` for the tables stored on the channel, or the
+        sentence saying there are none yet."""
+        parts = []
+        for module_id in _DETECTION_MODULE_IDS:
+            res = self._session.results.get(doc_id, int(channel), module_id)
+            if res is None or not isinstance(res.payload, EventSet):
+                continue
+            k = int(hand_made_mask(res.payload.df).sum())
+            if k:
+                parts.append(f"{detector_name(module_id)} {k}")
+        return ("Hand-made here: " + ", ".join(parts)) if parts else "No hand-made events yet"
+
+    def preview_hand_row(self, doc_id: str, channel: int, start: int, end: int, *,
+                         want_row: bool = True) -> HandRowPreview:
+        """A dry run of :meth:`add_manual_event` for the Measure tab: the table the span would be
+        filed in, the signal that table measures on, and (``want_row``) the row it would store.
+
+        Reads exactly what the door reads (:meth:`fit_context`, the same span refusals, the same
+        `measure_hand_row`), changes nothing and emits nothing. The first call on a channel
+        builds the Manual contract (a whole-recording baseline) under a wait cursor, once."""
+        channel = int(channel)
+        ctx = self.fit_context(doc_id, channel)
+        if isinstance(ctx, str):
+            return HandRowPreview(reason=ctx)
+        name = detector_name(ctx.module_id)
+        summary = self.hand_made_summary(doc_id, channel)
+        n = ctx.n
+        start = int(np.clip(int(start), 0, n))
+        end = int(np.clip(int(end), 0, n))
+        base = float("nan")
+        if ctx.baseline is not None and end > start:
+            try:
+                track = np.asarray(ctx.baseline)[start:end]
+                finite = track[np.isfinite(track)]
+                if finite.size:
+                    base = float(finite.mean())
+            except (TypeError, ValueError, IndexError):
+                base = float("nan")
+        common = dict(table=name, module_id=ctx.module_id, basis_kind=ctx.basis_kind,
+                      basis_text=ctx.basis_text, signal=ctx.signal, fs=ctx.fs,
+                      polarity=ctx.polarity, noise_rms=ctx.noise_rms, baseline=base,
+                      hand_counts=summary)
+        if end <= start:
+            return HandRowPreview(refusal="The span is empty.", **common)
+        stored = self._session.results.get(doc_id, channel, ctx.module_id)
+        df = stored.payload.df if stored is not None and isinstance(stored.payload, EventSet) else None
+        refusal = self._span_refusal(ctx.provenance or {}, df, name, n, start, end)
+        if refusal is not None:
+            return HandRowPreview(refusal=refusal, **common)
+        if not want_row:
+            return HandRowPreview(**common)
+        try:
+            row = measure_hand_row(
+                ctx.signal, ctx.fs, start, end, provenance=ctx.provenance or {},
+                units=ctx.units, recording=ctx.recording, pore_id=ctx.pore_id,
+                event_id=ctx.next_id,
+                edge=EdgeRecord(bounds_source="start=drawn;end=drawn",
+                                drawn_start=start, drawn_end=end))
+        except (ValueError, IndexError) as exc:
+            return HandRowPreview(refusal=f"The span could not be measured ({exc}).", **common)
+        return HandRowPreview(row=row.iloc[0].to_dict(), **common)
+
+    def _span_refusal(self, prov: Mapping[str, Any], df: pd.DataFrame | None, name: str,
+                      n: int, start: int, end: int, *, door: bool = False) -> str | None:
+        """Why ``[start, end)`` cannot join a table as it stands, or ``None``: outside the
+        stretch the detector searched, or overlapping an event it already has. The add door
+        (``door=True``, whose sentences say nothing was added) and the Measure tab's preview ask
+        this one question."""
+        a0, a1 = analysed_span(prov, n)
+        if start < a0 or end > a1:
+            return (("Nothing was added: that" if door else "That")
+                    + f" span is outside the stretch {name} searched (samples {a0:,} to "
+                    f"{a1:,}). Add it to the Manual table, or re-run the detector over the "
+                    "whole recording.")
+        covered = self._events_overlapping(df, start, end) if df is not None else []
+        if covered:
+            return (f"That span overlaps event {covered[0]}"
+                    + (f" and {len(covered) - 1} more" if len(covered) > 1 else "")
+                    + f", which {name} already has" + (", so nothing was added" if door else "")
+                    + ". Select that event to curate it, or bracket only the stretch between "
+                    "events.")
+        return None
+
+    def _open_pore_tau(self, doc_id: str, channel: int, module_id: str, prov: Mapping[str, Any],
+                       signal: np.ndarray, fs: float, baseline: Any, noise: float,
+                       starts: np.ndarray, ends: np.ndarray) -> float:
+        """The open-pore autocorrelation time the fit's z-tests answer for: the Manual table's
+        contract carries it; a detector table's is measured once from its own rows and cached."""
+        stored = prov.get("open_pore_tau")
+        try:
+            if stored is not None and np.isfinite(float(stored)) and float(stored) >= 1.0:
+                return float(stored)
+        except (TypeError, ValueError):
+            pass
+        key = (doc_id, channel, module_id, fs, prov.get("baseline_fingerprint"))
+        hit = self._tau_cache.get(key)
+        if hit is not None:
+            return hit
+        tau = 1.0
+        if baseline is not None:
+            from ..analysis.cusum import filter_autocorr_time
+
+            floor = None
+            cutoff = prov.get("filter_cutoff_hz")
+            try:
+                if cutoff is not None:
+                    floor = filter_autocorr_time(
+                        fs, float(cutoff), order=int(prov.get("filter_order") or 8),
+                        kind=str(prov.get("filter_kind") or "bessel"))
+            except (TypeError, ValueError):
+                floor = None
+            try:
+                tau = float(estimate_open_pore_tau(
+                    np.asarray(signal, dtype=np.float64) - np.asarray(baseline, dtype=np.float64),
+                    list(zip(starts.tolist(), ends.tolist())) if starts.size else None,
+                    noise_rms=noise, fs=fs, filter_autocorr=floor))
+            except Exception:  # noqa: BLE001
+                tau = 1.0
+        if len(self._tau_cache) >= 16:
+            self._tau_cache.pop(next(iter(self._tau_cache)))
+        self._tau_cache[key] = tau
+        return tau
+
+    @staticmethod
+    def _neighbours(ctx: "_FitContext", start: int, end: int) -> tuple[int, int]:
+        """``(lo, hi)``: the previous event's end and the next event's start around
+        ``[start, end)``, or the recording's edges. No fit window crosses them."""
+        lo, hi = 0, ctx.n
+        if ctx.starts.size:
+            before = ctx.ends[ctx.ends <= start]
+            after = ctx.starts[ctx.starts >= end]
+            lo = int(before.max()) if before.size else 0
+            hi = int(after.min()) if after.size else ctx.n
+        return lo, hi
+
+    def fit_span_edges(self, doc_id: str, channel: int, start: int, end: int, *,
+                       px_samples: float | None = None,
+                       edges: tuple[str, ...] = ("start", "end")) -> tuple[EdgeFit | None, str]:
+        """Fit the edges of a placed span to the step each sits on, on the target table's own
+        measurement basis. ``(fit, "")``, or ``(None, sentence)`` when nothing could be tried."""
+        ctx = self.fit_context(doc_id, channel)
+        if isinstance(ctx, str):
+            return None, ctx
+        lo, hi = self._neighbours(ctx, int(start), int(end))
+        fit = fit_edges(
+            ctx.signal, ctx.fs, int(start), int(end), polarity=ctx.polarity,
+            noise_rms=ctx.noise_rms, tau=ctx.tau, lo=lo, hi=hi, baseline=ctx.baseline,
+            edges=edges, px_samples=px_samples, rise_s=ctx.rise_s,
+            filter_rise_s=ctx.filter_rise_s)
+        return fit, ""
+
+    def catch_event_at(self, doc_id: str, channel: int, sample: float, *, px_samples: float,
+                       view_lo: int, view_hi: int) -> tuple[Catch | None, str]:
+        """Find the event under ``sample`` and fit both its edges (the ``C`` key). ``(catch,
+        "")`` -- whose own ``ok`` / ``reason`` carry a refusal such as "No event under the
+        pointer" -- or ``(None, sentence)`` when no table can take one."""
+        ctx = self.fit_context(doc_id, channel)
+        if isinstance(ctx, str):
+            return None, ctx
+        p = int(round(float(sample)))
+        if ctx.starts.size and bool(((ctx.starts <= p) & (p < ctx.ends)).any()):
+            return Catch(ok=False, reason="The pointer is on an event already in the table"), ""
+        lo, hi = self._neighbours(ctx, p, p + 1)
+        catch = catch_event(
+            ctx.signal, ctx.fs, float(sample), polarity=ctx.polarity, noise_rms=ctx.noise_rms,
+            baseline=ctx.baseline, lo=lo, hi=hi, view_lo=int(view_lo), view_hi=int(view_hi),
+            px_samples=float(px_samples), tau=ctx.tau, rise_s=ctx.rise_s,
+            filter_rise_s=ctx.filter_rise_s)
+        return catch, ""
+
+    #: The scopes of :meth:`export_event_statistics`.
+    STATISTICS_SCOPES = ("shown", "channel", "manual")
+
+    def event_statistics_tables(self, scope: str) -> list[AnalysisResult]:
+        """The stored event tables a statistics export of ``scope`` covers, non-empty ones only:
+        ``shown`` (the table on screen), ``channel`` (every table on this recording and channel)
+        or ``manual`` (every Manual table in the project)."""
+        if scope == "shown":
+            res = self._stored_detection()
+            found = [res] if res is not None else []
+        elif scope == "channel":
+            found = list(self._available_detection_results())
+        elif scope == "manual":
+            found = list(self._session.results.for_module(MANUAL_MODULE_ID))
+        else:
+            raise ValueError(f"unknown scope {scope!r}; one of {self.STATISTICS_SCOPES}")
+        return [r for r in found
+                if isinstance(r.payload, EventSet) and len(r.payload.df)
+                and self._session.has_document(r.doc_id)]
+
+    def export_event_statistics(self, path: str | Path | None = None, *, scope: str = "shown",
+                                amplitude_method: str = "median") -> Path | None:
+        """Write the full statistics (mean, median, std, variance, min, max, ptp, rms, skewness,
+        kurtosis, area, amplitude, SNR...) of every event of the chosen tables to one CSV.
+
+        The columns are the manual-measurement table's (`measure.MEASUREMENT_SCHEMA`, then
+        `signal_basis`, then `table` and `event_id`), so a file made from hand-made events reads
+        like the measurement lists it replaces, and works for automatic tables too. Each row is
+        measured on the signal its table was measured on, with the table's own baseline, noise
+        and polarity. Several tables, or every Manual table of several recordings, land in ONE
+        file. A table on another clock than its recording is left out and said so.
+
+        ``path`` None asks (the `ask_export_path` seam). Returns the file written, or ``None``."""
+        tables = self.event_statistics_tables(scope)
+        if not tables:
+            self.statusMessage.emit("There are no events to export statistics for.")
+            return None
+        if path is None:
+            chosen = ask_export_path(
+                self, title="Export event statistics", suggestion="event_statistics.csv",
+                filters="CSV (*.csv);;All files (*)")
+            if chosen is None:
+                return None
+            path = chosen
+        frames: list[pd.DataFrame] = []
+        left_out: list[str] = []
+        skipped_rows = 0
+        for res in tables:
+            name = detector_name(res.module_id)
+            meta = self._session.document(res.doc_id).meta
+            stale = stale_rate_reason(res.payload.provenance, meta.sample_rate_hz)
+            if stale is not None:
+                left_out.append(f"{name} of {meta.path.name} (on another sample rate)")
+                continue
+            try:
+                signal, fs = self._active_signal(res.payload.provenance, strict=True,
+                                                 key=(res.doc_id, res.channel))
+            except Exception as exc:  # noqa: BLE001 — name the table, keep the rest
+                left_out.append(f"{name} of {meta.path.name} ({exc})")
+                continue
+            if signal is None or fs is None:
+                left_out.append(f"{name} of {meta.path.name} (no samples or rate)")
+                continue
+            ch = self._session.calibrated(res.doc_id, res.channel)
+            cal = self._session.calibration(res.doc_id, res.channel)
+            frame, skipped = event_statistics_frame(
+                res.payload.df, signal, float(fs), provenance=res.payload.provenance or {},
+                table_name=name, units=ch.units or "", recording=meta.path.name,
+                doc_key=persistent_key(self._session.document(res.doc_id)),
+                channel_name=meta.channels[res.channel].name, channel_index=res.channel,
+                cal_gain=float(cal.gain), cal_offset=float(cal.offset), t0_s=float(meta.t0_s),
+                amplitude_method=amplitude_method)
+            skipped_rows += len(skipped)
+            if len(frame):
+                frames.append(frame)
+        if not frames:
+            self.runRefused.emit("Nothing was exported: " + (
+                "; ".join(left_out) if left_out else "no event could be measured."))
+            return None
+        out = pd.concat(frames, ignore_index=True)
+        target = Path(path)
+        try:
+            with staged_path(target) as staged:
+                out.to_csv(staged, index=False)
+        except Exception as exc:  # noqa: BLE001 — reported, never an escaping slot
+            self.runRefused.emit(f"Could not write the export: {exc}")
+            return None
+        said = f"Wrote statistics for {len(out):,} events to {target.name}."
+        if skipped_rows:
+            said += f" {skipped_rows} too short or non-finite to measure were left out."
+        if left_out:
+            said += " Left out: " + "; ".join(left_out) + "."
+        self.statusMessage.emit(said)
+        return target
+
+    def delete_hand_made_events(self, event_ids) -> list[int]:
+        """Remove hand-made events from the shown table, one undo step; the ids removed.
+
+        Only hand-made rows can go: a detected row is the detector's record, and rejecting it
+        is how it leaves the count. Deleting is for the span drawn in a hurry, which the overlap
+        rule would otherwise keep refusing for good (a rejected row still blocks its span)."""
         res = self._stored_detection()
         if res is None or not isinstance(res.payload, EventSet):
-            return None
+            return []
         if res.module_id == CONSENSUS_MODULE_ID:
             self.runRefused.emit(_RECONCILED_EDIT_REFUSAL)
-            return None
-        # A table the amber line calls stale is on the OLD clock, and this reads the live one
-        # (``ch.sample_rate_hz`` below): the new row would be the second clock in the table
-        # (S8-DATA1). Refused before anything is read or written; MainWindow's shortcut path
-        # reads ``last_missed_refusal`` and stays quiet, as it does for the overlap refusal.
-        stale = self._stale_edit_refusal(res, "Nothing was added.")
-        if stale is not None:
-            self.last_missed_refusal = stale
-            self.runRefused.emit(stale)
-            return None
+            return []
+        new_df, removed = delete_hand_rows(res.payload.df, [int(i) for i in event_ids])
+        if not removed:
+            self.runRefused.emit("Only hand-made events can be deleted. Reject a detected "
+                                 "event to take it out of the count.")
+            return []
+        self._session.add_result(
+            reconcile_result(res, EventSet(new_df, dict(res.payload.provenance or {}))))
+        n = len(removed)
+        self.statusMessage.emit(
+            f"Deleted {n} hand-made event{'s' if n != 1 else ''} "
+            f"({', '.join(str(i) for i in removed[:6])}{'…' if n > 6 else ''}). "
+            f"{self._undo_hint()} brings {'it' if n == 1 else 'them'} back.")
+        return removed
+
+    def add_manual_event(self, doc_id: str, channel: int, start: int, end: int, *,
+                         edge: EdgeRecord | None = None, note: str | None = None) -> AddOutcome:
+        """File the span ``[start, end)`` of ``(doc_id, channel)`` as a hand-made event.
+
+        THE one door every manual gesture goes through: Ctrl+M and the Measure tab's Add, and
+        the cursor keys. Takes sample indices, not the Measure region, so a gesture that never
+        draws a region can call it. The event lands in the channel's TARGET table (see
+        :meth:`target_module_id`): Schmitt, CUSUM, Keras or a study table, or the Manual table,
+        which is created empty when it does not exist yet. The row is measured on the table's
+        own basis by `recharacterize_span`, is ``added`` / ``manual`` / ``reviewed``, and joins
+        the table in time order, so the results table, the overlays, the gallery, the inspector
+        and every export see it at once. One undo step.
+
+        Every refusal changes nothing, creates nothing and says why, in a sentence that names the
+        way forward; ``last_missed_refusal`` holds it for callers that read it, and
+        ``runRefused`` carries it to the status bar.
+        """
+        self.last_missed_refusal = ""
+        channel = int(channel)
+
+        def refuse(sentence: str) -> AddOutcome:
+            self.last_missed_refusal = sentence
+            self.runRefused.emit(sentence)
+            self.last_add_outcome = AddOutcome(False, sentence)
+            return self.last_add_outcome
+
+        if self._sel != (doc_id, channel) or not self._session.has_document(doc_id):
+            return refuse("Nothing was added: the span is not on the channel shown in the "
+                          "Analysis panel. Select that channel, then add the event.")
+        meta = self._session.document(doc_id).meta
+        runnable, _why = self._gate_for(doc_id, channel)
+        if not runnable:
+            if meta.sample_rate_hz is None:
+                return refuse("Nothing was added: an event needs a sample rate for its dwell "
+                              "time. The readout works without one; declare a rate in File "
+                              "Info to add events.")
+            kind = self._session.effective_kind(doc_id, channel)
+            return refuse("Nothing was added: events are added on a current channel, and this "
+                          f"is a {kind.value} channel.")
+        got = self._raw_signal(doc_id, channel)
+        if got is None:
+            return refuse("Nothing was added: this channel has no samples.")
+        raw, fs = got
+        n = int(raw.size)
+        start = int(np.clip(int(start), 0, n))
+        end = int(np.clip(int(end), 0, n))
+        if end <= start:
+            return refuse("Nothing was added: the span is empty.")
+
+        module_id = self.target_module_id(doc_id, channel)
+        name = detector_name(module_id)
+        if module_id == CONSENSUS_MODULE_ID:
+            return refuse(_RECONCILED_ADD_REFUSAL)
+        res = self._session.results.get(doc_id, channel, module_id)
+        created = False
+        try:
+            if module_id == MANUAL_MODULE_ID:
+                if res is None:
+                    QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                    try:
+                        contract = self._manual_contract(doc_id, channel)
+                    finally:
+                        QtWidgets.QApplication.restoreOverrideCursor()
+                    res = self._manual_result(doc_id, channel, contract,
+                                              empty_manual_events(contract))
+                    created = True
+                else:
+                    stale = self._manual_stale_reason(res)
+                    if stale is not None:
+                        return refuse(f"Nothing was added. {stale}")
+            else:
+                if res is None or not isinstance(res.payload, EventSet):
+                    return refuse(f"Nothing was added: {name} has no stored table on this "
+                                  "channel. Show a table, or the Manual table.")
+                stale = self._stale_edit_refusal(res, "Nothing was added.")
+                if stale is not None:
+                    return refuse(stale)
+        except Exception as exc:  # noqa: BLE001 — the contract can fail on a degenerate trace
+            return refuse(f"Nothing was added: {exc}")
+
+        events = res.payload
+        prov = dict(events.provenance or {})
+        df = events.df
+        why = self._span_refusal(prov, df, name, n, start, end, door=True)
+        if why is not None:
+            return refuse(why)
+        try:
+            signal, _ = self._active_signal(prov, strict=True)
+        except Exception as exc:  # noqa: BLE001 — surface the reason instead of measuring raw
+            return refuse(f"Nothing was added: this table's signal could not be rebuilt ({exc}).")
+        if signal is None:
+            return refuse("Nothing was added: this channel has no samples.")
+
+        ensure_added_column(df)
+        recording, pore_id = self._row_identity(df, doc_id)
+        new_id = (int(df["event_id"].max()) + 1) if len(df) else 0
+        units = self._session.calibrated(doc_id, channel).units or "pA"
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            row = measure_hand_row(
+                signal, float(fs), start, end, provenance=prov, units=units,
+                recording=recording, pore_id=pore_id, event_id=new_id, note=note,
+                edge=edge or EdgeRecord(bounds_source="start=drawn;end=drawn",
+                                        drawn_start=start, drawn_end=end))
+        except (ValueError, IndexError) as exc:
+            return refuse(f"Nothing was added: the span could not be measured ({exc}).")
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        new_events = EventSet(insert_hand_row(df, row), prov)
+        if created:
+            # The empty table first, so the history has an "absent" baseline to step back
+            # to: the first checkpoint of a key is silent, and the row's is the undo step.
+            self._chosen_table[(doc_id, channel)] = MANUAL_MODULE_ID
+            self._session.add_result(res)
+            res = self._session.results.get(doc_id, channel, MANUAL_MODULE_ID) or res
+        self._session.add_result(reconcile_result(res, new_events))
+        message = f"Added event {new_id} to {name}. {self._undo_hint()} undoes it."
+        stored = self._session.results.get(doc_id, channel, module_id)
+        crow = (stored.payload.df.loc[stored.payload.df["event_id"] == new_id]
+                if stored is not None else None)
+        if crow is not None and len(crow) and not bool(crow["accepted"].iloc[0]):
+            message = (f"Added event {new_id} to {name}, but it was rejected automatically "
+                       f"({crow['flag'].iloc[0] or 'see its flag'}). {self._undo_hint()} undoes it.")
+        self.last_add_outcome = AddOutcome(True, message, new_id, module_id, created)
+        self.eventAdded.emit(int(new_id), module_id)
+        return self.last_add_outcome
+
+    def add_current_selection_as_event(self) -> int | None:
+        """Add the Measure cursors' span as a hand-made event; the ``event_id``, or ``None``.
+
+        A thin wrapper over :meth:`add_manual_event` that reads the span from the trace's
+        Measure region. The cursors have to be ON THIS RECORDING: ``measure_bounds`` hands back
+        sample indices with no recording attached, and the region may sit on another pane."""
+        self.last_missed_refusal = ""
         if self._sel is None:
             return None
         doc_id, channel = self._sel
-        if not self._session.has_document(doc_id):
+        if self.target_module_id(doc_id, channel) == CONSENSUS_MODULE_ID:
+            # The derived table says so even before a region is drawn: the reason is the
+            # table, not the cursors.
+            self.last_missed_refusal = _RECONCILED_ADD_REFUSAL
+            self.runRefused.emit(_RECONCILED_ADD_REFUSAL)
             return None
-        # The cursors have to be ON THIS RECORDING. ``measure_bounds`` hands back sample
-        # indices with no recording attached, and the Measure region may be sitting on
-        # another pane — appending those indices here would add an event bracketing
-        # whatever happens to live at those sample numbers in THIS trace. Same guard, same
-        # reason, as MainWindow's "spectrum of the selection" action.
         target = self._trace_view.measure_target()
         bounds = self._trace_view.measure_bounds()
-        if bounds is None or target is None or target != (doc_id, channel):
-            return None
-
-        ch = self._session.calibrated(doc_id, channel)
-        data = np.asarray(ch.data)
-        n = int(data.size)
-        fs = ch.sample_rate_hz
-        if fs is None or n == 0:
-            return None            # dwell is undefined without a time base
-        start = int(np.clip(int(bounds[0]), 0, n))
-        end = int(np.clip(int(bounds[1]), 0, n))
-        if end <= start:
-            return None
-
-        events = res.payload
-        df = events.df
-        # A span the detector already found is not "missed": a second row over it would be
-        # counted twice in n, the rate and every export.
-        covered = self._events_overlapping(df, start, end)
-        if covered:
+        if bounds is None or target is None:
             self.last_missed_refusal = (
-                f"That span overlaps event {covered[0]}"
-                + (f" and {len(covered) - 1} more" if len(covered) > 1 else "")
-                + ", which the detection already has, so nothing was added. Select that "
-                "event to curate it, or bracket only the stretch between events.")
-            self.runRefused.emit(self.last_missed_refusal)
+                "Measure is on but no region is selected. Press C over the event to catch it, "
+                "or drag across it." if self._trace_view.measure_empty() else
+                "No region is selected on the trace. Turn on Measure and drag across the event.")
             return None
-        ensure_added_column(df)
-        recording, pore_id = self._missed_identity(df, doc_id)
-        # Measure the hand-added event on the trace the DETECTOR measured on, so its row
-        # is comparable with the detected rows it is being appended to (see
-        # :meth:`_active_signal`). Falls back to the raw channel when the conditioning
-        # cannot be rebuilt.
-        conditioned, _ = self._active_signal(events.provenance or {})
-        crow = self._characterize_missed(
-            conditioned if conditioned is not None else data,
-            float(fs), start, end, events.provenance or {},
-            ch.units or "pA", recording, pore_id)
-        if crow is None:
+        if target != self._sel:
+            self.last_missed_refusal = (
+                "The cursors are on another recording or channel than the one in the Analysis "
+                "panel. Select that channel and try again.")
             return None
-
-        new_id = (int(df["event_id"].max()) + 1) if len(df) else 0
-        row = crow.to_dict()
-        row["event_id"] = int(new_id)
-        row[ADDED_COLUMN] = True                      # this is a detector MISS
-        # ``accepted`` / ``flag`` come from the rebuild, NOT from a blanket
-        # ``accepted = True`` here. A hand-added event is real by definition, and it
-        # arrives with ``accepted=True`` for exactly that reason -- but if the user's
-        # selection runs off the end of the recording, the row is boundary-clipped and
-        # its dwell is a lower bound, and asserting it is fine would be the same lie
-        # the merge used to tell.
-
-        # reindex, NOT `[df.columns]`: the detection frame now carries the detector's
-        # ORIGINAL bounds (`orig_start_idx`/`orig_end_idx`, stamped at detection so the
-        # inspector's Revert has something to revert TO), and `row` comes from
-        # `characterize`, whose output is `df[list(SCHEMA)]` and so has neither column.
-        # A column SELECTION raises KeyError on them; reindex fills NA, which is the right
-        # answer twice over -- a hand-added event HAS no detector bounds, and
-        # `events.original_bounds` reads NA as "unknown" and disables Revert for that row.
-        combined = pd.concat(
-            [df, pd.DataFrame([row]).reindex(columns=df.columns)], ignore_index=True)
-        combined = combined.astype({c: df[c].dtype for c in df.columns})
-        # A HAND-ADDED EVENT IS A RULING BY DEFINITION -- somebody looked at the trace,
-        # drew a span and said "the detector missed this". `ensure_source_status` stopped
-        # inferring reviewedness from ``added`` (it may not promote a merged row), so
-        # without this the row the user just created reads status 'unknown'. Marked on
-        # the frame that is about to be installed, so the ONE ``add_result`` below carries
-        # both writes and the checkpoint it drives sees the row whole.
-        mark_reviewed(combined, rows=np.array([len(combined) - 1], dtype=np.int64))
-        new_events = EventSet(combined, dict(events.provenance or {}))
-        # Re-install under the SAME (doc, channel, module) key: resultsChanged drives
-        # _show_result (table + spans + score) and MainWindow re-feeds the inspector.
-        # Through `reconcile_result`, not a bare `replace`: the table just grew a row,
-        # so every row-derived count and sentence on the result is re-read from it.
-        self._session.add_result(reconcile_result(res, new_events))
-        return int(new_id)
+        out = self.add_manual_event(doc_id, channel, int(bounds[0]), int(bounds[1]))
+        return out.event_id if out.ok else None
 
     @staticmethod
     def _events_overlapping(df: pd.DataFrame, start: int, end: int) -> list[int]:
@@ -4932,7 +6096,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         return self._merge.window_s()
 
     def _active_signal(
-        self, provenance: dict[str, Any] | None = None
+        self, provenance: dict[str, Any] | None = None, *, strict: bool = False,
+        key: tuple[str, int] | None = None,
     ) -> tuple[np.ndarray | None, float | None]:
         """The trace a re-characterization must measure on, + the sample rate.
 
@@ -4950,9 +6115,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         hence a merge — is undefined then). Cached: ~0.12 s for a 3 M-sample recording,
         and the merge entry points are on the GUI thread.
         """
-        if self._sel is None:
+        target = key if key is not None else self._sel
+        if target is None:
             return None, None
-        doc_id, channel = self._sel
+        doc_id, channel = target
         if not self._session.has_document(doc_id):
             return None, None
         ch = self._session.calibrated(doc_id, channel)
@@ -4962,6 +6128,11 @@ class AnalysisPanel(QtWidgets.QWidget):
             return None, None
         if provenance is None:
             return data, float(fs)
+        if provenance.get("detector") == "manual" and provenance.get("signal_basis") == "raw":
+            # A Manual table is measured on the raw calibrated channel, and every row of it
+            # must be handed the same array object (the baseline memo is keyed on identity).
+            got = self._raw_signal(doc_id, channel)
+            return (None, None) if got is None else got
 
         try:
             calib = self._session.calibration(doc_id, channel).fingerprint()
@@ -4974,9 +6145,33 @@ class AnalysisPanel(QtWidgets.QWidget):
         try:
             out = detection_signal(data, float(fs), provenance)
         except Exception:  # noqa: BLE001 — a bad stored param must not break a merge
+            if strict:
+                # The hand-add door must not fall back to measuring on the raw channel under
+                # a table's name: it refuses and says why.
+                raise
             out = data
         self._cond_cache = (key, out)
         return out, float(fs)
+
+    def _raw_signal(self, doc_id: str, channel: int) -> tuple[np.ndarray, float] | None:
+        """The float32 contiguous raw calibrated channel and its rate, or ``None`` when the
+        recording has no samples or no rate. One array per (recording, channel, rate,
+        calibration), so a contract and the rows measured under it share the baseline memo."""
+        ch = self._session.calibrated(doc_id, channel)
+        data = np.asarray(ch.data)
+        fs = ch.sample_rate_hz
+        if fs is None or data.size == 0:
+            return None
+        try:
+            calib = tuple(self._session.calibration(doc_id, channel).fingerprint())
+        except Exception:  # noqa: BLE001
+            calib = None
+        key = (doc_id, int(channel), int(data.size), float(fs), calib)
+        if self._raw_cache is not None and self._raw_cache[0] == key:
+            return self._raw_cache[1], float(fs)
+        arr = np.ascontiguousarray(data, dtype=np.float32)
+        self._raw_cache = (key, arr)
+        return arr, float(fs)
 
     def _stale_merge_report(self, res: AnalysisResult,
                             window_s: float | None = None) -> MergeReport | None:
@@ -5292,6 +6487,11 @@ class AnalysisPanel(QtWidgets.QWidget):
             return self._refuse_baseline_job("no_detection")
         if res.module_id == CONSENSUS_MODULE_ID:
             return self._refuse_baseline_job("reconciled")
+        if res.module_id == MANUAL_MODULE_ID:
+            # A Manual table is repaired by Rebuild: the re-measure engine refuses a table on
+            # another clock and holds times fixed, which is exactly what a Manual table needs
+            # moved after a rate declaration.
+            return self.rebuild_manual_table()
         stale = self._stale_edit_refusal(res, "Nothing was re-measured.")
         if stale is not None:
             return self._refuse_baseline_job("stale_rate", stale)
@@ -5326,6 +6526,11 @@ class AnalysisPanel(QtWidgets.QWidget):
             return self._refuse_baseline_job("no_detection")
         if res.module_id == CONSENSUS_MODULE_ID:
             return self._refuse_baseline_job("reconciled")
+        if res.module_id == MANUAL_MODULE_ID:
+            return self._refuse_baseline_job(
+                "manual", "The Manual table is measured on the raw trace under the confirmed "
+                          "open-pore estimator. To see what another estimator changes, show a "
+                          "detector table and compare there; Rebuild re-measures this one.")
         stale = self._stale_edit_refusal(res, "Nothing was re-measured.")
         if stale is not None:
             return self._refuse_baseline_job("stale_rate", stale)
@@ -6066,6 +7271,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._stale.setVisible(False)
             self._table.set_stale_columns(())
             return
+        if res.module_id == MANUAL_MODULE_ID and isinstance(res.payload, EventSet):
+            self._judge_manual_staleness(res)
+            return
         doc_id, channel = self._sel
         reconciled = res.module_id == CONSENSUS_MODULE_ID
         live = self._session.calibration(doc_id, channel).fingerprint()
@@ -6591,9 +7799,18 @@ class AnalysisPanel(QtWidgets.QWidget):
         # ...and the standing baseline mark with them, for the same reason: it names the
         # windows of ONE load, and a kept entry would re-raise "ACCEPTED OVER 2 FAILED
         # HEALTH CHECKS" over a re-opened file whose user has been refused nothing.
-        for store in (self._recovery, self._fdr, self._baseline_marks):
+        for store in (self._recovery, self._fdr, self._baseline_marks, self._chosen_table):
             for key in [k for k in store if k[0] == doc_id]:
                 del store[key]
+        # ...and the hand-made-event machinery keyed on this load: the table choice (above), the
+        # Manual contracts built on its signal, the open-pore taus, the float32 raw copy.
+        for cache in (self._manual_contracts,):
+            for key in [k for k in cache if isinstance(k, tuple) and k and k[0] == doc_id]:
+                del cache[key]
+        for key in [k for k in self._tau_cache if k[0] == doc_id]:
+            del self._tau_cache[key]
+        if self._raw_cache is not None and self._raw_cache[0][0] == doc_id:
+            self._raw_cache = None
         # The OFFER too: a proposal is measured on one recording, and this one is gone.
         if self._baseline_offer is not None and self._baseline_offer[0][0] == doc_id:
             self._baseline_offer = None

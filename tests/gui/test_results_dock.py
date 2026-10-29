@@ -248,8 +248,8 @@ def test_no_new_sibling_import():
         sys.path.pop(0)
     assert _gui_modules_reached(AP) == {
         "analysis_worker", "baseline_panel", "baseline_workspace", "categorical",
-        "export_paths", "inspector_widgets", "measure_panel", "merge_panel",
-        "open_pore_preview", "overlays", "panels", "trace_view"}
+        "export_paths", "hand_row_preview", "inspector_widgets", "measure_panel",
+        "merge_panel", "open_pore_preview", "overlays", "panels", "trace_view"}
 
 
 # ================================================================================================

@@ -143,13 +143,13 @@ def test_score_reflects_reject_two_and_add_one_missed(window, qtbot, tmp_path):
     assert score.value_text("fp") == "2"
     assert score.value_text("fn") == "0"
 
-    # Bracket the missed blockade and press the Mark-missed button (the full wiring:
-    # markMissedRequested -> AnalysisPanel.add_current_selection_as_event).
+    # Bracket the missed blockade and press the Add button (the full wiring: addRequested ->
+    # MainWindow._add_event_from_cursors -> AnalysisPanel.add_manual_event).
     _bracket_missed(window, doc_id)
     mp = panel.measure_panel
-    assert mp._mark_missed_btn.isEnabled(), "button must arm with a detection + live cursors"
+    assert mp._add_button.isEnabled(), "the button must arm with live cursors"
     with qtbot.waitSignal(window._session.resultsChanged, timeout=5_000):
-        mp._mark_missed_btn.click()
+        mp._add_button.click()
     qtbot.wait(20)
 
     # Final score: 3 matched, 2 spurious, 1 missed -> P=0.6, R=0.75, F1=2/3.
@@ -242,27 +242,28 @@ def test_mark_missed_shortcut_action_works_with_measure_tab_hidden_and_keeps_vie
     before_bounds = window._trace_view.measure_bounds()
     before_n = len(panel.current_events_df())
 
-    assert window._act_mark_missed.shortcut().toString() == "Ctrl+Shift+M"
+    assert window._act_add_event.shortcut().toString() == "Ctrl+M"
     with qtbot.waitSignal(window._session.resultsChanged, timeout=5_000):
-        window._act_mark_missed.trigger()
+        window._act_add_event.trigger()
     qtbot.wait(20)
 
     assert len(panel.current_events_df()) == before_n + 1
     assert tuple(window._trace_view.anchor_plot().vb.viewRange()[0]) == pytest.approx(before_view)
     assert window._trace_view.measure_bounds() == before_bounds
-    assert "reviewed training label" in window.statusBar().currentMessage()
+    assert "Added event" in window.statusBar().currentMessage()
 
 
-def test_mark_missed_shortcut_without_detector_refuses_out_loud_and_writes_nothing(
-        window, tmp_path):
+def test_the_add_shortcut_without_a_detector_starts_the_manual_table(window, tmp_path):
     doc_id, _channel = _install(window, _doc(tmp_path))
     _bracket_missed(window, doc_id)
-    assert window._act_mark_missed.isEnabled()
+    assert window._act_add_event.isEnabled()
 
-    window._act_mark_missed.trigger()
+    window._act_add_event.trigger()
 
-    assert window._analysis_panel.current_detection() is None
-    assert "no source detector table" in window.statusBar().currentMessage().lower()
+    res = window._analysis_panel.current_detection()
+    assert res is not None and res.module_id == "detect.manual" and len(res.payload.df) == 1
+    assert "Added event" in window.statusBar().currentMessage()
+    assert "Manual" in window.statusBar().currentMessage()
 
 
 # ================================================================================================
@@ -317,24 +318,27 @@ def test_training_export_include_all_keeps_rejected(window, qtbot, tmp_path):
 
 
 # ================================================================================================
-# the Mark-missed button gate
+# the Add button gate
 # ================================================================================================
 
-def test_mark_missed_button_requires_detection_and_cursors(window, qtbot, tmp_path):
+def test_add_button_arms_with_live_cursors_with_or_without_a_detection(window, qtbot, tmp_path):
     doc_id, channel = _install(window, _doc(tmp_path))
     mp = window._analysis_panel.measure_panel
 
-    # No detection yet: even with cursors up, the button is dead.
+    # No cursors yet: the button is dead.
+    assert not mp._add_button.isEnabled()
+
+    # No detection, cursors up: the event has a home (the channel's Manual table), so it arms.
     mp.set_active(True)
     vals = window._session.x_axis(doc_id).values
     window._trace_view.set_measure_region(float(vals[_MISSED[0]]), float(vals[_MISSED[1]]))
-    assert not mp._mark_missed_btn.isEnabled()
+    assert mp._add_button.isEnabled()
 
-    # After a detection lands, the same live selection arms the button.
+    # After a detection lands, the same live selection still arms it.
     _run_detection(window, qtbot)
     _bracket_missed(window, doc_id)
-    assert mp._mark_missed_btn.isEnabled()
+    assert mp._add_button.isEnabled()
 
     # Turning the cursors off disarms it again.
     mp.set_active(False)
-    assert not mp._mark_missed_btn.isEnabled()
+    assert not mp._add_button.isEnabled()

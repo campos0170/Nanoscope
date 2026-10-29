@@ -675,10 +675,13 @@ def test_add_shortcut_saves_without_touching_the_mouse(window, tmp_path):
     # Ctrl+M is a MainWindow QAction, not a panel-scoped QShortcut: a Qt.WindowShortcut on
     # the panel is dead whenever the Manual-measurement tab is not the raised one, which is
     # most of the workflow (the cursors deliberately stay live when the tab is hidden).
-    assert window._act_add_measurement.shortcut().toString() == "Ctrl+M"
-    assert window._act_add_measurement.isEnabled()
-    window._act_add_measurement.trigger()
-    assert len(mp.measurements_df) == 1
+    assert window._act_add_event.shortcut().toString() == "Ctrl+M"
+    assert window._act_add_event.isEnabled()
+    window._act_add_event.trigger()
+    # Ctrl+M files an EVENT now (here the Manual table: this channel has no detector run).
+    res = window._analysis_panel.current_detection()
+    assert res is not None and res.module_id == "detect.manual" and len(res.payload.df) == 1
+    assert len(mp.measurements_df) == 0
 
 
 def test_ctrl_m_is_alive_with_the_measurement_tab_hidden(window, tmp_path):
@@ -703,9 +706,11 @@ def test_ctrl_m_is_alive_with_the_measurement_tab_hidden(window, tmp_path):
     # `test_p3_regressions.py::test_ctrl_m_is_DELIVERED_with_the_measurement_page_hidden`,
     # which needs a shown window and is kept out of this file because showing one here
     # changes where the next test's keyboard focus lands.
-    assert window._act_add_measurement.isEnabled()
-    window._act_add_measurement.trigger()
-    assert len(mp.measurements_df) == 1
+    assert window._act_add_event.isEnabled()
+    window._act_add_event.trigger()
+    res = window._analysis_panel.current_detection()
+    assert res is not None and len(res.payload.df) == 1
+    assert len(mp.measurements_df) == 0
 
 
 def test_ctrl_m_with_measure_off_says_what_is_missing(window, tmp_path):
@@ -717,8 +722,8 @@ def test_ctrl_m_with_measure_off_says_what_is_missing(window, tmp_path):
     _install(window, _doc(tmp_path, _trace(), name="A.dat"))
     mp = window._analysis_panel.measure_panel
     mp.set_active(False)
-    assert window._act_add_measurement.isEnabled()
-    window._act_add_measurement.trigger()
+    assert window._act_add_event.isEnabled()
+    window._act_add_event.trigger()
     assert len(mp.measurements_df) == 0
     assert "Measure is off" in window.statusBar().currentMessage()
 
@@ -943,7 +948,15 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           # gui reach at all.
                           "plot_export_options", "plot_print_preflight",
                           # trace_view's own reach (pre-existing, 2026-09-13).
-                          "display_residual"}
+                          "display_residual",
+                          # busy_cursor: the wait-cursor helpers the Measure panel's exact
+                          # re-measure asks for (functions only, no widget; the guard below
+                          # proves it). It was reached for a while before this list said so.
+                          # hand_row_preview: the plain value the Analysis panel answers the
+                          # Measure tab with ("what would an event here be?"). It is a
+                          # NamedTuple, so the two panels can exchange it without importing
+                          # each other.
+                          "busy_cursor", "hand_row_preview"}
 
 
 def test_the_non_panel_allowlist_holds_no_panel():
@@ -1051,14 +1064,16 @@ def test_measure_panel_imports_no_sibling_gui_panel():
     """
     import nanoscope.gui.measure_panel as measure_mod
 
-    assert sorted(_relative_sibling_imports(measure_mod)) == ["export_paths", "trace_view"]
+    assert sorted(_relative_sibling_imports(measure_mod)) == [
+        "busy_cursor", "export_paths", "hand_row_preview", "trace_view"]
     # ...and not by any other spelling of the same import, either. Stated as the MEASURED
     # set, not as `_NON_PANEL_GUI_MODULES`: the two happened to coincide while the
     # allowlist held exactly these two names, and comparing against the allowlist then
     # broke -- harmlessly but confusingly -- the moment two more non-panel helpers were
     # added that this panel does not use. What is being pinned is what THIS module
     # reaches, and separately that everything it reaches is on the allowlist.
-    assert _gui_modules_reached(measure_mod) == {"export_paths", "trace_view"}
+    assert _gui_modules_reached(measure_mod) == {
+        "busy_cursor", "export_paths", "hand_row_preview", "trace_view"}
     assert _gui_modules_reached(measure_mod) <= _NON_PANEL_GUI_MODULES
 
 

@@ -241,9 +241,9 @@ def assert_refused(rig: Rig, before: pd.DataFrame, undo_before: str, outcome: st
 def test_the_shortcut_refuses_to_hand_add_an_event_into_a_stale_table(stale):
     stale.bracket(_MISSED)
     before, undo = stale.snapshot(), stale.undo_text()
-    assert stale.window._act_mark_missed.shortcut().toString() == "Ctrl+Shift+M"   # Shift+Cmd+M
-    assert stale.window._act_mark_missed.isEnabled()
-    stale.window._act_mark_missed.trigger()
+    assert stale.window._act_add_event.shortcut().toString() == "Ctrl+M"   # Cmd+M
+    assert stale.window._act_add_event.isEnabled()
+    stale.window._act_add_event.trigger()
     settle()
     assert_refused(stale, before, undo, "Nothing was added.")
 
@@ -251,7 +251,7 @@ def test_the_shortcut_refuses_to_hand_add_an_event_into_a_stale_table(stale):
 def test_the_measure_tabs_button_refuses_the_same_way(stale):
     stale.bracket(_MISSED)
     before, undo = stale.snapshot(), stale.undo_text()
-    button = stale.panel.measure_panel._mark_missed_btn
+    button = stale.panel.measure_panel._add_button
     assert button.isEnabled()
     button.click()
     settle()
@@ -355,11 +355,11 @@ def test_with_the_declaration_taken_back_hand_add_writes_a_row_on_the_tables_clo
     stale.take_the_declaration_back()
     assert stale.panel._stale.isHidden(), "the rates match again: nothing is stale"
     stale.bracket(_MISSED)
-    stale.window._act_mark_missed.trigger()
+    stale.window._act_add_event.trigger()
     settle()
     df = stale.df()
     assert len(df) == 7 and rows_on_clock(df, FS) == 7
-    assert "Added missed event" in stale.status() and _MODAL == []
+    assert "Added event" in stale.status() and _MODAL == []
 
 
 def test_with_the_declaration_taken_back_a_drag_and_merge_all_edit_as_before(stale):
@@ -388,11 +388,11 @@ def test_a_rerun_under_the_declared_rate_makes_every_door_edit_on_the_new_clock(
     assert rows_on_clock(stale.df(), DECLARED) == len(stale.df())
     n = len(stale.df())
     stale.bracket(_MISSED)
-    stale.window._act_mark_missed.trigger()
+    stale.window._act_add_event.trigger()
     settle()
     df = stale.df()
     assert len(df) == n + 1 and rows_on_clock(df, DECLARED) == n + 1
-    assert "Added missed event" in stale.status() and _MODAL == []
+    assert "Added event" in stale.status() and _MODAL == []
 
 
 def test_a_reopened_project_is_still_stale_and_still_refuses(stale, qtbot, tmp_path):
@@ -414,7 +414,7 @@ def test_a_reopened_project_is_still_stale_and_still_refuses(stale, qtbot, tmp_p
         assert reopened.stamp() == FS and reopened.panel._stale.kind == "sample_rate"
         before, undo = reopened.snapshot(), reopened.undo_text()
         reopened.bracket(_MISSED)
-        window._act_mark_missed.trigger()
+        window._act_add_event.trigger()
         settle()
         assert_refused(reopened, before, undo, "Nothing was added.")
         reopened.merge_all()
@@ -434,6 +434,6 @@ def test_a_table_that_carries_no_rate_stamp_is_judged_by_nothing_and_edits_as_be
     assert rig.panel._stale.isHidden() or rig.panel._stale.kind != "sample_rate"
     n = len(rig.df())
     rig.bracket(_MISSED)
-    rig.window._act_mark_missed.trigger()
+    rig.window._act_add_event.trigger()
     settle()
-    assert len(rig.df()) == n + 1 and "Added missed event" in rig.status()
+    assert len(rig.df()) == n + 1 and "Added event" in rig.status()

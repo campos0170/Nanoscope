@@ -71,6 +71,7 @@ from ..analysis.curation_view import (
     no_unreviewed_note,
     prev_member_before,
     row_unchanged,
+    can_keep_place,
     same_events,
     unlabel_rows,
 )
@@ -88,6 +89,7 @@ from ..analysis.events import (
 from ..analysis.modules import detection_signal, detection_signal_key
 from ..analysis.labels import LabelVocabulary, format_labels
 from ..analysis.reconcile import CONSENSUS_MODULE_ID, clear_curation_conflicts
+from ..analysis.events import MANUAL_MODULE_ID, KIND_MANUAL, source_kind, source_of
 from ..core.session import Session
 from .curation_keys import CurationKeyGuard
 from .overlays import STEP_LEVEL_HEX
@@ -227,8 +229,18 @@ _DETECTOR_NAMES = {
     "detect.cusum": "the CUSUM detector",
     "detect.keras": "the ML detector",
     "detect.study": "the imported study candidate table",
+    MANUAL_MODULE_ID: "the Manual table",
     CONSENSUS_MODULE_ID: "the reconciled result",
 }
+
+#: Said for a hand-made event in ANY table: it has no detector bounds, so there is nothing to
+#: revert to, and the sentence says why instead of blaming a detection that is old.
+_REVERT_TIP_HAND_MADE = (
+    "Drawn by hand: there are no detector bounds to return to. Drag the mask to move an edge; "
+    "Ctrl+Z undoes the edit.")
+
+#: What the inspector says when the browsed table has no events yet.
+_EMPTY_MANUAL_TEXT = ("No manual events yet. Bracket an event on the trace and press Ctrl+M.")
 
 #: Said when a row carries no recorded original. NOT backfilled from the current bounds — see
 #: :func:`~nanoscope.analysis.events.original_bounds`.
@@ -1156,6 +1168,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
     amplitudeEdited = Signal(int)            # optional amplitude only; -1 means batch; NEVER refit
     curationBatchChanged = Signal()          # Accept all / Reject all rewrote 'accepted'
     mergeWithNextRequested = Signal(int)     # stitch this event to the following one(s) (event_id)
+    deleteHandMadeRequested = Signal(int)    # remove this hand-made event (event_id)
     labelsChanged = Signal()                 # a label was written on the shared frame
     # An accept the derived half refused, with NOTHING written (the A key / Accepted
     # checkbox on a row the detector flagged unmeasurable, already rejected). The same
@@ -1441,6 +1454,14 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             "Stitch this event to the following event(s) within the merge window into one "
             "event, then advance. Reversed by ⌘Z in this window or Edit ▸ Undo.")
         self._merge_next_btn.clicked.connect(self._on_merge_with_next)
+        # Delete: only for an event a person drew, so it is hidden for every detected one.
+        self._delete_btn = QtWidgets.QPushButton("Delete")
+        self._delete_btn.setToolTip(
+            "Remove this hand-made event from the table. A detected event is the detector's "
+            "record and cannot be deleted: reject it instead. Reversed by ⌘Z in this window "
+            "or Edit ▸ Undo.")
+        self._delete_btn.clicked.connect(self._on_delete_hand_made)
+        self._delete_btn.setVisible(False)
 
         # Batch curation: accept or reject EVERY event at once (the whole df, not just the filtered
         # subset), so the reviewer can "accept all, then reject the few bad ones" or the reverse.
@@ -1489,12 +1510,12 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
              None, self._host_btn),
             (filter_label, self._filter_combo, 12, self._advance_check, 12,
              self._gallery_btn, self._trace_btn, None, self._accept_all_btn,
-             self._reject_all_btn, 12, self._merge_next_btn),
+             self._reject_all_btn, 12, self._merge_next_btn, self._delete_btn),
         )
         self._toolbar_narrow = (
             (self._prev_btn, self._index_spin, self._count_label, self._next_btn, 8,
              self._accept_btn, self._reject_btn, None),
-            (self._accept_check, self._revert_btn, self._merge_next_btn, None),
+            (self._accept_check, self._revert_btn, self._merge_next_btn, self._delete_btn, None),
             (self._pan_left_btn, self._pan_right_btn, self._context_combo, 8,
              self._trace_btn, self._gallery_btn, None),
             (filter_label, self._filter_combo, 8, self._accept_all_btn,
@@ -2333,7 +2354,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
                       and self._channel == int(channel))
         keep = (bool(keep_place) and not same_frame and self._current_id is not None
                 and str(doc_id) == self._doc_id and self._channel == int(channel)
-                and same_events(self._df, events_df))
+                and can_keep_place(self._df, events_df, self._current_id))
         # A DIFFERENT detection invalidates the level fit. MainWindow calls this on every
         # selection change and the detection "may be a different detection", so without
         # this the levels fitted on recording A were printed under recording B's events --
@@ -2384,7 +2405,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._current_id = None
         self._sync_progress()
         if len(self._df) == 0:
-            self._show_empty("Detection found no events.")
+            self._show_empty(_EMPTY_MANUAL_TEXT if self._module_id == MANUAL_MODULE_ID
+                             else "Detection found no events.")
             return
         first = int(self._df["event_id"].iloc[0])
         self._render_and_sync(first, emit=False)
@@ -3083,6 +3105,18 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             return
         self.mergeWithNextRequested.emit(int(self._current_id))
 
+    def _on_delete_hand_made(self) -> None:
+        """Announce that the displayed hand-made event should be deleted. Intent only: the
+        panel owns the table, MainWindow routes it and lands this window on the next event."""
+        if (self._df is None or self._current_id is None
+                or self._module_id == CONSENSUS_MODULE_ID):
+            return
+        row = self._row_for_id(self._current_id)
+        if row is None or "source" not in self._df.columns \
+                or str(self._df["source"].iloc[row]) != "manual":
+            return
+        self.deleteHandMadeRequested.emit(int(self._current_id))
+
     def _on_show_in_trace(self) -> None:
         """Announce that the displayed event should be shown in the MAIN trace ("Show in
         trace" / T). Intent only: this window has no business moving another surface's view,
@@ -3528,6 +3562,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             return False, _RECONCILED_EDIT_TIP
         if self._df is None or row is None:
             return False, _REVERT_TIP_UNKNOWN.format(detector=detector)
+        if source_kind(source_of(self._df.iloc[row])) == KIND_MANUAL:
+            return False, _REVERT_TIP_HAND_MADE
         bounds = original_bounds(self._df.iloc[row])
         if bounds is None:
             return False, _REVERT_TIP_UNKNOWN.format(detector=detector)
@@ -4145,10 +4181,27 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             lines.append(f"amplitude:       {_fmt_num(r['amplitude_pA'], ' ' + str(r['amplitude_units']), 5)} "
                          f"({r['amplitude_method']}; separate from depth/dI/I0/SNR)"
                          + (" ⚠" if self._stale_columns else ""))
+        source_line = self._source_line(r)
+        if source_line:
+            lines.append(source_line)
         lines.extend(self._level_lines(ev_id, units))
         # The labels line comes and goes with a label write: its height is held either way.
         self._readout.set_spare_lines(0 if _labels else 1)
         self._readout.setText("\n".join(lines))
+
+    @staticmethod
+    def _source_line(r: pd.Series) -> str:
+        """``source: drawn by hand · …`` for a hand-made event, else ``""``. The origin of a
+        carried or copied row, how its bounds were made, and its note ride the same line."""
+        if source_kind(source_of(r)) != KIND_MANUAL:
+            return ""
+        bits = ["drawn by hand"]
+        for col, text in (("origin", "from {}"), ("bounds_source", "bounds {}"),
+                          ("note", "note: {}")):
+            value = r.get(col, None)
+            if value is not None and not pd.isna(value) and str(value).strip():
+                bits.append(text.format(str(value).strip()))
+        return "source:          " + " · ".join(bits)
 
     def _stale_sentence(self) -> str:
         """The banner's sentence when the owner gave one, else the columns by name."""
@@ -4455,6 +4508,10 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             self._pan_right_btn.setEnabled(has_current)
             self._context_combo.setEnabled(has_current)
             geometry_editable = has_current and self._module_id != CONSENSUS_MODULE_ID
+            self._delete_btn.setVisible(
+                has_current and geometry_editable
+                and source_kind(source_of(self._df.iloc[self._row_for_id(cur)])) == KIND_MANUAL
+                if (has_current and self._row_for_id(cur) is not None) else False)
             self._merge_next_btn.setEnabled(geometry_editable)
             self._merge_next_btn.setToolTip(
                 _RECONCILED_EDIT_TIP if has_current and not geometry_editable

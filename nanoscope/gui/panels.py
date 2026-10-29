@@ -7929,6 +7929,9 @@ class EventTable(QWidget):
     acceptanceRefused = Signal(int)
     inspectRequested = Signal(int)
     galleryRequested = Signal(int)
+    #: Right-click ▸ "Delete hand-made event(s)": the ``event_id``s of the selected rows a
+    #: person drew. Intent only; MainWindow routes it to the panel's delete door.
+    deleteHandMadeRequested = Signal(list)
     #: One of the notice chip's menu entries was chosen (its key, see _NOTICE_ACTIONS).
     noticeActionRequested = Signal(str)
 
@@ -8788,8 +8791,22 @@ class EventTable(QWidget):
         act_gallery = menu.addAction("Open in Event &gallery")
         act_gallery.setToolTip(
             "See every event at once as a grid of waveform tiles, with this one focused.")
+        hand_ids = self._selected_hand_made_ids()
+        act_delete = None
+        if hand_ids:
+            menu.addSeparator()
+            act_delete = menu.addAction(
+                "&Delete hand-made event" if len(hand_ids) == 1
+                else f"&Delete {len(hand_ids)} hand-made events")
+            act_delete.setToolTip(
+                "Remove the events you drew by hand from this table. A detected event is the "
+                "detector's record and is not deleted: reject it to take it out of the count. "
+                "One step on Edit ▸ Undo.")
         chosen = self._exec_menu(menu, self.view.viewport().mapToGlobal(pos))
         if chosen is None:
+            return
+        if act_delete is not None and chosen is act_delete:
+            self.deleteHandMadeRequested.emit(hand_ids)
             return
         if chosen is act_accept:
             self.curate_selected(True)
@@ -8799,6 +8816,17 @@ class EventTable(QWidget):
             self.inspectRequested.emit(event_id)
         elif chosen is act_gallery:
             self.galleryRequested.emit(event_id)
+
+    def _selected_hand_made_ids(self) -> list[int]:
+        """``event_id`` of every SELECTED row a person drew (``source`` manual)."""
+        df = self._model.df
+        if df is None or not len(df) or "source" not in df.columns:
+            return []
+        ids = []
+        for src_row in self.selected_source_rows():
+            if 0 <= src_row < len(df) and str(df["source"].iloc[src_row]) == "manual":
+                ids.append(int(self._model._event_id(src_row)))
+        return ids
 
     def set_notice(self, text: str, tooltip: str = "",
                    actions: Sequence[str] | None = None) -> None:

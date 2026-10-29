@@ -834,10 +834,9 @@ def test_fit_button_tracks_the_live_detection_in_a_real_window(win, tmp_path):
 
 _ANALYSIS_ACTION_ATTRS = (
     "_act_run_detection", "_act_batch_detect", "_act_load_ml_model", "_act_run_ml_detection",
-    "_act_event_inspector", "_act_measure", "_act_add_measurement",
+    "_act_event_inspector", "_act_measure", "_act_add_event", "_act_export_event_statistics", "_act_include_hand_made", "_act_copy_hand_made", "_act_convert_measurements",
     "_act_compare_baseline",
     "_act_plots", "_act_event_plots", "_act_event_gallery", "_act_reconcile", "_act_labels",
-    "_act_mark_missed",
     # Change D: Signal conditioning… joins Explore this recording just before the PSD,
     # after _act_plots (which must stay item 8).
     "_act_signal_conditioning",
@@ -895,10 +894,9 @@ def test_analysis_menu_keeps_every_shortcut_and_flag(win):
     # Ctrl+M lives on the MENU, not on the MeasurePanel: a Qt.WindowShortcut on a panel
     # that is one page of a hidden tab stack is delivered only while that tab is raised,
     # which is not when the key is used (C30).
-    assert win._act_add_measurement.shortcut() == QtCore.QKeyCombination(
+    assert win._act_add_event.shortcut() == QtCore.QKeyCombination(
         QtCore.Qt.ControlModifier, QtCore.Qt.Key_M)
-    assert win._act_mark_missed.shortcut() == QtCore.QKeyCombination(
-        QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier, QtCore.Qt.Key_M)
+    # Ctrl+Shift+M retired: two adjacent keys with different targets invite misfiled events.
     # Reserved for Signal conditioning… (change D), and always enabled: disabled, the key
     # would fall through to the event table's modifier-blind curation keys (F = flag).
     assert win._act_signal_conditioning.shortcut() == QtCore.QKeyCombination(

@@ -142,7 +142,7 @@ def test_a_hand_add_with_the_gallery_open_does_not_move_the_trace(private_settin
     announced: list[int] = []
     window._event_gallery.eventSelected.connect(announced.append)
     _bracket(window, 21_000, 21_400)
-    window._mark_selection_as_missed()
+    window._add_event_from_cursors()
     settle()
     assert len(_frame(window)) == 7
     assert announced == [] and _x_range(window) == before
@@ -160,12 +160,12 @@ def test_a_hand_add_over_a_detected_event_is_refused(private_settings, qtbot):
     for start, end in ((first, last), (first - 40, first + 40), (last - 40, last + 40),
                        (first + 5, last - 5)):
         _bracket(window, start, end)
-        window._mark_selection_as_missed()
+        window._add_event_from_cursors()
         assert len(_frame(window)) == 6, (start, end)
         assert "overlaps event" in window.statusBar().currentMessage()
         assert "could not be added" not in window.statusBar().currentMessage()
     _bracket(window, last, last + 300)                   # touching is not overlapping
-    window._mark_selection_as_missed()
+    window._add_event_from_cursors()
     assert len(_frame(window)) == 7
-    assert "Added missed event" in window.statusBar().currentMessage()
+    assert "Added event" in window.statusBar().currentMessage()
     close_window(window)

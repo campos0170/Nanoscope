@@ -108,6 +108,10 @@ def test_a_poisoned_OPEN_PORE_WINDOW_explains_itself_too(panel, window):
     """The half nobody sees coming: every sample under the cursors is finite, and the
     reading is still refused because the reference beside them is not."""
     mp, doc_id = panel
+    # The reference beside the cursors is only read when the panel measures on its own. With an
+    # owner supplying the table's baseline (interpolated through bad samples) it is not, and the
+    # readout stands (test_measure_tab_preview.py); detach the owner to pin the refusal itself.
+    mp.set_basis_provider(None)
     _place(window, doc_id, *POISONED_FLANK)
 
     assert mp.current_measurement() is None

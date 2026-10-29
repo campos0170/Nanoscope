@@ -121,7 +121,10 @@ class PanScrollBar(QtWidgets.QWidget):
             button.setAutoRaise(True)
             button.setToolTip(tip)
             button.setFixedWidth(max(22, button.sizeHint().width()))
-            button.clicked.connect(slot)
+            # `clicked` carries its `checked` flag, and PySide hands it to a slot that has room
+            # for it. `zoom_in` / `zoom_out` now take an optional anchor, so a bare connect would
+            # read "checked=False" as "zoom about x = 0". The Scan strip's buttons keep the centre.
+            button.clicked.connect(lambda _checked=False, _slot=slot: _slot())
             lay.addWidget(button)
             return button
 
@@ -211,13 +214,26 @@ class PanScrollBar(QtWidgets.QWidget):
         """Move one overlapping annotation window right, preserving zoom exactly."""
         return self._scan(1)
 
-    def zoom_out(self) -> bool:
-        """Double the visible width around its centre, clamped to this recording."""
-        return self._zoom(LOCAL_ZOOM_FACTOR)
+    def step_window(self, direction: int) -> bool:
+        """Step one window along the recording: ``direction`` >= 0 is forward, < 0 backward.
 
-    def zoom_in(self) -> bool:
-        """Halve the visible width around its centre, never below two sample intervals."""
-        return self._zoom(1.0 / LOCAL_ZOOM_FACTOR)
+        The same 90% step with 10% overlap, at the same zoom, clamped to the annotation target,
+        as :meth:`next_view` / :meth:`previous_view` (which are this with the direction fixed).
+        A live Measure mask travels with the window and is moved by the same clamped delta;
+        with NO mask (Measure off, or on and empty) nothing is carried -- there is nothing to
+        move and nothing is created. False when the window cannot move that way."""
+        return self._scan(1 if direction >= 0 else -1)
+
+    def zoom_out(self, anchor: float | None = None) -> bool:
+        """Double the visible width, clamped to this recording. Around the centre, or around the
+        data x ``anchor`` when one is given (and lies inside the view): that x stays where it is on
+        screen, as long as the recording's ends do not force the window to move."""
+        return self._zoom(LOCAL_ZOOM_FACTOR, anchor)
+
+    def zoom_in(self, anchor: float | None = None) -> bool:
+        """Halve the visible width, never below two sample intervals. Around the centre, or
+        around the data x ``anchor`` (see :meth:`zoom_out`)."""
+        return self._zoom(1.0 / LOCAL_ZOOM_FACTOR, anchor)
 
     def show_full_trace(self) -> bool:
         """Restore the complete trace through the same path as View ▸ Reset zoom."""
@@ -367,7 +383,7 @@ class PanScrollBar(QtWidgets.QWidget):
         self._apply(x0, x0 + width)
         return True
 
-    def _zoom(self, multiplier: float) -> bool:
+    def _zoom(self, multiplier: float, anchor: float | None = None) -> bool:
         rng = self._current_range()
         if self._view is None or rng is None or multiplier <= 0.0:
             return False
@@ -393,8 +409,20 @@ class PanScrollBar(QtWidgets.QWidget):
                 or abs(multiplier - 1.0) <= 1e-14):
             self._apply(lo, hi)
             return False
-        centre = 0.5 * (lo + hi)
-        x0 = self._clamp_start(centre - 0.5 * wanted, wanted)
+        # The point that stays put: the pointer's x when one was given and it is INSIDE the view
+        # (an x off the view -- the pointer over an axis, say -- would fling the window), else the
+        # centre. ``m`` is the multiplier actually achieved after the extent and sample-floor
+        # clamps above, so the anchor holds even where the request was cut short.
+        px = 0.5 * (lo + hi)
+        if anchor is not None and not isinstance(anchor, bool):   # a bool is a signal's `checked`
+            try:
+                candidate = float(anchor)
+            except (TypeError, ValueError):
+                candidate = float("nan")
+            if lo <= candidate <= hi:
+                px = candidate
+        m = wanted / width
+        x0 = self._clamp_start(px - (px - lo) * m, wanted)
         if hasattr(self._view, "zoom_x_to"):
             self._view.zoom_x_to(x0, x0 + wanted)
         else:

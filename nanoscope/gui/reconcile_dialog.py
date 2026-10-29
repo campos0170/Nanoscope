@@ -39,7 +39,7 @@ def can_reconcile_sources(sources: Sequence[AnalysisResult]) -> bool:
     """
     compatible = tuple(
         result for result in sources
-        if result.module_id != CONSENSUS_MODULE_ID
+        if result.module_id not in (CONSENSUS_MODULE_ID, "detect.manual")
         and isinstance(result.payload, EventSet)
     )
     if len(compatible) >= 2:
@@ -65,7 +65,8 @@ class ReconcileDialog(QtWidgets.QDialog):
         self.setMinimumWidth(590)
         self._sources = tuple(
             res for res in sources
-            if res.module_id != CONSENSUS_MODULE_ID and isinstance(res.payload, EventSet)
+            if res.module_id not in (CONSENSUS_MODULE_ID, "detect.manual")
+            and isinstance(res.payload, EventSet)
         )
         self._checks: dict[str, QtWidgets.QCheckBox] = {}
         self._outcome: ReconcileOutcome | None = None

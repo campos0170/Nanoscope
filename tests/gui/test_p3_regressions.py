@@ -1034,12 +1034,18 @@ def test_ctrl_m_is_DELIVERED_with_the_measurement_page_hidden(qapp, qtbot, tmp_p
         w.show()
         QtWidgets.QApplication.processEvents()
         QtTest.QTest.keyClick(w, QtCore.Qt.Key_M, QtCore.Qt.ControlModifier)
-        assert len(mp.measurements_df) == 1, "Ctrl+M was not delivered with the page hidden"
+        # Ctrl+M files an EVENT now (here the Manual table: nothing was detected on this channel)
+        manual = w._session.results.get(doc_id, 0, "detect.manual")
+        assert manual is not None and len(manual.payload.df) == 1, (
+            "Ctrl+M was not delivered with the page hidden")
 
         w._analysis_panel._detection.show_measure_tab()
         QtWidgets.QApplication.processEvents()
+        # a second, different span: the same one would (rightly) be refused as an overlap
+        w._trace_view.set_measure_region(w._trace_view.x_for_index(doc_id, 0, 5_000),
+                                         w._trace_view.x_for_index(doc_id, 0, 6_000))
         QtTest.QTest.keyClick(w, QtCore.Qt.Key_M, QtCore.Qt.ControlModifier)
-        assert len(mp.measurements_df) == 2
+        assert len(w._session.results.get(doc_id, 0, "detect.manual").payload.df) == 2
     finally:
         w.close()
         QtWidgets.QApplication.processEvents()

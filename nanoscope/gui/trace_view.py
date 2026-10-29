@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import itertools
+import time
 from dataclasses import dataclass, replace
 from typing import Callable, Mapping
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6 import QtCore
+import shiboken6
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core.analysis import OverlayHint, OverlayKind
 from ..core.layer import LAYER_INKS, Layer, ViewMode
@@ -19,7 +21,8 @@ from .display_residual import DisplayResidualCache
 
 __all__ = ["PaneSpec", "plan_panes", "effective_kind", "ChannelPane", "TraceView", "Crosshair", "TraceViewBox",
            "PREVIEW_CHANNEL_NOT_SHOWN", "MAX_X_SPAN_FACTOR", "MEASURE_MAX_VIEW_FRACTION",
-           "MEASURE_HANDLE_SIZE_PX", "WHEEL_Y_PAN_FRACTION", "layer_ink", "FILTER_PREVIEW_HEX"]
+           "MEASURE_HANDLE_SIZE_PX", "WHEEL_Y_PAN_FRACTION", "WHEEL_X_PAN_FRACTION",
+           "DRAW_CLICK_MAX_PX", "SWIPE_LOCK_PX", "layer_ink", "FILTER_PREVIEW_HEX"]
 
 #: The filter-preview curve's ink. NOT a layer colour and deliberately outside
 #: :data:`~nanoscope.core.layer.LAYER_INKS`: it is a "what this filter would do to the
@@ -62,6 +65,106 @@ MEASURE_HANDLE_SIZE_PX = 16.0
 #: current pane height. Translation (rather than scaling) preserves amplitude span.
 WHEEL_Y_PAN_FRACTION = 0.10
 
+#: ...and a horizontal notch (or Shift plus a vertical one, which a Mac delivers as
+#: horizontal) slides the view along TIME by one tenth of the visible span.
+WHEEL_X_PAN_FRACTION = 0.10
+
+#: A drag that ends narrower than this many screen pixels is a click, not a drawn span.
+DRAW_CLICK_MAX_PX = 3.0
+
+#: A trackpad swipe picks its axis (time or amplitude) once either accumulated ``pixelDelta``
+#: component reaches this many pixels. The first event of a gesture (``ScrollBegin``) carries
+#: no movement, so the choice cannot be made there; until it is made nothing moves, and what
+#: was held back is applied on the chosen axis in one go so no travel is lost.
+SWIPE_LOCK_PX = 6.0
+
+_QT = QtCore.Qt
+_SCROLL_BEGIN = _QT.ScrollPhase.ScrollBegin
+_NO_SCROLL_PHASE = _QT.ScrollPhase.NoScrollPhase
+
+
+def _wheel_phase(ev):
+    """The scroll phase of a wheel event; ``NoScrollPhase`` for a mouse wheel (and for a test
+    double that has no such method)."""
+    try:
+        return ev.phase()
+    except AttributeError:
+        return _NO_SCROLL_PHASE
+
+
+def _wheel_pixel_delta(ev) -> tuple[float, float]:
+    """``(x, y)`` of the event's ``pixelDelta`` in logical pixels; zero for a mouse wheel."""
+    try:
+        pd = ev.pixelDelta()
+    except AttributeError:
+        return 0.0, 0.0
+    return float(pd.x()), float(pd.y())
+
+
+def _wheel_is_horizontal(ev) -> bool:
+    try:
+        return ev.orientation() == _QT.Orientation.Horizontal
+    except AttributeError:
+        return False            # a bare test double: the vertical wheel the trace always had
+
+
+def _wheel_has_shift(ev) -> bool:
+    try:
+        return bool(ev.modifiers() & _QT.KeyboardModifier.ShiftModifier)
+    except AttributeError:
+        return False
+
+
+class _ScrollGesture:
+    """The axis one trackpad scroll gesture is locked to, shared by every pane's ViewBox.
+
+    Qt reports each wheel event along whichever component dominates THAT event, so a diagonal
+    swipe alternates between time and amplitude from one event to the next. The lock is made
+    once, from the accumulated ``pixelDelta`` since the gesture began, and kept until the next
+    ``ScrollBegin`` (momentum events continue on it). Two failsafes for hardware that does not
+    frame its gestures: a pause longer than :attr:`IDLE_S` ends a gesture too, and an event with
+    a pixel delta but no phase at all decides for itself and never locks (see
+    :meth:`TraceViewBox.wheelEvent`)."""
+
+    IDLE_S = 0.6
+
+    def __init__(self) -> None:
+        self.axis: str | None = None
+        self.acc_x = 0.0
+        self.acc_y = 0.0
+        self.last_t: float | None = None
+
+    def reset(self) -> None:
+        self.axis = None
+        self.acc_x = 0.0
+        self.acc_y = 0.0
+
+
+def _alive(obj) -> bool:
+    """Is the C++ object behind this wrapper still there? Calling into one that is not can
+    SEGFAULT instead of raising: ``GraphicsView.close()`` clears the scene (deleting every item)
+    and only then detaches the viewport, and that last step sends the view a focus-out while the
+    panes it lists are already gone."""
+    try:
+        return bool(shiboken6.isValid(obj))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _draw_wanted(draw_mode, ev) -> bool:
+    """Does this left drag draw a span? Draw mode on XOR Option (Alt) held at its start.
+
+    Option inverts the drag in BOTH states, so a one-off span needs no mode and a quick dive
+    into an event (box zoom) needs no mode change. Control is avoided on purpose: on a Mac,
+    Control+click is a right click."""
+    on = bool(draw_mode()) if draw_mode is not None else False
+    option = bool(ev.modifiers() & _QT.KeyboardModifier.AltModifier)
+    return on != option
+
+
+def _drag_phase(ev) -> str:
+    return "start" if ev.isStart() else ("finish" if ev.isFinish() else "move")
+
 
 class TraceViewBox(pg.ViewBox):
     """A ViewBox tuned for trace inspection, so the user can get *inside* a millisecond event.
@@ -69,23 +172,103 @@ class TraceViewBox(pg.ViewBox):
     - Mouse wheel PANS amplitude vertically without changing either axis span. Wheel up moves the
       drawn signal up; wheel down moves it down. Horizontal scale belongs to box zoom and the
       persistent −/+ controls, so an accidental scroll cannot lose the event in time.
+    - A horizontal two-finger swipe (or a horizontal wheel, or Shift plus the wheel) slides the
+      view along TIME, with the axis locked for the whole gesture (:class:`_ScrollGesture`).
     - Mouse mode is RectMode by default: left-drag draws a zoom box, so you frame an event and dive
       straight in — the gesture the coarse navigator strip physically cannot do (~36 ms/pixel).
       Right-drag still scales, and View ▸ Drag mode flips back to panning.
+    - In DRAW MODE (or with Option held) a left-drag draws a Measure span instead: the drag is
+      handed, phase by phase, to ``on_draw`` and never reaches the box zoom. Option inverts it
+      in both states.
     - Double-click requests a manual mask centred at that data-x. The Measure panel owns the active
-      annotation target and therefore performs the actual placement.
+      annotation target and therefore performs the actual placement. In draw mode it asks to
+      CATCH the event there (``on_catch``) instead.
+    - ``hoverEvent`` reports the pointer ENTERING this box (``on_hover_enter``): pyqtgraph's
+      ViewBox has no hover handling of its own.
+
+    Every hook is an injected callable, like ``on_double_click`` always was, so this class
+    knows nothing of the view that owns it.
     """
 
-    def __init__(self, *args, on_double_click=None, **kwargs) -> None:
+    def __init__(self, *args, on_double_click=None, on_draw=None, draw_mode=None,
+                 on_catch=None, on_hover_enter=None, scroll=None, extent=None,
+                 **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._on_double_click = on_double_click
+        #: ``on_draw(source, phase, ev, handle) -> handle``. ``phase`` is "start", "move",
+        #: "finish" or "cancel"; ``handle`` is whatever the previous call returned (None at
+        #: the start), so the owner can hold the gesture's token and the box need not.
+        self._on_draw = on_draw
+        self._draw_mode = draw_mode
+        self._on_catch = on_catch
+        self._on_hover_enter = on_hover_enter
+        self._scroll = scroll if scroll is not None else _ScrollGesture()
+        self._extent = extent
+        self._drawing = False          # THIS box took the left drag now in progress
+        self._draw_handle = None
 
+    # -- wheel / trackpad ------------------------------------------------------------------------
     def wheelEvent(self, ev, axis=None):  # noqa: N802  (Qt/pyqtgraph signature)
-        del axis  # every wheel delivered by the trace is the same vertical-pan gesture
+        del axis  # the trace answers every wheel the same way, wherever on the pane it lands
+        gesture = self._scroll
+        phase = _wheel_phase(ev)
+        now = time.monotonic()
+        # THE LOCK IS RESET BEFORE ANY EARLY RETURN. A gesture's first event (ScrollBegin) carries
+        # no movement, so the zero-delta return below would otherwise swallow the one event that
+        # says "a new swipe starts here" and the previous swipe's axis would outlive it.
+        if phase == _SCROLL_BEGIN or (gesture.last_t is not None
+                                      and now - gesture.last_t > gesture.IDLE_S):
+            gesture.reset()
+        gesture.last_t = now
+
+        px, py = _wheel_pixel_delta(ev)
+        if px != 0.0 or py != 0.0:
+            self._precise_wheel(ev, phase, px, py)
+        else:
+            self._notched_wheel(ev)
+
+    def _precise_wheel(self, ev, phase, px: float, py: float) -> None:
+        """A trackpad (or any device that reports pixels). Locked per gesture when it frames
+        its gestures with scroll phases; decided event by event when it does not."""
+        gesture = self._scroll
+        if phase == _NO_SCROLL_PHASE:
+            axis = "x" if abs(px) > abs(py) else "y"
+            use_x, use_y = px, py
+        else:
+            gesture.acc_x += px
+            gesture.acc_y += py
+            if gesture.axis is None:
+                if max(abs(gesture.acc_x), abs(gesture.acc_y)) < SWIPE_LOCK_PX:
+                    ev.accept()           # still undecided: hold the travel back
+                    return
+                gesture.axis = "x" if abs(gesture.acc_x) >= abs(gesture.acc_y) else "y"
+                use_x, use_y = gesture.acc_x, gesture.acc_y     # replay what was held back
+            else:
+                use_x, use_y = px, py
+            axis = gesture.axis
+        if axis == "x":
+            self._pan_time_pixels(ev, use_x)
+        else:
+            # Qt gives a pixel-precise device an angle delta of 2 per pixel; the amplitude pan
+            # is defined on that scale, so a vertical swipe moves exactly as it always did.
+            self._pan_amplitude(ev, 2.0 * use_y)
+
+    def _notched_wheel(self, ev) -> None:
+        """A mouse wheel: no pixels, no phase, so every event decides from its orientation.
+        Horizontal (or Shift plus vertical, which a Mac delivers as horizontal) pans time."""
+        delta = float(ev.delta())
+        if not np.isfinite(delta) or delta == 0.0:
+            ev.ignore()
+            return
+        if _wheel_is_horizontal(ev) or _wheel_has_shift(ev):
+            self._pan_time_notches(ev, delta)
+        else:
+            self._pan_amplitude(ev, delta)
+
+    def _pan_amplitude(self, ev, delta: float) -> None:
         if not self.state["mouseEnabled"][1]:
             ev.ignore()
             return
-        delta = float(ev.delta())
         y0, y1 = (float(v) for v in self.viewRange()[1])
         span = y1 - y0
         if not np.isfinite(delta) or delta == 0.0 or not np.isfinite(span) or span <= 0.0:
@@ -104,16 +287,240 @@ class TraceViewBox(pg.ViewBox):
         ev.accept()
         self.sigRangeChangedManually.emit([False, True])
 
+    def _pan_time_pixels(self, ev, px: float) -> None:
+        """Slide the view so the trace follows the fingers: ``px`` logical pixels of content
+        travel, converted through this pane's own pixels-per-second."""
+        x0, x1 = (float(v) for v in self.viewRange()[0])
+        width = float(self.width())
+        if not (np.isfinite(px) and width > 0.0 and x1 > x0):
+            ev.ignore()
+            return
+        self._slide_time(ev, -px * (x1 - x0) / width)
+
+    def _pan_time_notches(self, ev, delta: float) -> None:
+        x0, x1 = (float(v) for v in self.viewRange()[0])
+        if not (np.isfinite(delta) and x1 > x0):
+            ev.ignore()
+            return
+        steps = float(np.clip(delta / 120.0, -4.0, 4.0))
+        self._slide_time(ev, -steps * (x1 - x0) * WHEEL_X_PAN_FRACTION)
+
+    def _slide_time(self, ev, dt: float) -> None:
+        """Translate x by ``dt`` data units without leaving the recording any further than the
+        view already was (a padded event jump legitimately shows blank margin; a fling must
+        not carry the window off into nothing, and momentum keeps flinging)."""
+        if not self.state["mouseEnabled"][0]:
+            ev.ignore()
+            return
+        x0, x1 = (float(v) for v in self.viewRange()[0])
+        extent = self._extent() if self._extent is not None else None
+        if extent is not None:
+            e0, e1 = extent
+            if dt > 0.0:
+                dt = min(dt, max(0.0, max(float(e1), x1) - x1))
+            elif dt < 0.0:
+                dt = max(dt, min(0.0, min(float(e0), x0) - x0))
+        ev.accept()
+        if dt == 0.0 or not np.isfinite(dt):
+            return
+        self._resetTarget()
+        self.translateBy(x=dt)
+        self.sigRangeChangedManually.emit([True, False])
+
+    # -- left drag: box zoom, or draw -----------------------------------------------------------
+    def mouseDragEvent(self, ev, axis=None):  # noqa: N802  (pyqtgraph MouseDragEvent)
+        # Only an un-axised LEFT drag can be a draw: a drag started on an axis scales that axis,
+        # and the right and middle buttons keep their pyqtgraph meaning.
+        if (self._on_draw is not None and axis is None
+                and ev.button() == QtCore.Qt.LeftButton):
+            if ev.isStart():
+                # Decided ONCE, at the start, from the modifier then: releasing Option halfway
+                # must not turn a draw into a box zoom under the user's hand.
+                self._drawing = _draw_wanted(self._draw_mode, ev)
+                self._draw_handle = None
+            if self._drawing:
+                ev.accept()           # accepted WITHOUT super(): that is what stops the box zoom
+                self._draw_handle = self._on_draw(self, _drag_phase(ev), ev, self._draw_handle)
+                if ev.isFinish():
+                    self._drawing = False
+                    self._draw_handle = None
+                return
+        super().mouseDragEvent(ev, axis)
+
     def mouseClickEvent(self, ev):  # noqa: N802  (pyqtgraph MouseClickEvent)
+        # A right-click while this box owns a draw cancels it. While the box owns a drag the
+        # scene routes clicks of OTHER buttons to it, and there is no context menu on a trace
+        # pane to lose.
+        if ev.button() == QtCore.Qt.RightButton and self._drawing:
+            ev.accept()
+            if self._on_draw is not None and self._draw_handle is not None:
+                self._on_draw(self, "cancel", ev, self._draw_handle)
+            return
         # Left double-click -> request a mask at the clicked data-x. pyqtgraph flags
         # double-clicks via ev.double(); the owner decides whether a valid target exists.
-        if (self._on_double_click is not None and ev.double()
-                and ev.button() == QtCore.Qt.LeftButton):
-            point = self.mapSceneToView(ev.scenePos())
+        if ev.double() and ev.button() == QtCore.Qt.LeftButton:
+            if (self._on_catch is not None and self._draw_mode is not None
+                    and self._draw_mode()):
+                point = self.mapSceneToView(ev.scenePos())
+                ev.accept()
+                self._on_catch(self, float(point.x()))
+                return
+            if self._on_double_click is not None:
+                point = self.mapSceneToView(ev.scenePos())
+                ev.accept()
+                self._on_double_click(float(point.x()))
+                return
+        super().mouseClickEvent(ev)
+
+    # -- hover -----------------------------------------------------------------------------------
+    def hoverEvent(self, ev):  # noqa: N802  (pyqtgraph HoverEvent)
+        # pg.ViewBox has no hoverEvent of its own, so the scene never told anyone the pointer
+        # had arrived. ``isEnter`` fires once per entry (not per move), which is exactly the
+        # "the pointer came to the trace" moment the focus rule wants.
+        if self._on_hover_enter is not None and not ev.isExit() and ev.isEnter():
+            self._on_hover_enter(self)
+
+
+class _MeasureRegionItem(pg.LinearRegionItem):
+    """The Measure mask. Identical to a ``LinearRegionItem`` except that, in draw mode or with
+    Option held, a drag that starts on its BODY draws a new span instead of moving the mask.
+
+    The scene gives a drag to the item that claimed it at the last hover, and failing that to
+    the first item near the press that accepts it in z order, and a movable region accepts any
+    left drag — so merely not claiming the hover is not enough (probed: the mask still moved).
+    The body therefore accepts the drag and forwards it to the same callback the pane's
+    ViewBox uses. Its two edge LINES are separate items and keep resizing exactly as before.
+
+    A right-click during a forwarded draw reaches THIS item (it owns the drag), whose base
+    ``mouseClickEvent`` only acts on a move it started itself, so the cancel is handled here."""
+
+    def __init__(self, *args, on_draw=None, draw_mode=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_draw = on_draw
+        self._draw_mode = draw_mode
+        self._forwarding = False
+        self._draw_handle = None
+
+    def mouseDragEvent(self, ev):  # noqa: N802
+        if self._on_draw is not None and ev.button() == QtCore.Qt.LeftButton:
+            if ev.isStart():
+                self._forwarding = _draw_wanted(self._draw_mode, ev)
+                self._draw_handle = None
+            if self._forwarding:
+                ev.accept()
+                self._draw_handle = self._on_draw(self, _drag_phase(ev), ev, self._draw_handle)
+                if ev.isFinish():
+                    self._forwarding = False
+                    self._draw_handle = None
+                return
+        super().mouseDragEvent(ev)
+
+    def mouseClickEvent(self, ev):  # noqa: N802
+        if ev.button() == QtCore.Qt.RightButton and self._forwarding:
             ev.accept()
-            self._on_double_click(float(point.x()))
+            if self._on_draw is not None and self._draw_handle is not None:
+                self._on_draw(self, "cancel", ev, self._draw_handle)
             return
         super().mouseClickEvent(ev)
+
+
+class _PaneLabel(QtWidgets.QGraphicsObject):
+    """A small caption pinned to the bottom-left of one pane, like a legend.
+
+    TRANSPARENT TO THE MOUSE, TWICE OVER: it accepts no mouse button (so the scene never makes
+    it the grabber of a press) and its ``shape`` is empty (so pyqtgraph's own item search for
+    drags, clicks and hovers, which tests shapes, never finds it). A banner that was a real
+    widget blocked every drag beneath it; this one cannot. It is a child of the ViewBox, not
+    of its data group, so it stays put in pixels while the data moves, and it is not an
+    ``addItem``'d child either, so autorange never sees it."""
+
+    _MARGIN = 8.0
+    _PAD_X = 6.0
+    _PAD_Y = 3.0
+
+    def __init__(self, view_box: pg.ViewBox) -> None:
+        super().__init__(view_box)
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self.setAcceptHoverEvents(False)
+        self.setZValue(30)               # above the curves, the mask (8) and the crosshair (20/21)
+        self._view_box = view_box
+        self._text = ""
+        font = QtGui.QFont()
+        font.setPointSizeF(max(8.0, font.pointSizeF() - 1.0))
+        self._font = font
+        self._rect = QtCore.QRectF()
+        view_box.sigResized.connect(self._reposition)
+
+    def text(self) -> str:
+        return self._text
+
+    def detach(self) -> None:
+        """Stop following the ViewBox's size (it outlives this caption)."""
+        try:
+            self._view_box.sigResized.disconnect(self._reposition)
+        except (RuntimeError, TypeError):
+            pass
+
+    def set_text(self, text: str) -> None:
+        text = str(text)
+        if text == self._text and not self._rect.isNull():
+            return
+        self.prepareGeometryChange()
+        self._text = text
+        metrics = QtGui.QFontMetricsF(self._font)
+        w = metrics.horizontalAdvance(text) + 2.0 * self._PAD_X
+        h = metrics.height() + 2.0 * self._PAD_Y
+        self._rect = QtCore.QRectF(0.0, 0.0, w, h)
+        self._reposition()
+        self.update()
+
+    def _reposition(self, *_args) -> None:
+        try:
+            height = float(self._view_box.height())
+        except RuntimeError:             # the ViewBox is being torn down with its plot
+            return
+        self.setPos(self._MARGIN, max(0.0, height - self._rect.height() - self._MARGIN))
+
+    def boundingRect(self) -> QtCore.QRectF:  # noqa: N802
+        return self._rect
+
+    def shape(self) -> QtGui.QPainterPath:
+        return QtGui.QPainterPath()
+
+    def paint(self, painter, option=None, widget=None) -> None:
+        if not self._text:
+            return
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor(20, 24, 30, 175))
+        painter.drawRoundedRect(self._rect, 3.0, 3.0)
+        painter.setPen(QtGui.QColor("#d7dde5"))
+        painter.setFont(self._font)
+        painter.drawText(self._rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), self._text)
+
+
+class _DrawGesture:
+    """One left-drag draw, from its first accepted frame to its release.
+
+    ``alive`` IS THE TOKEN. A rebuild, a cancel or a release clears it, and every later frame the
+    scene sends is dropped on seeing it clear: the scene keeps delivering a drag to the item that
+    started it until the button comes up, and after a rebuild that item is a ViewBox that has
+    been removed from the plot. The ``prev_*`` fields are what the mask was before the gesture,
+    so a cancel can put it back exactly (including "there was no mask")."""
+
+    __slots__ = ("alive", "start_x", "doc_id", "channel", "prev_range", "prev_xrange",
+                 "prev_empty")
+
+    def __init__(self, start_x: float, doc_id: str, channel: int,
+                 prev_range: tuple[float, float] | None,
+                 prev_xrange: tuple[float, float] | None, prev_empty: bool) -> None:
+        self.alive = True
+        self.start_x = start_x
+        self.doc_id = doc_id
+        self.channel = channel
+        self.prev_range = prev_range
+        self.prev_xrange = prev_xrange
+        self.prev_empty = prev_empty
 
 
 # ------------------------------------------------------------------------------------------------
@@ -523,6 +930,33 @@ class TraceView(pg.GraphicsLayoutWidget):
     # announce the one state in which there ARE no bounds (Measure was turned off), so activation
     # has its own small signal rather than leaving a stale annotation in the context strip.
     sigMeasureActiveChanged = QtCore.Signal(bool)
+    #: Measure is ON and the mask is GONE (:meth:`discard_measure_region`, or a cancelled draw
+    #: that put "no mask" back). The bounds signals cannot say this either: there ARE no bounds
+    #: to report. The Navigator drops its band on it and the Measure panel drops the readout
+    #: and the statistics it would otherwise go on offering to save.
+    sigMeasureCleared = QtCore.Signal()
+    #: DRAW MODE (a plain left-drag draws a span instead of box-zooming) was switched. Emitted
+    #: for every change, including the one the view makes itself when the Measure target pane
+    #: goes away (``False``).
+    sigDrawModeChanged = QtCore.Signal(bool)
+    #: A draw's first accepted frame.
+    sigDrawStarted = QtCore.Signal()
+    #: A draw was released as a real span: ``(doc_id, channel, lo_sample, hi_sample,
+    #: px_samples)``. ``(doc_id, channel)`` is exactly what :meth:`measure_target` returns;
+    #: ``lo``/``hi`` are half-open sample indices clipped to the loaded data (the same numbers
+    #: :meth:`measure_bounds` now returns); ``px_samples`` is samples per screen pixel at the
+    #: current zoom. A receiver that moves the mask itself or calls
+    #: :meth:`settle_measure_region` takes over the settle; if none does, the view settles.
+    sigDrawReleased = QtCore.Signal(str, int, int, int, float)
+    #: A draw ended without a span: right-click, a rebuild, :meth:`cancel_draw`, or a release
+    #: narrower than :data:`DRAW_CLICK_MAX_PX` pixels (a click).
+    sigDrawCancelled = QtCore.Signal()
+    #: A draw (or a catch) was refused, with the sentence to show: the drag was on another
+    #: pane ("Draw on the IN15 pane"), or Measure is off.
+    sigDrawRefused = QtCore.Signal(str)
+    #: A double-click in draw mode on the target pane asks to catch the event there:
+    #: ``(doc_id, channel, sample, px_samples)``. No mask is placed.
+    sigCatchRequested = QtCore.Signal(str, int, int, float)
     #: The managed filter-preview curve's ON-SCREEN state changed: ``""`` when the standing
     #: request is drawn (or there is no request), otherwise WHY it is not drawn. The view
     #: rebuilds itself on gestures its owner never hears — View ▸ Stacked/Overlay and every
@@ -584,6 +1018,31 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._measure_layer_id: str | None = None
         self._measure_active: bool = False
         self._measure_xrange: tuple[float, float] | None = None
+        #: MEASURE ON, NO MASK. A missing stored range already means "seed a mask", so the empty
+        #: state cannot be "no range": it is this explicit flag. While it is set a rebuild
+        #: re-creates nothing, and only :meth:`set_measure_region`, a draw, or an explicit
+        #: re-seeding turns it off again. Never True while ``_measure_region`` exists.
+        self._measure_empty: bool = False
+        #: Bumped each time the mask SETTLES (a real drag's release, a programmatic placement,
+        #: :meth:`settle_measure_region`), so a draw can tell whether a receiver of its release
+        #: already did the settling.
+        self._settled_count: int = 0
+        # Draw mode: a plain left-drag draws a Measure span instead of box-zooming.
+        self._draw_mode: bool = False
+        self._draw: _DrawGesture | None = None
+        # Focus follows the pointer onto the trace -- but only from holders with no keys of
+        # their own. ``_key_owners`` are widgets (the docked Event inspector) that own bare keys.
+        self._focus_follows: bool = True
+        self._closing: bool = False
+        self._key_owners: list[QtWidgets.QWidget] = []
+        self._last_focus_reason: QtCore.Qt.FocusReason | None = None
+        self._focus_lost_to_window: bool = False
+        # The target-pane caption and the optional fallback target used when Measure is off.
+        self._target_label_text: str = ""
+        self._target_label: _PaneLabel | None = None
+        self._annotation_layer_id: str | None = None
+        # One axis lock for the whole trace: a swipe that wanders across panes is one gesture.
+        self._scroll_gesture = _ScrollGesture()
         # RectMode = left-drag box-zoom (frame an event, dive in). Flipped by set_drag_mode().
         self._drag_mode: int = pg.ViewBox.RectMode
 
@@ -690,6 +1149,13 @@ class TraceView(pg.GraphicsLayoutWidget):
             prev_x = tuple(self._panes[0].plot.vb.viewRange()[0])  # type: ignore[assignment]
         self._prev_doc_ids = doc_ids
 
+        # A draw in flight dies with the panes it was drawn on. Its token is cleared HERE, before
+        # clear(): the scene goes on delivering the drag to the removed ViewBox until the button
+        # comes up, and every one of those frames must find the gesture dead. The mask's state is
+        # put back to what it was before the gesture, so the re-attach below cannot resurrect the
+        # half-drawn span (or a seeded mask where there was none).
+        draw_aborted = self._abort_draw_for_rebuild()
+
         self.clear()
         self._panes = []
         # The rendered items and their plots died in clear(); the REQUESTS behind them
@@ -709,6 +1175,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._filter_preview_plot = None
         self._measure_region = None          # died with its plot in clear(); reattached below if active
         self._measure_plot = None
+        self._target_label = None            # a child of the old ViewBox: gone with it
         self._placeholder = None
 
         specs = plan_panes(self.session)
@@ -720,6 +1187,7 @@ class TraceView(pg.GraphicsLayoutWidget):
             # and this exit must say so as loudly as the one below, or the placeholder
             # screen becomes the one place the ticked checkbox goes quiet again.
             self._reattach_filter_preview()
+            self._finish_rebuild(draw_aborted)
             return
 
         anchor: pg.PlotItem | None = None
@@ -734,7 +1202,12 @@ class TraceView(pg.GraphicsLayoutWidget):
             # notation for the whole axis — each pane gets its own instances, because
             # pyqtgraph axis items are owned by exactly one PlotItem.
             plot = self.addPlot(row=row, col=0,
-                                viewBox=TraceViewBox(on_double_click=self._request_measure_placement),
+                                viewBox=TraceViewBox(
+                                    on_double_click=self._request_measure_placement,
+                                    on_draw=self._on_draw_event, draw_mode=self.draw_mode,
+                                    on_catch=self._request_catch,
+                                    on_hover_enter=self._on_pane_hover_enter,
+                                    scroll=self._scroll_gesture, extent=self.full_x_extent),
                                 axisItems={"bottom": ReadableLinearAxis(orientation="bottom"),
                                            "left": ReadableLinearAxis(orientation="left")})
             self.ci.layout.setRowStretchFactor(
@@ -818,6 +1291,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         # down, never by a listener that was never told the pane went away.
         self._reattach_overlays()
         self._reattach_filter_preview()
+        self._finish_rebuild(draw_aborted)
 
     def refresh_channel(self, doc_id: str, channel: int) -> None:
         """Calibration changed: re-set data on the affected curves ONLY. MUST NOT rebuild —
@@ -1580,7 +2054,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         return self._filter_preview_reason
 
     # -- manual measurement region (the Measure tool) --------------------------------------------
-    def set_measure_active(self, doc_id: str, channel: int, on: bool) -> None:
+    def set_measure_active(self, doc_id: str, channel: int, on: bool, *, seed: bool = True) -> None:
         """Show/hide the manual-selection region on the (doc_id, channel) pane.
 
         When ``on``: create a single movable LinearRegionItem on that pane (added
@@ -1589,7 +2063,17 @@ class TraceView(pg.GraphicsLayoutWidget):
         comes to rest — see those signals). When ``off``: remove it and forget
         the selection. Idempotent; switching channel just re-targets and reseeds. The region is
         rebuild-safe: it is torn down with its plot on rebuild and recreated by _reattach_measure()
-        as long as the same channel is still layered."""
+        as long as the same channel is still layered.
+
+        ``seed=False`` turns Measure on WITHOUT a mask: the empty state (see
+        :meth:`measure_empty`). Nothing is seeded and nothing is emitted but the activation; the
+        mask appears when something gives it a range (:meth:`set_measure_region`, a draw). A mask
+        already standing on this very target is left alone; a stored range from before the
+        activation is put back; a mask on another target is removed (``sigMeasureCleared``).
+
+        ``sigMeasureActiveChanged`` reports whether Measure is on AND its target pane exists. It
+        used to read "is there a region", which would uncheck Measure the moment the mask was
+        discarded."""
         layer_id = f"{doc_id}#{channel}"
         if on:
             reseed = layer_id != self._measure_layer_id  # a new target seeds fresh, not stale x
@@ -1597,18 +2081,37 @@ class TraceView(pg.GraphicsLayoutWidget):
             self._measure_layer_id = layer_id
             if reseed:
                 self._measure_xrange = None
-            self._create_measure_region(seed=self._measure_xrange is None)
+                self._abandon_draw()          # the gesture was on the old target's pane
+            if seed:
+                self._measure_empty = False
+                self._create_measure_region(seed=self._measure_xrange is None)
+            elif self._measure_region is not None and not reseed:
+                pass                          # already on, with a mask: nothing to do
+            elif self._measure_xrange is not None and not reseed:
+                self._measure_empty = False
+                self._create_measure_region(seed=False)   # a range stored before: put it back
+            else:
+                had_mask = self._measure_region is not None
+                self._remove_measure_region()
+                self._measure_empty = True
+                if had_mask:
+                    self.sigMeasureCleared.emit()
         else:
+            self._abandon_draw()
             self._measure_active = False
+            self._measure_empty = False
             self._measure_layer_id = None
             self._measure_xrange = None
             self._remove_measure_region()
-        self.sigMeasureActiveChanged.emit(bool(on and self._measure_region is not None))
+        self.sigMeasureActiveChanged.emit(
+            bool(on and self.pane_for_layer(layer_id) is not None))
+        self._sync_draw_mode()
+        self._refresh_pane_decorations()
 
     def measure_bounds(self) -> tuple[int, int] | None:
         """Current selection as half-open sample indices (start_idx, stop_idx), or None when the
-        Measure tool is inactive / unmapped. Edges map through the target layer's x-axis and are
-        clamped to [0, n].
+        Measure tool is inactive / unmapped, or ON WITH NO MASK (:meth:`measure_empty`). Edges
+        map through the target layer's x-axis and are clamped to [0, n].
 
         INDICES, NOT SECONDS, and that is the point: this view's x-axis is on the
         instrument clock and most panels' time inputs are on the recording clock (see
@@ -1623,7 +2126,8 @@ class TraceView(pg.GraphicsLayoutWidget):
 
         A caller converting :meth:`measure_bounds` into that recording's own seconds
         needs to know WHICH recording, and the region does not have to be on the
-        recording the app has selected.
+        recording the app has selected. Still the target while Measure is on with no mask:
+        pair it with :meth:`measure_bounds`, which is None then.
         """
         layer_id = self._measure_layer_id
         if not self._measure_active or layer_id is None:
@@ -1635,19 +2139,28 @@ class TraceView(pg.GraphicsLayoutWidget):
 
     def set_measure_region(self, x0: float, x1: float) -> None:
         """Place the region programmatically in x (data) coords — e.g. snap to a detected event or
-        the current view. No-op when the region is not present; records the range so a later
-        rebuild reattaches at the same place."""
+        the current view. No-op when Measure is off (the range is still recorded so a later
+        rebuild reattaches at the same place). With Measure ON and no mask (the empty state) it
+        CREATES the mask at exactly this range: no seed, and no seeded emission before it."""
         lo, hi = (float(x0), float(x1)) if x0 <= x1 else (float(x1), float(x0))
-        self._measure_xrange = (lo, hi)
         if self._measure_region is not None:
+            self._measure_xrange = (lo, hi)
             # setRegion emits sigRegionChanged AND sigRegionChangeFinished (pyqtgraph calls
             # lineMoved then lineMoveFinished), i.e. sigMeasureChanged followed by
             # sigMeasureFinished — a programmatic placement is a settled one. It emits
             # NOTHING at all when both edges already sit here.
             self._measure_region.setRegion((lo, hi))
+        elif self._measure_active and self._measure_empty:
+            # Measure on, no mask: this range BECOMES the mask (and is remembered by the
+            # creation, only if there is a pane to hold it -- an unplaced range must not linger
+            # and be mistaken for a mask to put back).
+            self._create_measure_region(seed=False, initial=(lo, hi), announce="settled")
+        else:
+            self._measure_xrange = (lo, hi)      # remembered for a later activation / rebuild
 
     def measure_x_range(self) -> tuple[float, float] | None:
-        """Current Measure edges in plotted x coordinates, or None while Measure is off.
+        """Current Measure edges in plotted x coordinates, or None while Measure is off or has
+        no mask.
 
         This complements :meth:`measure_bounds`: navigation widgets need to translate the live
         cursor pair without a lossy x -> sample -> x round trip, while analysis code should keep
@@ -1712,6 +2225,556 @@ class TraceView(pg.GraphicsLayoutWidget):
             return None
         return e0, e1
 
+    # -- Measure ON with NO mask -----------------------------------------------------------------
+    def measure_empty(self) -> bool:
+        """True while Measure is ON and there is no mask: the state after an add (the next event
+        starts clean, and Next window carries nothing), after :meth:`discard_measure_region`, or
+        after Measure was armed with ``seed=False``.
+
+        An explicit flag and not "no stored range", because a missing range already means "seed
+        a mask": read that way, the first rebuild brought a seeded mask back, placement did
+        nothing, and Ctrl+M saved the event just added a second time from the stale readout.
+        :meth:`measure_bounds` and :meth:`measure_x_range` are None here and
+        :meth:`measure_target` still names the target."""
+        return bool(self._measure_active and self._measure_empty
+                    and self._measure_region is None)
+
+    def discard_measure_region(self) -> bool:
+        """Remove the mask but KEEP Measure on. True when there was a mask to remove.
+
+        Emits :attr:`sigMeasureCleared` (and nothing else: no bounds, no deactivation). A draw in
+        flight is cancelled with it. Turn the mask back on with :meth:`set_measure_region`, a
+        draw, or ``set_measure_active(..., seed=True)``."""
+        if not self._measure_active or self._measure_region is None:
+            return False
+        self._abandon_draw()
+        self._remove_measure_region()
+        self._measure_xrange = None
+        self._measure_empty = True
+        self.sigMeasureCleared.emit()
+        return True
+
+    def preview_measure_region(self, lo_x: float, hi_x: float) -> bool:
+        """Move the mask to ``[lo_x, hi_x]`` (data x, clamped to the target's legal extent) as one
+        FRAME of a drag: the two lines move with ``blockLineSignal``, exactly as
+        ``LinearRegionItem.mouseDragEvent`` itself does, and only :attr:`sigMeasureChanged`
+        goes out, so the Measure panel's debounce coalesces the stream. :meth:`set_measure_region`
+        emits a finished signal on every call and the panel recomputes at once on it, about
+        8 ms at 200,000 samples per frame. Creates the mask when there is none (the empty state).
+        Pair the last frame with :meth:`settle_measure_region`."""
+        lo, hi = (float(lo_x), float(hi_x)) if lo_x <= hi_x else (float(hi_x), float(lo_x))
+        target = self.measure_target()
+        if target is None or not (np.isfinite(lo) and np.isfinite(hi)):
+            return False
+        extent = self.measure_cursor_extent(*target)
+        if extent is not None:
+            lo = min(max(lo, extent[0]), extent[1])
+            hi = min(max(hi, extent[0]), extent[1])
+        region = self._measure_region
+        if region is None:
+            if self.pane_for_layer(self._measure_layer_id) is None:
+                return False
+            return self._create_measure_region(seed=False, initial=(lo, hi), announce="changed")
+        region.blockLineSignal = True
+        try:
+            region.lines[0].setValue(lo)
+            region.lines[1].setValue(hi)
+            region.prepareGeometryChange()
+        finally:
+            region.blockLineSignal = False
+        region.sigRegionChanged.emit(region)      # -> _on_measure_region_changed -> sigMeasureChanged
+        return True
+
+    def settle_measure_region(self) -> bool:
+        """Announce the mask AT REST: one :attr:`sigMeasureFinished` with its current bounds. On a
+        draw's release and after a fit. False when there is no mask."""
+        bounds = self._settled_measure_bounds()
+        if bounds is None:
+            return False
+        self._settled_count += 1
+        self.sigMeasureFinished.emit(bounds[0], bounds[1])
+        return True
+
+    # -- draw mode -------------------------------------------------------------------------------
+    def draw_mode(self) -> bool:
+        """Whether a plain left-drag draws a Measure span (True) or box-zooms (False). Option
+        inverts it for the one drag."""
+        return self._draw_mode
+
+    def set_draw_mode(self, on: bool) -> bool:
+        """Switch draw mode. Returns the mode now in force.
+
+        Draw mode draws on the Measure TARGET, so it needs one: asked to turn on with Measure off
+        (or its pane hidden) it stays off and says why on :attr:`sigDrawRefused`. It then survives
+        rebuilds, view-mode changes and table switches for as long as the target pane exists, and
+        drops itself (with ``sigDrawModeChanged(False)``) the moment the pane is gone. Turning it
+        on places no mask."""
+        on = bool(on)
+        if on and self._measure_pane() is None:
+            self.sigDrawRefused.emit("Turn on Measure first: draw mode draws on the Measure target")
+            return self._draw_mode
+        if on != self._draw_mode:
+            self._draw_mode = on
+            self.sigDrawModeChanged.emit(on)
+        return self._draw_mode
+
+    def draw_in_progress(self) -> bool:
+        g = self._draw
+        return g is not None and g.alive
+
+    def cancel_draw(self) -> bool:
+        """Cancel the draw in flight, putting the mask back as it was. True when there was one.
+        (A right-click does the same from the gesture itself; Esc is the owner's.)"""
+        g = self._draw
+        if g is None or not g.alive:
+            return False
+        self._cancel_gesture(g, restore=True)
+        return True
+
+    def _measure_pane(self) -> ChannelPane | None:
+        """The Measure target's pane, or None when Measure is off or the pane is not drawn."""
+        if not self._measure_active or self._measure_layer_id is None:
+            return None
+        return self.pane_for_layer(self._measure_layer_id)
+
+    def _sync_draw_mode(self) -> None:
+        """Draw mode needs its target: drop it, loudly, when the pane is gone."""
+        if self._draw_mode and self._measure_pane() is None:
+            self._draw_mode = False
+            self.sigDrawModeChanged.emit(False)
+
+    def _target_channel_name(self) -> str:
+        target = self.measure_target()
+        if target is not None and self.session.has_document(target[0]):
+            channels = self.session.document(target[0]).meta.channels
+            if 0 <= target[1] < len(channels):
+                return str(channels[target[1]].name)
+        return "target"
+
+    def _target_x(self, scene_pos) -> float | None:
+        """Data x of a scene position THROUGH THE TARGET PANE'S OWN ViewBox, clamped to the
+        target's legal cursor extent. Never through whichever pane received the event (panes
+        with different axis widths map one scene x to different data x) and never through a
+        pane's first layer (an overlay's first layer can sit on another time offset)."""
+        pane = self._measure_pane()
+        target = self.measure_target()
+        if pane is None or target is None:
+            return None
+        x = float(pane.plot.vb.mapSceneToView(scene_pos).x())
+        if not np.isfinite(x):
+            return None
+        extent = self.measure_cursor_extent(*target)
+        if extent is not None:
+            x = min(max(x, extent[0]), extent[1])
+        return x
+
+    def _data_per_pixel(self) -> float | None:
+        pane = self._measure_pane()
+        if pane is None:
+            return None
+        vb = pane.plot.vb
+        x0, x1 = (float(v) for v in vb.viewRange()[0])
+        width = float(vb.width())
+        if width <= 0.0 or not x1 > x0:
+            return None
+        return (x1 - x0) / width
+
+    def _on_draw_event(self, source, phase: str, ev, handle):
+        """THE one callback every drag-drawing item reports to (the panes' ViewBoxes and the
+        mask's body). ``phase`` is "start", "move", "finish" or "cancel"; ``handle`` is the
+        gesture that "start" returned (None when the draw was refused), handed back by the item
+        on every later call. A gesture the view has since killed (rebuild, cancel, release) is
+        simply not advanced, which is how the frames the scene keeps sending to a removed
+        ViewBox are dropped."""
+        if phase == "start":
+            return self._begin_draw(source, ev)
+        g = handle
+        if g is None or not g.alive or g is not self._draw:
+            return g
+        if phase == "cancel":
+            self._cancel_gesture(g, restore=True)
+            return g
+        self._advance_draw(g, ev, finish=(phase == "finish"))
+        return g
+
+    def _begin_draw(self, source, ev) -> _DrawGesture | None:
+        pane = self._measure_pane()
+        target = self.measure_target()
+        if pane is None or target is None:
+            self.sigDrawRefused.emit("Turn on Measure, then draw a span on the trace")
+            return None
+        if isinstance(source, pg.ViewBox) and source is not pane.plot.vb:
+            self.sigDrawRefused.emit(f"Draw on the {self._target_channel_name()} pane")
+            return None
+        # The START is the press, not the first frame: the scene only calls a press a drag
+        # after the pointer has travelled, and the span must begin where the user pressed.
+        start_x = self._target_x(ev.buttonDownScenePos())
+        if start_x is None:
+            return None
+        prior = self._draw
+        if prior is not None and prior.alive:
+            self._cancel_gesture(prior, restore=True)
+        region = self._measure_region
+        g = _DrawGesture(start_x, target[0], target[1],
+                         tuple(float(v) for v in region.getRegion()) if region is not None else None,
+                         self._measure_xrange, self._measure_empty)
+        self._draw = g
+        self.sigDrawStarted.emit()
+        if region is None:
+            # Measure on, no mask: the draw makes one, at the press, with nothing seeded and
+            # nothing announced -- the first frame below announces it.
+            self._create_measure_region(seed=False, initial=(start_x, start_x), announce="none")
+        self._advance_draw(g, ev, finish=False)
+        return g
+
+    def _advance_draw(self, g: _DrawGesture, ev, *, finish: bool) -> None:
+        x = self._target_x(ev.scenePos())
+        if x is None:
+            return
+        lo, hi = (g.start_x, x) if g.start_x <= x else (x, g.start_x)
+        if not finish:
+            self.preview_measure_region(lo, hi)
+            return
+        dpp = self._data_per_pixel()
+        if dpp is None or (hi - lo) < DRAW_CLICK_MAX_PX * dpp:
+            self._cancel_gesture(g, restore=True)         # narrower than 3 px: a click
+            return
+        self.preview_measure_region(lo, hi)               # the release position, always
+        g.alive = False
+        self._draw = None
+        bounds = self._measure_indices()
+        px = self.target_px_samples()
+        if bounds is None or px is None:
+            self.settle_measure_region()
+            return
+        settled = self._settled_count
+        self.sigDrawReleased.emit(g.doc_id, g.channel, int(bounds[0]), int(bounds[1]), float(px))
+        if self._settled_count == settled:
+            # Nobody moved the mask to a fitted position or settled it: do it here, once.
+            self.settle_measure_region()
+
+    def _cancel_gesture(self, g: _DrawGesture, *, restore: bool) -> None:
+        if not g.alive:
+            return
+        g.alive = False
+        if self._draw is g:
+            self._draw = None
+        if restore:
+            self._restore_before_draw(g)
+        self.sigDrawCancelled.emit()
+
+    def _abandon_draw(self) -> None:
+        """Cancel a draw in flight WITHOUT putting the mask back: the caller is removing or
+        re-targeting the mask anyway."""
+        g = self._draw
+        if g is not None and g.alive:
+            self._cancel_gesture(g, restore=False)
+
+    def _restore_before_draw(self, g: _DrawGesture) -> None:
+        """Put the mask back as it was before the gesture, "no mask" included."""
+        if g.prev_range is not None:
+            if self._measure_region is None:
+                self._create_measure_region(seed=False, initial=g.prev_range, announce="settled")
+            else:
+                self.preview_measure_region(*g.prev_range)
+                self.settle_measure_region()
+        elif self._measure_region is not None and self._measure_active:
+            self._remove_measure_region()
+            self._measure_xrange = None
+            self._measure_empty = True
+            self.sigMeasureCleared.emit()
+
+    def _abort_draw_for_rebuild(self) -> bool:
+        """A rebuild kills the draw: clear its token and put the stored mask state back, so the
+        re-attach that follows recreates the OLD mask (or none)."""
+        g = self._draw
+        if g is None or not g.alive:
+            return False
+        g.alive = False
+        self._draw = None
+        self._measure_xrange = g.prev_xrange
+        self._measure_empty = g.prev_empty
+        return True
+
+    def _finish_rebuild(self, draw_aborted: bool) -> None:
+        """The end of every rebuild, including the one with nothing to draw."""
+        self._sync_draw_mode()
+        self._refresh_pane_decorations()
+        if draw_aborted:
+            if self.measure_empty():
+                self.sigMeasureCleared.emit()    # the half-drawn span the readout still shows
+            self.sigDrawCancelled.emit()
+
+    def _request_catch(self, view_box, x: float) -> None:
+        """A double-click in draw mode: ask the owner to catch the event at that x, on the
+        target pane, instead of placing a 20% mask."""
+        x = float(x)
+        if not np.isfinite(x):
+            return
+        pane = self._measure_pane()
+        target = self.measure_target()
+        if pane is None or target is None:
+            self.sigDrawRefused.emit("Turn on Measure, then double-click the trace to catch an event")
+            return
+        if view_box is not pane.plot.vb:
+            self.sigDrawRefused.emit(f"Draw on the {self._target_channel_name()} pane")
+            return
+        vals = self.x_axis_for(*target).values
+        px = self.target_px_samples()
+        if vals.size < 2 or px is None:
+            return
+        sample = int(min(max(self._nearest_index(vals, x), 0), vals.size - 1))
+        self.sigCatchRequested.emit(target[0], target[1], sample, float(px))
+
+    # -- where the pointer is --------------------------------------------------------------------
+    def set_annotation_target(self, doc_id: str | None, channel: int | None = None) -> None:
+        """Name the (doc_id, channel) the annotation keys will act on while Measure is OFF, so the
+        pointer helpers, the focus rule, the cursor and the caption already work before the
+        first mask. ``None`` clears it. While Measure is on, its own target wins."""
+        new = None if doc_id is None else f"{doc_id}#{int(channel if channel is not None else 0)}"
+        if new == self._annotation_layer_id:
+            return
+        self._annotation_layer_id = new
+        self._refresh_pane_decorations()
+
+    def annotation_target(self) -> tuple[str, int] | None:
+        layer_id = self._annotation_layer_id
+        if layer_id is None:
+            return None
+        doc_id, _, channel = layer_id.rpartition("#")
+        return (doc_id, int(channel)) if doc_id and channel.isdigit() else None
+
+    def _target_ref(self) -> tuple[str, int, ChannelPane] | None:
+        """``(doc_id, channel, pane)`` of the pane the keys act on, or None: the Measure target
+        when Measure is on, else the annotation target, and only if its pane is drawn."""
+        layer_id = (self._measure_layer_id if (self._measure_active and self._measure_layer_id)
+                    else self._annotation_layer_id)
+        if layer_id is None:
+            return None
+        doc_id, _, channel = layer_id.rpartition("#")
+        if not doc_id or not channel.isdigit():
+            return None
+        pane = self.pane_for_layer(layer_id)
+        return None if pane is None else (doc_id, int(channel), pane)
+
+    def _pointer_scene_pos(self) -> QtCore.QPointF | None:
+        """The pointer in scene coordinates, or None unless it is really over THIS trace.
+
+        ``QCursor.pos()`` mapped to the viewport, and ``QApplication.widgetAt`` must be that
+        viewport: the position test alone is fooled by a window lying over the trace, which
+        still maps into it."""
+        global_pos = QtGui.QCursor.pos()
+        viewport = self.viewport()
+        local = viewport.mapFromGlobal(global_pos)
+        if not viewport.rect().contains(local):
+            return None
+        if QtWidgets.QApplication.widgetAt(global_pos) is not viewport:
+            return None
+        return self.mapToScene(local)
+
+    def pointer_data_x(self) -> float | None:
+        """The data x under the pointer, or None unless the pointer is inside the PLOT AREA (the
+        ViewBox, not its axes) of the target pane."""
+        ref = self._target_ref()
+        scene_pos = self._pointer_scene_pos() if ref is not None else None
+        if ref is None or scene_pos is None:
+            return None
+        vb = ref[2].plot.vb
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            return None
+        x = float(vb.mapSceneToView(scene_pos).x())
+        return x if np.isfinite(x) else None
+
+    def target_px_samples(self) -> float | None:
+        """Samples per screen pixel of the target pane at the current zoom, or None."""
+        ref = self._target_ref()
+        if ref is None:
+            return None
+        doc_id, channel, pane = ref
+        vb = pane.plot.vb
+        x0, x1 = (float(v) for v in vb.viewRange()[0])
+        width = float(vb.width())
+        dx = self.sample_dx(doc_id, channel)
+        if width <= 0.0 or dx <= 0.0 or not x1 > x0:
+            return None
+        return (x1 - x0) / width / dx
+
+    def pointer_sample(self) -> tuple[str, int, float, float] | None:
+        """``(doc_id, channel, sample_index, px_samples)`` under the pointer, or None.
+
+        ``sample_index`` is fractional and clamped to ``[0, n]``, through the target layer's own
+        x axis (its time offset included). None unless the pointer is over the target pane's
+        plot area (:meth:`pointer_data_x`)."""
+        ref = self._target_ref()
+        x = self.pointer_data_x()
+        if ref is None or x is None:
+            return None
+        doc_id, channel, _pane = ref
+        vals = self.x_axis_for(doc_id, channel).values
+        dx = self.sample_dx(doc_id, channel)
+        px = self.target_px_samples()
+        if vals.size < 2 or dx <= 0.0 or px is None:
+            return None
+        index = float(np.clip((x - float(vals[0])) / dx, 0.0, float(vals.size)))
+        return doc_id, channel, index, px
+
+    # -- focus, cursor, caption ------------------------------------------------------------------
+    def last_focus_reason(self) -> QtCore.Qt.FocusReason | None:
+        """Why the trace last took keyboard focus (None if it never has). A click or the
+        pointer arriving (``MouseFocusReason``) means the user pointed at the trace; the window
+        parking focus here when a dock closes (``OtherFocusReason``) does not. A window that
+        loses and regains activation gets its focus back for ``ActiveWindowFocusReason``;
+        that is not a new reason, and does not overwrite a ``MouseFocusReason``."""
+        return self._last_focus_reason
+
+    def add_key_owner(self, widget: QtWidgets.QWidget) -> None:
+        """Register a widget (the docked Event inspector) whose descendants own bare keys: the
+        pointer entering the trace never takes focus from anything inside it."""
+        if widget is not None and all(w is not widget for w in self._key_owners):
+            self._key_owners.append(widget)
+
+    def remove_key_owner(self, widget: QtWidgets.QWidget) -> None:
+        self._key_owners = [w for w in self._key_owners if w is not widget]
+
+    def set_focus_follows_pointer(self, on: bool) -> None:
+        self._focus_follows = bool(on)
+
+    def focus_follows_pointer(self) -> bool:
+        return self._focus_follows
+
+    def _focus_holder_is_free(self, holder: QtWidgets.QWidget | None) -> bool:
+        """May the trace take focus from ``holder``? Only from a holder with no keys of its own.
+
+        NEVER from an item view, a text or spin field, a slider, a menu, an open or editable
+        combo box, or anything inside a registered key owner (:meth:`add_key_owner`): those own
+        bare keys (the inspector's Left/Right/A/R/Space and its label hotkeys, the tables'
+        j/k/a/r/f, the tree's arrows, a field's typing) and a pointer crossing the trace must not
+        silently kill them -- a label hotkey on ``d`` would turn into an add after the crossing.
+
+        From everything else, yes: nothing, the trace itself, buttons (and the custom clickable
+        chips that are buttons in all but class), scroll bars, a closed combo box, docks, tab
+        bars, the navigator strip. The window starts with focus on such a chip, so a rule that
+        left unknown widgets alone would never engage in a fresh window until the first click."""
+        if holder is None or holder is self or self.isAncestorOf(holder):
+            return True
+        for owner in tuple(self._key_owners):
+            try:
+                if owner is holder or owner.isAncestorOf(holder):
+                    return False
+            except RuntimeError:
+                self._key_owners = [w for w in self._key_owners if w is not owner]
+        if isinstance(holder, (QtWidgets.QAbstractItemView, QtWidgets.QLineEdit,
+                               QtWidgets.QAbstractSpinBox, QtWidgets.QTextEdit,
+                               QtWidgets.QPlainTextEdit, QtWidgets.QKeySequenceEdit,
+                               QtWidgets.QMenu, QtWidgets.QMenuBar)):
+            return False
+        if isinstance(holder, QtWidgets.QAbstractSlider):
+            return isinstance(holder, QtWidgets.QScrollBar)       # a slider's arrows are its keys
+        if isinstance(holder, QtWidgets.QComboBox):
+            return not holder.isEditable() and not holder.view().isVisible()
+        return True
+
+    def _on_pane_hover_enter(self, view_box) -> None:
+        """The pointer entered a pane: if it is the target pane and the window is active, the
+        trace takes keyboard focus (``MouseFocusReason``) -- from a holder with no keys only."""
+        if not self._focus_follows or self.hasFocus():
+            return
+        ref = self._target_ref()
+        if ref is None or view_box is not ref[2].plot.vb:
+            return
+        window = self.window()
+        if window is None or not window.isActiveWindow():
+            return
+        if self._focus_holder_is_free(QtWidgets.QApplication.focusWidget()):
+            self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+
+    def close(self):  # noqa: A003  (pyqtgraph's GraphicsView.close, kept)
+        """pyqtgraph tears the scene down in here; from this moment the pane decorations must not
+        touch an item (see :func:`_alive`)."""
+        self._closing = True
+        return super().close()
+
+    def focusInEvent(self, ev) -> None:  # noqa: N802
+        reason = ev.reason()
+        restored = (reason == QtCore.Qt.FocusReason.ActiveWindowFocusReason
+                    and self._focus_lost_to_window
+                    and self._last_focus_reason == QtCore.Qt.FocusReason.MouseFocusReason)
+        if not restored:
+            self._last_focus_reason = reason
+        self._focus_lost_to_window = False
+        super().focusInEvent(ev)
+        self._apply_target_cursor()
+
+    def focusOutEvent(self, ev) -> None:  # noqa: N802
+        self._focus_lost_to_window = ev.reason() == QtCore.Qt.FocusReason.ActiveWindowFocusReason
+        super().focusOutEvent(ev)
+        self._apply_target_cursor()
+
+    def _apply_target_cursor(self) -> None:
+        """A cross on the TARGET pane's ViewBox while the trace has keyboard focus (the keys are
+        live), an arrow while focus is elsewhere. On the ViewBox and not the viewport, so the
+        other panes and the axes keep their own cursor."""
+        if self._closing:
+            return
+        ref = self._target_ref()
+        target_vb = ref[2].plot.vb if ref is not None else None
+        keys_live = self.hasFocus()
+        for pane in self._panes:
+            vb = pane.plot.vb
+            if not _alive(vb):
+                continue
+            if vb is target_vb:
+                vb.setCursor(QtCore.Qt.CursorShape.CrossCursor if keys_live
+                             else QtCore.Qt.CursorShape.ArrowCursor)
+            else:
+                vb.unsetCursor()
+
+    def set_target_label(self, text: str) -> None:
+        """Caption the target pane (bottom-left, over the data, transparent to the mouse). Empty
+        hides it. Survives rebuilds. The crosshair readout owns the top edge."""
+        self._target_label_text = str(text or "")
+        self._place_target_label()
+
+    def target_label_text(self) -> str:
+        return self._target_label_text
+
+    def _place_target_label(self) -> None:
+        if self._closing:
+            return
+        ref = self._target_ref()
+        want = bool(self._target_label_text) and ref is not None
+        label = self._target_label
+        if label is not None and not _alive(label):
+            label = self._target_label = None
+        if label is not None and (not want or label.parentItem() is not ref[2].plot.vb):
+            self._drop_target_label()
+            label = None
+        if not want:
+            return
+        if label is None:
+            label = _PaneLabel(ref[2].plot.vb)
+            self._target_label = label
+        label.set_text(self._target_label_text)
+        label.show()
+
+    def _drop_target_label(self) -> None:
+        label, self._target_label = self._target_label, None
+        if label is None:
+            return
+        try:
+            label.detach()
+            scene = label.scene()
+            if scene is not None:
+                scene.removeItem(label)
+            label.setParentItem(None)
+        except RuntimeError:
+            pass                        # torn down with its ViewBox
+
+    def _refresh_pane_decorations(self) -> None:
+        """Cursor and caption follow the target: re-derived whenever it can have changed."""
+        self._apply_target_cursor()
+        self._place_target_label()
+
     # -- measure internals -----------------------------------------------------------------------
     def _seed_measure_range(self) -> tuple[float, float]:
         """The initial region: the middle ~20% of the current x-view (span/5, centred). Falls back
@@ -1758,21 +2821,33 @@ class TraceView(pg.GraphicsLayoutWidget):
                 return (lo, lo + width)
         return (0.0, 1.0)
 
-    def _create_measure_region(self, *, seed: bool) -> None:
-        """(Re)build the region on the current target pane. ``seed`` picks a fresh window; otherwise
-        the stored _measure_xrange is restored (used on rebuild). Does nothing if the target channel
-        is not currently layered."""
+    def _create_measure_region(self, *, seed: bool,
+                               initial: tuple[float, float] | None = None,
+                               announce: str = "settled") -> bool:
+        """(Re)build the region on the current target pane. ``initial`` places it at exactly that
+        range; otherwise ``seed`` picks a fresh window and otherwise again the stored
+        _measure_xrange is restored (used on rebuild). Does nothing if the target channel is not
+        currently layered -- or if Measure is ON WITH NO MASK and nobody gave it a range, which
+        is the whole point of that state: a rebuild must not put a seeded mask back.
+
+        ``announce`` is what is emitted for the range it now holds: "settled" (a changed AND a
+        finished emit: a programmatic placement is at rest), "changed" (a drag preview: only the
+        debounced stream) or "none". Returns whether a region now exists."""
         self._remove_measure_region()
         pane = self.pane_for_layer(self._measure_layer_id) if self._measure_layer_id else None
         if pane is None:
-            return
-        region = pg.LinearRegionItem(
+            return False
+        if initial is None and not seed and self._measure_empty:
+            return False
+        region = _MeasureRegionItem(
             orientation="vertical",
             movable=True,
             brush=pg.mkBrush(33, 150, 243, 40),        # translucent blue — distinct from event spans
             hoverBrush=pg.mkBrush(33, 150, 243, 70),
             pen=pg.mkPen("#1565C0", width=1.5),        # the two edges ARE the boundary cursors
             hoverPen=pg.mkPen("#1E88E5", width=3),
+            on_draw=self._on_draw_event,               # a body drag draws, in draw mode or with Option
+            draw_mode=self.draw_mode,
         )
         region.setToolTip(
             "Drag the shaded mask to move it. Drag either circular edge handle to resize it.")
@@ -1784,17 +2859,25 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._measure_region = region
         self._measure_plot = pane.plot
 
-        x0, x1 = self._seed_measure_range() if (seed or self._measure_xrange is None) \
-            else self._measure_xrange
+        if initial is not None:
+            x0, x1 = initial
+        elif seed or self._measure_xrange is None:
+            x0, x1 = self._seed_measure_range()
+        else:
+            x0, x1 = self._measure_xrange
+        self._measure_empty = False
         region.setRegion((x0, x1))                     # set BEFORE connecting -> no spurious emit here
         self._measure_xrange = (float(x0), float(x1))
         region.sigRegionChanged.connect(self._on_measure_region_changed)
         region.sigRegionChangeFinished.connect(self._on_measure_region_finished)
-        self._on_measure_region_changed()              # one deliberate initial emit of the seeded bounds
-        # ...and the seed is already AT REST, so announce that too: a listener that debounces
+        if announce in ("settled", "changed"):
+            self._on_measure_region_changed()          # one deliberate initial emit of the bounds
+        # ...and the range is already AT REST, so announce that too: a listener that debounces
         # sigMeasureChanged would otherwise show nothing for its whole debounce interval
         # every time the tool is armed.
-        self._on_measure_region_finished()
+        if announce == "settled":
+            self._on_measure_region_finished()
+        return True
 
     def _remove_measure_region(self) -> None:
         """Detach the region from its pane (and the scene). Safe when none exists or after a rebuild
@@ -1822,18 +2905,20 @@ class TraceView(pg.GraphicsLayoutWidget):
 
     def _reattach_measure(self) -> None:
         """After a rebuild: recreate the region on the target pane if the Measure tool is active and
-        that channel is still layered; otherwise deactivate (its doc/channel went away)."""
+        that channel is still layered; otherwise deactivate (its doc/channel went away). With
+        Measure on and NO mask there is nothing to recreate: the empty state survives the rebuild."""
         if not self._measure_active or self._measure_layer_id is None:
             return
         if self.pane_for_layer(self._measure_layer_id) is None:
             self._measure_active = False
+            self._measure_empty = False
             self._measure_layer_id = None
             self._measure_xrange = None
             # A layer hide can remove the pane without anybody calling set_measure_active(False).
             # Announce the real state so the owning panel/menu cannot stay checked with no cursors.
             self.sigMeasureActiveChanged.emit(False)
             return
-        self._create_measure_region(seed=False)   # restore at the remembered x-range
+        self._create_measure_region(seed=False)   # restore at the remembered x-range (or stay empty)
 
     def _x_to_index(self, layer: Layer, x: float) -> int:
         """Nearest sample index for a data-x on ``layer``, clamped to [0, n]."""
@@ -1889,6 +2974,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         are now where the user left them" — one emit, not a stream."""
         bounds = self._settled_measure_bounds()
         if bounds is not None:
+            self._settled_count += 1
             self.sigMeasureFinished.emit(bounds[0], bounds[1])
 
 

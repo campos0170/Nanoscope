@@ -59,6 +59,7 @@ from ..core import clock
 from ..core.atomic_write import staged_write_set
 from .baseline import BASELINE_PARAM_KEYS
 from .events import (
+    KIND_MANUAL,
     REVIEW_COL,
     SOURCE_COL,
     STATUS_ACCEPTED,
@@ -78,6 +79,7 @@ __all__ = [
     "clock_stamp",
     "ScoreResult",
     "added_mask",
+    "hand_made_mask",
     "auto_rejected_mask",
     "ensure_added_column",
     "score_detection",
@@ -394,6 +396,25 @@ def added_mask(df: pd.DataFrame) -> np.ndarray:
     return df[ADDED_COLUMN].to_numpy(dtype=bool)
 
 
+def hand_made_mask(df: pd.DataFrame) -> np.ndarray:
+    """Which rows a person drew: ``source`` reads manual, falling back to ``added`` only where
+    ``source`` was never recorded. A merge of a detected row and a hand row is ``added=True``
+    with ``source="mixed"`` and is NOT hand-made. The one definition: the source filter, the
+    Include-hand-made switch, Delete, Copy and the carry-over all ask here."""
+    n = len(df)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    added = added_mask(df)
+    if SOURCE_COL not in df.columns:
+        return added
+    src = df[SOURCE_COL].astype("string").to_numpy(dtype=object)
+    known = ~pd.isna(src)
+    manual = np.zeros(n, dtype=bool)
+    if known.any():
+        manual[known] = np.array([source_kind(v) == KIND_MANUAL for v in src[known]], dtype=bool)
+    return np.where(known, manual, added)
+
+
 def ensure_added_column(df: pd.DataFrame) -> pd.DataFrame:
     """Add a default-``False`` ``added`` column to ``df`` IN PLACE if it is missing.
 
@@ -587,6 +608,7 @@ def _training_row_mask(
     *,
     include_all: bool,
     selection: str | None = None,
+    include_added: bool = True,
 ) -> np.ndarray:
     """THE one definition of which rows a training export writes.
 
@@ -601,6 +623,20 @@ def _training_row_mask(
     rejected row is a human rejection even when an old project lacks a ``review`` token;
     :func:`event_status` is the single authority for that inference.
     """
+    mask = _training_selection_mask(df, include_all=include_all, selection=selection)
+    if not include_added:
+        # The "Include hand-made events" switch is OFF: the rows a person drew stay in the
+        # table and out of the file. The writer and the sidecar share this one definition.
+        mask = mask & ~hand_made_mask(df)
+    return mask
+
+
+def _training_selection_mask(
+    df: pd.DataFrame,
+    *,
+    include_all: bool,
+    selection: str | None = None,
+) -> np.ndarray:
     n = len(df)
     selected = _resolve_training_selection(include_all=include_all, selection=selection)
     if selected == TRAINING_SELECTION_ALL:
@@ -635,6 +671,7 @@ def build_training_frame(
     *,
     include_all: bool = False,
     selection: str | None = None,
+    include_added: bool = True,
 ) -> pd.DataFrame:
     """Reduce a detection frame to the labelled-region training table.
 
@@ -655,7 +692,8 @@ def build_training_frame(
     # labels that occurred only on withheld rows created all-empty training columns.
     # The output schema should describe the rows actually exported.
     work = work[_training_row_mask(
-        work, include_all=include_all, selection=selection)].copy()
+        work, include_all=include_all, selection=selection,
+        include_added=include_added)].copy()
     # The user's labels, one column per key. Without this the export carries only
     # accepted/added — "is this event real", never "what is it" — so a model trained from it
     # can only ever learn the detector's job over again. The keys come from the data rather
@@ -695,6 +733,8 @@ def training_provenance(
     t0_s: float | None = None,
     df: pd.DataFrame | None = None,
     source_df: pd.DataFrame | None = None,
+    include_added: bool = True,
+    n_added_excluded: int = 0,
 ) -> dict[str, Any]:
     """Build the reproducibility sidecar for a training export.
 
@@ -749,8 +789,14 @@ def training_provenance(
         # of this block, so the training sidecar and the events sidecar cannot come to
         # describe the same curation differently.
         meta.update(curation_stamp(
-            df, source_df=source_df, provenance=prov, selection=selected
+            df, source_df=source_df, provenance=prov, selection=selected,
+            include_added=include_added, n_added_excluded=n_added_excluded,
         ))
+        if detector == "detect.manual":
+            # No detector ran: `added` in this table means "drawn by hand", not "the detector
+            # missed it", and a model trained on it must not read it as a miss.
+            meta["added_means"] = ("drawn by hand: this table comes from the Manual table, "
+                                   "where no detector ran")
         # TRAINING_COLUMNS intentionally omits event_id to preserve the model-input schema,
         # while reconciliation memberships are keyed by that id. Carry the selected ids in
         # exact table-row order so an external consumer can join each exported row back to
@@ -960,6 +1006,8 @@ def curation_stamp(
     source_df: pd.DataFrame | None = None,
     provenance: Mapping[str, Any] | None = None,
     selection: str | None = None,
+    include_added: bool = True,
+    n_added_excluded: int = 0,
 ) -> dict[str, Any]:
     """The curation block every events sidecar carries. THE one writer of it.
 
@@ -1044,6 +1092,11 @@ def curation_stamp(
     block: dict[str, Any] = {
         "n_in_table": total,
         "n_withheld": None if total is None else int(total - n_rows),
+        # The "Include hand-made events" switch, and what it cost this file. `n_withheld`
+        # keeps meaning the rows REJECTED; rows a person drew that the switch kept out are
+        # counted here instead, so a reader can tell curation from a choice about scope.
+        "include_added": bool(include_added),
+        "n_added_excluded": int(n_added_excluded),
         "note": note,
         "counted_from": counted_from,
         # WHICH description columns the CSV carries, so an absent breakdown below reads
@@ -1091,6 +1144,8 @@ def write_events_export(
     t0_s: float | None = None,
     n_total: int | None = None,
     source_df: pd.DataFrame | None = None,
+    include_added: bool = True,
+    n_added_excluded: int = 0,
 ) -> dict[str, Path]:
     """Write an events table as CSV, plus the provenance sidecar that describes it.
 
@@ -1151,7 +1206,8 @@ def write_events_export(
         "n_rows": int(len(df)),
         "columns": list(df.columns),
         **clock_stamp(df, meta=meta, t0_s=t0_s, provenance=prov),
-        **curation_stamp(df, n_total=n_total, source_df=source_df, provenance=prov),
+        **curation_stamp(df, n_total=n_total, source_df=source_df, provenance=prov,
+                         include_added=include_added, n_added_excluded=n_added_excluded),
         "provenance": prov,
     }
     with staged_write_set() as group:
@@ -1255,6 +1311,7 @@ def write_training_export(
     selection: str | None = None,
     meta: Any = None,
     t0_s: float | None = None,
+    include_added: bool = True,
 ) -> dict[str, Path]:
     """Write the curated events of ``df`` as a training table, plus a provenance sidecar.
 
@@ -1271,7 +1328,7 @@ def write_training_export(
     Returns ``{"data": <written table path>, "meta": <sidecar path>}``.
     """
     out = build_training_frame(
-        df, include_all=include_all, selection=selection)
+        df, include_all=include_all, selection=selection, include_added=include_added)
     path, meta_path = training_export_paths(path)
 
     # The rows the table above holds, as EVENT rows -- `build_training_frame` reduces to
@@ -1279,13 +1336,18 @@ def write_training_export(
     # block is computed from the same selection over the original frame. One definition
     # of that selection, `_training_row_mask`, serves both.
     written = df[_training_row_mask(
-        df, include_all=include_all, selection=selection)]
+        df, include_all=include_all, selection=selection, include_added=include_added)]
+    n_excluded = 0
+    if not include_added:
+        would_write = df[_training_row_mask(df, include_all=include_all, selection=selection)]
+        n_excluded = int(len(would_write) - len(written))
     meta = training_provenance(
         provenance, source_file=source_file, detector=detector,
         include_all=include_all, selection=selection,
         n_rows=len(out), columns=out.columns,
         meta=meta, t0_s=t0_s,
         df=written, source_df=df,
+        include_added=include_added, n_added_excluded=n_excluded,
     )
     with staged_write_set() as group:
         staged_data = group.stage(path)

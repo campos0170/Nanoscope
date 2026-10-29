@@ -76,6 +76,7 @@ from ..analysis.curation_view import (
     LABEL_FILTER_PREFIX, curation_progress, describe_progress, end_of_filter_note, filter_depends_on_labels_or_review,
     filter_display_candidates, filter_mask, filter_options, format_progress, is_filter,
     label_rows, no_unreviewed_note, row_unchanged, same_events, unlabel_rows,
+    can_keep_place,
 )
 from ..analysis.events import (
     AUTOMATIC_REJECTION_FLAGS, FRAC_DEPTH_ENHANCEMENT, flag_tokens, mark_reviewed,
@@ -257,6 +258,7 @@ _CAPTION_HEX = "#98a0aa"
 _REJECTED_HEX = "#c1554a"    # the strike-through + border on a rejected tile
 _REJECTED_DIM = 0.34         # opacity a rejected tile's waveform is drawn at
 _LABEL_HEX = "#8FD6C0"       # the label tag on a tile (Okabe-Ito green, lightened)
+_MANUAL_MARK_HEX = "#F0D58A"  # the "M" on a hand-made tile (Okabe-Ito yellow, lightened)
 
 #: The fitted CUSUM sub-state levels, in the ink ``overlays`` draws them in on the main
 #: trace -- so a level is one colour on all three event surfaces.
@@ -1122,6 +1124,18 @@ class _TileDelegate(QtWidgets.QStyledItemDelegate):
             painter.setPen(QtGui.QColor("#10151b"))
             painter.drawText(box, int(Qt.AlignCenter), text)
 
+        # A hand-made event wears an "M" in the bottom-left corner of its waveform (the top
+        # corners carry the label and the subpopulation chip, the border carries curation and
+        # the caption the sort quantity), so a grid of mixed tiles shows which ones a person drew.
+        if self._w.is_hand_made(int(row)):
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            side = fm.height() + 2
+            box = QtCore.QRect(wave.left() + 3, wave.bottom() - side - 2, side, side)
+            painter.fillRect(box, QtGui.QColor(_MANUAL_MARK_HEX))
+            painter.setPen(QtGui.QColor("#10151b"))
+            painter.drawText(box, int(Qt.AlignCenter), "M")
+
         border = QtGui.QColor(_BORDER_SEL_HEX if selected
                               else (_REJECTED_HEX if not accepted else _BORDER_HEX))
         pen = QtGui.QPen(border)
@@ -1514,6 +1528,8 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
     # "the curate", and it is a window of its own, so unlike the trace behind this one the
     # user can SEE the gesture land.
     inspectRequested = Signal(int)
+    #: The tile menu's "Delete hand-made event": the ``event_id``. Intent only.
+    deleteHandMadeRequested = Signal(int)
     acceptanceChanged = Signal(int, bool)
     curationBatchChanged = Signal()
     labelsChanged = Signal()                 # a label was written on the shared frame
@@ -2224,7 +2240,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         different detection, and the window's private ledger is dropped."""
         keep = (bool(keep_place) and self._df is not None and events_df is not self._df
                 and doc_id == self._doc_id and channel == self._channel
-                and same_events(self._df, events_df))
+                and can_keep_place(self._df, events_df, self._current_event_id()))
         # The owner handing back the ledger this window already holds says it is the same
         # detection, edited by the app itself (a hand-add, a merge, their undo).
         same_lineage = (self._df is not None and refusals is not None
@@ -2773,6 +2789,17 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
     def subpop_filter(self) -> int | None:
         return self._model.subpop()
 
+    def is_hand_made(self, df_row: int) -> bool:
+        """Did a person draw this event? (``source`` reads manual, ``added`` where unrecorded.)"""
+        df = self._df
+        if df is None or not (0 <= df_row < len(df)):
+            return False
+        if "source" in df.columns:
+            value = df["source"].iloc[df_row]
+            if not pd.isna(value):
+                return str(value).strip() == "manual"
+        return bool(df["added"].iloc[df_row]) if "added" in df.columns else False
+
     def subpop_of(self, df_row: int) -> tuple[int, str] | None:
         """``(class_id, chip_text)`` for a tile, or ``None`` when no report is installed."""
         classes = self._model.classes()
@@ -3307,8 +3334,15 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         menu.addSeparator()
         act_accept = menu.addAction("Accept")
         act_reject = menu.addAction("Reject")
+        act_delete = None
+        if ("source" in self._df.columns
+                and str(self._df["source"].iloc[row]) == "manual"):
+            menu.addSeparator()
+            act_delete = menu.addAction("Delete hand-made event")
         chosen = self._exec_menu(menu, self.view.viewport().mapToGlobal(pos))
-        if chosen is act_inspect:
+        if act_delete is not None and chosen is act_delete:
+            self.deleteHandMadeRequested.emit(event_id)
+        elif chosen is act_inspect:
             self.inspectRequested.emit(event_id)
         elif chosen is act_goto:
             self.eventActivated.emit(event_id)
@@ -4431,7 +4465,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             # run again. The wording is the Event inspector's, deliberately: the two windows
             # are handed the same result and must not describe it in different words.
             self.status.setText(
-                "Detection found no events — nothing to show in the gallery."
+                ("No manual events yet — bracket an event on the trace and press Ctrl+M."
+                 if self._module_id == "detect.manual" else
+                 "Detection found no events — nothing to show in the gallery.")
                 if self._ran_empty else
                 "No detection — run detection to fill the gallery.")
             return

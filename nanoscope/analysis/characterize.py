@@ -71,7 +71,33 @@ _MIN_LEVEL_SAMPLES = 3
 
 # Rise/fall crossings are searched a little outside [start, end): the detector
 # triggers at k*sigma, which for a shallow event is already above the 10% level.
+# The pad is ``max(_EDGE_PAD_SAMPLES, _EDGE_PAD_S * fs)`` -- see ``_edge_pad_samples``.
 _EDGE_PAD_SAMPLES = 64
+
+#: The pad's floor in time: 64 samples at the owner's 50 kHz. A fixed sample count is a
+#: shrinking window as the rate climbs (64 samples are 0.26 ms at 250 kHz), and an edge
+#: whose 10 % point lies further out than that comes back NaN -- which a hand-placed or
+#: step-fitted start, sitting MID-RAMP, makes common: a 0.6 ms edge at 250 kHz has its
+#: 10 % point 0.3 ms before the fitted start, 75 samples, outside the old 64.
+_EDGE_PAD_S = 1.28e-3
+
+
+def _edge_pad_samples(fs: float) -> int:
+    """The rise/fall search pad, in samples: ``max(64, 1.28 ms)``.
+
+    BIT-IDENTICAL to the old fixed 64 at 50 kHz (64 samples ARE 1.28 ms) and at every lower
+    rate; only a rate above ~50.4 kHz changes. ``round``, not ``ceil``: ``1.28e-3 * 50000.0``
+    is not exactly 64.0 in floating point and a ceiling would turn it into 65, moving
+    every row of the owner's recordings. A rate that is not a finite positive number keeps
+    the old 64.
+    """
+    try:
+        n = _EDGE_PAD_S * float(fs)
+    except (TypeError, ValueError):
+        return _EDGE_PAD_SAMPLES
+    if not np.isfinite(n) or n <= _EDGE_PAD_SAMPLES:
+        return _EDGE_PAD_SAMPLES
+    return int(round(n))
 
 #: A row whose depth was measured off a FLAT TOP -- the samples ran into an
 #: amplifier or ADC rail, so what was recorded is where the hardware stopped, not
@@ -1208,6 +1234,10 @@ def rise_fall_over_set(
     Search windows are padded outside the event -- the detector triggers at
     k*sigma, which can already be above the 10% level -- but clipped to the
     neighbouring events so one event's tail never becomes another's rise.
+    The pad is ``max(64 samples, 1.28 ms)`` (``_edge_pad_samples``): 64 samples
+    at 50 kHz and below, so every row of a recording at or under that rate is
+    unchanged, and 1.28 ms above it, where 64 samples would be a window too
+    short to hold the 10 % point of an edge fitted mid-ramp.
     NaN where the event never reaches 90% inside the window.
 
     RISE AND FALL ARE PROPERTIES OF THE EVENT SET, NOT OF ONE EVENT
@@ -1239,10 +1269,11 @@ def rise_fall_over_set(
     rise = np.full(n_ev, np.nan)
     fall = np.full(n_ev, np.nan)
 
+    pad = _edge_pad_samples(fs)
     lo_bound = np.concatenate(([0], ends[:-1]))
     hi_bound = np.concatenate((starts[1:], [current.size]))
-    w0 = np.maximum(starts - _EDGE_PAD_SAMPLES, lo_bound)
-    w1 = np.minimum(ends + _EDGE_PAD_SAMPLES, hi_bound)
+    w0 = np.maximum(starts - pad, lo_bound)
+    w1 = np.minimum(ends + pad, hi_bound)
 
     # Loop over EVENTS (thousands), not samples (millions): each iteration works
     # on a short window and the crossing search is inherently sequential. That

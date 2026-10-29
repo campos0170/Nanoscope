@@ -66,6 +66,7 @@ from .analysis_explorer import (
     PAGE_VOLTAGE_SERIES,
 )
 from .analysis_panel import AnalysisPanel
+from .trace_keys import TraceKeyController
 from .analysis_catalog import ANALYSIS_LABELS, PAGE_HOME, PAGE_IDS
 from .analysis_worker import AnalysisController, BatchDetectController
 from ..core import clock
@@ -151,6 +152,7 @@ _DETECTOR_LABELS = {
     "detect.cusum": "the CUSUM detector",
     "detect.keras": "the ML detector",
     "detect.study": "the imported study candidate table",
+    "detect.manual": "your Manual table",
     CONSENSUS_MODULE_ID: "the reconciled event table",
 }
 
@@ -227,8 +229,16 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     "event_inspector.traceRequested": "the 'Show in trace' button / T — centres the main trace "
                                       "on the browsed event; a view move, never the numbers",
     "measure_panel.navigateRequested": "'go to measurement' on another document — a view move",
-    "measure_panel.markMissedRequested": "a REQUEST to add an event; the add itself lands "
-                                         "on resultsChanged",
+
+    "event_gallery.deleteHandMadeRequested": "a REQUEST to delete a hand-made event; the "
+                                             "delete itself lands on resultsChanged",
+    "event_inspector.deleteHandMadeRequested": "a REQUEST to delete a hand-made event; the "
+                                               "delete itself lands on resultsChanged",
+    "measure_panel.addRequested": "a REQUEST to file the cursor region as an event; the add "
+                                  "itself lands on resultsChanged",
+    "analysis_panel.eventAdded": "a hand-made event joined the table; the windows already "
+                                 "re-fed on resultsChanged, this only lands them on it, "
+                                 "quietly (no zoom, no pan)",
     "measure_panel.measureActiveChanged": "the measure tool's on/off state, not its table",
     "analysis_panel.willReplaceEvents": "a detection run has STARTED and the table it will "
                                         "overwrite has to be recoverable — wired to "
@@ -1380,8 +1390,12 @@ class MainWindow(QtWidgets.QMainWindow):
         for sequence, slot in (
                 ("Shift+Left", self._pan_scrollbar.previous_view),
                 ("Shift+Right", self._pan_scrollbar.next_view),
-                ("Shift+Up", self._pan_scrollbar.zoom_in),
-                ("Shift+Down", self._pan_scrollbar.zoom_out)):
+                # Zoom about the pointer when it is over the trace, else about the centre: the
+                # event under the cursor stays under the cursor.
+                ("Shift+Up", lambda: self._pan_scrollbar.zoom_in(
+                    anchor=self._trace_view.pointer_data_x())),
+                ("Shift+Down", lambda: self._pan_scrollbar.zoom_out(
+                    anchor=self._trace_view.pointer_data_x()))):
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(sequence), self._trace_view)
             shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(slot)
@@ -1406,6 +1420,21 @@ class MainWindow(QtWidgets.QMainWindow):
             "Off: left-drag pans. The mouse wheel moves the signal vertically; use −/+ "
             "in the Scan strip to change the time scale.")
         self._act_boxzoom.toggled.connect(self._trace_view.set_drag_mode)
+
+        # Draw mode: a plain left-drag draws a span (fitted to the step it was drawn near)
+        # instead of box-zooming; Option+drag does the other one. `E` toggles it from the trace;
+        # this is the menu's twin, so the state is visible and reachable without the keyboard.
+        # It lives beside "Drag draws zoom box" because it decides what the SAME drag does.
+        self._act_draw_mode = view_menu.addAction("Drag draws an e&vent span (draw mode)")
+        self._act_draw_mode.setCheckable(True)
+        self._act_draw_mode.setShortcut(QtGui.QKeySequence("Ctrl+Shift+E"))
+        self._act_draw_mode.setToolTip(
+            "On: a plain left-drag on the trace draws a span, and its edges are fitted to the "
+            "steps when you let go; D then adds it. Option+drag does the other thing (box zoom "
+            "when this is on, a drawn span when it is off). Press E on the trace to toggle it. "
+            "Needs Measure event.")
+        self._act_draw_mode.setEnabled(False)
+        self._act_draw_mode.toggled.connect(self._on_draw_mode_toggled)
 
         view_menu.addSeparator()
         panels = view_menu.addMenu("&Panels")
@@ -1501,13 +1530,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # when the tab is hidden. A QAction on the menu bar is window-wide by construction.
         # The whole loop this serves is: drag a region on the trace, press Ctrl+M, drag the
         # next one — without ever looking at the panel.
-        self._act_add_measurement = analysis_menu.addAction("Add measurement to &list")
-        self._act_add_measurement.setShortcut(QtGui.QKeySequence("Ctrl+M"))
-        self._act_add_measurement.setToolTip(
-            "Append the region currently selected on the trace to the measurement table. "
-            "Works from any tab — turn on Measure event and drag a region first.")
-        self._act_add_measurement.setEnabled(False)
-        self._act_add_measurement.triggered.connect(self._add_measurement_to_list)
+        self._act_add_event = analysis_menu.addAction("Add &event from cursors")
+        self._act_add_event.setShortcut(QtGui.QKeySequence("Ctrl+M"))
+        self._act_add_event.setToolTip(
+            "File the region selected on the trace as a hand-made event in the table named "
+            "beside the cursors (Schmitt, CUSUM, Manual...); with no table yet it starts the "
+            "Manual table. It shows in the Results, the Event gallery and the Event inspector "
+            "at once and exports with the rest. Works from any tab — turn on Measure event "
+            "and drag a region first.")
+        self._act_add_event.setEnabled(False)
+        self._act_add_event.triggered.connect(self._add_event_from_cursors)
+
 
         # §4.2.7. The evidence the owner needs BEFORE he commits to re-measuring a
         # table he has already curated and exported: on a clean recording the report
@@ -1596,18 +1629,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "sub-state count, anything. The list becomes the 1–9 keys in the Event gallery "
             "and the Event inspector.")
         self._act_labels.triggered.connect(self._edit_labels)
-
-        # Window-wide because the Measure page is normally hidden during a trace-first labeling
-        # pass. Distinct from Ctrl+M: this writes a reviewed, hand-added row into the selected
-        # SOURCE detector table (and therefore into supervised-learning exports), whereas Ctrl+M
-        # appends statistics to the separate manual-measurement notebook.
-        self._act_mark_missed = analysis_menu.addAction("Mark selection as &missed event")
-        self._act_mark_missed.setShortcut(QtGui.QKeySequence("Ctrl+Shift+M"))
-        self._act_mark_missed.setToolTip(
-            "Add the current Measure selection to the active source detector as a reviewed "
-            "event it missed. Works from any tab. (Ctrl+Shift+M)")
-        self._act_mark_missed.setEnabled(False)
-        self._act_mark_missed.triggered.connect(self._mark_selection_as_missed)
 
         # After _act_plots (which must stay item 8). ALWAYS enabled: disabled, ⌘⇧F would
         # fall through to the event table, whose curation keys ignore modifiers.
@@ -1760,6 +1781,51 @@ class MainWindow(QtWidgets.QMainWindow):
         # and call it processed.
         self._act_export_processed.setEnabled(False)
         self._act_export_processed.triggered.connect(self._export_processed_trace)
+
+        # The scope switch for what LEAVES the app. Default on, which is how every export has
+        # always behaved; off keeps the events people drew out of the events and training
+        # exports (they stay in the table, the gallery and the counts). Disabled on the Manual
+        # table, where every row is hand-made.
+        self._act_include_hand_made = analysis_menu.addAction("Include &hand-made events in exports")
+        self._act_include_hand_made.setCheckable(True)
+        self._act_include_hand_made.setChecked(
+            QtCore.QSettings().value("analysis/include_hand_made", True, type=bool))
+        self._act_include_hand_made.setToolTip(
+            "On (the default): Export events and Export events for training include the "
+            "events you drew by hand, as they always have. Off: those two exports leave them "
+            "out and their .meta.json sidecars say how many were left out. The table, the "
+            "gallery and every count still include them, and Export event statistics always "
+            "writes every event of the tables you choose.")
+        self._act_include_hand_made.toggled.connect(self._on_include_hand_made_toggled)
+
+        self._act_convert_measurements = analysis_menu.addAction(
+            "Convert old &measurements to events…")
+        self._act_convert_measurements.setToolTip(
+            "Turn the manual measurements saved in this project into hand-made events in this "
+            "channel's Manual table, where the gallery, the inspector and every export see "
+            "them. You choose the rows; the measurement list is left as it is and Undo takes "
+            "the conversion back.")
+        self._act_convert_measurements.setEnabled(False)
+        self._act_convert_measurements.triggered.connect(self._convert_measurements)
+
+        self._act_copy_hand_made = analysis_menu.addAction("&Copy hand-made events to…")
+        self._act_copy_hand_made.setToolTip(
+            "Copy the events you drew by hand in the table on screen into another table of this "
+            "channel (Schmitt, CUSUM, Manual...). Each copy is measured the way that table "
+            "measures its own events; running it twice copies nothing twice; the copies are "
+            "independent of the originals.")
+        self._act_copy_hand_made.setEnabled(False)
+        self._act_copy_hand_made.triggered.connect(self._copy_hand_made_events)
+
+        self._act_export_event_statistics = analysis_menu.addAction("Export event &statistics…")
+        self._act_export_event_statistics.setToolTip(
+            "Write mean, median, standard deviation, variance, minimum, maximum, peak-to-peak, "
+            "RMS, skewness, kurtosis, area, amplitude and SNR for every event of the table on "
+            "screen, every table on this channel, or every Manual table in the project, to "
+            "one CSV. Hand-made events included. Each row is measured on the signal its table "
+            "was measured on and the file says which.")
+        self._act_export_event_statistics.setEnabled(False)
+        self._act_export_event_statistics.triggered.connect(self._export_event_statistics)
 
         # Training export: the curated events as a regions/labels table for the
         # StudentModel notebook — one row per event with accepted + added labels, plus
@@ -2085,6 +2151,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._file_dock.focus_document(self._current_selection[0])
 
     def _wire(self) -> None:
+        # The trace keys (C S F D G X E, Return, Esc), draw mode and the label on the trace.
+        # The docked Event inspector owns bare keys of its own, so the pointer crossing the
+        # trace never takes focus from it.
+        self._trace_keys = TraceKeyController(self)
+        self._trace_view.add_key_owner(self._inspector)
+        self._trace_view.sigDrawModeChanged.connect(self._on_trace_draw_mode_changed)
+        self._analysis_panel.measure_panel.addRequested.connect(self._add_event_from_cursors)
+        self._analysis_panel.resultSwitched.connect(self._trace_keys.refresh_label)
         self._session.documentOpened.connect(self._remember_loaded_source)
         self._controller.probed.connect(self._on_probed)
         self._controller.loaded.connect(self._on_loaded)
@@ -2197,7 +2271,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # "Go to measurement" on a row belonging to a DIFFERENT document/channel. The panel
         # cannot select a document (no panel imports another panel), so it announces the
         # target and MainWindow — the sole wirer — drives the Files dock, exactly as it does
-        # for markMissedRequested. Routing is synchronous, so by the time the emit returns the
+        # for the Add button. Routing is synchronous, so by the time the emit returns the
         # panel has been re-pointed and can finish the jump (cursors + zoom) itself.
         self._analysis_panel.measure_panel.navigateRequested.connect(
             self._on_measurement_navigate_requested)
@@ -2342,6 +2416,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # and the Files-dock button and File ▸ Close document must not disagree about it.
         self._file_dock.closeDocumentRequested.connect(self._close_document)
         self._trace_view.sigMeasureChanged.connect(lambda *_: self._sync_create_segment_action())
+        # A discarded mask fires ONLY ``sigMeasureCleared`` (Measure stays on with nothing to
+        # measure), so without this Create segment, Centre and PSD-of-selection stayed enabled
+        # over a region that was gone.
+        self._trace_view.sigMeasureCleared.connect(lambda *_: self._sync_create_segment_action())
         self._analysis_panel.measure_panel.measureActiveChanged.connect(
             lambda *_: self._sync_create_segment_action())
         self._session.documentOpened.connect(lambda *_: self._sync_create_segment_action())
@@ -2360,6 +2438,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # decision. Both cases used to be completely silent: a "Visible view" run whose
         # target is not on screen (which quietly detected over the WHOLE recording instead),
         # and a detection returning for a load of the recording that no longer exists.
+        self._analysis_panel.eventAdded.connect(self._land_on_added_event)
+        self._analysis_panel._table.deleteHandMadeRequested.connect(
+            self._delete_hand_made_events)
         self._analysis_panel.runRefused.connect(
             lambda msg: self.statusBar().showMessage(msg, 12000))
         # S7-POP1: the moment the events table's badge set is (re)written — a Preprocess
@@ -3039,6 +3120,7 @@ class MainWindow(QtWidgets.QMainWindow):
         total_events = 0
         n_installed = 0
         n_stale = 0
+        n_kept = 0
         for res in results:
             # Same rule as the interactive detection sink: a result whose document is no
             # longer open is a result about nothing (close_document already dropped the store
@@ -3048,12 +3130,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._session.has_document(res.doc_id):
                 n_stale += 1
                 continue
-            self._session.add_result(res)
+            report = self._analysis_panel.install_detection_result(res, announce=False)
+            if report is not None:
+                n_kept += len(report.kept) + len(report.moved)
             n_installed += 1
             if isinstance(res.payload, EventSet):
                 total_events += len(res.payload.df)
 
         parts = [f"Batch detect: {n_installed} recording(s), {total_events} event(s)."]
+        if n_kept:
+            parts.append(f"Kept {n_kept} hand-made event(s) from the tables it replaced.")
         if n_stale:
             parts.append(f"Dropped {n_stale} whose recording was closed (or closed and "
                          f"reopened) while it ran.")
@@ -3442,15 +3528,17 @@ class MainWindow(QtWidgets.QMainWindow):
         """Enable Measure event whenever there is a DRAWN live channel to select on. The
         measurement is a hand gesture, not a detector, so it never waits on a run.
 
-        *Add measurement to list* (Ctrl+M) and *Mark missed* ride the broader OPEN-target gate,
-        deliberately not the narrower "is a region drawn right now". Qt
-        never delivers a keystroke to a disabled action, so gating it on the region would
-        leave the user pressing a dead key with no way to learn why. Their handlers name a hidden
-        channel explicitly, while the toggle itself cannot promise cursors it cannot draw."""
+        *Add event from cursors* (Ctrl+M) rides the broader OPEN-target gate, deliberately
+        not the narrower "is a region drawn right now". Qt never delivers a keystroke to a
+        disabled action, so gating it on the region would leave the user pressing a dead key
+        with no way to learn why. Its handler names a hidden channel explicitly, while the
+        toggle itself cannot promise cursors it cannot draw."""
         panel = self._analysis_panel.measure_panel
         self._act_measure.setEnabled(panel.can_measure())
-        self._act_add_measurement.setEnabled(panel.has_open_target())
-        self._act_mark_missed.setEnabled(panel.has_open_target())
+        self._act_add_event.setEnabled(panel.has_open_target())
+        self._act_draw_mode.setEnabled(panel.has_open_target())
+        if getattr(self, "_trace_keys", None) is not None:
+            self._trace_keys.refresh_label()
         # The processed-trace export rides the same refreshes (a selection retarget is one
         # of the two things that can move its gate); the other one, the Preprocess form, is
         # covered by the menu's own aboutToShow.
@@ -3515,12 +3603,28 @@ class MainWindow(QtWidgets.QMainWindow):
             f"(+ the chain in {out['meta'].name}).", 8000)
         self._disclose_identity_notes("Export processed trace", list(out.values()))
 
-    def _add_measurement_to_list(self) -> None:
-        """Analysis ▸ Add measurement to list (Ctrl+M) — stamp the current cursor region.
+    def _on_draw_mode_toggled(self, checked: bool) -> None:
+        """The menu item turns draw mode on or off through the trace keys' own door, and the
+        item follows the mode back when the view changes it itself (the target pane went)."""
+        self._trace_keys.set_draw_mode(bool(checked))
+        if self._act_draw_mode.isChecked() != self._trace_view.draw_mode():
+            was = self._act_draw_mode.blockSignals(True)
+            self._act_draw_mode.setChecked(self._trace_view.draw_mode())
+            self._act_draw_mode.blockSignals(was)
+
+    def _on_trace_draw_mode_changed(self, on: bool) -> None:
+        was = self._act_draw_mode.blockSignals(True)
+        self._act_draw_mode.setChecked(bool(on))
+        self._act_draw_mode.blockSignals(was)
+
+    def _add_event_from_cursors(self) -> None:
+        """Analysis ▸ Add event from cursors (Ctrl+M) — file the Measure region as an event.
 
         Reports the FIRST real blocker rather than failing silently, which is what the
         panel's own shortcut did (``add_current`` returns False and says nothing when there
-        is no live measurement)."""
+        is no live measurement). The four gates below are the gesture's own; everything
+        after them is the add door's (:meth:`AnalysisPanel.add_manual_event`), which names
+        its own refusals."""
         panel = self._analysis_panel.measure_panel
         if not panel.has_open_target():
             self.statusBar().showMessage(
@@ -3536,50 +3640,177 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Measure is off. Turn on Analysis ▸ Measure event, then drag a region on "
                 "the trace and press Ctrl+M.", 10000)
             return
-        if not panel.add_current():
+        bounds = self._trace_view.measure_bounds()
+        target = self._trace_view.measure_target()
+        sel = self._analysis_panel.current_target()
+        if bounds is None or target is None:
+            self.statusBar().showMessage(self._no_region_sentence("add, then press Ctrl+M"), 10000)
+            return
+        if sel is None or target != sel:
             self.statusBar().showMessage(
-                "No region is selected on the trace — drag one across the event you want "
-                "to measure, then press Ctrl+M.", 10000)
+                "The cursors are on another recording or channel than the one in the "
+                "Analysis panel. Select that channel, then press Ctrl+M again.", 10000)
+            return
+        self._file_hand_made_event(sel[0], sel[1], int(bounds[0]), int(bounds[1]))
 
-    def _mark_selection_as_missed(self) -> None:
-        """Ctrl+Shift+M: promote the live cursor span into the selected source detector table."""
-        panel = self._analysis_panel.measure_panel
-        if not panel.has_open_target():
-            self.statusBar().showMessage(
-                "Nothing to mark — open and select a recording first.", 8000)
+    def _no_region_sentence(self, then: str) -> str:
+        """Why there is nothing to act on, said for the state the person is actually in: Measure
+        ON with no mask (after an add or a discard) is not "turn Measure on"."""
+        if self._trace_view.measure_empty():
+            return (f"Measure is on but no region is selected. Press C over the event to catch "
+                    f"it, or drag across the event you want to {then}.")
+        return (f"No region is selected on the trace — drag one across the event you want "
+                f"to {then}.")
+
+    def _file_hand_made_event(self, doc_id: str, channel: int, start: int, end: int, *,
+                              edge=None):
+        """THE window-level add: every manual gesture (Ctrl+M, the Add button, the cursor
+        keys) calls this, which calls the panel's door and reports the outcome.
+
+        The curation windows keep their filter, current event and selection through the
+        re-feed the add causes (``_keep_curation_place``), then land on the new event without
+        moving the trace; the status line says where the event went or why it did not."""
+        self._keep_curation_place = True
+        try:
+            outcome = self._analysis_panel.add_manual_event(doc_id, channel, start, end,
+                                                            edge=edge)
+        finally:
+            self._keep_curation_place = False
+        if outcome.ok:
+            self.statusBar().showMessage(outcome.message, 10000)
+        # A refusal is posted by ``runRefused``, wired to the status bar like every refusal.
+        return outcome
+
+    def _choose_measurements_to_convert(self, plan) -> list[int] | None:
+        """Ask which old measurements to convert (the one modal, behind a seam); ``None`` when
+        the user backs out."""
+        from .convert_measurements_dialog import ConvertMeasurementsDialog
+
+        dialog = ConvertMeasurementsDialog(plan, self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return None
+        return dialog.selected_ids()
+
+    def _convert_measurements(self) -> None:
+        """Analysis ▸ Convert old measurements to events…"""
+        plan = self._analysis_panel.conversion_plan()
+        if not plan:
+            self.statusBar().showMessage("There are no saved measurements to convert.", 8000)
             return
-        if not panel.can_measure():
-            self.statusBar().showMessage(
-                "The selected current channel is not shown. Tick that channel in the File "
-                "Manager, then bracket the missed event and press Ctrl+Shift+M again.", 12000)
+        ids = self._choose_measurements_to_convert(plan)
+        if ids is None:
             return
-        if not panel.is_active() or self._trace_view.measure_bounds() is None:
-            self.statusBar().showMessage(
-                "Turn on Measure event and bracket the missed event first, then press "
-                "Ctrl+Shift+M.", 10000)
+        self._keep_curation_place = True
+        try:
+            self._analysis_panel.convert_measurements(ids)
+        finally:
+            self._keep_curation_place = False
+
+    def _choose_copy_target(self) -> str | None:
+        """Ask which table the hand-made events are copied into (the one modal, behind a seam)."""
+        from ..core.sources import detector_name
+
+        targets = self._analysis_panel.copy_targets()
+        if not targets:
+            return None
+        labels = [detector_name(m) for m in targets]
+        label, ok = QtWidgets.QInputDialog.getItem(
+            self, "Copy hand-made events", "Copy into which table?", labels, 0, False)
+        return targets[labels.index(label)] if ok else None
+
+    def _copy_hand_made_events(self) -> None:
+        """Analysis ▸ Copy hand-made events to…"""
+        target = self._choose_copy_target()
+        if target is None:
             return
-        current = self._analysis_panel.current_detection()
-        if current is None:
-            self.statusBar().showMessage(
-                "There is no source detector table to add this event to. Run a detector, or "
-                "select an existing Schmitt/CUSUM/ML result, then mark the missed event.", 12000)
-            return
-        if current.module_id == CONSENSUS_MODULE_ID:
-            self.statusBar().showMessage(
-                "The Reconciled table is derived and cannot be edited directly. Select a source "
-                "detector table, add the missed event there, then reconcile again.", 12000)
-            return
-        event_id = self._analysis_panel.add_current_selection_as_event()
-        if event_id is None:
-            if self._analysis_panel.last_missed_refusal:
-                return                  # it said why, on the status bar, itself
-            self.statusBar().showMessage(
-                "The selection could not be added. Check that its cursors are on the selected "
-                "recording and span at least one sample.", 10000)
-            return
+        self._keep_curation_place = True
+        try:
+            self._analysis_panel.copy_hand_made_events(target)
+        finally:
+            self._keep_curation_place = False
+
+    def _include_hand_made(self) -> bool:
+        """The state of Analysis ▸ Include hand-made events in exports."""
+        return bool(self._act_include_hand_made.isChecked())
+
+    def _on_include_hand_made_toggled(self, on: bool) -> None:
+        QtCore.QSettings().setValue("analysis/include_hand_made", bool(on))
         self.statusBar().showMessage(
-            f"Added missed event {event_id} as a reviewed training label. Use Shift+Right "
-            "or the Scan ▶ button to continue at the same zoom.", 10000)
+            "Exports now include the events you drew by hand." if on else
+            "Exports now leave out the events you drew by hand. They stay in the table.", 8000)
+
+    def _choose_statistics_scope(self) -> str | None:
+        """Ask which tables an event-statistics export covers, or ``None`` when the user backs
+        out. The one modal behind a seam: the tests answer it."""
+        from ..core.sources import detector_name
+
+        panel = self._analysis_panel
+        offers: list[tuple[str, str]] = []
+        shown = panel.event_statistics_tables("shown")
+        if shown:
+            offers.append((f"This table ({detector_name(shown[0].module_id)}, "
+                           f"{len(shown[0].payload.df):,} events)", "shown"))
+        if len(panel.event_statistics_tables("channel")) > 1:
+            offers.append(("Every table on this recording and channel", "channel"))
+        if panel.event_statistics_tables("manual"):
+            offers.append(("Every Manual table in the project", "manual"))
+        if not offers:
+            return None
+        if len(offers) == 1:
+            return offers[0][1]
+        labels = [label for label, _scope in offers]
+        label, ok = QtWidgets.QInputDialog.getItem(
+            self, "Export event statistics", "Which events?", labels, 0, False)
+        return dict(offers)[label] if ok else None
+
+    def _export_event_statistics(self) -> None:
+        """Analysis ▸ Export event statistics…"""
+        scope = self._choose_statistics_scope()
+        if scope is None:
+            self.statusBar().showMessage("There are no events to export statistics for.", 8000)
+            return
+        out = self._analysis_panel.export_event_statistics(scope=scope)
+        if out is not None:
+            self._disclose_identity_notes("Export event statistics", [out])
+
+    def _delete_hand_made_events(self, event_ids) -> None:
+        """Delete hand-made events from the table on screen, then put the open curation
+        windows on the event that follows (or precedes) the first one removed, quietly."""
+        res = self._analysis_panel.current_detection()
+        if res is None:
+            return
+        ids = [int(i) for i in event_ids]
+        df = res.payload.df
+        ordered = [int(i) for i in df["event_id"]]
+        survivors = [i for i in ordered if i not in set(ids)]
+        first = min((ordered.index(i) for i in ids if i in ordered), default=None)
+        neighbour = None
+        if first is not None and survivors:
+            after = [i for i in ordered[first:] if i in set(survivors)]
+            before = [i for i in ordered[:first] if i in set(survivors)]
+            neighbour = after[0] if after else before[-1]
+        self._keep_curation_place = True
+        try:
+            removed = self._analysis_panel.delete_hand_made_events(ids)
+        finally:
+            self._keep_curation_place = False
+        if removed and neighbour is not None:
+            if self._event_gallery is not None:
+                self._event_gallery.show_event(neighbour)
+            if self._event_inspector is not None:
+                self._event_inspector.show_event_quietly(neighbour)
+
+    def _land_on_added_event(self, event_id: int, module_id: str) -> None:
+        """After a hand-made event joins the table on screen, point the open curation windows at
+        it. Quietly: no ``eventSelected`` is emitted, so the trace does not zoom or pan (the
+        view is the curator's, and a hand-add leaves it alone)."""
+        res = self._analysis_panel.current_detection()
+        if res is None or res.module_id != module_id:
+            return
+        if self._event_gallery is not None:
+            self._event_gallery.show_event(int(event_id))
+        if self._event_inspector is not None:
+            self._event_inspector.show_event_quietly(int(event_id))
 
     def _on_measure_toggled(self, checked: bool) -> None:
         """Menu ▸ Measure event drives the panel's own toggle (one source of truth), and
@@ -3653,6 +3884,9 @@ class MainWindow(QtWidgets.QMainWindow):
         region = self._trace_view.measure_x_range()
         if region is None:
             self.statusBar().showMessage(
+                "Measure is on but no region is selected. Press C over an event, or drag a "
+                "region, to choose what to centre."
+                if self._trace_view.measure_empty() else
                 "Turn on Measure (Analysis ▸ Measure event) and drag a region on the trace to "
                 "choose what to centre.", 8000)
             return
@@ -3796,6 +4030,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._push_level_fit(stored.payload)
         self._act_export_levels.setEnabled(self._level_fit is not None)
         self._act_export_events.setEnabled(has_detection)
+        self._act_include_hand_made.setEnabled(
+            has_detection and det.module_id != "detect.manual")
+        meas = self._analysis_panel.measure_panel.measurements_df
+        self._act_convert_measurements.setEnabled(bool(
+            meas is not None and len(meas) and self._analysis_panel.conversion_target() is not None))
+        from ..analysis.scoring import hand_made_mask as _hand_made
+
+        self._act_copy_hand_made.setEnabled(bool(
+            has_detection and hasattr(det.payload, "df")
+            and _hand_made(det.payload.df).any()
+            and self._analysis_panel.copy_targets()))
+        self._act_export_event_statistics.setEnabled(bool(
+            self._analysis_panel.event_statistics_tables("shown")
+            or self._analysis_panel.event_statistics_tables("manual")))
         self._act_export_density.setEnabled(len(self._density_groups()) >= 1)
         self._act_export_training.setEnabled(has_detection)
         self._act_event_inspector.setEnabled(has_detection)
@@ -3841,7 +4089,9 @@ class MainWindow(QtWidgets.QMainWindow):
         doc_id, channel = target
         out = []
         for module_id in DETECTION_MODULE_IDS:
-            if module_id == CONSENSUS_MODULE_ID:
+            # Reconciled is derived, and Manual is not a detector's vote: it can be added to a
+            # reconciliation later (see the Manual design, 7.5), not yet.
+            if module_id in (CONSENSUS_MODULE_ID, "detect.manual"):
                 continue
             res = self._session.results.get(doc_id, channel, module_id)
             if res is not None and isinstance(res.payload, EventSet):
@@ -5563,6 +5813,11 @@ class MainWindow(QtWidgets.QMainWindow):
         from ..core.source_style import display_sources
 
         meas = self._analysis_panel.measure_panel.measurements_df
+        # A measurement that has been converted to a Manual event is that event now: offering it
+        # again as a "manual measurement" would put one span in the pooled figure twice.
+        converted = self._analysis_panel.converted_measurement_ids()
+        if converted and len(meas):
+            meas = meas[~meas["measurement_id"].isin(converted)]
         sources = discover_plot_sources(
             self._session.documents(),
             self._session.results.get,
@@ -6297,6 +6552,9 @@ class MainWindow(QtWidgets.QMainWindow):
         bounds = self._trace_view.measure_bounds()
         if target is None or bounds is None:
             self.statusBar().showMessage(
+                "Measure is on but no region is selected. Press C over an event, or drag a "
+                "region, and this opens the spectrum of exactly that region."
+                if self._trace_view.measure_empty() else
                 "Turn on the Measure tool and drag a region on the trace first — this "
                 "opens the spectrum of exactly that region.", 8000)
             return
@@ -6444,6 +6702,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # "Merge with next" stitches the browsed event to its forward run; the panel merges
             # on the shared EventSet (existing refresh) and MainWindow advances the browser.
             insp.mergeWithNextRequested.connect(self._on_merge_with_next)
+            insp.deleteHandMadeRequested.connect(
+                lambda event_id: self._delete_hand_made_events([event_id]))
             insp.labelsChanged.connect(self._analysis_panel.resync_curation)
             insp.labelsChanged.connect(self._mark_dirty)
             insp.labelsChanged.connect(self._checkpoint_labels)
@@ -7350,6 +7610,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # select the event THROUGH the panel — the same relay a table-row click uses,
             # so the inspector, the table and the trace all land on it together.
             gal.inspectRequested.connect(self._open_inspector_at_event)
+            gal.deleteHandMadeRequested.connect(
+                lambda event_id: self._delete_hand_made_events([event_id]))
             gal.acceptanceChanged.connect(
                 lambda eid, acc, s=gal: self._relay_acceptance(s, "Event gallery", eid, acc))
             self._analysis_panel.eventAcceptanceChanged.connect(gal.reflect_acceptance)
@@ -8436,25 +8698,36 @@ class MainWindow(QtWidgets.QMainWindow):
         if path is None:
             return
         accepted = events.accepted.df
+        total = len(events.df)
+        include = self._include_hand_made() or res.module_id == "detect.manual"
+        n_excluded = 0
+        if not include:
+            from ..analysis.scoring import hand_made_mask
+
+            n_excluded = int(hand_made_mask(accepted).sum())
+            total = int((~hand_made_mask(events.df)).sum())
+            accepted = accepted[~hand_made_mask(accepted)]
         source_file, doc_meta = self._export_source(res.doc_id)
         try:
             out = write_events_export(
                 accepted, str(path),
                 provenance=self._export_provenance(events.provenance, accepted),
                 source_file=source_file, detector=res.module_id, meta=doc_meta,
+                include_added=include, n_added_excluded=n_excluded,
                 # How many rows the table this export came FROM had, so the sidecar's
                 # `curation.n_withheld` is the exact count rather than the one inferred
                 # from `provenance['n_events']` (which a merge or a hand-add can leave
                 # stale -- see events.reconcile_row_counts). The frame is in hand here;
                 # the sidecar was guessing from a number written before curation.
-                n_total=len(events.df))
+                n_total=total)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
                 self, "Export events", f"Could not write the export:\n{exc}")
             return
+        left_out = (f" {n_excluded} hand-made event(s) left out." if n_excluded else "")
         self.statusBar().showMessage(
-            f"Wrote {len(accepted)} accepted event(s) of {len(events.df)} to "
-            f"{out['data'].name} (+ provenance {out['meta'].name}).", 8000)
+            f"Wrote {len(accepted)} accepted event(s) of {total} to "
+            f"{out['data'].name} (+ provenance {out['meta'].name}).{left_out}", 8000)
         self._disclose_identity_notes("Export events", list(out.values()))
 
     @staticmethod
@@ -9683,6 +9956,13 @@ class MainWindow(QtWidgets.QMainWindow):
         for res in self._session.results.all():
             if not isinstance(res.payload, EventSet):
                 continue
+            # ONE table per recording and channel: the one the panel shows. With a Schmitt
+            # run, a CUSUM run and a Manual table on one channel the figure used to draw all
+            # of them as separate populations under colliding labels.
+            if self._session.has_document(res.doc_id):
+                shown = self._analysis_panel.stored_to_show(res.doc_id, res.channel)
+                if shown is not None and shown.module_id != res.module_id:
+                    continue
             acc = res.payload.accepted
             if len(acc.df) < 5:      # a KDE of four points is a decoration
                 continue
@@ -10050,17 +10330,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # Supply a copy only at this GUI export seam so the sidecar explains each dynamic
         # label column without mutating the stored detector provenance.
         export_provenance["label_vocabulary"] = self._label_vocab.to_json()
+        include = self._include_hand_made() or res.module_id == "detect.manual"
         try:
             out = write_training_export(
                 res.payload.df, path, provenance=export_provenance,
                 source_file=source_file, detector=res.module_id,
-                selection=selection, meta=doc_meta)
+                selection=selection, meta=doc_meta, include_added=include)
         except Exception as exc:  # noqa: BLE001 — an export failure is reported, never crashes
             QtWidgets.QMessageBox.warning(
                 self, "Export events for training",
                 f"Could not write the training export:\n{exc}")
             return
-        n_sel = len(build_training_frame(df, selection=selection))
+        n_sel = len(build_training_frame(df, selection=selection, include_added=include))
         selection_label = {
             TRAINING_SELECTION_REVIEWED: "reviewed decision",
             TRAINING_SELECTION_ACCEPTED: "accepted candidate",
@@ -11218,6 +11499,22 @@ class MainWindow(QtWidgets.QMainWindow):
         prepare_sample_rate_workspace(workspace.extra)
         workspace.extra[RATE_KEY] = capture_sample_rate_declarations(
             session, workspace.extra.get(RATE_KEY, []))
+        from ..core.table_choice_state import (
+            WORKSPACE_KEY as CHOICE_KEY, capture_table_choices, prepare_table_choice_workspace,
+        )
+        prepare_table_choice_workspace(workspace.extra)
+        live_choices = []
+        for (choice_doc, choice_ch), module_id in self._analysis_panel.chosen_tables().items():
+            if not session.has_document(choice_doc):
+                continue
+            info = chinfo.get(choice_doc, {}).get(int(choice_ch))
+            live_choices.append({
+                "doc_id": pkey.get(choice_doc, choice_doc), "channel": int(choice_ch),
+                "channel_name": None if info is None else channel_identity(info)[0],
+                "module_id": module_id})
+        if live_choices or CHOICE_KEY in workspace.extra:
+            workspace.extra[CHOICE_KEY] = capture_table_choices(
+                live_choices, workspace.extra.get(CHOICE_KEY))
         state = ProjectState(
             documents=documents, segments=segments, calibrations=calibrations, layers=layers,
             view_mode=self._session.view_mode.value, results=results,
@@ -12159,6 +12456,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     else _stored_baseline_fingerprint(r.provenance)))
             self._session.add_result(res)
             self._restored_records.add(id(r))
+
+        from ..core.calibration import channel_identity
+        from ..core.table_choice_state import (
+            WORKSPACE_KEY as CHOICE_KEY, restore_table_choices,
+        )
+        if CHOICE_KEY in state.workspace.extra:
+            doc_info = self._session.document(doc_id).meta.channels
+            for message in restore_table_choices(
+                    state.workspace.extra.get(CHOICE_KEY), key,
+                    lambda ch, module_id: self._analysis_panel.apply_chosen_table(
+                        doc_id, ch, module_id),
+                    lambda ch: (channel_identity(doc_info[ch])[0]
+                                if 0 <= ch < len(doc_info) else None)):
+                if message not in self._restore_notes:
+                    self._restore_notes.append(message)
 
         # v6 -- the derived fits. Both staleness stamps come back from the FILE, never from
         # the live calibration/baseline, for the reason the block above spells out: a
@@ -13510,10 +13822,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not bits or label not in ("Re-run detection", "Detection"):
             return
         held = bits[0] if len(bits) == 1 else ", ".join(bits[:-1]) + " and " + bits[-1]
+        kept = ""
+        if self._analysis_panel.last_carry_report is not None:
+            # A re-run keeps the events a person DREW; the same line says so, after the loss.
+            kept = " " + self._analysis_panel.last_carry_sentence.split(". ", 1)[-1]
         self.statusBar().showMessage(
             f"Detection replaced the previous table ({summary.get('n_events', 0)} events, "
             f"{held}). Your curation is not carried over — "
-            f"Edit ▸ Undo puts it back.", 15000)
+            f"Edit ▸ Undo puts it back.{kept}", 15000)
 
     @QtCore.Slot(str, int)
     def _on_steps_evicted(self, doc_id: str, total: int) -> None:

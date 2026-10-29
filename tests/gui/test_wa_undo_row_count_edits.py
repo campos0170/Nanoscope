@@ -83,10 +83,13 @@ def detected(window, tmp_path):
     window._create_default_layers(doc)
     window._on_selection(doc_id, 0)
 
-    # Detect over the first 55 000 samples only, so `_MISSED` is a genuine detector miss.
-    df, prov = detect_events(sig[:55_000], FS, baseline=I0, min_dwell_s=1e-4)
+    # Detect over the whole recording but on a copy with the `_MISSED` dip filled in, so it
+    # is a genuine detector miss INSIDE the stretch the detector searched (a miss beyond the
+    # searched stretch is refused by the add door, which says to use the Manual table).
+    seen = sig.copy()
+    seen[_MISSED[0]:_MISSED[1]] += np.float32(DEPTH)
+    df, prov = detect_events(seen, FS, baseline=I0, min_dwell_s=1e-4)
     prov = dict(prov)
-    prov.update(span_start=0, span_stop=55_000)
     window._session.add_result(AnalysisResult(
         module_id="detect.schmitt", module_version="1.0", doc_id=doc_id, channel=0,
         params={"detector": "detect.schmitt", "min_dwell_s": 1e-4},

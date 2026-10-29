@@ -865,6 +865,9 @@ REVIEW_COL = "review"
 #: A row a person put there by hand. NOT a module id, and it cannot collide with one:
 #: every detector id this app registers is dotted (``detect.schmitt``) and this is not.
 SOURCE_MANUAL = "manual"
+#: The module id of a channel's Manual table: the event table that holds rows people drew by
+#: hand (``analysis.manual_events``). A table, so it IS dotted, unlike the row token above.
+MANUAL_MODULE_ID = "detect.manual"
 #: A row assembled from fragments with more than one source (a merge across a detector
 #: run and a hand-added event). Named rather than resolved, because picking one of the
 #: two contributors would be a claim nobody made -- see :func:`combine_sources`.
@@ -920,6 +923,9 @@ SOURCE_KIND_BY_MODULE: dict[str, str] = {
     # existing honest category for exactly this case. Individual rows still carry
     # their precise ``source`` and reconciliation membership provenance.
     "detect.reconciled": KIND_MIXED,
+    # The table of hand-drawn events. Its rows are `source="manual"`; the TABLE reads as
+    # manual too, which is what the selector, the exports and the source filter name it.
+    MANUAL_MODULE_ID: KIND_MANUAL,
 }
 
 #: Column -> (dtype, unit, description), the same shape as :data:`SCHEMA` and

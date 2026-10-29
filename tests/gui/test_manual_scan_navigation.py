@@ -540,8 +540,8 @@ def test_voltage_row_navigation_uses_the_resolved_current_annotation_target(
     assert window._act_measure.isChecked() is False
     assert window._act_measure.isEnabled() is False
     # The save/label shortcuts remain reachable so their handlers can explain the hidden channel.
-    assert window._act_add_measurement.isEnabled() is True
-    assert window._act_mark_missed.isEnabled() is True
+    assert window._act_add_event.isEnabled() is True
+    assert window._act_add_event.isEnabled() is True
 
 
 def test_hidden_annotation_target_refuses_measure_arm_and_shortcuts_out_loud(
@@ -563,13 +563,13 @@ def test_hidden_annotation_target_refuses_measure_arm_and_shortcuts_out_loud(
     assert panel.is_active() is False
     assert window._trace_view.measure_x_range() is None
 
-    assert window._act_add_measurement.isEnabled() is True
-    window._act_add_measurement.trigger()
+    assert window._act_add_event.isEnabled() is True
+    window._act_add_event.trigger()
     assert "not shown" in window.statusBar().currentMessage().lower()
     assert "file manager" in window.statusBar().currentMessage().lower()
 
-    assert window._act_mark_missed.isEnabled() is True
-    window._act_mark_missed.trigger()
+    assert window._act_add_event.isEnabled() is True
+    window._act_add_event.trigger()
     assert "not shown" in window.statusBar().currentMessage().lower()
     assert "file manager" in window.statusBar().currentMessage().lower()
 

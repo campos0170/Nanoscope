@@ -7,6 +7,14 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **Ctrl+M files an event, and Ctrl+Shift+M and *Mark selection as missed event* are gone.** The Measure
+  tab's *Add to list* became **Add event** and the old measurement list is a group, **Old
+  measurements (N)**, shown only while it holds rows (Go to, Remove, Export CSV; no longer added to
+  or edited). The *measure on* Raw/Processed choice is hidden whenever the Analysis panel supplies the
+  table's own signal, which is always in the app.
+- The rise / fall search window of an event pads its edges by max(64 samples, 1.28 ms): bit-identical
+  at 50 kHz and below, wider above it, so an edge fitted mid-ramp at 250 kHz no longer loses its 10 %
+  point to a window that was a fixed 64 samples (0.26 ms there).
 - The event table, its Summary / Fits / Quality tabs and the Merge sub-events strip moved out of
   the Inspector into a new **Results** dock under the trace (View ▸ Panels ▸ Results, ⇧⌘R; close
   it to give the trace its full height — nothing is lost). The Inspector keeps only the parameter
@@ -31,6 +39,43 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Added
 
+- **Hand-made events.** **Analysis ▸ Add event from cursors** (Ctrl+M) files the region selected on
+  the trace as an event row in the table the channel is working in (Schmitt, CUSUM, a study table), or
+  in a new per-channel **Manual** table that the Table selector always offers ("Manual — no events
+  yet") and the first add creates. One door, `AnalysisPanel.add_manual_event`, is behind Ctrl+M, the
+  Measure tab's **Add event** button and the trace keys; the row is measured under the table's own
+  provenance by `recharacterize_span`, is accepted, `added` and `reviewed`, joins the table in time
+  order, and is one undo step. Every refusal changes nothing and names the way forward: no sample
+  rate, a non-current channel, a stale table, a span outside what the detector searched, a span that
+  overlaps an event, a Reconciled table. The chosen table is remembered per channel and saved with the
+  project (workspace key `event_table_choices_v1`; no format bump). Rows carry `note`, `origin`,
+  `bounds_source` (`drawn`, `placed`, `fit:step`) and the span as drawn.
+- **Trace keys, draw mode and fitted edges.** With the trace focused: **C** catches the event under the
+  pointer and fits both edges, **S** / **F** place an edge at the pointer fitted to its step
+  (**Shift+S** / **Shift+F** exactly), **D** adds, **Shift+D** adds and goes to the next window, **G** /
+  **Shift+G** step windows, **X** discards the mask, **E** toggles draw mode (**View ▸ Drag draws an
+  event span**, Ctrl+Shift+E), where a left-drag draws a span instead of box-zooming and releasing fits
+  its edges; **Option** inverts the drag for one gesture. Return / Enter / Esc are aliases that act
+  only after a click or the pointer arriving, never after a dock parked focus on the trace. New
+  `analysis/edge_fit.py` fits the step with gates checked against correlated noise. Keyboard focus
+  follows the pointer onto the trace unless a table, text field or menu holds it, a horizontal swipe
+  or notch pans **time**, and **Shift+↑ / Shift+↓** zoom about the pointer.
+- **Measure tab: preview and unstored statistics.** A preview line shows the row the add would store
+  (measured like the chosen table's own events, on that table's signal), refusals before the click,
+  and the channel's hand-made counts. The statistics beside it are measured on the same signal against
+  the table's baseline and noise, so the baseline shown is the baseline stored.
+- **Hand-made events across the app.** The gallery marks them **M**, the inspector says so and offers
+  **Delete**, the table and gallery menus delete them, and the source filters gain *Hand-made only*,
+  *Detected only* and *Merged (hand + detected)*. **Re-running detection keeps them**: each is
+  re-measured under the new run, labels move onto a detection of the same event, and the status line
+  says what was kept and what was left out. **Analysis ▸ Copy hand-made events to…**,
+  **Include hand-made events in exports** (events and training exports) and **Export event
+  statistics…** (mean, median, std, variance, min, max, peak-to-peak, RMS, skewness, kurtosis, area,
+  amplitude and SNR for one table, every table on the channel, or every Manual table in the project,
+  with a `signal_basis` column).
+- **Analysis ▸ Convert old measurements to events…** turns the saved manual measurements you tick into
+  events in the channel's Manual table (re-measured as events; the dialog says which numbers change),
+  hides the converted originals from the Distributions plot source, and is one undo step.
 - **Inspector ▸ File Info ▸ Sample rate / time unit…** declares a recording's time base when the
   file does not say, or says it wrongly: the unit its time column is written in (the rate and t₀
   move together) or the sample rate it was acquired at (the only option for a legacy TDMS, which
