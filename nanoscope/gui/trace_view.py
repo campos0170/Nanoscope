@@ -2622,9 +2622,12 @@ class TraceView(pg.GraphicsLayoutWidget):
     def last_focus_reason(self) -> QtCore.Qt.FocusReason | None:
         """Why the trace last took keyboard focus (None if it never has). A click or the
         pointer arriving (``MouseFocusReason``) means the user pointed at the trace; the window
-        parking focus here when a dock closes (``OtherFocusReason``) does not. A window that
-        loses and regains activation gets its focus back for ``ActiveWindowFocusReason``;
-        that is not a new reason, and does not overwrite a ``MouseFocusReason``."""
+        parking focus here when a dock closes (``OtherFocusReason``) does not. A click on a
+        trace that already has focus counts as that click (:meth:`mousePressEvent`); the pointer
+        arriving on it does not, since the trace grows into a closing dock's place under a
+        pointer that never moved toward it. A window that loses and regains activation gets its
+        focus back for ``ActiveWindowFocusReason``; that is not a new reason, and does not
+        overwrite a ``MouseFocusReason``."""
         return self._last_focus_reason
 
     def add_key_owner(self, widget: QtWidgets.QWidget) -> None:
@@ -2677,6 +2680,8 @@ class TraceView(pg.GraphicsLayoutWidget):
     def _on_pane_hover_enter(self, view_box) -> None:
         """The pointer entered a pane: if it is the target pane and the window is active, the
         trace takes keyboard focus (``MouseFocusReason``) -- from a holder with no keys only."""
+        # Not even the reason changes on a trace that already has focus: after a park it may have
+        # grown under a pointer that never moved toward it (see last_focus_reason).
         if not self._focus_follows or self.hasFocus():
             return
         ref = self._target_ref()
@@ -2709,6 +2714,15 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._focus_lost_to_window = ev.reason() == QtCore.Qt.FocusReason.ActiveWindowFocusReason
         super().focusOutEvent(ev)
         self._apply_target_cursor()
+
+    def mousePressEvent(self, ev) -> None:  # noqa: N802
+        # Qt gives focus for a press before delivering it, so focusInEvent has already recorded
+        # MouseFocusReason for a press on a trace without focus. A trace that already had it
+        # (parked here when a dock closed) gets no focus-in, and the click would leave Return,
+        # Enter and Esc asleep.
+        if self.hasFocus():
+            self._last_focus_reason = QtCore.Qt.FocusReason.MouseFocusReason
+        super().mousePressEvent(ev)
 
     def _apply_target_cursor(self) -> None:
         """A cross on the TARGET pane's ViewBox while the trace has keyboard focus (the keys are

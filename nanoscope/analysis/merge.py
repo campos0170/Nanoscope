@@ -103,6 +103,7 @@ from .events import (
     combine_sources,
     reconcile_row_counts,
 )
+from .manual_events import LEGACY_IDS_COL, NOTE_COL, ORIGIN_COL, join_ids, join_notes
 
 __all__ = [
     "MARGINAL_MERGE_OCCUPANCY",
@@ -501,7 +502,11 @@ def _merged_row(
     """One SCHEMA row for a run of >= 2 events, re-characterized over its full span.
 
     ``recording`` / ``pore_id`` copy the run's first row; any extra (non-schema)
-    columns are carried as the OR of a boolean column, else the run's first value.
+    columns are carried as the OR of a boolean column, else the run's first value --
+    except ``source`` / ``review`` (:func:`_combined_provenance_cell`) and what a
+    hand-made row says about itself: ``note`` joins every fragment's note in time
+    order, each once, and ``origin`` / ``legacy_measurement_ids`` list every
+    fragment's ids once.
 
     ``flag`` and ``accepted`` are NOT decided here -- :func:`recharacterize_span`
     owns them, which is the whole point. This function used to OR ``accepted`` and
@@ -530,6 +535,17 @@ def _merged_row(
         series = run_df[col]
         if col in (SOURCE_COL, REVIEW_COL):
             row[col] = _combined_provenance_cell(col, series)
+        elif col == NOTE_COL:
+            # The first value is arbitrary for a measured column and a loss for these
+            # three. A note is a person's words: every fragment's is kept, in time order
+            # (the run is start-sorted), by the rule a re-run's carry-over uses.
+            row[col] = join_notes(*series)
+        elif col in (ORIGIN_COL, LEGACY_IDS_COL):
+            # The ids are read back by other doors. Four converted measurements merged
+            # into one event kept the first one's id, so the old list offered the other
+            # three as unconverted; four merged copies kept one origin, so Copy hand-made
+            # events to... called the other three overlaps instead of already copied.
+            row[col] = join_ids(*series)
         elif pd.api.types.is_bool_dtype(series):
             row[col] = bool(series.to_numpy(dtype=bool).any())
         else:

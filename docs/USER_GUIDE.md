@@ -1254,8 +1254,12 @@ project reopens on it. A detector run does not take the screen from **Manual**.
 3. Read the **preview** on the Measure tab, then press **D**. Return, Enter, **Ctrl+M** (from any
    tab) and the **Add event** button do the same. **Shift+D** adds and moves to the next window.
 
-After an add the mask is cleared and the table, gallery and inspector keep their place, so the next
-event starts clean. For a clean event the whole gesture is: point, **C**, **D**.
+After an add the mask is cleared, the trace stays where it is and the table keeps its place, so the
+next event starts clean. The gallery and the inspector move to the new event when their filter shows
+it; a window whose filter hides it (*Detected only*, *Unreviewed*, or *Accepted only* for an event
+the recording's end cut off, which is stored rejected) keeps its filter, its event and its
+selection, so your next A or R is about the event you were on. For a clean event the whole gesture
+is: point, **C**, **D**.
 
 **Keys on the trace.** They act while the trace has keyboard focus, which follows the pointer onto
 the trace unless something that takes keys itself (a table, a text field, a menu, the docked Event
@@ -1342,7 +1346,9 @@ over the trace (around the centre otherwise); **+ / −** adjust the working zoo
   event is rejected, not deleted. The inspector and the gallery keep their filter (*Hand-made only*
   stays on): a window that showed a deleted event moves to the next event in its own list (the
   gallery in its sort order), or the one before, and a window that showed another event stays.
-  Undoing an add that the windows were showing does the same.
+  Undoing an add that the windows were showing does the same. A Delete that empties the filter
+  leaves it chosen (the inspector says no events match, the gallery shows an empty page); when
+  **Edit ▸ Undo** or your next add fills it again, each window shows its first event.
 - **Re-running detection keeps them.** Each hand-made event is re-measured under the new run, its
   labels and note move onto a detection of the same event (several hand-made events on one detection
   keep every note, joined with `; `), and the status line says what was kept, what is now detected,
@@ -1442,6 +1448,8 @@ For the current −700mV gallery table, position147 in All corresponds to ID146.
   themselves). After an undo or redo the inspector
   keeps its filter and the event on screen, and the gallery its selection, as long as the restored
   table holds the same events; an undo that renumbers events (a merge) starts again from the first.
+  A filter that held no event stays chosen too: when the undo or redo puts events back in it,
+  the inspector and the gallery show its first event.
 
 ### A curation pass: Unreviewed, Advance after decision and progress
 

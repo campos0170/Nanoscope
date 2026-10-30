@@ -76,7 +76,7 @@ from ..analysis.curation_view import (
     LABEL_FILTER_PREFIX, curation_progress, describe_progress, end_of_filter_note, filter_depends_on_labels_or_review,
     filter_display_candidates, filter_mask, filter_options, format_progress, is_filter,
     label_rows, no_unreviewed_note, row_unchanged, same_events, unlabel_rows,
-    can_keep_place, landing_after_removal,
+    can_keep_place, landing_after_add, landing_after_refill, landing_after_removal,
 )
 from ..analysis.events import (
     AUTOMATIC_REJECTION_FLAGS, FRAC_DEPTH_ENHANCEMENT, flag_tokens, mark_reviewed,
@@ -2223,8 +2223,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         ``start_idx``), the selection and the cursor are put back -- quietly, emitting nothing
         -- instead of the cursor landing on tile 0, which announced a selection and moved the
         trace, the table and the inspector with it. When the cursor's tile is one of those
-        gone, the tile that took its place is selected, else the one before it. Anything else
-        gets today's reset.
+        gone, the tile that took its place is selected, else the one before it. When the grid
+        held no tile (the Show filter held none, or the table none at all) and the new frame
+        fills it, the first tile is selected, as quietly. Anything else gets today's reset.
 
         ``quiet`` is MainWindow saying this re-feed is a VIEW switch (the Results dock's
         Table selector put another stored table on screen): a different frame, so the
@@ -2256,6 +2257,17 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         # those the new frame has lost.
         drawn = (self._df["event_id"].to_numpy(dtype=np.int64)[self._model.df_rows()]
                  if keep else None)
+        # NO TILE TO KEEP: the Show filter held none (a Delete took its last event), or the
+        # table held none at all, which this window keeps as no frame -- the same table on
+        # screen, as nothing else is left to compare. A re-feed that keeps the place and fills
+        # the grid again selects its first tile (``landing_after_refill``); the filter is the
+        # model's and survives any frame. The restored tile used to be left unselected (the
+        # undo of the Delete), or, with no frame left, tile 0 announced as a click.
+        refill = bool(keep_place) and (
+            (keep and not len(drawn))
+            or (self._df is None and self._ran_empty and events_df is not None
+                and doc_id == self._doc_id and channel == self._channel
+                and module_id == self._module_id))
         self._doc_id = doc_id
         self._channel = channel
         self._module_id = module_id
@@ -2298,6 +2310,13 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self._fix_counter_widths()
         self._sync_progress()
         self._sync_controls()
+        if refill:
+            land = landing_after_refill(
+                self._df["event_id"].to_numpy(dtype=np.int64)[self._model.df_rows()]
+                if self._df is not None else ())
+            if land is not None:
+                self.show_event(land)          # quietly, as every landing here is
+                return
         if keep:
             if keep_cur is not None and self._row_for_id(keep_cur) is None:
                 # THE CURSOR'S TILE WENT WITH THE ROWS (a Delete from this menu, the table's or
@@ -3114,6 +3133,20 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
                 self._updating = False
         self._sync_controls()
         self.view.viewport().update()
+
+    def land_on_added_event(self, event_id: int) -> None:
+        """A hand-made event, ``event_id``, joined the table this window shows: focus its tile,
+        quietly, when the grid's list holds it -- the Show filter, a subpopulation class, the
+        representative sample (``curation_view.landing_after_add``). When the list hides it,
+        the cursor and the selection stay where they were. The add used to call
+        :meth:`show_event` whatever the list held, and its miss clears both ("Event 7 is
+        filtered out of Detected only"), so after an add A, R and Space acted on nothing."""
+        if self._df is None:
+            return
+        drawn = self._df["event_id"].to_numpy(dtype=np.int64)[self._model.df_rows()]
+        land = landing_after_add(drawn, int(event_id))
+        if land is not None:
+            self.show_event(land)
 
     def _missed_note(self) -> str:
         """"Event 12 is filtered out of Accepted only (100 shown) — …", or "".

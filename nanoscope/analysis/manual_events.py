@@ -60,6 +60,7 @@ __all__ = [
     "DRAWN_START_COL",
     "EdgeRecord",
     "FIT_JSON_COL",
+    "ID_JOINER",
     "LEGACY_IDS_COL",
     "MANUAL_EXTRAS",
     "MANUAL_MODULE_VERSION",
@@ -79,6 +80,7 @@ __all__ = [
     "ensure_manual_extras",
     "hand_made_mask",
     "insert_hand_row",
+    "join_ids",
     "join_notes",
     "measure_hand_row",
     "measurement_noise_rms",
@@ -99,12 +101,16 @@ MANUAL_MODULE_VERSION = "1"
 #: Free text the user can edit. A converted measurement's ``label`` lands here.
 NOTE_COL = "note"
 #: What joins the notes of several rows that become ONE event (:func:`join_notes`), in time
-#: order. Design section 3 asks the same of a merge.
+#: order: a re-run's carry-over and a merge.
 NOTE_JOINER = "; "
-#: Where a copied or carried row came from, for example ``"detect.manual:41"``.
+#: Where a copied or carried row came from, for example ``"detect.manual:41"``; a merged row lists
+#: every fragment's, ``"detect.manual:41,detect.manual:42"``.
 ORIGIN_COL = "origin"
 #: The ids of the legacy measurement rows this event was converted from, ``"12"`` or ``"12,15"``.
 LEGACY_IDS_COL = "legacy_measurement_ids"
+#: What separates the ids of an ``origin`` or ``legacy_measurement_ids`` cell that lists several
+#: (:func:`join_ids`), the form `AnalysisPanel.converted_measurement_ids` reads back.
+ID_JOINER = ","
 #: How each edge was made: ``"start=fit:step;end=placed"``. Values: drawn, placed, fit:step,
 #: fit:schmitt, fit:cusum, edited, stale.
 BOUNDS_SOURCE_COL = "bounds_source"
@@ -405,6 +411,29 @@ def join_notes(*notes: Any) -> Any:
         seen.add(text.strip())
         out.append(text)
     return NOTE_JOINER.join(out) if out else pd.NA
+
+
+def join_ids(*cells: Any) -> Any:
+    """Every id in the ``origin`` or ``legacy_measurement_ids`` cells given, in that order, joined
+    by :data:`ID_JOINER`; a blank or a repeat adds nothing, and ``pd.NA`` when none is left.
+
+    Unlike a note, each cell is split first: an id is a token, not a person's words, and a row
+    merged before already lists several, so ``"12,15"`` and ``"15"`` make ``"12,15"``."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for cell in cells:
+        for part in _id_parts(cell):
+            if part not in seen:
+                seen.add(part)
+                out.append(part)
+    return ID_JOINER.join(out) if out else pd.NA
+
+
+def _id_parts(cell: Any) -> list[str]:
+    """The ids one ``origin`` or ``legacy_measurement_ids`` cell lists."""
+    if cell is None or pd.isna(cell):
+        return []
+    return [part.strip() for part in str(cell).split(ID_JOINER) if part.strip()]
 
 
 def measure_hand_row(
@@ -893,8 +922,10 @@ def copy_hand_rows(
         excluded = _exclusion_samples(prov.get("exclude_regions") or None, n, float(fs))
     except (TypeError, ValueError):
         excluded = []
-    have_origin = (set(df[ORIGIN_COL].dropna().astype(str)) if ORIGIN_COL in df.columns
-                   else set())
+    # Every id a cell lists: a merge of two copies keeps both origins (`join_ids`), and each of
+    # them is a row this target already holds.
+    have_origin = ({o for cell in df[ORIGIN_COL] for o in _id_parts(cell)}
+                   if ORIGIN_COL in df.columns else set())
     rows = source_df.loc[hand].sort_values("start_idx", kind="stable")
     copied: list[tuple[int, int]] = []
     already: list[int] = []

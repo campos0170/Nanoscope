@@ -237,8 +237,8 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     "measure_panel.addRequested": "a REQUEST to file the cursor region as an event; the add "
                                   "itself lands on resultsChanged",
     "analysis_panel.eventAdded": "a hand-made event joined the table; the windows already "
-                                 "re-fed on resultsChanged, this only lands them on it, "
-                                 "quietly (no zoom, no pan)",
+                                 "re-fed on resultsChanged, this only lands on it each one "
+                                 "whose own list holds it, quietly (no zoom, no pan)",
     "measure_panel.measureActiveChanged": "the measure tool's on/off state, not its table",
     "analysis_panel.willReplaceEvents": "a detection run has STARTED and the table it will "
                                         "overwrite has to be recoverable — wired to "
@@ -3801,16 +3801,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self._keep_curation_place = False
 
     def _land_on_added_event(self, event_id: int, module_id: str) -> None:
-        """After a hand-made event joins the table on screen, point the open curation windows at
-        it. Quietly: no ``eventSelected`` is emitted, so the trace does not zoom or pan (the
-        view is the curator's, and a hand-add leaves it alone)."""
+        """After a hand-made event joins the table on screen, point each open curation window at
+        it whose own list holds it (``curation_view.landing_after_add``); a window whose filter
+        hides it (Detected only, Unreviewed, Accepted only for an add stored rejected) stays
+        where the re-feed that kept its place left it. Quietly: no ``eventSelected`` is
+        emitted, so the trace does not zoom or pan (the view is the curator's, and a hand-add
+        leaves it alone). Both windows used to be pointed at the event whatever they showed:
+        the gallery then dropped its cursor and selection, and the inspector showed the event
+        outside its filter, so the next A or R ruled on it."""
         res = self._analysis_panel.current_detection()
         if res is None or res.module_id != module_id:
             return
         if self._event_gallery is not None:
-            self._event_gallery.show_event(int(event_id))
+            self._event_gallery.land_on_added_event(int(event_id))
         if self._event_inspector is not None:
-            self._event_inspector.show_event_quietly(int(event_id))
+            self._event_inspector.land_on_added_event(int(event_id))
 
     def _on_measure_toggled(self, checked: bool) -> None:
         """Menu ▸ Measure event drives the panel's own toggle (one source of truth), and

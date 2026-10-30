@@ -242,9 +242,24 @@ tags identify tested development baselines and do not promise a stable file or A
   Measure off, how a recording opens, focus did not follow the pointer onto the trace, **C** did
   nothing and **Shift+↑ / Shift+↓** ignored the pointer; the trace keys now act on the selected
   recording's current channel with Measure on or off.
+- After a dock closes and parks the keyboard on the trace, a click on the trace wakes Return, Enter
+  and Esc, as the User Guide says. The click did not count, because the trace already had the
+  keyboard: Return added nothing and Esc neither discarded the mask nor cancelled a draw, while
+  **D** added, until the keyboard left the trace and came back. The pointer merely arriving still
+  wakes nothing after a park: the trace grows under a pointer resting on the closed panel, and a
+  habitual Return there must not add.
 - **Delete** of a hand-made event from the inspector dropped its *Hand-made only* filter and put both
   curation windows on a detected event. Each window now keeps its filter and lands, quietly, on the
   next event of its own list. **Edit ▸ Undo** of an add the windows were showing does the same.
+- **An add moves a curation window only when its filter shows the new event.** Under *Detected only*,
+  or *Accepted only* for an event the recording's end cut off (stored rejected), an add put the
+  inspector on the new event outside its filter, so the next A or R ruled on it, and left the gallery
+  with no cursor and no selection, so A, R and Space acted on nothing. Both now stay on the event
+  they showed. A filter a Delete emptied stays chosen, and when the Undo, the next add, the undo of a
+  curation step or a reject in the Results table fills it again, each window shows its first event;
+  the inspector had gone back to *All* on the first event (also when the recording was selected
+  again), and the gallery had left the restored tile unselected (or, when the Delete had emptied a
+  Manual table, announced it as a click).
 - The Measure tab's preview went blank and **Add event** greyed out on a span holding a NaN or Inf
   sample, while Ctrl+M stored the row; the preview now shows that row, marked *would be rejected:
   non_finite*, and **Add event** is available whenever there is a mask.
@@ -252,6 +267,13 @@ tags identify tested development baselines and do not promise a stable file or A
   note is kept now, joined in time order with `; `. With **Include hand-made events in exports** off,
   the training export's sidecar counted the switched-off rows as withheld. After a re-run with another
   low-pass, the edge fit used the old run's open-pore tau.
+- **A merge keeps what every fragment said.** Merge all, Merge events in selection and the Event
+  inspector's Merge with next kept only the first fragment's `note`, `origin` and
+  `legacy_measurement_ids`. The merged event now joins every fragment's note in time order with `; `,
+  each once, and lists every fragment's origin and old-measurement id once, separated by commas
+  (`12,15`). Converted events merged into one had left the old list offering every measurement but
+  the first as unconverted, and **Copy hand-made events to…** called merged copies overlaps instead
+  of already copied. Undo brings back each fragment as it was.
 - Event inspector and Event gallery: A, R and Space no longer take the key from the control that
   has the keyboard. Space on a Tab-focused button (Show in trace, Gallery…, Accept all / Reject
   all, Accept selected / Reject selected, Apply…) or check box presses it instead of toggling

@@ -56,6 +56,8 @@ __all__ = [
     "first_member",
     "count_before",
     "landing_after_removal",
+    "landing_after_add",
+    "landing_after_refill",
     "CurationProgress",
     "curation_progress",
     "format_progress",
@@ -300,7 +302,9 @@ def can_keep_place(old: pd.DataFrame | None, new: pd.DataFrame | None) -> bool:
     event joined), and for ``new`` being ``old`` less some events (a Delete, the undo of an
     add): the same table less some rows, not a new detection. The window keeps its filter;
     when the event it stood on is one of those gone, it lands beside it
-    (:func:`landing_after_removal`). This used to also ask that the event on screen survived,
+    (:func:`landing_after_removal`), and when it stood on none because its filter was empty,
+    it shows the filter's first event (:func:`landing_after_refill`). This used to also ask
+    that the event on screen survived,
     which the inspector's own Delete never satisfies -- the event on screen is the one
     deleted -- so a curator in Hand-made only was put back in All, on a detected event."""
     return same_events(old, new) or superset_by_id(old, new) or superset_by_id(new, old)
@@ -323,6 +327,33 @@ def landing_after_removal(order: Any, gone_id: int, members: Any) -> int | None:
     if row is None:
         row = prev_member_before(still, int(at[0]))
     return None if row is None else int(order[row])
+
+
+def landing_after_add(members: Any, new_id: int) -> int | None:
+    """Where a window goes when a hand-made event, ``new_id``, joined the table it shows: onto
+    it when ``members`` (the ids its list holds now) holds it, else ``None``, and the window
+    stays where the re-feed that kept its place left it: its filter, its event, its selection.
+
+    A filter the curator set is a decision, and an add it hides is no reason to leave the pass.
+    Both windows used to be pointed at the new event whatever they showed: under Detected only
+    the gallery then had no tile to put its cursor on and dropped its selection, so A, R and
+    Space acted on nothing, and the inspector showed the event outside its filter, so the next
+    A or R ruled on it. An add cut off by the recording's end is stored rejected
+    (``clipped_by_boundary``), so under Accepted only every such add did that."""
+    hit = np.asarray(members, dtype=np.int64) == int(new_id)
+    return int(new_id) if bool(hit.any()) else None
+
+
+def landing_after_refill(members: Any) -> int | None:
+    """Where a window whose list was empty goes when a re-feed that keeps its place fills it
+    again (the undo of the Delete that emptied it, an add, the undo of a curation step): the
+    first event of ``members``, its list now in its own order, else ``None`` while the list is
+    still empty. The filter stays either way. The inspector used to keep its place only while
+    it stood on an event, so after a Delete emptied Hand-made only, the Undo that brought the
+    event back put it in All on the first event, and the gallery kept the filter with the
+    restored tile unselected."""
+    order = np.asarray(members, dtype=np.int64)
+    return int(order[0]) if order.size else None
 
 
 def row_unchanged(a: pd.DataFrame, b: pd.DataFrame, row: int) -> bool:

@@ -169,11 +169,22 @@ wanted.
 ### 4.3 Landing
 
 After an add, the gallery and inspector, if already open, move to the new event without
-moving the trace: `EventGalleryWindow.show_event`, which emits nothing, and
-`EventInspectorWindow.show_event_quietly` (`event_inspector.py:2647-2658`). Never
+moving the trace, each only when its own list holds it (`curation_view.landing_after_add`):
+the inspector's filter, the gallery's Show filter with its class or representative sample.
+A window whose list hides the new event (Detected only, Rejected only, Unreviewed, a label
+filter, or Accepted only for an add stored rejected as `clipped_by_boundary`) keeps its
+filter, its event and its selection, so the next A or R rules on the event the curator was
+on. Each window decides in its own `land_on_added_event`, which emits nothing. Never
 `select_event` or the `_open_*_at_event` helpers (`main_window.py:7727-7744`), which zoom
 the trace and break the pinned rule that a hand-add leaves the view alone
 (`test_ui_sweep_fixes.py:135-152`).
+
+A window whose filter held no event (a Delete emptied it) keeps that filter through every
+re-feed that keeps its place, and when the frame fills it again (the undo of that Delete,
+the next add, the undo of a curation step) it shows the filter's first event, in its own
+order (`curation_view.landing_after_refill`). While the filter is still empty, the window
+says so. Owner's rule, 2026-10-29
+(`tests/gui/test_curation_windows_keep_their_filter_through_adds_and_refills.py`).
 
 Today any change in row count resets both windows to the first event with the filter on
 All, because `same_events` is positional and exact-length (`curation_view.py:198-209`,
@@ -676,8 +687,7 @@ Different from this draft:
   a re-run joins the notes of several hand-made rows that land on one detection
   (`manual_events.join_notes`); the training sidecar counts only the rows the include switch kept;
   the edge fit's tau cache is keyed on the run; Delete keeps the curation windows' filter; and the
-  preview stands on a span the unstored statistics refuse. Still open: a merge keeps only the first
-  fragment's `note`, `origin` and `legacy_measurement_ids`, which section 3 says it must join.
+  preview stands on a span the unstored statistics refuse.
 - **Not built:** the purple overlay of the Manual rows when another table is shown; decision 5
   (the Manual table is discarded with its recording through the existing prompt); the restore-note
   offer, the "Revert conversion" action and the remapping of saved Distributions recipes (conversion

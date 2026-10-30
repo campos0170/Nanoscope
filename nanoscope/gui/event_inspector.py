@@ -67,6 +67,8 @@ from ..analysis.curation_view import (
     label_display_candidates,
     label_filter,
     label_rows,
+    landing_after_add,
+    landing_after_refill,
     landing_after_removal,
     next_member_after,
     no_unreviewed_note,
@@ -2330,7 +2332,10 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         those and more, or those less some (``can_keep_place``: each kept ``event_id`` at its
         ``start_idx``; a merge renumbers ids, and a kept id would then name another event).
         When the event on screen is one of those gone, the window lands, quietly, on the next
-        event of its filter after it, else the one before. Otherwise, the reset.
+        event of its filter after it, else the one before. When there was no event on screen
+        because the filter was empty, the filter stays and the window shows its first event,
+        quietly, once the frame fills it again, or says again that none match; a re-feed of the
+        same frame keeps an empty filter the same way. Otherwise, the reset.
 
         ``provenance`` is the detection's provenance dict (from the EventSet); a mask edit reads
         the detector's ``polarity`` / ``noise_rms_pA`` / ``filter_rise_s`` from it so a
@@ -2356,7 +2361,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         same_frame = (events_df is self._df
                       and str(doc_id) == self._doc_id
                       and self._channel == int(channel))
-        keep = (bool(keep_place) and not same_frame and self._current_id is not None
+        keep = (bool(keep_place) and not same_frame
                 and str(doc_id) == self._doc_id and self._channel == int(channel)
                 and can_keep_place(self._df, events_df))
         # The events as this window held them, in order: where to land if the one on screen
@@ -2397,17 +2402,28 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._advanced_from = None
         self._note = ("", "")
         self._fix_counter_widths()
-        if keep:
+        if keep or (same_frame and self._current_id is None):
             self._sync_progress()
-            if self._row_for_id(self._current_id) is not None:
+            if self._current_id is None:
+                # THE FILTER WAS EMPTY ("No events match ..."): no event was on screen, and the
+                # place to keep is the filter. It stays, and the window shows its first event
+                # when this frame fills it again -- the undo of the Delete that emptied it, an
+                # add, the undo of a curation step, the same frame re-read after an edit made
+                # elsewhere -- else it says again that none match. It used to keep its place
+                # only while it stood on an event, so each of these put it in All on the first
+                # event (measured: delete the only hand-made event under Hand-made only, Undo).
+                land = landing_after_refill(self._subset_ids())
+            elif self._row_for_id(self._current_id) is not None:
                 self._render_and_sync(self._current_id, emit=False)
                 return
-            # THE EVENT ON SCREEN WENT WITH THE ROWS: this window's own Delete always does
-            # that, and so does the undo of the add it stood on. The same table less some rows
-            # is not a new detection, so the filter stays and the window lands on the next
-            # event of that filter after it, else the one before -- never on one outside it
-            # (measured: Delete under Hand-made only came back in All, on a detected event).
-            land = landing_after_removal(held, self._current_id, self._subset_ids())
+            else:
+                # THE EVENT ON SCREEN WENT WITH THE ROWS: this window's own Delete always does
+                # that, and so does the undo of the add it stood on. The same table less some
+                # rows is not a new detection, so the filter stays and the window lands on the
+                # next event of that filter after it, else the one before -- never on one
+                # outside it (measured: Delete under Hand-made only came back in All, on a
+                # detected event).
+                land = landing_after_removal(held, self._current_id, self._subset_ids())
             self._current_id = None
             if land is not None:
                 self._render_and_sync(land, emit=False)
@@ -2700,6 +2716,16 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         if self._current_id == int(event_id):
             return
         self._render_and_sync(int(event_id), emit=False)
+
+    def land_on_added_event(self, event_id: int) -> None:
+        """A hand-made event, ``event_id``, joined the table this window shows: display it,
+        quietly, when the filter holds it (``curation_view.landing_after_add``). When the
+        filter hides it (Detected only, Unreviewed, Accepted only for an add stored rejected)
+        the window stays on the event it showed, or on its empty filter's note, so the next
+        A or R rules on what the curator was looking at."""
+        land = landing_after_add(self._subset_ids(), int(event_id))
+        if land is not None:
+            self.show_event_quietly(land)
 
     def focus_curation_surface(self) -> None:
         """Give keyboard focus to the waveform, not to the first text field in the tab chain.
