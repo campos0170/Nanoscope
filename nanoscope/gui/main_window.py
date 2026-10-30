@@ -13152,16 +13152,19 @@ class MainWindow(QtWidgets.QMainWindow):
         1280 -> 473, 1152 -> 409. Only the widest of those is capped — half the room at 1512
         is 589 — and that cap is what stops a big display opening a 900 px control column.
 
-        BELOW 1337 px the two things this method arbitrates — the Inspector showing its own
+        BELOW 1265 px the two things this method arbitrates — the Inspector showing its own
         pages, and the viewer staying the widest column — cannot both be had, and the clamp
         in :meth:`_inspector_default_width` resolves it towards the floor: the Inspector
         opens at its designed minimum and takes a scrollbar. A scrollbar on a control page
         whose controls are all still whole is a door with a step in front of it; a viewer
         squeezed under the Inspector has no door at all.
 
-        1337 IS MEASURED, and it is the width at which this ceiling first reaches the width
-        the pages need (502 on this tree): ``room = 1337 - 12 - 320 = 1005``, ``(1005-1)//2
-        == 502``; at 1336 it is 501. This line used to say "roughly 1252", which is a
+        1265 IS MEASURED (offscreen, 12 px text), and it is the width at which this ceiling
+        first reaches the width the pages need (466 on this tree, the Calibration page, since
+        c86b119 put the Measure page in two columns): ``room = 1265 - 12 - 320 = 933``,
+        ``(933-1)//2 == 466``; at 1264 it is 465. With the Mac's 13 px text the pages need 488
+        and the boundary is 1309. It was 1337 while the Measure page needed 502. This line
+        once said "roughly 1252", which is a
         different boundary — the width at which the ceiling drops below the FLOOR (460) —
         and stating it here left an 84 px band, 1253 to 1336, where the docstring claimed
         both things could be had and the clamp silently gave neither: the Inspector opened

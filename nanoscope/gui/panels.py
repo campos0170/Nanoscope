@@ -4275,7 +4275,9 @@ class DetectionPanel(QWidget):
             msg = ""
         self.ml_gate_label.setText(msg)
         self.ml_gate_label.setVisible(bool(msg))
-        self._ml_gate_host.setVisible(bool(msg))
+        # The HOST stays: its fixed height is the row reserved for this note (LAY-W3b), so
+        # loading or clearing a model, or a channel override, never moves the preset row
+        # and its Save as... / Delete. Hiding the host with the note moved them 38 px.
 
     def set_polarity_evidence(self, evidence: dict[str, Any]) -> None:
         """Show the measured polarity evidence from ``detect_polarity`` (carried in

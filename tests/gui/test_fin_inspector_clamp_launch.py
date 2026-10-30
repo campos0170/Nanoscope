@@ -39,7 +39,9 @@ from PySide6 import QtCore, QtWidgets
 from nanoscope.gui.main_window import (
     _DOCK_SEPARATOR_WIDTH,
     _FILE_DOCK_DEFAULT_WIDTH,
+    _INSPECTOR_CHROME_WIDTH,
     _INSPECTOR_DEFAULT_WIDTH,
+    _INSPECTOR_NESTED_CHROME_WIDTH,
     MainWindow,
 )
 from nanoscope.gui.measure_panel import MeasurePanel
@@ -96,15 +98,43 @@ def test_a_1280_launch_leaves_the_signal_viewer_the_widest_column(fresh_profile,
     """
     win = _launch(qtbot, NARROW)
     inspector, viewer = win._inspector.width(), win.centralWidget().width()
-    assert inspector == _INSPECTOR_DEFAULT_WIDTH, (
+    assert inspector == win._inspector_default_width(), (
         f"launched at {NARROW[0]}x{NARROW[1]} on a fresh profile, the Inspector opened at "
-        f"{inspector} px instead of its floor ({_INSPECTOR_DEFAULT_WIDTH}). The clamp in "
+        f"{inspector} px instead of {win._inspector_default_width()}. The clamp in "
         f"_inspector_default_width is being asked about the constructor's 1440 again.")
     assert viewer > inspector, (
         f"the Inspector ({inspector}) is wider than the signal viewer ({viewer}) at "
         f"{NARROW[0]} px")
     assert viewer > win._file_dock.width()
     assert inspector <= win._inspector_width_ceiling(win.width())
+
+
+#: Below the measured boundary (1265 offscreen, 1309 with 13 px text) and wide enough that
+#: Qt need not squeeze a dock to keep the central column's minimum (1163 / 1190).
+BELOW_BOUNDARY = (1200, 800)
+
+
+def _pages_wanted(win: MainWindow) -> int:
+    widest = max(a.widget().minimumSizeHint().width()
+                 for a in win._inspector_tabs.findChildren(QtWidgets.QScrollArea)
+                 if a.widget() is not None)
+    return widest + _INSPECTOR_CHROME_WIDTH + _INSPECTOR_NESTED_CHROME_WIDTH
+
+
+def test_a_launch_below_the_boundary_opens_at_the_floor(fresh_profile, qtbot):
+    """THE PIN, where it can still fail: at a width whose ceiling cannot reach the pages, a
+    launch that asked the constructor's 1440 instead of the width the window got would open
+    at the pages' width rather than at the floor."""
+    win = _launch(qtbot, BELOW_BOUNDARY)
+    wanted = _pages_wanted(win)
+    assert wanted > win._inspector_width_ceiling(BELOW_BOUNDARY[0]), (
+        f"{BELOW_BOUNDARY[0]} px is no longer below the boundary; this test cannot see the "
+        f"launch path there")
+    assert wanted <= win._inspector_width_ceiling(1440)
+    assert win._inspector.width() == _INSPECTOR_DEFAULT_WIDTH, (
+        f"launched at {BELOW_BOUNDARY[0]} px the Inspector opened at "
+        f"{win._inspector.width()} px instead of its floor ({_INSPECTOR_DEFAULT_WIDTH}). "
+        f"The clamp is being asked about the constructor's 1440 again.")
 
 
 def test_the_owners_display_is_unchanged(fresh_profile, qtbot):
@@ -128,7 +158,12 @@ def test_the_opening_widths_are_not_re_imposed_on_a_later_resize(fresh_profile, 
     win = _launch(qtbot, OWNERS)
     opened = win._inspector.width()
     assert not win._opening_layout_pending, "the opening layout never stopped being provisional"
-    for width, height in ((1440, 900), NARROW, (1152, 800)):
+    # The narrowest step must be one where a re-imposed opening width would differ, and one
+    # Qt can hold without squeezing a dock to keep the central column's own minimum.
+    assert _pages_wanted(win) > win._inspector_width_ceiling(BELOW_BOUNDARY[0])
+    assert (opened + _FILE_DOCK_DEFAULT_WIDTH + 2 * _DOCK_SEPARATOR_WIDTH
+            + win.centralWidget().minimumSizeHint().width()) <= BELOW_BOUNDARY[0]
+    for width, height in ((1440, 900), NARROW, BELOW_BOUNDARY):
         win.resize(width, height)
         _settle()
         assert win._inspector.width() == opened, (

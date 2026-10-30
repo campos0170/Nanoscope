@@ -440,9 +440,11 @@ def test_a_measured_column_is_now_visible_at_a_realistic_dock_width(win, tmp_pat
     assert not set(EventTable._IDENTITY_COLUMNS) & set(order[:order.index("depth_pA")])
 
 
-def test_a_pore_id_that_actually_varies_stays_where_the_schema_puts_it():
-    """A table pooling two pores has a REAL pore_id column. Demoting it there would be
-    hiding data, not tidying a constant."""
+def test_a_pore_id_that_actually_varies_stays_a_visible_column():
+    """A table pooling two pores has a REAL pore_id column. Hiding it, or captioning it as
+    a constant, would be hiding data, not tidying a constant. Where it is painted is the
+    default scientific order's business since c86b119: after the measured columns, which
+    the owner accepted (2026-10-30) over moving a varying identity column back in front."""
     table = EventTable()
     try:
         df, prov = detect_events(_signal(), FS, baseline=I0, min_dwell_s=1e-4)
@@ -450,8 +452,8 @@ def test_a_pore_id_that_actually_varies_stays_where_the_schema_puts_it():
         df["pore_id"] = pd.Series(
             ["A" if i % 2 else "B" for i in range(len(df))], dtype="string")
         table.set_events(df)
-        order = _visual_order(table)
-        assert order.index("pore_id") < order.index("depth_pA")
+        cols = list(table._model.df.columns)
+        assert not table.view.isColumnHidden(cols.index("pore_id"))
         assert "pore_id" not in table.constants_label.text()
     finally:
         table.deleteLater()

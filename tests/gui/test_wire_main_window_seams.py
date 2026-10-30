@@ -306,7 +306,9 @@ def test_the_boundary_is_1337_and_the_docstring_says_so(window):
     1252 — the width at which the ceiling drops below the FLOOR, which is a different
     number about a different clamp, and 84 px of window width lay between them."""
     boundary = _measured_boundary(window)
-    assert boundary == 1337, f"measured boundary moved to {boundary}"
+    wanted = _pages_minimum(window)
+    assert window._inspector_width_ceiling(boundary) >= wanted
+    assert window._inspector_width_ceiling(boundary - 1) < wanted
     doc = MainWindow._inspector_width_ceiling.__doc__
     assert f"BELOW {boundary} px" in doc, (
         "the docstring does not state the measured boundary as its claim")
@@ -322,7 +324,11 @@ def test_below_the_boundary_the_inspector_opens_at_the_floor_not_at_the_ceiling(
     trace. One answer across the whole band now: the designed floor, with the scrollbar,
     and every unusable pixel handed back to the viewer."""
     wanted = _pages_minimum(window)
-    for width in (1253, 1280, 1300, 1336):
+    boundary = _measured_boundary(window)
+    crossover = next(w for w in range(900, 2000)
+                     if window._inspector_width_ceiling(w) >= _INSPECTOR_DEFAULT_WIDTH)
+    assert crossover < boundary, "no band: the ceiling reaches the pages at the floor crossover"
+    for width in sorted({crossover, (crossover + boundary) // 2, boundary - 1}):
         dock, viewer = _launch_at(window, width)
         assert dock == _INSPECTOR_DEFAULT_WIDTH, (
             f"at {width} px the Inspector opened at {dock}: neither the width its pages "

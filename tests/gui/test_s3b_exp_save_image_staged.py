@@ -44,7 +44,9 @@ import pytest
 from PySide6 import QtWidgets
 
 from nanoscope.core.session import Session
-from nanoscope.gui import event_plot_panel, iv_panel, plots_panel, psd_panel, voltage_dep_panel
+from nanoscope.gui import (event_plot_panel, iv_panel, plot_export, plots_panel, psd_panel,
+                           voltage_dep_panel)
+from nanoscope.gui.plot_export_options import ExportOptionsDialog
 from nanoscope.gui.event_plot_panel import EventPlotWindow
 from nanoscope.gui.iv_panel import IVWindow
 from nanoscope.gui.plots_panel import PlotsWindow
@@ -62,7 +64,8 @@ _PANELS = (
 _IDS = [cls.__name__ for cls, _b in _PANELS]
 
 #: Every module whose ``save_image`` reaches the file dialog through this name.
-_PANEL_MODULES = (plots_panel, psd_panel, iv_panel, voltage_dep_panel, event_plot_panel)
+_PANEL_MODULES = (plots_panel, psd_panel, iv_panel, voltage_dep_panel, event_plot_panel,
+                  plot_export)
 
 
 # ================================================================================================
@@ -100,7 +103,17 @@ def boxes(monkeypatch):
 
 
 @pytest.fixture
-def picks(monkeypatch):
+def options_ok(monkeypatch):
+    """Press OK in the "Export current figure" options dialog, keeping its defaults."""
+    def _ok(self, *_a, **_k):
+        self.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ExportOptionsDialog, "exec", _ok)
+
+
+@pytest.fixture
+def picks(monkeypatch, options_ok):
     """Make the file dialog answer with whatever path the test last chose.
 
     Returns a one-element list; assign ``picks[0] = path`` before clicking the button.
@@ -171,8 +184,7 @@ def test_an_unwritable_format_leaves_the_previous_file_whole_and_dates_it(
     target = tmp_path / "fig3b.xyz"
     target.write_bytes(b"PREVIOUS CONTENT THE USER CARES ABOUT")
 
-    picks[0] = target
-    getattr(w, btn).click()
+    w.save_image(str(target))
 
     assert target.read_bytes() == b"PREVIOUS CONTENT THE USER CARES ABOUT", (
         "an image export that cannot render the format truncated the user's file")
@@ -191,8 +203,7 @@ def test_a_refusal_with_nothing_of_that_name_still_says_the_file_was_not_created
     w = _window(cls, qtbot)
     target = tmp_path / "fig3b.xyz"          # nothing of that name on disk
 
-    picks[0] = target
-    getattr(w, btn).click()
+    w.save_image(str(target))
 
     text = _texts(boxes)
     assert "The file was not created" in text
@@ -213,7 +224,9 @@ def test_a_good_save_still_lands_and_says_nothing(
     assert boxes == [], f"a clean export must be silent, got {boxes!r}"
     # No staging sibling left behind, under any name.
     assert [p.name for p in tmp_path.iterdir()] == ["plot.png"]
-    if hasattr(w, "details_text"):
+    # The four panels with a Details pane record the save there. EventPlotWindow has none:
+    # its details_text() (779d4ec) is computed figure-bundle provenance, not a pane.
+    if cls in (PlotsWindow, PSDWindow, IVWindow, VDepWindow):
         assert "Saved image → plot.png" in w.details_text()
 
 

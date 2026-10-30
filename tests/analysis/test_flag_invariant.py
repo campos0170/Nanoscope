@@ -421,8 +421,16 @@ _DETECTOR_FILES = {
 #: rebuild -- the case the docstring below already permits -- not a row rebuilt inside
 #: a padded window, and it goes through ``characterize`` precisely so the automatic
 #: rules and flag/accepted are applied by the one function rather than copied.
+#:
+#: 2026-10-30: ``prepare_review_export`` (added 2026-09-29 in a4e185a, the study's
+#: "Curate in main workspace" export) is the detector of the native ``detect.study``
+#: table: it measures every study candidate ONCE over the WHOLE exported prepared
+#: trace (no ``clip_bounds``, so the default ``(0, len(signal))``) and stamps
+#: ``span_provenance(0, len(signal))`` with ``detector='study_candidates'``. That is a
+#: whole-span measurement, not a row rebuilt inside a padded window.
 _DETECTOR_OWNED_FUNCTIONS = {
     "nanoscope/analysis/modules.py::_recharacterize_highpass_candidates",
+    "nanoscope/gui/study_event_bridge.py::prepare_review_export",
 }
 
 
@@ -498,6 +506,45 @@ def test_the_highpass_measurement_pass_rebuilds_rows_over_the_whole_recording():
     assert clip_bounds == ["(0, int(current.size))"], (
         f"{rel}::_recharacterize_highpass_candidates passes clip_bounds={clip_bounds}; "
         "the allowance in _DETECTOR_OWNED_FUNCTIONS assumes a whole-recording rebuild"
+    )
+
+
+def test_the_study_review_export_measures_the_whole_exported_trace():
+    """The property that earns ``prepare_review_export`` its allowance above: ONE
+    direct call, with no ``clip_bounds``, so the boundary rule judges the edges of the
+    whole exported trace, exactly as a detector does."""
+    rel = "nanoscope/gui/study_event_bridge.py"
+    tree = ast.parse((_SRC.parent / rel).read_text())
+    calls = [
+        call
+        for call, scope in _calls_by_scope(tree)
+        if scope == "prepare_review_export" and _called_name(call) == "characterize"
+    ]
+    assert len(calls) == 1, (
+        f"{rel}::prepare_review_export makes {len(calls)} direct characterize() calls; "
+        "the allowance in _DETECTOR_OWNED_FUNCTIONS covers one whole-trace measurement"
+    )
+    clip_bounds = [kw for kw in calls[0].keywords if kw.arg == "clip_bounds"]
+    assert not clip_bounds, (
+        f"{rel}::prepare_review_export passes clip_bounds; the allowance in "
+        "_DETECTOR_OWNED_FUNCTIONS assumes the default whole-trace bounds"
+    )
+    # STRONGER PIN (verifier variant): the default bounds are only the whole trace when
+    # the array handed over IS the whole exported trace, and only agree with what later
+    # rebuilds read back when the stamped span is that same trace.
+    measured = ast.unparse(calls[0].args[0]) if calls[0].args else None
+    assert measured == "signal", (
+        f"{rel}::prepare_review_export measures {measured!r}, not the whole exported "
+        "trace; a window cut out of it must go through recharacterize_span"
+    )
+    spans = [
+        ast.unparse(call)
+        for call, scope in _calls_by_scope(tree)
+        if scope == "prepare_review_export" and _called_name(call) == "span_provenance"
+    ]
+    assert spans == ["span_provenance(0, len(signal))"], (
+        f"{rel}::prepare_review_export stamps {spans}; the default clip bounds of its "
+        "characterize() call are (0, len(signal)), so the stamped span must be too"
     )
 
 

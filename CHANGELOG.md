@@ -232,6 +232,9 @@ tags identify tested development baselines and do not promise a stable file or A
   failure after a save that had succeeded; the editor now hides on close and is freed later.
 - The Plots window's Data sources buttons (**Save name as project default**, **Project source
   color…**) are stacked, so the controls column fits its 360 px budget again.
+- Loading or clearing an ML model, or a channel override, no longer moves the ML page's preset row and
+  its **Save as…** / **Delete** by 38 px: the gate's note keeps its reserved row again, as it did
+  before the Inspector restructure of 2026-09-04.
 - The User Guide names **Analysis ▸ Noise spectrum of the measured region** and **Add event from
   cursors**, the menu's own labels.
 - **Every add files the same row.** Ctrl+M and the Measure tab's **Add event** button now add through
