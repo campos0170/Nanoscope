@@ -274,6 +274,10 @@ tags identify tested development baselines and do not promise a stable file or A
   (`12,15`). Converted events merged into one had left the old list offering every measurement but
   the first as unconverted, and **Copy hand-made events to…** called merged copies overlaps instead
   of already copied. Undo brings back each fragment as it was.
+- A merged event says how each of its edges was made: `bounds_source`, the drawn bound and the fit
+  in `fit_json` come from the first fragment for the start and from the fragment that ends last for
+  the end. It had kept the first fragment's record for both, so its end read as that fragment's end,
+  a drawn bound inside the span and its fit. An edge from a detected fragment records nothing.
 - Event inspector and Event gallery: A, R and Space no longer take the key from the control that
   has the keyboard. Space on a Tab-focused button (Show in trace, Gallery…, Accept all / Reject
   all, Accept selected / Reject selected, Apply…) or check box presses it instead of toggling

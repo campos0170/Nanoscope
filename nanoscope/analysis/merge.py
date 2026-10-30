@@ -103,7 +103,14 @@ from .events import (
     combine_sources,
     reconcile_row_counts,
 )
-from .manual_events import LEGACY_IDS_COL, NOTE_COL, ORIGIN_COL, join_ids, join_notes
+from .manual_events import (
+    LEGACY_IDS_COL,
+    NOTE_COL,
+    ORIGIN_COL,
+    join_ids,
+    join_notes,
+    merged_edge_cells,
+)
 
 __all__ = [
     "MARGINAL_MERGE_OCCUPANCY",
@@ -505,8 +512,14 @@ def _merged_row(
     columns are carried as the OR of a boolean column, else the run's first value --
     except ``source`` / ``review`` (:func:`_combined_provenance_cell`) and what a
     hand-made row says about itself: ``note`` joins every fragment's note in time
-    order, each once, and ``origin`` / ``legacy_measurement_ids`` list every
-    fragment's ids once.
+    order, each once, ``origin`` / ``legacy_measurement_ids`` list every fragment's
+    ids once, and the edge record (``bounds_source``, ``drawn_start_idx`` /
+    ``drawn_end_idx``, ``fit_json``) takes the start side from the first fragment and
+    the end side from the one that ends last
+    (:func:`~nanoscope.analysis.manual_events.merged_edge_cells`). A side whose
+    fragment recorded nothing, a detected row, records nothing: its part of
+    ``bounds_source`` is left out, its drawn bound is ``<NA>`` and its ``fit_json``
+    entry reads "not requested".
 
     ``flag`` and ``accepted`` are NOT decided here -- :func:`recharacterize_span`
     owns them, which is the whole point. This function used to OR ``accepted`` and
@@ -527,6 +540,15 @@ def _merged_row(
         units=units,
         pad_ms=_PAD_MS,
     )
+    # How each edge was made belongs to the fragment whose edge it is (cursor design
+    # 5.5): the first fragment's start, and the end of the one that ends last, which is
+    # not the last to start when a short piece is nested in a longer one. The first
+    # value alone gave the merged end the first fragment's own end: a drawn bound inside
+    # the span, and the fit of an edge that is no longer an edge.
+    ends = run_df["end_idx"].to_numpy(dtype=np.int64)
+    edge = merged_edge_cells(
+        run_df.iloc[0], run_df.iloc[int(np.flatnonzero(ends == ends.max())[-1])],
+        (int(row["start_idx"].iloc[0]), int(row["end_idx"].iloc[0])))
 
     # Carry any columns beyond the frozen schema (e.g. scoring's ``added`` marker).
     for col in columns:
@@ -546,6 +568,8 @@ def _merged_row(
             # three as unconverted; four merged copies kept one origin, so Copy hand-made
             # events to... called the other three overlaps instead of already copied.
             row[col] = join_ids(*series)
+        elif col in edge:
+            row[col] = edge[col]
         elif pd.api.types.is_bool_dtype(series):
             row[col] = bool(series.to_numpy(dtype=bool).any())
         else:

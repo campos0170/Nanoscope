@@ -39,6 +39,7 @@ from .baseline import (
     repair_nonfinite,
 )
 from .characterize import recharacterize_span
+from .edge_fit import REASON_NOT_REQUESTED
 from .events import (
     MANUAL_MODULE_ID,
     ORIGINAL_BOUNDS_SCHEMA,
@@ -80,9 +81,11 @@ __all__ = [
     "ensure_manual_extras",
     "hand_made_mask",
     "insert_hand_row",
+    "join_edge_fits",
     "join_ids",
     "join_notes",
     "measure_hand_row",
+    "merged_edge_cells",
     "measurement_noise_rms",
     "nullable_extras",
     "rebuild_manual_events",
@@ -605,6 +608,85 @@ def rebuild_manual_events(
 def fit_record_json(payload: Mapping[str, Any]) -> str:
     """Compact, key-sorted JSON for the ``fit_json`` column."""
     return json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), default=float)
+
+
+# ---------------------------------------------------------------------------
+# The edge record of a row made of several
+# ---------------------------------------------------------------------------
+_SIDES = ("start", "end")
+
+
+def _edge_sources(cell: Any) -> dict[str, str]:
+    """``{"start": ..., "end": ...}`` from a ``bounds_source`` cell; a side it does not name is
+    absent."""
+    if cell is None or pd.isna(cell):
+        return {}
+    out: dict[str, str] = {}
+    for part in str(cell).split(";"):
+        name, sep, value = part.partition("=")
+        if sep and name.strip() in _SIDES and value.strip():
+            out[name.strip()] = value.strip()
+    return out
+
+
+def _index_cell(value: Any) -> Any:
+    return pd.NA if value is None or pd.isna(value) else int(value)
+
+
+def join_edge_fits(own: Mapping[str, str], bounds: tuple[int, int]) -> str | None:
+    """One ``fit_json`` from the record of the fit that set each edge (``own``: edge name -> that
+    record, start first), in the shape the trace keys store for edges set by two fits (cursor
+    design 5.5): each edge's entry, window (``W``), rise and placed position from its own record,
+    an edge no record set marked "not requested" at its bound, and the shared parameters from the
+    first record. One record that set both edges comes back as it is; ``None`` when there is
+    none."""
+    if not own:
+        return None
+    if len(own) == 2 and own["start"] == own["end"]:
+        return own["start"]
+    fits = {name: json.loads(text) for name, text in own.items()}
+    out = json.loads(next(iter(own.values())))
+    for key in ("W", "rise"):
+        part = {name: fit[key][name] for name, fit in fits.items() if name in (fit.get(key) or {})}
+        if part or key in out:
+            out[key] = part
+    out["edges"] = {
+        name: fits[name]["edges"][name] if name in fits else {
+            "pos": int(pos), "fitted": False, "z": 0.0, "step": 0.0,
+            "reason": REASON_NOT_REQUESTED}
+        for name, pos in zip(_SIDES, bounds)}
+    out["placed"] = [fits[name]["placed"][i] if name in fits else int(bounds[i])
+                     for i, name in enumerate(_SIDES)]
+    out["edges_requested"] = list(fits)
+    return json.dumps(out, separators=(",", ":"), sort_keys=True, allow_nan=False)
+
+
+def merged_edge_cells(first: Mapping[str, Any], last: Mapping[str, Any],
+                      bounds: tuple[int, int]) -> dict[str, Any]:
+    """The edge record of one row made of several (a merge), as its four cells: the start side as
+    ``first`` (the fragment whose start is the row's start) recorded it and the end side as
+    ``last`` (the one whose end is the row's end) recorded it, cursor design 5.5.
+    ``bounds_source`` joins the two sides' parts, ``drawn_start_idx`` and ``drawn_end_idx`` come
+    from their own fragments, and ``fit_json`` holds each side's own fit (:func:`join_edge_fits`),
+    or is ``<NA>`` when neither side is ``fit:step``, as the add door stores it.
+
+    A side whose fragment recorded nothing (a detected row) records nothing here either: its part
+    of ``bounds_source`` is left out, its drawn bound is ``<NA>``, and its ``fit_json`` entry is
+    the "not requested" one an edge no fit set gets. The vocabulary has no word for a detector's
+    own edge (``fit:schmitt`` and ``fit:cusum`` name the table rule run on a hand-made row), and
+    the row's ``source`` already says ``mixed``. With nothing on either side every cell is
+    ``<NA>``, as on a detected row."""
+    s_src = _edge_sources(first.get(BOUNDS_SOURCE_COL)).get("start")
+    e_src = _edge_sources(last.get(BOUNDS_SOURCE_COL)).get("end")
+    sources = ";".join(f"{name}={src}" for name, src in zip(_SIDES, (s_src, e_src)) if src)
+    own = {name: str(row.get(FIT_JSON_COL))
+           for name, row, src in zip(_SIDES, (first, last), (s_src, e_src))
+           if src not in (None, "drawn") and not pd.isna(row.get(FIT_JSON_COL, pd.NA))}
+    fit = join_edge_fits(own, bounds) if "fit:step" in (s_src, e_src) else None
+    return {BOUNDS_SOURCE_COL: _scalar(sources or None),
+            DRAWN_START_COL: _index_cell(first.get(DRAWN_START_COL)),
+            DRAWN_END_COL: _index_cell(last.get(DRAWN_END_COL)),
+            FIT_JSON_COL: _scalar(fit)}
 
 
 # ---------------------------------------------------------------------------

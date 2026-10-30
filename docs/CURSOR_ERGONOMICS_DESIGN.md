@@ -372,8 +372,9 @@ never in `orig_start_idx`/`orig_end_idx`, which mean detector bounds only
 
 Keeping them true:
 
-- Merge takes the start side from the first fragment and the end side from the last
-  (`merge.py:532-540` today keeps the first fragment's value of every extra).
+- Merge takes the start side from the first fragment and the end side from the last, the one
+  that ends last (`manual_events.merged_edge_cells`); a side whose fragment recorded nothing, a
+  detected row, records nothing.
 - An inspector mask drag or Revert sets that edge to `edited`; `_write_measured_row` writes
   only measured columns today (`event_inspector.py:3588-3603`).
 - On the companion design's re-run carry-over (6) and Copy to (7.3), a row whose edge source is

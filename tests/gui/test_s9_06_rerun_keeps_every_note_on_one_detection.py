@@ -16,9 +16,8 @@ THE FIX. A note moved onto a detected row is joined with every note earlier hand
 (``manual_events.join_notes``, handed the whole list each time): in time order, since the hand rows
 are visited by start, with ``NOTE_JOINER`` ("; "), and a blank or repeated note adds nothing, even
 when a third row repeats a note that is already part of a joined one. The report and the status
-line are unchanged: both events were kept, and both are now that one detection. (The merges in
-this build keep the first fragment's note, so there was no joiner to share; ``NOTE_JOINER`` is the
-one the design's merge rule in section 3 can use.)
+line are unchanged: both events were kept, and both are now that one detection. (A merge joins its
+fragments' notes by the same rule, design section 3: ``test_merge_joins_notes_and_origins``.)
 
 These tests drive a real MainWindow through the path a note really takes into a table: the old
 measurement list as a project restore leaves it, Analysis ▸ Convert old measurements to events…,
