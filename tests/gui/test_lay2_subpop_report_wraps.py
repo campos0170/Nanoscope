@@ -160,12 +160,19 @@ def _pane(win) -> QtWidgets.QPlainTextEdit:
 
 
 def _open(qtbot, monkeypatch, screen: QtCore.QRect, report=None):
-    """A window opened as ``main_window._open_subpop_window`` opens it, on ``screen``."""
+    """A window opened as ``main_window._open_subpop_window`` opens it, on ``screen``,
+    then turned to Section ▸ Analysis before any report is installed.
+
+    The window opens on Data, and since b21e8ae the report pane is shown only in the
+    Analysis section: on Data it is hidden and never laid out, so the measurements below
+    read a 0 px viewport (two failed, and six passed without measuring anything).
+    """
     monkeypatch.setattr(SW, "available_screen_rect", lambda _w: screen)
     win = SW.SubpopReportWindow()
     qtbot.addWidget(win)
     win.show()
     qtbot.waitExposed(win)
+    win._workflow.set_section("Analysis")
     if report is not None:
         win.set_report(report, subtitle="synthetic")
     qtbot.wait(30)

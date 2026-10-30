@@ -3085,10 +3085,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         #     passage)") and an "Apply fit" button side by side -- so that row was
         #     unstacked and the long combos told to size to a fixed character count
         #     instead of to their widest item, which brought the content minimum from
-        #     444 px to 331. The number below is then derived from THAT, plus the
-        #     vertical scrollbar and the frame, so the two can never disagree again the
-        #     way they did. (A literal would have rotted the first time a control was
-        #     added to a group.)
+        #     444 px to 331. (Measured on this build: 309 with no group hidden, where
+        #     the Style group is the widest, and 303 on the Data section the window
+        #     opens on.) The number below is then derived from THAT, plus the vertical
+        #     scrollbar and the frame -- 329 on this build -- so the two can never
+        #     disagree again the way they did. (A literal would have rotted the first
+        #     time a control was added to a group.)
         scroll.setMinimumWidth(max(_CONTROLS_MIN_PX, self._controls_min_width(scroll, controls)))
         # The column also has to STOP growing when the window does; without this the
         # splitter hands it half of every extra pixel and the plot never gets wider.
@@ -3484,7 +3486,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         edit_hint.setStyleSheet(f"color:{_MSG_HEX};")
         lay.addWidget(edit_hint)
 
-        source_defaults = QtWidgets.QHBoxLayout()
+        # STACKED, not side by side. The controls column's minimum width is the widest
+        # row in it and is a HARD budget (<= 360 px, pinned by
+        # test_the_controls_column_is_never_capped_below_its_own_contents). Abreast,
+        # these two buttons made a 339 px row, which measured this group at 363 px and
+        # took the whole column to 379; stacked, the group measures 212 and the column
+        # 303, where the Plot group below it is the widest thing showing.
+        source_defaults = QtWidgets.QVBoxLayout()
         self._project_source_label = QtWidgets.QPushButton("Save name as project default")
         self._project_source_color = QtWidgets.QPushButton("Project source color…")
         self._project_source_label.setToolTip(

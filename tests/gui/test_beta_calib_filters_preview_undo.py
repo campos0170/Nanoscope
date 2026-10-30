@@ -159,6 +159,10 @@ def test_preview_on_rate_unknown_recording_says_why_instead_of_silently_drawing_
 
     det.notch_enabled.setChecked(True)
     qtbot.wait(10)
+    # Analysis opens Preprocess on "Open-pore baseline". The box, and the card that holds
+    # the error line, live in "Signal chain", so the user picks that section first.
+    det.show_signal_chain()
+    assert det.filter_preview.isVisibleTo(det)
     assert det.filter_preview.isEnabled()
     det.filter_preview.setChecked(True)   # the user asks to see the processed trace
     qtbot.wait(20)

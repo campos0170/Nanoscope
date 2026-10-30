@@ -21,10 +21,13 @@ def replay(qapp, qtbot, tmp_path):
 @pytest.mark.parametrize("cutoff", [0., -1., np.nan, np.inf, 50_000., "invalid"])
 def test_saved_invalid_lowpass_cannot_be_replayed_as_unfiltered(replay, cutoff):
     inspector, _, _, _, raw = replay
+    # Rendering already cached the valid saved recipe's trace. A refused replay must
+    # leave that entry exactly as it was and put nothing in its place.
+    saved = inspector._cond_cache
     inspector._provenance = dict(inspector._provenance, filter_cutoff_hz=cutoff)
     with pytest.raises(ValueError, match="saved low-pass"):
         inspector._conditioned(raw, builders.FS)
-    assert inspector._cond_cache is None
+    assert inspector._cond_cache is saved
 
 
 def test_replay_failure_does_not_cache_raw_and_valid_cache_survives(replay, monkeypatch):
@@ -64,6 +67,10 @@ def test_failed_drag_preserves_rows_optional_amplitude_history_signal_handles_an
     inspector.eventEdited.connect(history.append)
     warnings = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args: warnings.append(args))
+    # Rendering already cached the conditioned trace, and a drag would reuse it. Start
+    # empty so the drag has to replay the saved filter, and so the closing ``is None``
+    # check shows that a failed replay cached nothing.
+    inspector._cond_cache = None
     if kind == "exception":
         def fail(*args, **kwargs):
             raise ValueError("saved filter could not run")

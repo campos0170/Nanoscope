@@ -364,7 +364,7 @@ detector found it.
   through detection, characterisation, ML characterisation and re-characterisation. Deliberately NOT
   on it: `percentile` and the four `asls_*` knobs, which tune a *detrender*, not the I0-tracking
   shape that has to be identical across the four call sites.
-- **`baseline.characterisation_baseline` is THE door**, and `baseline.DEFAULT_BASELINE` is the only
+- **`baseline.characterisation_baseline` is THE door**, and `baseline.py` names every
   baseline-parameter literal in the package. Parameters alone would have fixed four sites, not the
   *class*: `estimate_baseline` is public and takes `window_s=` with a silent default, so the fifth
   site to hit a baseline problem would fix it locally exactly as `ml_modules` did — for a good

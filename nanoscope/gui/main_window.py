@@ -11386,17 +11386,23 @@ class MainWindow(QtWidgets.QMainWindow):
         by_key = {persistent_key(doc): doc for doc in session.documents()}
 
         def source_document(doc):
+            # None once the parent (or an ancestor) is not open under its saved key: "Close
+            # only this recording" keeps a recording's segments open. Each use below skips
+            # such a segment, and _write_project's unrestorable-segment warning counts it.
+            # A strict lookup here raised KeyError instead, which failed every save and every
+            # recovery capture.
             while isinstance(doc, SegmentDocument):
-                doc = by_key[doc.spec.parent_key]
+                doc = by_key.get(doc.spec.parent_key)
             return doc
 
         for doc in session.documents():
             self._remember_loaded_source(doc.doc_id)
         live_sources = dict(self._loaded_source_fingerprints)
-        result_sources = {
-            doc.doc_id: live_sources[source_document(doc).doc_id]
-            for doc in session.documents()
-        }
+        result_sources = {}
+        for doc in session.documents():
+            root = source_document(doc)
+            if root is not None:
+                result_sources[doc.doc_id] = live_sources[root.doc_id]
 
         def evidence(res):
             if res.source_fingerprint_recorded or res.source_fingerprint is not None:
@@ -11407,8 +11413,12 @@ class MainWindow(QtWidgets.QMainWindow):
         unknown_roots, mismatched_roots = set(), set()
         carried = self._carried_over or {}
         parents = {spec.segment_uid: spec.parent_key for spec in carried.get("segments", [])}
-        evidence_records = [(res, source_document(session.document(res.doc_id)))
-                            for res in session.results.all() if session.has_document(res.doc_id)]
+        evidence_records = []
+        for res in session.results.all():
+            if session.has_document(res.doc_id):
+                root = source_document(session.document(res.doc_id))
+                if root is not None:
+                    evidence_records.append((res, root))
         for record in [*carried.get("results", []), *carried.get("fits", [])]:
             key, seen = record.doc_id, set()
             while key in parents and key not in seen:
@@ -11416,8 +11426,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 key = parents[key]
             match = next((doc for doc in session.documents()
                           if same_source(persistent_key(doc), key)), None)
-            if match is not None:
-                evidence_records.append((record, source_document(match)))
+            root = source_document(match) if match is not None else None
+            if root is not None:
+                evidence_records.append((record, root))
         for res, root_doc in evidence_records:
             if not res.source_fingerprint_recorded and res.source_fingerprint is None:
                 continue
@@ -11893,8 +11904,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._project_disk_stamp = committed_stamp
         self._last_project_dir = str(Path(path).parent)
         self._add_recent_project(path)
-        self._explicit_saved_revision = max(
-            self._explicit_saved_revision, int(write_revision))
         if dropped:
             # A SAVE THAT DROPPED WORK DOES NOT REPORT SUCCESS. The user was warned and
             # chose "Save without them", so the file is written — but the segments and
@@ -11905,8 +11914,14 @@ class MainWindow(QtWidgets.QMainWindow):
             # the modal had just named went out with the window. Staying dirty means
             # reopening the parent recording and pressing Save again still costs one
             # click, and closing without doing so still asks.
+            # ...AND THE RECOVERY COPY THAT STILL HOLDS THEM STAYS LIVE: the explicit-save
+            # fence does not advance, or a capture of this same revision landing after the
+            # save is retired at once (_on_recovery_saved), and a crash then loses the
+            # segments the file does not contain either.
             self._update_title()
         else:
+            self._explicit_saved_revision = max(
+                self._explicit_saved_revision, int(write_revision))
             # Retire only snapshots no newer than the state that actually reached disk.
             # An edit arriving through a nested Qt loop after the snapshot was gathered
             # remains dirty and its newer recovery generation remains live.

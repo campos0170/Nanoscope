@@ -27,6 +27,10 @@ The detector is driven DIRECTLY (``analysis.detect.detect_events``) and its Even
 through ``Session.add_result``, exactly as ``test_level_fit_reconcile`` does: these are tests
 about wiring, and running the detection through the panel would make them tests about the
 detection instead.
+
+The level fit, by contrast, goes through the real menu action, and that action hands the fit
+to the analysis controller as a background job. Each trigger is therefore followed by a wait
+until the controller is idle; a fixed 10 ms pause returned before the levels were installed.
 """
 
 from __future__ import annotations
@@ -132,7 +136,7 @@ def test_an_inspector_opened_after_the_fit_still_gets_the_levels(detected, qtbot
     had in fact succeeded."""
     window, _doc_id, _df = detected
     window._act_fit_levels.trigger()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert window._level_fit is not None and not window._level_fit.payload.empty
 
     window._act_event_inspector.trigger()
@@ -149,7 +153,7 @@ def test_the_levels_survive_selecting_away_and_back(detected, qtbot, tmp_path):
     window, doc_id, _df = detected
     window._act_event_inspector.trigger()
     window._act_fit_levels.trigger()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     insp = window._event_inspector
     assert len(insp._cusum_items) > 0
 
@@ -168,7 +172,7 @@ def test_the_gallery_gets_the_same_level_table(detected, qtbot):
     per-tile CUSUM bars were dormant code. One push now feeds both surfaces."""
     window, _doc_id, _df = detected
     window._act_fit_levels.trigger()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
 
     window._act_event_gallery.trigger()
     qtbot.wait(10)
@@ -186,8 +190,11 @@ def test_a_fit_is_never_printed_under_another_recordings_events(detected, qtbot,
     window, _doc_id, _df = detected
     window._act_event_inspector.trigger()
     window._act_fit_levels.trigger()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     insp = window._event_inspector
+    assert insp._levels is not None and len(insp._cusum_items) > 0, (
+        "precondition: recording A's fit must be on screen before the switch, "
+        "or the assertions below prove nothing")
 
     other = _install(window, tmp_path, _signal(seed=3), "other.dat")
     window._on_selection(other, 0)
@@ -206,7 +213,7 @@ def test_looking_at_another_recording_does_not_destroy_the_fit(detected, qtbot, 
     the levels."""
     window, doc_id, _df = detected
     window._act_fit_levels.trigger()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     fitted = window._level_fit
     assert fitted is not None
 
@@ -224,7 +231,7 @@ def test_a_re_detection_still_retires_the_fit(detected, qtbot):
     fit's own recording and channel is real staleness and still retires it, store included."""
     window, doc_id, _df = detected
     window._act_fit_levels.trigger()
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: not window._analysis_controller.is_busy(), timeout=10000)
     assert window._level_fit is not None
 
     _install_detection(window, doc_id, _signal(seed=1))   # a different frame, same target

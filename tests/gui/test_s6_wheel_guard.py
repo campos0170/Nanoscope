@@ -46,11 +46,15 @@ def _click_focus(widget, qtbot):
 
 
 def _scrollable_panel(qtbot, tab=1):
-    """A real DetectionPanel inside a QScrollArea short enough to actually scroll.
+    """A real DetectionPanel held 200 px tall, so its page scrollers have something to scroll.
 
-    The panel is the app's densest stack of guarded widgets, and this is the arrangement
-    it really ships in (AnalysisPanel wraps its controls in a ``_scroll_wrap`` area), so
-    the redirect is exercised against the geometry the complaint came from.
+    The panel is the app's densest stack of guarded widgets. Since the Inspector
+    restructure (c86b119, 2026-09-04) it ships unwrapped: each mode page's settings
+    scroll inside their own bounded ``InspectorScrollArea`` (``panel.page_scrolls[page]``),
+    and that page scroller, not any area around the panel, is the nearest enclosing
+    scroll area of a control like ``k_in``. The outer QScrollArea here only bounds the
+    panel's height (the panel's minimum is below 200 px, so the outer area itself gets
+    no range).
 
     ``tab`` raises the page whose widget the caller is about to click: a QTabWidget hides
     the pages it is not showing, and a hidden widget cannot take focus — so "the user
@@ -131,17 +135,21 @@ def test_a_clicked_detection_combo_still_refuses_the_wheel(qapp, qtbot):
 def test_the_wheel_over_a_spinbox_scrolls_the_enclosing_scroll_area(qapp, qtbot):
     """Refusing the edit must not cost the scroll.
 
-    The analysis dock is a QScrollArea over ~140 guarded widgets; a guard that merely
-    swallowed the event would make the dock unscrollable wherever the pointer happened to
-    land. The event is redirected to the viewport instead, so the bar really moves.
+    Each Inspector page's settings scroll in their own bounded scroller, packed with
+    guarded spinboxes and combos; a guard that merely swallowed the event would make the
+    page unscrollable wherever the pointer happened to land. The event is redirected to
+    the nearest enclosing scroll area's viewport instead — for ``k_in`` the Detection
+    page's own scroller — so its bar really moves, and the spinbox keeps its value.
     """
     area, panel = _scrollable_panel(qtbot)
-    bar = area.verticalScrollBar()
+    bar = panel.page_scrolls[panel._detection_page].verticalScrollBar()
     qtbot.waitUntil(lambda: bar.maximum() > 0, timeout=2000)
     bar.setValue(0)
+    before = panel.k_in.value()
     _click_focus(panel.k_in, qtbot)
     _wheel(panel.k_in)
-    assert bar.value() > 0, "the wheel was swallowed — the dock stopped scrolling over a spinbox"
+    assert bar.value() > 0, "the wheel was swallowed — the page stopped scrolling over a spinbox"
+    assert panel.k_in.value() == before, "the wheel scrolled the page AND edited the spinbox"
 
 
 def test_a_wheel_with_no_enclosing_scroll_area_is_simply_refused(qapp, qtbot):

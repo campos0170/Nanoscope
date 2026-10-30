@@ -5,7 +5,7 @@ sibling one page along — ``ml_gate_label``, same panel, same amber, same
 show-and-hide-with-state — was not, so the anti-pattern survived one widget along, and the
 reachability round escalated it by putting live controls directly underneath it.
 
-Measured on a real ``MainWindow`` at 1512x900 on a fresh profile, ML detector page,
+Measured on a real ``MainWindow`` at 1512x900 on a fresh profile, ML page,
 BEFORE this fix (content y of ``ml_preset_save_btn``, one of the preset verbs below the
 banner; ``ml_preset_delete_btn`` moves identically):
 
@@ -70,12 +70,13 @@ def _settle(root: QtWidgets.QWidget, rounds: int = 3) -> None:
 
 
 def _ml_page(panel: DetectionPanel) -> None:
-    tabs = panel.findChild(QtWidgets.QTabWidget)
-    for i in range(tabs.count()):
-        if tabs.tabText(i) == "ML detector":
-            tabs.setCurrentIndex(i)
-            return
-    raise AssertionError("no ML detector page")
+    """Raise the ML page by its widget, not by its tab title.
+
+    c86b119 renamed the tab from "ML detector" to "ML"; looking it up by the old title
+    stopped every test here before a single rectangle was measured.
+    """
+    panel.mode_tabs.setCurrentWidget(panel._ml_page)
+    assert panel.mode_tabs.currentWidget() is panel._ml_page, "no ML page"
 
 
 def _geometry(root: QtWidgets.QWidget, panel: DetectionPanel) -> dict[str, tuple[int, int]]:

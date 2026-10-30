@@ -58,11 +58,12 @@ def _big_frame(n: int = N, seed: int = 11) -> pd.DataFrame:
 
 
 def _col(view, name: str) -> int:
-    model = view.model()
-    for c in range(model.columnCount()):
-        if str(model.headerData(c, Qt.Horizontal)).split(" ")[0] == name:
-            return c
-    raise AssertionError(f"no {name} column")
+    # By the model's column NAME, not the header caption, whose first word stopped being
+    # the name when b21e8ae (2026-09-06) captioned depth "median depth (depth_pA)". The
+    # proxy never permutes columns, so the source index is the view's index.
+    cols = view.model().sourceModel()._columns
+    assert name in cols, f"no {name} column"
+    return cols.index(name)
 
 
 def _shown(table: EventTable, colname: str) -> np.ndarray:

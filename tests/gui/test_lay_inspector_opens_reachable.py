@@ -112,9 +112,12 @@ def test_the_detector_has_a_real_geometry_on_launch(win):
     empty visible region. A control with no geometry cannot be reached or measured."""
     dp = win._analysis_panel.detection_panel
     assert dp.isVisible()
-    # Laid out INSIDE the viewport it lives in, not at the default widget size.
+    # Laid out INSIDE the page it lives in, not at the default widget size. Since the
+    # Inspector restructure (c86b119) the detector is no longer wrapped in a scroll area:
+    # it sits directly on the Analysis page and holds the per-mode scrollers itself, so
+    # its container is the Analysis page, not _controls_area (which is now INSIDE it).
     assert dp.width() != 640 or dp.height() != 480
-    assert dp.width() <= _controls_area(win).widget().width()
+    assert dp.width() <= win._analysis_panel.width()
     assert not dp.visibleRegion().isEmpty()
 
 

@@ -1,6 +1,8 @@
 """The study uses the app's actual shared curation and persisted source contract."""
 from copy import deepcopy
 from dataclasses import replace
+import os
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -495,3 +497,123 @@ def test_open_review_still_succeeds_when_launch_project_is_still_open(window, tm
     window.open_study_review(second, launch_doc_ids)
     assert window._session.has_document(second['document'].doc_id)
     assert window._session.has_document(first['document'].doc_id)
+
+
+def test_a_study_accepted_event_cut_off_by_the_trace_edge_arrives_rejected(tmp_path):
+    """The study's own Schmitt keeps an event still in progress at the first or last
+    sample of the prepared trace and accepts it; its gate has no boundary rule. The
+    export wrote the study's ``accepted`` over characterize's verdict, so the two edge
+    rows opened accepted beside ``clipped_by_boundary`` (measured: accepted
+    [True, True, True, True]), the state the event table corrects back to rejected on the
+    next Accept. A curator's acceptance of the edge row in the study also made it a
+    reviewed training positive. The study's decision is now ANDed with characterize's
+    rules, as on every rebuild, so the native rule wins and the study's own decision
+    stays in ``study_accepted``."""
+    from nanoscope.analysis.study_signal import analyze, SchmittSettings
+    from nanoscope.analysis.study_review import apply_event_decision
+    from nanoscope.analysis.events import FLAG_CLIPPED, event_status, has_flag
+    from nanoscope.analysis.scoring import build_training_frame
+    row = record(tmp_path, events=False)
+    row['prepared'].detrended[:300] -= 15
+    row['prepared'].detrended[-300:] -= 15
+    row['analysis'] = analyze(row['prepared'], SchmittSettings())
+    catalog = row['analysis'].catalog
+    assert catalog.accepted.tolist() == [True] * 4
+    assert catalog.start_idx.iloc[0] == 0
+    assert catalog.end_idx.iloc[-1] == len(row['prepared'].detrended) - 1
+    native = prepare_review_export(row, tmp_path / 'edges')['result'].payload.df
+    assert has_flag(native.flag, FLAG_CLIPPED).tolist() == [True, False, False, True]
+    assert native.accepted.tolist() == [False, True, True, False]
+    assert event_status(native).tolist() == ['auto-rejected', 'unreviewed', 'unreviewed', 'auto-rejected']
+    assert native.study_accepted.tolist() == [True] * 4
+    row['analysis'] = apply_event_decision(row['analysis'], [catalog.event_id.iloc[0]], True)
+    reviewed = prepare_review_export(row, tmp_path / 'reviewed-edge')['result'].payload.df
+    assert reviewed.review.iloc[0] == 'reviewed' and not reviewed.accepted.iloc[0]
+    assert event_status(reviewed).iloc[0] == 'auto-rejected'
+    assert build_training_frame(reviewed, selection='reviewed').empty
+
+
+def test_an_imported_max_dwell_rejection_keeps_its_reason_in_the_review_table(tmp_path):
+    """A main-workspace detection that declared ``max_dwell_s`` rejects a clog as
+    ``dwell>max_dwell_s``, and the study imports the row rejected with that token in
+    ``source_flag``. The return trip stripped every derived token, but this export
+    declares no ``max_dwell_s`` and cannot re-derive that one, so the row opened rejected
+    with flag '' (measured): C21's rejected-with-no-reason, invisible to any filter on the
+    reason. The token is now inherited, as recharacterize_span inherits it when the limit
+    is unknown."""
+    from nanoscope.analysis.manual_detection import measure_imported_events, MeasurementSettings
+    from nanoscope.analysis.events import FLAG_MAX_DWELL, event_status
+    row = record(tmp_path)
+    main = pd.DataFrame(dict(event_id=np.array([0, 1], np.int64),
+        start_idx=np.array([1000, 2000], np.int64), end_idx=np.array([1040, 2070], np.int64),
+        accepted=[True, False], flag=pd.array(['', FLAG_MAX_DWELL], dtype='string'),
+        review=['unreviewed', 'unreviewed']))
+    row['analysis'] = measure_imported_events(row['prepared'], main, MeasurementSettings(),
+        source_provenance=dict(max_dwell_s=1e-3, polarity=-1))
+    native = prepare_review_export(row, tmp_path / 'returned')['result'].payload.df
+    assert native.flag.tolist() == ['', FLAG_MAX_DWELL]
+    assert native.accepted.tolist() == [True, False]
+    assert event_status(native).tolist() == ['unreviewed', 'auto-rejected']
+
+
+@pytest.mark.parametrize('decision', ['accepted_in_the_study', 'reset_to_the_automatic_gate'])
+def test_a_study_acceptance_does_not_clear_an_inherited_max_dwell_rejection(tmp_path, decision):
+    """The same imported clog, then accepted in the study: by the curator's Accept, or by
+    "Reset review to automatic gate", whose gate passes a deep clog. The study catalog
+    then reads accepted [True, True]. inherited_curation trusts a prior ``accepted`` to
+    honour its own flags, which holds for a main-workspace row but not for a study
+    decision, so inheriting the reason alone opened the clog accepted beside
+    ``dwell>max_dwell_s`` (measured on a first version of the fix), the state the event
+    table calls forbidden. An inherited rejecting reason now rejects the row whatever the
+    study decided."""
+    from nanoscope.analysis.manual_detection import measure_imported_events, MeasurementSettings
+    from nanoscope.analysis.study_review import apply_event_decision
+    from nanoscope.analysis.events import FLAG_MAX_DWELL, event_status
+    row = record(tmp_path)
+    main = pd.DataFrame(dict(event_id=np.array([0, 1], np.int64),
+        start_idx=np.array([1000, 2000], np.int64), end_idx=np.array([1040, 2070], np.int64),
+        accepted=[True, False], flag=pd.array(['', FLAG_MAX_DWELL], dtype='string'),
+        review=['unreviewed', 'unreviewed']))
+    imported = measure_imported_events(row['prepared'], main, MeasurementSettings(),
+        source_provenance=dict(max_dwell_s=1e-3, polarity=-1))
+    if decision == 'accepted_in_the_study':
+        imported = apply_event_decision(imported, [imported.catalog.event_id.iloc[1]], True)
+    else:
+        imported = apply_event_decision(imported, [], None)
+    assert imported.catalog.accepted.tolist() == [True, True]
+    row['analysis'] = imported
+    native = prepare_review_export(row, tmp_path / 'returned')['result'].payload.df
+    assert native.flag.tolist() == ['', FLAG_MAX_DWELL]
+    assert native.accepted.tolist() == [True, False]
+    assert event_status(native).iloc[1] == 'auto-rejected'
+
+
+@pytest.mark.parametrize('branch', ['raw_recording', 'prepared_review'])
+def test_a_case_variant_spelling_of_the_open_file_is_the_same_source(window, tmp_path, branch):
+    """Both source checks in snapshot_events compared ``Path.resolve()`` strings, and
+    resolve() does not fold case. On a case-insensitive volume (macOS's default APFS) the
+    study's own file under another case spelling (a Finder rename, a Recent entry) was
+    refused with "Select this study recording's original raw channel or its exported
+    prepared review copy." Identity is now asked of the filesystem through
+    identity.same_source; a byte-identical copy at another path is another file and is
+    still refused."""
+    row, payload = opened(window, tmp_path)
+    path = payload['document'].meta.path
+    variant = path.with_name(path.name.upper())
+    if not variant.exists() or not os.path.samefile(variant, path):
+        pytest.skip('case-sensitive volume: no case variant of one file exists')
+    copy = tmp_path / 'elsewhere' / path.name
+    copy.parent.mkdir()
+    shutil.copyfile(path, copy)
+    if branch == 'raw_recording':
+        prepared = replace(row['prepared'],
+            provenance=dict(row['prepared'].provenance, raw_file=_fingerprint(path)))
+        row = dict(row, prepared=prepared)
+        row.pop('main_workspace_bridge')
+        spelled = lambda spelling: dict(row, source_path=spelling)
+    else:
+        spelled = lambda spelling: dict(row,
+            main_workspace_bridge=dict(row['main_workspace_bridge'], path=str(spelling)))
+    assert window.snapshot_study_events(spelled(variant))['provenance']['source_kind'] == branch
+    with pytest.raises(ValueError, match='original raw channel'):
+        window.snapshot_study_events(spelled(copy))

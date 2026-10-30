@@ -18,6 +18,7 @@ from ..analysis.event_amplitude import AMPLITUDE_COLUMNS
 from ..analysis.incubation_detection import PreparedRecording, RecordingAnalysis, _fingerprint
 from ..analysis.manual_detection import _imported_integer_column
 from ..analysis.events import REVIEW_NONE, REVIEW_VALUES
+from ..core.identity import same_source
 from . import study_event_bridge as native
 
 
@@ -169,7 +170,9 @@ def snapshot_events(window, state, tag):
     if result is None or not window._session.has_document(result.doc_id):
         raise ValueError('Select this acid recording in the main event editor first.')
     doc = window._session.document(result.doc_id)
-    if doc.meta.path.resolve() != Path(descriptor['path']).resolve():
+    # resolve() does not fold case, so on a case-insensitive disk two spellings of the
+    # review copy resolve to two strings; same_source asks the filesystem instead.
+    if not same_source(doc.source_key, str(Path(descriptor['path']).expanduser().resolve())):
         raise ValueError('Select this acid recording’s prepared review copy before saving its edits.')
     if int((result.payload.provenance or {}).get('polarity', 0)) != -1:
         raise ValueError('Acid review uses events-down prepared current; select downward detections.')
@@ -281,10 +284,12 @@ def apply_review(state, tag, snapshot, folder, *, progress=None, cancel=None):
     row = _row(state, tag); descriptor = row.get('main_workspace_bridge')
     provenance = deepcopy(snapshot.get('provenance', {}))
     signature = review_signature(state, tag)
+    # The snapshot names the review copy as the open document spells it, the descriptor as
+    # the export did: one file, possibly two spellings, so ask same_source, not ==.
     if (not isinstance(descriptor, dict) or descriptor.get('acid_review_signature') != signature
             or provenance.get('acid_review_signature') != signature
             or provenance.get('acid_recording_id') != row['recording_id']
-            or provenance.get('source_path') != descriptor.get('path')):
+            or not same_source(provenance.get('source_path'), descriptor.get('path'))):
         raise ValueError('This review snapshot no longer matches the acid study. Open the current events again.')
     _verify_files(state, row, cancel)
     if _fingerprint(descriptor['path'], cancel)['sha256'] != descriptor['file_sha256']:

@@ -20,6 +20,7 @@ from PySide6 import QtCore, QtWidgets
 
 from ..analysis import manual_workspace as checkpoint
 from ..analysis.cancel import check_cancelled
+from ..core.identity import same_source
 from .manual_study_window import _OperationWorker, _Form
 from .incubation_window import _FrameModel, _FigureView
 from .worker_thread import JOB_NONE, retire_worker_thread, start_worker_thread
@@ -550,11 +551,13 @@ class AcidStudyWindow(QtWidgets.QMainWindow):
         from . import acid_event_bridge as bridge
         from .study_event_bridge import _assert_idle
         _assert_idle(owner)
-        # Re-enter the live table rather than replacing the curator's unsaved work.
+        # Re-enter the live table rather than replacing the curator's unsaved work. The
+        # open copy may be spelled differently (case) from the descriptor; same_source
+        # recognises one file under both, where comparing resolve() strings did not.
         descriptor = row.get('main_workspace_bridge') or {}
         current_review = descriptor.get('acid_review_signature') == bridge.review_signature(self.state, tag)
         for doc in owner._session.documents() if current_review else ():
-            if descriptor.get('path') and doc.meta.path.resolve() == Path(descriptor['path']).resolve():
+            if descriptor.get('path') and same_source(doc.source_key, str(Path(descriptor['path']).expanduser().resolve())):
                 owner.begin_study_curation(self, tag, doc.doc_id)
                 owner.show_study_curation()
                 self.hide()
@@ -759,12 +762,19 @@ class AcidStudyWindow(QtWidgets.QMainWindow):
                     saved.append(target)
                     return current
                 def committed():
-                    expected[:] = [self._revision,saved[0]]; editor.saved()
+                    from shiboken6 import isValid
+                    expected[:] = [self._revision,saved[0]]
+                    if isValid(editor): editor.saved()
                 self._stage('Save acid figure styling',operation,fresh_output=True,allow_drafts=True,on_success=committed)
+            # Closing an editor only hides it; dispose of the closed ones here, on our own
+            # schedule. Nothing can still call back into one: an editor opens only while
+            # no save is in flight.
+            for old in self.findChildren(StudyFigureWindow, options=QtCore.Qt.FindDirectChildrenOnly):
+                if old.isHidden(): old.deleteLater()
             editor = StudyFigureWindow(figure,data,resources,name=path.stem,
                 provenance=dict(study=self.state.get('name'),workspace=str(self.folder),revision=expected[0]),
                 style=state.get('figure_styles',{}).get(style_key),save_style=save_style,library_owner=self.parent(),parent=self)
-            self._style_windows.append(editor); editor.destroyed.connect(lambda *_: self._style_windows.remove(editor) if editor in self._style_windows else None)
+            self._style_windows.append(editor); editor.closed.connect(lambda: self._style_windows.remove(editor) if editor in self._style_windows else None)
             editor.show()
         return self._start('Open acid figure styling',compute,install)
 

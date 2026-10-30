@@ -17,6 +17,7 @@ from nanoscope.gui.figure_bundle import FigureSnapshot
 from nanoscope.gui.plot_appearance import PlotAppearanceWidget
 from nanoscope.gui.plot_export_options import resolve_export_options
 from nanoscope.gui.study_figure_window import StudyFigureWindow
+from .test_acid_study_window import complete, seeded
 
 
 def test_close_before_initial_fit_does_not_call_a_deleted_canvas(qtbot):
@@ -135,6 +136,27 @@ def test_interactive_export_honors_publication_size(page, tmp_path, monkeypatch)
     assert abs(image.dotsPerMeterX() - 300 / .0254) < 2
 
 
+def test_bundle_dialog_asks_through_the_export_seam(page, tmp_path, monkeypatch):
+    """Save figure bundle… asks ``export_paths.ask_export_path`` for its path.
+
+    It called ``QFileDialog.getSaveFileName`` itself, which no gui module may do outside
+    the seam (``test_export_overwrite.py``). The bundle writes exactly the chosen file, so
+    the seam's default output set is declared, and None from the seam is a cancel.
+    """
+    import nanoscope.gui.study_figure_window as module
+    asked = []
+    chosen = tmp_path / 'chosen.zip'
+    monkeypatch.setattr(module, 'ask_export_path', lambda parent, **kw: asked.append((parent, kw)) or chosen)
+    assert page.export_bundle() == chosen, page._status.text()
+    assert asked == [(page, dict(title='Save figure bundle', suggestion='study_test.zip',
+                                 filters='Figure bundle (*.zip)'))]
+    assert zipfile.is_zipfile(chosen)
+    monkeypatch.setattr(module, 'ask_export_path', lambda parent, **kw: None)
+    status = page._status.text()
+    assert page.export_bundle() is None
+    assert page._status.text() == status
+
+
 def test_snapshot_and_bundle_roundtrip_detach_numbers_and_resources(page, tmp_path):
     original = page._data.copy(deep=True)
     snapshot = page.snapshot()
@@ -204,7 +226,16 @@ def test_invalid_style_does_not_replace_frozen_preview(page):
     assert 'could not be applied' in page._status.text()
 
 
-def test_close_disposes_editor_but_snapshot_still_exports(qtbot, tmp_path):
+def test_close_hides_and_frees_editor_but_snapshot_still_exports(qtbot, tmp_path):
+    """Close hides the editor and frees what it held; it never deletes the window.
+
+    The editor set ``WA_DeleteOnClose``, the one attribute nanoscope/gui forbids
+    (``test_fup_wiring_and_suite_green.py::test_no_gui_widget_turns_close_into_a_delete``):
+    MainWindow's quit stops windows by closing them, and a save still running when the
+    user closed the editor called ``saved()`` on a deleted window. Now the window outlives
+    its close, empty: no figure, no rendering in its scene, no data. It says so through
+    ``closed``, and a second close (the quit's) finds nothing left to free.
+    """
     import shiboken6
     from nanoscope.gui.figure_bundle import write_frozen_figure_image
     figure = Figure(figsize=(3, 2), dpi=100)
@@ -213,19 +244,130 @@ def test_close_disposes_editor_but_snapshot_still_exports(qtbot, tmp_path):
     data = pd.DataFrame({'x': [0., 1.], 'y': [1., 2.]})
     editor = StudyFigureWindow(figure, data, {'methods.json': b'{}'}, name='disposable',
                                provenance={'study': 'Cu'}, save_style=lambda *args: None)
-    # This test owns disposal; registering with qtbot would close a deleted widget twice.
+    qtbot.addWidget(editor)
+    closed = []
+    editor.closed.connect(lambda: closed.append('closed'))
     editor.show()
     snapshot = editor.snapshot()
     editor.close()
-    qtbot.waitUntil(lambda: not shiboken6.isValid(editor))
-    assert not figure.axes
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    assert shiboken6.isValid(editor) and editor.isHidden()
+    assert closed == ['closed']
+    assert not editor._view.scene().items(), 'the closed editor still holds its rendering'
+    assert editor._figure is None and not figure.axes
     assert editor._styler is None and editor._data is None
     assert not editor._resources and editor._save_style is None
+    # A second close must find nothing left to free (MainWindow's quit closes every
+    # window it owns). Qt 6 sends no event for close() on a closed window, so send one.
+    QtWidgets.QApplication.sendEvent(editor, QtGui.QCloseEvent())
+    assert shiboken6.isValid(editor) and closed == ['closed', 'closed']
     pd.testing.assert_frame_equal(snapshot.dataframe(), data, check_exact=True)
     path = tmp_path / 'after-close.svg'
     options = resolve_export_options((snapshot.width, snapshot.height), extension='.svg')
     write_frozen_figure_image(path, snapshot, options)
     assert path.stat().st_size > 1000
+
+
+@pytest.fixture
+def acid_window(qtbot):
+    from nanoscope.gui.acid_study_window import AcidStudyWindow
+    from nanoscope.gui.worker_thread import drain_detached
+    window = AcidStudyWindow(); qtbot.addWidget(window)
+    yield window
+    window.abort(); drain_detached(5000); window.close()
+
+
+def _acid_study_with_a_figure(window, tmp_path, qtbot):
+    from nanoscope.analysis import manual_workspace as checkpoint
+    from nanoscope.plot.acid_figure_recipe import capture_figure
+    seeded(window, tmp_path)
+    complete(qtbot, window, window.confirm_selection)
+    folder = window.folder / 'runs' / 'initial'; folder.mkdir(parents=True)
+    path = folder / 'test_acid_plot.png'
+    figure = Figure(figsize=(5, 3)); FigureCanvasAgg(figure)
+    figure.subplots().plot([1, 2, 3], [4, 8, 6], color='#147d92', label='Accepted')
+    figure.savefig(path); capture_figure(figure, path)
+    window.state['records'][0]['prepared'] = {'figures': [path]}
+    window.state['figures'] = []
+    window._revision = checkpoint.save_workspace(window.state, window.folder, expected_revision=window._revision,
+                                                 owned_outputs=checkpoint.stage_output_files(folder))
+    window.refresh()
+    return path
+
+
+def test_acid_editor_closed_mid_save_reports_the_save_and_is_freed_by_the_next_open(acid_window, tmp_path, qtbot):
+    """Closing the Acid figure editor while its save runs no longer fails the save.
+
+    Measured before the fix: close the editor after Save styling to study and before the
+    save lands, and the study committed the styling, then called ``saved()`` on the
+    deleted editor, showed "Completed result could not be displayed: libshiboken: Internal
+    C++ object (PySide6.QtWidgets.QLabel) already deleted." and emitted
+    ``operationFailed``. Close now only hides the editor (its ``closed`` signal drops it
+    from ``_style_windows``), the save reports success, and the study window disposes of
+    the closed editor when the next one opens, when no save can still call back into it.
+    """
+    import shiboken6
+    window = acid_window
+    path = _acid_study_with_a_figure(window, tmp_path, qtbot)
+    complete(qtbot, window, window.style_selected_figure)
+    editor = window._style_windows[-1]
+    editor._panel_edits['title'].textEdited.emit('Closed mid-save')
+    failed, finished = [], []
+    window.operationFailed.connect(failed.append); window.operationFinished.connect(finished.append)
+    editor.save_to_study()
+    assert window.is_busy(), window._status.text()
+    editor.close()
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    assert shiboken6.isValid(editor) and editor.isHidden()
+    assert editor not in window._style_windows
+    qtbot.waitUntil(lambda: not window.is_busy(), timeout=20000)
+    assert not failed, failed
+    assert finished == ['Save acid figure styling']
+    assert window._status.text() == 'Save acid figure styling complete.'
+    assert window.state['figures'][0] != path
+    complete(qtbot, window, window.style_selected_figure)
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    assert not shiboken6.isValid(editor), 'the closed editor was kept after the next one opened'
+    assert len(window._style_windows) == 1 and window._style_windows[0].isVisible()
+
+
+def test_manual_study_disposes_a_closed_editor_when_the_next_one_opens(qtbot, tmp_path, monkeypatch):
+    """Close only hides an editor, so the Manual study window frees the closed ones itself.
+
+    Otherwise each Style selected figure… would leave one hidden editor, with its window
+    backing store, parented to the study until quit. An editor still open is never touched.
+    """
+    import shiboken6
+    from nanoscope.gui import study_figure_recipe
+    from nanoscope.gui.manual_study_window import ManualStudyWindow
+    from nanoscope.gui.worker_thread import drain_detached
+    window = ManualStudyWindow(); qtbot.addWidget(window)
+    failures = []; window.operationFailed.connect(failures.append)
+    try:
+        window.new_workspace(tmp_path / 'workspace')
+        image = QtGui.QImage(40, 30, QtGui.QImage.Format_RGB32); image.fill(0xffffff)
+        path = window.folder / 'saved-figure.png'; assert image.save(str(path))
+        window.state['figures'] = [path]; window.refresh()
+        def reconstruct(state, figure_path, cancel=None):
+            figure = Figure(figsize=(3, 2)); FigureCanvasAgg(figure)
+            figure.subplots().plot([0., 1.], [1., 2.])
+            return figure, pd.DataFrame({'x': [0., 1.]}), {}, {'kind': 'fixture'}
+        monkeypatch.setattr(study_figure_recipe, 'reconstruct', reconstruct)
+        def open_editor():
+            assert window.style_selected_figure() is not False
+            qtbot.waitUntil(lambda: not window.is_busy(), timeout=20000)
+            QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+            return window._figure_editor
+        first = open_editor(); first.close()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        assert shiboken6.isValid(first) and first.isHidden()
+        second = open_editor()
+        assert not shiboken6.isValid(first), 'the closed editor was kept after the next one opened'
+        third = open_editor()
+        assert shiboken6.isValid(second) and shiboken6.isValid(third), 'an open editor was disposed'
+        assert not failures, failures
+    finally:
+        window.abort(); drain_detached(3000)
 
 
 def test_legacy_gallery_title_requires_explicit_edit_and_survives_event_reorder(qtbot):

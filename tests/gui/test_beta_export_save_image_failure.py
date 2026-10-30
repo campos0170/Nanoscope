@@ -32,6 +32,10 @@ from nanoscope.gui.voltage_dep_panel import VDepWindow
 
 #: Every panel with a ``save_image`` — the defect was copied into all five.
 _PANELS = (PlotsWindow, PSDWindow, IVWindow, VDepWindow, EventPlotWindow)
+#: The four with a Details pane (a text box) that records "Saved image → <name>".
+#: EventPlotWindow has no such pane: its ``details_text()`` (779d4ec) is computed
+#: figure-bundle provenance, so only the negative check below applies to it.
+_DETAILS_PANE_PANELS = (PlotsWindow, PSDWindow, IVWindow, VDepWindow)
 
 
 # ================================================================================================
@@ -83,7 +87,8 @@ def test_save_image_into_readonly_dir_reports_and_returns_none(
     _title, text = warnings_shown[0]
     assert "Could not write the image" in text
     assert "plot.png" in text
-    # The details pane (where the panel has one) must not carry the success line.
+    # Nothing that reports Details — a pane, or EventPlotWindow's provenance text — may
+    # carry the success line.
     if hasattr(w, "details_text"):
         assert "Saved image" not in w.details_text()
 
@@ -102,5 +107,5 @@ def test_save_image_success_still_returns_path_and_says_so(
     assert out is not None and out == target
     assert target.exists() and target.stat().st_size > 0
     assert warnings_shown == []
-    if hasattr(w, "details_text"):
+    if cls in _DETAILS_PANE_PANELS:
         assert "Saved image → plot.png" in w.details_text()

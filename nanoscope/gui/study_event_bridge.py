@@ -10,12 +10,13 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from ..analysis.baseline import BaselineConfig, characterisation_baseline
+from ..analysis.baseline import STUDY_EXPORT_BASELINE, characterisation_baseline
 from ..analysis.cancel import check_cancelled, propagate_cancel, resolve_cancel
 from ..analysis.characterize import characterize
 from ..analysis.events import (EventSet, REVIEW_NONE, analysed_span,
                                span_provenance, stamp_original_bounds, stamp_source_status,
-                               DERIVED_FLAGS, flag_tokens, combine_flags,
+                               AUTOMATIC_REJECTION_FLAGS, DERIVED_FLAGS, FLAG_MAX_DWELL,
+                               flag_tokens, inherited_curation,
                                STUDY_REVIEW_POLICY_COL, STUDY_REVIEW_POLICY)
 from ..analysis.incubation_detection import _fingerprint
 from ..analysis.manual_detection import recording_identity, _array_hash
@@ -24,7 +25,7 @@ from ..core.analysis import AnalysisResult
 from ..core.calibration import (CalibrationSet, ChannelCalibration, save_sidecar,
                                 SIDECAR_WRITTEN)
 from ..core.document import TraceDocument
-from ..core.identity import fingerprint_source, describe_source_change
+from ..core.identity import fingerprint_source, describe_source_change, same_source
 from ..core.segment import SegmentDocument
 from ..core.types import Provenance, STUDY_BRIDGE_ATTR_KEY as BRIDGE_KEY
 from ..io.hdf5 import Hdf5Reader
@@ -111,13 +112,29 @@ def prepare_review_export(record: dict, output_folder: Path, *, cancel=None) -> 
     starts = frame.start_idx.to_numpy(np.int64)
     ends = frame.end_idx.to_numpy(np.int64) + 1
     baseline = characterisation_baseline(signal, fs,
-        config=BaselineConfig(method="constant"), polarity=-1, health=False, cache=False)
+        config=STUDY_EXPORT_BASELINE, polarity=-1, health=False, cache=False)
     noise = max(float(np.median(np.abs(signal - np.median(signal))) * 1.4826), 1e-12)
+    # The study's decision and a return trip's native reasons reach each row the way
+    # every rebuild's do: inherited_curation, then characterize ANDs the decision with
+    # its own rules, so a study-accepted event cut off by the trace's edge still arrives
+    # rejected as clipped_by_boundary. This export declares no max_dwell_s, so that
+    # reason cannot be re-derived here and is inherited rather than dropped -- and an
+    # inherited rejecting reason still rejects the row when the study accepted it.
+    # inherited_curation trusts the prior accepted to honour its own flags, which holds
+    # for a main-workspace row but not for a study decision: a curator's Accept, or
+    # "Reset review to automatic gate" on a deep clog, would otherwise write accepted
+    # beside dwell>max_dwell_s, the state panels.py calls forbidden.
+    derived = DERIVED_FLAGS - {FLAG_MAX_DWELL}
+    flags = frame.source_flag if "source_flag" in frame else [""] * len(frame)
+    decisions = frame.accepted.to_numpy(bool) if "accepted" in frame else [True] * len(frame)
+    curation = [inherited_curation(flag, ok, derived=derived) for flag, ok in zip(flags, decisions)]
     native = characterize(signal, baseline.baseline, starts, ends, fs, -1,
         noise_rms=noise, pore_id=str(record.get("pore_id") or ""),
-        recording=str(record.get("tag") or prepared.tag), units="pA", cancel=cancel)
-    if "accepted" in frame:
-        native["accepted"] = frame.accepted.to_numpy(bool)
+        recording=str(record.get("tag") or prepared.tag), units="pA",
+        inherit_flag=[flag for flag, _ in curation],
+        inherit_accepted=[ok and not any(token in AUTOMATIC_REJECTION_FLAGS
+                                         for token in flag_tokens(flag))
+                          for flag, ok in curation], cancel=cancel)
     analysis = record.get("analysis")
     source_id = (SCHMITT_SOURCE_ID if analysis is not None and "schmitt_settings" in analysis.provenance
                  else MODULE_ID)
@@ -136,11 +153,6 @@ def prepare_review_export(record: dict, output_folder: Path, *, cancel=None) -> 
         for name in ("source", "added", "orig_start_idx", "orig_end_idx"):
             if "source_" + name in frame:
                 native[name] = frame["source_" + name].to_numpy(copy=True)
-        if "source_flag" in frame:
-            native["flag"] = pd.array([
-                combine_flags(fresh, ";".join(t for t in flag_tokens(prior) if t not in DERIVED_FLAGS))
-                for fresh, prior in zip(native.flag, frame.source_flag)
-            ], dtype="string")
     # Current study gestures (including an explicit reset) supersede archived
     # native attention. Untouched imported rows retain their recorded review.
     if analysis is not None:
@@ -312,7 +324,8 @@ def snapshot_events(window, record):
             result.source_fingerprint, current_source, loaded_n_samples=n):
         raise ValueError("The main detection's source file changed; reload and recompute before importing.")
     descriptor = record.get("main_workspace_bridge")
-    bridge_match = isinstance(descriptor, dict) and Path(descriptor.get("path", "")).resolve() == doc.meta.path.resolve()
+    bridge_match = isinstance(descriptor, dict) and same_source(
+        doc.source_key, str(Path(descriptor.get("path", "")).expanduser().resolve()))
     if bridge_match:
         if (descriptor.get("version") != BRIDGE_VERSION
                 or descriptor.get("recording_id") != record.get("recording_id")
@@ -324,7 +337,7 @@ def snapshot_events(window, record):
             raise ValueError("The study changed since this review export. Open a fresh review copy before returning detections.")
     else:
         source = prepared.provenance.get("raw_file", {})
-        if (doc.meta.path.resolve() != Path(record.get("source_path", "")).expanduser().resolve()
+        if (not same_source(doc.source_key, str(Path(record.get("source_path", "")).expanduser().resolve()))
                 or result.channel != int(record.get("channel", -1))
                 or not source.get("sha256")
                 or _fingerprint(doc.meta.path)["sha256"] != source["sha256"]):

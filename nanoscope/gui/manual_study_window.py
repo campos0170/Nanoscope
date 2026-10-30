@@ -30,6 +30,7 @@ from ..analysis.incubation_study import StudyRecording, NOTEBOOK_FEATURES, _appe
 from ..analysis.incubation_detection import RecordingAnalysis
 from ..analysis.ml_preprocess import MLPreprocessConfig
 from ..analysis.cancel import OperationCancelled, cancel_scope, check_cancelled
+from ..core.identity import same_source
 from ..plot import incubation_figures as figures
 from .incubation_window import _FrameModel, _FigureView
 from .worker_thread import JOB_NONE, retire_worker_thread, start_worker_thread
@@ -980,8 +981,10 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
                 _assert_idle(owner)
                 descriptor=row.get('main_workspace_bridge') or {}
                 if descriptor.get('catalog_signature')==catalog_signature(row):
+                    # One review copy may be open under another (case) spelling than the
+                    # descriptor's; same_source asks the filesystem, resolve() strings do not.
                     for doc in owner._session.documents():
-                        if descriptor.get('path') and doc.meta.path.resolve()==Path(descriptor['path']).resolve():
+                        if descriptor.get('path') and same_source(doc.source_key,str(Path(descriptor['path']).expanduser().resolve())):
                             owner.begin_study_curation(self,row['tag'],doc.doc_id)
                             owner.show_study_curation(); self.hide(); return True
             session=owner._session; generation=getattr(owner,'_study_curation_project_generation',None)
@@ -1094,7 +1097,9 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
             if signal_settings is not None:
                 record['measurement_method']='schmitt'; record['schmitt_settings']=asdict(signal_settings)
             descriptor=record.get('main_workspace_bridge')
-            if isinstance(descriptor,dict) and provenance.get('source_path')==descriptor.get('path'):
+            # The snapshot spells the review copy as the open document does, the descriptor
+            # as the export did; same_source, not ==, so one file is one file.
+            if isinstance(descriptor,dict) and same_source(provenance.get('source_path'),descriptor.get('path')):
                 from .study_event_bridge import catalog_signature
                 record['main_workspace_bridge']={**descriptor,'catalog_signature':catalog_signature(record)}
             _invalidate_global(state)
@@ -1104,7 +1109,7 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
                 owner=self.parent()
                 for context in getattr(owner,'_study_curation_sessions',{}).values():
                     if (context['study'] is self and context['recording_id']==row.get('recording_id')
-                            and provenance.get('source_path')==context['path']):
+                            and same_source(provenance.get('source_path'),context['path'])):
                         from .study_event_bridge import catalog_signature
                         context['saved_signature']=(provenance.get('source_module_id'),catalog_signature({'candidates':events}))
                         context.pop('error',None)
@@ -1379,6 +1384,10 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
                         if isValid(editor):editor.saved()
                         self._figure_selector.setCurrentIndex(self.state['figures'].index(target));self.show_figure(self._figure_selector.currentIndex())
                     return self._stage('Save figure styling: '+path.stem,write,apply,style,output_folder=destination,on_success=done)
+                # Closing an editor only hides it; dispose of the closed ones on our own
+                # schedule, here, where no save can still call back into one.
+                for old in self.findChildren(StudyFigureWindow,options=QtCore.Qt.FindDirectChildrenOnly):
+                    if old.isHidden():old.deleteLater()
                 editor=StudyFigureWindow(figure,data,resources,name=path.stem,provenance=provenance,
                     style=state.get('figure_styles',{}).get(path.stem),save_style=save_style,
                     library_owner=self.parent(),parent=self)

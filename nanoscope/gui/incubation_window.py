@@ -12,6 +12,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..analysis import incubation_study as study
 from ..analysis.cancel import OperationCancelled, cancel_scope
+from .export_paths import ask_export_path
 from .numeric_text import parse_strict_number
 from .worker_thread import JOB_NONE, retire_worker_thread, start_worker_thread
 
@@ -618,8 +619,11 @@ class IncubationStudyWindow(QtWidgets.QMainWindow):
             self._dialog_action(lambda: self.load_recipe(path))
 
     def _choose_save_recipe(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save study recipe", "incubation-study.json", "Study recipe (*.json)")
-        if path:
+        # save_spec writes exactly the chosen file, so the seam's default output set (that
+        # one path) is the honest declaration. None is a cancel.
+        path = ask_export_path(self, title="Save study recipe", suggestion="incubation-study.json",
+                               filters="Study recipe (*.json)")
+        if path is not None:
             self._dialog_action(lambda: self.save_recipe(path))
 
     def _choose_result(self):

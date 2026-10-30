@@ -48,6 +48,7 @@ from nanoscope.analysis.events import (
     FLAG_CLIPPED,
     FLAG_MAX_DWELL,
     FLAG_NON_FINITE,
+    FLAG_SATURATED,
     FLAG_ZERO_BASELINE,
     EventSet,
     inherited_curation,
@@ -176,8 +177,10 @@ def test_the_note_count_is_a_different_question_and_keeps_its_answer():
 def test_the_rejecting_set_is_exactly_what_characterize_rejects_on():
     """THE PREMISE. ``characterize`` computes
     ``accepted = ~(too_long | clipped | non_finite)`` -- three rules, three tokens,
-    and ``zero_baseline`` is not among them. If that line ever gains or loses a rule,
-    this test fails and the set has to be revised with it rather than drifting."""
+    and neither caveat it also derives is among them: ``zero_baseline``, and
+    ``saturated`` since 89a41fa (2026-09-12) moved it into ``DERIVED_FLAGS``. If that
+    line ever gains or loses a rule, this test fails and the set has to be revised
+    with it rather than drifting."""
     import inspect
 
     from nanoscope.analysis import characterize as C
@@ -185,7 +188,8 @@ def test_the_rejecting_set_is_exactly_what_characterize_rejects_on():
 
     assert AUTOMATIC_REJECTION_FLAGS == {FLAG_MAX_DWELL, FLAG_CLIPPED, FLAG_NON_FINITE}
     assert AUTOMATIC_REJECTION_FLAGS < DERIVED_FLAGS
-    assert DERIVED_FLAGS - AUTOMATIC_REJECTION_FLAGS == {FLAG_ZERO_BASELINE}
+    assert DERIVED_FLAGS - AUTOMATIC_REJECTION_FLAGS == {FLAG_ZERO_BASELINE,
+                                                         FLAG_SATURATED}
     src = inspect.getsource(C.characterize)
     assert "accepted = ~(too_long | clipped | non_finite)" in src
 

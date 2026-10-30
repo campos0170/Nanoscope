@@ -1,7 +1,8 @@
 """Picking a filter stage must not move the Preprocess column (pytest-qt, offscreen).
 
-The "Signal filters" group is one combo over a QStackedWidget, and the whole Preprocess
-column lives in a QScrollArea. ``QStackedWidget.setCurrentIndex`` hides the outgoing page,
+The "Signal filters" group is one combo over a QStackedWidget, and the Preprocess page's
+settings scroll in their own InspectorScrollArea (``page_scrolls``, since c86b119; the
+whole column scrolled before). ``QStackedWidget.setCurrentIndex`` hides the outgoing page,
 and when the focused widget is ON that page Qt hands focus to the incoming page's
 counterpart — inside a scroll area that is a scroll. Measured on a real MainWindow at
 1512x900 with the apo ABF loaded: click the Low-pass page's ``enable`` box, then pick
@@ -31,27 +32,37 @@ from PySide6.QtWidgets import QScrollArea, QWidget
 from nanoscope.gui.panels import DetectionPanel
 
 N_STAGES = 8
-# The Inspector dock's real geometry on the owner's 1512x900 screen: a 462x457 viewport
-# over a column that is ~2500 px tall, i.e. every stage change happens while scrolled.
+# Short enough that the Preprocess page's own scroller scrolls: ~335 of ~670 px of
+# settings in view at this panel size (~590 of ~1335 in the Inspector of a fresh
+# 1512x900 window), i.e. every stage change happens while scrolled.
 VIEWPORT = (480, 460)
 
 
 def _scrolled_panel(qtbot) -> tuple[DetectionPanel, QScrollArea]:
-    """A DetectionPanel inside a QScrollArea small enough to scroll, on the Preprocess tab."""
+    """A DetectionPanel on its Preprocess page, small enough for that page to scroll, and
+    the page's own scroller.
+
+    Not an outer QScrollArea around the panel: since c86b119 the panel holds one bounded
+    InspectorScrollArea per mode page, whose 0x0 minimum lets the panel shrink to any
+    viewport, so an outer area has nothing to scroll (range 0..0).
+    """
     panel = DetectionPanel()
-    area = QScrollArea()
-    area.setWidgetResizable(True)
-    area.setWidget(panel)
-    qtbot.addWidget(area)
-    area.resize(*VIEWPORT)
-    area.show()
+    qtbot.addWidget(panel)
+    panel.resize(*VIEWPORT)
+    panel.show()
     qtbot.wait(60)
     panel.mode_tabs.setCurrentIndex(0)          # Preprocess
     qtbot.wait(60)
+    area = panel.page_scrolls[panel._preprocess_page]
+    holder = panel.filter_stack.parentWidget()
+    while holder is not None and not isinstance(holder, QScrollArea):
+        holder = holder.parentWidget()
+    assert holder is area, (
+        f"the stage editor scrolls in {holder!r}, not the Preprocess page's scroller")
     bar = area.verticalScrollBar()
-    assert bar.maximum() > 0, (
-        "the column must be taller than the viewport for this test to mean anything "
-        f"(range 0..{bar.maximum()})")
+    assert bar.maximum() >= 300, (
+        "the column must be taller than the viewport, by at least the parked value, "
+        f"for this test to mean anything (range 0..{bar.maximum()})")
     return panel, area
 
 

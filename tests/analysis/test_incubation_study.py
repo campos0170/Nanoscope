@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -87,6 +90,71 @@ def test_manifest_resolves_relative_paths_and_freezes_recordings(configured, tmp
     assert loaded.recordings == snapshot.recordings
     assert loaded.model_path == Path(spec.model_path)
     assert loaded.seed == 0
+
+
+def test_saving_over_a_read_only_recipe_is_refused_and_changes_nothing(configured, tmp_path):
+    """A chmod-400 recipe was measured being replaced without a word. save_spec staged
+    with its own mkstemp + os.replace, and os.replace needs write permission on the
+    folder, not on the file. It now saves through core.atomic_write's staged_path,
+    which refuses by the recipe's own name and leaves the folder as it was."""
+    spec, _ = configured
+    recipe = tmp_path/'recipe.json'
+    recipe.write_text('{"kept": true}\n')
+    os.chmod(recipe, 0o400)
+    listing = sorted(tmp_path.iterdir())
+    try:
+        # The door's own sentence, not just the name: an in-place write of a read-only
+        # file raises the OS's PermissionError naming recipe.json too.
+        with pytest.raises(PermissionError, match=r'recipe\.json is marked read-only'):
+            study.save_spec(spec, recipe)
+        assert recipe.read_text() == '{"kept": true}\n'
+        assert sorted(tmp_path.iterdir()) == listing
+    finally:
+        os.chmod(recipe, 0o600)
+
+
+def test_saving_a_recipe_keeps_the_files_own_permissions(configured, tmp_path):
+    """mkstemp makes its file 0600 and os.replace installed that file, so a 0644 recipe
+    was measured coming back 0600 after a save. staged_path gives the replacement the
+    recipe's mode before it lands. 0640 is neither mkstemp's 0600 nor what the usual 022
+    umask gives a new file, so a save that installs a new file keeps it only by copying the
+    mode across."""
+    spec, _ = configured
+    recipe = tmp_path/'recipe.json'
+    recipe.write_text('{}\n')
+    os.chmod(recipe, 0o640)
+    study.save_spec(spec, recipe)
+    assert recipe.stat().st_mode & 0o777 == 0o640
+    assert study.load_spec(recipe).recordings == spec.recordings
+
+
+def _xattr_names(path):
+    # Read by the OS's own tool, not through the ctypes binding the save itself uses.
+    if sys.platform == 'darwin':
+        return sorted(subprocess.run(['xattr', str(path)], capture_output=True, text=True).stdout.split())
+    return sorted(os.listxattr(path))
+
+
+@pytest.mark.skipif(sys.platform not in ('darwin', 'linux'), reason='extended attributes are a POSIX feature')
+def test_saving_a_recipe_keeps_its_extended_attributes(configured, tmp_path):
+    """os.replace installs a new file, so the hand-rolled save was measured dropping an
+    extended attribute (a Finder tag, a user note) from the recipe on every save.
+    staged_path copies them onto the replacement before it lands."""
+    spec, _ = configured
+    recipe = tmp_path/'recipe.json'
+    recipe.write_text('{}\n')
+    try:
+        if sys.platform == 'darwin':
+            subprocess.run(['xattr', '-w', 'user.note', 'lab recipe', str(recipe)], check=True)
+        else:
+            os.setxattr(recipe, 'user.note', b'lab recipe')
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip('this filesystem does not support extended attributes')
+    before = _xattr_names(recipe)
+    assert 'user.note' in before
+    study.save_spec(spec, recipe)
+    assert _xattr_names(recipe) == before
+    assert study.load_spec(recipe).recordings == spec.recordings
 
 
 @pytest.mark.parametrize('change,message', [({'seed':68}, 'fixes seed 0'), ({'recipe_version':'other'},'Unsupported')])

@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp
 
+from ..core.atomic_write import staged_path
 from . import event_features as EF
 from . import subpop_cluster as SC
 from . import subpop_gmm as SG
@@ -125,13 +126,11 @@ def save_spec(spec: StudySpec, path: Path | str) -> Path:
     """Save an editable recipe atomically; relative paths are relative to the JSON."""
     path = _absolute(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    os.close(fd)
-    try:
-        _write_json(Path(temporary), _manifest(spec, path.parent))
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+    # The user's own file, so through the staging door. A private mkstemp + os.replace
+    # was atomic but overwrote a read-only recipe without a word, reset its mode to
+    # 0600 and dropped its extended attributes. See nanoscope.core.atomic_write.
+    with staged_path(path) as tmp:
+        _write_json(tmp, _manifest(spec, path.parent))
     return path
 
 

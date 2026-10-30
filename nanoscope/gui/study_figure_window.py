@@ -12,6 +12,7 @@ from ..core.project import WorkspaceArtifact
 from ..core.figure_library import make_figure
 from ..plot.study_figure_style import StudyFigureStyle
 from .comparison_figures_panel import _ComparisonCanvas
+from .export_paths import ask_export_path
 from .matplotlib_figure_item import MatplotlibFigureItem
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget
 from .figure_bundle import capture_figure_snapshot, write_figure_bundle
@@ -50,12 +51,21 @@ def _plotted_arrays(figure):
 
 
 class StudyFigureWindow(QtWidgets.QMainWindow):
-    """Own a reconstructed Figure; appearance changes never revisit study engines."""
+    """Own a reconstructed Figure; appearance changes never revisit study engines.
+
+    Never ``WA_DeleteOnClose`` (see build_info_dialog.py's docstring for why). Closing
+    hides the editor and frees what it held (see ``closeEvent``); the study window that
+    opened it disposes of it when the next editor opens. A save still running when the
+    user closes the editor reports to it through ``saved()``, which a deleted window
+    turned into a failure after a save that had succeeded.
+    """
+
+    #: Emitted from ``closeEvent``, so an owner can drop the editor from its open ones.
+    closed = QtCore.Signal()
 
     def __init__(self, figure, data, resources, *, name, provenance, style=None,
                  save_style=None, library_owner=None, parent=None):
         super().__init__(parent)
-        self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setWindowTitle('NanoScope — Style study figure')
         screen=self.screen() or QtGui.QGuiApplication.primaryScreen()
         available=screen.availableGeometry() if screen is not None else QtCore.QRect(0,0,1490,1030)
@@ -247,13 +257,22 @@ class StudyFigureWindow(QtWidgets.QMainWindow):
     def export_bundle(self,checked=False,*,path=None):
         try:
             if path is None:
-                path,_=QtWidgets.QFileDialog.getSaveFileName(self,'Save figure bundle',self._name+'.zip','Figure bundle (*.zip)')
-                if not path:return
+                # write_figure_bundle writes exactly the chosen file, so the seam's default
+                # output set (that one path) is the honest declaration. None is a cancel.
+                path=ask_export_path(self,title='Save figure bundle',suggestion=self._name+'.zip',
+                    filters='Figure bundle (*.zip)')
+                if path is None:return
             result=write_figure_bundle(path,self.snapshot());self._status.setText('Exported '+str(result));return result
         except Exception as exc:self._status.setText('Bundle was not exported: '+str(exc));return None
 
     def closeEvent(self,event):
-        self._fit_timer.stop();self._item=None
-        self._figure.clear();self._resources.clear();self._save_style=None
+        # The window outlives its close, so free what it rendered too: the scene item
+        # keeps a QPicture and SVG, the figure's canvas an Agg buffer, megabytes each for
+        # a dense figure. MainWindow's quit closes every window it owns, closed ones
+        # included, so a second close must find nothing left to free.
+        self._fit_timer.stop();self._item=None;self._view.scene().clear()
+        if self._figure is not None:self._figure.clear()
+        self._figure=None;self._resources.clear();self._save_style=None
         self._styler=None;self._data=None
         super().closeEvent(event)
+        self.closed.emit()

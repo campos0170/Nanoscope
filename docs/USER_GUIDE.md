@@ -367,7 +367,7 @@ newcomer usability study has yet established a learning-time or error-rate impro
 Menus: **File** (Open, Open/Save Project, Create segment from selection, Close document, Quit),
 **Edit** (Undo / Redo — §9b), **View** (Overlay/Stacked, Zoom Back/Forward, Reset zoom, drag mode,
 Panels), and **Analysis**, grouped into **Detect** (Run detection, Batch detect, ML model),
-**Curate** (Event inspector, Measure event, Add measurement to list, Compare baseline estimators —
+**Curate** (Event inspector, Measure event, Add event from cursors, Compare baseline estimators —
 §9a), **Explore this recording** (Distributions, Distribution summaries, Comparison figures,
 Event waveforms, Event gallery, Reconcile detector results, Event labels, Noise spectrum),
 **Compare recordings** (I-V / conductance, Voltage dependence) and **Export** (events, training
@@ -2272,7 +2272,7 @@ recording whose own loader note said the magnitudes suggest nA.
 **Setting the window: don't type the numbers.** *Start* and *End* are seconds from the start of the
 recording, while the trace's x-axis is on the instrument clock (§2), so a recording with a non-zero
 t₀ will not agree with what you read off the trace. Bracket the quiet stretch with the Measure
-tool's cursors and use **Analysis ▸ Power spectrum of the measured region** instead — the selection
+tool's cursors and use **Analysis ▸ Noise spectrum of the measured region** instead — the selection
 is carried as sample indices, so the two clocks cannot be confused.
 
 ### Comparing two pores

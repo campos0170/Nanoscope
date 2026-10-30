@@ -117,12 +117,13 @@ def _table(qtbot) -> EventTable:
 
 
 def _col(view, name: str) -> int:
-    model = view.model()
-    for c in range(model.columnCount()):
-        # The header may carry a badge ("depth_pA ⚠"), so match the prefix.
-        if str(model.headerData(c, Qt.Horizontal)).split(" ")[0] == name:
-            return c
-    raise AssertionError(f"no {name} column")
+    # By the model's column NAME, not the header caption. The caption is prose: it may
+    # carry a badge ("... ⚠"), and since b21e8ae (2026-09-06) the depth header reads
+    # "median depth (depth_pA)", so matching its first word found no depth_pA column at
+    # all. The proxy never permutes columns, so the source index is the view's index.
+    cols = view.model().sourceModel()._columns
+    assert name in cols, f"no {name} column"
+    return cols.index(name)
 
 
 def _raw_order(table: EventTable, colname: str) -> list:

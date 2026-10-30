@@ -13,7 +13,7 @@ and ``tests/io/test_s3_io_guide.py`` are written. Measured here on a real MainWi
 Calibration-panel combo and a real *Apply*, on a synthetic recording whose header declares
 channel 0 VOLTAGE and channel 1 nothing (sidecar lands under ``tmp_path``): treating channel 1
 as *current* moves every surface the bullet credits — Detect False->True, Analysis ▸ Run
-detection False->True, Batch detect False->True, Power spectrum False->True, I-V False->True,
+detection False->True, Batch detect False->True, Noise spectrum False->True, I-V False->True,
 the "Measure this recording" gate False->True ("Detection runs on CURRENT channels; this is a
 unknown channel." -> runnable), the status-bar chip "No current channel" -> "✓ Gain set: ×1 →
 pA", and the workflow strip's DETECT stage locked -> available.
@@ -39,11 +39,19 @@ import pytest
 
 from nanoscope.core.document import TraceDocument
 from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, RecordingMeta
+from nanoscope.gui.analysis_catalog import ANALYSIS_LABELS
+from nanoscope.gui.analysis_explorer import PAGE_NOISE
 from nanoscope.gui.calibration_panel import CalibrationPanel
 from nanoscope.gui.main_window import MainWindow
 from nanoscope.gui.workflow_status import Stage
 
 _GUIDE = Path(__file__).resolve().parents[1] / "docs" / "USER_GUIDE.md"
+
+#: The name the Analysis menu gives the PSD surface — ``main_window`` builds the menu item from
+#: this very label, and the guide and the combo tooltip use it. Read, never copied: 3775a55
+#: (2026-09-11) renamed it from "Power spectrum" to "Noise spectrum", and the hard-coded copy
+#: this module used to carry went stale with it.
+_NOISE = ANALYSIS_LABELS[PAGE_NOISE]
 
 FS = 50_000.0
 N = 20_000
@@ -121,7 +129,7 @@ def _surfaces(window) -> dict[str, object]:
         "Detect": panel._detection.detect_button.isEnabled(),
         "Run detection": window._act_run_detection.isEnabled(),
         "Batch detect": window._act_batch_detect.isEnabled(),
-        "Power spectrum": window._act_psd.isEnabled(),
+        _NOISE: window._act_psd.isEnabled(),
         "I-V": window._act_iv.isEnabled(),
         # NOT probe_button.isEnabled(): the baseline panel gates by styling, never by
         # setEnabled(False), so the button is enabled on both sides. This is the gate.
@@ -158,7 +166,7 @@ def moved(window, qtbot, tmp_path) -> list[str]:
 def test_the_override_moves_every_surface_the_bullet_credits_it_with(moved):
     """The premise the guide's sentence rests on, measured first: one *Apply* on the combo
     turns the whole analysis on for a channel the file declared nothing about."""
-    assert set(moved) == {"Detect", "Run detection", "Batch detect", "Power spectrum", "I-V",
+    assert set(moved) == {"Detect", "Run detection", "Batch detect", _NOISE, "I-V",
                           "Measure this recording", "calibration chip", "workflow strip"}, moved
 
 
@@ -188,7 +196,7 @@ def test_the_bullet_and_the_combo_tooltip_name_the_same_surfaces(qapp, qtbot, bu
     panel = CalibrationPanel(Session())
     qtbot.addWidget(panel)
     tip = _norm(panel._treat_as.toolTip())
-    vocabulary = ("Run detection", "Batch detect", "Power spectrum", "I-V",
+    vocabulary = ("Run detection", "Batch detect", _NOISE, "I-V",
                   "calibration chip", "workflow strip", "pane")
     claimed = [phrase for phrase in vocabulary if phrase.lower() in tip.lower()]
     assert len(claimed) >= 6, f"the tooltip stopped naming its surfaces: {tip!r}"

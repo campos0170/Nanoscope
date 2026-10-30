@@ -2445,7 +2445,8 @@ class DetectionPanel(QWidget):
             "Inspect and confirm the open-pore reference used to measure event amplitudes.")
         self.baseline_reference_button.clicked.connect(self.show_open_pore_baseline)
         row.addWidget(self.baseline_reference_button)
-        self.layout().insertWidget(0, bar)
+        # Pinned: a bare row would floor the Inspector (INVARIANT in MainWindow._build_docks).
+        self.layout().insertWidget(0, PinnedActions(bar))
         self.essential_settings_summary = _FixedLinesNote(3)
         self.essential_settings_summary.setAccessibleName("Essential view retained settings")
         self.essential_settings_summary.setStyleSheet("color:#8b9199;")
@@ -8261,46 +8262,42 @@ class EventTable(QWidget):
         """
         self._model.set_clock_offset(offset_s)
 
-    #: Text columns that identify the run rather than the row. Demoted when constant.
+    #: Text columns that identify the run rather than the row. Captioned when constant.
     _IDENTITY_COLUMNS = ("recording", "pore_id")
 
     def _demote_constant_columns(self, df: pd.DataFrame) -> None:
-        """Move any leading column that is IDENTICAL on every row to the far right,
-        and state its single value once, above the table.
+        """State once, above the table, the value of each identity column that is
+        IDENTICAL on every row. It moves no column: the column order places them.
 
         A column whose value never changes carries no per-row information, and these
-        two are full-width strings (a file stem and a pore id) sitting in visual
-        positions 1 and 2 of twenty. At the Inspector dock's real width that meant
+        two are full-width strings (a file stem and a pore id) in visual positions 1
+        and 2 of twenty in schema order. At the Inspector dock's real width that meant
         NO MEASURED COLUMN was on screen without scrolling sideways — on the surface
         the whole detection lands in. Measured on the owner's apoferritin run: the
         first visible measured column was off-screen at every dock width he uses.
 
-        Demoted, not hidden, and only while actually constant: a table pooling two
-        pores has a ``pore_id`` that varies, and there it is a real column and stays
-        where the schema puts it. The move is VISUAL only —
-        ``QHeaderView.moveSection`` reorders what is painted; the model, the frame,
-        the 20-column schema, sorting and every export are untouched.
+        This method used to move them to the far right itself, with
+        ``QHeaderView.moveSection``. It no longer moves anything, so it cannot fight the
+        layout the Columns… menu remembers: :meth:`_apply_column_preferences` runs right
+        after it and owns the order — the user's saved one, or by default
+        ``_SCIENTIFIC_ORDER``, which paints the scientific block first and both identity
+        columns after it, constant or not. Either way the order is VISUAL only; the
+        model, the frame, the 20-column schema, sorting and every export are untouched.
+
+        Demoted, not hidden, and captioned only while actually constant: a table pooling
+        two pores has a ``pore_id`` that varies, and there it is a real column whose
+        values are read in its cells, not stated once.
         """
-        header = self.view.horizontalHeader()
         cols = list(df.columns)
         shown: list[str] = []
-        # IN DECLARATION ORDER. Each move lands its column at the far right, so the LAST
-        # one moved ends up rightmost — iterating backwards would reverse them relative
-        # to the schema, which is a small thing that reads as a bug the first time
-        # someone compares the table with a CSV.
         for name in self._IDENTITY_COLUMNS:
             if name not in cols:
                 continue
             series = df[name]
             if len(series) and series.nunique(dropna=False) > 1:
                 continue
-            logical = cols.index(name)
-            visual = header.visualIndex(logical)
-            # The scientific default / remembered header layout owns ordering.
-            # This method now only presents the constant identity values once.
             value = "" if not len(series) else str(series.iloc[0] or "")
-            # An EMPTY constant carries nothing to state. It is still demoted (a blank
-            # full-width string column is the worst of both) but it earns no caption:
+            # An EMPTY constant carries nothing to state, so it earns no caption:
             # "recording = " on screen is noise pretending to be provenance.
             if value:
                 shown.append(f"{name} = {value}")

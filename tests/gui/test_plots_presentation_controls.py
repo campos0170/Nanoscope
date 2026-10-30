@@ -10,9 +10,9 @@ numbers, and each one has a regression here:
   (``set_fit``, ``set_fit_components``, ``set_scatter_fit``, ``VDepWindow.set_fit``)
   stay immediate — naming the model IS the confirmation.
 * **#13 "once the Fit has been applied, include the numerical values on the plot."**
-  The on-plot box now carries EVERY parameter, n, BIC and the KS verdict its own
-  tooltip has been promising, and the Scatter page — the one that owns the scatter-fit
-  combo — draws one at all.
+  The on-plot box now carries EVERY parameter, n, BIC and the numerical KS statistic
+  its own tooltip promises (the verdict itself stays in Details), and the Scatter page
+  — the one that owns the scatter-fit combo — draws one at all.
 * **#15 "more control over styling; the legend is not editable."** A legend entry is
   retyped in place on the source list, the legend moves to any corner, its font size
   is a control rather than a constant, and the automatic ``(n = N)`` is defeatable so
@@ -225,9 +225,10 @@ def test_the_on_plot_box_carries_every_parameter_not_just_the_headline(win):
     assert "μ_1" in text and "μ_2" in text, text
     assert "σ_1" in text and "σ_2" in text, "the widths were the missing half"
     assert "n = " in text and "BIC = " in text, text
-    # The Style checkbox's tooltip promises the KS verdict; the box now delivers it.
+    # The Style checkbox's tooltip promises the numerical KS statistic; the box delivers
+    # it. (The verdict stays in Details, not on the figure, since 779d4ec, 2026-09-06.)
     assert "KS = " in text, text
-    assert "KS verdict" in win._fit_values_check.toolTip()
+    assert "numerical KS statistic" in win._fit_values_check.toolTip()
 
 
 def test_the_scatter_page_draws_a_fit_values_box_at_all(win):

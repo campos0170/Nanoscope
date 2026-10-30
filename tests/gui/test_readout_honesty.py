@@ -397,9 +397,19 @@ def test_the_constant_identity_columns_are_demoted_and_stated_once(win, tmp_path
     _open(win, tmp_path)
     table = win._analysis_panel._table
     order = _visual_order(table)
-    assert order[-2:] == ["recording", "pore_id"], order
-    # NOT hidden: the value they carried is stated, once, above the table.
-    assert "recording = apo.dat" in table.constants_label.text()
+    # The scientific default order owns placement now, not a move to the far right:
+    # both identity columns are painted after every scientific column, so neither of
+    # them leads the table.
+    last_scientific = max(order.index(n) for n in EventTable._SCIENTIFIC_ORDER if n in order)
+    cols = list(table._model.df.columns)
+    for name in EventTable._IDENTITY_COLUMNS:
+        assert order.index(name) > last_scientific, order
+        # Demoted, NOT hidden.
+        assert not table.view.isColumnHidden(cols.index(name)), name
+    # ...and the value they carried is stated, once, above the table.
+    caption = table.constants_label.text()
+    assert "recording = apo.dat" in caption and "pore_id = pore-1" in caption, caption
+    assert caption.count("recording =") == 1 and caption.count("pore_id =") == 1, caption
     assert not table.constants_label.isHidden()
 
 
@@ -407,7 +417,8 @@ def test_a_measured_column_is_now_visible_at_a_realistic_dock_width(win, tmp_pat
     """THE POINT OF THE DEMOTION, IN PIXELS. Measured against the schema order it
     replaced: the two identity columns are full-width strings (a file stem and a pore
     id) in visual positions 1 and 2 of twenty, and every pixel they take is a pixel
-    before the first measured column."""
+    before the first measured column. The scientific default order does the demoting
+    now, and it rearranges more than these two columns, so the saving is a floor."""
     _open(win, tmp_path, name="a_recording_with_a_realistic_file_name.dat")
     table = win._analysis_panel._table
     header = table.view.horizontalHeader()
@@ -420,8 +431,9 @@ def test_a_measured_column_is_now_visible_at_a_realistic_dock_width(win, tmp_pat
     now = _width_to_depth(_visual_order(table))
     schema_order = _width_to_depth(cols)          # what the table used to paint
     assert now < schema_order
-    # ...and the saving is the whole width of the two demoted columns, not a rounding.
-    assert schema_order - now == sum(
+    # ...and the saving is at least the whole width of the two demoted columns, not a
+    # rounding.
+    assert schema_order - now >= sum(
         header.sectionSize(cols.index(n)) for n in EventTable._IDENTITY_COLUMNS)
     # No leading text-identity column survives ahead of the first measured one.
     order = _visual_order(table)

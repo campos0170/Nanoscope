@@ -207,6 +207,7 @@ __all__ = [
     "collect_baseline_warnings",
     "baseline_progress_scope",
     "DEFAULT_BASELINE",
+    "STUDY_EXPORT_BASELINE",
     "UNPROBED_DEFAULT_WARNING",
     "level_occupancy_warning",
     "alternative_level",
@@ -1471,7 +1472,8 @@ class BaselineConfig:
         return f"{self.method}, window {self.window_s * 1e3:g} ms"
 
 
-#: THE default. The only baseline-parameter literal in the app.
+#: THE default, and the only DEFAULT baseline in the app. Every baseline-parameter
+#: literal (this one and STUDY_EXPORT_BASELINE below) is named in this module.
 #:
 #: These are the notebook's own ``MASKED_MEDIAN_DEFAULTS`` -- the one parameter set
 #: in evidence that is a *default* rather than a per-recording override. On the real
@@ -1496,6 +1498,14 @@ UNPROBED_DEFAULT_WARNING = (
     "health check reading ok. Open the Preprocess tab and press \u201cMeasure this "
     "recording\u201d before trusting a depth from this table."
 )
+
+#: NOT a default: the study review export's baseline, a constant median of the prepared
+#: current, whatever the Preprocess form says. Named here because this module owns every
+#: baseline-parameter literal; `study_event_bridge.prepare_review_export` stamps its
+#: fingerprint as ``study_fixed_baseline_fingerprint``. Keep ``window_s`` at the class
+#: default so old and new exports carry one fingerprint; `adapt_to_length`'s too-short
+#: constant pins the legacy 10 ms and fingerprints differently.
+STUDY_EXPORT_BASELINE = BaselineConfig(method="constant")
 
 
 def level_occupancy_warning(

@@ -168,8 +168,10 @@ def test_unknown_artifact_survives_main_window_gather_byte_for_byte(qapp, qtbot)
     assert carried.blobs == opaque.blobs
     assert carried.extra == opaque.extra
     from nanoscope.core.acquisition_state import WORKSPACE_KEY
-    assert {key: value for key, value in state.workspace.extra.items() if key != WORKSPACE_KEY} == {
-        "plugin-order": ["plugin.example/result"]}
+    from nanoscope.core.sample_rate_state import WORKSPACE_KEY as RATE_KEY
+    app_owned = {WORKSPACE_KEY, RATE_KEY}
+    assert {key: value for key, value in state.workspace.extra.items()
+            if key not in app_owned} == {"plugin-order": ["plugin.example/result"]}
 
 
 def test_loaded_workspace_is_lazy_and_does_not_open_surface_windows(qapp, qtbot):

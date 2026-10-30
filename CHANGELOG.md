@@ -209,6 +209,31 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- **A project can be saved after "Close only this recording".** Once a segment's parent recording was
+  closed, every save failed with "Could not save the project:" and the parent's path, and wrote
+  nothing, not even other recordings' work; the crash-recovery copy stopped updating too ("Could not
+  update the crash-recovery copy: KeyError ..."). The save now reaches the "N segment(s) cannot be
+  saved" question, **Save without them** writes the rest, and the recovery copy keeps the dropped
+  segments until they are saved. Broken since 2026-09-12.
+- **The Event inspector can be dragged narrow again.** The Detection page's Controls row (Essential /
+  Advanced and **Baseline reference…**) kept the docked inspector at least about 330 px wide since
+  2026-09-11; it now sits in a pinned strip and the dock narrows to its tab bar as before.
+- **Curate in main workspace** (study workflows) no longer opens an event the study accepted but that
+  touches the first or last sample of the exported trace as accepted beside `clipped_by_boundary`, and an
+  imported `dwell>max_dwell_s` rejection keeps its reason (and stays rejected) instead of arriving as a
+  rejection with no reason.
+- **Saving a study recipe** refuses a read-only recipe instead of replacing it, and keeps the file's
+  permissions and extended attributes; it had reset them to 0600 and dropped the attributes.
+- Study windows recognise a recording opened under another capitalisation of its path as the same
+  file (macOS volumes ignore case), when reopening a review copy and when saving curation back.
+- **Save figure bundle** and **Save study recipe** ask through the app's own save dialog, with its
+  overwrite question, like every other export.
+- Closing a study figure editor while its styling was still being saved to an Acid study reported a
+  failure after a save that had succeeded; the editor now hides on close and is freed later.
+- The Plots window's Data sources buttons (**Save name as project default**, **Project source
+  color…**) are stacked, so the controls column fits its 360 px budget again.
+- The User Guide names **Analysis ▸ Noise spectrum of the measured region** and **Add event from
+  cursors**, the menu's own labels.
 - **Every add files the same row.** Ctrl+M and the Measure tab's **Add event** button now add through
   the same path as **D**: the same record of how each edge was made (`bounds_source`, the span drawn,
   `fit_json`), the same second press for an edge that is not fitted ("Press again to add it as
