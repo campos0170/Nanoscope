@@ -1276,7 +1276,7 @@ channel, and **C** turns Measure on. After you close the selected recording, sel
 | **G** / **Shift+G** | Next / previous window at the current zoom (the Scan step). |
 | **X** | Discard the mask; Measure stays on. |
 | **E** | Draw mode on or off (also **View ▸ Drag draws an event span (draw mode)**, Ctrl+Shift+E). |
-| Return / Enter, **Esc** | Add, and cancel a draw or discard the mask. These two act only when the trace got focus from a click or the pointer arriving, so a habitual Return or Esc after closing a dock does nothing. |
+| Return / Enter, **Esc** | Add, and cancel a draw or discard the mask. These two act only when the trace got focus from a click or the pointer arriving, so a habitual Return or Esc after closing a dock does nothing until you click the trace. |
 
 **Draw mode.** With draw mode on, a plain left-drag on the trace draws a span instead of box-zooming,
 and releasing fits its edges. Holding **Option** while you start a drag does the opposite of the

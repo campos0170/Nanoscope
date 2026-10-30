@@ -30,14 +30,12 @@ members it is handed.
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 
 from PySide6 import QtCore, QtGui
 
-from ..analysis.edge_fit import REASON_NOT_REQUESTED
-from ..analysis.manual_events import EdgeRecord
+from ..analysis.manual_events import EdgeRecord, join_edge_fits
 
 __all__ = ["TraceKeyController"]
 
@@ -126,7 +124,8 @@ class TraceKeyController(QtCore.QObject):
 
     def _alias(self, slot) -> None:
         """Return / Enter / Esc act only when the user pointed at the trace (see the module
-        docstring); after the window parked focus here they do nothing."""
+        docstring); after the window parked focus here they do nothing until a click on the
+        trace wakes them (`TraceView.mousePressEvent`)."""
         if self._tv.last_focus_reason() == QtCore.Qt.FocusReason.MouseFocusReason:
             slot()
 
@@ -463,36 +462,16 @@ class TraceKeyController(QtCore.QObject):
         """The row's ``fit_json`` (None when no edge is fitted): each edge's part of the fit that
         put it there (cursor design 5.5). One fit that set both edges (``C``, a drawn span) is
         stored as it came. Edges set by two fits (``S`` then ``F``), or one moved by hand since
-        its fit, are merged into the latest fit's record: each edge's entry, window, rise and
-        placed position come from its own fit, and an edge no fit set reads "not requested", as
-        in a fit asked for the other edge only. So the record never calls an edge unfitted that
-        ``bounds_source`` calls ``fit:step``."""
+        its fit, are merged into the latest fit's record by `join_edge_fits`, the join a merge
+        uses: each edge's entry, window, rise and placed position come from its own fit, and an
+        edge no fit set reads "not requested", as in a fit asked for the other edge only. So the
+        record never calls an edge unfitted that ``bounds_source`` calls ``fit:step``."""
         if "fit:step" not in (s_src, e_src):
             return None
         own = {name: edge.fit for name, edge, src in (("start", self._start, s_src),
                                                       ("end", self._end, e_src))
                if src != "drawn" and edge.fit}
-        if not own:
-            return None
-        if len(own) == 2 and own["start"] == own["end"]:
-            return own["start"]
-        fits = {name: json.loads(text) for name, text in own.items()}
-        body = json.loads(self._fit_json if self._fit_json in own.values()
-                          else next(iter(own.values())))
-        for key in ("W", "rise"):
-            part = {name: fit[key][name] for name, fit in fits.items()
-                    if name in (fit.get(key) or {})}
-            if part or key in body:
-                body[key] = part
-        body["edges"] = {
-            name: fits[name]["edges"][name] if name in fits else {
-                "pos": int(pos), "fitted": False, "z": 0.0, "step": 0.0,
-                "reason": REASON_NOT_REQUESTED}
-            for name, pos in zip(("start", "end"), bounds)}
-        body["placed"] = [fits[name]["placed"][i] if name in fits else int(bounds[i])
-                          for i, name in enumerate(("start", "end"))]
-        body["edges_requested"] = list(fits)
-        return json.dumps(body, separators=(",", ":"), sort_keys=True, allow_nan=False)
+        return join_edge_fits(own, bounds, shared=self._fit_json)
 
     def step_window(self, direction: int) -> None:
         """``G`` / Shift+``G``: the next / previous window at the same zoom. With no mask nothing

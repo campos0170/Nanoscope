@@ -2304,6 +2304,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # those gates and must move with them, not on the next selection (S7-CAL1/CAL2).
         self._session.calibrationChanged.connect(
             lambda *_: (self._sync_detection_action(), self._sync_ml_detection_action()))
+        # It can also move the panel's target to another channel of the recording; the trace's
+        # keys, the Navigator and the Scan bar follow it there.
+        self._session.calibrationChanged.connect(self._follow_analysis_target)
 
         # Unsaved-work tracking. The SAME state-changing signals that refresh the strip also
         # mark the session dirty — each is a mutation a project save would persist: a document
@@ -3381,13 +3384,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # voltage is still an analysis of its current, and aligned channels can have different x
         # extents. All three surfaces must describe the same annotation target, and so must the
         # trace's keys.
-        target_doc, target_channel = annotation_target
-        step("Navigator", lambda: self._navigator.set_target(target_doc, target_channel))
-        step("Scan", lambda: self._pan_scrollbar.set_target(target_doc, target_channel))
-        # While Measure is off the trace's keys act on this pane: focus follows the pointer onto
-        # it, Shift+Up / Shift+Down zoom about the pointer, and C finds the event under it.
-        step("Trace keys", lambda: self._trace_view.set_annotation_target(
-            target_doc, target_channel))
+        self._point_at_annotation_target(*annotation_target, step)
         step("rate", lambda: self._update_rate_label(doc_id))
         step("Detect", self._sync_detection_action)
         step("Run ML", self._sync_ml_detection_action)
@@ -3459,6 +3456,44 @@ class MainWindow(QtWidgets.QMainWindow):
                 traceback.print_exc()
 
         return step
+
+    def _point_at_annotation_target(self, doc_id: str, channel: int, step) -> None:
+        """Point the Navigator, the Scan bar and the trace's keys at one ``(doc_id, channel)``,
+        each through ``step`` (:meth:`_retarget_step`). They describe the channel being
+        annotated, so they move together: on a selection, and when a calibration edit moves
+        Analysis's target (:meth:`_follow_analysis_target`)."""
+        step("Navigator", lambda: self._navigator.set_target(doc_id, channel))
+        step("Scan", lambda: self._pan_scrollbar.set_target(doc_id, channel))
+        # While Measure is off the trace's keys act on this pane: focus follows the pointer onto
+        # it, Shift+Up / Shift+Down zoom about the pointer, and C finds the event under it.
+        step("Trace keys", lambda: self._trace_view.set_annotation_target(doc_id, channel))
+
+    def _follow_analysis_target(self, doc_id: str, _channel: int) -> None:
+        """A calibration edit moved Analysis's target to another channel of the recording the
+        keys are on: point the keys, the Navigator and the Scan bar there and re-gate Measure, as
+        selecting the recording again does.
+
+        "Treat this channel as" can make another channel the recording's current one. The
+        AnalysisPanel then repoints itself and its Measure panel (its own ``calibrationChanged``
+        slot, connected before this one), and nothing pointed the rest: with Measure off the keys
+        stayed on the old channel's pane, so the pointer took no focus on the new current's pane,
+        Shift+Up / Shift+Down zoomed about the centre there, and the caption and the Navigator
+        stayed on the old channel until the recording was selected again. A mask on the old
+        channel goes as on a selection: the Measure panel turned Measure off when it moved."""
+        target = self._analysis_panel.current_target()
+        keys = self._trace_view.annotation_target()
+        if (target is None or keys is None or target == keys
+                or target[0] != doc_id or keys[0] != doc_id):
+            return
+        failures: list[str] = []
+        step = self._retarget_step(failures)
+        self._point_at_annotation_target(*target, step)
+        step("Measure", self._sync_measure_action)
+        if failures:
+            self.statusBar().showMessage(
+                "The current channel moved, but " + ", ".join(sorted(set(failures)))
+                + " could not follow it; select the recording again before trusting them.",
+                12000)
 
     def _sync_detection_action(self) -> None:
         """Mirror the AnalysisPanel's own runnable state — it resolves the selection to the

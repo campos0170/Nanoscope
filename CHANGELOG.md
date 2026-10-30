@@ -248,6 +248,12 @@ tags identify tested development baselines and do not promise a stable file or A
   **D** added, until the keyboard left the trace and came back. The pointer merely arriving still
   wakes nothing after a park: the trace grows under a pointer resting on the closed panel, and a
   habitual Return there must not add.
+- **Treat this channel as** (Calibration tab) takes the trace keys to the new current channel. When
+  it made another channel the recording's current one, the analysis moved there, but the keys, the
+  Navigator and the Scan strip stayed on the old channel until the recording was selected again:
+  with Measure off, focus followed the pointer onto the old channel's pane and not the new one's,
+  **Shift+↑ / Shift+↓** ignored the pointer on the new one, and the label on the trace stayed on the
+  old pane. A mask on the old channel is still cleared, as selecting another channel clears it.
 - **Delete** of a hand-made event from the inspector dropped its *Hand-made only* filter and put both
   curation windows on a detected event. Each window now keeps its filter and lands, quietly, on the
   next event of its own list. **Edit ▸ Undo** of an add the windows were showing does the same.

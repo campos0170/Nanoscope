@@ -633,19 +633,20 @@ def _index_cell(value: Any) -> Any:
     return pd.NA if value is None or pd.isna(value) else int(value)
 
 
-def join_edge_fits(own: Mapping[str, str], bounds: tuple[int, int]) -> str | None:
+def join_edge_fits(own: Mapping[str, str], bounds: tuple[int, int], *,
+                   shared: str | None = None) -> str | None:
     """One ``fit_json`` from the record of the fit that set each edge (``own``: edge name -> that
     record, start first), in the shape the trace keys store for edges set by two fits (cursor
     design 5.5): each edge's entry, window (``W``), rise and placed position from its own record,
-    an edge no record set marked "not requested" at its bound, and the shared parameters from the
-    first record. One record that set both edges comes back as it is; ``None`` when there is
-    none."""
+    an edge no record set marked "not requested" at its bound, and the shared parameters from
+    ``shared`` when it is one of the records (the trace keys pass the latest fit's), else from the
+    first. One record that set both edges comes back as it is; ``None`` when there is none."""
     if not own:
         return None
     if len(own) == 2 and own["start"] == own["end"]:
         return own["start"]
     fits = {name: json.loads(text) for name, text in own.items()}
-    out = json.loads(next(iter(own.values())))
+    out = json.loads(shared if shared in own.values() else next(iter(own.values())))
     for key in ("W", "rise"):
         part = {name: fit[key][name] for name, fit in fits.items() if name in (fit.get(key) or {})}
         if part or key in out:
