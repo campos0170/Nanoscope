@@ -1261,10 +1261,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         #: thrown away (C24). A different object here means a genuinely different table:
         #: a project restore installing the saved run, a detector switch, a re-detection.
         self._seeded_from: AnalysisResult | None = None
-        #: The table the user chose in the Table selector, per (doc_id, channel). A hand-made
-        #: event is filed in THIS table, so where Ctrl+M lands never depends on a side effect
-        #: (a detector run, a switch of recording, a reopen). A channel nobody chose a table
-        #: for files into whatever table is shown. See :meth:`target_module_id`.
+        #: The table each channel shows, per (doc_id, channel): what the Table selector names.
+        #: Written with ``_active_detection`` (:meth:`_set_active_detection`), so it follows the
+        #: table on screen through every door that changes it (the selector, a newly installed
+        #: run, Reconcile, the detector combo) and comes back with the channel and the project.
+        #: A hand-made event is filed in the table on screen (:meth:`target_module_id`), the one
+        #: Edit ▸ Undo walks back.
         self._chosen_table: dict[tuple[str, int], str] = {}
         #: Manual-table contracts already built, by `manual_events.contract_key`. A contract
         #: costs a whole-recording baseline, so it is built once per (recording, channel,
@@ -1279,8 +1281,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         #: ran is not overwritten by a three-second-old view of it.
         self._manual_job: tuple[str, int, EventSet] | None = None
         #: Open-pore autocorrelation times already measured for a detector table, by
-        #: (doc_id, channel, module_id, fs, baseline fingerprint): tau barely depends on the
-        #: rows, and measuring it is a pass over the recording.
+        #: (doc_id, channel, module_id, fs) and the run that made the table (its signal chain,
+        #: estimator and run stamp): tau barely depends on the rows, and measuring it is a pass
+        #: over the recording.
         self._tau_cache: dict[tuple[Any, ...], float] = {}
         #: ``(doc_id, channel, module_id)`` of a table the panel must keep on screen while it
         #: writes ANOTHER table (a copy into Manual): a write makes its table the shown one,
@@ -1813,11 +1816,25 @@ class AnalysisPanel(QtWidgets.QWidget):
         two threshold detectors; an ML result keeps its own tab and leaves the combo alone
         (a combo cannot name ``detect.keras``, so writing to it would be the same lie in
         the other direction).
+
+        ...and the channel's remembered table with them (S9-01). Measured: pick Schmitt in the
+        Table selector, then Reconcile. Reconciled took the screen while the choice still said
+        Schmitt, so Ctrl+M filed the event into Schmitt with "Ctrl+Z undoes it", and Ctrl+Z,
+        keyed to the table on screen, took back the curator's last Reconciled ruling instead.
+        The choice is written only when the channel shown HOLDS ``module_id``'s table, so it is
+        the table on screen: a save writes it and a reopen shows it. The project restore also
+        calls this with the panel-wide id the project saved (Schmitt by default) over a channel
+        that may have no such table; recording that as the channel's choice made a channel with
+        no table refuse Ctrl+M after a reopen ("Schmitt has no stored table on this channel")
+        instead of starting its Manual table.
         """
         self._active_detection = module_id
         if module_id in (_MODULE_ID, _CUSUM_MODULE_ID):
             self._combo_detector = module_id
             self._detection.set_detector(module_id)
+        if (self._sel is not None and self._session.has_document(self._sel[0])
+                and self._session.results.get(*self._sel, module_id) is not None):
+            self._chosen_table[self._sel] = module_id
 
     def _available_detection_results(self) -> tuple[AnalysisResult, ...]:
         """Every stored EventSet for the resolved selection, in the shared source order."""
@@ -1894,9 +1911,14 @@ class AnalysisPanel(QtWidgets.QWidget):
         res = self._session.results.get(doc_id, channel, module_id)
         if res is None and module_id == MANUAL_MODULE_ID and self._manual_offered():
             # Choosing Manual before it exists creates it empty: that is the user's choice.
+            previous = self._chosen_table.get((doc_id, channel))
             self._chosen_table[(doc_id, channel)] = module_id
             if self._create_manual_table(doc_id, channel) is None:
-                self._chosen_table.pop((doc_id, channel), None)
+                # Nothing was created, so the table on screen did not change, nor does the choice.
+                if previous is None:
+                    self._chosen_table.pop((doc_id, channel), None)
+                else:
+                    self._chosen_table[(doc_id, channel)] = previous
                 self._sync_result_selector()
             return
         if res is None or not isinstance(res.payload, EventSet):
@@ -1965,8 +1987,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         asks it to decide whether anything has changed, and :meth:`_load_stored_detection`
         asks it to decide what to display, and the two must never disagree.
 
-        A table the user CHOSE for this target comes first: the choice is per channel and
-        survives a switch of recording, which the panel-wide ``_active_detection`` does not."""
+        The table this target remembers comes first (the one it last showed, or a choice a
+        project restored): it is per channel and survives a switch of recording, which the
+        panel-wide ``_active_detection`` does not."""
         chosen = self._chosen_table.get((doc_id, int(channel)))
         for mid in dict.fromkeys(
                 (*((chosen,) if chosen else ()), self._active_detection, *_DETECTION_MODULE_IDS)):
@@ -4435,9 +4458,16 @@ class AnalysisPanel(QtWidgets.QWidget):
 
     # -- results display -------------------------------------------------------------------------
     def _on_results_changed(self, doc_id: str, module_id: str) -> None:
-        # resultsChanged carries (doc_id, module_id) but not the channel; fetch by the
-        # selected channel, so a sibling channel's run is a harmless idempotent redraw.
+        # resultsChanged carries (doc_id, module_id) but not the channel, so a write to a
+        # sibling channel used to be fetched by the selected channel's: its own older table of
+        # that module took the screen and, with it, the channel's remembered table (a Batch
+        # detect on channel 0 put channel 1's old Schmitt over its CUSUM). The session says
+        # which channel it is announcing; a write to another one changes nothing shown here.
         if self._sel is None or doc_id != self._sel[0]:
+            return
+        written = self._session.announcing
+        if (written is not None and written[0] == doc_id and written[2] == module_id
+                and written[1] != self._sel[1]):
             return
         # A source table can be replaced while its derived Reconciled snapshot is on
         # screen (Undo/Redo, a scripted install, or another detector run). Preserve and
@@ -5034,13 +5064,21 @@ class AnalysisPanel(QtWidgets.QWidget):
     def target_module_id(self, doc_id: str, channel: int) -> str:
         """The table a hand-made event on ``(doc_id, channel)`` is filed in.
 
-        The channel's CHOSEN table (the Table selector remembers one per channel), else the
-        table on screen, else Manual: a channel with no table at all files into the Manual
-        table, which the door creates. Never depends on which detector ran last."""
-        chosen = self._chosen_table.get((doc_id, int(channel)))
+        On the channel shown, THE TABLE ON SCREEN, which the Table selector names: it is the
+        table Edit ▸ Undo walks back, so the add's "Ctrl+Z undoes it" is true, and with
+        Reconciled on screen the door refuses rather than file into a source table out of view
+        (S9-01). Otherwise the channel's CHOSEN table (remembered per channel), else the table it
+        would show, else Manual: a channel with no table at all files into the Manual table,
+        which the door creates."""
+        channel = int(channel)
+        if (doc_id, channel) == self._sel:
+            shown = self._stored_detection()
+            if shown is not None:
+                return shown.module_id
+        chosen = self._chosen_table.get((doc_id, channel))
         if chosen:
             return chosen
-        shown = self._stored_to_show(doc_id, int(channel))
+        shown = self._stored_to_show(doc_id, channel)
         return shown.module_id if shown is not None else MANUAL_MODULE_ID
 
     def chosen_tables(self) -> dict[tuple[str, int], str]:
@@ -5048,14 +5086,16 @@ class AnalysisPanel(QtWidgets.QWidget):
         return dict(self._chosen_table)
 
     def apply_chosen_table(self, doc_id: str, channel: int, module_id: str) -> None:
-        """Record a restored choice. Quiet: it changes where the NEXT hand-made event is filed
-        and which stored table is shown when the channel is selected, nothing on screen now."""
+        """Record a restored choice. Quiet: it decides which stored table the channel shows, and
+        so where its hand-made events are filed, once the channel is selected; nothing on screen
+        changes now."""
         self._chosen_table[(doc_id, int(channel))] = str(module_id)
 
     def stored_to_show(self, doc_id: str, channel: int) -> AnalysisResult | None:
-        """The stored table the panel shows (or would show) for ``(doc_id, channel)``: the
-        user's choice for that channel, else the table on screen. Public so a figure that wants
-        ONE table per recording and channel asks the same question the panel answers."""
+        """The stored table the panel shows (or would show) for ``(doc_id, channel)``: the table
+        that channel remembers (the one it last showed), else the table on screen. Public so a
+        figure that wants ONE table per recording and channel asks the same question the panel
+        answers."""
         return self._stored_to_show(doc_id, int(channel))
 
     def target_table_name(self, doc_id: str, channel: int) -> str:
@@ -5137,16 +5177,14 @@ class AnalysisPanel(QtWidgets.QWidget):
         way forward: a Manual table is never re-run."""
         if self._sel is None or not isinstance(res.payload, EventSet):
             return None
-        doc_id, channel = self._sel
-        live_fs = self._session.document(doc_id).meta.sample_rate_hz
+        live_fs = self._session.document(self._sel[0]).meta.sample_rate_hz
         stamped = stale_rate_hz(res.payload.provenance, live_fs)
         if stamped is not None:
             now = "unknown" if not live_fs else f"{float(live_fs):,.6g} Hz"
             return (f"The sample rate changed since this Manual table was built "
                     f"({stamped:,.6g} Hz → {now}): every time in it is on the old rate. "
                     "Rebuild the Manual table first.")
-        live = tuple(self._session.calibration(doc_id, channel).fingerprint())
-        if tuple(res.calibration_fingerprint) != live:
+        if self._calibration_moved(res):
             return ("The calibration changed since this Manual table was built, so its depths "
                     "are on the old gain. Rebuild the Manual table first.")
         if self._baseline_staleness(res) is not None:
@@ -5238,10 +5276,8 @@ class AnalysisPanel(QtWidgets.QWidget):
 
     def _judge_manual_staleness(self, res: AnalysisResult) -> None:
         """The amber line for a Manual table: the three stamps, each repaired by Rebuild."""
-        doc_id, channel = self._sel
-        live_fs = self._session.document(doc_id).meta.sample_rate_hz
-        calibration_moved = (tuple(res.calibration_fingerprint)
-                             != tuple(self._session.calibration(doc_id, channel).fingerprint()))
+        live_fs = self._session.document(self._sel[0]).meta.sample_rate_hz
+        calibration_moved = self._calibration_moved(res)
         if stale_rate_hz(res.payload.provenance, live_fs) is not None:
             self._stale.show_message(
                 self._manual_stale_reason(res), kind=_STALE_SAMPLE_RATE,
@@ -5676,7 +5712,13 @@ class AnalysisPanel(QtWidgets.QWidget):
                 return float(stored)
         except (TypeError, ValueError):
             pass
-        key = (doc_id, channel, module_id, fs, prov.get("baseline_fingerprint"))
+        # Keyed on the table's own RUN, not only on its estimator: a re-run with another
+        # low-pass (or none) keeps the baseline fingerprint, and the first run's tau and filter
+        # floor came back for it (S9-12). The signal digest names the low-pass and the rest of
+        # the chain the tau is measured on; ``detected_at`` is new on every run and survives an
+        # add or a merge, so a tau is measured once per run, not once per edit.
+        key = (doc_id, channel, module_id, fs, str(detection_signal_key(prov)),
+               str(prov.get("baseline_fingerprint")), str(prov.get("detected_at")))
         hit = self._tau_cache.get(key)
         if hit is not None:
             return hit
@@ -5772,6 +5814,33 @@ class AnalysisPanel(QtWidgets.QWidget):
                 if isinstance(r.payload, EventSet) and len(r.payload.df)
                 and self._session.has_document(r.doc_id)]
 
+    def _statistics_staleness(self, res: AnalysisResult) -> tuple[str, str] | None:
+        """Why the statistics export leaves ``res`` out, or ``None``: ``(cause, sentence)``, the
+        cause for the "Left out:" list and the sentence, way forward first, for a refusal.
+
+        The amber line's own two tests (``stale_rate_reason`` and :meth:`_calibration_moved`).
+        Each row is re-measured on today's signal against the ``baseline_pA`` the table stored,
+        so a table on an old calibration mixed two gains in one row. Measured (S9-02): a 300 pA
+        event over -1000 pA, then the gain corrected to 2, came out with baseline -1000 (old
+        gain), level -1399 (new gain), amplitude -399, frac_amplitude -0.40 and SNR -48.5,
+        stamped ``cal_gain`` 2.0, with nothing said."""
+        name = detector_name(res.module_id)
+        meta = self._session.document(res.doc_id).meta
+        way = ("first rebuild the Manual table" if res.module_id == MANUAL_MODULE_ID
+               else "first re-run its source detectors, then reconcile again"
+               if res.module_id == CONSENSUS_MODULE_ID else "first re-run detection")
+        if stale_rate_reason(res.payload.provenance, meta.sample_rate_hz) is not None:
+            return ("on another sample rate",
+                    f"{way}. The {name} table was measured on another sample rate than "
+                    f"{meta.path.name} has now, so its times are on a clock the trace no longer "
+                    "has.")
+        if self._calibration_moved(res):
+            return ("on the old calibration",
+                    f"{way}. The calibration changed since the {name} table was measured, so "
+                    "its baselines are on the old gain, and statistics measured on the "
+                    "re-calibrated signal against them would mix the two.")
+        return None
+
     def export_event_statistics(self, path: str | Path | None = None, *, scope: str = "shown",
                                 amplitude_method: str = "median") -> Path | None:
         """Write the full statistics (mean, median, std, variance, min, max, ptp, rms, skewness,
@@ -5782,12 +5851,18 @@ class AnalysisPanel(QtWidgets.QWidget):
         like the measurement lists it replaces, and works for automatic tables too. Each row is
         measured on the signal its table was measured on, with the table's own baseline, noise
         and polarity. Several tables, or every Manual table of several recordings, land in ONE
-        file. A table on another clock than its recording is left out and said so.
+        file. A table on another clock or calibration than its recording is left out and said so
+        (:meth:`_statistics_staleness`); the table on screen alone is refused before the file
+        dialog, with the way forward.
 
         ``path`` None asks (the `ask_export_path` seam). Returns the file written, or ``None``."""
         tables = self.event_statistics_tables(scope)
         if not tables:
             self.statusMessage.emit("There are no events to export statistics for.")
+            return None
+        stale = [self._statistics_staleness(res) for res in tables]
+        if scope == "shown" and stale[0] is not None:
+            self.runRefused.emit("Nothing was exported — " + stale[0][1])
             return None
         if path is None:
             chosen = ask_export_path(
@@ -5799,12 +5874,11 @@ class AnalysisPanel(QtWidgets.QWidget):
         frames: list[pd.DataFrame] = []
         left_out: list[str] = []
         skipped_rows = 0
-        for res in tables:
+        for res, why in zip(tables, stale):
             name = detector_name(res.module_id)
             meta = self._session.document(res.doc_id).meta
-            stale = stale_rate_reason(res.payload.provenance, meta.sample_rate_hz)
-            if stale is not None:
-                left_out.append(f"{name} of {meta.path.name} (on another sample rate)")
+            if why is not None:
+                left_out.append(f"{name} of {meta.path.name} ({why[0]})")
                 continue
             try:
                 signal, fs = self._active_signal(res.payload.provenance, strict=True,
@@ -5902,16 +5976,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         if self._sel != (doc_id, channel) or not self._session.has_document(doc_id):
             return refuse("Nothing was added: the span is not on the channel shown in the "
                           "Analysis panel. Select that channel, then add the event.")
-        meta = self._session.document(doc_id).meta
-        runnable, _why = self._gate_for(doc_id, channel)
-        if not runnable:
-            if meta.sample_rate_hz is None:
-                return refuse("Nothing was added: an event needs a sample rate for its dwell "
-                              "time. The readout works without one; declare a rate in File "
-                              "Info to add events.")
-            kind = self._session.effective_kind(doc_id, channel)
-            return refuse("Nothing was added: events are added on a current channel, and this "
-                          f"is a {kind.value} channel.")
+        gate = self._gate_add_refusal(doc_id, channel)
+        if gate is not None:
+            return refuse(gate)
         got = self._raw_signal(doc_id, channel)
         if got is None:
             return refuse("Nothing was added: this channel has no samples.")
@@ -5924,32 +5991,21 @@ class AnalysisPanel(QtWidgets.QWidget):
 
         module_id = self.target_module_id(doc_id, channel)
         name = detector_name(module_id)
-        if module_id == CONSENSUS_MODULE_ID:
-            return refuse(_RECONCILED_ADD_REFUSAL)
+        table_refusal = self._table_add_refusal(doc_id, channel, module_id)
+        if table_refusal is not None:
+            return refuse(table_refusal)
         res = self._session.results.get(doc_id, channel, module_id)
         created = False
         try:
-            if module_id == MANUAL_MODULE_ID:
-                if res is None:
-                    QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-                    try:
-                        contract = self._manual_contract(doc_id, channel)
-                    finally:
-                        QtWidgets.QApplication.restoreOverrideCursor()
-                    res = self._manual_result(doc_id, channel, contract,
-                                              empty_manual_events(contract))
-                    created = True
-                else:
-                    stale = self._manual_stale_reason(res)
-                    if stale is not None:
-                        return refuse(f"Nothing was added. {stale}")
-            else:
-                if res is None or not isinstance(res.payload, EventSet):
-                    return refuse(f"Nothing was added: {name} has no stored table on this "
-                                  "channel. Show a table, or the Manual table.")
-                stale = self._stale_edit_refusal(res, "Nothing was added.")
-                if stale is not None:
-                    return refuse(stale)
+            if module_id == MANUAL_MODULE_ID and res is None:
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                try:
+                    contract = self._manual_contract(doc_id, channel)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                res = self._manual_result(doc_id, channel, contract,
+                                          empty_manual_events(contract))
+                created = True
         except Exception as exc:  # noqa: BLE001 — the contract can fail on a degenerate trace
             return refuse(f"Nothing was added: {exc}")
 
@@ -5999,6 +6055,55 @@ class AnalysisPanel(QtWidgets.QWidget):
         self.last_add_outcome = AddOutcome(True, message, new_id, module_id, created)
         self.eventAdded.emit(int(new_id), module_id)
         return self.last_add_outcome
+
+    def _gate_add_refusal(self, doc_id: str, channel: int) -> str | None:
+        """The door's refusal of a channel that takes no events, or ``None``."""
+        if self._gate_for(doc_id, channel)[0]:
+            return None
+        if self._session.document(doc_id).meta.sample_rate_hz is None:
+            return ("Nothing was added: an event needs a sample rate for its dwell time. The "
+                    "readout works without one; declare a rate in File Info to add events.")
+        kind = self._session.effective_kind(doc_id, channel)
+        return ("Nothing was added: events are added on a current channel, and this is a "
+                f"{kind.value} channel.")
+
+    def _table_add_refusal(self, doc_id: str, channel: int, module_id: str) -> str | None:
+        """The door's refusal of ANY span for the table ``module_id`` (Reconciled, a stale
+        table, a detector with no stored table), or ``None``."""
+        if module_id == CONSENSUS_MODULE_ID:
+            return _RECONCILED_ADD_REFUSAL
+        res = self._session.results.get(doc_id, int(channel), module_id)
+        try:
+            if module_id == MANUAL_MODULE_ID:
+                stale = None if res is None else self._manual_stale_reason(res)
+                return None if stale is None else f"Nothing was added. {stale}"
+            if res is None or not isinstance(res.payload, EventSet):
+                return (f"Nothing was added: {detector_name(module_id)} has no stored table on "
+                        "this channel. Show a table, or the Manual table.")
+            return self._stale_edit_refusal(res, "Nothing was added.")
+        except Exception as exc:  # noqa: BLE001 — the reason, not a traceback
+            return f"Nothing was added: {exc}"
+
+    def refuse_add_for_the_table(self, doc_id: str, channel: int) -> bool:
+        """Refuse an add as :meth:`add_manual_event` would, before any span is looked at, when
+        the channel takes no events or the table it files into takes no hand-made row
+        (Reconciled, a stale table, a detector with no stored table): the door's own sentence,
+        through its own ``last_missed_refusal``, ``runRefused`` and ``last_add_outcome``. False,
+        and nothing said, otherwise. Cheap (no contract, no signal), so a gesture asks it before
+        anything about its mask: the reason is the table, not the cursors, and the Measure
+        tab's preview names it first too."""
+        channel = int(channel)
+        if self._sel != (doc_id, channel) or not self._session.has_document(doc_id):
+            return False                     # the door's own first sentence says it
+        sentence = (self._gate_add_refusal(doc_id, channel)
+                    or self._table_add_refusal(doc_id, channel,
+                                               self.target_module_id(doc_id, channel)))
+        if sentence is None:
+            return False
+        self.last_missed_refusal = sentence
+        self.runRefused.emit(sentence)
+        self.last_add_outcome = AddOutcome(False, sentence)
+        return True
 
     def add_current_selection_as_event(self) -> int | None:
         """Add the Measure cursors' span as a hand-made event; the ``event_id``, or ``None``.
@@ -7274,9 +7379,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         if res.module_id == MANUAL_MODULE_ID and isinstance(res.payload, EventSet):
             self._judge_manual_staleness(res)
             return
-        doc_id, channel = self._sel
         reconciled = res.module_id == CONSENSUS_MODULE_ID
-        live = self._session.calibration(doc_id, channel).fingerprint()
         # The rate stamp first: it is the one that moves the TIME columns, and a
         # re-detection is the only repair for a table whose filters, dwell limits and
         # seconds all ran at a rate the document no longer has. When the calibration
@@ -7284,7 +7387,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         # must not read as a certificate for depths measured under the old gain.
         rate_reason = self._sample_rate_staleness(res)
         if rate_reason is not None:
-            calibration_moved = tuple(res.calibration_fingerprint) != tuple(live)
+            calibration_moved = self._calibration_moved(res)
             if calibration_moved:
                 rate_reason += (" The calibration changed since this detection ran as well, "
                                 "so its amplitude columns are stale too; one re-run repairs "
@@ -7301,7 +7404,7 @@ class AnalysisPanel(QtWidgets.QWidget):
                 _RATE_COLUMNS + tuple(c for c in REMEASURED_COLUMNS if c not in _RATE_COLUMNS)
                 if calibration_moved else _RATE_COLUMNS)
             return
-        if tuple(res.calibration_fingerprint) != tuple(live):
+        if self._calibration_moved(res):
             reference_changed = not reconciled and self._reference_redetection_needed(res)
             self._stale.show_message(
                 "Calibration changed since this detection ran — the blockade depths and "
@@ -7383,6 +7486,13 @@ class AnalysisPanel(QtWidgets.QWidget):
             return None
         return stale_rate_reason(
             res.payload.provenance, self._session.document(self._sel[0]).meta.sample_rate_hz)
+
+    def _calibration_moved(self, res: AnalysisResult) -> bool:
+        """Whether ``res`` was measured under another calibration than its channel has now: the
+        test behind every "Depths stale — the calibration changed" line, asked of the table's
+        OWN recording and channel, so the statistics export can ask it of a table not on screen."""
+        live = self._session.calibration(res.doc_id, int(res.channel)).fingerprint()
+        return tuple(res.calibration_fingerprint) != tuple(live)
 
     def _stale_edit_refusal(self, res: AnalysisResult, outcome: str) -> str | None:
         """What an in-place door says INSTEAD of writing into ``res``: ``outcome`` ("Nothing

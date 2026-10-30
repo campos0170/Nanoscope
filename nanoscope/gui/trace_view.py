@@ -2628,8 +2628,8 @@ class TraceView(pg.GraphicsLayoutWidget):
         return self._last_focus_reason
 
     def add_key_owner(self, widget: QtWidgets.QWidget) -> None:
-        """Register a widget (the docked Event inspector) whose descendants own bare keys: the
-        pointer entering the trace never takes focus from anything inside it."""
+        """Register a widget (the dock that holds the docked Event inspector) whose descendants
+        own bare keys: the pointer entering the trace never takes focus from anything inside it."""
         if widget is not None and all(w is not widget for w in self._key_owners):
             self._key_owners.append(widget)
 

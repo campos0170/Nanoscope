@@ -150,7 +150,7 @@ def test_an_edge_that_cannot_be_fitted_stays_where_pointed_and_d_asks_twice(rig)
     win._trace_keys.place_edge("end", fit=True)
     win._trace_keys.add()
     assert _table(win, doc_id) is None                    # the first D only asked
-    assert "Press D again" in win.statusBar().currentMessage()
+    assert "Press again" in win.statusBar().currentMessage()   # Ctrl+M and Add ask it too
     win._trace_keys.add()
     row = _table(win, doc_id).iloc[0]
     assert row["bounds_source"] == "start=placed;end=placed"

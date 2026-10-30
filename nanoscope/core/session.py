@@ -89,6 +89,9 @@ class Session(QObject):
         self._time_base_as_read: dict[str, TimeBaseAsRead] = {}
         self._cache = LruArrayCache(cache_budget_mb)
         self._results = ResultStore()
+        #: ``(doc_id, channel, module_id)`` of the result :meth:`add_result` is announcing, for
+        #: as long as its ``resultsChanged`` runs (the signal carries no channel); else None.
+        self._announcing: tuple[str, int, str] | None = None
         # What the CALIBRATION did to a channel, keyed exactly like the cached calibrated
         # array — (doc_id, ch, gain, offset) — so the scan runs once per distinct calibration
         # and an A->B->A edit reuses the answer instead of re-scanning 3 M samples.
@@ -987,4 +990,15 @@ class Session(QObject):
         lock — same discipline as every other mutator. Emits
         resultsChanged(doc_id, module_id) so panels refresh and redraw overlays."""
         self._results.put(res)
-        self.resultsChanged.emit(res.doc_id, res.module_id)
+        outer, self._announcing = self._announcing, (res.doc_id, int(res.channel), res.module_id)
+        try:
+            self.resultsChanged.emit(res.doc_id, res.module_id)
+        finally:
+            self._announcing = outer
+
+    @property
+    def announcing(self) -> tuple[str, int, str] | None:
+        """``(doc_id, channel, module_id)`` of the result whose ``resultsChanged`` is running,
+        else ``None``: the signal carries no channel, and a panel showing one channel of a
+        recording must not take a write to another channel for its own."""
+        return self._announcing

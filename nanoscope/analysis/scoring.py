@@ -1338,15 +1338,21 @@ def write_training_export(
     written = df[_training_row_mask(
         df, include_all=include_all, selection=selection, include_added=include_added)]
     n_excluded = 0
+    source = df
     if not include_added:
         would_write = df[_training_row_mask(df, include_all=include_all, selection=selection)]
         n_excluded = int(len(would_write) - len(written))
+        # The table the counts are over is the rows the switch KEPT, as the events export's
+        # are: a hand-made row the switch left out is counted in `n_added_excluded` only.
+        # Over the whole table it was counted again as withheld, and listed as an "accepted"
+        # withheld row under a note that defines withheld as accepted=False (S9-07).
+        source = df[~hand_made_mask(df)]
     meta = training_provenance(
         provenance, source_file=source_file, detector=detector,
         include_all=include_all, selection=selection,
         n_rows=len(out), columns=out.columns,
         meta=meta, t0_s=t0_s,
-        df=written, source_df=df,
+        df=written, source_df=source,
         include_added=include_added, n_added_excluded=n_excluded,
     )
     with staged_write_set() as group:

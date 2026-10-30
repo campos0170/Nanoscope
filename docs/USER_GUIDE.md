@@ -1236,12 +1236,13 @@ gallery, the inspector, the Distributions page and every export see it, and **Ed
 it back.
 
 **Which table.** The event goes into the table named beside the **Add event** button and in the
-label on the trace (`→ Manual · 37 hand-made · 2 in view`). That is the table chosen in the Results
-panel's **Table** selector for this channel: Schmitt, CUSUM, a study table, or **Manual**. A channel
-with no table yet offers **Manual — no events yet** in the selector, and the first event you add
-creates it. A Reconciled table is derived, so it refuses an add and the status bar says to add to a
-source table and reconcile again. The selector remembers its choice for each channel, and the choice
-is saved with the project.
+label on the trace (`→ Manual · 37 hand-made · 2 in view`). That is the table on screen, the one the
+Results panel's **Table** selector names for this channel: Schmitt, CUSUM, a study table, or
+**Manual**. A channel with no table yet offers **Manual — no events yet** in the selector, and the
+first event you add creates it. A Reconciled table is derived, so with it on screen an add is refused
+and the status bar says to show a source table or Manual and add there. Each channel remembers the
+table on screen, however it got there (the selector, a new detector run, Reconcile), and a saved
+project reopens on it. A detector run does not take the screen from **Manual**.
 
 **One event, three gestures.**
 
@@ -1257,15 +1258,17 @@ After an add the mask is cleared and the table, gallery and inspector keep their
 event starts clean. For a clean event the whole gesture is: point, **C**, **D**.
 
 **Keys on the trace.** They act while the trace has keyboard focus, which follows the pointer onto
-the trace unless something that takes keys itself (a table, a text field, a menu) holds it.
+the trace unless something that takes keys itself (a table, a text field, a menu, the docked Event
+inspector) holds it. Measure need not be on: the keys act on the selected recording's current
+channel, and **C** turns Measure on. After you close the selected recording, select one again.
 
 | Key | Does |
 |---|---|
 | **C** | Catch the event under the pointer: find it and fit both edges. Turns Measure on if it is off. |
-| **S** / **F** | Put the start / finish edge at the pointer, fitted to the step nearest it. |
+| **S** / **F** | Put the start / finish edge at the pointer, fitted to the step nearest it. The other edge stays where it is. |
 | **Shift+S** / **Shift+F** | Put that edge exactly at the pointer. |
-| **D** | Add the mask as an event. |
-| **Shift+D** | Add, then go to the next window. |
+| **D** | Add the mask as an event. With only one edge set yet, nothing is added and the status bar names the key that sets the other. |
+| **Shift+D** | Add, then go to the next window. At the last window it still adds and says there is no next one. |
 | **G** / **Shift+G** | Next / previous window at the current zoom (the Scan step). |
 | **X** | Discard the mask; Measure stays on. |
 | **E** | Draw mode on or off (also **View ▸ Drag draws an event span (draw mode)**, Ctrl+Shift+E). |
@@ -1279,20 +1282,32 @@ mode, so a one-off span needs no mode and a quick zoom needs no switch. The labe
 **Fitted edges.** A fitted edge sits on the step, not where the pointer happened to be. If an edge
 cannot be fitted (a ramp, a noisy shoulder), the mask keeps the placement, the label says
 `start not fitted` or `finish not fitted`, and the status line says which key to press: **S** / **F**
-to try again, **Shift+S** / **Shift+F** to set it exactly, or **D** twice to add it as placed. Each
-row records how its bounds were made (the `bounds_source` column: `drawn`, `placed` or
-`fit:step`) and the span you drew.
+to try again, **Shift+S** / **Shift+F** to set it exactly, or **D** twice to add it as placed (Return,
+Enter, **Ctrl+M** and **Add event** ask twice too). The second press must come within ten seconds,
+on the same mask; a new mask asks again. Each row records how its bounds were made (the
+`bounds_source` column: `drawn`, `placed` or `fit:step`), the span you drew, and in `fit_json` the
+fit of each fitted edge.
+
+**S** or **F** moves one edge of whatever mask is on the trace, however it got there (**C**, a
+double-click, a snap, a drag), and the other edge stays. The exception is the mask Measure lays down
+when you turn it on (the middle fifth of the view): until you move it, **S** then **F** build a new
+mask over it. With no mask, **S** or **F** sets one edge and waits for the other; until both are set
+an add is refused, and the preview says which edge is missing. An event that the recording's end
+cuts off ends at the last sample and is rejected automatically as `clipped_by_boundary`.
 
 **The preview and the statistics.** The Measure tab (**Cursors (add events by hand)**) shows two
 different things:
 
 - The **preview** is the row the add would store, measured the way the chosen table measures its own
-  events: dwell, depth, baseline, and whether the automatic rules would flag it. It says what signal
+  events: dwell, depth, baseline, and whether the automatic rules would reject it. It says what signal
   that is (*Measured on the raw signal*, or *Schmitt's signal (low-pass bessel 5000 Hz)*) and how many
   hand-made events the channel has in each table. If the add would be refused (the span overlaps an
   event, or lies outside the stretch the detector searched) the preview says so before you press
   anything. Above 200,000 samples it says the span is too long to preview live; the stored row is
-  still measured on every sample.
+  still measured on every sample. A span with a non-finite sample (a dropout) still previews its row,
+  marked *would be rejected: non_finite*; only the statistics below stay blank. **Add event** is
+  available whenever there is a mask, as Ctrl+M is, and a refusal comes from the add, which says
+  why.
 - **Statistics (not stored)** are the unstored readout: dwell, amplitude, ΔI/I₀, level, baseline, mean,
   median, std, variance, min, max, peak-to-peak, RMS, skewness, **kurtosis** (excess), area/ECD and SNR.
   They are measured on the same signal as the preview and against the **table's own baseline and
@@ -1324,19 +1339,26 @@ over the trace (around the centre otherwise); **+ / −** adjust the working zoo
   *Hand-made only*, *Detected only* and *Merged (hand + detected)* appear when the table has them.
 - **Delete** a hand-made event from the inspector's **Delete** button, or right-click it in the
   table or the gallery. Delete is one undo step, and offered only for hand-made rows: a detected
-  event is rejected, not deleted.
-- **Re-running detection keeps them.** Each hand-made event is re-measured under the new run, a
-  label moves onto a detection of the same event, and the status line says what was kept, what is
-  now detected, and what was left out because the run did not search there. **Edit ▸ Undo** brings
+  event is rejected, not deleted. The inspector and the gallery keep their filter (*Hand-made only*
+  stays on): a window that showed a deleted event moves to the next event in its own list (the
+  gallery in its sort order), or the one before, and a window that showed another event stays.
+  Undoing an add that the windows were showing does the same.
+- **Re-running detection keeps them.** Each hand-made event is re-measured under the new run, its
+  labels and note move onto a detection of the same event (several hand-made events on one detection
+  keep every note, joined with `; `), and the status line says what was kept, what is now detected,
+  and what was left out because the run did not search there. **Edit ▸ Undo** brings
   the previous table back.
 - **Analysis ▸ Copy hand-made events to…** copies the events you drew in the table on screen into
   another table of this channel, measured the way that table measures; running it twice copies
   nothing twice.
 - **Analysis ▸ Include hand-made events in exports** (on by default) decides whether the events
-  export and the training export carry them; the export's sidecar records how many were left out.
+  export and the training export carry them; the export's sidecar records how many were left out,
+  and the training sidecar's other counts cover only the rows the export kept.
 - **Analysis ▸ Export event statistics…** writes the unstored statistics above for every event of the
   table on screen, every table on the channel, or every Manual table in the project, to one CSV with
-  a `signal_basis` column naming each table's signal.
+  a `signal_basis` column naming each table's signal. A table measured before a calibration change or
+  on another sample rate is left out and named in the status line; for the table on screen alone the
+  export is refused before the save dialog, with what to rebuild or re-run first.
 
 **A hand-made row records what it was measured under**: the table's baseline estimator, polarity and
 noise level, the calibration, and the sample rate. Change the calibration or declare a different

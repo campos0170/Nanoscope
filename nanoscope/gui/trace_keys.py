@@ -30,16 +30,18 @@ members it is handed.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 
 from PySide6 import QtCore, QtGui
 
+from ..analysis.edge_fit import REASON_NOT_REQUESTED
 from ..analysis.manual_events import EdgeRecord
 
 __all__ = ["TraceKeyController"]
 
-#: How long a "press D again to add it as placed" stays armed.
+#: How long a "press again to add it as placed" stays armed.
 _CONFIRM_WINDOW_S = 10.0
 #: A one-sided press with no mask gives the unknown edge this many pixels of room to be fitted in.
 _PROVISIONAL_PX = 40
@@ -55,6 +57,8 @@ class _Edge:
     source: str = "unset"
     #: Where the edge stood before any fit moved it.
     drawn: int | None = None
+    #: The record (``EdgeFit.to_json``) of the fit that put the edge here; None when no fit did.
+    fit: str | None = None
 
 
 class TraceKeyController(QtCore.QObject):
@@ -66,10 +70,16 @@ class TraceKeyController(QtCore.QObject):
         self._tv = window._trace_view
         self._start = _Edge()
         self._end = _Edge()
+        #: The latest fit's record: the shared parameters of a ``fit_json`` merged from two.
         self._fit_json: str | None = None
         self._target: tuple[str, int] | None = None
         self._expect: tuple[int, int] | None = None
         self._confirm_until = 0.0
+        #: The mask (target and bounds) the armed "press again" was asked about.
+        self._confirm_for: tuple | None = None
+        #: Measure as the trace last reported it, and the bounds of a seed it showed while off.
+        self._measure_on = False
+        self._seed: tuple[int, int] | None = None
         self.shortcuts: list[QtGui.QShortcut] = []
         self._install()
         tv = self._tv
@@ -78,7 +88,7 @@ class TraceKeyController(QtCore.QObject):
         tv.sigDrawRefused.connect(self._say)
         tv.sigMeasureCleared.connect(self._reset)
         tv.sigMeasureFinished.connect(self._on_mask_settled)
-        tv.sigMeasureActiveChanged.connect(lambda on: None if on else self._reset())
+        tv.sigMeasureActiveChanged.connect(self._on_measure_active_changed)
         tv.sigDrawModeChanged.connect(lambda _on: self.refresh_label())
         self._label_timer = QtCore.QTimer(self)
         self._label_timer.setSingleShot(True)
@@ -136,7 +146,14 @@ class TraceKeyController(QtCore.QObject):
         self._target = None
         self._expect = None
         self._confirm_until = 0.0
+        self._confirm_for = None
+        self._seed = None
         self.refresh_label()
+
+    def _on_measure_active_changed(self, on: bool) -> None:
+        self._measure_on = bool(on)
+        if not on:
+            self._reset()
 
     def _ensure_measure(self) -> tuple[str, int] | None:
         """Turn Measure on (without seeding a mask) and return the target, or say why not."""
@@ -157,7 +174,15 @@ class TraceKeyController(QtCore.QObject):
         return target
 
     def _x(self, target: tuple[str, int], index: int) -> float | None:
-        return self._tv.x_for_index(target[0], target[1], int(index))
+        """The data-x of a mask edge at sample ``index``. ``x_for_index`` clamps to the last
+        sample, so an end at ``n`` (an event the recording's end cuts off) would sit on ``n - 1``
+        and be filed one sample short; it goes one sample past the last x instead, where
+        ``MeasurePanel._x_span`` puts it and ``measure_bounds`` reads ``n`` back."""
+        doc_id, channel = target
+        x = self._tv.x_for_index(doc_id, channel, int(index))
+        if x is not None and int(index) >= self._tv.x_axis_for(doc_id, channel).values.size:
+            x += self._tv.sample_dx(doc_id, channel)
+        return x
 
     def _show_mask(self, target: tuple[str, int], start: int, end: int) -> None:
         x0, x1 = self._x(target, start), self._x(target, end)
@@ -180,21 +205,57 @@ class TraceKeyController(QtCore.QObject):
 
     # -- the mask's record ----------------------------------------------------------------------
     def _on_mask_settled(self, lo: int, hi: int) -> None:
-        """The mask came to rest. If it is where this controller put it, nothing changes; if a
-        person dragged a handle or the body, the edges that moved were placed by hand."""
+        """The mask came to rest. If it is where this controller put it, nothing changes; an edge
+        that moved (a handle or the body dragged, a double-click, a snap) was placed by hand and
+        loses its fit record, and the other edge keeps its own. A mask this controller has no
+        record of is what the person sees, so both its edges are recorded as drawn and ``S`` or
+        ``F`` then moves only one of them. Measure's own seed (the middle fifth, which settles
+        before Measure reports itself on) is nobody's aim: until something moves it, it is not
+        recorded, so ``S`` then ``F`` still builds a mask over it, and a rebuild putting it
+        back changes nothing. Snap to view and a double-click turn Measure on without a seed, so
+        their mask is recorded even on the seed's own middle fifth; only Snap to view over a seed
+        nothing has moved lands on it exactly and leaves it the seed (the trace says nothing of a
+        mask placed where one already is)."""
         if self._expect is not None:
             elo, ehi = self._expect
             self._expect = None
             if abs(lo - elo) <= 1 and abs(hi - ehi) <= 1:
                 return
         if self._start.pos is None and self._end.pos is None:
+            seed = self._seed
+            if not self._measure_on or (
+                    seed is not None and abs(lo - seed[0]) <= 1 and abs(hi - seed[1]) <= 1):
+                self._seed = (int(lo), int(hi))
+            else:
+                # Quietly: two drawn edges put nothing on the label, so there is no repaint
+                # (and no second measurement of the span Measure has just measured).
+                self._target = self._tv.measure_target()
+                self._start = _Edge(int(lo), "drawn", int(lo))
+                self._end = _Edge(int(hi), "drawn", int(hi))
             return
-        if self._start.pos is None or abs(lo - self._start.pos) > 1:
+        before = (self._start.source, self._end.source)
+        stand_in = hi - lo <= 1
+        if self._moved(self._start, lo, stand_in):
             self._start = _Edge(int(lo), "drawn", int(lo))
-        if self._end.pos is None or abs(hi - self._end.pos) > 1:
+        if self._moved(self._end, hi, stand_in):
             self._end = _Edge(int(hi), "drawn", int(hi))
-        self._fit_json = None
-        self.refresh_label()
+        # The label says how the edges were made, not where they are, so only a change of how
+        # repaints it (a repaint measures the span again, and Measure has just measured it).
+        if (self._start.source, self._end.source) != before:
+            self.refresh_label()
+
+    @staticmethod
+    def _moved(edge: _Edge, at: int, stand_in: bool) -> bool:
+        """Whether a settle with this edge of the mask at ``at`` put the edge somewhere new. A
+        drawn edge is wherever the mask's edge is; a fitted or placed one keeps its record
+        through a one-sample difference. The edge still to come after S or F alone is put
+        somewhere only by dragging the one-sample stand-in wider: a rebuild putting the
+        stand-in back puts it nowhere."""
+        if edge.pos is None:
+            return not stand_in
+        if edge.source == "drawn":
+            return int(at) != edge.pos
+        return abs(int(at) - edge.pos) > 1
 
     def _bounds(self) -> tuple[int, int] | None:
         b = self._tv.measure_bounds()
@@ -226,9 +287,10 @@ class TraceKeyController(QtCore.QObject):
         e_fit = fit is not None and fit.end.fitted
         start = int(fit.start.position) if s_fit else int(catch.start)
         end = int(fit.end.position) if e_fit else int(catch.end)
-        self._start = _Edge(start, "fit:step" if s_fit else "placed", int(catch.start))
-        self._end = _Edge(end, "fit:step" if e_fit else "placed", int(catch.end))
-        self._fit_json = fit.to_json() if fit is not None else None
+        record = fit.to_json() if fit is not None else None
+        self._start = _Edge(start, "fit:step" if s_fit else "placed", int(catch.start), record)
+        self._end = _Edge(end, "fit:step" if e_fit else "placed", int(catch.end), record)
+        self._fit_json = record
         self._target = target
         self._show_mask(target, start, end)
         if s_fit and e_fit:
@@ -238,7 +300,8 @@ class TraceKeyController(QtCore.QObject):
             self._say(f"Caught, but the {which} edge is not fitted"
                       f"{' (' + self._reason(fit, which) + ')' if fit is not None else ''}. "
                       f"Point at it and press {'S' if which == 'start' else 'F'}, "
-                      f"Shift+{'S' if which == 'start' else 'F'} to set it exactly, or D to add it as placed.")
+                      f"Shift+{'S' if which == 'start' else 'F'} to set it exactly, or D twice to add it "
+                      "as placed.")
         self.refresh_label()
 
     @staticmethod
@@ -267,8 +330,8 @@ class TraceKeyController(QtCore.QObject):
         n = self._sample_count(target)
         if self._target != target:
             self._start, self._end = _Edge(), _Edge()
-        # The other edge is the one THIS controller built (a mask that was seeded or dragged
-        # in some other way is not an instruction); with none, give the fit room to work in.
+        # The other edge is the mask's own (a mask placed some other way was recorded when it
+        # settled; only Measure's seed is not an instruction); with none, give the fit room.
         other_edge = self._end if which == "start" else self._start
         provisional = other_edge.pos is None
         if provisional:
@@ -290,10 +353,10 @@ class TraceKeyController(QtCore.QObject):
             position = int(edge_result.position)
             source = "fit:step" if edge_result.fitted else "placed"
             reason = edge_result.reason
-            fit_json = fitted.to_json()
+            fit_json = self._fit_json = fitted.to_json()
         else:
             position, source, reason, fit_json = p, "drawn", "", None
-        new = _Edge(position, source, p)
+        new = _Edge(position, source, p, fit_json)
         if which == "start":
             self._start = new
             if provisional:
@@ -303,7 +366,6 @@ class TraceKeyController(QtCore.QObject):
             if provisional:
                 self._start = _Edge(None, "unset", None)
         self._target = target
-        self._fit_json = fit_json if fit else None
         a = self._start.pos if self._start.pos is not None else (
             max(0, position - 1) if which == "end" else position)
         b = self._end.pos if self._end.pos is not None else (
@@ -324,7 +386,9 @@ class TraceKeyController(QtCore.QObject):
         self.refresh_label()
 
     def add(self, *, then_next: bool = False) -> None:
-        """``D``: add the mask as a hand-made event; the mask is discarded and the view stays."""
+        """``D``: add the mask as a hand-made event; the mask is discarded and the view stays.
+        Return, Enter, Ctrl+M and the Add button add through here too, so each files the same
+        row for the same mask."""
         target = self._current()
         if target is None:
             self._say("Select a recording first.")
@@ -333,13 +397,26 @@ class TraceKeyController(QtCore.QObject):
         if bounds is None:
             self._say("No mask: press C over an event, or drag in draw mode (E).")
             return
+        # The table's refusal first, as the Measure tab's preview gives it: no edge to set and no
+        # second press is asked for a row the table on screen cannot take.
+        if self._panel().refuse_add_for_the_table(target[0], target[1]):
+            return                       # the door's own sentence; the mask is kept
+        hold = self._hold()
+        if hold:
+            self._say(f"Nothing was added: {hold}")
+            return
         record = self._edge_record(bounds)
         unfitted = [name for name, edge in (("start", self._start), ("finish", self._end))
                     if edge.source == "placed"]
-        if unfitted and time.monotonic() > self._confirm_until:
+        # The second press confirms the mask it was asked about, not whatever is on screen next.
+        asked = (target, bounds)
+        if unfitted and (time.monotonic() > self._confirm_until or self._confirm_for != asked):
             self._confirm_until = time.monotonic() + _CONFIRM_WINDOW_S
-            self._say(f"The {' and '.join(unfitted)} edge is not fitted. Press D again to add it "
-                      "as placed, or fit it first (S / F) or set it exactly (Shift+S / Shift+F).")
+            self._confirm_for = asked
+            edges = (f"{unfitted[0]} edge is" if len(unfitted) == 1
+                     else "start and finish edges are")
+            self._say(f"The {edges} not fitted. Press again to add it as placed, or fit it first "
+                      "(S / F) or set it exactly (Shift+S / Shift+F).")
             return
         outcome = self._w._file_hand_made_event(target[0], target[1], bounds[0], bounds[1],
                                                 edge=record)
@@ -347,25 +424,75 @@ class TraceKeyController(QtCore.QObject):
             return                       # a refusal keeps the mask and says why
         self._tv.discard_measure_region()
         self._reset()
-        if then_next:
-            self.step_window(+1)
+        if then_next and not self._w._pan_scrollbar.step_window(+1):
+            # The add's own sentence stays (where the event went, how to undo it).
+            self._say(f"{outcome.message} There is no next window: that is the end of the "
+                      "recording.", 10000)
 
     def add_and_next(self) -> None:
         self.add(then_next=True)
 
+    def _hold(self) -> str:
+        """Why the mask on screen cannot be added yet, or "". S or F alone shows a one-sample
+        stand-in for the other edge, which nobody has put anywhere. The add says it on a press
+        and the Measure tab's preview says it before one."""
+        unset = [(name, key) for name, key, edge in (("start", "S", self._start),
+                                                     ("finish", "F", self._end))
+                 if edge.pos is None]
+        if len(unset) != 1:
+            return ""
+        name, key = unset[0]
+        return (f"the {name} edge is not set yet. Point at it and press {key}, or Shift+{key} "
+                "to set it exactly.")
+
     def _edge_record(self, bounds: tuple[int, int]) -> EdgeRecord:
         """How each edge of the mask being added was made. An edge a person moved after the fit
-        is ``drawn``; an unset or unknown one is ``drawn`` too, since the mask is what they see."""
+        is ``drawn``; an unset or unknown one is ``drawn`` too, since the mask is what they see,
+        and a drawn edge was drawn where it stands (a plain bracket's row is the one the door
+        stores for it on its own)."""
         s, e = self._start, self._end
         s_src = s.source if s.pos is not None and abs(s.pos - bounds[0]) <= 1 else "drawn"
         e_src = e.source if e.pos is not None and abs(e.pos - bounds[1]) <= 1 else "drawn"
-        s_drawn = s.drawn if s_src != "drawn" or s.drawn is not None else bounds[0]
-        e_drawn = e.drawn if e_src != "drawn" or e.drawn is not None else bounds[1]
         return EdgeRecord(
             bounds_source=f"start={s_src};end={e_src}",
-            drawn_start=int(s_drawn if s_drawn is not None else bounds[0]),
-            drawn_end=int(e_drawn if e_drawn is not None else bounds[1]),
-            fit_json=self._fit_json if "fit:step" in (s_src, e_src) else None)
+            drawn_start=int(bounds[0] if s_src == "drawn" or s.drawn is None else s.drawn),
+            drawn_end=int(bounds[1] if e_src == "drawn" or e.drawn is None else e.drawn),
+            fit_json=self._fit_record(bounds, s_src, e_src))
+
+    def _fit_record(self, bounds: tuple[int, int], s_src: str, e_src: str) -> str | None:
+        """The row's ``fit_json`` (None when no edge is fitted): each edge's part of the fit that
+        put it there (cursor design 5.5). One fit that set both edges (``C``, a drawn span) is
+        stored as it came. Edges set by two fits (``S`` then ``F``), or one moved by hand since
+        its fit, are merged into the latest fit's record: each edge's entry, window, rise and
+        placed position come from its own fit, and an edge no fit set reads "not requested", as
+        in a fit asked for the other edge only. So the record never calls an edge unfitted that
+        ``bounds_source`` calls ``fit:step``."""
+        if "fit:step" not in (s_src, e_src):
+            return None
+        own = {name: edge.fit for name, edge, src in (("start", self._start, s_src),
+                                                      ("end", self._end, e_src))
+               if src != "drawn" and edge.fit}
+        if not own:
+            return None
+        if len(own) == 2 and own["start"] == own["end"]:
+            return own["start"]
+        fits = {name: json.loads(text) for name, text in own.items()}
+        body = json.loads(self._fit_json if self._fit_json in own.values()
+                          else next(iter(own.values())))
+        for key in ("W", "rise"):
+            part = {name: fit[key][name] for name, fit in fits.items()
+                    if name in (fit.get(key) or {})}
+            if part or key in body:
+                body[key] = part
+        body["edges"] = {
+            name: fits[name]["edges"][name] if name in fits else {
+                "pos": int(pos), "fitted": False, "z": 0.0, "step": 0.0,
+                "reason": REASON_NOT_REQUESTED}
+            for name, pos in zip(("start", "end"), bounds)}
+        body["placed"] = [fits[name]["placed"][i] if name in fits else int(bounds[i])
+                          for i, name in enumerate(("start", "end"))]
+        body["edges_requested"] = list(fits)
+        return json.dumps(body, separators=(",", ":"), sort_keys=True, allow_nan=False)
 
     def step_window(self, direction: int) -> None:
         """``G`` / Shift+``G``: the next / previous window at the same zoom. With no mask nothing
@@ -419,9 +546,9 @@ class TraceKeyController(QtCore.QObject):
         s_fit, e_fit = fit.start.fitted, fit.end.fitted
         start = int(fit.start.position) if s_fit else int(lo)
         end = int(fit.end.position) if e_fit else int(hi)
-        self._start = _Edge(start, "fit:step" if s_fit else "placed", int(lo))
-        self._end = _Edge(end, "fit:step" if e_fit else "placed", int(hi))
-        self._fit_json = fit.to_json()
+        record = self._fit_json = fit.to_json()
+        self._start = _Edge(start, "fit:step" if s_fit else "placed", int(lo), record)
+        self._end = _Edge(end, "fit:step" if e_fit else "placed", int(hi), record)
         self._target = target
         if (start, end) != (int(lo), int(hi)):
             self._show_mask(target, start, end)
@@ -433,7 +560,7 @@ class TraceKeyController(QtCore.QObject):
             which = "start" if not s_fit else "finish"
             self._say(f"The {which} edge is not fitted ({self._reason(fit, which)}). Point at it "
                       f"and press {'S' if which == 'start' else 'F'}, or press D twice to add it "
-                      "as drawn.")
+                      "as placed.")
         self.refresh_label()
 
     def _on_catch_requested(self, doc_id: str, channel: int, sample: int, px: float) -> None:
@@ -451,10 +578,13 @@ class TraceKeyController(QtCore.QObject):
         if target is None or not self._w._session.has_document(target[0]):
             self._tv.set_target_label("")
             panel.measure_panel.set_add_target_text("")
+            panel.measure_panel.set_add_hold("")
             return
         name = panel.target_table_name(*target)
         # The Measure tab's preview names the same table and counts the same rows: whatever
-        # moved the label (a new table, a chosen table, a hand-made row) moved the preview.
+        # moved the label (a new table, a chosen table, a hand-made row, an edge set or unset)
+        # moved the preview.
+        panel.measure_panel.set_add_hold(self._hold())
         panel.measure_panel.refresh_preview()
         text = f"→ {name}"
         res = panel._session.results.get(target[0], target[1], panel.target_module_id(*target))

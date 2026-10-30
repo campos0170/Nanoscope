@@ -40,15 +40,15 @@ tags identify tested development baselines and do not promise a stable file or A
 ### Added
 
 - **Hand-made events.** **Analysis ▸ Add event from cursors** (Ctrl+M) files the region selected on
-  the trace as an event row in the table the channel is working in (Schmitt, CUSUM, a study table), or
+  the trace as an event row in the table on screen (Schmitt, CUSUM, a study table), or
   in a new per-channel **Manual** table that the Table selector always offers ("Manual — no events
   yet") and the first add creates. One door, `AnalysisPanel.add_manual_event`, is behind Ctrl+M, the
   Measure tab's **Add event** button and the trace keys; the row is measured under the table's own
   provenance by `recharacterize_span`, is accepted, `added` and `reviewed`, joins the table in time
   order, and is one undo step. Every refusal changes nothing and names the way forward: no sample
   rate, a non-current channel, a stale table, a span outside what the detector searched, a span that
-  overlaps an event, a Reconciled table. The chosen table is remembered per channel and saved with the
-  project (workspace key `event_table_choices_v1`; no format bump). Rows carry `note`, `origin`,
+  overlaps an event, a Reconciled table. The table on screen is remembered per channel, however it got
+  there, and saved with the project (workspace key `event_table_choices_v1`; no format bump). Rows carry `note`, `origin`,
   `bounds_source` (`drawn`, `placed`, `fit:step`) and the span as drawn.
 - **Trace keys, draw mode and fitted edges.** With the trace focused: **C** catches the event under the
   pointer and fits both edges, **S** / **F** place an edge at the pointer fitted to its step
@@ -58,7 +58,8 @@ tags identify tested development baselines and do not promise a stable file or A
   its edges; **Option** inverts the drag for one gesture. Return / Enter / Esc are aliases that act
   only after a click or the pointer arriving, never after a dock parked focus on the trace. New
   `analysis/edge_fit.py` fits the step with gates checked against correlated noise. Keyboard focus
-  follows the pointer onto the trace unless a table, text field or menu holds it, a horizontal swipe
+  follows the pointer onto the trace, with Measure on or off, unless a table, text field, menu or the
+  docked Event inspector holds it, a horizontal swipe
   or notch pans **time**, and **Shift+↑ / Shift+↓** zoom about the pointer.
 - **Measure tab: preview and unstored statistics.** A preview line shows the row the add would store
   (measured like the chosen table's own events, on that table's signal), refusals before the click,
@@ -208,6 +209,49 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- **Every add files the same row.** Ctrl+M and the Measure tab's **Add event** button now add through
+  the same path as **D**: the same record of how each edge was made (`bounds_source`, the span drawn,
+  `fit_json`), the same second press for an edge that is not fitted ("Press again to add it as
+  placed"), and the mask cleared afterwards with Measure left on. They had stored a caught event as
+  drawn, without its fit, and kept the mask, so a second Ctrl+M was refused as an overlap. The
+  second press now confirms only the mask it was asked about: a new mask made within the ten
+  seconds was filed by its first press. A table that takes no hand-made row (Reconciled, a stale
+  table) is refused on the first press, before any question about the mask.
+- **S and F move one edge of any mask.** On a mask placed by a double-click, Snap to view, Snap to
+  selected event, Go to measurement or a drag, S or F threw the other edge away and collapsed the
+  mask to one sample. Now the other edge stays; only the mask Measure lays down when it is turned on
+  is no instruction until it is moved. With one edge still unset (S or F alone) an add is refused and
+  names the key that sets it, and the Measure tab's preview says so first; **D** had filed the
+  one-sample stand-in as an event. `fit_json` keeps each edge's own fit, where it had described only
+  the latest fit and could call an edge stored as `fit:step` unfitted.
+- An event cut off by the recording's end ends at the last sample and is rejected automatically as
+  `clipped_by_boundary`; it was filed one sample short and accepted. **Shift+D** at the last window
+  keeps the add's confirmation and adds that there is no next window, instead of replacing it.
+- **An add goes to the table on screen.** With Reconciled on screen, Ctrl+M filed into the source
+  table remembered from before, and **Edit ▸ Undo** then reverted the Reconciled table instead. The
+  remembered table now follows the screen (the selector, a new run, Reconcile), a saved project
+  reopens on it, and Reconciled on screen refuses an add with the way forward. A **Batch detect**,
+  or a Run that finished after you moved to another channel of the same recording, no longer puts
+  that channel's own older table of the same detector on screen in place of the one you were
+  working in.
+- **Export event statistics** no longer mixes gains: a table measured before a calibration change is
+  refused before the save dialog when it is the table on screen, and left out and named when the
+  scope is every table on the channel or every Manual table, as a table on another sample rate is.
+- The docked Event inspector lost A, R, Space and the label keys whenever the pointer crossed the
+  trace, because the Inspector panel beside it had been registered as the trace's key owner. With
+  Measure off, how a recording opens, focus did not follow the pointer onto the trace, **C** did
+  nothing and **Shift+↑ / Shift+↓** ignored the pointer; the trace keys now act on the selected
+  recording's current channel with Measure on or off.
+- **Delete** of a hand-made event from the inspector dropped its *Hand-made only* filter and put both
+  curation windows on a detected event. Each window now keeps its filter and lands, quietly, on the
+  next event of its own list. **Edit ▸ Undo** of an add the windows were showing does the same.
+- The Measure tab's preview went blank and **Add event** greyed out on a span holding a NaN or Inf
+  sample, while Ctrl+M stored the row; the preview now shows that row, marked *would be rejected:
+  non_finite*, and **Add event** is available whenever there is a mask.
+- Re-running detection kept only one note when several hand-made events landed on one detection; every
+  note is kept now, joined in time order with `; `. With **Include hand-made events in exports** off,
+  the training export's sidecar counted the switched-off rows as withheld. After a re-run with another
+  low-pass, the edge fit used the old run's open-pore tau.
 - Event inspector and Event gallery: A, R and Space no longer take the key from the control that
   has the keyboard. Space on a Tab-focused button (Show in trace, Gallery…, Accept all / Reject
   all, Accept selected / Reject selected, Apply…) or check box presses it instead of toggling

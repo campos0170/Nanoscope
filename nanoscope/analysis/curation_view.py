@@ -55,6 +55,7 @@ __all__ = [
     "prev_member_before",
     "first_member",
     "count_before",
+    "landing_after_removal",
     "CurationProgress",
     "curation_progress",
     "format_progress",
@@ -292,18 +293,36 @@ def superset_by_id(old: pd.DataFrame | None, new: pd.DataFrame | None) -> bool:
     return bool(np.array_equal(new["start_idx"].to_numpy()[pos], old["start_idx"].to_numpy()))
 
 
-def can_keep_place(old: pd.DataFrame | None, new: pd.DataFrame | None,
-                   current_id: int | None = None) -> bool:
+def can_keep_place(old: pd.DataFrame | None, new: pd.DataFrame | None) -> bool:
     """May a window that was showing ``old`` keep its place when ``new`` arrives?
 
     Yes for the very same events (an edit), for ``new`` holding all of ``old`` (a hand-made
-    event joined), and for ``new`` being ``old`` less some events (the undo of that add)
-    provided the event the window stands on survived."""
-    if same_events(old, new) or superset_by_id(old, new):
-        return True
-    if current_id is not None and superset_by_id(new, old):
-        return bool(new is not None and (new["event_id"].to_numpy() == int(current_id)).any())
-    return False
+    event joined), and for ``new`` being ``old`` less some events (a Delete, the undo of an
+    add): the same table less some rows, not a new detection. The window keeps its filter;
+    when the event it stood on is one of those gone, it lands beside it
+    (:func:`landing_after_removal`). This used to also ask that the event on screen survived,
+    which the inspector's own Delete never satisfies -- the event on screen is the one
+    deleted -- so a curator in Hand-made only was put back in All, on a detected event."""
+    return same_events(old, new) or superset_by_id(old, new) or superset_by_id(new, old)
+
+
+def landing_after_removal(order: Any, gone_id: int, members: Any) -> int | None:
+    """Where a window goes when the event it stood on, ``gone_id``, left the table: the first
+    event after it in ``order`` (the window's list as it was, by ``event_id``) that
+    ``members`` (the ids its list holds now) still holds, else the last one before it.
+    ``None`` when there is neither: the list is empty now.
+
+    One rule, each window asking it of its own list: the inspector's filter runs in table
+    order, the gallery's tiles in the order they are drawn (a sort by depth is not time)."""
+    order = np.asarray(order, dtype=np.int64)
+    at = np.flatnonzero(order == int(gone_id))
+    if not at.size:
+        return None
+    still = np.isin(order, np.asarray(members, dtype=np.int64))
+    row = next_member_after(still, int(at[0]))
+    if row is None:
+        row = prev_member_before(still, int(at[0]))
+    return None if row is None else int(order[row])
 
 
 def row_unchanged(a: pd.DataFrame, b: pd.DataFrame, row: int) -> bool:

@@ -1052,6 +1052,8 @@ class MeasurePanel(QtWidgets.QWidget):
         #: ``_measured_basis_kind`` the basis ('raw' / 'processed') the last measurement used.
         self._basis_provider = None
         self._preview: HandRowPreview | None = None
+        #: Why the owner holds the add back for the mask on screen, see :meth:`set_add_hold`.
+        self._add_hold: str = ""
         self._measured_basis_kind: str | None = None
         # The LIVE Preprocess-form parameters, pushed in by the owner (AnalysisPanel)
         # through `set_conditioning`. None / an empty dict means "no processing is
@@ -1797,6 +1799,8 @@ class MeasurePanel(QtWidgets.QWidget):
                     "The statistics below are measured on this span alone.")
         basis = f"Measured on {preview.basis_text}." if preview.basis_text else ""
         tail = f"{basis} {preview.hand_counts}.".strip()
+        if self._add_hold:
+            return f"Would not be added to {preview.table}: {self._add_hold}\n{tail}"
         if preview.refusal:
             return f"Would not be added to {preview.table}: {preview.refusal}\n{tail}"
         row = preview.row
@@ -1817,7 +1821,10 @@ class MeasurePanel(QtWidgets.QWidget):
             parts.append(f"baseline {base:.4g}{(' ' + units) if units else ''}")
         head = f"→ {preview.table}: " + " · ".join(parts)
         if not bool(get("accepted", True)):
-            head += f" · would be flagged {get('flag') or 'by the automatic rules'}"
+            # Stored, but out of the count: the word the door's own status line uses.
+            flag = get("flag") or ""
+            head += (f" · would be rejected: {flag}" if flag
+                     else " · would be rejected by the automatic rules")
         return f"{head}\n{tail}"
 
     def _render_preview(self) -> None:
@@ -1937,6 +1944,19 @@ class MeasurePanel(QtWidgets.QWidget):
 
     def add_target_text(self) -> str:
         return self._add_target_label.text()
+
+    def set_add_hold(self, text: str) -> None:
+        """Say in the preview why the add is held back for the mask on screen: S or F alone
+        leaves the other edge unset ("the finish edge is not set yet. ..."). Empty clears it.
+        The hold is the owner's and this only shows it; the Add button still asks, and the owner
+        answers with the same sentence, as the door does for its own refusals."""
+        text = str(text or "").strip()
+        if text != self._add_hold:
+            self._add_hold = text
+            self._render_preview()
+
+    def add_hold(self) -> str:
+        return self._add_hold
 
     def _on_add_clicked(self, *_args) -> None:
         """The Add button ASKS; the owner answers (`addRequested`). `add_current` is still the
@@ -2096,7 +2116,11 @@ class MeasurePanel(QtWidgets.QWidget):
         lo = min(max(lo, overlap0), overlap1 - width)
         hi = lo + width
 
-        self.set_active(True)
+        # On with no seed: the mask goes down just below, so a seed would only be measured and
+        # thrown away. Worse, Snap to view lands on the seed's own middle fifth, the trace then
+        # reports no settle, and the trace keys took the placed mask for the seed (S or F built
+        # a new mask instead of moving one edge of this one).
+        self.set_active(True, seed=False)
         self._trace_view.set_measure_region(lo, hi)
         if clicked:
             self._set_status(
@@ -2320,14 +2344,24 @@ class MeasurePanel(QtWidgets.QWidget):
         """Adopt ``stats`` as the current measurement and refresh everything that shows it.
 
         ``preview`` is the owner's answer for the same span; anything that installs ``None``
-        (Measure off, the mask gone) clears it with the numbers it described."""
+        (Measure off, the mask gone) clears it with the numbers it described.
+
+        THE PREVIEW STANDS WHEN THESE STATISTICS REFUSE THE SPAN. They are not the add: one NaN
+        under the cursors is a ``NonFiniteSelection`` here, and the door measures the same span
+        and stores the row, rejected as non_finite. Dropping the owner's answer with the
+        statistics left "Drag a region..." under a drawn region and a greyed Add button, while
+        Ctrl+M stored a row the preview never showed. So the preview is kept, the refusal note
+        still says why the statistics are blank, and with an owner the Add button is armed by
+        the mask alone, as Ctrl+M is: every refusal past that is the door's, and it says why.
+        A panel with no owner to ask still arms it by its own readout."""
         self._last_stats = stats
-        self._preview = preview if stats is not None else None
+        self._preview = preview
         self._render_readout(stats)
         self._render_approx_note(stats)
         self._render_refusal_note()
         self._render_preview()
-        self._add_button.setEnabled(stats is not None)
+        self._add_button.setEnabled(
+            (preview if self._basis_provider is not None else stats) is not None)
         self._sync_update_button()
 
     def _stop_pending_recompute(self) -> None:
@@ -2666,7 +2700,7 @@ class MeasurePanel(QtWidgets.QWidget):
             self._set_status("Could not re-measure the selection exactly; nothing was updated.")
             return False
         if exact is not self._last_stats:
-            self._install_stats(exact)
+            self._install_stats(exact, self._preview)   # the same span: its preview stands
         measurement_id = int(previous["measurement_id"])
         replacement = self._saved_row_from_exact(
             exact, label=self._row_text(previous, "label"), measurement_id=measurement_id)

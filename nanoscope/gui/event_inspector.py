@@ -67,6 +67,7 @@ from ..analysis.curation_view import (
     label_display_candidates,
     label_filter,
     label_rows,
+    landing_after_removal,
     next_member_after,
     no_unreviewed_note,
     prev_member_before,
@@ -2323,10 +2324,13 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         Resets the filter to All and shows the first event (without emitting a selection — opening
         the browser must not yank the main trace).
 
-        ``keep_place`` is MainWindow saying this re-feed is an undo or redo: the filter, the
-        event on screen and the hand-framed context are kept -- but only when the incoming
-        frame holds the very same events (identical ``event_id`` and ``start_idx``; a merge
-        renumbers ids, and a kept id would then name another event). Otherwise, the reset.
+        ``keep_place`` is MainWindow saying this re-feed edits the table on screen (an undo or
+        redo, a hand-made add, a Delete): the filter, the event on screen and the hand-framed
+        context are kept -- but only when the incoming frame holds the very same events, or
+        those and more, or those less some (``can_keep_place``: each kept ``event_id`` at its
+        ``start_idx``; a merge renumbers ids, and a kept id would then name another event).
+        When the event on screen is one of those gone, the window lands, quietly, on the next
+        event of its filter after it, else the one before. Otherwise, the reset.
 
         ``provenance`` is the detection's provenance dict (from the EventSet); a mask edit reads
         the detector's ``polarity`` / ``noise_rms_pA`` / ``filter_rise_s`` from it so a
@@ -2354,7 +2358,10 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
                       and self._channel == int(channel))
         keep = (bool(keep_place) and not same_frame and self._current_id is not None
                 and str(doc_id) == self._doc_id and self._channel == int(channel)
-                and can_keep_place(self._df, events_df, self._current_id))
+                and can_keep_place(self._df, events_df))
+        # The events as this window held them, in order: where to land if the one on screen
+        # is among those the new frame has lost.
+        held = self._df["event_id"].to_numpy(dtype=np.int64) if keep else None
         # A DIFFERENT detection invalidates the level fit. MainWindow calls this on every
         # selection change and the detection "may be a different detection", so without
         # this the levels fitted on recording A were printed under recording B's events --
@@ -2392,7 +2399,23 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._fix_counter_widths()
         if keep:
             self._sync_progress()
-            self._render_and_sync(self._current_id, emit=False)
+            if self._row_for_id(self._current_id) is not None:
+                self._render_and_sync(self._current_id, emit=False)
+                return
+            # THE EVENT ON SCREEN WENT WITH THE ROWS: this window's own Delete always does
+            # that, and so does the undo of the add it stood on. The same table less some rows
+            # is not a new detection, so the filter stays and the window lands on the next
+            # event of that filter after it, else the one before -- never on one outside it
+            # (measured: Delete under Hand-made only came back in All, on a detected event).
+            land = landing_after_removal(held, self._current_id, self._subset_ids())
+            self._current_id = None
+            if land is not None:
+                self._render_and_sync(land, emit=False)
+            elif len(self._df):
+                self._show_empty(f"No events match “{self._filter}”.")
+            else:
+                self._show_empty(_EMPTY_MANUAL_TEXT if self._module_id == MANUAL_MODULE_ID
+                                 else "Detection found no events.")
             return
         # A genuinely new (or empty) detection browses in All from the first event -- and a
         # note counting the PREVIOUS detection's unmeasurable rows is about events that no
@@ -3107,7 +3130,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
 
     def _on_delete_hand_made(self) -> None:
         """Announce that the displayed hand-made event should be deleted. Intent only: the
-        panel owns the table, MainWindow routes it and lands this window on the next event."""
+        panel owns the table and MainWindow routes it; the re-feed that follows lands this
+        window on the next event of its filter (see :meth:`set_events`)."""
         if (self._df is None or self._current_id is None
                 or self._module_id == CONSENSUS_MODULE_ID):
             return

@@ -65,6 +65,7 @@ __all__ = [
     "MANUAL_MODULE_VERSION",
     "ManualContract",
     "NOTE_COL",
+    "NOTE_JOINER",
     "ORIGIN_COL",
     "CARRY_MIN_OVERLAP",
     "CarryReport",
@@ -78,6 +79,7 @@ __all__ = [
     "ensure_manual_extras",
     "hand_made_mask",
     "insert_hand_row",
+    "join_notes",
     "measure_hand_row",
     "measurement_noise_rms",
     "nullable_extras",
@@ -96,6 +98,9 @@ MANUAL_MODULE_VERSION = "1"
 # ---------------------------------------------------------------------------
 #: Free text the user can edit. A converted measurement's ``label`` lands here.
 NOTE_COL = "note"
+#: What joins the notes of several rows that become ONE event (:func:`join_notes`), in time
+#: order. Design section 3 asks the same of a merge.
+NOTE_JOINER = "; "
 #: Where a copied or carried row came from, for example ``"detect.manual:41"``.
 ORIGIN_COL = "origin"
 #: The ids of the legacy measurement rows this event was converted from, ``"12"`` or ``"12,15"``.
@@ -382,6 +387,26 @@ def _scalar(value: Any) -> Any:
     return pd.NA if value is None else value
 
 
+def join_notes(*notes: Any) -> Any:
+    """The notes given, in that order, joined by :data:`NOTE_JOINER`; a blank one or a repeat
+    adds nothing, and ``pd.NA`` when none is left. A note is a person's own words, so two rows
+    that become one event keep both.
+
+    Hand it EVERY note at once: a note already joined is one piece of text here, so joining
+    onto it again would not see that a later note repeats one of its parts."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for note in notes:
+        if note is None or pd.isna(note):
+            continue
+        text = str(note)
+        if not text.strip() or text.strip() in seen:
+            continue
+        seen.add(text.strip())
+        out.append(text)
+    return NOTE_JOINER.join(out) if out else pd.NA
+
+
 def measure_hand_row(
     signal: np.ndarray,
     fs: float,
@@ -653,7 +678,8 @@ def carry_hand_rows(
 
     * A hand row the new run ALSO detected (overlap coefficient >= :data:`CARRY_MIN_OVERLAP`
       with a viable detected row): the detected row stays, and the hand row's non-derived flag
-      tokens (labels), note, review and any hand rejection move onto it.
+      tokens (labels), note, review and any hand rejection move onto it. When several hand rows
+      match one detected row, their notes are joined in time order, each once (:func:`join_notes`).
     * ...with a detected row an AUTOMATIC rule rejected: the hand row stays and that row goes,
       since an automatic rejection does not outvote a ruling.
     * Overlapping by less than half: both stay, listed.
@@ -686,6 +712,9 @@ def carry_hand_rows(
     left_out: list[tuple[int, str]] = []
     drop_ids: set[int] = set()
     add_rows: list[pd.DataFrame] = []
+    # Every note moved onto a detected row so far, by the row's position, in time order: the
+    # row's note is joined from this list (`join_notes`) each time another hand row lands on it.
+    landed_notes: dict[int, list[Any]] = {}
 
     for _i, row in old_rows.iterrows():
         old_id = int(row["event_id"])
@@ -721,7 +750,14 @@ def carry_hand_rows(
                     if NOTE_COL not in new_df.columns:
                         new_df[NOTE_COL] = pd.Series([pd.NA] * len(new_df), index=new_df.index,
                                                      dtype="string")
-                    new_df.iat[best, new_df.columns.get_loc(NOTE_COL)] = str(note)
+                    # Joined with what earlier hand rows moved there: two halves drawn by hand
+                    # of an event the run finds whole both land on this row, and the first
+                    # note used to be overwritten by the second (S9-06). Joined from the whole
+                    # list each time, so a third row repeating the first's note adds nothing.
+                    at = new_df.columns.get_loc(NOTE_COL)
+                    landed = landed_notes.setdefault(best, [new_df.iat[best, at]])
+                    landed.append(note)
+                    new_df.iat[best, at] = join_notes(*landed)
                 mark_reviewed(new_df, rows=np.array([best], dtype=np.int64))
                 moved.append((old_id, det_id))
                 continue

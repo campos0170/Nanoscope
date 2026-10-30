@@ -651,6 +651,15 @@ Different from this draft:
   within 3 px at 50 and 250 kHz and 1 to 100 samples per pixel; sub-state ends 95 to 100 %; `C` on
   2 to 200 ms events at 10 to 20 sigma 96 to 100 % of the unrefused; pure noise never made a fitted
   row. At 250 kHz soft sub-states of unknown rise fail (0 to 7 %).
+- **Fixed after the 2026-10-29 bug sweep** (`tests/gui/test_s9_*.py`): Ctrl+M and the Add button add
+  through `TraceKeyController.add`, so every add carries the edge record, asks twice for an unfitted
+  edge and clears the mask; a settled mask the controller did not place is recorded as drawn, so S / F
+  move one edge of it, Measure's own seed excepted until it is moved; an add with one edge unset is
+  refused and the preview says so first (`MeasurePanel.set_add_hold`); an edge at the recording's end
+  stays at `n`; `fit_json` keeps each edge's own fit; the Event inspector's dock, not the Inspector
+  panel, is the trace's key owner; and the trace has a key target with Measure off. The second press
+  confirms only the mask it was asked about, and a table that takes no hand-made row is refused
+  (`AnalysisPanel.refuse_add_for_the_table`) before any question about the mask.
 - **Not built:** the Inspector's S / F and nudge keys with one write per burst, the table rule, the
   Resume pass, scan-history coalescing, the flash on add, and the focus-parking docstring updates.
 - **Not tried:** a real Mac, a trackpad (the swipe direction is the one sign most likely to need

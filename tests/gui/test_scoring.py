@@ -239,7 +239,6 @@ def test_mark_missed_shortcut_action_works_with_measure_tab_hidden_and_keeps_vie
     panel.detection_panel.mode_tabs.setCurrentIndex(0)
     assert panel.detection_panel.mode_tabs.currentIndex() == 0
     before_view = tuple(window._trace_view.anchor_plot().vb.viewRange()[0])
-    before_bounds = window._trace_view.measure_bounds()
     before_n = len(panel.current_events_df())
 
     assert window._act_add_event.shortcut().toString() == "Ctrl+M"
@@ -249,7 +248,8 @@ def test_mark_missed_shortcut_action_works_with_measure_tab_hidden_and_keeps_vie
 
     assert len(panel.current_events_df()) == before_n + 1
     assert tuple(window._trace_view.anchor_plot().vb.viewRange()[0]) == pytest.approx(before_view)
-    assert window._trace_view.measure_bounds() == before_bounds
+    # As after D, the mask is cleared and Measure stays on, so the next event starts clean.
+    assert window._trace_view.measure_bounds() is None and window._trace_view.measure_empty()
     assert "Added event" in window.statusBar().currentMessage()
 
 

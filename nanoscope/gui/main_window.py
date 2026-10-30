@@ -2153,9 +2153,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _wire(self) -> None:
         # The trace keys (C S F D G X E, Return, Esc), draw mode and the label on the trace.
         # The docked Event inspector owns bare keys of its own, so the pointer crossing the
-        # trace never takes focus from it.
+        # trace never takes focus from it: its dock registers with the trace when it is built
+        # (_inspector_dock_widget).
         self._trace_keys = TraceKeyController(self)
-        self._trace_view.add_key_owner(self._inspector)
         self._trace_view.sigDrawModeChanged.connect(self._on_trace_draw_mode_changed)
         self._analysis_panel.measure_panel.addRequested.connect(self._add_event_from_cursors)
         self._analysis_panel.resultSwitched.connect(self._trace_keys.refresh_label)
@@ -3379,10 +3379,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # first would briefly (and, without another x change, permanently) cache the old extent.
         # Use Analysis's RESOLVED current channel, not the raw row: selecting an ABF's command
         # voltage is still an analysis of its current, and aligned channels can have different x
-        # extents. All three surfaces must describe the same annotation target.
+        # extents. All three surfaces must describe the same annotation target, and so must the
+        # trace's keys.
         target_doc, target_channel = annotation_target
         step("Navigator", lambda: self._navigator.set_target(target_doc, target_channel))
         step("Scan", lambda: self._pan_scrollbar.set_target(target_doc, target_channel))
+        # While Measure is off the trace's keys act on this pane: focus follows the pointer onto
+        # it, Shift+Up / Shift+Down zoom about the pointer, and C finds the event under it.
+        step("Trace keys", lambda: self._trace_view.set_annotation_target(
+            target_doc, target_channel))
         step("rate", lambda: self._update_rate_label(doc_id))
         step("Detect", self._sync_detection_action)
         step("Run ML", self._sync_ml_detection_action)
@@ -3622,9 +3627,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         Reports the FIRST real blocker rather than failing silently, which is what the
         panel's own shortcut did (``add_current`` returns False and says nothing when there
-        is no live measurement). The four gates below are the gesture's own; everything
-        after them is the add door's (:meth:`AnalysisPanel.add_manual_event`), which names
-        its own refusals."""
+        is no live measurement). The four gates below are the gesture's own; after them it is
+        the add ``D`` makes (:meth:`TraceKeyController.add`: the record of how each edge was
+        made, the refusal of an edge not set yet, the second press an unfitted edge asks for,
+        the mask cleared after the add), and then the add door's
+        (:meth:`AnalysisPanel.add_manual_event`), which names its own refusals."""
         panel = self._analysis_panel.measure_panel
         if not panel.has_open_target():
             self.statusBar().showMessage(
@@ -3651,7 +3658,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "The cursors are on another recording or channel than the one in the "
                 "Analysis panel. Select that channel, then press Ctrl+M again.", 10000)
             return
-        self._file_hand_made_event(sel[0], sel[1], int(bounds[0]), int(bounds[1]))
+        self._trace_keys.add()
 
     def _no_region_sentence(self, then: str) -> str:
         """Why there is nothing to act on, said for the state the person is actually in: Measure
@@ -3664,8 +3671,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _file_hand_made_event(self, doc_id: str, channel: int, start: int, end: int, *,
                               edge=None):
-        """THE window-level add: every manual gesture (Ctrl+M, the Add button, the cursor
-        keys) calls this, which calls the panel's door and reports the outcome.
+        """THE window-level add: every manual gesture (the cursor keys, and Ctrl+M and the Add
+        button through their add) calls this, which calls the panel's door and reports the
+        outcome.
 
         The curation windows keep their filter, current event and selection through the
         re-feed the add causes (``_keep_curation_place``), then land on the new event without
@@ -3774,31 +3782,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self._disclose_identity_notes("Export event statistics", [out])
 
     def _delete_hand_made_events(self, event_ids) -> None:
-        """Delete hand-made events from the table on screen, then put the open curation
-        windows on the event that follows (or precedes) the first one removed, quietly."""
-        res = self._analysis_panel.current_detection()
-        if res is None:
+        """Delete hand-made events from the table on screen (the inspector's Delete, the
+        gallery's and the Results table's menus), one undo step.
+
+        A Delete is the same table less some rows, not a new detection, so the curation windows
+        keep their place through the re-feed (``_keep_curation_place``): each keeps its filter,
+        and one that stood on a deleted event lands, quietly, on the next event of its own list
+        after it, else the one before (``curation_view.landing_after_removal``). The landing
+        used to be picked here, the next survivor in TABLE order for both windows: under
+        Hand-made only that is a detected event, and the inspector, refused its place, had
+        gone back to All besides."""
+        if self._analysis_panel.current_detection() is None:
             return
-        ids = [int(i) for i in event_ids]
-        df = res.payload.df
-        ordered = [int(i) for i in df["event_id"]]
-        survivors = [i for i in ordered if i not in set(ids)]
-        first = min((ordered.index(i) for i in ids if i in ordered), default=None)
-        neighbour = None
-        if first is not None and survivors:
-            after = [i for i in ordered[first:] if i in set(survivors)]
-            before = [i for i in ordered[:first] if i in set(survivors)]
-            neighbour = after[0] if after else before[-1]
         self._keep_curation_place = True
         try:
-            removed = self._analysis_panel.delete_hand_made_events(ids)
+            self._analysis_panel.delete_hand_made_events([int(i) for i in event_ids])
         finally:
             self._keep_curation_place = False
-        if removed and neighbour is not None:
-            if self._event_gallery is not None:
-                self._event_gallery.show_event(neighbour)
-            if self._event_inspector is not None:
-                self._event_inspector.show_event_quietly(neighbour)
 
     def _land_on_added_event(self, event_id: int, module_id: str) -> None:
         """After a hand-made event joins the table on screen, point the open curation windows at
@@ -6853,6 +6853,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._place_inspector_dock()
             dock.visibilityChanged.connect(self._queue_dock_focus)
             dock.installEventFilter(self)
+            # The trace's key owner is THIS dock, not the Inspector panel it is tabbed beside:
+            # the pointer crossing the trace never takes A / R / Space or a label hotkey from the
+            # docked inspector, and the panel's buttons and scroll area give way like any other.
+            self._trace_view.add_key_owner(dock)
         elif not self._inspector_dock_placed():
             self._place_inspector_dock()
         return self._inspector_dock
@@ -10870,6 +10874,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sync_export_action()
             self._sync_plots_action()
             self._sync_create_segment_action()
+        # The trace's keys stop acting on it too: the survivor drawn above is not selected, and
+        # only a selection names their target again.
+        annotation = self._trace_view.annotation_target()
+        if annotation is not None and annotation[0] == doc_id:
+            self._trace_view.set_annotation_target(None)
         # The windows are re-fed unconditionally, by the session-wide refresher wired to
         # this same signal — a recording that was not the SELECTED one is still plotted in
         # the Plots and voltage-dependence windows, which is what the old "only if it was

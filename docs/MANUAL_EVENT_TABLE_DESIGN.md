@@ -669,6 +669,15 @@ Different from this draft:
 - **The Raw / Processed choice is hidden, not deleted.** `MeasurePanel.set_basis_provider(None)`
   brings it back for a panel with no owner, which is how its own tests reach it.
 - **The old list is not collapsed.** It is a group, "Old measurements (N)", hidden while empty.
+- **Fixed after the 2026-10-29 bug sweep** (`tests/gui/test_s9_*.py`): the chosen table follows the
+  table on screen (every install writes it, for a table the channel holds), so the add always writes
+  the table on screen (4.4) and a project reopens on it; a write to another channel of the recording
+  on screen leaves the channel shown alone (`Session.announcing`); Export event statistics refuses or leaves out a table on an old calibration;
+  a re-run joins the notes of several hand-made rows that land on one detection
+  (`manual_events.join_notes`); the training sidecar counts only the rows the include switch kept;
+  the edge fit's tau cache is keyed on the run; Delete keeps the curation windows' filter; and the
+  preview stands on a span the unstored statistics refuse. Still open: a merge keeps only the first
+  fragment's `note`, `origin` and `legacy_measurement_ids`, which section 3 says it must join.
 - **Not built:** the purple overlay of the Manual rows when another table is shown; decision 5
   (the Manual table is discarded with its recording through the existing prompt); the restore-note
   offer, the "Revert conversion" action and the remapping of saved Distributions recipes (conversion

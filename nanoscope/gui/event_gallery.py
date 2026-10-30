@@ -76,7 +76,7 @@ from ..analysis.curation_view import (
     LABEL_FILTER_PREFIX, curation_progress, describe_progress, end_of_filter_note, filter_depends_on_labels_or_review,
     filter_display_candidates, filter_mask, filter_options, format_progress, is_filter,
     label_rows, no_unreviewed_note, row_unchanged, same_events, unlabel_rows,
-    can_keep_place,
+    can_keep_place, landing_after_removal,
 )
 from ..analysis.events import (
     AUTOMATIC_REJECTION_FLAGS, FRAC_DEPTH_ENHANCEMENT, flag_tokens, mark_reviewed,
@@ -2217,11 +2217,14 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
                    keep_place: bool = False, quiet: bool = False) -> None:
         """Install the CURRENT detection's shared frame (a reference, never a copy).
 
-        ``keep_place`` is MainWindow saying this re-feed is an undo or redo. When the new
-        frame holds the very same events (identical ``event_id`` and ``start_idx``), the
-        selection and the cursor are put back -- quietly, emitting nothing -- instead of
-        the cursor landing on tile 0, which announced a selection and moved the trace, the
-        table and the inspector with it. Anything else gets today's reset.
+        ``keep_place`` is MainWindow saying this re-feed edits the table on screen (an undo or
+        redo, a hand-made add, a Delete). When the new frame holds the very same events, or
+        those and more, or those less some (``can_keep_place``: each kept ``event_id`` at its
+        ``start_idx``), the selection and the cursor are put back -- quietly, emitting nothing
+        -- instead of the cursor landing on tile 0, which announced a selection and moved the
+        trace, the table and the inspector with it. When the cursor's tile is one of those
+        gone, the tile that took its place is selected, else the one before it. Anything else
+        gets today's reset.
 
         ``quiet`` is MainWindow saying this re-feed is a VIEW switch (the Results dock's
         Table selector put another stored table on screen): a different frame, so the
@@ -2240,7 +2243,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         different detection, and the window's private ledger is dropped."""
         keep = (bool(keep_place) and self._df is not None and events_df is not self._df
                 and doc_id == self._doc_id and channel == self._channel
-                and can_keep_place(self._df, events_df, self._current_event_id()))
+                and can_keep_place(self._df, events_df))
         # The owner handing back the ledger this window already holds says it is the same
         # detection, edited by the app itself (a hand-add, a merge, their undo).
         same_lineage = (self._df is not None and refusals is not None
@@ -2249,6 +2252,10 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         keep_sel = ([int(self._df["event_id"].iloc[r]) for r in self._selected_rows()]
                     if keep else [])
         keep_cur = self._current_event_id() if keep else None
+        # The tiles in the order they were drawn: where to land if the cursor's tile is among
+        # those the new frame has lost.
+        drawn = (self._df["event_id"].to_numpy(dtype=np.int64)[self._model.df_rows()]
+                 if keep else None)
         self._doc_id = doc_id
         self._channel = channel
         self._module_id = module_id
@@ -2292,6 +2299,21 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self._sync_progress()
         self._sync_controls()
         if keep:
+            if keep_cur is not None and self._row_for_id(keep_cur) is None:
+                # THE CURSOR'S TILE WENT WITH THE ROWS (a Delete from this menu, the table's or
+                # the inspector's; the undo of the add it stood on). The Show filter stays, and
+                # the next tile after it in the grid's order -- the one that took its place --
+                # is shown, else the one before it, and none when the subset is empty. Through
+                # show_event, quietly, as an add's landing is: it turns the page only when rows
+                # removed before that tile moved it onto an earlier one. It used to be the next
+                # event in TABLE order, which Hand-made only does not hold.
+                now = (self._df["event_id"].to_numpy(dtype=np.int64)[self._model.df_rows()]
+                       if self._df is not None else ())
+                land = landing_after_removal(drawn, keep_cur, now)
+                if land is not None:
+                    self.show_event(land)
+                    return
+                keep_cur = None
             self._restore_selection(keep_sel, keep_cur)
             self._sync_controls()
             return
