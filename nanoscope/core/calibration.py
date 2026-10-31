@@ -24,10 +24,13 @@ __all__ = [
     "SIDECAR_FAILED",
     "SIDECAR_DELETE_FAILED",
     "SIDECAR_RECORDING_MOVED",
+    "SIDECAR_KEPT",
     "sidecar_path",
     "sidecar_effect",
     "notes_lost_by",
     "save_sidecar",
+    "sidecar_bytes",
+    "restore_sidecar",
     "load_sidecar",
 ]
 
@@ -176,6 +179,8 @@ class CalibrationSet:
     """
 
     entries: dict[tuple[str, int], ChannelCalibration] = field(default_factory=dict)
+    #: The default each channel OPENED with, keyed like ``entries`` — see :meth:`opened_default`.
+    opened_defaults: dict[tuple[str, int], ChannelCalibration] = field(default_factory=dict)
 
     def get(self, doc_id: str, ch: int) -> ChannelCalibration:
         """Identity for an unseeded channel; Session seeds default_for() at add_document."""
@@ -184,12 +189,47 @@ class CalibrationSet:
     def set(self, doc_id: str, ch: int, cal: ChannelCalibration) -> None:
         self.entries[(doc_id, ch)] = cal
 
+    def set_opened_default(self, doc_id: str, ch: int, cal: ChannelCalibration) -> None:
+        """Record the default ``ch`` opened with. ``Session.add_document`` calls it once per
+        channel, before any sidecar is applied, so what it records is the app's default and
+        never the user's calibration."""
+        self.opened_defaults[(doc_id, ch)] = cal
+
+    def opened_default(self, doc_id: str, info: ChannelInfo) -> ChannelCalibration:
+        """*** THE DEFAULT THIS CHANNEL OPENED WITH *** — what "back at its default" means to
+        Reset, to the sidecar and to the workflow chip.
+
+        Not :meth:`default_for` called again, because that answer depends on a number only
+        the open can read: the voltage encoding is detected from the channel's own median.
+        Asked without it, :meth:`default_for` gives 0.1 for every voltage-mV channel, and the
+        host-guest channel that reads its bias directly opens at 1.0. Reset installed that
+        median-less 0.1 -- 10x on every voltage, conductance and V-dependence figure -- and
+        the sidecar compared every channel with it, so any write for such a recording also
+        stored the voltage channel the user never touched.
+
+        A channel nobody recorded (a set built by hand, as tests and the study bridge do)
+        falls back to :meth:`default_for` without a median, which is the answer every caller
+        got before this record existed.
+        """
+        recorded = self.opened_defaults.get((doc_id, info.index))
+        return recorded if recorded is not None else self.default_for(info)
+
+    def copy(self) -> "CalibrationSet":
+        """An independent copy of both records — what an ask-before-commit probe evaluates.
+
+        Both, not ``entries`` alone: a probe that copied only the entries judged every channel
+        against the median-less default and predicted a sidecar write the real commit does
+        not make."""
+        return CalibrationSet(entries=dict(self.entries),
+                              opened_defaults=dict(self.opened_defaults))
+
     def fingerprint(self, doc_id: str, ch: int) -> tuple[float, float]:
         return self.get(doc_id, ch).fingerprint()
 
     def drop_doc(self, doc_id: str) -> None:
-        for key in [k for k in self.entries if k[0] == doc_id]:
-            del self.entries[key]
+        for record in (self.entries, self.opened_defaults):
+            for key in [k for k in record if k[0] == doc_id]:
+                del record[key]
 
     @staticmethod
     def default_for(info: ChannelInfo, raw_median: float | None = None) -> ChannelCalibration:
@@ -304,8 +344,9 @@ def resolve_channel(
 
 # --- sidecar persistence -------------------------------------------------------------------------
 # <datafile>.npcal.json next to the data file. This is the payoff for splitting calibration out of
-# the document. WRITE ONLY when at least one channel differs from CalibrationSet.default_for() —
-# do not litter a sidecar next to every file the user merely opened.
+# the document. WRITE ONLY when at least one channel differs from the default it opened with
+# (CalibrationSet.opened_default) — do not litter a sidecar next to every file the user merely
+# opened, and do not store a channel the user never touched.
 # Format: {"version": 2, "channels": {"<index>": {"gain":…, "offset":…, "target_units":…,
 #                                                 "note":…, "name":…, "kind":…,
 #                                                 "treat_as_kind":…}}}
@@ -351,11 +392,20 @@ def _sidecar_payload(doc_id: str, calib: CalibrationSet,
     THE one place that determination lives. :func:`save_sidecar` acts on it and
     :func:`sidecar_effect` predicts it, so "what will this write do" and "what this write
     does" cannot drift apart.
+
+    "Their default" is the one each channel OPENED with (:meth:`CalibrationSet.opened_default`),
+    because the next open re-derives exactly that default from the same samples: a channel
+    equal to it needs no entry to come back as it is. Compared with the median-less
+    ``default_for(info)`` instead, a host-guest voltage channel that opened at gain 1.0 read
+    as "differs from 0.1", so calibrating only the current channel wrote the untouched voltage
+    channel too. A sidecar an older build wrote that way still opens with the same numbers:
+    its entry installs the gain, offset and units the open had seeded already, and the next
+    write leaves it out.
     """
     payload: dict[str, dict[str, object]] = {}
     for info in channels:
         cal = calib.get(doc_id, info.index)
-        default = CalibrationSet.default_for(info)
+        default = calib.opened_default(doc_id, info)
         # THE KIND OVERRIDE IS PART OF "DIFFERS FROM DEFAULT". Without it a user who only
         # tells the app that an undeclared channel is a current — no gain, no units — has
         # made a change that writes nothing, so the panes come back in the old order on the
@@ -401,6 +451,11 @@ SIDECAR_DELETE_FAILED = "delete_failed"  # the removal was refused; the OLD side
 # (and in a project); the caller must SAY it was not stored beside the data. Decided by
 # ``Session.recording_moved``, which is the only place that knows the file was ever there.
 SIDECAR_RECORDING_MOVED = "recording_moved"
+# An undo or a redo found the file NOT as the step it was taking had left it -- a later step
+# on another channel still in effect rewrote it, or it was edited outside the app -- and left
+# it alone: putting the step's other side back would take that later change back with it,
+# unasked. Only :func:`restore_sidecar` answers it; the calibration still moved in the session.
+SIDECAR_KEPT = "kept"
 
 
 def sidecar_effect(data_path: Path, doc_id: str, calib: CalibrationSet,
@@ -411,9 +466,9 @@ def sidecar_effect(data_path: Path, doc_id: str, calib: CalibrationSet,
     before ``SIDECAR_REMOVED``. That branch deletes a file the app does not own, sitting
     next to the user's raw data, carrying a ``note`` field a project file cannot round-trip;
     it is reached by any commit that leaves every channel at its default, which the
-    Calibration panel's *Reset to default* button does by definition and its *Apply* button
-    does whenever the typed values happen to be the defaults. Silent deletion from either
-    was C12.
+    Calibration panel's *Reset to default* button does unless a "treat as" override or
+    another channel still differs, and its *Apply* button does whenever the typed values
+    happen to be the defaults. Silent deletion from either was C12.
     """
     if _sidecar_payload(doc_id, calib, channels):
         return SIDECAR_WRITTEN
@@ -441,6 +496,12 @@ def notes_lost_by(data_path: Path, doc_id: str, calib: CalibrationSet,
 
     A note that is being REPLACED by another note is not a loss and is not reported; an
     empty note is not a loss either, and neither is a channel whose entry survives.
+
+    Nor is a note the next open writes back by itself: the one the channel's OPENED default
+    carries, word for word. An older build stored an untouched host-guest voltage channel
+    with exactly that note (see :func:`_sidecar_payload`); its entry now leaves the file on
+    the next write and the open re-derives the same note, so asking about it would put a
+    confirmation in front of an ordinary Apply -- the prompt users learn to click through.
     """
     path = sidecar_path(data_path)
     try:
@@ -451,6 +512,7 @@ def notes_lost_by(data_path: Path, doc_id: str, calib: CalibrationSet,
     if not isinstance(on_disk, dict):
         return ()
     after = _sidecar_payload(doc_id, calib, channels)
+    by_index = {int(info.index): info for info in channels}
     lost: list[tuple[int, str]] = []
     for key, entry in on_disk.items():
         note = str(entry.get("note", "")) if isinstance(entry, dict) else ""
@@ -460,9 +522,14 @@ def notes_lost_by(data_path: Path, doc_id: str, calib: CalibrationSet,
         if kept is not None and str(kept.get("note", "")).strip():
             continue                   # the entry survives and still carries a note
         try:
-            lost.append((int(key), note))
+            ch = int(key)
         except (TypeError, ValueError):
             continue
+        info = by_index.get(ch)
+        if kept is None and info is not None \
+                and note == calib.opened_default(doc_id, info).note:
+            continue                   # the next open writes this very note back
+        lost.append((ch, note))
     return tuple(sorted(lost))
 
 
@@ -505,8 +572,7 @@ def save_sidecar(data_path: Path, doc_id: str, calib: CalibrationSet,
             return SIDECAR_REMOVED if existed else SIDECAR_NONE
         except OSError as exc:
             if reason is not None:
-                reason.append(str(exc) if isinstance(exc, PermissionError)
-                              else f"{exc.strerror or exc}".strip())
+                reason.append(_os_reason(exc))
             return SIDECAR_DELETE_FAILED
     try:
         # STAGED, not written in place. PORT_PLAN rule 21 claimed every write over user data
@@ -521,8 +587,86 @@ def save_sidecar(data_path: Path, doc_id: str, calib: CalibrationSet,
         return SIDECAR_WRITTEN
     except OSError as exc:
         if reason is not None:
-            reason.append(str(exc) if isinstance(exc, PermissionError)
-                          else f"{exc.strerror or exc}".strip())
+            reason.append(_os_reason(exc))
+        return SIDECAR_FAILED
+
+
+def _os_reason(exc: OSError) -> str:
+    """The OS's own words for a refused sidecar write or delete (see :func:`save_sidecar`'s
+    ``reason``). A permission error keeps its path, which is the part a user acts on."""
+    return str(exc) if isinstance(exc, PermissionError) else f"{exc.strerror or exc}".strip()
+
+
+def sidecar_bytes(data_path: Path) -> bytes | None:
+    """``<datafile>.npcal.json`` exactly as it is on disk, or ``None`` when there is none.
+
+    What Edit ▸ Undo keeps of the file on each side of a calibration commit, so taking the
+    commit back puts the FILE back as well -- byte for byte, the user's own version, wording
+    and notes included -- instead of re-deriving it from the calibration it returns to (see
+    :func:`restore_sidecar`). Raises ``OSError`` when a file is there and cannot be read:
+    "no file" is a state an undo restores by deleting, so it is never a guess.
+    """
+    try:
+        return sidecar_path(data_path).read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def restore_sidecar(data_path: Path, blob: bytes | None, *, expect: bytes | None,
+                    reason: list[str] | None = None) -> str:
+    """Put ``<datafile>.npcal.json`` back to ``blob`` (``None``: no file) — if, and only if,
+    it holds ``expect`` now. Edit ▸ Undo and Redo's door to the file; every other write goes
+    through :func:`save_sidecar`.
+
+    NOT :func:`save_sidecar`, because that DERIVES the file from the calibration set, by the
+    payload rule (a channel is stored only where it differs from its opened default). An undo
+    written back through it took a note on a channel at its default numbers out of the user's
+    file, deleted the file outright when that was its only entry, and, after a project
+    restore (which installs the project's calibration without touching the file), wrote a
+    gain the file had never held -- none of it asked, all of it under "Undone: Apply
+    calibration · saved to …" (measured in B1's review). Design §5.4 promises the file
+    "exactly as it was before the step", and only the bytes the step found can keep that.
+
+    ``expect`` is what the step left the file as (its "after" on an undo, its "before" on a
+    redo). Anything else there, short of ``blob`` itself, means a later change is still in
+    effect -- another channel's step, which rewrites the one file the recording's channels
+    share, or an edit made outside the app -- and putting ``blob`` back would take that
+    change back with it, unasked: the file is left as it is (:data:`SIDECAR_KEPT`). Journal
+    order makes that rare: a press takes back the newest step of the recording on screen,
+    so the steps taken after this one are already undone. A file that holds ``blob``
+    already (an undo whose write failed, redone) needs nothing.
+
+    Returns :data:`SIDECAR_WRITTEN` / :data:`SIDECAR_REMOVED` / :data:`SIDECAR_NONE` (it holds
+    ``blob`` already) / :data:`SIDECAR_FAILED` / :data:`SIDECAR_DELETE_FAILED`, as
+    :func:`save_sidecar` does, or :data:`SIDECAR_KEPT`; ``reason`` collects the OS's words for
+    a failure, and for a file that could not even be read.
+    """
+    path = sidecar_path(data_path)
+    try:
+        now = sidecar_bytes(data_path)
+    except OSError as exc:
+        if reason is not None:
+            reason.append(_os_reason(exc))
+        return SIDECAR_KEPT
+    if now == blob:
+        return SIDECAR_NONE
+    if now != expect:
+        return SIDECAR_KEPT
+    if blob is None:
+        try:
+            path.unlink(missing_ok=True)
+            return SIDECAR_REMOVED
+        except OSError as exc:
+            if reason is not None:
+                reason.append(_os_reason(exc))
+            return SIDECAR_DELETE_FAILED
+    try:
+        with atomic_write.staged_write(path) as fh:     # staged: see save_sidecar
+            fh.write(blob)
+        return SIDECAR_WRITTEN
+    except OSError as exc:
+        if reason is not None:
+            reason.append(_os_reason(exc))
         return SIDECAR_FAILED
 
 

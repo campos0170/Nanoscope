@@ -7,8 +7,11 @@ here, so they cannot disagree:
 * :data:`CHAIN_KEYS` / :data:`CHAIN_DEFAULTS` / :func:`complete_recipe` -- a protocol is
   a COMPLETE chain. Recalling a partial dict left unrelated stages on under the
   protocol's name (SP-04).
-* :func:`effective_chain` / :func:`chain_differences` / :func:`judge_chain` -- does the
-  form's chain differ from the chain the detection on screen ran with, and how.
+* :func:`effective_chain` / :func:`chain_differences` / :func:`threshold_differences` /
+  :func:`judge_chain` -- does the form differ from what the detection on screen ran with
+  (its chain, and a Schmitt/CUSUM run's thresholds), and how.
+* :data:`STAGE_PARAM_KEYS` / :func:`revert_params` / :func:`reset_stage_params` -- what
+  Revert and Reset put back, stage by stage.
 * :func:`stage_rows` -- the eight stages in EXECUTION order, as the window lists them.
 * :func:`validate_recipe` / :func:`write_protocols_file` / :func:`read_protocols_file` /
   :func:`merge_imported_protocols` -- the JSON protocol exchange.
@@ -21,7 +24,7 @@ import json
 import math
 import pprint
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +53,9 @@ __all__ = [
     "SCOPE_SENTENCE",
     "STAGE_ENABLE_KEY",
     "STAGE_KEYS",
+    "STAGE_PARAM_KEYS",
     "STAGE_TITLES",
+    "THRESHOLD_KEYS_BY_MODULE",
     "ChainDiff",
     "ChainStatus",
     "MergeReport",
@@ -67,7 +72,11 @@ __all__ = [
     "read_protocols_file",
     "recipe_key_differences",
     "recipes_equal",
+    "reset_stage_params",
+    "revert_params",
     "stage_rows",
+    "stages_that_differ",
+    "threshold_differences",
     "validate_recipe",
     "write_protocols_file",
 ]
@@ -112,8 +121,25 @@ CHAIN_DEFAULTS: Mapping[str, Any] = MappingProxyType({
     "normalize_clip_sigma": float(filters.MODEL_INPUT_CLIP_SIGMA),
 })
 
+#: The detection THRESHOLDS each classical detector reads from the form, beside its chain.
+#: A stored run that recorded them can be compared with the form key for key, exactly as
+#: its chain is (``judge_chain``); before this map nothing compared them, so a k_in edited
+#: after a run left the table on screen looking current. ``polarity`` is not here: the
+#: chain judge compares it while the baseline-drift stage runs, the one stage that reads
+#: it. With that stage off nothing judges it, though ``detect_events`` reads it too: an
+#: open question for the owner. One definition, read by this module's judge and by
+#: ``analysis.lineage``.
+THRESHOLD_KEYS_BY_MODULE: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "detect.schmitt": ("k_in", "k_out", "min_dwell_s", "max_dwell_s", "merge_gap_s"),
+    "detect.cusum": ("cusum_k", "cusum_h", "min_dwell_s", "max_dwell_s", "merge_gap_s"),
+})
+
 #: Keys for which ``None`` is a value rather than "absent".
 _NONE_IS_A_VALUE = frozenset({"filter_cutoff_hz", "notch_freqs"})
+#: A recorded ``None`` that is a setting too, one :func:`complete_recipe` spells as its
+#: default: a provenance stamps the auto detrend stride as the kernel's ``None``, and the
+#: form's 0 (``modules._DECIM_AUTO``) is the same auto. A Revert puts it back.
+_NONE_IS_AUTO = frozenset({"detrend_decim"})
 
 #: Baseline-drift estimator labels, keyed by the method string
 #: :func:`nanoscope.analysis.baseline.remove_baseline_wander` accepts.
@@ -152,6 +178,19 @@ STAGE_ENABLE_KEY: Mapping[str, str | None] = MappingProxyType({
     "detrend": "detrend_enabled", "rmean": "rmean_enabled", "savgol": "savgol_enabled",
     "normalize": "normalize_enabled", "lowpass": None,
 })
+#: Each stage's own CHAIN_KEYS, its on/off among them (the low-pass's is its cutoff), in
+#: CHAIN_KEYS order: what a stage's Revert puts back and its Reset defaults. Read off the
+#: key prefixes, so a new chain key lands in its stage or fails the import below.
+STAGE_PARAM_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    stage: tuple(k for k in CHAIN_KEYS if k.startswith(prefix))
+    for stage, prefix in (("notch", "notch_"), ("median", "median_"), ("highpass", "hp_"),
+                          ("detrend", "detrend_"), ("rmean", "rmean_"),
+                          ("savgol", "savgol_"), ("normalize", "normalize_"),
+                          ("lowpass", "filter_"))})
+# Every chain key in exactly one stage: a key no prefix claims, or two claim, fails here.
+assert sorted(k for keys in STAGE_PARAM_KEYS.values() for k in keys) == sorted(CHAIN_KEYS)
+#: The key that switches each stage on and off: its flag, or the low-pass's cutoff.
+_STAGE_SWITCH = {stage: STAGE_ENABLE_KEY[stage] or "filter_cutoff_hz" for stage in STAGE_KEYS}
 _STAGE_PHRASE = {
     "notch": "notch", "median": "median", "highpass": "high-pass",
     "detrend": "baseline drift", "rmean": "running mean", "savgol": "Savitzky-Golay",
@@ -287,6 +326,12 @@ def _notch_lines(p: Mapping[str, Any], fs: float | None) -> list[float]:
     return [freq * k for k in range(1, max(harmonics, 0) + 1)]
 
 
+def _polarity(params: Mapping[str, Any]) -> int | None:
+    """The polarity as the baseline-drift stage reads it (None = auto)."""
+    polarity = params.get("polarity")
+    return None if polarity is None else int(polarity)
+
+
 def effective_chain(params: Mapping[str, Any] | None, fs: float | None = None) -> dict[str, Any]:
     """The values that actually change the array, per ENABLED stage, in kernel order.
 
@@ -311,8 +356,7 @@ def effective_chain(params: Mapping[str, Any] | None, fs: float | None = None) -
         if method not in _DETREND_WINDOW_IGNORED:
             stage["window_s"] = float(p["detrend_window_s"])
         stage.update(detrend_method_kwargs(p))
-        polarity = params.get("polarity")
-        stage["polarity"] = None if polarity is None else int(polarity)
+        stage["polarity"] = _polarity(params)
         chain["detrend"] = stage
     if p["rmean_enabled"]:
         chain["rmean"] = {"window_s": float(p["rmean_window_s"])}
@@ -369,7 +413,12 @@ def recipes_equal(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None, *,
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ChainDiff:
-    """One difference, worded run → form (``'low-pass 10000 → 5000 Hz'``)."""
+    """One difference, worded run → form (``'low-pass 10000 → 5000 Hz'``).
+
+    ``stage`` is a :data:`STAGE_KEYS` stage, or ``"thresholds"`` for a detection threshold
+    (:func:`threshold_differences`); ``key`` is what differs within it (``'cutoff_hz'``,
+    ``'enabled'``; a threshold's own params key).
+    """
 
     stage: str
     text: str
@@ -382,6 +431,16 @@ def _g(v: Any) -> str:
 
 def _ms(v: Any) -> str:
     return f"{float(v) * 1e3:g}"
+
+
+def _seconds(v: Any) -> str:
+    """A duration in the unit it reads in (``20 µs``, ``1 ms``, ``2 s``); ``None`` is off."""
+    if v is None:
+        return "off"
+    s = float(v)
+    if s == 0 or s >= 1:
+        return f"{s:g} s"
+    return f"{s * 1e3:g} ms" if s >= 1e-3 else f"{s * 1e6:g} µs"
 
 
 def _lines_text(lines: Sequence[float]) -> str:
@@ -409,6 +468,15 @@ _DETREND_KNOB_TEXT: dict[str, tuple[str, Any]] = {
     "sg_poly": ("SG order", _g),
     "sg_decim": ("SG decimation", _g),
 }
+
+#: Each detection threshold's words in a difference; CUSUM's k and h say whose they are.
+_THRESHOLD_TEXT: dict[str, tuple[str, Any]] = {
+    "k_in": ("k_in", _g), "k_out": ("k_out", _g),
+    "cusum_k": ("CUSUM k", _g), "cusum_h": ("CUSUM h", _g),
+    "min_dwell_s": ("min dwell", _seconds), "max_dwell_s": ("max dwell", _seconds),
+    "merge_gap_s": ("merge gap", _seconds),
+}
+assert set(_THRESHOLD_TEXT) == {k for keys in THRESHOLD_KEYS_BY_MODULE.values() for k in keys}
 
 
 def _stage_summary(key: str, st: Mapping[str, Any]) -> str:
@@ -523,6 +591,131 @@ def describe_differences(diffs: Sequence[ChainDiff], limit: int = 3) -> str:
     return f"{shown} (+{extra} more)" if extra > 0 else shown
 
 
+def _describe_settings(diffs: Sequence[ChainDiff]) -> str:
+    """:func:`describe_differences` with the thresholds first: no stage list shows them, so
+    a long list must not leave them to its "(+N more)"."""
+    return describe_differences(sorted(diffs, key=lambda d: d.stage != "thresholds"))
+
+
+_MISSING = object()
+#: The two thresholds whose 0 is off. The form spells its 0 as ``None``
+#: (``DetectionPanel.params``) and shows a stored ``None`` as 0, so a run that recorded
+#: either is the form's off; telling them apart would name a difference no Revert clears.
+_OFF_AT_ZERO = frozenset({"max_dwell_s", "merge_gap_s"})
+
+
+def _threshold(params: Mapping[str, Any], key: str) -> Any:
+    """``params``' setting for threshold ``key``: a float, ``None`` for off, or ``_MISSING``
+    when it holds none (absent, or a ``None`` or non-number that is no setting)."""
+    value = params.get(key, _MISSING)
+    if value is None and key in _OFF_AT_ZERO:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _MISSING
+    if not math.isfinite(number):
+        return _MISSING
+    return None if key in _OFF_AT_ZERO and number <= 0 else number
+
+
+def threshold_differences(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None,
+                          module_id: str | None, *, rel: float = 1e-9) -> tuple[ChainDiff, ...]:
+    """Every threshold of ``module_id``'s detector that ``form`` changed since ``run``, as
+    ``"thresholds"`` diffs worded run → form (``'k_in 5 → 6'``, ``'merge gap off → 1 ms'``).
+
+    Only a :data:`THRESHOLD_KEYS_BY_MODULE` detector has thresholds here, and a key is
+    judged only where both sides hold a setting: a threshold the run never recorded is not
+    second-guessed with a default.
+    """
+    form, run = form or {}, run or {}
+    diffs: list[ChainDiff] = []
+    for key in THRESHOLD_KEYS_BY_MODULE.get(module_id or "", ()):
+        ran, now = _threshold(run, key), _threshold(form, key)
+        if ran is _MISSING or now is _MISSING or _same(ran, now, rel):
+            continue
+        label, fmt = _THRESHOLD_TEXT[key]
+        diffs.append(ChainDiff("thresholds", f"{label} {fmt(ran)} → {fmt(now)}", key))
+    return tuple(diffs)
+
+
+# ---------------------------------------------------------------------------
+# Revert and Reset, stage by stage
+# ---------------------------------------------------------------------------
+def stages_that_differ(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None, *,
+                       fs: float | None = None) -> frozenset[str]:
+    """The stages :func:`chain_differences` names: the ones a stage's Revert acts on and
+    the stage list marks."""
+    return frozenset(d.stage for d in chain_differences(form, run, fs=fs))
+
+
+def _recorded_chain(run: Mapping[str, Any]) -> dict[str, Any]:
+    """The chain keys ``run`` recorded, in :func:`complete_recipe`'s spelling and CHAIN_KEYS
+    order. An absent key, or a ``None`` that only means "not recorded", is left out.
+
+    Every stage's on/off is in, recorded or not. A stage that ran stamps its flag (and the
+    low-pass its cutoff), so a run with none did not run that stage: it predates the stage.
+    That is how the judge reads it too, so this off is a fact, not a default.
+    """
+    full = complete_recipe(run)
+    switches = _STAGE_SWITCH.values()
+    return {k: full[k] for k in CHAIN_KEYS if k in switches or (k in run and (
+        run[k] is not None or k in _NONE_IS_A_VALUE or k in _NONE_IS_AUTO))}
+
+
+def revert_params(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None, *,
+                  stages: str | Iterable[str] | None = None, fs: float | None = None,
+                  module_id: str | None = None) -> dict[str, Any] | None:
+    """What Revert puts on the form: the RUN's own values for each stage that differs (or
+    for each of ``stages``, one stage key or several, differing or not), every key of the
+    stage it recorded; ``None`` when that cannot put the form back.
+
+    A key the run never recorded is LEFT OUT, never filled from :data:`CHAIN_DEFAULTS`:
+    ``DetectionPanel.set_params`` leaves an absent key alone, so what the user typed there
+    survives. Filling it was defect 7: a legacy provenance records only the enabled stages'
+    values, so a Revert reset every other stage's settings to their defaults. A stage's
+    on/off is the one key that comes back unrecorded, as off (:func:`_recorded_chain`); the
+    stage keeps its settings.
+
+    ``polarity`` comes back with the baseline-drift stage when that stage ran (it reads the
+    polarity) and the form's differs, so one Revert leaves nothing behind. With ``stages``
+    unset and a :data:`THRESHOLD_KEYS_BY_MODULE` detector, each threshold the run recorded
+    that differs comes back too. Empty when nothing differs.
+
+    ``None`` when a stage it reverts would still differ afterwards. The judge reads a setting
+    the run never recorded (a knob newer than the build that made the table) at its default,
+    which Revert will not invent; offered anyway, it reports the form reverted while the
+    notice still names the difference, press after press. Thresholds never cause this: only
+    the ones the run recorded are judged.
+    """
+    form, run = form or {}, run or {}
+    if isinstance(stages, str):
+        stages = (stages,)
+    chosen = stages_that_differ(form, run, fs=fs) if stages is None else frozenset(stages)
+    keys = {k for stage in chosen for k in STAGE_PARAM_KEYS[stage]}
+    out = {k: v for k, v in _recorded_chain(run).items() if k in keys}
+    ran = effective_chain(run, fs).get("detrend") if "detrend" in chosen else None
+    if ran is not None and "polarity" in run and ran["polarity"] != _polarity(form):
+        out["polarity"] = run["polarity"]
+    if stages_that_differ(dict(form, **out), run, fs=fs) & chosen:
+        return None
+    if stages is None:
+        for diff in threshold_differences(form, run, module_id):
+            out[diff.key] = _threshold(run, diff.key)
+    return out
+
+
+def reset_stage_params(stage: str) -> dict[str, Any]:
+    """What a stage's Reset puts on the form: the :data:`CHAIN_DEFAULTS` of its settings,
+    but NOT its on/off, which a Reset leaves as it is (a running stage keeps running).
+
+    The low-pass has no flag of its own: its on/off IS ``filter_cutoff_hz`` (None = off),
+    so its Reset restores only ``filter_order`` and ``filter_kind`` and keeps the cutoff.
+    """
+    switch = _STAGE_SWITCH[stage]
+    return {k: CHAIN_DEFAULTS[k] for k in STAGE_PARAM_KEYS[stage] if k != switch}
+
+
 # ---------------------------------------------------------------------------
 # the judge
 # ---------------------------------------------------------------------------
@@ -531,11 +724,14 @@ _CLASSICAL = frozenset({"detect.schmitt", "detect.cusum"})
 
 @dataclass(frozen=True)
 class ChainStatus:
-    """How the form's chain relates to the chain of the detection on screen.
+    """How the form relates to the detection on screen: its chain, and the thresholds a
+    Schmitt/CUSUM run recorded.
 
     ``kind``: ``none`` (no detection shown) | ``match`` | ``differs`` | ``unknown``
     (the run's chain was not recorded or could not be read) | ``not_classical`` (the
-    table did not come from this chain at all).
+    table did not come from this chain at all). ``revert_params`` holds only what
+    differs (:func:`revert_params`), never the whole form; on a ``differs`` it is None
+    when Revert cannot put the form back, and the sentence then offers only a run.
     """
 
     kind: str
@@ -547,11 +743,19 @@ class ChainStatus:
     @property
     def headline(self) -> str:
         """The verdict for one elided line, differences first (the full :attr:`sentence`
-        is for its tooltip)."""
+        is for its tooltip). A threshold among them makes it "Settings changed"."""
         if self.kind == "differs" and self.diffs:
+            if self.thresholds_differ:
+                return f"⚠ Settings changed: {_describe_settings(self.diffs)}"
             label = self.detector_label or "detection"
             return f"⚠ Differs from the {label} run: {describe_differences(self.diffs)}"
         return self.sentence
+
+    @property
+    def thresholds_differ(self) -> bool:
+        """Whether a detection threshold is among the differences, which makes the verdict
+        "Settings changed" rather than the chain's alone."""
+        return any(d.stage == "thresholds" for d in self.diffs)
 
     @classmethod
     def none(cls) -> "ChainStatus":
@@ -568,7 +772,14 @@ def judge_chain(form_params: Mapping[str, Any] | None,
                 run_params: Mapping[str, Any] | None, *,
                 module_id: str | None, detector_label: str = "",
                 fs: float | None = None) -> ChainStatus:
-    """Compare the form's chain with the chain a stored detection ran with."""
+    """Compare the form with what a stored detection ran with: its chain and, for a
+    Schmitt/CUSUM run, the thresholds it recorded.
+
+    A chain-only difference keeps the chain's wording. A threshold among the differences
+    makes the verdict "Settings changed" and names the thresholds first: before they were
+    judged, a k_in edited after a run left the table on screen looking current. Revert is
+    offered only where :func:`revert_params` can put the form back.
+    """
     if not module_id:
         return ChainStatus.none()
     label = detector_label or str(module_id)
@@ -589,16 +800,23 @@ def judge_chain(form_params: Mapping[str, Any] | None,
             f"The chain the {label} detection on screen ran with is not recorded, so the "
             f"form cannot be compared with it."), detector_label=label)
     diffs = chain_differences(form_params, run_params, fs=fs)
-    if not diffs:
+    thresholds = threshold_differences(form_params, run_params, module_id)
+    if not diffs and not thresholds:
         return ChainStatus("match", (
             f"The form's chain is the one the {label} detection on screen ran with."),
             detector_label=label)
-    revert = complete_recipe(run_params)
-    if any(d.key == "polarity" for d in diffs):
-        revert["polarity"] = run_params.get("polarity")
-    sentence = (f"⚠ The form differs from the chain the {label} detection on screen ran "
-                f"with: {describe_differences(diffs)}. Revert, or run detection to apply it.")
-    return ChainStatus("differs", sentence, diffs, revert, label)
+    revert = revert_params(form_params, run_params, fs=fs, module_id=module_id)
+    it = "them" if thresholds else "it"
+    advice = (f"Revert, or run detection to apply {it}." if revert is not None else
+              f"Run detection to apply {it} — Revert cannot restore a setting the run did "
+              f"not record.")
+    if thresholds:
+        sentence = (f"⚠ Settings changed since the {label} detection on screen ran: "
+                    f"{_describe_settings(diffs + thresholds)}. {advice}")
+    else:
+        sentence = (f"⚠ The form differs from the chain the {label} detection on screen "
+                    f"ran with: {describe_differences(diffs)}. {advice}")
+    return ChainStatus("differs", sentence, diffs + thresholds, revert, label)
 
 
 # ---------------------------------------------------------------------------

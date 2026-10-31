@@ -1,6 +1,7 @@
 """THE UNDO DOOR — one snapshot stack over every mutation of every ``EventSet``,
-and a sibling of the same shape over the hand-measurement table
-(:class:`MeasurementHistory`, at the foot of this file).
+and two siblings of the same shape at the foot of this file: one over the
+hand-measurement table (:class:`MeasurementHistory`) and one over the analysis
+settings (:class:`SettingsHistory`).
 
 Why this file exists
 ====================
@@ -92,7 +93,7 @@ from __future__ import annotations
 
 import copy
 import weakref
-from dataclasses import dataclass, fields as dc_fields, replace
+from dataclasses import dataclass, fields as dc_fields, is_dataclass, replace
 from collections.abc import Mapping
 from typing import Any, Iterable
 
@@ -109,6 +110,8 @@ __all__ = [
     "describe_change",
     "EventHistory",
     "MeasurementHistory",
+    "SettingsScope",
+    "SettingsHistory",
 ]
 
 #: Largest number of undoable steps kept **PER EVENT TABLE** — per ``EventKey``, i.e. the
@@ -1552,3 +1555,476 @@ def _describe_measurement_change(before: pd.DataFrame, after: pd.DataFrame) -> s
     if n0 == 0:
         return "Edit measurements"
     return "Edit measurement"
+
+
+# ================================================================================================
+# The analysis settings — the same rule a third time, over values that are not tables
+# ================================================================================================
+
+#: A settings scope: a hashable tuple whose element ``[1]`` is the ``doc_id`` it belongs to.
+#: MainWindow builds four shapes:
+#:
+#: * ``("form", doc_id, channel, module_id)`` — the Detection, ML and Baseline forms of one
+#:   event table, ``module_id`` being ``None`` until that recording and channel has a table;
+#: * ``("calibration", doc_id, channel)``;
+#: * ``("time_base", doc_id)``;
+#: * ``("acquisition", doc_id, channel)`` — the acquisition-bandwidth override.
+#:
+#: :class:`SettingsHistory` reads ``[1]``, to drop a closed recording's scopes, and nothing
+#: else. A fifth kind of setting is therefore a new tuple in MainWindow, never an edit here.
+SettingsScope = tuple
+
+#: The label of a step nobody named. Only MainWindow's ``describe`` knows what a setting is
+#: called; a missing or failing one costs the menu this wording, never the step.
+_SETTINGS_LABEL = "Change settings"
+
+
+def _settings_equal(a: Any, b: Any) -> bool:
+    """Do two settings states hold the same values? Exact, with four allowances.
+
+    Each allowance is a way the SAME setting can come back as a different Python value, and
+    each would otherwise push a step for an edit nobody made — the phantom
+    :func:`_column_equal` and ``_OPTIONAL_COLUMNS`` were both written against:
+
+    * **NaN equals NaN.** Two reads produce two NaN objects and ``nan != nan``, so one NaN
+      anywhere in a state would read as a change on every checkpoint.
+    * **A list equals a tuple with equal items.** JSON has no tuple, so a value that last
+      passed through a protocol or a project comes back in the other container.
+    * **A numpy value is the Python value it holds:** ``np.float64(5.0)`` equals ``5.0``,
+      and an array equals the nested list it holds.
+    * **Containers compare item by item, to any depth:** dicts by key, lists and tuples by
+      position, and a dataclass field by field (same type required; a ``compare=False``
+      field is skipped, as the type's own ``==`` skips it), so a NaN inside a
+      ``ChannelCalibration`` is no more a change than a NaN in a dict.
+
+    Everything else is ``==``: ``5`` and ``5.0`` are one value, and ``None`` is not ``NaN``,
+    ``0`` or ``""``.
+
+    A COMPARISON THAT CANNOT ANSWER READS AS A CHANGE, the opposite of :func:`_values_equal`,
+    because a wrong answer costs the opposite thing here. There the frame is compared on its
+    own, and a stamp misread as unchanged costs a coarser label. Here the state IS the
+    payload: an edit misread as unchanged leaves the pristine copy behind, the next Undo
+    writes the older state over the edit, and no redo leads back to it. The price of this
+    direction is a phantom step on every checkpoint for as long as such a value sits in a
+    state, which is why every type a real state holds — the forms' dicts,
+    :class:`~nanoscope.core.calibration.ChannelCalibration`,
+    :class:`~nanoscope.core.sample_rate.SampleRateDeclaration`,
+    :class:`~nanoscope.core.acquisition.AcquisitionBandwidth` — is answered above and never
+    reaches it.
+    """
+    try:
+        if a is b:
+            return True
+        if isinstance(a, np.ndarray):
+            a = a.tolist()
+        elif isinstance(a, np.generic):
+            a = a.item()
+        if isinstance(b, np.ndarray):
+            b = b.tolist()
+        elif isinstance(b, np.generic):
+            b = b.item()
+        if isinstance(a, float) and isinstance(b, float):
+            return a == b or (a != a and b != b)
+        if (is_dataclass(a) and not isinstance(a, type)) or (
+                is_dataclass(b) and not isinstance(b, type)):
+            return type(a) is type(b) and all(
+                _settings_equal(getattr(a, f.name), getattr(b, f.name))
+                for f in dc_fields(a) if f.compare)
+        if isinstance(a, Mapping) or isinstance(b, Mapping):
+            return (isinstance(a, Mapping) and isinstance(b, Mapping) and set(a) == set(b)
+                    and all(_settings_equal(a[k], b[k]) for k in a))
+        if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+            return (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple))
+                    and len(a) == len(b)
+                    and all(_settings_equal(x, y) for x, y in zip(a, b)))
+        return bool(a == b)
+    except Exception:                          # noqa: BLE001 - see the docstring's last paragraph
+        return False
+
+
+def _detached(state: Any) -> Any:
+    """A deep copy of ``state``. A reader may hand out an object it goes on editing in place,
+    and a history holding that very object would silently track the edits it exists to
+    remember (``_snapshot``'s reason). A value that refuses to be copied is kept as it is: a
+    shared value costs the isolation, a raised error would cost the step."""
+    try:
+        return copy.deepcopy(state)
+    except Exception:                          # noqa: BLE001 - a copy must never sink a checkpoint
+        return state
+
+
+def _scope_doc(scope: Any) -> Any:
+    """The recording a scope belongs to: its element ``[1]``. See :data:`SettingsScope`."""
+    return scope[1] if isinstance(scope, tuple) and len(scope) > 1 else None
+
+
+@dataclass(frozen=True, eq=False)
+class _SettingsStep:
+    """One settings change: the state before it, the state after it, and its name.
+
+    BOTH ENDS ARE KEPT, where :class:`_Entry` keeps one state and snapshots the live table on
+    every move. A settings state is small (see :class:`SettingsHistory`), so a step can stay
+    one immutable fact that moves between the two stacks unchanged: undo writes ``before``,
+    redo writes ``after``, and a redo re-applies exactly the change its label names.
+    ``eq=False`` for :class:`_Entry`'s reason: steps are identities, and two equal changes
+    are two steps.
+    """
+
+    before: Any
+    after: Any
+    label: str
+
+
+class SettingsHistory(QObject):
+    """Undo/redo over the ANALYSIS SETTINGS: the Detection, ML and Baseline forms of each
+    event table, a channel's calibration, a recording's time base and a channel's
+    acquisition-bandwidth override (``docs/EDITING_FOUNDATION_DESIGN.md`` §3).
+    :class:`EventHistory`'s rule, applied a third time.
+
+    Why a sibling class and not a key on :class:`EventHistory`
+    ---------------------------------------------------------
+    :class:`MeasurementHistory`'s answer, unchanged: the rule is reused and the payload is
+    not. What carries over is a **pristine copy per scope that is compared**, so a setting
+    need not announce itself to be captured, and wiring ``checkpoint`` to two signals for one
+    edit cannot invent a step; silent adoption the first time a scope is seen, while
+    suspended and while applying; a derived label; a depth ceiling that is counted and
+    announced. What does not carry over is everything ``EventHistory`` does with an
+    ``AnalysisResult``: the frame diff, :func:`describe_change`, ``session.add_result`` as
+    the install door. A state here is a small plain value — a dict of form fields, a
+    ``ChannelCalibration`` — read and written through two callables, so this class holds no
+    widget, imports nothing from ``gui`` and knows no settings schema.
+
+    Why one stack per scope
+    -----------------------
+    MainWindow's journal (``_undo_journal``) already decides the ORDER across stacks, and
+    each settings entry in it names a scope (design §3.5); what it asks this class is only
+    what one scope can do. And redo is per scope by the owner's decision 2: a new step ends
+    its own scope's redo branch and no other — not another table's form, not a calibration,
+    not an event table's branch. With a stack per scope, that is the only branch a push can
+    reach.
+
+    Why no byte budget
+    ------------------
+    Measured on the default forms, ``DetectionPanel.params()`` plus ``ml_params()`` plus
+    ``BaselinePanel.params()`` is 98 scalars, 2.3 kB pickled; two of them compare in 15 µs,
+    and a full 30-step history of one form holds 107 kB. A calibration, a declaration or an
+    override is a handful of scalars. The Plots window measured a whole ``PlotConfig`` at
+    1,446 bytes and keeps 200 of them with no byte ceiling (``_HISTORY_DEPTH`` in
+    ``gui/plots_panel.py``). :data:`MAX_BYTES` exists because an event snapshot is a
+    deep-copied frame, 38.7 MiB at 100 000 events; a whole form history is under a
+    thousandth of that 128 MiB ceiling. :data:`MAX_DEPTH` per scope is the only bound.
+
+    ``None`` is not a state
+    -----------------------
+    ``read(scope)`` returns ``None`` to say the scope cannot be read now, and
+    :meth:`checkpoint` then does nothing. A setting whose own value can be ``None`` — the
+    time base's "the file's own", a channel with no bandwidth override — is therefore read
+    wrapped (``{"declaration": None}``), never bare: a bare ``None`` would make "nothing
+    declared" a state this class can neither adopt nor return to.
+
+    Ownership
+    ---------
+    Driven entirely by :class:`~nanoscope.gui.main_window.MainWindow`, like both siblings. It
+    supplies ``read(scope)``, ``write(scope, state)`` and ``describe(scope, before, after)``,
+    builds the scopes, checkpoints at the moments that commit an edit, and calls
+    :meth:`rebase` as each scope appears and whenever a state arrives, :meth:`drop_doc` when
+    a recording closes, :meth:`clear` when a project opens and :meth:`set_suspended` around a
+    restore. No form and no part of the session knows this class exists.
+    """
+
+    #: The stacks moved: a step was pushed, undone, redone, re-keyed or dropped. MainWindow
+    #: hangs the dirty flag and the Edit-menu text off this, as it does for both siblings.
+    changed = Signal()
+
+    #: ``(scope, label)`` — a step was PUSHED. Emitted by the push itself, wherever it came
+    #: from (an undo's leading checkpoint, :meth:`checkpoint_all` at a save), for the reason
+    #: :attr:`MeasurementHistory.stepRecorded` gives: MainWindow journals each step from
+    #: here, so a push that bypassed its wrapper still takes its place in the order Ctrl+Z
+    #: walks.
+    stepRecorded = Signal(object, str)
+
+    #: ``(scope, total)`` — steps dropped from the far end of one scope to stay under the
+    #: depth, counted over the session for that scope. :attr:`EventHistory.stepsDepthDropped`'s
+    #: twin, for its reason: a ceiling that drops history silently leaves the menu saying
+    #: there is nothing to undo about settings the user did change.
+    stepsDepthDropped = Signal(object, int)
+
+    def __init__(self, read, write, describe=None, parent: QObject | None = None, *,
+                 depth: int = MAX_DEPTH) -> None:
+        super().__init__(parent)
+        self._get = read
+        self._set = write
+        self._describe = describe
+        self._depth = int(depth)
+        #: Each scope's steps, oldest first.
+        self._undo: dict[SettingsScope, list[_SettingsStep]] = {}
+        self._redo: dict[SettingsScope, list[_SettingsStep]] = {}
+        #: The last COMMITTED state of each scope, detached. Everything is measured against
+        #: this; a scope absent from it has never been seen.
+        self._pristine: dict[SettingsScope, Any] = {}
+        #: Steps dropped from each scope to stay under the depth, ever — the same
+        #: never-decremented ledger as :attr:`EventHistory._depth_dropped`.
+        self._depth_dropped: dict[SettingsScope, int] = {}
+        self._suspended = False
+        self._applying = False
+        #: The scope of the last step PUSHED — :attr:`EventHistory.last_step_key`'s twin.
+        self.last_step_scope: SettingsScope | None = None
+
+    # -- recording ------------------------------------------------------------------------------
+    def set_suspended(self, on: bool) -> None:
+        """While suspended, checkpoints adopt what they read and push nothing. A project
+        restore rebuilds every setting from disk, and those are reconstructions, not edits."""
+        self._suspended = bool(on)
+
+    def _read(self, scope: SettingsScope) -> Any:
+        try:
+            return self._get(scope)
+        except Exception:                      # noqa: BLE001 - reading must never sink a save
+            return None
+
+    def _label(self, scope: SettingsScope, before: Any, after: Any) -> str:
+        if self._describe is None:
+            return _SETTINGS_LABEL
+        try:
+            text = self._describe(scope, before, after)
+        except Exception:                      # noqa: BLE001 - a label must never cost the step
+            return _SETTINGS_LABEL
+        return text if isinstance(text, str) and text else _SETTINGS_LABEL
+
+    def checkpoint(self, scope: SettingsScope | None, *, label: str | None = None) -> bool:
+        """Commit whatever has happened to ``scope`` since its last checkpoint.
+
+        Returns True if a step was pushed. Free when nothing changed, so MainWindow can call
+        it after the 700 ms pause, before a run or a switch, and from every signal that might
+        mean an edit, without inventing steps. ``label`` names the step when the caller knows
+        better than the diff ("Recall protocol ‘HG student’"); otherwise ``describe`` does.
+        """
+        if scope is None:
+            return False
+        state = self._read(scope)
+        if state is None:
+            return False
+        prior = self._pristine.get(scope)
+        if prior is None:
+            # First sight: nothing to return to yet, so this is the baseline, not a step.
+            self._pristine[scope] = _detached(state)
+            return False
+        if _settings_equal(prior, state):
+            return False
+        if self._suspended or self._applying:
+            self._pristine[scope] = _detached(state)
+            return False
+        after = _detached(state)
+        text = label or self._label(scope, prior, after)
+        self._undo.setdefault(scope, []).append(_SettingsStep(prior, after, text))
+        self._redo.pop(scope, None)
+        self._pristine[scope] = after
+        self._trim(scope)
+        self.last_step_scope = scope
+        self.stepRecorded.emit(scope, text)
+        self.changed.emit()
+        return True
+
+    def checkpoint_all(self) -> bool:
+        """:meth:`checkpoint` every scope seen so far. The safety net for the four moments at
+        which "what happened last" has to be true — an undo, the Edit menu opening, a save
+        and a quit — as :meth:`EventHistory.checkpoint_all` is."""
+        pushed = False
+        for scope in list(self._pristine):
+            pushed |= self.checkpoint(scope)
+        return pushed
+
+    def rebase(self, scope: SettingsScope) -> None:
+        """Adopt what ``scope`` holds now as committed, without a step.
+
+        For a state that ARRIVED rather than was edited, and before anything can checkpoint
+        the scope again:
+
+        * **A scope appearing**: a recording's calibration, time base and override when it
+          opens, a form when it first comes on screen. First sight is a baseline, and the
+          session announces those three settings only AFTER they change (opening a
+          recording emits ``documentOpened`` alone), so a scope first seen from
+          ``calibrationChanged`` would take the first Apply as its baseline, and that Apply
+          could never be undone.
+        * **A switch, a project restore or a seed from a stored run**: an event undo or redo
+          that installs a run re-seeds the form, so it is a seed too. The caller checkpoints
+          the outgoing scope first, switches, then rebases the incoming one (design §3.9). A
+          seed left unrebased is pushed as a step by the next checkpoint, :meth:`undo`'s
+          leading one included, and §3.6's single press would then undo that phantom
+          instead of the settings that led to the run.
+
+        Does nothing when the scope cannot be read.
+        """
+        state = self._read(scope)
+        if state is not None:
+            self._pristine[scope] = _detached(state)
+
+    def forget(self, scope: SettingsScope) -> None:
+        """Drop ``scope``'s pristine copy and keep its steps: the next checkpoint adopts what
+        the scope then holds, silently, as on first sight."""
+        self._pristine.pop(scope, None)
+
+    # -- querying -------------------------------------------------------------------------------
+    def can_undo(self, scope: SettingsScope | None) -> bool:
+        return bool(self._undo.get(scope))
+
+    def can_redo(self, scope: SettingsScope | None) -> bool:
+        return bool(self._redo.get(scope))
+
+    def undo_label(self, scope: SettingsScope | None) -> str:
+        steps = self._undo.get(scope)
+        return steps[-1].label if steps else ""
+
+    def redo_label(self, scope: SettingsScope | None) -> str:
+        steps = self._redo.get(scope)
+        return steps[-1].label if steps else ""
+
+    def undo_depth(self, scope: SettingsScope | None) -> int:
+        return len(self._undo.get(scope) or ())
+
+    def redo_depth(self, scope: SettingsScope | None) -> int:
+        return len(self._redo.get(scope) or ())
+
+    def depth_dropped(self, scope: SettingsScope | None) -> int:
+        """Steps dropped from ``scope`` to stay under the depth, ever. Read by the Edit menu
+        so "nothing to undo" is never shown for settings whose history the ceiling took —
+        :meth:`EventHistory.depth_dropped`'s contract."""
+        return int(self._depth_dropped.get(scope, 0))
+
+    def has_any(self) -> bool:
+        return any(self._undo.values()) or any(self._redo.values())
+
+    def scopes_with_history(self) -> tuple[SettingsScope, ...]:
+        """Every scope holding an undo or a redo step — what MainWindow's fallback asks when
+        its journal has run out (design §3.5)."""
+        found = dict.fromkeys(s for s, steps in self._undo.items() if steps)
+        found.update(dict.fromkeys(s for s, steps in self._redo.items() if steps))
+        return tuple(found)
+
+    def is_applying(self) -> bool:
+        """True while :meth:`undo` or :meth:`redo` is writing, so MainWindow can keep an undo
+        from announcing itself as a fresh edit."""
+        return self._applying
+
+    # -- applying -------------------------------------------------------------------------------
+    def undo(self, scope: SettingsScope | None) -> str:
+        """Write ``scope``'s state from before its newest step. Returns that step's label,
+        or ``''``.
+
+        An edit not yet committed (its 700 ms pause still running) becomes a step FIRST, as
+        in :meth:`EventHistory._move`, so Ctrl+Z takes back that edit rather than jumping
+        past it to the one before. The write runs with recording muted, and what the app
+        settles on afterwards (a writer may clamp or normalise) becomes the pristine copy, so
+        the settling is never recorded as an edit of its own. Muting reaches every scope but
+        lasts only as long as the write: a writer that also moves ANOTHER scope (undoing a
+        declaration clamps the form's low-pass to the slower Nyquist) checkpoints that scope
+        before it returns, and the knock-on is adopted; caught later, by the 700 ms pause, it
+        would be recorded as the user's edit. A write that raises puts the step back where it
+        was and re-raises: nothing was undone, so nothing moves.
+        """
+        return self._move(scope, self._undo, self._redo, forward=False)
+
+    def redo(self, scope: SettingsScope | None) -> str:
+        """Write the state ``scope``'s newest undone step led to. :meth:`undo`'s mirror; it
+        clears nothing, so the rest of the branch stays redoable."""
+        return self._move(scope, self._redo, self._undo, forward=True)
+
+    def _move(self, scope: SettingsScope | None, source: dict, sink: dict, *,
+              forward: bool) -> str:
+        self.checkpoint(scope)
+        steps = source.get(scope)
+        if not steps:
+            return ""
+        step = steps.pop()
+        state = step.after if forward else step.before
+        self._applying = True
+        try:
+            self._set(scope, _detached(state))
+        except BaseException:
+            steps.append(step)                 # nothing was undone, so nothing moves
+            raise
+        finally:
+            self._applying = False
+        settled = self._read(scope)
+        self._pristine[scope] = _detached(settled) if settled is not None else state
+        sink.setdefault(scope, []).append(step)
+        self._trim(scope)
+        self.changed.emit()
+        return step.label
+
+    # -- lifetime -------------------------------------------------------------------------------
+    def move_scope(self, old: SettingsScope, new: SettingsScope) -> None:
+        """Give ``old``'s steps, redo branch, pristine copy and dropped count to ``new``.
+
+        For the settings a recording's form gathers before its first event table (design
+        §3.4): the form is keyed ``(..., None)`` until a detection exists, and those settings
+        produced that table, so they become its history. ``old``'s steps go BEFORE any
+        ``new`` already holds, being older. A redo branch is the future of the newest step,
+        so ``old``'s survives only into a scope with no steps of its own; where ``new`` has
+        any, ``old``'s branch is dropped, never spliced. A pristine copy ``new`` already
+        holds is kept, being the newer of the two.
+        """
+        if old == new:
+            return
+        own = bool(self._undo.get(new) or self._redo.get(new))
+        moved = False
+        steps = self._undo.pop(old, None)
+        if steps:
+            self._undo[new] = steps + self._undo.get(new, [])
+            moved = True
+        branch = self._redo.pop(old, None)
+        if branch:
+            if not own:
+                self._redo[new] = branch
+            moved = True
+        dropped = self._depth_dropped.pop(old, 0)
+        if dropped:
+            self._depth_dropped[new] = self._depth_dropped.get(new, 0) + dropped
+            moved = True
+        prior = self._pristine.pop(old, None)
+        if prior is not None:
+            self._pristine.setdefault(new, prior)
+        if self.last_step_scope == old:
+            self.last_step_scope = new
+        if moved:
+            self._trim(new)
+            self.changed.emit()
+
+    def drop_doc(self, doc_id: str) -> None:
+        """Forget every scope of a closed recording, with its pristine copy and dropped
+        count. Steps that outlived their recording could not be written anywhere, so Undo
+        would name a step and then do nothing — :meth:`EventHistory.drop_doc`'s reason."""
+        before = (self._n_steps(), len(self._pristine))
+        for table in (self._undo, self._redo, self._pristine, self._depth_dropped):
+            for scope in [s for s in table if _scope_doc(s) == doc_id]:
+                del table[scope]
+        if _scope_doc(self.last_step_scope) == doc_id:
+            self.last_step_scope = None
+        if before != (self._n_steps(), len(self._pristine)):
+            self.changed.emit()
+
+    def clear(self) -> None:
+        """Forget everything (a project opened, the session was reset)."""
+        had = self.has_any() or bool(self._pristine)
+        self._undo.clear()
+        self._redo.clear()
+        self._pristine.clear()
+        self._depth_dropped.clear()
+        self.last_step_scope = None
+        if had:
+            self.changed.emit()
+
+    def _n_steps(self) -> int:
+        return (sum(len(s) for s in self._undo.values())
+                + sum(len(s) for s in self._redo.values()))
+
+    def _trim(self, scope: SettingsScope | None) -> None:
+        """Hold ``scope`` to the depth: its OWN oldest steps go, counted and announced, as in
+        :meth:`EventHistory._trim`. One scope's sprint never costs another scope a step."""
+        steps = self._undo.get(scope)
+        excess = len(steps) - self._depth if steps else 0
+        if excess <= 0:
+            return
+        del steps[:excess]
+        self._depth_dropped[scope] = self._depth_dropped.get(scope, 0) + excess
+        self.stepsDepthDropped.emit(scope, self._depth_dropped[scope])

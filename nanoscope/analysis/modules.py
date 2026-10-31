@@ -16,6 +16,7 @@ R2).
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping, NamedTuple, Sequence
@@ -60,6 +61,7 @@ from .detect_cusum import (
 from .characterize import FLAG_SATURATED, characterize, saturated_warning
 from .events import (
     EventSet,
+    _usable_rate,
     clipped_boundary_warning,
     ensure_source_status,
     has_flag,
@@ -127,6 +129,10 @@ __all__ = [
     "depth_floor_from_provenance",
     "stamp_fit_provenance",
     "FIT_DETECTION_KEY",
+    "FIT_INPUT_COLUMN_KEY",
+    "FIT_INPUT_DIGEST_KEY",
+    "FIT_BASELINE_KEY",
+    "FIT_RATE_KEY",
     "FIT_CURRENT",
     "FIT_OTHER_TABLE",
     "FIT_CALIBRATION_MOVED",
@@ -2446,6 +2452,29 @@ def _filter_limited_mask(df: pd.DataFrame) -> np.ndarray:
     return np.asarray(col.where(col.notna(), False), dtype=bool)
 
 
+def _fit_rows(
+    df: pd.DataFrame, *, accepted_only: bool = True, use_filter_limited: bool = False,
+) -> tuple[pd.DataFrame, int, int]:
+    """The rows a distribution fit is handed: ``(rows, n_input, n_excluded_filter_limited)``.
+
+    The accepted rows (all of them when ``accepted_only`` is off), less the filter-limited ones
+    unless ``use_filter_limited`` keeps them; ``n_input`` counts the rows before that exclusion.
+    One selection for every reader of it: :func:`dwell_fit_inputs` and
+    :func:`depth_fit_inputs` hand these rows to the fitters, and :func:`judge_stored_fit`
+    selects them again from the table on screen to ask whether they are still the rows a stored
+    fit was handed. A second spelling of the rule would make a fit of an unchanged table read
+    as stale.
+    """
+    sel = _accepted(df) if accepted_only else df
+    n_input = int(len(sel))
+    limited = _filter_limited_mask(sel)
+    n_excluded = 0
+    if not use_filter_limited and limited.any():
+        n_excluded = int(limited.sum())
+        sel = sel[~limited]
+    return sel, n_input, n_excluded
+
+
 def _right_truncation(
     full: pd.DataFrame, prov: Mapping[str, Any], kept: np.ndarray
 ) -> tuple[float | None, list[str]]:
@@ -2515,15 +2544,10 @@ def dwell_fit_inputs(
     """
     df, prov = _unpack_events(events)
     full = df
-    sel = _accepted(full) if accepted_only else full
-    n_input = int(len(sel))
+    sel, n_input, n_excluded = _fit_rows(
+        full, accepted_only=accepted_only, use_filter_limited=use_filter_limited)
 
     notes: list[str] = []
-    limited = _filter_limited_mask(sel)
-    n_excluded = 0
-    if not use_filter_limited and limited.any():
-        n_excluded = int(limited.sum())
-        sel = sel[~limited]
     dwell = sel["dwell_s"].to_numpy(dtype=np.float64)
 
     observed_min = float(dwell.min()) if dwell.size else None
@@ -2593,15 +2617,11 @@ def depth_fit_inputs(
     See :func:`depth_floor_from_provenance`.
     """
     df, prov = _unpack_events(events)
-    sel = _accepted(df) if accepted_only else df
-    n_input = int(len(sel))
+    sel, n_input, n_excluded = _fit_rows(
+        df, accepted_only=accepted_only, use_filter_limited=use_filter_limited)
 
     notes: list[str] = []
-    limited = _filter_limited_mask(sel)
-    n_excluded = 0
-    if not use_filter_limited and limited.any():
-        n_excluded = int(limited.sum())
-        sel = sel[~limited]
+    if n_excluded:
         notes.append(
             f"{n_excluded} filter-limited event(s) excluded from the fit: the low-pass never "
             f"let the current reach the true blockade level, so their depths are attenuated "
@@ -2649,6 +2669,11 @@ def fit_dwell(
     the fit of another table. Left out, the fit records none and
     :func:`judge_stored_fit` will not vouch for it.
 
+    The fit also records WHICH values it was handed (:func:`_stamp_fit_input`): the column,
+    a digest of the fitted rows, and the table's rate and open-pore estimator stamps where
+    ``events`` carries them. The estimator's stamp lives on the stored ``AnalysisResult``,
+    so it is recorded when that result is passed rather than its bare EventSet.
+
     Returns a derived ``AnalysisResult`` (``module_id='fit.dwell'``) whose payload
     is the :class:`~nanoscope.analysis.stats.FitResult`; the controller stores it
     via ``Session.add_result``.
@@ -2659,6 +2684,7 @@ def fit_dwell(
         efficiency=efficiency, n_boot=n_boot, seed=seed,
     )
     stamp_fit_provenance(fit, inp, detection_module_id=detection_module_id)
+    _stamp_fit_input(fit, events, "dwell_s", use_filter_limited=use_filter_limited)
     return _fit_result("fit.dwell", fit, doc_id, channel,
                        {"t_min": float(inp.t_min), "t_max": inp.t_max,
                         "n_components": int(n_components),
@@ -2686,15 +2712,19 @@ def fit_depth(
     fit, which warns when the shallowest component sits on it -- an untruncated
     mixture fit to a floor-truncated sample returns mu too high and sigma too low.
 
-    ``detection_module_id`` is recorded as it is by :func:`fit_dwell`.
+    ``detection_module_id`` and the values fitted are recorded as they are by
+    :func:`fit_dwell`. The column is always ``frac_depth``: the Fits box offers no other
+    (the Plots window, which does, files its fits through its own resolution).
 
     Returns a derived ``AnalysisResult`` (``module_id='fit.depth'``) carrying the
     :class:`~nanoscope.analysis.stats.FitResult`.
     """
-    inp = depth_fit_inputs(events, use_filter_limited=use_filter_limited)
+    column = "frac_depth"
+    inp = depth_fit_inputs(events, column=column, use_filter_limited=use_filter_limited)
     fit = fit_depth_gaussians(inp.values, n_components=n_components,
                               depth_floor=inp.depth_floor, n_boot=n_boot, seed=seed)
     stamp_fit_provenance(fit, inp, detection_module_id=detection_module_id)
+    _stamp_fit_input(fit, events, column, use_filter_limited=use_filter_limited)
     return _fit_result("fit.depth", fit, doc_id, channel,
                        {"n_components": int(n_components),
                         "use_filter_limited": bool(use_filter_limited)},
@@ -2808,6 +2838,21 @@ def fit_levels(
 #: WITHOUT the key (written by an earlier build, or filed by the Plots window) is "unrecorded".
 FIT_DETECTION_KEY = "detection_module_id"
 
+#: ``FitResult.meta`` keys naming WHICH VALUES a ``fit.dwell`` / ``fit.depth`` was handed: the
+#: column it fitted, and a digest of that column over the fitted rows (:func:`_fit_input_digest`).
+#: The accepted count (``n_input_events``) cannot see an event swapped for another, resized or
+#: re-measured: the count stays, the sample does not, and the Fits tab went on printing the fit
+#: as current (``docs/EDITING_FOUNDATION_DESIGN.md`` 7.2, decision 10). Added keys, as
+#: :data:`FIT_DETECTION_KEY` is: an older build carries them through untouched, and a fit
+#: without them is judged by the count alone.
+FIT_INPUT_COLUMN_KEY = "input_column"
+FIT_INPUT_DIGEST_KEY = "input_digest"
+#: ...and the TABLE's own rate and open-pore estimator stamps, spelled as the table spells them
+#: (``provenance['fs']``, ``AnalysisResult.baseline_fingerprint``), so a fit states what it was
+#: made from the way its table does (``analysis.lineage.made_with`` reads both).
+FIT_RATE_KEY = "fs"
+FIT_BASELINE_KEY = "baseline_fingerprint"
+
 
 def stamp_fit_provenance(
     fit: FitResult,
@@ -2846,11 +2891,75 @@ def stamp_fit_provenance(
             )
 
 
+def _fit_input_digest(df: pd.DataFrame, column: str) -> str | None:
+    """``sha256:`` over each row's ``start_idx`` and its ``column`` value as float64, in event
+    order -- or None when the rows cannot be named (no ``start_idx`` or no such column, or
+    starts that are not integers).
+
+    ``df`` is the rows a fit is handed (:func:`_fit_rows`), so this one function serves the
+    stamp and the judge, and equal digests mean the same events with the same values. The
+    event counts because a swap -- one event accepted, another rejected -- keeps the count and
+    can keep the values; the value counts because a resize or a re-measure keeps the event.
+
+    An event is named by its start, not its ``event_id``, and taken in start order, not in the
+    table's row order: a merge renumbers the ids and re-sorts the rows (``merge._rebuild``).
+    Hashed by id, two rejected fragments merged into one rejected row -- the count kept, no
+    fitted value touched -- moved the digest of both fits, and Export figure refused them as
+    stale. The bytes are the values' own: the project stores event tables as parquet, which
+    keeps every float64 bit, so a reopened table hashes as it did when it was fitted.
+    """
+    if "start_idx" not in df.columns or column not in df.columns:
+        return None
+    if not pd.api.types.is_integer_dtype(df["start_idx"]):
+        return None              # a float cast would hash a NaN start as INT_MIN, not refuse it
+    try:
+        starts = df["start_idx"].to_numpy(dtype="<i8")
+        values = df[column].to_numpy(dtype="<f8")
+    except (TypeError, ValueError):
+        return None
+    # Stable, as a merge sorts (``merge._sort_order``) and a hand-made row is inserted: rows
+    # that share a start keep their relative order through both, so they hash as they did.
+    order = np.argsort(starts, kind="stable")
+    digest = hashlib.sha256()
+    digest.update(np.ascontiguousarray(starts[order]).tobytes())
+    digest.update(np.ascontiguousarray(values[order]).tobytes())
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _stamp_fit_input(
+    fit: FitResult, events: Any, column: str, *, use_filter_limited: bool,
+) -> None:
+    """Record WHICH values ``fit`` was handed, and the stamps of the table they came from.
+
+    :data:`FIT_INPUT_COLUMN_KEY` and :data:`FIT_INPUT_DIGEST_KEY` -- the digest of the rows
+    :func:`_fit_rows` hands the fitter, the selection :func:`judge_stored_fit` repeats on the
+    table on screen -- and, where ``events`` carries them, the table's rate
+    (:data:`FIT_RATE_KEY`) and estimator (:data:`FIT_BASELINE_KEY`) stamps. Only
+    :func:`fit_dwell` and :func:`fit_depth` record these. The Plots window stamps its fits
+    through :func:`stamp_fit_provenance` alone: it may fit a narrowed range, or another column
+    of the same events, so a digest of the table's rows would not describe what it fitted, and
+    its fits keep the count rule.
+    """
+    df, prov = _unpack_events(events)
+    rows, _, _ = _fit_rows(df, use_filter_limited=use_filter_limited)
+    meta = fit.meta
+    meta[FIT_INPUT_COLUMN_KEY] = column
+    digest = _fit_input_digest(rows, column)
+    if digest is not None:
+        meta[FIT_INPUT_DIGEST_KEY] = digest
+    rate = _usable_rate(prov.get("fs"))
+    if rate is not None:
+        meta[FIT_RATE_KEY] = rate
+    baseline = getattr(events, "baseline_fingerprint", None)
+    if baseline:
+        meta[FIT_BASELINE_KEY] = str(baseline)
+
+
 #: The answers of :func:`judge_stored_fit`.
 FIT_CURRENT = "current"                        # it belongs to this table, as the table stands
 FIT_OTHER_TABLE = "other_table"                # it names a different table
 FIT_CALIBRATION_MOVED = "calibration_moved"    # fitted under another gain/offset than the table
-FIT_EVENTS_CHANGED = "events_changed"          # the table's accepted count is not the one fitted
+FIT_EVENTS_CHANGED = "events_changed"          # the table no longer holds the events fitted
 FIT_UNRECORDED = "unrecorded"                  # it names no table, so nothing can vouch for it
 
 #: What Export figure says for each of the two guards it has always had -- the wording of its
@@ -2866,13 +2975,19 @@ class FitVerdict(NamedTuple):
 
     ``made_on`` is the table the fit names (``""`` when it names none), ``n_fit`` the accepted
     events it says it was fitted to (None when it did not record the count) and ``n_now`` the
-    accepted events the table holds now.
+    accepted events the table holds now. ``digest_moved`` says the events themselves changed:
+    the fit recorded a digest of the values it was handed (:data:`FIT_INPUT_DIGEST_KEY`) and
+    the table's rows no longer match it -- an event swapped for another, resized or
+    re-measured. It is there for the Fits tab's note to word such a verdict from ("the events
+    it fitted changed since"): at an unchanged count, the two counts alone would read as no
+    change at all.
     """
 
     reason: str
     made_on: str = ""
     n_fit: int | None = None
     n_now: int = 0
+    digest_moved: bool = False
 
     @property
     def current(self) -> bool:
@@ -2886,17 +3001,39 @@ def _fit_counts(stored: AnalysisResult, table: AnalysisResult) -> tuple[int | No
     return (None if n_fit is None else int(n_fit)), n_now
 
 
-def _fit_staleness(stored: AnalysisResult, table: AnalysisResult) -> str:
-    """The two guards Export figure has always applied: ``FIT_CALIBRATION_MOVED``,
-    ``FIT_EVENTS_CHANGED`` or ``""``. Calibration first, and a fit that carries no
-    ``n_input_events`` cannot disagree on the count -- the order and the leniency are the
-    export's, kept verbatim."""
+def _fit_digest_moved(stored: AnalysisResult, table: AnalysisResult) -> bool:
+    """Whether ``table`` no longer holds the values ``stored`` recorded it was handed.
+
+    The rows are selected as the stamp selected them (:func:`_fit_rows`, with the fit's own
+    filter-limited choice) and hashed by the same :func:`_fit_input_digest`, so an unchanged
+    table can only match. False when either side cannot say -- a fit with no digest (an earlier
+    build, the Plots window) or a table whose rows cannot be named: those keep the count rule.
+    """
+    meta = getattr(stored.payload, "meta", None) or {}
+    recorded, column = meta.get(FIT_INPUT_DIGEST_KEY), meta.get(FIT_INPUT_COLUMN_KEY)
+    if not recorded or not column:
+        return False
+    rows, _, _ = _fit_rows(table.payload.df,
+                           use_filter_limited=bool(meta.get("use_filter_limited", False)))
+    now = _fit_input_digest(rows, str(column))
+    return now is not None and now != recorded
+
+
+def _fit_staleness(stored: AnalysisResult, table: AnalysisResult) -> tuple[str, bool]:
+    """The two guards Export figure has always applied, as ``(reason, digest_moved)``: the reason
+    is ``FIT_CALIBRATION_MOVED``, ``FIT_EVENTS_CHANGED`` or ``""``. Calibration first, and a fit
+    that carries no ``n_input_events`` cannot disagree on the count -- the order and the leniency
+    are the export's, kept verbatim. The events guard also fails when the fit's digest no longer
+    matches (:func:`_fit_digest_moved`): an event swapped, resized or re-measured at the same
+    count changed the fitted sample as surely as a rejection does. The digest only adds a
+    reason; it never clears a count that moved."""
     if tuple(stored.calibration_fingerprint) != tuple(table.calibration_fingerprint):
-        return FIT_CALIBRATION_MOVED
+        return FIT_CALIBRATION_MOVED, False
     n_fit, n_now = _fit_counts(stored, table)
-    if n_fit is not None and n_fit != n_now:
-        return FIT_EVENTS_CHANGED
-    return ""
+    digest_moved = _fit_digest_moved(stored, table)
+    if digest_moved or (n_fit is not None and n_fit != n_now):
+        return FIT_EVENTS_CHANGED, digest_moved
+    return "", False
 
 
 def stored_fit_problem(stored: AnalysisResult, table: AnalysisResult) -> str:
@@ -2906,11 +3043,13 @@ def stored_fit_problem(stored: AnalysisResult, table: AnalysisResult) -> str:
     This is the rule ``MainWindow._stored_fit`` applies before a saved fit is allowed onto an
     exported histogram: a fit taken under another gain/offset describes different depths, and a
     fit of a different number of accepted events (the table was curated, merged or re-run
-    since) is "worse than a documented refit". It says nothing about WHICH table the fit was
-    made on -- that is :func:`judge_stored_fit`, which applies these same two guards and the
-    lineage on top.
+    since) is "worse than a documented refit". So is a fit of as many events that are no longer
+    the same ones -- swapped, resized or re-measured -- which the fit's digest catches where the
+    count cannot (a fit without one keeps the count rule). It says nothing about WHICH table the
+    fit was made on -- that is :func:`judge_stored_fit`, which applies these same two guards and
+    the lineage on top.
     """
-    return _EXPORT_WORDS.get(_fit_staleness(stored, table), "")
+    return _EXPORT_WORDS.get(_fit_staleness(stored, table)[0], "")
 
 
 def judge_stored_fit(stored: AnalysisResult, table: AnalysisResult) -> FitVerdict:
@@ -2925,8 +3064,10 @@ def judge_stored_fit(stored: AnalysisResult, table: AnalysisResult) -> FitVerdic
        (two tables can hold the same number of accepted events by coincidence);
     2. ``FIT_CALIBRATION_MOVED`` -- fitted under another gain/offset than the table was measured
        under;
-    3. ``FIT_EVENTS_CHANGED`` -- the accepted count is not the one the fit used (curation, a
-       merge, a re-run with other settings, or an Undo of any of them since);
+    3. ``FIT_EVENTS_CHANGED`` -- the table no longer holds the events the fit used: the accepted
+       count moved (curation, a merge, a re-run with other settings, or an Undo of any of them
+       since), or the count is the same but the fitted rows no longer match the digest the fit
+       recorded (an event swapped, resized or re-measured; the verdict's ``digest_moved``);
     4. ``FIT_UNRECORDED`` -- it names no table at all;
     5. ``FIT_CURRENT`` -- otherwise.
 
@@ -2944,14 +3085,14 @@ def judge_stored_fit(stored: AnalysisResult, table: AnalysisResult) -> FitVerdic
     made_on = str(meta.get(FIT_DETECTION_KEY) or "")
     n_fit, n_now = _fit_counts(stored, table)
 
-    def verdict(reason: str) -> FitVerdict:
-        return FitVerdict(reason, made_on, n_fit, n_now)
+    def verdict(reason: str, digest_moved: bool = False) -> FitVerdict:
+        return FitVerdict(reason, made_on, n_fit, n_now, digest_moved)
 
     if made_on and made_on != table.module_id:
         return verdict(FIT_OTHER_TABLE)
-    moved = _fit_staleness(stored, table)
+    moved, digest_moved = _fit_staleness(stored, table)
     if moved:
-        return verdict(moved)
+        return verdict(moved, digest_moved)
     return verdict(FIT_CURRENT if made_on else FIT_UNRECORDED)
 
 

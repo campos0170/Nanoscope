@@ -61,7 +61,7 @@ claim a new audit of all measurement-advisory behavior.
 8. [Manual measurement](#8-manual-measurement)
 9. [The event inspector](#9-the-event-inspector)
 9a. [When the open-pore baseline changes](#9a-when-the-open-pore-baseline-changes)
-9b. [Undoing a change to the event table](#9b-undoing-a-change-to-the-event-table)
+9b. [Undoing a change](#9b-undoing-a-change)
 9c. [Reconciling detectors & building training labels](#9c-reconciling-detectors--building-training-labels)
 10. [Population plots & machine learning](#10-population-plots--machine-learning)
 11. [Noise spectra (PSD)](#11-noise-spectra-psd)
@@ -507,7 +507,8 @@ finite positive number. Once applied, File Info prints the declared rate with th
 `user` and the file's own reading beside it — `100,000 Hz · user (file: 100 Hz · measured)` — so an
 override is visibly an override; the status bar prints the declared rate and its provenance. The
 declaration is **saved with the project** and never written beside the raw file; *Use the file's
-own time base* removes it. Detections already made on the recording keep the rate they were
+own time base* removes it, and **Edit ▸ Undo** takes back a declaration or its removal (§9b).
+Detections already made on the recording keep the rate they were
 measured at and are marked stale (*Times stale — sample rate changed*), never silently re-scaled:
 re-run them under the declared rate. A Manual table is marked the same way and its **Rebuild**
 re-measures every event under the declared rate; an old saved measurement gets the same ⚠ on its row.
@@ -523,9 +524,13 @@ with a target-units label. It shows a live **raw-vs-calibrated** table (median /
 and a **command-voltage check** that reconciles the measured voltage against the nominal applied
 voltage.
 
-- For ABF recordings the **voltage channel** defaults to a gain of `0.1` (the raw values are stored
-  10× too large); you can see this reconcile in the command-voltage check (e.g. raw −5999 mV × 0.1 =
-  −599.9 mV vs a nominal −600 mV).
+- For ABF recordings the **voltage channel**'s default gain is **detected from what the channel
+  reads**, not assumed, because files store it two ways. A channel reading past 1,200 mV cannot be a
+  bias anyone applied to a nanopore, so its raw values are stored 10× too large and it opens at a
+  gain of `0.1`; you can see this reconcile in the command-voltage check (e.g. raw −5999 mV × 0.1 =
+  −599.9 mV vs a nominal −600 mV). A channel that reads a plausible bias (75.07 mV on a 75 mV run)
+  is taken as it is and opens at `1.0`. Either way the channel's note says which was taken; check it
+  against your protocol.
 - The **current channel** defaults to a gain of `1.0`. **This is the key calibration to set for your
   rig.** Until it is correct, the current axis is in raw units — detection and dwell are unaffected,
   but absolute blockade depths (pA/nA) and conductance are not physically scaled. Edits apply live
@@ -562,6 +567,26 @@ actually happened to it — including the operating system's own reason when a w
 **one** channel while another keeps the file alive asks the same question at the smaller scale: the
 file stays, that channel's entry does not, and the note is shown in full before it goes. Changing a
 gain carries the note forward and asks nothing.
+
+**Reset to default resets the numbers and nothing else.** It puts back the gain, offset and units
+the channel **opened with** — the app's default for it, detected as above, before any saved
+calibration was applied — so a voltage channel that opened at `1.0` resets to `1.0`, not to the
+`0.1` of the other encoding (Reset used to install `0.1` there, 10× on every voltage, conductance
+and V-dependence figure). The channel's **note** and its **Treat this channel as** choice stay: the
+note is your record of how the channel was calibrated, and the override has its own reset — set the
+combo back to *as the file declares* and press *Apply*. A channel you never changed is **never
+written to the sidecar**, so calibrating the current channel no longer stores the untouched voltage
+channel beside it.
+
+**Edit ▸ Undo takes a calibration back, sidecar and all** (§9b). Undoing an *Apply* or a *Reset*
+puts the channel's previous calibration back, and `<your recording>.npcal.json` exactly as it was
+before that step — byte for byte, a file you wrote by hand included. A file the step created is
+removed; a file a Reset deleted is written back, note and all. It does not ask first;
+the status line, and the Calibration panel's own line under it, name what happened to the file:
+*Undone: Reset calibration · saved to pore.abf.npcal.json.* If the file is no longer as that step
+left it — another channel's later step, say, or an edit made outside NanoScope — it is left as it
+is, and the line says so (*… pore.abf.npcal.json left as it is: it has changed since this step. …*).
+That holds while the session holds the step; undo history is not saved with a project.
 
 **A gain of zero is refused,** at the box you typed it into, with the reason. Zero is not a small
 gain: it flattens the whole channel to a single constant, and every number downstream — RMS noise,
@@ -639,7 +664,9 @@ strip, or **Advanced signal-chain settings** in the open-pore baseline workspace
 the Baseline drift stage). There is one window: closing it hides it, and every setting stays on the form. It opens
 against the right edge of the main window, over the Inspector, so the main trace stays in view;
 **Show main trace** on its toolbar brings the main window back in front, and NanoScope remembers
-where you put it. **Ctrl+S** / **Ctrl+Shift+S** save the project from this window too.
+where you put it. **Ctrl+S** / **Ctrl+Shift+S** save the project from this window too, and
+**Ctrl/⌘+Z** / **Ctrl/⌘+Shift+Z** run Edit ▸ Undo / Redo (§9b) — they used to do nothing here,
+in the window where the chain is edited.
 
 The window edits the same chain the Preprocess tab always held — it moves the controls, it does
 not copy them — so detection, **Measure ‘Processed signal’**, **Export processed trace** and a
@@ -743,11 +770,17 @@ the complete chain: picking one sets every stage, and turns off any stage it doe
 low-pass included. The combo shows the protocol's name only while the form still is that protocol;
 the moment a setting differs it reads **— manual —**. That includes a value this recording cannot
 hold — a cutoff above its Nyquist limit, say: the form clamps it, the combo reads **— manual —**
-and the status bar names what changed. **Export protocols…** writes your own
-protocols to a `.json` file; **Import protocols…** adds the protocols of such a file to your
-library. Import never overwrites: a name you already use comes in as *name (imported)*, a protocol
-identical to one you have is skipped, and a file that is not a NanoScope protocol file, or a
-protocol naming a setting that is not part of the signal chain, is refused by name.
+and the status bar names what changed; the value the protocol set comes back on a recording that
+can hold it (see the Nyquist notes under the table below). A recall is one step of **Edit ▸ Undo**,
+named after the protocol — *"Undo Recall protocol ‘Zn2-insulin (zn_30h)’"* (§9b).
+**Export protocols…** writes your own protocols to a `.json` file; **Import protocols…** adds the
+protocols of such a file to your library. Import never overwrites: a name you already use comes in
+as *name (imported)*, a protocol identical to one you have is skipped, and a file that is not a
+NanoScope protocol file, or a protocol naming a setting that is not part of the signal chain, is
+refused by name. **Delete** asks first and names the protocol, with **Cancel** as the default: your
+protocols are a preference kept on this computer, not part of a project, so no undo reaches the
+library. Deleting a model preset you saved on the ML tab asks the same way, and says which default
+preset the tab falls back to.
 
 **Copy as Python** puts a short script on the clipboard that rebuilds the processed trace outside
 NanoScope: it opens the recording with NanoScope's own reader, applies the channel's calibration
@@ -760,10 +793,49 @@ the whole channel).
 or CUSUM detection and you change the chain, an orange **⚠ Chain changed** button appears in the
 table's toolbar, the Preprocess card and the window's status line name the differences
 (*low-pass 10000 → 5000 Hz; notch Q 30 → 20*), and **Revert to detection's chain** is enabled.
+The detection's **thresholds** are compared too — `k_in` and `k_out` (CUSUM `k` and `h`), min
+dwell, max dwell and the merge gap — so a threshold edited after the run no longer leaves the
+table looking current: the window's status line leads with it (*⚠ Settings changed: k_in 5 → 6*).
+The button then reads **⚠ Settings changed**, the window's **Revert to detection's chain** reads
+**Revert to detection's settings**, and the button's menu entry **Revert form to this detection's
+chain** says *settings* too. The polarity override is the exception: it is compared only while the
+Baseline drift stage is on, so with that stage off a changed polarity does not make the table look
+stale, although a new run would read it.
 The rows are not marked stale: they are a faithful record of the chain they were detected with,
 and nothing changes until you run detection again (**Run detection…** in the window, enabled
 exactly when the Detect button is, or the button's menu). A table from the ML detector or a reconciled table is labelled as not produced by
 this chain.
+
+**Revert puts back only what differs** — the stages and thresholds the line names — and leaves
+everything else as you set it. It used to rewrite the whole chain, filling any setting the run had
+not recorded with its default. It never invents a setting now: when a difference is in one the run
+did not record (a table made before that setting existed, say), Revert is withheld and the line
+says why — *Run detection to apply it — Revert cannot restore a setting the run did not record.*
+The window's **Revert** and the button's menu entry are greyed then. A Revert is one step of
+Edit ▸ Undo (*"Undo Revert chain to Schmitt's run"*, or *"Undo Revert settings to CUSUM's run"*
+once a threshold was among what it put back; §9b).
+
+**One stage at a time.** In the Signal Conditioning window, a stage whose settings differ from the
+run on screen is marked in the stage list — its row turns bold amber, and its tooltip leads with
+what differs — and **Revert stage** and **Reset stage** sit under the stage form, for the selected
+stage. **Revert stage** puts back that stage's settings from the run and leaves the other stages
+and the thresholds as they are; it is enabled only when the stage differs and the run recorded what
+it would put back. **Reset stage** restores the stage's default settings and leaves it on or off as
+it is — for the low-pass, whose cutoff is its on/off, that is the filter type and order — and says
+so when the stage already holds them. Each press is one named step of Edit ▸ Undo: *"Undo Revert
+Notch stage"*, *"Undo Reset Notch stage"*.
+
+**Your edits stay with their table.** The form keeps what you set for each event table — and for
+each recording and channel before it has one. Look at another recording, pick another table in the
+Table selector or the other detector on the form, come back, and the form is as you left it,
+settings you have not run included, with the ⚠ button saying how it differs from the table;
+switching used to re-seed the form from the stored run and throw those edits away. A table you have
+not edited is seeded from its stored run, as before. A run you start from the form — **Detect**,
+**Run ML** or **Re-measure depths** — settles its edits, since the table then is what the form
+says; the stale line's **Re-run** and a batch run replay a stored run instead, and, like an Undo of
+a curation step, leave the edits where they are. The exception is a recording's first table,
+whoever makes it: it seeds the form, and what you had set before it are that table's first steps in
+Edit ▸ Undo (§9b). Closing a recording drops its edits; the rest are saved with the project (§11a).
 
 Open **Preprocess ▸ Signal chain** for the compact card: the comparison with the table on screen,
 any warning, the protocol name, the scope line and the execution order, with **Open Signal
@@ -805,6 +877,14 @@ Notes:
   the failing stage's own complaint. With a known rate the three frequency spins are also capped at
   that recording's Nyquist, so a 100 kHz cutoff carried over from a faster file is pulled down
   instead of poisoning the next run.
+- **A clamp is said out loud, and what you set comes back.** On a recording too slow for a frequency
+  on the form, the box reads its ceiling and the status bar says so — *Low-pass 20 kHz is above this
+  recording's Nyquist (12.5 kHz); the form now reads 12.4999 kHz.* — because a run there would use
+  what the box reads, not what you set. The form remembers what you set: back on a recording that
+  can hold it, the box reads it again; on one that cannot, it reads that recording's ceiling. The
+  line names only a stage that is on (the notch only while it uses its base frequency and
+  harmonics, not an explicit line list) holding a value you set, or one a recalled run or protocol
+  put there — never a box's built-in default.
 
 ---
 
@@ -860,7 +940,8 @@ least smoothing it can get away with. Windows the search never estimated are cou
 the reason line is explicit that a stop rule is not a measurement of them.
 
 It proposes; it does not apply. **"Use these values"** is the confirmation — the app never applies a
-measured parameter on its own — and **"Back to default"** returns to 0.5 s / 0.1 s.
+measured parameter on its own — and **"Back to default"** returns the two windows to 0.5 s / 0.1 s
+(*Two resets, one thing each*, below).
 
 A proposal the estimator's own health checks condemn is **refused on the first press**, with the
 reason: *REFUSED — 2 of the checks in Baseline health CONDEMN the windows proposed above (…)*. The
@@ -899,6 +980,20 @@ edit, by **Back to default**, or by a clean re-proposal.
 The buttons stay clickable when they cannot act. Click one that is blocked and it tells you the first
 real reason — no current channel selected, no sample rate, a probe already running — rather than
 sitting greyed and unexplained.
+
+**Two resets, one thing each.** **Back to default** resets the estimator — its two windows, where
+they came from, and the *ACCEPTED OVER* mark — in every mode, and never an open-pore reference you
+supplied. Under such a reference (**Known open-pore current** or **Selected open-pore intervals**;
+see [Recording-specific open-pore references](OPEN_PORE_REFERENCE.md)) the estimator measures
+nothing, so **Measure this recording** and **Use these values** step aside and a caption beside Back
+to default quotes the windows it would reset: *Automatic estimator (not in use): 0.5 s / 0.1 s*.
+Pressing it there does not mark the table on screen stale, because those windows did not measure
+its depths. **Clear reference**, beside the mode combo, is the other reset: it puts the recording
+back on **Automatic (existing estimator)** — the chosen mode, the open-pore current, the intervals
+and the notes are cleared — and keeps the estimator's windows. With nothing to clear it says so
+(*There is no open-pore reference to clear: this recording already uses the Automatic estimator.*)
+and changes nothing. Each is one step of Edit ▸ Undo — *"Undo Reset baseline estimator"*, *"Undo
+Clear open-pore reference"* (§9b).
 
 ### Why no default can be right
 
@@ -1486,7 +1581,7 @@ Both the inspector and the gallery offer the same tools for working through a de
 | T | Show the event in the main trace | — |
 | Ctrl/⌘+U | First unreviewed event of the filter | First unreviewed tile of the Show subset, in sort order |
 | Ctrl/⌘+Z | Undo (main window's history) | Undo (main window's history) |
-| Ctrl/⌘+Shift+Z | Redo | — |
+| Ctrl/⌘+Shift+Z | Redo | Redo (main window's history), as the **Redo** button beside **Undo** |
 | PgDn / PgUp, Home / End | — | Next / previous page, first / last page |
 | Ctrl/⌘+A, Esc, Ctrl/⌘+I | — | Select all on the page / none / inverse |
 | Ctrl/⌘+S, Ctrl/⌘+Shift+S | Save / Save As | Save / Save As |
@@ -1581,9 +1676,13 @@ were stored.
   boundaries, and every accept/reject and hand-written flag survives — including ones you make
   while it is running. A calibration change is different: its line (*Depths stale — calibration
   changed*) offers **Re-run**, which re-detects, and the current curation does not survive that.
-  When the offered action cannot run (for example the channel is overridden to voltage), the
-  button is greyed and the line goes on *· Re-run unavailable: …* (on a narrow panel it gives up
-  the verdict first, never the start of the reason); the whole reason is in **Details**.
+  **Re-measure depths** refuses such a table, on the status bar: *Nothing was re-measured. Re-run
+  first — the calibration changed since this table was detected.* It used to measure under the new
+  calibration and keep the table's old calibration stamp, so the depths had moved while the line
+  went on calling them stale. When the offered action cannot run (for example the channel is
+  overridden to voltage), the button is greyed and the line goes on *· Re-run unavailable: …* (on
+  a narrow panel it gives up the verdict first, never the start of the reason); the whole reason
+  is in **Details**.
 
 Optional selected amplitudes are not silently reinterpreted under the new baseline: affected
 values become stale and must be reapplied. If an amplitude choice is edited while re-measurement
@@ -1591,6 +1690,36 @@ is running, the late result is refused rather than overwriting that edit.
 
 Old projects always open. They are marked, badged, and otherwise fully readable, plottable and
 exportable.
+
+**Details lists everything the table was made from, not only the first thing that moved.** The
+amber line keeps its one verdict, in its order — sample rate, then calibration, then the estimator.
+Under the full sentence, **Details** adds *Inputs, as made → now:* with a row for each of five
+inputs, every one judged on its own: the sample rate, the calibration, the open-pore estimator and,
+for a Schmitt or CUSUM table, the signal chain and the thresholds. A row that moved ends with its
+own way forward — *Sample rate: 50 kHz → 25 kHz — Re-run*, *Calibration: gain 1, offset 0 → gain 2,
+offset 0 — Re-run*; the estimator, which **Re-measure depths** settles, names the two estimators in
+words and ends *— Re-measure depths*; the chain and the thresholds, which the form can put back,
+end *— Revert, or re-run to apply*. A row that did not move says *unchanged*. A table stale on two
+counts used to name only one.
+
+A recording whose rate is no longer known is asked to declare it first (*Sample rate: 50 kHz →
+unknown — Declare the rate (Inspector ▸ File Info ▸ Sample rate / time unit…), then Re-run*), and
+an input a table never recorded — a table from an older build — says so and is not compared
+(*Sample rate: not recorded with this table, so it is not compared.*). On a reconciled table the
+rate, calibration and estimator rows end *Refresh sources first*; on a Manual table, *Rebuild*; and
+when the open-pore reference changed, the calibration and estimator rows end *Run detection* — a
+fresh detection, not a re-measure.
+
+**A fit says when the events it fitted have changed.** A dwell or depth fit records which accepted
+events it fitted and the values it fitted, not only how many. The Fits tab therefore stops showing
+it as current when an accepted event is swapped for another, resized or re-measured, even at an
+unchanged count, and says so: *… the fitted events changed since the fit (swapped, resized or
+re-measured) — press Fit to fit it as it stands.*
+**Generate Report figures…** does not draw such a fit either: it refits the histogram afresh, and
+the status line says why (*saved fit is stale (the accepted events changed since it ran)*). An edge
+drag re-measures that event's depth, so after a resize both fits read this way; a merge of rejected
+events changes nothing a fit used and leaves it standing. A fit saved by an earlier build carries
+no such record and is judged by its count, as before.
 
 ### Re-detect, do not re-measure — for anything that uses the span
 
@@ -1629,31 +1758,114 @@ configurations are not poolable either; carry the configuration with the number,
 
 ---
 
-## 9b. Undoing a change to the event table
+<!-- The section's old anchor, from when it covered the event table alone: other documents
+     (MANUAL_ZN_WORKFLOW.md) still link to it. -->
+<a id="9b-undoing-a-change-to-the-event-table"></a>
 
-**Edit ▸ Undo (Ctrl/⌘Z)** walks the event table on screen back through every change made to it in
-this session, and the menu names the step it will undo — *"Undo Re-run detection"*, *"Undo Merge
-events"*, *"Undo Resize event mask"*, *"Undo Edit event amplitude"*, *"Undo Accept all events"*.
-**Redo** is Ctrl+Shift+Z / ⇧⌘Z.
-Everything that can change an event table is covered: a re-detection, a merge, an accept/reject, a
-batch Accept-all / Reject-all, a mask resize in the Event Inspector, a hand-made event (added,
-deleted, copied or carried into a re-run) and a re-measure, and amplitude choices, red-level edits and resets. An undo restores the table
-**exactly** — the accept/reject decisions, optional amplitude audit fields, any flag token
-you typed, and the hand-added markers.
+## 9b. Undoing a change
+
+**Edit ▸ Undo (Ctrl/⌘Z)** takes back your last change, and the menu names the step it will undo —
+*"Undo Re-run detection"*, *"Undo Merge events"*, *"Undo Resize event mask"*, *"Undo Edit event
+amplitude"*, *"Undo Accept all events"*, *"Undo Apply calibration"*, *"Undo Declare 25,000 Hz"*.
+**Redo** is Ctrl+Shift+Z / ⇧⌘Z. There is one Undo, not one per panel: whichever of the things below
+you changed last is what a press takes back first, then the one before it — on the recording on
+screen (see below). It covers every edit that changes what the next number will be:
+
+- **The event table on screen.** A re-detection, a merge, an accept/reject, a batch Accept-all /
+  Reject-all, a mask resize in the Event Inspector, a hand-made event (added, deleted, copied or
+  carried into a re-run), a re-measure, and amplitude choices, red-level edits and resets. An undo
+  restores the table **exactly** — the accept/reject decisions, optional amplitude audit fields,
+  any flag token you typed, and the hand-added markers.
+- **The old measurement list** (§8). Deleting rows is a step like any other — *"Undo Delete 3
+  measurements"*. The confirmation before deleting stays, because knowing there is something to
+  recover is a different job from being able to recover it.
+- **The settings of the table on screen** — the Detection form (the signal chain and the
+  thresholds), the ML form and the Baseline form, with one history for each event table. A chain
+  or threshold edit, a stage ticked on or off in Signal Conditioning, notch lines sent from the
+  spectrum, a protocol recalled, a model preset loaded, Revert, a stage's Revert or Reset, and the
+  baseline's Back to default and Clear reference are each a step. A step is named from what changed
+  — *"Undo Change k_in 5 → 6"*, *"Undo Turn on notch"*, *"Undo Change 4 settings"* — or after the
+  action that made it — *"Undo Recall protocol ‘Zn2-insulin (zn_30h)’"*, *"Undo Reset Notch
+  stage"*. Typing in a field becomes one step once you pause for 700 ms, or sooner when anything else
+  is recorded inside the pause — a curation click, a calibration Apply — so the edit is always the
+  older step and Ctrl+Z takes the newer one first. Settings changed before a recording and channel
+  have any table belong to the first table they get, since they produced it, wherever that table is
+  made: on screen, or by a batch run or a Detect that lands while you look at another recording.
+- **Calibration**, per channel: *Apply* and *Reset to default*, the **Treat this channel as**
+  override with them (*"Undo Reset calibration"*). The sidecar follows the calibration: an undo puts
+  `<your recording>.npcal.json` back exactly as it was before the step, byte for byte — removed
+  when the step had created it, written back, note and all, when a Reset deleted it. It does not
+  ask first; the status line, and the Calibration panel's own line, name what happened to the file
+  instead (*Undone: Reset calibration · saved to pore.abf.npcal.json.*). A file that is no longer
+  as the step left it is left as it is, and the line says so. See §3.
+- **The time base**, per recording: a declaration under **Inspector ▸ File Info ▸ Sample rate / time
+  unit…**, or its removal (*"Undo Use the file's own time base"*). A segment follows its recording's
+  declaration, so the step belongs to the recording.
+- **The acquisition bandwidth**, per channel, under **Inspector ▸ File Info ▸ Acquisition
+  bandwidth…** (*"Undo Change acquisition bandwidth"*).
+
+Undoing a setting never re-measures anything; the stamps do the rest. Undo the calibration change
+that turned a table's line amber and the line goes away, because the table matches its calibration
+again.
 
 **And any edit that reaches the table by a path nobody announced.** That is deliberate, and it is
 what makes the guarantee worth relying on: an edit that changed the table without telling the undo
 stack is committed anyway, the next time anything asks — when you open the **Edit** menu, when you
 **save the project**, when you press **Ctrl+Z**, or when you **quit**. It lands with a derived label
-("Edit events") instead of a named one. A forgotten door costs you a word, never a row — and
-because a quit and a save are two of those four moments, an unannounced edit also reaches the dirty
-flag and therefore the save prompt.
+("Edit events"; a calibration change nobody named reads "Change calibration (gain 1 → 2)") instead
+of a named one. A forgotten door costs you a word, never a row — and because a quit and a save are
+two of those four moments, an unannounced edit also reaches the dirty flag and therefore the save
+prompt.
 
-Four things to know:
+**Ctrl+Z never silently changes a recording that is not on screen.** A press takes back the newest
+step that belongs to what you are looking at: the event table on screen and its settings, the
+measurement list, and the calibration, time base and acquisition bandwidth of the recording on
+screen. The history is per event table, so a step made on another table or recording waits there,
+and when that is all there is, the menu says where instead of going quiet:
 
-- **The history is per event table.** Undo acts on the detection you are looking at, so Ctrl+Z can
-  never silently repair a recording that is not on screen. When there is history but none for this
-  table, the menu says so instead of going quiet.
+- *"Undo — nothing on this table; the CUSUM detector (3 steps) on this channel"* — another table of
+  this recording and channel holds steps, curation or settings: they are one Table selector switch
+  away;
+- *"Undo — nothing to undo on this event table"* — the session holds steps, but none that a press
+  from here may take: event history on another table or recording, everything on this table
+  already undone (**Redo** is offered then), or the settings of another table or channel of this
+  recording, which wait for their table;
+- *"Undo — nothing on this recording"* — no event table has any history at all, and the only steps
+  left are settings of a recording that is not on screen.
+
+Redo says the same in its own words (*"Redo — nothing to redo on this event table"*). Select that
+recording or table and its steps are back on the menu. A press from any other window keeps the same
+rule.
+
+**Undoing a run takes back the settings that led to it.** Change the settings, run detection, and
+one Ctrl+Z restores both the previous table and the settings it was made with; the menu says so —
+*"Undo Re-run detection and 2 setting changes"* (*"… and 1 setting change"*). Redo replays the
+settings, then the run. Only the setting changes made on that table **just before** the run join
+it: one separated from the run by other work — a curation click, say — stays a step of its own. A
+**Re-measure depths** takes the settings before it along in the same way (*"Undo Re-measure depths
+and 2 setting changes"*).
+
+**Redo is kept for each table and each setting.** A settings step ends only its own setting's Redo,
+and a step on an event table never ends a setting's: applying a calibration after undoing a
+curation click leaves that click's **Redo** in place, and a curation click leaves an undone
+calibration's **Redo** alone. While an edit of a form is still waiting to become a step, that
+form's **Redo** is not offered, because the edit ends it.
+
+**The same Undo from every window.** ⌘Z and ⇧⌘Z run Edit ▸ Undo and Redo from the Signal
+Conditioning window, where the chain is edited, as they do from the Event inspector and the Event
+gallery; the gallery has a **Redo** button beside its **Undo**, and each says in its tooltip which
+step it would take. A text field or spin box you are typing in keeps ⌘Z for its own typing, in
+every window. Plot windows are the exception, on purpose: there ⌘Z undoes the plot's own history
+(§10), and Edit ▸ Undo never reaches a plot.
+
+**What it does not reach.** The view — zoom, which has its own Back / Forward, layer visibility,
+colour and time offset, Overlay / Stacked; your libraries of protocols, model presets and plot
+templates, which are preferences kept on this computer rather than part of a project (deleting one
+asks first instead); fits, which a Fit press simply replaces; and the study windows, which keep
+their own records.
+
+Two things to know:
+
 - **Re-running detection replaces the table, and now says so.** The status bar reports what the
   replaced table held ("6 events, 2 rejected by hand and 1 hand-added") and points at Undo.
   Curation is still not carried into a fresh detection — undo is what gets it back. The counts are
@@ -1662,26 +1874,30 @@ Four things to know:
   nothing about it is lost. This holds when you press Detect a second time with the settings
   unchanged, which is the commonest case and the one that used to pass in silence.
 - **Closing a recording is the one remaining one-way door.** A closed document takes its results
-  *and its history* with it, so closing a recording that carries detected events asks first and names
-  them. For a **segment** it says the thing that matters: a segment is held in memory, not on disk,
-  so there is nothing to reopen and nothing to detect again. Save the project first. **Opening a
-  project** clears the session and therefore the stack, for the same reason. Nothing else in the
-  app is one-way: deleting a hand measurement, which used to be the second door, is now a step like
-  any other — see below.
-- **Hand measurements are covered too, by the same Ctrl+Z.** Deleting rows from the
-  Manual-measurement list (§8) is now a step like any other — *"Undo Delete 3 measurements"*. There
-  is one Undo, not two: when both the event table and the measurement list have history, a press
-  takes back **the most recent thing you did**, then the one before it. The confirmation before
-  deleting stays, because knowing there is something to recover is a different job from being able
-  to recover it.
+  *and its history* — its tables' steps and its settings' — with it, so closing a recording that
+  carries detected events asks first and names them. For a **segment** it says the thing that
+  matters: a segment is held in memory, not on disk, so there is nothing to reopen and nothing to
+  detect again. Save the project first. **Opening a project** clears the session and therefore
+  every history, for the same reason. Nothing else in a project is one-way: deleting a hand
+  measurement, which used to be the second door, is now a step like any other.
 
-The history keeps up to 30 steps **per event table**, within a 128 MiB budget for the whole
-session, and is cleared when the recording closes or a project is opened. When the ceiling evicts
-steps, the Edit menu says so by name (*"Undo history for “&lt;name&gt;” is at its 30-step ceiling — N of
-your steps have been evicted"*) instead of showing the never-edited wording. The per-table depth
-matters when several recordings are open: curating one recording no longer uses up another's
-history, and undoing on one no longer ends the other's redo branch. If a step is ever dropped
-because the memory budget bound first, the app says so rather than losing it silently.
+**How far back it goes.** Each event table keeps up to 30 steps, within a 128 MiB budget for the
+whole session, and the measurement list and each setting — a table's forms, a channel's
+calibration or acquisition bandwidth, a recording's time base — keep 30 of their own. The per-table
+depth matters when several recordings are open: curating one recording no longer uses up another's
+history, and undoing on one no longer ends the other's redo branch. A step is never dropped in
+silence. The moment the oldest one goes, the status bar says so — *Undo history for “pore.abf” is
+at its 30-step ceiling — its oldest step has been dropped and cannot be undone.* — and once you
+have undone back to the floor, the menu says why it stopped rather than showing the never-edited
+wording: *"Undo — this table's oldest history was dropped at the 30-step ceiling (4 steps lost)"*,
+or, for a setting of the recording on screen, *"Undo — this recording's oldest settings history was
+dropped at the 30-step ceiling (1 step lost)"*. If the memory budget binds first, the status bar
+and the menu name that ceiling instead — *Undo history for “pore.abf” is at the 128 MiB memory
+ceiling — its oldest step was dropped and cannot be undone.*, and *the memory ceiling* in the menu.
+
+**Undo history lasts for the session.** It is not saved with a project and crash recovery does not
+keep it (§11b), so a reopened project has its tables and settings as they were saved, and nothing
+to undo.
 
 **Keyboard curation on the event table.** Click a row, then `j` / `k` move down / up, `a` accepts,
 `r` rejects and `f` marks the row with your own flag. `f` **adds** your mark to whatever reasons the
@@ -1856,6 +2072,17 @@ explicit commit described above. Appearance-only edits restyle the existing resu
 running those analyses or applying pending proposals. After changing any numerical control,
 inspect the result and its state before assuming the canvas is unchanged.
 
+**A source measured under settings that have since changed says so.** When a drawn source's table
+is stale — its calibration, its sample rate or its open-pore estimator changed after it was
+detected — **Details — methods and provenance** says so (*⚠ STALE: dwell_s*) and names the columns
+that change with it (*STALE: dwell_s on this plot is not what a fresh run would measure now …*), by
+the same rules as that table's amber line in the Results panel (§9a); nothing is recomputed. The
+sample rate and the calibration are judged for every table the
+plot draws; the open-pore estimator only for the table on screen, because it is judged against the
+Baseline form, and that form belongs to the table on screen. Distributions used to check the
+calibration alone. **Generate Report figures…** asks the same question before it writes anything
+(§12).
+
 ### Comparing two of anything
 
 The source picker is a **checkable list**, not a single choice. Tick two or more and the histogram
@@ -2002,6 +2229,13 @@ tool. Clustering runs on the **first ticked** source.
   column width. For a fixed width, increase typography in Appearance and capture/export again.
   **Approximate print-size preview…** uses the screen's reported resolution; it is uncalibrated,
   not a physical ruler. PNG DPI improves raster sampling, not the physical size of text.
+- **Configuration** (**Section → Export**) — **Undo** / **Redo** step the whole plot recipe,
+  appearance included, back and forward, 200 steps deep; ⌘Z / ⇧⌘Z do the same in this page. This
+  history is the page's own and Edit ▸ Undo never reaches it. **Template:** recalls a saved plot
+  template — plot type, columns, fit recipe, axes and style at once, leaving your ticked sources
+  alone — and **Save as…**, **Rename** and **Delete** manage them. **Delete** asks first and names
+  the template, with **Cancel** as the default: a template is a preference kept on this computer,
+  not part of a project, so no undo brings it back.
 
 ### A consistent plotting workflow
 
@@ -2020,6 +2254,20 @@ heatmap colour scales have their own palette controls. Use **Save appearance pre
 your style across plot types. Presets are local application preferences and contain appearance
 only—not recordings, event filters, bins, axis scaling, fitting choices or detector settings.
 Reset restores that plot's existing defaults. Appearance used by a figure is saved in its project.
+
+**Each plot keeps its own appearance Undo.** Event waveforms, Noise spectrum, I-V / conductance,
+Voltage dependence, Distribution summaries, Comparison figures, Subpopulations and the study figure
+editor (**Style selected figure…**, §1) have **Undo** and **Redo** beside **Reset appearance**, and
+⌘Z / ⇧⌘Z do the same while the Appearance controls are on screen — in the Analysis Explorer, while
+the page's **Section** shows **Appearance**. A text box you are typing in keeps ⌘Z for its typing.
+Every change is a step — an edit, a preset, a saved appearance, a colour, Reset — and edits less
+than 700 ms apart, such as the keystrokes of one size, make one; the buttons' tooltips name the step
+(*Undo: title size 12 → 14 pt*). Each plot keeps 200 steps, and once older ones have been dropped
+the Undo tooltip says how many. The history is the plot's own: Edit ▸ Undo never reaches a plot, and
+a plot's ⌘Z never reaches an event table or a setting. It ends when the figure is replaced from
+outside — a project opened, a saved state restored, or **Reset all figure styling** in the study
+figure editor. Distributions has no second one: its **Configuration** Undo already covers its
+appearance.
 
 Warnings remain beside the figure as a short summary and count. Expand **Full details** (or
 **Details — methods and provenance** in Distributions) for the complete warnings and audit text.
@@ -2314,8 +2562,9 @@ allocated. The message gives the requested size and asks you to analyse a shorte
 A project stores **references**, not signal: each recording's path plus the sample range you
 loaded, and everything you cannot cheaply recreate (calibrations, the acquisition-bandwidth and
 sample-rate / time-unit declarations made in File Info, layer view state and stable recording
-colours, curated event tables, manual measurements, segments). Reopening it reopens those files
-from disk.
+colours, curated event tables, the form settings you changed for a table and have not run yet,
+manual measurements, segments). Reopening it reopens those files from disk. Undo
+history is not part of it (§9b).
 
 **If a source file has changed, the app says so.** A path is a *name*, not a recording — re-exporting
 from Clampex over the same filename leaves the name identical and the data completely different. The
@@ -2499,7 +2748,12 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   and the dialog blamed the environment. Either way, if a figure could not be built or rendered and a
   file of that name is already on disk, you are told **which files under this base name are left over
   from an earlier export**, with their dates — including when *every* figure failed, which is the
-  case where the most is stale.
+  case where the most is stale. It refuses a table whose sample rate is stale, as **Export
+  events…** and the training and sub-state exports do (*Nothing was exported — re-run detection
+  under the declared rate first. …*), and a table stale on its calibration or open-pore estimator
+  is named on the status line rather than exported in silence.
+  A saved fit that no longer describes the table is not drawn: that histogram is refit afresh, and
+  the status line says why (§9a).
 - **Analysis Explorer ▸ Export current figure…** — the plot that is actually on
   screen, including companion axes such as density marginals and spectrogram colour bars. The
   Distributions page exposes the same choices from **Export ▾**. This is distinct from the standard
@@ -2611,7 +2865,7 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | Ctrl+S | Save project |
 | Ctrl+Shift+S | Save project as… |
 | Ctrl+W | Close current document |
-| **Ctrl/⌘+Z** | **Undo the last change to the event table on screen (or to the measurement list)** |
+| **Ctrl/⌘+Z** | **Undo the last change — to the event table on screen or its Detection / ML / Baseline settings, the measurement list, or the calibration, time base or acquisition bandwidth of the recording on screen (§9b)** |
 | **Ctrl+Shift+Z / ⇧⌘Z** | **Redo it** |
 | Ctrl+D | Run detection |
 | **Ctrl+I** | **Open the Event inspector** |
@@ -2626,6 +2880,7 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Trace focused: E** | **Draw mode on or off** |
 | **Ctrl+Shift+F** | **Open the Signal Conditioning window (the classical detectors' signal chain)** |
 | **Signal Conditioning:** Ctrl+1 / Ctrl+2 / Ctrl+3 | Time / Spectrum / Response preview tab |
+| **Signal Conditioning:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Edit ▸ Undo / Redo without leaving the window (a field you are typing in keeps them for its typing) |
 | Ctrl+0 / trace-focused Home / **Full** button | Reset zoom to the complete trace |
 | Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history) |
 | Ctrl+E | Centre the view on the current selection |
@@ -2646,6 +2901,8 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Event gallery:** A / R / Space | Accept / Reject / toggle every selected tile (a single tile moves to the next one when **Advance after decision** is on) |
 | **Event gallery:** PageDown / PageUp | Next / previous page |
 | **Event gallery:** Home / End | First / last page |
+| **Event gallery:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo on the main window's history, as the **Undo** and **Redo** buttons do |
+| **Plot windows:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo the plot's own history — its appearance while the Appearance controls are on screen; in Distributions, the whole plot recipe. Never Edit ▸ Undo (§10) |
 | **Event inspector & Event gallery:** 1–9 | Apply the matching label from the palette (**Analysis ▸ Event labels…**) — same digits, same meanings, in both windows |
 | **Event inspector & Event gallery:** custom one-character label hotkey | Apply that palette label (reserved and duplicate keys cannot be saved) |
 

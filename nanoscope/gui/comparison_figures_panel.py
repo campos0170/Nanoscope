@@ -532,7 +532,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
     def _appearance_from_user(self, state):
         previous = self._appearance
         try:
-            self.set_appearance_state(state)
+            self._install_appearance(state)
         except (TypeError, ValueError, RuntimeError, ImportError) as exc:
             self._appearance_widget.set_state(previous)
             QtWidgets.QMessageBox.warning(self, "Style comparison figure", str(exc))
@@ -543,6 +543,13 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         return self._appearance.to_dict()
 
     def set_appearance_state(self, state):
+        """A restore: the installed figure starts its appearance history over (design
+        §4.2). The user's own edits come through :meth:`_install_appearance` instead, or
+        each one would erase the history it is recorded in."""
+        self._install_appearance(state)
+        self._appearance_widget.clear_history()
+
+    def _install_appearance(self, state):
         appearance = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
         item = self._make_figure_item(self._snapshot, self._tables, appearance, self._source_appearance) if self._snapshot else None
         self._appearance = appearance
@@ -669,6 +676,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
             self._source_appearance_editor.set_state(source_appearance)
             self._source_appearance_editor.set_sources(snapshot.get("sources") or self._sources.values())
             self._appearance_widget.set_state(appearance)
+            self._appearance_widget.clear_history()
             self._stale = payload["stale"]
             self._fit_pending = False
             if item is not None:

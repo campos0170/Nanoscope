@@ -230,13 +230,15 @@ def test_a_project_saved_now_carries_the_note_itself(qapp, qtbot, tmp_path):
     w2._controller.abort()
 
 
-def test_reset_to_default_still_ends_the_note(qapp, qtbot, tmp_path):
-    """The rule is NOT "always keep the note".
+def test_reset_to_default_keeps_the_note_and_still_removes_the_file(qapp, qtbot, tmp_path):
+    """Reset resets the numbers, not the record. This test used to pin the opposite ("Reset
+    still ends the note"); the owner chose otherwise (EDITING_FOUNDATION_DESIGN §6,
+    decision 5): putting the gain back to the default the channel opened with is not a
+    statement that the user's account of the channel is wrong.
 
-    A note is carried when the writer had nothing to say about it. *Reset to default* has
-    something to say: this channel has no calibration, so it has no note either, and the
-    sidecar entry goes with it. A fix that resurrected the note here would leave the user
-    with "measured against the 1 MΩ standard" attached to gain 1.0.
+    The sidecar rule is untouched by that: the channel is back at its opened default, so its
+    entry leaves the file — here the whole file, after the removal confirmation (answered
+    yes) — and the note does not come back from the file on the next open.
     """
     csv = tmp_path / "pore.csv"
     arr = _trace()
@@ -250,7 +252,8 @@ def test_reset_to_default_still_ends_the_note(qapp, qtbot, tmp_path):
 
     panel._reset()
 
-    assert s.calibration(doc_id, 0).note == ""
+    assert s.calibration(doc_id, 0).gain == 1.0
+    assert s.calibration(doc_id, 0).note == NOTE
     assert not sidecar_path(csv).exists()
 
 

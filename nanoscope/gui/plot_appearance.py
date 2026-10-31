@@ -5,13 +5,30 @@ original graphical properties. Text overrides never change units, arrays or fits
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import math
 import json
 from typing import Any, Mapping, Sequence
 
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from .key_sequences import redo_sequences, undo_sequences
+
+#: How many appearance values one widget's history keeps, and how long a run of edits
+#: may stay open before it becomes one undo step. EQUAL to ``plots_panel``'s
+#: ``_HISTORY_DEPTH`` and ``_HISTORY_COALESCE_MS``, on purpose: design §4.2 gives every
+#: plot window the Plots window's depth and pause, and two windows of one app must not
+#: disagree about how far back Undo reaches or how long a pause ends a run. Only those
+#: two: what joins a run is this widget's own rule (any edit, a combo pick included),
+#: where the Plots window commits every change but typing at once and ends typing when
+#: the box loses focus (``PlotsWindow._history_touch``). Restated rather than imported,
+#: because ``plots_panel`` hosts this widget and so imports THIS module.
+#: tests/gui/test_plot_appearance_history.py holds the two pairs equal. No byte ceiling:
+#: an entry is fifteen scalars, where the Plots window's measured 1.5 kB entries already
+#: cost only ~320 kB at this depth.
+APPEARANCE_HISTORY_DEPTH = 200
+APPEARANCE_COALESCE_MS = 700
 
 
 @dataclass(frozen=True)
@@ -67,30 +84,241 @@ class PlotAppearance:
         return cls(**valid)
 
 
+#: The shipped looks, by their entry in the preset combo. Values, so that a history step
+#: which lands exactly on one can be named after it ("Undo: Publication · light preset").
+_BUILTIN_PRESETS: dict[str, PlotAppearance] = {
+    "Publication · light": PlotAppearance(
+        font_family="Arial", title_size=14, axis_size=12, tick_size=10, grid=False,
+        background="light", data_color="#0072b2", fit_color="#d55e00", line_width=2,
+        marker_size=8),
+    "Presentation · dark": PlotAppearance(
+        font_family="Arial", title_size=14, axis_size=12, tick_size=10, grid=True,
+        background="dark", data_color="#0072b2", fit_color="#d55e00", line_width=2,
+        marker_size=11),
+}
+
+#: How a step names each field, and the word for "no override" in that control's own
+#: vocabulary: the size spins and colour buttons say "Default", the three-way combos
+#: "Original", the label boxes' placeholder "Automatic". An EMPTIED label box is not
+#: that: it holds "", which Comparison and Study figures draw as no title or label at
+#: all, so a step names it "blank".
+_STEP_WORDS: dict[str, tuple[str, str]] = {
+    "title": ("title", "automatic"), "x_label": ("x label", "automatic"),
+    "y_label": ("y label", "automatic"), "legend_visible": ("legend", "original"),
+    "legend_size": ("legend text", "default"), "font_family": ("font", "default"),
+    "title_size": ("title size", "default"), "axis_size": ("axis label size", "default"),
+    "tick_size": ("tick size", "default"), "grid": ("grid", "original"),
+    "background": ("background", "original"), "data_color": ("data color", "default"),
+    "fit_color": ("fit color", "default"), "line_width": ("line width", "default"),
+    "marker_size": ("marker size", "default"),
+}
+_POINT_FIELDS = frozenset({"title_size", "axis_size", "tick_size", "legend_size"})
+_TEXT_FIELDS = ("title", "x_label", "y_label")
+
+
+def _spell(key: str, value) -> str:
+    if value is None:
+        return _STEP_WORDS[key][1]
+    if value == "":
+        return "blank"
+    if isinstance(value, bool):
+        return "shown" if value else "hidden"
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    if key in _TEXT_FIELDS:
+        return f"‘{value if len(value) <= 24 else value[:23] + '…'}’"
+    return str(value)
+
+
+def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
+    """Name the step from ``before`` to ``after`` for its Undo or Redo tooltip.
+
+    Read off the two VALUES, so the stack holds nothing but appearances. A single field is
+    named with both of its values, whatever moved it: a size typed back to Default is
+    that, not a reset. Several fields that land exactly on a shipped preset are that
+    preset, several that land on no override at all are a reset, and any other several
+    are counted.
+    """
+    moved = [f.name for f in fields(PlotAppearance)
+             if getattr(before, f.name) != getattr(after, f.name)]
+    if len(moved) == 1:
+        key = moved[0]
+        old, new = getattr(before, key), getattr(after, key)
+        said_old, said_new = _spell(key, old), _spell(key, new)
+        if key in _POINT_FIELDS:    # "12 → 14 pt": the unit once, on a side with a number
+            if new is not None:
+                said_new += " pt"
+            elif old is not None:
+                said_old += " pt"
+        return f"{_STEP_WORDS[key][0]} {said_old} → {said_new}"
+    for name, preset in _BUILTIN_PRESETS.items():
+        if after == preset:
+            return f"{name} preset"
+    if not after.to_dict():
+        return "reset appearance"
+    return f"{len(moved)} appearance changes"
+
+
+class _AppearanceHistory:
+    """A bounded undo/redo stack of :class:`PlotAppearance` VALUES, local to one widget.
+
+    ``plots_panel._ConfigHistory``'s shape, and its arguments, without the origin
+    machinery its import disclosures need: ``base`` is the value the controls are believed
+    to show, ``_past`` what came before it (oldest first), ``_future`` what an undo
+    stepped off. :meth:`note` records by DIFF, so a caller that says "something may have
+    moved" too often costs one comparison, and walking a combo away and back pushes
+    nothing. Qt-free.
+    """
+
+    __slots__ = ("base", "_past", "_future", "dropped")
+
+    def __init__(self, base: PlotAppearance) -> None:
+        self.base = base
+        self._past: list[PlotAppearance] = []
+        self._future: list[PlotAppearance] = []
+        #: Steps thrown away at :data:`APPEARANCE_HISTORY_DEPTH`. Counted rather than
+        #: merely dropped, because a silent bound looks exactly like a broken Undo button.
+        self.dropped = 0
+
+    def depth(self) -> tuple[int, int]:
+        """``(steps back, steps forward)``."""
+        return len(self._past), len(self._future)
+
+    def last_step(self) -> tuple[PlotAppearance, PlotAppearance] | None:
+        """``(before, after)`` of the step an undo would take back."""
+        return (self._past[-1], self.base) if self._past else None
+
+    def next_step(self) -> tuple[PlotAppearance, PlotAppearance] | None:
+        """``(before, after)`` of the step a redo would replay."""
+        return (self.base, self._future[-1]) if self._future else None
+
+    def note(self, now: PlotAppearance) -> bool:
+        """Record that the controls moved from :attr:`base` to ``now``. True if they had."""
+        if now == self.base:
+            return False
+        self._past.append(self.base)
+        self.base = now
+        # A new step ends the redo branch: "forward" would lead somewhere no longer
+        # reachable from here.
+        self._future.clear()
+        while len(self._past) > APPEARANCE_HISTORY_DEPTH:
+            del self._past[0]
+            self.dropped += 1
+        return True
+
+    def undo(self) -> PlotAppearance | None:
+        if not self._past:
+            return None
+        self._future.append(self.base)
+        self.base = self._past.pop()
+        return self.base
+
+    def redo(self) -> PlotAppearance | None:
+        if not self._future:
+            return None
+        self._past.append(self.base)
+        self.base = self._future.pop()
+        return self.base
+
+    def rebase(self, state: PlotAppearance) -> None:
+        """Move the base WITHOUT recording a step."""
+        self.base = state
+
+    def reset(self, base: PlotAppearance) -> None:
+        """Forget every step, and the ceiling count with them (``_ConfigHistory.reset``)."""
+        self.base = base
+        self._past.clear()
+        self._future.clear()
+        self.dropped = 0
+
+
 class PlotAppearanceWidget(QtWidgets.QWidget):
-    """Compact common controls. ``set_state`` is silent; user edits emit once."""
+    """Compact common controls. ``set_state`` is silent; user edits emit once.
+
+    With ``history`` (the default) the widget keeps its own Undo and Redo of its
+    appearance, apart from Edit ▸ Undo (design §4.2): every user change is one step, a run
+    of edits closer together than :data:`APPEARANCE_COALESCE_MS` is one, and an undo or
+    redo emits ``changed`` exactly as the user's own edit would, so the host re-applies it
+    the same way. ``set_state`` is never a step. A host whose figure is replaced from
+    outside -- a restore, a window blanked for an incoming project, a reset of everything
+    -- calls :meth:`clear_history` after it.
+
+    ``shortcuts`` binds the platform's Undo and Redo keys to that history, scoped to the
+    widget's window. A host whose window already binds those keys passes False: the same
+    key bound twice in one window is ambiguous, and Qt then fires NEITHER. The Plots window
+    passes ``history=False`` -- its own configuration stack already holds appearance, and
+    one window must not have two stacks.
+    """
 
     changed = QtCore.Signal(object)
 
     def __init__(self, state: PlotAppearance | None = None, parent=None, *,
                  include_colors=True, compact=False, include_markers=True,
-                 include_labels=True, include_legend=True, multi_view_labels=False):
+                 include_labels=True, include_legend=True, multi_view_labels=False,
+                 history=True, shortcuts=True):
         super().__init__(parent)
         self._state = state or PlotAppearance()
         self._loading = False
+        #: How deep this widget is inside its own ``changed`` emission. A ``set_state``
+        #: arriving then is the host answering the value it was just handed, not an
+        #: install from outside (see :meth:`set_state`).
+        self._emitting = 0
+        self._history = _AppearanceHistory(self._state) if history else None
         layout = QtWidgets.QGridLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(4)
         self.preset = QtWidgets.QComboBox()
-        self.preset.addItems(["Choose appearance preset…", "Publication · light", "Presentation · dark"])
+        self.preset.addItems(["Choose appearance preset…", *_BUILTIN_PRESETS])
         self.preset.setToolTip("Appearance only: never changes data, fitting, axis scales, or analysis settings.")
         self.preset.activated.connect(self._apply_preset)
-        layout.addWidget(self.preset, 0, 0, 1, 3)
         self.reset_button = QtWidgets.QPushButton("Reset appearance")
         self.reset_button.setToolTip("Remove appearance overrides; keep all data and analytical settings.")
         self.reset_button.clicked.connect(self._reset)
-        layout.addWidget(self.reset_button, 0, 3)
+        # Undo and Redo sit beside Reset, the only other buttons here that move the whole
+        # appearance. Without a history the cell is the bare button, as it always was.
+        self.undo_button = self.redo_button = self._burst = None
+        reset_cell = self.reset_button
+        if self._history is not None:
+            self.undo_button = QtWidgets.QPushButton("Undo")
+            self.undo_button.setAccessibleName("Undo appearance change")
+            self.undo_button.clicked.connect(self.undo)
+            self.redo_button = QtWidgets.QPushButton("Redo")
+            self.redo_button.setAccessibleName("Redo appearance change")
+            self.redo_button.clicked.connect(self.redo)
+            for button in (self.undo_button, self.redo_button):
+                # The text's own width, not the style's 80 px push-button floor. At the
+                # floor the compact row wanted 308 px where the rest of the column wants
+                # 287, so it would have widened every sidebar it sits in (measured
+                # offscreen); at this width the column is as wide as it always was.
+                button.setFixedWidth(button.fontMetrics().horizontalAdvance(button.text()) + 20)
+            reset_cell = QtWidgets.QWidget()
+            reset_cell.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+            row_layout = QtWidgets.QHBoxLayout(reset_cell)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            for button in (self.reset_button, self.undo_button, self.redo_button):
+                row_layout.addWidget(button)
+            self._burst = QtCore.QTimer(self)
+            self._burst.setSingleShot(True)
+            self._burst.setInterval(APPEARANCE_COALESCE_MS)
+            self._burst.timeout.connect(self._close_burst)
+            if shortcuts:
+                # Window-scoped, and live only while this widget is on screen: Qt matches
+                # a WindowShortcut whose parent is visible and enabled in the active
+                # window, so a page behind another Explorer tab, or an Appearance section
+                # the workflow bar has folded away, does not answer. Each resolved key
+                # once (key_sequences says why). A focused text box keeps the key for its
+                # own typing, as everywhere else in the app.
+                for keys, slot in ((undo_sequences(), self.undo), (redo_sequences(), self.redo)):
+                    for key in keys:
+                        shortcut = QtGui.QShortcut(key, self)
+                        shortcut.setContext(QtCore.Qt.ShortcutContext.WindowShortcut)
+                        shortcut.activated.connect(slot)
+        # Three buttons need two columns of the four; the preset gives up the third, which
+        # costs the grid nothing where the extra column would have cost it the row's width.
+        wide = reset_cell is not self.reset_button
+        layout.addWidget(self.preset, 0, 0, 1, 2 if wide else 3)
+        layout.addWidget(reset_cell, 0, 2 if wide else 3, 1, 2 if wide else 1)
         self.font_family = QtWidgets.QComboBox()
         self.font_family.setEditable(True)
         self.font_family.addItems(["Default", *QtGui.QFontDatabase.families()])
@@ -159,7 +387,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
                 layout.addWidget(label, row, 0)
                 layout.addWidget(control, row, 1)
                 row += 1
-            layout.addWidget(self.reset_button, row, 0, 1, 2)
+            layout.addWidget(reset_cell, row, 0, 1, 2)
             layout.addWidget(note, row + 1, 0, 1, 2)
             layout.setColumnStretch(3, 0)
         columns = 2 if compact else 4
@@ -218,7 +446,27 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         return self._state
 
     def set_state(self, state: PlotAppearance | Mapping[str, Any]):
-        self._state = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
+        """Adopt ``state`` silently: a restore, a recipe load, a host's reset or its answer.
+
+        Never an undo step. From outside, it first closes any open run of edits -- that
+        run was the user's and stays a step -- then moves the history's base without one.
+        From INSIDE this widget's own ``changed``, where a host normalises or refuses the
+        value it was just handed, it only moves the controls: the step being recorded is
+        the user's, and it records what the host left on screen, so a refused edit records
+        nothing.
+        """
+        state = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
+        outside = self._history is not None and not self._emitting
+        if outside:
+            self._close_burst()
+        self._write(state)
+        if outside:
+            self._history.rebase(self._state)
+            self._sync_history_buttons()
+
+    def _write(self, state: PlotAppearance) -> None:
+        """Put ``state`` on the controls without any of them reporting an edit."""
+        self._state = state
         self._loading = True
         try:
             self.font_family.setCurrentText(self._state.font_family or "Default")
@@ -293,11 +541,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         values = self.user_preset_states()
         if name not in values:
             return False
-        state = PlotAppearance.from_mapping(values[name])
-        changed = state != self._state
-        self.set_state(state)
-        if changed:
-            self.changed.emit(state)
+        self._apply(PlotAppearance.from_mapping(values[name]))
         return True
 
     def delete_user_preset(self, name: str) -> bool:
@@ -333,36 +577,179 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             self.delete_user_preset(name)
 
     def _edit(self, key, value):
+        """A control moved: one property, held open as part of a run of edits.
+
+        Spin boxes, the editable font box and the label boxes report every keystroke, so
+        "14" typed into Title (pt) is two values a few hundred milliseconds apart. The run
+        becomes ONE step once :data:`APPEARANCE_COALESCE_MS` passes without another edit,
+        or sooner when Undo, Redo, a one-gesture change or ``set_state`` closes it.
+        """
         if self._loading:
             return
         updated = PlotAppearance.from_mapping({**self._state.to_dict(), key: value})
         if updated != self._state:
             self._state = updated
-            self.changed.emit(updated)
+            self._announce(updated)
+            if self._history is not None:
+                self._burst.start()
+                self._sync_history_buttons()
+
+    def _apply(self, state: PlotAppearance, *, always: bool = False) -> None:
+        """A one-gesture change -- a preset, a saved appearance, a colour, Reset: one step.
+
+        Recorded after the host has answered ``changed``, so the step holds what the host
+        left on screen. ``always`` announces even a state these controls already show, as
+        a built-in preset always has: the Plots window installs whole configurations
+        without writing them back here, so its controls can lag the window, and the preset
+        must still reach it. Announcing an unchanged state records no step.
+        """
+        self._close_burst()      # a run of edits still open is its own, earlier step
+        if state == self._state and not always:
+            return
+        self._write(state)
+        self._announce(state)
+        self._close_burst()
+
+    def _announce(self, state: PlotAppearance) -> None:
+        self._emitting += 1
+        try:
+            self.changed.emit(state)
+        finally:
+            self._emitting -= 1
 
     def _choose_color(self, field):
         color = QtWidgets.QColorDialog.getColor(
             QtGui.QColor(getattr(self._state, field) or "#0072B2"), self,
             "Choose data color" if field == "data_color" else "Choose fit color")
         if color.isValid():
-            self._edit(field, color.name())
-            self.set_state(self._state)
+            self._apply(PlotAppearance.from_mapping({**self._state.to_dict(), field: color.name()}))
 
     def _reset(self):
-        if self._state != PlotAppearance():
-            self.set_state(PlotAppearance())
-            self.changed.emit(self._state)
+        self._apply(PlotAppearance())
 
     def _apply_preset(self, index):
-        if index not in (1, 2):
+        presets = tuple(_BUILTIN_PRESETS.values())
+        if not 1 <= index <= len(presets):
             return
-        self.set_state(PlotAppearance(
-            font_family="Arial", title_size=14, axis_size=12, tick_size=10,
-            grid=False if index == 1 else True,
-            background="light" if index == 1 else "dark", data_color="#0072b2",
-            fit_color="#d55e00", line_width=2, marker_size=8 if index == 1 else 11))
         self.preset.setCurrentIndex(0)
-        self.changed.emit(self._state)
+        self._apply(presets[index - 1], always=True)
+
+    # -- history ------------------------------------------------------------------------
+    def undo(self) -> bool:
+        """Step the appearance back one change. True if it moved.
+
+        A run of edits still open is committed first, so Undo right after typing takes
+        back the typing rather than the step before it.
+        """
+        if self._history is None:
+            return False
+        self._close_burst()
+        return self._step(self._history.undo, self._history.redo)
+
+    def redo(self) -> bool:
+        """Step the appearance forward one change. True if it moved."""
+        if self._history is None:
+            return False
+        self._close_burst()
+        return self._step(self._history.redo, self._history.undo)
+
+    def clear_history(self) -> None:
+        """Forget every step, for a host whose figure was just replaced.
+
+        A step back would restyle what the window no longer shows, so the history ends
+        with the data it was made on, as the Plots window's does
+        (``PlotsWindow.reset_state``). Call it after the ``set_state`` that installs the
+        replacement.
+        """
+        if self._history is None:
+            return
+        self._burst.stop()
+        self._history.reset(self._state)
+        self._sync_history_buttons()
+
+    def _step(self, move, unmove) -> bool:
+        """Move the stack one step with ``move`` and hand the host the state it lands on.
+
+        ``unmove`` is ``move``'s inverse, for a host that refuses the step.
+        """
+        left = self._state
+        state = move()
+        if state is None:
+            return False
+        self._write(state)
+        # ``changed`` exactly as after a user edit: the host re-applies and re-saves the
+        # value the way it always does, so an undo cannot be styled differently from the
+        # edit it takes back.
+        self._announce(state)
+        if state != left and self._state == left:
+            # The host REFUSED it and put back what it showed, as Comparison figures does
+            # when the figure will not render. Nothing moved, so the stack moves back too:
+            # re-basing here would lose the step, and leave a Redo that replays a step to
+            # where the plot already is.
+            unmove()
+            self._sync_history_buttons()
+            return False
+        # Re-based onto what is on the controls once the host has answered, as the Plots
+        # window re-bases after its own installs: a base that disagreed with the controls
+        # would make the next edit push a phantom step.
+        self._history.rebase(self._state)
+        self._sync_history_buttons()
+        return True
+
+    def _close_burst(self) -> None:
+        """Close any open run of edits: one step, if the controls moved from the base."""
+        if self._history is None:
+            return
+        self._burst.stop()
+        self._history.note(self._state)
+        self._sync_history_buttons()
+
+    def _sync_history_buttons(self) -> None:
+        """Enable and name Undo and Redo from the stack, counting an OPEN run of edits.
+
+        An open run is offered to Undo (committing it is the first thing :meth:`undo`
+        does) and withdraws Redo, which committing it will clear -- the Plots window's
+        rule (``PlotsWindow._sync_config_buttons``), in its words.
+        """
+        history = self._history
+        if history is None or self.undo_button is None:
+            return
+        pending = history.base != self._state
+        back, forward = history.depth()
+        want_undo, want_redo = bool(back or pending), bool(forward and not pending)
+        # A focused button about to be disabled hands focus to its partner on the same
+        # row first. Left to Qt, focus walks the tab chain, and the scroll area these
+        # controls sit in scrolls after it -- measured in the Plots window, where it put a
+        # different control under a pointer that had not moved
+        # (``PlotsWindow._retire_history_button``).
+        for dying, wanted, partner, partner_wanted in (
+                (self.undo_button, want_undo, self.redo_button, want_redo),
+                (self.redo_button, want_redo, self.undo_button, want_undo)):
+            if not wanted and dying.hasFocus():
+                if partner_wanted:
+                    partner.setEnabled(True)
+                    partner.setFocus()
+                else:
+                    dying.clearFocus()
+        self.undo_button.setEnabled(want_undo)
+        self.redo_button.setEnabled(want_redo)
+        lost = history.dropped
+        plural = "s" if lost != 1 else ""
+        ceiling = (f". Its oldest history was dropped at the {APPEARANCE_HISTORY_DEPTH}-step "
+                   f"ceiling ({lost} step{plural} lost).") if lost else ""
+        step = (history.base, self._state) if pending else history.last_step()
+        if step is not None:
+            self.undo_button.setToolTip(f"Undo: {_describe_step(*step)}{ceiling}")
+        elif lost:
+            self.undo_button.setToolTip(
+                f"Nothing left to undo — this plot's oldest appearance history was dropped "
+                f"at the {APPEARANCE_HISTORY_DEPTH}-step ceiling ({lost} step{plural} lost).")
+        else:
+            self.undo_button.setToolTip("Nothing to undo yet.")
+        step = history.next_step()
+        self.redo_button.setToolTip(
+            "Redo is cleared by a new change." if pending and step else
+            f"Redo: {_describe_step(*step)}" if step else "Nothing to redo.")
 
 
 def _item_defaults(item):

@@ -485,6 +485,8 @@ def test_delete_only_offered_for_user_presets_and_falls_back_to_the_default(
     panel._save_ml_preset_as()
     assert panel.ml_preset_delete_btn.isEnabled()
 
+    # Delete asks first; answered Delete.
+    monkeypatch.setattr(DetectionPanel, "_confirm_delete_ml_preset", lambda self, name: True)
     panel._delete_ml_preset()
     assert DetectionPanel._load_ml_user_presets() == {}
     assert panel.ml_preset.findData("mine") < 0

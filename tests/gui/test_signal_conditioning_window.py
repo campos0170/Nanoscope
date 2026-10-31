@@ -880,8 +880,9 @@ def test_the_module_imports_no_sibling_gui_module():
                     or (node.level == 0 and (node.module or "").startswith("nanoscope.gui")):
                 reached.add(f"{node.level}:{node.module}")
     # D-beta: the previews need the mandated worker-thread seam, the readable axes and the
-    # trace view's curve factory — all on test_measure_navigation's non-panel allowlist.
-    assert reached == {"1:worker_thread", "1:axes", "1:trace_view"}
+    # trace view's curve factory — all on test_measure_navigation's non-panel allowlist —
+    # and ⌘Z / ⇧⌘Z, forwarded to the main window, the one key-list rule (design §3.7).
+    assert reached == {"1:worker_thread", "1:axes", "1:trace_view", "1:key_sequences"}
 
 
 def test_hosting_does_not_raise_the_inspector_floor(window, qtbot):

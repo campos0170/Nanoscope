@@ -115,6 +115,7 @@ from ..analysis.conditioning_recipes import (
     MANUAL_PROTOCOL,
     SCOPE_SENTENCE,
     STAGE_KEYS,
+    STAGE_TITLES,
     MergeReport as ProtocolMergeReport,
     chain_differences,
     complete_recipe,
@@ -283,6 +284,15 @@ def _notch_lines_text(lines: Sequence[float]) -> str:
     if len(spelled) <= 6:
         return ", ".join(spelled) + " Hz"
     return f"{len(spelled)} lines: " + ", ".join(spelled[:3]) + f" … {spelled[-1]} Hz"
+
+
+def _hz_text(hz: float) -> str:
+    """'20 kHz', '12.4999 kHz', '60 Hz': kHz from 1 kHz up, with every digit a frequency
+    box holds. Not ``:g``, whose six digits print a high-pass box clamped to 12499.99 Hz
+    as '12.5 kHz' -- the Nyquist it was clamped below."""
+    hz = float(hz)
+    value, unit = (hz / 1e3, "kHz") if abs(hz) >= 1e3 else (hz, "Hz")
+    return f"{value:.6f}".rstrip("0").rstrip(".") + f" {unit}"
 
 
 def _detrend_method_choices() -> tuple[tuple[str, str], ...]:
@@ -542,8 +552,24 @@ class DetectionPanel(QWidget):
     stageShown = Signal(str)
     #: A sentence about a protocol recall for the status line (e.g. what the form clamped).
     protocolNotice = Signal(str)
+    #: A protocol recall has been applied to the form (the protocol's name): once per
+    #: recall, after the form has settled, so the window can name that step.
+    protocolRecalled = Signal(str)
     #: The Detect gate moved (``set_runnable``): True when detection can run now.
     runGateChanged = Signal(bool)
+    #: After every re-range to a recording's Nyquist (``set_recording``): the sentence
+    #: naming each frequency someone set, for a stage a run here reads, that its box can
+    #: no longer hold -- or ``""`` when there is none. See :meth:`clamp_notice`.
+    clampNotice = Signal(str)
+    #: The ML tab's form changed -- a hand edit, :meth:`set_ml_params` or a preset load --
+    #: with :meth:`ml_params`. A load announces itself ONCE, when it is done, not once per
+    #: widget it pushed.
+    mlParamsChanged = Signal(dict)
+    #: A preset was loaded into the ML form (the preset key): a pick,
+    #: :meth:`apply_ml_preset` or the fall-back after a delete. Not the preset a
+    #: :meth:`set_ml_params` seed passes through on its way to the stored run -- that
+    #: seed announces only ``mlParamsChanged``.
+    mlPresetLoaded = Signal(str)
 
     #: Stage key per editor page, in filter_selector / filter_stack order.
     _EDITOR_STAGE_KEYS: tuple[str, ...] = (
@@ -630,6 +656,13 @@ class DetectionPanel(QWidget):
     _STATIC_LP_RANGE = (1.0, 5_000_000.0)
     _STATIC_HP_RANGE = (0.1, 5_000_000.0)
     _STATIC_NOTCH_RANGE = (1.0, 100_000.0)
+    #: The boxes a recording's Nyquist bounds, as ``(attribute == params() key, stage)``,
+    #: in the order :meth:`clamp_notice` names them.
+    _NYQUIST_SPINS: tuple[tuple[str, str], ...] = (
+        ("filter_cutoff_hz", "lowpass"),
+        ("hp_cutoff_hz", "highpass"),
+        ("notch_freq_hz", "notch"),
+    )
 
     #: *** THE SCHMITT NOTCH-LINE CAP. *** The most lines the Preprocess tab's explicit
     #: "lines" box may commit — the ML tab's ``_ML_NOTCH_MAX_LINES`` (32) by value: the
@@ -686,6 +719,14 @@ class DetectionPanel(QWidget):
         # filter cutoff into a real resolution floor for this fs. None == the
         # channel's sample rate is genuinely unknown (legacy TDMS).
         self._fs: float | None = None
+        # What each Nyquist-ranged box (`_NYQUIST_SPINS`) was last SET to -- by the user
+        # or by set_params, never by a range clamp -- and the flag that tells the two
+        # apart while the panel moves a box itself. Seeded in the wiring below with the
+        # value each box is built with, which goes back like any set value; but nobody
+        # chose it, so only the boxes in `_frequency_chosen` are ever announced.
+        self._frequency_intent: dict[str, float] = {}
+        self._frequency_chosen: set[str] = set()
+        self._moving_frequency_boxes = False
 
         # ML detector state. The panel holds only the model PATH (a string) -- it
         # never loads the TensorFlow model on the GUI thread; the worker does, off
@@ -2117,6 +2158,16 @@ class DetectionPanel(QWidget):
         ):
             _spin.setKeyboardTracking(False)
 
+        # -- what each frequency box was set to ----------------------------
+        # Connected BEFORE anything else listens to these boxes, so the value is
+        # remembered before a listener (the preview, the chain judge, a re-seed) can
+        # react to it by writing another one.
+        for _key, _stage in self._NYQUIST_SPINS:
+            _box = getattr(self, _key)
+            self._frequency_intent[_key] = round(_box.value(), _box.decimals())
+            _box.valueChanged.connect(
+                lambda value, key=_key: self._remember_frequency(key, value))
+
         # -- detector selection --------------------------------------------
         self.detector_combo.currentIndexChanged.connect(self._on_detector_changed)
         self.detector_combo.currentIndexChanged.connect(self._emit_params)
@@ -2289,6 +2340,9 @@ class DetectionPanel(QWidget):
             _combo.currentIndexChanged.connect(self._on_ml_param_changed)
         self._on_ml_norm_method_changed()
         self.ml_notch_freqs.editingFinished.connect(self._on_ml_param_changed)
+        # The analysed range is in ml_params() as well, but it is no part of the model's
+        # pipeline, so it announces the change without latching a preset choice.
+        self.ml_range.currentIndexChanged.connect(self._emit_ml_params)
 
         # Start on the apo notebook's own reference bias -- the pipeline that was
         # actually executed and validated. Loading a model re-defaults the preset from
@@ -3161,10 +3215,11 @@ class DetectionPanel(QWidget):
         self._ml_preset_chosen = True             # an explicit choice, like picking one
 
     def _delete_ml_preset(self) -> None:
-        """Forget the selected USER preset (the shipped ones are not deletable)."""
+        """Forget the selected USER preset (the shipped ones are not deletable), once
+        :meth:`_confirm_delete_ml_preset` says so."""
         name = str(self.ml_preset.currentData() or "")
         presets = self._load_ml_user_presets()
-        if name not in presets:
+        if name not in presets or not self._confirm_delete_ml_preset(name):
             return
         presets.pop(name, None)
         self._store_ml_user_presets(presets)
@@ -3174,6 +3229,21 @@ class DetectionPanel(QWidget):
         if self.ml_preset.findData(name) < 0:
             self.apply_ml_preset(DEFAULT_PRESET)
         self._refresh_ml_preset_buttons()
+
+    def _confirm_delete_ml_preset(self, name: str) -> bool:
+        """Ask before forgetting the user's saved model preset ``name``; True to go ahead.
+
+        Asked the way :meth:`_confirm_delete_protocol` asks, for the same reason, and it
+        says the part a click does not show: the preset being deleted is the one this tab
+        is on, so its preprocessing and decode settings fall back to the default preset.
+        A method so a test can answer it."""
+        return self._ask_to_delete(
+            self, "Delete model preset?",
+            f"Delete your saved preset “{name}”?\n\n"
+            f"Its stored pipeline is forgotten, and this tab's model preprocessing and "
+            f"decode settings change to the default preset, "
+            f"“{self._ml_preset_label(DEFAULT_PRESET)}”. Deleting the preset cannot be "
+            f"undone.")
 
     # -- ML preset <-> widgets ---------------------------------------------
     def ml_preset_name(self) -> str:
@@ -3209,11 +3279,17 @@ class DetectionPanel(QWidget):
             self._ml_preset_chosen = True
 
     def _load_ml_preset(self) -> None:
-        """Push the selected preset's values into every widget (no deviations left)."""
+        """Push the selected preset's values into every widget (no deviations left).
+
+        Announced (``mlPresetLoaded``, then ``mlParamsChanged``) once the widgets hold the
+        preset -- unless this load is the first half of :meth:`set_ml_params`, whose
+        stored configs are about to be laid over it: that seed announces itself, once,
+        when the form holds the run rather than a preset it is passing through."""
         name = self.ml_preset_name()
         pre, dec = self._ml_preset_configs(name)
         if pre is None or dec is None:
             return
+        seeding = self._ml_loading
         self._ml_loading = True
         try:
             # ONE writer for "put a config into these widgets", shared with
@@ -3222,10 +3298,13 @@ class DetectionPanel(QWidget):
             self._push_ml_preprocess(pre)
             self._push_ml_decode(dec)
         finally:
-            self._ml_loading = False
+            self._ml_loading = seeding
         self._refresh_ml_baseline_rows()
         self._refresh_ml_preset_status()
         self._refresh_ml_preset_buttons()
+        if not seeding:
+            self.mlPresetLoaded.emit(name)
+            self._emit_ml_params()
 
     def _refresh_ml_baseline_rows(self) -> None:
         """Show only the baseline parameters the selected estimator actually reads."""
@@ -3339,14 +3418,35 @@ class DetectionPanel(QWidget):
         self._ml_preset_chosen = True
         self._refresh_ml_preset_status()
         self._refresh_control_level_summary()
+        self._emit_ml_params()
+
+    def _emit_ml_params(self, *_a) -> None:
+        """``mlParamsChanged`` -- the ML tab's counterpart of :meth:`_emit_params`.
+
+        Silent while this panel is pushing values into its own ML widgets: a preset load
+        or :meth:`set_ml_params` announces itself once, when it is done, where the
+        detection form's ``paramsChanged`` fires once per widget a ``set_params`` moves.
+        Silent, too, over a form that is momentarily not a pipeline (the case
+        :meth:`_refresh_ml_preset_status` reads as "custom (values not yet valid)"):
+        there is no :meth:`ml_params` to send, and the edit that makes it one will."""
+        if self._ml_loading:
+            return
+        try:
+            params = self.ml_params()
+        except ValueError:
+            return
+        self.mlParamsChanged.emit(params)
 
     @staticmethod
     def _parse_notch_freqs(text: str) -> tuple[float, ...]:
         """Parse the comma/space-separated notch-line box.
 
-        Unparseable or non-positive entries are dropped; an empty result falls back
-        to the trained 60/120/180 so the model is never handed an un-notched signal
-        because of a typo.
+        Unparseable, non-finite or non-positive entries are dropped; an empty result falls
+        back to the trained 60/120/180 so the model is never handed an un-notched signal
+        because of a typo. "inf" and "1e999" parse and are positive, and are no frequency:
+        `MLPreprocessConfig` refuses them, so one kept here made `ml_params()` raise from
+        the one box that is meant to be lenient, and with it every reader of the form
+        (a recording switch among them).
         """
         out: list[float] = []
         for tok in str(text).replace(";", ",").replace("/", ",").split(","):
@@ -3357,7 +3457,7 @@ class DetectionPanel(QWidget):
                 val = float(tok)
             except ValueError:
                 continue
-            if val > 0:
+            if np.isfinite(val) and val > 0:
                 out.append(val)
         return tuple(out) if out else tuple(NOTCH_FREQS)
 
@@ -3891,13 +3991,17 @@ class DetectionPanel(QWidget):
         :meth:`set_runnable` — because it also depends on the channel kind.
 
         This also re-ranges every frequency control against the new Nyquist, so a value
-        the kernel would reject cannot be dialled in at all.
+        the kernel would reject cannot be dialled in at all, and gives every box back the
+        value it was set to, as far as the new range allows. ``clampNotice`` then names
+        what it could not give back that a run here would read -- once the panel has
+        settled, so a listener reads it whole.
         """
         self._fs = float(fs) if fs else None
         self._apply_nyquist_ranges()
         self._refresh_notch_mode()
         self._update_rise_time()
         self._update_response_plot()
+        self.clampNotice.emit(self.clamp_notice())
 
     # -- fs-aware spin ranges ---------------------------------------------
     @staticmethod
@@ -3929,27 +4033,186 @@ class DetectionPanel(QWidget):
         intent: a stale 100 kHz cutoff carried over from a faster recording is pulled down
         to something legal instead of poisoning the next run.
 
+        A CLAMP IS NOT AN EDIT, so it is not where the value stays. What each box was last
+        set to -- by the user or by :meth:`set_params`, never by this method -- is
+        remembered (`_frequency_intent`) and given back to the box once the range is set.
+        Before this a look at a slower recording cost the user's own number: a 20 kHz
+        low-pass typed on a 50 kHz recording was clamped to 12499.9 Hz on a 25 kHz one and
+        stayed there back on the 50 kHz one, where 20 kHz is legal, so the next run there
+        filtered at the clamp with nothing on screen saying so. Taking back a lower
+        sample-rate declaration lost it the same way. setValue clamps as setRange does, so
+        a value the new range cannot hold reads its ceiling: what a box reads follows from
+        what was set and this recording alone, never from the way here (30 kHz reads
+        24999.9 Hz on a 50 kHz recording, not the 12499.9 Hz of a 25 kHz one it came by).
+
         With no rate (legacy TDMS) the static fallbacks stay — detection is gated off
         anyway, and inventing a ceiling would be a lie.
         """
         fs = self._fs
-        if fs is None:
-            self.filter_cutoff_hz.setRange(*self._STATIC_LP_RANGE)
-            self.hp_cutoff_hz.setRange(*self._STATIC_HP_RANGE)
-            self.notch_freq_hz.setRange(*self._STATIC_NOTCH_RANGE)
-            return
-        self.filter_cutoff_hz.setRange(
-            min(self._STATIC_LP_RANGE[0], self._nyquist_cap(fs, 1)),
-            self._nyquist_cap(fs, self.filter_cutoff_hz.decimals()),
-        )
-        self.hp_cutoff_hz.setRange(
-            min(self._STATIC_HP_RANGE[0], self._nyquist_cap(fs, 2)),
-            self._nyquist_cap(fs, self.hp_cutoff_hz.decimals()),
-        )
-        self.notch_freq_hz.setRange(
-            min(self._STATIC_NOTCH_RANGE[0], self._nyquist_cap(fs, 1)),
-            self._nyquist_cap(fs, self.notch_freq_hz.decimals()),
-        )
+        was_moving = self._moving_frequency_boxes
+        self._moving_frequency_boxes = True
+        try:
+            if fs is None:
+                self.filter_cutoff_hz.setRange(*self._STATIC_LP_RANGE)
+                self.hp_cutoff_hz.setRange(*self._STATIC_HP_RANGE)
+                self.notch_freq_hz.setRange(*self._STATIC_NOTCH_RANGE)
+            else:
+                self.filter_cutoff_hz.setRange(
+                    min(self._STATIC_LP_RANGE[0], self._nyquist_cap(fs, 1)),
+                    self._nyquist_cap(fs, self.filter_cutoff_hz.decimals()),
+                )
+                self.hp_cutoff_hz.setRange(
+                    min(self._STATIC_HP_RANGE[0], self._nyquist_cap(fs, 2)),
+                    self._nyquist_cap(fs, self.hp_cutoff_hz.decimals()),
+                )
+                self.notch_freq_hz.setRange(
+                    min(self._STATIC_NOTCH_RANGE[0], self._nyquist_cap(fs, 1)),
+                    self._nyquist_cap(fs, self.notch_freq_hz.decimals()),
+                )
+            for key, _stage in self._NYQUIST_SPINS:
+                getattr(self, key).setValue(self._frequency_intent[key])
+        finally:
+            # Restored, not cleared: a listener can re-range from inside a clamp, and the
+            # clamps still to come here must not be remembered as set.
+            self._moving_frequency_boxes = was_moving
+
+    def _remember_frequency(self, key: str, value: float) -> None:
+        """A Nyquist-ranged box moved: remember the value as set, unless the panel moved it
+        itself (a re-range, or `_set_frequency`, which remembers what it was asked)."""
+        if not self._moving_frequency_boxes:
+            self._frequency_intent[key] = round(float(value), getattr(self, key).decimals())
+            self._frequency_chosen.add(key)
+
+    def _set_frequency(self, key: str, value: float) -> None:
+        """Put ``value`` in one of the Nyquist-ranged boxes and remember it as set.
+
+        The value remembered is the one ASKED for, not what the box reads: the box clamps
+        what this recording cannot hold, and the asked-for value is what
+        `_apply_nyquist_ranges` puts back once a recording can. It is remembered BEFORE
+        the box moves, so a listener that answers this write with another one has the last
+        word, as it does after an edit by hand.
+
+        Asking for the very ceiling a clamped box already reads sets nothing, as typing the
+        number a box already shows sets nothing (the box does not move). That number is
+        the clamp's, and it is what a snapshot of the form, or a run made here, holds:
+        writing one back -- an Undo of any step on this recording, a re-seed from that run
+        -- would otherwise trade the value set for the clamp, so the notice would go quiet
+        and a faster recording get the clamp back. Any other value is set as asked.
+        """
+        box = getattr(self, key)
+        asked = round(float(value), box.decimals())
+        if not (self._frequency_intent[key] > box.maximum() and asked == box.value()):
+            self._frequency_intent[key] = asked
+            self._frequency_chosen.add(key)
+        was_moving = self._moving_frequency_boxes
+        self._moving_frequency_boxes = True
+        try:
+            box.setValue(asked)
+        finally:
+            self._moving_frequency_boxes = was_moving
+
+    def clamp_notice(self) -> str:
+        """One sentence naming each frequency set that its box here cannot hold, or ``""``.
+
+        Each is named with the value it was set to, beside the limit and what the form
+        reads instead: "Low-pass 20 kHz is above this recording's Nyquist (12.5 kHz); the
+        form now reads 12.4999 kHz." A run uses what the boxes read, so this is the
+        sentence that tells the user a run here would not use what they set -- and so it
+        names only a box a run here reads (its stage on and, for the notch, the series
+        spelling in force) holding a value someone set. An off stage reads no cutoff, and
+        a box nobody has set holds the value it was built with: naming either would be a
+        false alarm on every arrival (an untouched panel would announce its 10 kHz
+        low-pass, off, on any recording sampled at 20 kHz or less). Both are still put
+        back where they fit.
+        """
+        # What a run reads is what params() sends, so the notice cannot disagree with it.
+        run = self.params()
+        read = {"filter_cutoff_hz": run["filter_cutoff_hz"] is not None,
+                "hp_cutoff_hz": run["hp_enabled"],
+                "notch_freq_hz": run["notch_enabled"] and run["notch_freqs"] is None}
+        clamped = [(STAGE_TITLES[stage], self._frequency_intent[key], getattr(self, key))
+                   for key, stage in self._NYQUIST_SPINS
+                   if read[key] and key in self._frequency_chosen
+                   and self._frequency_intent[key] > getattr(self, key).maximum()]
+        if not clamped:
+            return ""
+
+        def spoken(items: list[str]) -> str:
+            return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+        named = spoken([f"{title if i == 0 else title.lower()} {_hz_text(wanted)}"
+                        for i, (title, wanted, _box) in enumerate(clamped)])
+        reads = spoken([_hz_text(box.value()) for _title, _wanted, box in clamped])
+        verb = "is" if len(clamped) == 1 else "are"
+        if self._fs:
+            nyquist = self._fs / 2.0
+            # The box's ceiling is the last value below Nyquist at its precision, so a
+            # value it cannot hold may sit exactly ON Nyquist -- which the kernels refuse
+            # too, but which is not "above" it.
+            where = ("above" if all(wanted > nyquist for _t, wanted, _b in clamped)
+                     else "at or above")
+            limit = f"{where} this recording's Nyquist ({_hz_text(nyquist)})"
+        else:
+            limit = "above what the form accepts while the sample rate is unknown"
+        return f"{named} {verb} {limit}; the form now reads {reads}."
+
+    def frequency_intents(self) -> dict[str, Any]:
+        """What each Nyquist-ranged box was last SET to, and which of them someone chose:
+        the half of this form that :meth:`params` cannot show.
+
+        ``{"set": {key: value, ...}, "chosen": [key, ...]}``, keyed and ordered as
+        `_NYQUIST_SPINS`; plain data, lists never tuples, so a snapshot equals itself after
+        a trip through JSON. :meth:`restore_frequency_intents` puts it back.
+
+        WHY A SNAPSHOT OF THE FORM NEEDS IT. ``params()`` holds what the boxes READ, and on
+        a slower recording that is the clamp. Writing such a snapshot back through
+        :meth:`set_params` keeps what was set only while the box still reads its ceiling
+        (`_set_frequency`). Measured on the wave-A tree: type 20 kHz at 50 kHz, look at a
+        25 kHz recording (the box reads 12499.9 Hz), type 10 kHz there, then take that
+        edit back: the box read 10 kHz, not its ceiling, so the write-back remembered
+        12499.9 Hz as the value set -- the clamp notice went quiet, and back at 50 kHz the
+        box read 12499.9 Hz, not the 20 kHz typed. With this pair in the snapshot the undo
+        puts the 20 kHz back.
+        """
+        return {
+            "set": {key: float(self._frequency_intent[key]) for key, _stage in self._NYQUIST_SPINS},
+            "chosen": [key for key, _stage in self._NYQUIST_SPINS
+                       if key in self._frequency_chosen],
+        }
+
+    def restore_frequency_intents(self, intents: Mapping[str, Any]) -> None:
+        """Put back a :meth:`frequency_intents` snapshot, and the boxes with it.
+
+        A SET, like every restore of this form: afterwards :meth:`frequency_intents`
+        equals the snapshot, and each box reads what was set as far as this recording's
+        range allows -- the one rule `_apply_nyquist_ranges` keeps -- so a low-pass that is
+        OFF gets its box value back too, which :meth:`set_params` leaves alone. A part
+        that is absent, a key this panel does not have, and a value that is not a finite
+        number are left alone. Called after :meth:`set_params` on the same snapshot: that
+        write remembers what it asked for, and this has the last word.
+        """
+        known = {key for key, _stage in self._NYQUIST_SPINS}
+        values = intents.get("set")
+        if isinstance(values, Mapping):
+            for key, value in values.items():
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if key in known and np.isfinite(number):
+                    self._frequency_intent[key] = round(number, getattr(self, key).decimals())
+        chosen = intents.get("chosen")
+        if isinstance(chosen, (list, tuple)):
+            self._frequency_chosen = {key for key in chosen if key in known}
+        # The boxes follow, under the flag that keeps a move by the panel from being
+        # remembered as set; setValue clamps to this recording's ceiling as setRange does.
+        was_moving = self._moving_frequency_boxes
+        self._moving_frequency_boxes = True
+        try:
+            for key, _stage in self._NYQUIST_SPINS:
+                getattr(self, key).setValue(self._frequency_intent[key])
+        finally:
+            self._moving_frequency_boxes = was_moving
 
     def set_preview_error(self, message: str) -> None:
         """Show why the processed-trace preview could not be computed (``""`` clears it).
@@ -4156,6 +4419,10 @@ class DetectionPanel(QWidget):
         Seeding is NOT a user choice, so it runs with the deviation indicator suppressed;
         but the result IS a deliberate configuration, so ``_ml_preset_chosen`` is latched
         afterwards: a model loaded next must not overrule the run that is on screen.
+
+        The seed is ONE change, announced once (``mlParamsChanged``) with the run on the
+        form: the preset applied first is a step on the way, not a preset load, so it
+        runs under the same ``_ml_loading`` and announces nothing of its own.
         """
         if not params:
             return
@@ -4179,11 +4446,10 @@ class DetectionPanel(QWidget):
                     name = str(candidate)
                     break
 
-        if name is not None:
-            self.apply_ml_preset(name)
-
         self._ml_loading = True
         try:
+            if name is not None:
+                self.apply_ml_preset(name)
             if pre is not None:
                 self._push_ml_preprocess(pre)
             if dec is not None:
@@ -4205,6 +4471,7 @@ class DetectionPanel(QWidget):
         self._refresh_ml_preset_status()
         self._ml_preset_chosen = True
         self._refresh_control_level_summary()
+        self._emit_ml_params()
 
     def _push_ml_preprocess(self, pre: MLPreprocessConfig) -> None:
         """Put one preprocessing config into the widgets. Caller owns ``_ml_loading``."""
@@ -4498,7 +4765,7 @@ class DetectionPanel(QWidget):
 
     def set_hp_cutoff_hz(self, cutoff_hz: float) -> None:
         """Set the high-pass cutoff in Hz."""
-        self.hp_cutoff_hz.setValue(float(cutoff_hz))
+        self._set_frequency("hp_cutoff_hz", cutoff_hz)
 
     def set_notch_enabled(self, enabled: bool) -> None:
         """Enable/disable the mains-hum notch stage."""
@@ -4506,7 +4773,7 @@ class DetectionPanel(QWidget):
 
     def set_notch_freq_hz(self, freq_hz: float) -> None:
         """Set the notch fundamental line frequency in Hz (60 in the Americas, 50 else)."""
-        self.notch_freq_hz.setValue(float(freq_hz))
+        self._set_frequency("notch_freq_hz", freq_hz)
 
     def set_notch_harmonics(self, harmonics: int) -> None:
         """Set how many harmonics of the mains line the notch removes."""
@@ -4989,6 +5256,12 @@ class DetectionPanel(QWidget):
         Ordering is load-bearing in one place: ``k_in`` is applied before ``k_out``, because
         the panel clamps ``k_out``'s maximum to just under ``k_in`` and applying them the
         other way round would silently truncate a stored ``k_out``.
+
+        A frequency set here is remembered as SET even where this recording's Nyquist
+        clamps its box, so a faster recording gets it back (`_apply_nyquist_ranges`). The
+        one exception is the ceiling a clamped box already reads, which sets nothing: that
+        is what a form snapshot taken here holds, so writing one back keeps what was set
+        (`_set_frequency`).
         """
         def _apply(key, setter, cast=None):
             if key in params:
@@ -5020,11 +5293,12 @@ class DetectionPanel(QWidget):
             self.set_polarity(params["polarity"])
 
         # -- low-pass (cutoff None == the stage was off) --------------------
+        # An OFF low-pass leaves its box, and what the box was set to, as they were.
         if "filter_cutoff_hz" in params:
             cutoff = params["filter_cutoff_hz"]
             self.filter_enabled.setChecked(cutoff is not None)
             if cutoff is not None:
-                self.filter_cutoff_hz.setValue(float(cutoff))
+                self._set_frequency("filter_cutoff_hz", cutoff)
         _apply("filter_order", self.set_filter_order, int)
         _apply("filter_kind", self.set_filter_kind, str)
 
@@ -5227,7 +5501,9 @@ class DetectionPanel(QWidget):
         finally:
             self._protocol_updating = False
         form = self.params()
-        if not recipes_equal(form, proto):
+        if recipes_equal(form, proto):
+            self._set_protocol_buttons_enabled(True)
+        else:
             # The form clamped a value (a cutoff above this recording's Nyquist, a stored
             # value outside a box's range): the chain on screen is not the protocol.
             changed = (describe_differences(chain_differences(form, proto, fs=self._fs))
@@ -5236,10 +5512,10 @@ class DetectionPanel(QWidget):
             self.protocolNotice.emit(
                 f"Protocol “{name}” could not be applied exactly on this recording, so the "
                 f"form shows “{self._PROTO_MANUAL}”: {changed}.")
-            self._refresh_chain_card()
-            return
-        self._set_protocol_buttons_enabled(True)
         self._refresh_chain_card()
+        # Exactly or not, the recall has been applied. Announced last, once the combo and
+        # the card have settled, so the step it names is the form as it now stands.
+        self.protocolRecalled.emit(name)
 
     def _protocol_dialog_parent(self) -> QWidget:
         """The window the protocol verbs are clicked in (the Signal Conditioning window
@@ -5344,13 +5620,49 @@ class DetectionPanel(QWidget):
         self._select_protocol(new)
 
     def _delete_protocol(self) -> None:
+        """Forget the selected protocol, once :meth:`_confirm_delete_protocol` says so."""
         name = self.protocol_combo.currentText()
         if name == self._PROTO_MANUAL:
             return
         protocols = self._load_protocols()
-        protocols.pop(name, None)
+        if name not in protocols or not self._confirm_delete_protocol(name):
+            return
+        protocols.pop(name)
         self._store_protocols(protocols)
         self._load_protocols_into_combo()
+
+    def _confirm_delete_protocol(self, name: str) -> bool:
+        """Ask before forgetting the saved protocol ``name``; True to go ahead.
+
+        Edit ▸ Undo does not reach the protocol library -- it is a preference kept in
+        QSettings, not part of the project -- so this question is all that stands between
+        a stray click on Delete and a chain the user can only rebuild from memory. It used
+        to be one click with nothing asked. A method so a test can answer it."""
+        return self._ask_to_delete(
+            self._protocol_dialog_parent(), "Delete protocol?",
+            f"Delete the protocol “{name}”?\n\n"
+            f"Its saved chain is forgotten. The settings on screen stay as they are. "
+            f"This cannot be undone.")
+
+    @staticmethod
+    def _ask_to_delete(parent: QWidget, title: str, text: str) -> bool:
+        """The one delete prompt of this panel: True only when Delete was clicked.
+
+        PLAIN TEXT, because the text quotes a name the user typed and Qt's default
+        (AutoText) would render a name that looks like markup as markup. The buttons are
+        named, never indexed (docs/ARCHITECTURE.md): Cancel is the default AND the escape
+        button, so Return and Esc both keep what was about to be deleted."""
+        box = QMessageBox(parent)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setTextFormat(Qt.PlainText)
+        box.setText(text)
+        delete = box.addButton("Delete", QMessageBox.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return box.clickedButton() is delete
 
     def _protocol_drop_to_manual(self, params: Mapping[str, Any] | None = None, *_a) -> None:
         """The combo names a protocol only while the form still IS that protocol.
@@ -7938,14 +8250,18 @@ class EventTable(QWidget):
     #: One of the notice chip's menu entries was chosen (its key, see _NOTICE_ACTIONS).
     noticeActionRequested = Signal(str)
 
-    #: The notice the chip's reserved slot is sized for.
-    _NOTICE_SLOT_TEXT = "⚠ Chain changed"
+    #: The notice the chip's reserved slot is sized for: the longer of the two it shows
+    #: ("⚠ Chain changed" is the other), so neither elides where the slot has its width.
+    _NOTICE_SLOT_TEXT = "⚠ Settings changed"
     #: The notice chip's menu, built ONCE (key, label).
     _NOTICE_ACTIONS: tuple[tuple[str, str], ...] = (
         ("revert", "Revert form to this detection's chain"),
         ("run", "Run detection with the form's chain…"),
         ("open", "Open Signal Conditioning…"),
     )
+    #: The revert entry once a detection threshold differs: Revert then puts thresholds
+    #: back as well as stages, and "chain" would undersell what it writes.
+    _NOTICE_REVERT_SETTINGS = "Revert form to this detection's settings"
 
     _COLUMN_SETTINGS_KEY = 'inspector/event_columns_v1'
     _SCIENTIFIC_ORDER = ('accepted', 't_start_s', 'dwell_s', 'depth_pA',
@@ -8845,6 +9161,23 @@ class EventTable(QWidget):
                 action.setVisible(key in wanted)
         if self.notice_chip.isHidden() == bool(text):
             self.notice_chip.setVisible(bool(text))
+
+    def set_notice_revert(self, *, settings: bool, enabled: bool) -> None:
+        """Word the chip menu's revert entry for what it writes, and grey it out when it
+        cannot put the form back.
+
+        ``settings``: a threshold differs too, so the entry says "settings", not "chain".
+        ``enabled`` False: the form differs on a setting the run did not record. Revert has
+        nothing to restore it from, and an entry that reported a revert while the chip stayed
+        up would be a lie; the chip's tooltip, the judge's sentence, says why.
+        """
+        action = self._notice_actions["revert"]
+        text = (self._NOTICE_REVERT_SETTINGS if settings
+                else dict(self._NOTICE_ACTIONS)["revert"])
+        if action.text() != text:
+            action.setText(text)
+        if action.isEnabled() != bool(enabled):
+            action.setEnabled(bool(enabled))
 
     def notice_text(self) -> str:
         return self.notice_chip.text() if not self.notice_chip.isHidden() else ""

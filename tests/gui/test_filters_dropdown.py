@@ -498,7 +498,8 @@ def test_protocol_save_recall_and_manual_drop(qtbot, monkeypatch):
     panel2.protocol_combo.setCurrentText("eu-mains")
     assert panel2.notch_harmonics.value() == 5
 
-    # Delete forgets it everywhere.
+    # Delete forgets it everywhere -- once its prompt is answered Delete (it asks first).
+    monkeypatch.setattr(DetectionPanel, "_confirm_delete_protocol", lambda self, name: True)
     panel._delete_protocol() if panel.protocol_combo.currentText() == "eu-mains" else None
     panel.protocol_combo.setCurrentText("eu-mains") if any(
         panel.protocol_combo.itemText(i) == "eu-mains"

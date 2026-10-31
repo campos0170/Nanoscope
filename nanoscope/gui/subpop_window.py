@@ -1269,6 +1269,9 @@ class SubpopReportWindow(QtWidgets.QWidget):
         if report is None:
             self._header.setText(self._empty_header())
             self._text.setPlainText("")
+            # A blanked window -- MainWindow blanks this one for an incoming project --
+            # ends the appearance history made on the report it showed (design §4.2).
+            self._appearance_widget.clear_history()
         else:
             self._header.setText(self._describe(report, subtitle))
             self._text.setPlainText(report.text())
@@ -1295,7 +1298,7 @@ class SubpopReportWindow(QtWidgets.QWidget):
         return self._report
 
     def _appearance_from_user(self, state: PlotAppearance) -> None:
-        self.set_appearance_state(state)
+        self._install_appearance(state)
         self.workspaceChanged.emit()
 
     def _appearance_after_view_change(self, *_args) -> None:
@@ -1348,6 +1351,13 @@ class SubpopReportWindow(QtWidgets.QWidget):
         self._ensure_figure_minima()
 
     def set_appearance_state(self, state) -> None:
+        """A restore: the installed figure starts its appearance history over (design
+        §4.2). The user's own edits come through :meth:`_install_appearance` instead, or
+        each one would erase the history it is recorded in."""
+        self._install_appearance(state)
+        self._appearance_widget.clear_history()
+
+    def _install_appearance(self, state) -> None:
         parsed = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
         # Class colours are categorical identities shared with the trace/gallery.
         self._appearance = replace(parsed, data_color=None, fit_color=None)

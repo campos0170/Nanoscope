@@ -59,12 +59,14 @@ THE UX RULES THIS CODEBASE ALREADY PAID FOR
 Signals:
     probeRequested(): "Measure this recording" clicked and nothing blocks it.
     paramsChanged(dict): a value changed; carries :meth:`params`.
+    resetPerformed(str): one part of the form was just reset; carries the step's name.
     addReferenceSelectionRequested(): deliberately copy the trace's time selection.
     referencePreviewRequested(): preview a valid supplied reference without applying it.
 """
 
 from __future__ import annotations
 
+import copy
 import html
 import math
 from typing import Any, Mapping
@@ -210,7 +212,30 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         self.mode.setToolTip(
             "Choose a reference for this recording only. Automatic keeps the existing "
             "estimator. The other modes use information you provide, not independently verified.")
-        layout.addWidget(self.mode)
+        # CLEAR REFERENCE RIDES THE MODE'S ROW. Everything under this row changes with
+        # the mode, and this button changes the mode, so anywhere lower would move it out
+        # from under the pointer that pressed it. Sharing the row costs 2 px of height
+        # (the button stands that much taller than the combo) where a row of its own
+        # would cost a button's. The combo may elide down to eight characters instead,
+        # so this row never sets the panel's minimum width: the dock opens at the widest
+        # page minimum, and this panel is not to become it. Measured offscreen: the
+        # minimum is still 260 px in Automatic and constant and 279 px in intervals, as
+        # before the button existed, and every mode name shows whole from a 344 px
+        # panel up.
+        self.mode.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.mode.setMinimumContentsLength(8)
+        self.clear_button = QtWidgets.QPushButton("Clear reference")
+        self.clear_button.setToolTip(
+            "Go back to Automatic for this recording: clears the chosen mode, the "
+            "open-pore current, the intervals and the notes. The automatic estimator's "
+            "rough and base windows are kept -- Back to default resets those.")
+        top = QtWidgets.QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+        top.addWidget(self.mode, 1)
+        top.addWidget(self.clear_button)
+        layout.addLayout(top)
 
         self.known_box = QtWidgets.QWidget()
         self.known_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
@@ -470,6 +495,74 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         self._loading = False
         self._refresh()
 
+    def clearable(self) -> bool:
+        """Does Clear reference have anything to clear?
+
+        Exactly when this form puts something into the run: a user-provided mode, or
+        a stored reference that could not be restored, which blocks detection until
+        someone chooses deliberately. Drafts typed into a mode that is no longer
+        chosen contribute nothing, so they do not count.
+        """
+        return bool(self.params())
+
+    def form_state(self) -> dict[str, Any]:
+        """Everything that decides :meth:`params` and :meth:`error`, as plain data.
+
+        Every box is kept AS TYPED, because an invalid draft is shown, refused and
+        kept rather than repaired (this class's own rule) -- an undo that parsed the
+        rows would bring back a different draft than the one the user left. The
+        recording's rate and length are not in it: they are facts about the recording,
+        not edits, and arrive through :meth:`set_recording`.
+        """
+        return {
+            "mode": self.reference_mode(),
+            "current": self.current.text(),
+            "notes": self.notes.text(),
+            "interpolation": str(self.method.currentData()),
+            "intervals": [[self.table.item(row, col).text() if self.table.item(row, col)
+                           else "" for col in range(2)]
+                          for row in range(self.table.rowCount())],
+            "confirmed": self._confirmed,
+            "restore_error": self._restore_error,
+            "invalid_recipe": copy.deepcopy(self._invalid_recipe),
+            "invalid_flags": copy.deepcopy(self._invalid_reference_flags),
+        }
+
+    def restore_form_state(self, state: Mapping[str, Any]) -> None:
+        """Write a :meth:`form_state` snapshot back verbatim, without emitting.
+
+        Not :meth:`set_params`, which is a seed and steps aside for a confirmed form.
+        A key that is absent leaves its part of the form alone.
+        """
+        self._loading = True
+        try:
+            if "mode" in state:
+                self.mode.setCurrentIndex(max(0, self.mode.findData(state["mode"])))
+            if "current" in state:
+                self.current.setText(str(state["current"]))
+            if "notes" in state:
+                self.notes.setText(str(state["notes"]))
+            if "interpolation" in state:
+                self.method.setCurrentIndex(max(0, self.method.findData(state["interpolation"])))
+            if "intervals" in state:
+                self.table.setRowCount(0)
+                for texts in state["intervals"]:
+                    row = self.table.rowCount()
+                    self.table.insertRow(row)
+                    for col in range(2):
+                        self.table.setItem(row, col, QtWidgets.QTableWidgetItem(str(texts[col])))
+        finally:
+            self._loading = False
+        if "confirmed" in state:
+            self._confirmed = bool(state["confirmed"])
+        if "restore_error" in state:
+            self._restore_error = str(state["restore_error"])
+        if "invalid_recipe" in state:
+            self._invalid_recipe = copy.deepcopy(state["invalid_recipe"])
+        if "invalid_flags" in state:
+            self._invalid_reference_flags = copy.deepcopy(dict(state["invalid_flags"]))
+        self._refresh()
+
     def set_params(self, params: Mapping[str, Any]):
         if self._confirmed:
             return
@@ -547,10 +640,18 @@ class BaselinePanel(QtWidgets.QGroupBox):
         reference_mode() -> str             # automatic / constant / intervals
         reference_error() -> str            # invalid draft; must block a run
         add_reference_interval(start,end)   # recording-relative seconds; intent only
+        form_state() -> dict                # the whole form, as plain data
+        restore_form_state(state)           # SET it back (undo); not a seed
     """
 
     probeRequested = QtCore.Signal()
     paramsChanged = QtCore.Signal(dict)
+    #: A reset of ONE part of the form has been applied: "Reset baseline estimator"
+    #: (Back to default) or "Clear open-pore reference". Emitted after `paramsChanged`,
+    #: so whoever records the step finds the reset already in the form, and named by
+    #: the button that knows what it reset -- a diff of the form could only say how
+    #: many values moved.
+    resetPerformed = QtCore.Signal(str)
     addReferenceSelectionRequested = QtCore.Signal()
     referencePreviewRequested = QtCore.Signal()
     #: The two VIEW requests, carried separately from `paramsChanged` on purpose:
@@ -680,15 +781,49 @@ class BaselinePanel(QtWidgets.QGroupBox):
             "-- with the panel saying so from then on.")
         self.reset_button = QtWidgets.QPushButton("Back to default")
         self.reset_button.setToolTip(
-            f"Return to the app default ({DEFAULT_BASELINE.rough_s:g} s / "
-            f"{DEFAULT_BASELINE.base_s:g} s). A defensible floor for an unseen "
-            f"recording, and provably wrong for some -- measure instead where you can.")
+            f"Return the automatic estimator's two windows to the app default "
+            f"({DEFAULT_BASELINE.rough_s:g} s / {DEFAULT_BASELINE.base_s:g} s). A "
+            f"defensible floor for an unseen recording, and provably wrong for some -- "
+            f"measure instead where you can. It resets the estimator only, in every "
+            f"mode: an open-pore reference you supplied is kept (Clear reference clears it).")
+        #: Apply's cell, while a user-provided reference is chosen: whose reset Back to
+        #: default is, and the windows it would reset. See the row below.
+        self.estimator_windows_label = QtWidgets.QLabel()
+        # Its width ignored, so it takes what the button leaves and wraps there. A
+        # wrapped label asks for forty characters, and under a reference that set the
+        # panel's preferred width (measured offscreen: 406 px, against 291 px without it).
+        self.estimator_windows_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.estimator_windows_label.setWordWrap(True)
+        self.estimator_windows_label.setStyleSheet("color:#8a939c;")
+        self.estimator_windows_label.setToolTip(
+            "The automatic estimator's rough and base windows. A user-provided reference "
+            "replaces the estimator, so these measure nothing while one is chosen; they "
+            "are kept for when you choose Automatic again. Back to default resets them, "
+            "never the reference.")
+        self.estimator_windows_label.setVisible(False)
         row.addWidget(self.probe_button, 0, 0, 1, 2)
         row.addWidget(self.apply_button, 1, 0)
-        row.addWidget(self.reset_button, 1, 1)
+        row.addWidget(self.estimator_windows_label, 1, 0)
+        # Top-aligned, which beside Apply changes nothing. Beside the caption it keeps
+        # the button still: a press re-words the caption, the new words can wrap to a
+        # line fewer or more, and a centred button then moved under the pointer that
+        # pressed it (measured offscreen, 12.345 / 0.1234 s back to the default: 7 px at
+        # a 280 px host, 8 px at 340 px).
+        row.addWidget(self.reset_button, 1, 1, QtCore.Qt.AlignTop)
         row.setColumnStretch(0, 1)
         row.setColumnStretch(1, 1)
-        automatic_layout.addLayout(row)
+        # IN THE PANEL, NOT IN `automatic_controls`, which a user-provided reference
+        # hides. Back to default resets the estimator in every mode -- its windows still
+        # travel in `params` and in the baseline fingerprint while a reference is chosen
+        # -- and a reset that exists in one mode only is not one the user can count on.
+        # It is the ONLY one of the three that stays. Measure and Use these values
+        # propose and confirm windows for the estimator a reference replaces, so they
+        # leave with the spins (`_refresh_reference_mode`), and Apply's cell shows
+        # `estimator_windows_label` instead: alone under a reference form the button
+        # would read as that form's reset, and with the spins hidden its press would
+        # change nothing anyone could see.
+        root.addLayout(row)
         self.display_group = QtWidgets.QGroupBox('Trace display')
         display_layout = QtWidgets.QVBoxLayout(self.display_group)
         display_layout.setContentsMargins(8, 6, 8, 8)
@@ -870,6 +1005,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
         # -- wiring (own children only) --------------------------------------
         self.rough_s.valueChanged.connect(self._on_edited)
         self.base_s.valueChanged.connect(self._on_edited)
+        self.rough_s.valueChanged.connect(self._refresh_estimator_windows)
+        self.base_s.valueChanged.connect(self._refresh_estimator_windows)
         self.show_track.toggled.connect(self._on_view_toggled)
         self.subtract_view.toggled.connect(self._on_view_toggled)
         self.probe_button.clicked.connect(self._on_probe_clicked)
@@ -878,10 +1015,12 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.reference_editor.changed.connect(self._on_reference_edited)
         self.reference_editor.selectionRequested.connect(self.addReferenceSelectionRequested)
         self.reference_editor.preview_button.clicked.connect(self._on_reference_preview_clicked)
+        self.reference_editor.clear_button.clicked.connect(self._on_clear_reference_clicked)
 
         self._recouple()      # the two windows constrain each other from the start
         self._refresh_source()
         self._refresh_decim()
+        self._refresh_estimator_windows()
         self._restyle_buttons()
         self._refresh_reference_mode()
 
@@ -956,11 +1095,13 @@ class BaselinePanel(QtWidgets.QGroupBox):
     def _refresh_reference_mode(self) -> None:
         automatic = self.reference_mode() == "automatic"
         self.automatic_controls.setVisible(automatic)
+        # Of the estimator's three actions only Back to default stays under a
+        # reference, beside the caption that says whose reset it is (see the row).
+        self.probe_button.setVisible(automatic)
+        self.apply_button.setVisible(automatic)
+        self.estimator_windows_label.setVisible(not automatic)
         self.proposal_box.setVisible(automatic and self._proposal is not None)
-        if not automatic:
-            self.run_windows_label.hide()
-        else:
-            self._refresh_run_windows()
+        self._refresh_run_windows()
         self._restyle_buttons()
 
     def _set_windows(self, rough: float | None, base: float | None) -> None:
@@ -1050,6 +1191,56 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self._source = src if src in PARAM_SOURCES else "user"
         self._refresh_source()
         self._refresh_decim()
+
+    def form_state(self) -> dict[str, Any]:
+        """The whole form as plain data: what :meth:`restore_form_state` puts back.
+
+        Everything that decides :meth:`params`, :meth:`param_source` and
+        :meth:`reference_error`: the two windows, where they came from, the standing
+        "ACCEPTED OVER" mark, and the reference form. Lists, never tuples, so a
+        snapshot still equals itself after a trip through JSON.
+
+        Left out on purpose: the proposal on offer and its health block are a
+        MEASUREMENT of the recording, not a setting -- taking one back could put a
+        proposal on offer that the user has already seen refused -- and the override
+        armed against it goes with it; the two view boxes ask for a drawing and change
+        no number (see `showBaselineToggled`).
+        """
+        return {
+            "rough_s": float(self.rough_s.value()),
+            "base_s": float(self.base_s.value()),
+            "source": self._source,
+            "accepted_condemned": list(self._accepted_condemned),
+            "reference": self.reference_editor.form_state(),
+        }
+
+    def restore_form_state(self, state: Mapping[str, Any]) -> None:
+        """SET the form to a :meth:`form_state` snapshot -- the door undo and redo use.
+
+        A SET, NOT A SEED. :meth:`set_params` steps aside for a confirmed form, which
+        is right for a stored run arriving on its own; an undo is the user's own act,
+        so this writes through every confirmation (the windows', and the reference
+        form's) and leaves exactly the snapshot behind: ``form_state()`` afterwards
+        equals ``state``. A key that is absent leaves its part of the form alone.
+
+        Written with the form's own handlers muted -- through them the write would
+        read as a hand edit and stamp the source ``'user'`` -- and then
+        `paramsChanged` is emitted ONCE, so the detection on screen is re-judged
+        against the restored form as after any other change. Not `resetPerformed`:
+        an undo is not a reset, and its step already has a name.
+        """
+        if "rough_s" in state or "base_s" in state:
+            self._set_windows(state.get("rough_s"), state.get("base_s"))
+        if "source" in state:
+            self._source = str(state["source"])
+        if "accepted_condemned" in state:
+            self._accepted_condemned = tuple(str(label) for label in state["accepted_condemned"])
+        if "reference" in state:
+            self.reference_editor.restore_form_state(state["reference"])
+        self._refresh_reference_mode()
+        self._refresh_source()
+        self._refresh_decim()
+        self.paramsChanged.emit(self.params())
 
     def param_source(self) -> str:
         """How the values in the form were chosen (one of `PARAM_SOURCES`)."""
@@ -1154,9 +1345,16 @@ class BaselinePanel(QtWidgets.QGroupBox):
         still not comparable with ones measured at the configured windows, and the
         contrast clause alone is dropped, because "ran at 0.08 s, not the 0.08 s
         above" is not a sentence.
+
+        Hidden, too, while a user-provided reference is chosen: the sentence points at
+        the spins "above", which that mode hides. The rule lives HERE, in the single
+        writer, and not only in `_refresh_reference_mode`, because Back to default is
+        reachable in every mode and its own refresh (through `_set_windows`) comes
+        here -- under a constant reference it put the line back up, quoting windows
+        nobody could see.
         """
         run = self._run_windows
-        if run is None:
+        if run is None or self.reference_mode() != "automatic":
             self.run_windows_label.setVisible(False)
             self.run_windows_label.clear()
             return
@@ -1766,6 +1964,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
                          and self.reference_mode() != "automatic" and not self.reference_error())
         self.reference_editor.preview_button.setStyleSheet(
             _OK_BUTTON if preview_ready else _DIM_BUTTON)
+        self.reference_editor.clear_button.setStyleSheet(
+            _OK_BUTTON if self.reference_editor.clearable() else _DIM_BUTTON)
 
     # ==================================================================
     # internals
@@ -1841,6 +2041,11 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.apply_proposal()
 
     def _on_reset_clicked(self) -> None:
+        """Back to default: the estimator's windows, their source and the mark.
+
+        In every mode, and never the reference -- Clear reference is that reset -- so
+        each of the two resets one thing and can name it (`resetPerformed`).
+        """
         self._post("")
         self._set_windows(DEFAULT_BASELINE.rough_s, DEFAULT_BASELINE.base_s)
         self._source = "default"
@@ -1849,6 +2054,30 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self._refresh_decim()
         self._restyle_buttons()
         self.paramsChanged.emit(self.params())
+        self.resetPerformed.emit("Reset baseline estimator")
+
+    def _on_clear_reference_clicked(self) -> None:
+        """Clear reference: the reference form back to Automatic, the windows kept.
+
+        Through the editor's own `reset` -- the one a new recording gets -- so the
+        mode, every box and row, a stored reference that could not be restored, and
+        the confirmation all go. Dropping the confirmation is what makes it a reset
+        rather than a choice of Automatic: a stored run's reference may seed the form
+        again, as on a recording nobody has edited, just as Back to default's
+        ``'default'`` source lets a stored run seed the windows.
+
+        With nothing to clear, the click says so and changes nothing: no
+        `paramsChanged`, and no step to name.
+        """
+        if not self.reference_editor.clearable():
+            self._post("There is no open-pore reference to clear: this recording "
+                       "already uses the Automatic estimator.")
+            return
+        self._post("")
+        self.reference_editor.reset()
+        self._refresh_reference_mode()
+        self.paramsChanged.emit(self.params())
+        self.resetPerformed.emit("Clear open-pore reference")
 
     def _on_edited(self, *_a) -> None:
         if self._loading:
@@ -1899,3 +2128,16 @@ class BaselinePanel(QtWidgets.QGroupBox):
             return
         taps = int(float(self.base_s.value()) * self._fs / max(d, 1))
         self.decim_label.setText(f"{d}  ({taps} taps)")
+
+    def _refresh_estimator_windows(self, *_a) -> None:
+        """Quote the two spins in the caption Back to default sits beside under a reference.
+
+        Connected to the spins themselves rather than called from the paths that move
+        them: most of those paths write with `_on_edited` muted -- a seed, a
+        confirmation, a reset, a restore -- and a caption that missed one would quote
+        windows the form no longer holds, the defect the run-windows line had (see
+        `set_run_windows`).
+        """
+        self.estimator_windows_label.setText(
+            "Automatic estimator (not in use): " + self._windows_text(
+                float(self.rough_s.value()), float(self.base_s.value())))

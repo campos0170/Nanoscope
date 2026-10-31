@@ -291,6 +291,7 @@ _ROLE_CLASSES = {
     "analysis_panel": "nanoscope.gui.analysis_panel:AnalysisPanel",
     "measure_panel": "nanoscope.gui.measure_panel:MeasurePanel",
     "measure_history": "nanoscope.core.history:MeasurementHistory",
+    "settings_history": "nanoscope.core.history:SettingsHistory",
     "event_inspector": "nanoscope.gui.event_inspector:EventInspectorWindow",
     "event_gallery": "nanoscope.gui.event_gallery:EventGalleryWindow",
 }

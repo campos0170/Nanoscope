@@ -55,8 +55,30 @@ class TraceDocument:
             assert a.flags["C_CONTIGUOUS"], f"ch{i}: non-contiguous"
             assert len(a) == n, f"ch{i}: len {len(a)} != meta.n_samples {n}"
         self._reject_empty()
+        self._freeze_samples()
         self._stamp_load_uid()
         self._report_nonfinite()
+
+    def _freeze_samples(self) -> None:
+        """Make every channel array read-only — the flag, NOT a copy.
+
+        ``frozen=True`` freezes the attributes; it never froze the samples. At an identity
+        calibration ``Session.calibrated`` hands out the recording's OWN array (caching a
+        reference would double-count it), so the trace view, every panel and every worker
+        read this one buffer, and a single in-place ``arr -= baseline`` anywhere changed the
+        recording for all of them, silently, for the rest of the session. With the flag
+        down, that write raises ``ValueError: assignment destination is read-only`` at the
+        line that tried it — the same contract the worker snapshots already keep
+        (``FrozenChannelSource.capture``).
+
+        HERE, for the reason :meth:`_report_nonfinite` gives: every reader and every segment
+        builds this object, so this is the one door. Free, and safe to re-enter:
+        ``dataclasses.replace(doc, meta=...)`` hands the same arrays back through here, and
+        clearing a flag that is already clear changes nothing. A caller that needs to write
+        takes a copy first.
+        """
+        for a in self.channels:
+            a.setflags(write=False)
 
     def _reject_empty(self) -> None:
         """A recording with NO SAMPLES is refused here, at the one door all of them use.
@@ -192,7 +214,8 @@ class TraceDocument:
         return self.meta.path.name
 
     def raw(self, channel: int) -> np.ndarray:
-        """Uncalibrated, signed, float32. Calibrated data comes from Session.calibrated()."""
+        """Uncalibrated, signed, float32, READ-ONLY (see :meth:`_freeze_samples`; copy before
+        writing). Calibrated data comes from Session.calibrated()."""
         return self.channels[channel]
 
 

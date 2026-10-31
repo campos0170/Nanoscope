@@ -156,6 +156,7 @@ from .axes import ReadableLogAxis
 from .categorical import category_brushes, category_colour, category_counts, legend_swatch
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
+from .key_sequences import redo_sequences, undo_sequences
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget
 from .plot_lasso import PlotLasso, RowIdentityIndex, toggled_rows, unique_rows
 from .plot_export import (
@@ -2840,6 +2841,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         #: ``(doc_id, channel, module_id)`` of the detection the Analysis panel is
         #: SHOWING, set by :meth:`set_active_detection`. See :meth:`_active_source_key`.
         self._active_detection: tuple | None = None
+        #: The Results panel's judge of a stored table, set by
+        #: :meth:`set_staleness_provider`. See :meth:`_table_staleness`.
+        self._staleness_provider = None
         self._cluster_result: populations.ClusterResult | None = None
         self._pca_result: populations.PCAResult | None = None
         #: Non-None only while :meth:`_render_workspace_snapshot` is painting values
@@ -3961,7 +3965,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         groups use)."""
         box = QtWidgets.QGroupBox("Style")
         form = QtWidgets.QFormLayout(box)
-        self._appearance_widget = PlotAppearanceWidget(compact=True)
+        # NO HISTORY OF ITS OWN (design §4.2). Every appearance edit already lands on
+        # this window's `_ConfigHistory` as part of the whole `PlotConfig`
+        # (`_appearance_from_user` -> `_history_settle`), and one window must not have
+        # two stacks: a second would answer the same Ctrl+Z this window binds itself,
+        # and Qt fires neither of two shortcuts that share a key in one window.
+        self._appearance_widget = PlotAppearanceWidget(compact=True, history=False)
         self._appearance_widget.changed.connect(self._appearance_from_user)
         form.addRow(self._appearance_widget)
 
@@ -5926,22 +5935,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # every other undo the owner uses. Parented to the window, so they are
         # window-scoped and die with it.
         #
-        # ...plus Ctrl/Cmd+Shift+Z by name, because what ``StandardKey.Redo`` resolves to
-        # is a THEME decision and the themes disagree: measured, Ctrl+Y under the generic
-        # theme the offscreen platform falls back to, Cmd+Shift+Z under the Mac one. The
-        # list is deduped on the resolved sequence, so on a platform where the standard
-        # key IS Shift+Z nothing is registered twice -- Qt answers a double registration
-        # with an "ambiguous shortcut overload" and then does NOTHING, which would take
-        # Redo away on exactly the platform that had it right.
-        registered: list[QtGui.QKeySequence] = []
-        for seq, slot in ((QtGui.QKeySequence.Undo, self.undo_config),
-                          (QtGui.QKeySequence.Redo, self.redo_config),
-                          (QtGui.QKeySequence("Ctrl+Shift+Z"), self.redo_config)):
-            key = QtGui.QKeySequence(seq)
-            if key.isEmpty() or any(key == seen for seen in registered):
-                continue
-            registered.append(key)
-            QtGui.QShortcut(key, self).activated.connect(slot)
+        # ...plus Ctrl/Cmd+Shift+Z by name for Redo, each RESOLVED key once, through the
+        # shared ``key_sequences`` rule (design §3.7) rather than a copy of it. On a Mac
+        # the standard Redo IS Cmd+Shift+Z, and a key registered twice is an "ambiguous
+        # shortcut overload" that Qt answers by doing NOTHING -- Redo gone on exactly the
+        # platform that had it right. ``key_sequences`` holds the measurement.
+        for keys, slot in ((undo_sequences(), self.undo_config),
+                           (redo_sequences(), self.redo_config)):
+            for key in keys:
+                QtGui.QShortcut(key, self).activated.connect(slot)
 
         # -- A3: named templates ---------------------------------------------------------
         self._template_combo = QtWidgets.QComboBox()
@@ -6739,9 +6741,37 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._load_templates_into_combo()
         self._select_template(new)
 
+    def _confirm_delete_template(self, name: str) -> bool:
+        """Ask before forgetting the template ``name``. True to delete.
+
+        A template lives in the preferences, not the project, so no undo reaches it
+        (design §3.8) and this question is the only thing between a stray click and the
+        saved recipe. A separate method so a test can answer it without a live modal.
+        """
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        # PLAIN TEXT: the name is the user's own typing, and a confirmation must show the
+        # name it is asking about, not whatever Qt's rich-text guess makes of it.
+        box.setTextFormat(QtCore.Qt.PlainText)
+        box.setWindowTitle("Delete plot template")
+        # The name goes in the body: macOS does not show a message box's window title.
+        box.setText(f"Delete the plot template “{name}”?")
+        box.setInformativeText(
+            "Its saved recipe and style are forgotten, and this cannot be undone. The plot "
+            "on screen does not change.")
+        delete = box.addButton("Delete template", QtWidgets.QMessageBox.DestructiveRole)
+        cancel = box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        # Named, never indexed (docs/ARCHITECTURE.md): Return and Esc both keep it.
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return box.clickedButton() is delete
+
     def _delete_template(self) -> None:
         name = self._template_combo.currentText()
         if name == self._TPL_MANUAL or name in self._BUILTIN_TEMPLATES:
+            return
+        if not self._confirm_delete_template(name):
             return
         templates = self._load_templates()
         templates.pop(name, None)
@@ -6915,6 +6945,17 @@ class PlotsWindow(QtWidgets.QMainWindow):
         method for what this exists to stop.
         """
         self._active_detection = tuple(key) if key else None
+
+    def set_staleness_provider(self, provider) -> None:
+        """Tell the window how the Results panel judges a stored table:
+        ``provider(doc_id, channel, module_id) -> (columns, sentence)`` gives the columns
+        the event table badges ⚠ on that table and the amber line's sentence for them
+        (``((), "")`` when none). MainWindow sets ``AnalysisPanel.table_staleness``.
+
+        Without one (a window built bare, as most tests build it) the window judges the
+        calibration alone, as it always did (:meth:`_calibration_superseded`).
+        """
+        self._staleness_provider = provider
 
     def _active_source_key(self) -> str:
         """The key of the source that IS the detection on screen in the Analysis panel,
@@ -10396,13 +10437,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
     # found on.
 
     def _superseded_columns(self, src: PlotSource | None) -> tuple[str, ...]:
-        """Columns of ``src`` measured under a calibration that has since been replaced.
-
-        The SAME test the event table's badge is driven by
-        (``AnalysisPanel._check_staleness``): the detection's stored
-        ``calibration_fingerprint`` against the channel's live one. Same columns too --
-        :data:`nanoscope.analysis.remeasure.REMEASURED_COLUMNS`, ``baseline_pA``
-        included, because it is the column the other six are computed FROM.
+        """Every column of ``src`` the event table badges ⚠: measured under a calibration
+        that has since been replaced (:meth:`_calibration_superseded`), and -- through the
+        Results panel's own judge -- on a clock the recording no longer has, or by an
+        open-pore estimator the table on screen no longer has (:meth:`_table_staleness`).
 
         The app's doctrine for a superseded measurement is "never silently re-measure":
         the numbers stay and every surface that shows them says so (USER_GUIDE §9a --
@@ -10410,16 +10448,24 @@ class PlotsWindow(QtWidgets.QMainWindow):
         and exportable"). *Plottable* is where the mark stopped: two panels away from a
         ⚠ header and amber cells, this window drew the same ``depth_pA`` and printed its
         fitted mean in the title, the legend and Details with nothing to say the
-        calibration behind it had been superseded.
+        calibration behind it had been superseded -- and, until the judge was asked here,
+        nothing at all for a re-declared sample rate or a changed estimator.
+        """
+        return tuple(dict.fromkeys((*self._calibration_superseded(src),
+                                    *self._table_staleness(src)[0])))
+
+    def _calibration_superseded(self, src: PlotSource | None) -> tuple[str, ...]:
+        """Columns of ``src`` measured under a calibration that has since been replaced.
+
+        The SAME test the event table's badge is driven by
+        (``AnalysisPanel._calibration_moved``): the detection's stored
+        ``calibration_fingerprint`` against the channel's live one. Same columns too --
+        :data:`nanoscope.analysis.remeasure.REMEASURED_COLUMNS`, ``baseline_pA``
+        included, because it is the column the other six are computed FROM.
 
         Empty for a source with no document behind it (the manual table), for one whose
-        detection is gone, and whenever the stamps match.
-
-        NOT the whole badge: the event table also badges these columns when the
-        BASELINE estimator has moved, and that half of the test lives in
-        ``gui.analysis_panel._baseline_staleness`` where this window cannot reach it.
-        Lifting both halves onto :class:`~nanoscope.core.sources.PlotSource` (where
-        ``calibration_fingerprint`` already rides) is the real home for this rule.
+        detection is gone, and whenever the stamps match. Asked of the session directly,
+        so a window with no provider still marks a superseded calibration.
         """
         if src is None or src.doc_id is None or src.channel is None or not src.module_id:
             return ()
@@ -10439,6 +10485,35 @@ class PlotsWindow(QtWidgets.QMainWindow):
             return ()
         optional = ("amplitude_pA",) if src.df is not None and "amplitude_pA" in src.df else ()
         return (*REMEASURED_COLUMNS, *optional)
+
+    def _table_staleness(self, src: PlotSource | None) -> tuple[tuple[str, ...], str]:
+        """``(columns, sentence)``: what the Results panel badges on ``src``'s table BEYOND a
+        superseded calibration, and the amber line's sentence for it -- ``((), "")`` without
+        a provider (:meth:`set_staleness_provider`), for a source with no stored detection
+        behind it, and when the table is current.
+
+        The provider is the panel's own judge, so a re-declared sample rate (the time
+        columns) is marked on every source, and a changed open-pore estimator (the
+        amplitude columns) on the table on screen -- the one whose form it is judged
+        against -- exactly where the event table would badge them. The columns a
+        superseded calibration explains are left to :meth:`_calibration_superseded`, whose
+        note already says so; ``amplitude_pA`` rides with ``depth_pA`` here as it does there
+        and in the event table's own badge.
+        """
+        provider = self._staleness_provider
+        if (provider is None or src is None or src.doc_id is None or src.channel is None
+                or not src.module_id):
+            return (), ""
+        try:
+            columns, sentence = provider(src.doc_id, int(src.channel), str(src.module_id))
+        except Exception:       # pragma: no cover - a caveat must never break a plot
+            return (), ""
+        calibration = set(self._calibration_superseded(src))
+        cols = [str(c) for c in columns if str(c) not in calibration]
+        if ("depth_pA" in cols and "amplitude_pA" not in cols and src.df is not None
+                and "amplitude_pA" in src.df):
+            cols.append("amplitude_pA")
+        return (tuple(cols), str(sentence or "")) if cols else ((), "")
 
     def _clock_offset(self, src: PlotSource | None) -> float | None:
         """``t0_s`` of the recording behind ``src``, or None when there is no clock."""
@@ -10463,20 +10538,35 @@ class PlotsWindow(QtWidgets.QMainWindow):
         out: list[str] = []
         multi = len(srcs) > 1
 
-        # 1. SUPERSEDED CALIBRATION -- per source, naming the drawn columns it touches.
+        # 1. STALE COLUMNS -- per source, naming the drawn columns each mark touches: a
+        #    SUPERSEDED CALIBRATION first, then whatever else the Results panel's judge
+        #    badges on the same table (a re-declared rate, a changed estimator), in the
+        #    amber line's own sentence.
         for src in srcs:
             hit = [c for c in cols if c in self._superseded_columns(src)]
             if not hit:
                 continue
             who = f"{src.label}: " if multi else ""
-            out.append(
-                f"{who}SUPERSEDED CALIBRATION: {', '.join(hit)} on this plot "
-                f"{'was' if len(hit) == 1 else 'were'} measured under a gain/offset that "
-                f"has since been changed, and {'it has' if len(hit) == 1 else 'they have'} "
-                f"NOT been recomputed — the event table badges the same column(s) ⚠. The "
-                f"numbers drawn, and every fitted parameter printed from them, are in the "
-                f"OLD calibration. Re-run detection on this recording before reporting "
-                f"them.")
+            calibration = self._calibration_superseded(src)
+            old_gain = [c for c in hit if c in calibration]
+            if old_gain:
+                out.append(
+                    f"{who}SUPERSEDED CALIBRATION: {', '.join(old_gain)} on this plot "
+                    f"{'was' if len(old_gain) == 1 else 'were'} measured under a gain/offset "
+                    f"that has since been changed, and "
+                    f"{'it has' if len(old_gain) == 1 else 'they have'} NOT been recomputed — "
+                    f"the event table badges the same column(s) ⚠. The numbers drawn, and "
+                    f"every fitted parameter printed from them, are in the OLD calibration. "
+                    f"Re-run detection on this recording before reporting them.")
+            rest = [c for c in hit if c not in calibration]
+            if rest:
+                one = len(rest) == 1
+                out.append(
+                    f"{who}STALE: {', '.join(rest)} on this plot {'is' if one else 'are'} not "
+                    f"what a fresh run would measure now, and {'it has' if one else 'they have'} "
+                    f"NOT been recomputed — the event table badges the same column(s) ⚠, and "
+                    f"every fitted parameter printed from {'it' if one else 'them'} is as "
+                    f"stale. {self._table_staleness(src)[1]}".rstrip())
 
         # 2. WHICH CLOCK a column of instants is on. `t_start_s` is seconds since THIS
         #    recording's first loaded sample, so pooling it across recordings puts two
@@ -10524,7 +10614,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         return out
 
     def _stale_headline(self, columns: Sequence[str], sources=None) -> str:
-        """The title's own mark for a drawn column under a superseded calibration.
+        """The title's own mark for a drawn column the event table badges stale:
+        ``⚠ SUPERSEDED CALIBRATION`` under a replaced gain/offset, ``⚠ STALE: <columns>``
+        for what the Results panel's judge badges besides (a re-declared rate, a changed
+        estimator; :meth:`_table_staleness`), and both when both hold.
 
         In the title because the title is the only thing ``Save image`` keeps -- the
         same reason the comparability verdict goes there (see :meth:`_apply_title`).
@@ -10533,11 +10626,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         if sources is None:
             sources = [src for src, _df in self._drawn_frames()]
-        cols = {str(c) for c in columns if c}
+        cols = [c for c in dict.fromkeys(str(c) for c in columns if c)]
+        old_gain = False
+        rest: list[str] = []
         for src in sources:
-            if cols & set(self._superseded_columns(src)):
-                return "⚠ SUPERSEDED CALIBRATION"
-        return ""
+            hit = [c for c in cols if c in self._superseded_columns(src)]
+            calibration = self._calibration_superseded(src)
+            old_gain = old_gain or any(c in calibration for c in hit)
+            rest += [c for c in hit if c not in calibration]
+        marks = ["⚠ SUPERSEDED CALIBRATION"] if old_gain else []
+        if rest:
+            marks.append("⚠ STALE: " + ", ".join(dict.fromkeys(rest)))
+        return self._warn_headline(*marks) or ""
 
     @staticmethod
     def _warn_headline(*parts: str) -> str | None:

@@ -135,10 +135,11 @@ def test_segment_channels_are_owned_float32_contiguous_copies():
         assert a.flags["C_CONTIGUOUS"]
         assert a.base is None                       # a real copy — NOT a view into the parent
 
-    # Mutating the parent's array must not bleed into the segment (proves independence).
-    before = seg.channels[0].copy()
-    parent.channels[0][400:900] += 1000.0
-    assert np.array_equal(seg.channels[0], before)
+    # Independent of the parent's buffer, shown on the buffers themselves: the parent's
+    # samples are read-only once it is built (EDITING_FOUNDATION_DESIGN §5.1), so this no
+    # longer writes into the parent to watch whether the segment moves.
+    for c in range(len(seg.channels)):
+        assert not np.shares_memory(seg.channels[c], parent.channels[c])
 
 
 # ================================================================================================

@@ -511,8 +511,15 @@ def test_save_recall_rename_and_delete_a_template(win, monkeypatch):
     assert plot_config_from_json(stored["figure 3"]).histogram.bins == 64, (
         "a rename is not a re-save of what is on screen")
 
+    # DELETE ASKS FIRST (design §3.8): a template lives in the preferences, where no
+    # undo reaches. Answered Delete here; tests/gui/test_plot_appearance_history.py
+    # pins the question itself and its Cancel.
+    asked: list = []
+    monkeypatch.setattr(win, "_confirm_delete_template",
+                        lambda name: asked.append(name) or True)
     win._select_template("figure 3")
     win._delete_template()
+    assert asked == ["figure 3"], "the question names the template it deletes"
     assert PlotsWindow._load_templates() == {}
     assert win._template_combo.currentText() == PlotsWindow._TPL_MANUAL
     assert win._bins.value() == 99, "deleting a NAME is not a request to change the plot"

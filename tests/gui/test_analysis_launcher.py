@@ -1230,7 +1230,10 @@ def test_label_editor_fits_a_laptop_screen(win, monkeypatch):
 def _open_inspector_with_events(win, tmp_path, n=30, level=None):
     doc = _doc(tmp_path)
     if level is not None:
-        doc.channels[0][:] = level + 10.0 * np.sin(np.arange(N) / 50.0)
+        # Built ON the level rather than written into afterwards: a document's samples are
+        # read-only once it exists (EDITING_FOUNDATION_DESIGN §5.1).
+        signal = (level + 10.0 * np.sin(np.arange(N) / 50.0)).astype(np.float32)
+        doc = TraceDocument(meta=doc.meta, channels=(signal,))
     doc_id = _install(win, doc)
     _install_detection(win._session, doc_id, _eventset([True] * n))
     win._on_selection(doc_id, 0)

@@ -31,6 +31,7 @@ What it does:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from copy import deepcopy
 from pathlib import Path
@@ -68,10 +69,17 @@ from ..analysis.conditioning import (
 )
 from ..analysis.conditioning_preview import ConditioningSource
 from ..analysis.conditioning_recipes import (
+    STAGE_ENABLE_KEY,
+    STAGE_KEYS,
+    STAGE_TITLES,
     ChainStatus,
     judge_chain,
     python_script,
     read_protocols_file,
+    recipes_equal,
+    reset_stage_params,
+    revert_params,
+    stages_that_differ,
     write_protocols_file,
 )
 from ..analysis.events import (
@@ -112,6 +120,7 @@ from ..analysis.merge import (
     span_occupancy,
 )
 from ..analysis.modules import (
+    DETECTOR_PRIVATE_KEYS,
     DETREND_PARAM_KEYS,
     FILTER_PARAM_KEYS,
     FIT_CALIBRATION_MOVED,
@@ -140,6 +149,7 @@ from ..analysis.remeasure import (
     merge_late_curation,
 )
 from ..analysis.labels import label_conflicts
+from ..analysis.lineage import LiveInputs, judge_inputs, made_with
 from ..analysis.reconcile import (
     CONSENSUS_LABEL_CONFLICTS_COL,
     CONSENSUS_MODULE_ID,
@@ -543,7 +553,59 @@ _STALE_SUMMARIES = {
     _STALE_BASELINE: "Depths stale — estimator changed",
     _STALE_RECONCILIATION_SOURCE: "Source table changed",
 }
+
+
+class _Staleness(NamedTuple):
+    """What the amber line says about a table (:meth:`AnalysisPanel._staleness`): the sentence,
+    the kind the action button dispatches on, the button's label, a narrower one-line verdict
+    than the kind's own (``None`` keeps :data:`_STALE_SUMMARIES`'), and the columns the event
+    table badges ⚠."""
+
+    text: str
+    kind: str
+    action_label: str
+    summary: str | None
+    columns: tuple[str, ...]
+
+
+def _badged_columns(*, times: bool, amplitudes: bool) -> tuple[str, ...]:
+    """The columns a stale table's badge covers: the TIME columns a rate change leaves wrong
+    (:data:`_RATE_COLUMNS`), the AMPLITUDE columns a calibration or estimator change leaves
+    wrong (``REMEASURED_COLUMNS``), or both, without a repeat."""
+    cols = _RATE_COLUMNS if times else ()
+    if amplitudes:
+        cols += tuple(c for c in REMEASURED_COLUMNS if c not in cols)
+    return cols
+
+
+#: What the amber line's Details calls each input ``analysis.lineage`` judges -- the labels its
+#: own sentences open with, so a row and the sentence behind it name the input alike.
+_INPUT_TITLES = {
+    "rate": "Sample rate",
+    "calibration": "Calibration",
+    "baseline": "Open-pore estimator",
+    "chain": "Signal chain",
+    "thresholds": "Thresholds",
+}
 _RESULTS_EMPTY_TEXT = "Run detection to see events, summaries and quality scores."
+
+
+def _params_from_stamp(prov: Mapping[str, Any]) -> dict[str, Any]:
+    """The form's settings from a detector's provenance stamp, the CUSUM thresholds included.
+
+    ``detection_params_from_provenance`` projects onto the Schmitt form's keys
+    (``DETECT_PARAM_KEYS``), which drops ``cusum_k`` and ``cusum_h``: the chain notice never
+    judged a legacy CUSUM table's k and h, while ``analysis.lineage`` (``_run_params``, which
+    reads the same stamp through ``preprocess_params_from_provenance``) keeps them for the
+    Details list. ONE RECORD, the detector's own stamp, read the same by both, so the notice
+    and the Details list cannot disagree on that table. The form seeded from it gets the run's
+    k and h too, and the stale banner's Re-run replays them instead of the form's.
+    """
+    params = detection_params_from_provenance(prov)
+    for key in DETECTOR_PRIVATE_KEYS[_CUSUM_MODULE_ID]:
+        if key in prov:
+            params[key] = prov[key]
+    return params
 
 
 def schmitt_params_from_result(res: AnalysisResult | None) -> dict[str, Any]:
@@ -554,8 +616,9 @@ def schmitt_params_from_result(res: AnalysisResult | None) -> dict[str, Any]:
     1. ``res.params`` — the exact dict the module was handed. Present on every live run and,
        since project v3, on every restored one.
     2. the EventSet provenance — the detector's own stamp of its thresholds and its
-       preprocessing chain. The fallback for a v1/v2 project, which stored no params at all
-       and therefore came back with ``params={}``.
+       preprocessing chain (:func:`_params_from_stamp`, which keeps a CUSUM run's k and h).
+       The fallback for a v1/v2 project, which stored no params at all and therefore came
+       back with ``params={}``.
 
     ``{}`` means "the run cannot be reproduced": the caller must fall back to the live form
     rather than pretend, because a detection re-run under settings that are not the ones on
@@ -589,14 +652,14 @@ def schmitt_params_from_result(res: AnalysisResult | None) -> dict[str, Any]:
                 if reference_key not in params:
                     params[reference_key] = prov.get(reference_key)
                 return params
-            return detection_params_from_provenance(prov)
+            return _params_from_stamp(prov)
         except (TypeError, ValueError) as exc:
             # The non-reference controls still need the legacy projection:
             # e.g. low-pass-off provenance stores filter_order=None, which is
             # not an integer widget value, and percentile uses a kernel name.
             # Remove only the failed reference instruction while projecting,
             # then restore it below as an explicitly invalid draft.
-            draft = dict(params) if params else detection_params_from_provenance({
+            draft = dict(params) if params else _params_from_stamp({
                 key: value for key, value in prov.items()
                 if key not in (reference_key, error_key, *reference_flags)})
             for key in (reference_key, *reference_flags):
@@ -611,7 +674,7 @@ def schmitt_params_from_result(res: AnalysisResult | None) -> dict[str, Any]:
         return params
     if isinstance(events, EventSet) and events.provenance:
         try:
-            return detection_params_from_provenance(events.provenance)
+            return _params_from_stamp(events.provenance)
         except (TypeError, ValueError):
             if (events.provenance.get("baseline_reference_applied")
                     or events.provenance.get("baseline_estimator_bypassed")
@@ -894,6 +957,15 @@ class _StaleBanner(QtWidgets.QFrame):
     the way the Detect button's gate label prints its own. The reason therefore STARTS on
     screen before any click and is never only in a tooltip; on a narrow dock the line
     elides, and the full refusal is one click away in Details (``_why``).
+
+    THE LINE NAMES ONE INPUT; DETAILS LISTS THEM ALL. The verdict keeps its order of
+    precedence -- rate, then calibration, then the estimator -- so a table stale on two
+    counts named only the first, and a re-run that repaired it left the second to be found
+    afterwards. The third label in the pane (``_inputs``) lists every input the table was
+    made with, each judged on its own (``analysis.lineage``), as made → now, with the action
+    that repairs it. The panel hands it a source (:meth:`set_inputs_source`) and the list is
+    read again each time the pane opens: a chain or threshold edit does not re-judge the
+    line, and the list must not describe the form as it stood before it.
     """
 
     actionRequested = QtCore.Signal(str)   # one of _STALE_* below
@@ -939,13 +1011,17 @@ class _StaleBanner(QtWidgets.QFrame):
         self._label = QtWidgets.QLabel()
         # The sentence the docs quote, verbatim, and the full refusal under it.
         self._why = QtWidgets.QLabel()
-        for label in (self._label, self._why):
+        # ...and, last, every input the table was made with (see the class docstring).
+        self._inputs = QtWidgets.QLabel()
+        for label in (self._label, self._why, self._inputs):
             label.setTextFormat(QtCore.Qt.PlainText)
             label.setWordWrap(True)
             label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
             label.setFixedWidth(420)
             pane_lay.addWidget(label)
         self._why.setVisible(False)
+        self._inputs.setVisible(False)
+        self._inputs_source = None
         self._details_action = QtWidgets.QWidgetAction(self._details_menu)
         self._details_action.setDefaultWidget(pane)
         self._details_menu.addAction(self._details_action)
@@ -973,9 +1049,32 @@ class _StaleBanner(QtWidgets.QFrame):
             button.setFixedHeight(max(1, int(height) - border))
 
     def _open_details(self) -> None:
+        self.refresh_inputs()
         self._details_pane.adjustSize()
+        # A QMenu keeps the height of its first open. Taking the action out and putting it
+        # back makes it measure the pane again, so a list that grew is not cut off.
+        self._details_menu.removeAction(self._details_action)
+        self._details_menu.addAction(self._details_action)
         self._details_menu.popup(
             self._details.mapToGlobal(QtCore.QPoint(0, self._details.height())))
+
+    def set_inputs_source(self, source) -> None:
+        """``source() -> str``: the list of inputs Details shows under the sentence, ``""``
+        for none. Read by :meth:`refresh_inputs`."""
+        self._inputs_source = source
+
+    def refresh_inputs(self) -> None:
+        """Read the list of inputs from its source onto the pane; an empty list hides it."""
+        try:
+            text = str(self._inputs_source() or "") if self._inputs_source is not None else ""
+        except Exception:  # noqa: BLE001 — the list under the line must never take the line down
+            text = ""
+        self._inputs.setText(text)
+        self._inputs.setVisible(bool(text))
+
+    def inputs_text(self) -> str:
+        """The list of inputs Details shows under the sentence (tests read this)."""
+        return self._inputs.text()
 
     def show_message(self, text: str, kind: str = _STALE_CALIBRATION,
                      action_label: str = "Re-run", summary: str | None = None) -> None:
@@ -1140,6 +1239,20 @@ class AnalysisPanel(QtWidgets.QWidget):
     eventAdded = QtCore.Signal(int, str)
     #: Open the Signal Conditioning window on this stage key ("" = the current one).
     openSignalConditioningRequested = QtCore.Signal(str)
+    #: THE FORM HISTORY'S FIVE SIGNALS (design §3.2-3.4, §5.2). The Detection, ML and
+    #: Baseline forms are one set of widgets showing whichever event table is on screen,
+    #: filed under :meth:`form_key`; MainWindow (the sole wirer) turns these into steps.
+    #: A USER edit changed a form: a hand edit, a recall, a reset, a revert.
+    formEdited = QtCore.Signal()
+    #: The app wrote the forms itself (a seed, a draft put back, an undo, a clamp), so the
+    #: result is adopted, never recorded. Once per write, when the writing guard closes.
+    formWritten = QtCore.Signal()
+    #: The key about to leave the screen, BEFORE anything changes the form.
+    formLeaving = QtCore.Signal(object)
+    #: ``(old_key, new_key)``, once the form for ``new_key`` is in place.
+    formArrived = QtCore.Signal(object, object)
+    #: A named user action just changed the form: the label its step goes by.
+    formStepNamed = QtCore.Signal(str)
 
     def __init__(self, session: Session, controller: AnalysisController,
                  trace_view: TraceView, parent=None) -> None:
@@ -1295,6 +1408,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._wire_trace_view()
         self._wire_controller()
         self._init_conditioning()
+        self._init_form_history()
         self._show_empty()
 
     # -- construction ----------------------------------------------------------------------------
@@ -1309,6 +1423,7 @@ class AnalysisPanel(QtWidgets.QWidget):
 
         # Built here, laid out in the results surface's status line below.
         self._stale = _StaleBanner(self._on_stale_action)
+        self._stale.set_inputs_source(self._stale_inputs_text)
 
         self._detection = DetectionPanel()
         #: What the Detection tab's "measured" polarity line reads before anything has been
@@ -1707,10 +1822,22 @@ class AnalysisPanel(QtWidgets.QWidget):
             # form has to follow it or the user is shown app defaults over somebody else's
             # numbers — which is the entire reason `_seed_form_from` exists. "Same target"
             # is not "same table"; only the second one means there is nothing to do.
-            if self._stored_to_show(doc_id, channel) is not self._seeded_from:
-                self._load_stored_detection(doc_id, channel)
+            shown = self._stored_to_show(doc_id, channel)
+            if shown is not self._seeded_from:
+                # Another table is another form key, so the form leaves and arrives
+                # around it; a new result object of the same table only re-seeds.
+                old = self._form_shown
+                self._leave_form(old, self._form_key_showing(shown))
+                with self._writing_form():
+                    self._load_stored_detection(doc_id, channel)
+                self._arrive_form(old)
             return
 
+        # The form leaves first, BEFORE anything below moves it: `set_recording` clamps the
+        # frequency boxes to the new recording's Nyquist, so a draft taken after it would
+        # keep the clamp instead of the value typed (design §5.3).
+        old = self._form_shown
+        self._leave_form(old, None)
         # Leaving the previous selection: drop its overlays + any live preview.
         self._baseline_view_timer.stop()
         self._baseline_conditioned_cache = None
@@ -1736,38 +1863,57 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._push_measure_conditioning()
         fs = meta.sample_rate_hz
 
-        # Gate: detection runs on CURRENT channels with a known sample rate. The
-        # Schmitt buttons and the ML detector share this gate (ML also needs a model
-        # loaded + TensorFlow, which the panel ANDs in itself). ``_regate`` also writes
-        # the title -- what the channel is TREATED AS, and what the file says when the
-        # two differ -- from the same resolver the gate reads.
-        self._detection.set_recording(fs)
-        runnable, reason = self._regate()
-        # ``set_recording`` drops any proposal from the previous file. ``target`` as well
-        # as the rate: it is what ends a CONFIRMED per-recording configuration (see
-        # `BaselinePanel.set_recording`). Re-selecting the same channel is navigation and
-        # must cost the user nothing; moving to another recording must not carry his
-        # 2.0 / 0.5 s over onto it. The gate itself was set by ``_regate`` above; it is
-        # re-asserted here because ``set_recording`` is the call that resets the panel.
-        self._clear_baseline_notice()
-        rate_and_length = self._active_rate_and_length()
-        duration = (rate_and_length[1] / rate_and_length[0]) if rate_and_length else None
-        self._baseline.set_recording(fs, (doc_id, channel), duration_s=duration)
-        self._baseline.set_gate(runnable, reason)
-        self._regate()
-        # The two view boxes are a STANDING preference and the trace under them just
-        # changed: re-apply them to the new selection, and (through the clear inside)
-        # take the previous recording's rail down. Without this a rail ticked on the
-        # -600 mV run stayed up over the -1000 mV one, claimed by nothing on screen.
-        self._apply_baseline_views()
-        self._sync_baseline_workspace()
+        # Everything from here to the seed writes the forms for the APP (a clamp, the
+        # baseline reset, the seed or the draft), so none of it is the user's edit.
+        with self._writing_form():
+            # Gate: detection runs on CURRENT channels with a known sample rate. The
+            # Schmitt buttons and the ML detector share this gate (ML also needs a model
+            # loaded + TensorFlow, which the panel ANDs in itself). ``_regate`` also writes
+            # the title -- what the channel is TREATED AS, and what the file says when the
+            # two differ -- from the same resolver the gate reads.
+            self._detection.set_recording(fs)
+            runnable, reason = self._regate()
+            # ``set_recording`` drops any proposal from the previous file. ``target`` as
+            # well as the rate: it is what ends a CONFIRMED per-recording configuration
+            # (see `BaselinePanel.set_recording`). Re-selecting the same channel is
+            # navigation and must cost the user nothing; moving to another recording must
+            # not carry his 2.0 / 0.5 s over onto it. The gate itself was set by
+            # ``_regate`` above; it is re-asserted here because ``set_recording`` is the
+            # call that resets the panel.
+            self._clear_baseline_notice()
+            rate_and_length = self._active_rate_and_length()
+            duration = (rate_and_length[1] / rate_and_length[0]) if rate_and_length else None
+            self._baseline.set_recording(fs, (doc_id, channel), duration_s=duration)
+            self._baseline.set_gate(runnable, reason)
+            self._regate()
+            # The two view boxes are a STANDING preference and the trace under them just
+            # changed: re-apply them to the new selection, and (through the clear inside)
+            # take the previous recording's rail down. Without this a rail ticked on the
+            # -600 mV run stayed up over the -1000 mV one, claimed by nothing on screen.
+            self._apply_baseline_views()
+            self._sync_baseline_workspace()
 
-        # Reflect the preview toggle onto the new pane (usually off after a switch).
-        if self._detection.filter_preview.isChecked():
-            self._detection.filter_preview.setChecked(False)
+            # Reflect the preview toggle onto the new pane (usually off after a switch).
+            if self._detection.filter_preview.isChecked():
+                self._detection.filter_preview.setChecked(False)
 
-        self._sync_surrogate_readouts()
-        self._load_stored_detection(doc_id, channel)
+            self._sync_surrogate_readouts()
+            # The seed, or this key's draft in its place (design §5.2).
+            self._load_stored_detection(doc_id, channel)
+        self._arrive_form(old)
+        # Said only now, with the form seeded: ``set_recording`` above clamped the boxes to
+        # this recording's Nyquist, and the seed or the draft that followed may have set
+        # them again.
+        self._say_clamp()
+
+    def _say_clamp(self) -> None:
+        """Put the Detection form's clamp notice on the status line (design §5.3): which
+        frequency someone set that this recording's Nyquist cannot hold, and what the form
+        reads instead — the value a run here would use. Nothing is said, and the line is left
+        as it was, when nothing is clamped."""
+        notice = self._detection.clamp_notice()
+        if notice:
+            self.statusMessage.emit(notice)
 
     def _sync_surrogate_readouts(self) -> None:
         """Point the FDR label and the 'use measured efficiency' toggle at the CURRENT target.
@@ -1788,16 +1934,19 @@ class AnalysisPanel(QtWidgets.QWidget):
         Repointing at a target also RE-SEEDS the detection form from that target's stored
         Schmitt run, so the settings on the tab are the settings that produced the table on
         screen. Without it a reopened project showed the panel's defaults over restored
-        events — and Detect / Re-run then quietly detected something else."""
-        res = self._stored_to_show(doc_id, channel)
-        if res is not None:
-            self._set_active_detection(res.module_id)
-            self._seeded_from = res
-            self._seed_form_from(res)
-            self._show_result(res)
-            return
-        self._seeded_from = None
-        self._clear_results()
+        events — and Detect / Re-run then quietly detected something else. A table the user
+        left with edits that never ran gets those back instead (:meth:`_fill_form`)."""
+        with self._writing_form():
+            res = self._stored_to_show(doc_id, channel)
+            if res is not None:
+                self._set_active_detection(res.module_id)
+                self._seeded_from = res
+                self._fill_form(res)
+                self._show_result(res)
+                return
+            self._seeded_from = None
+            self._fill_form(None)
+            self._clear_results()
 
     def _set_active_detection(self, module_id: str) -> None:
         """THE ONE WRITER of ``_active_detection`` — and the one place the detector combo
@@ -1831,7 +1980,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._active_detection = module_id
         if module_id in (_MODULE_ID, _CUSUM_MODULE_ID):
             self._combo_detector = module_id
-            self._detection.set_detector(module_id)
+            # The combo re-seeds the knobs the two detectors share as it moves
+            # (`DetectionPanel._on_detector_changed`): the app's write, not the user's edit.
+            with self._writing_form():
+                self._detection.set_detector(module_id)
         if (self._sel is not None and self._session.has_document(self._sel[0])
                 and self._session.results.get(*self._sel, module_id) is not None):
             self._chosen_table[self._sel] = module_id
@@ -1927,14 +2079,20 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._chosen_table[(doc_id, channel)] = module_id
         if module_id == self._active_detection and res is self._seeded_from:
             return
+        # Another table is another form: the one leaving keeps its un-run edits as its
+        # draft, captured before the combo below moves (design §5.2).
+        old = self._form_shown
+        self._leave_form(old, self._form_key_showing(res))
         self._switching_result = True
         try:
-            self._set_active_detection(module_id)
-            self._seeded_from = res
-            self._seed_form_from(res)
-            self._show_result(res)
+            with self._writing_form():
+                self._set_active_detection(module_id)
+                self._seeded_from = res
+                self._fill_form(res)
+                self._show_result(res)
         finally:
             self._switching_result = False
+        self._arrive_form(old)
         # AFTER the guard is down, and said once the table really is on screen: what listens
         # re-reads ``current_detection()`` and may call back into this panel.
         self.resultSwitched.emit()
@@ -1955,7 +2113,18 @@ class AnalysisPanel(QtWidgets.QWidget):
 
         Left alone when the table on screen belongs to the ML detector: that result lives on
         its own tab and this combo does not name it.
+
+        NOT WHILE THE COMBO IS STILL MOVING. The combo re-seeds the two knobs the detectors
+        share as it moves (`DetectionPanel._on_detector_changed`), one ``paramsChanged`` per
+        knob, and the first of them is what reaches here. Switching then put the other knob's
+        re-seed on top of the table that had just arrived -- over its own run's merge gap,
+        or over a draft the user had left there -- so the switch waits for
+        :meth:`_on_detector_combo_settled`, when every knock-on has landed, and the form the
+        table leaves is filed as it stood before the combo moved (`_form_override`).
         """
+        if self._detection.detector_combo.currentIndex() != self._combo_index_settled:
+            self._detector_switch_due = module_id
+            return
         if self._sel is None or self._switching_detector or self._switching_result:
             return
         if self._active_detection not in (_MODULE_ID, _CUSUM_MODULE_ID):
@@ -1964,19 +2133,29 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
         doc_id, channel = self._sel
         res = self._session.results.get(doc_id, channel, module_id)
+        old = self._form_shown
+        # The draft keeps what the user left, not the combo's re-seed of the shared knobs.
+        self._form_override = dict(self._form_knock_on_base)
+        try:
+            self._leave_form(old, self._form_key_showing(res))
+        finally:
+            self._form_override = None
         self._chosen_table[(doc_id, channel)] = module_id
         self._switching_detector = True
         try:
-            self._active_detection = module_id
-            if res is not None:
-                self._seeded_from = res
-                self._seed_form_from(res)
-                self._show_result(res)
-            else:
-                self._seeded_from = None
-                self._clear_results()
+            with self._writing_form():
+                self._active_detection = module_id
+                if res is not None:
+                    self._seeded_from = res
+                    self._fill_form(res)
+                    self._show_result(res)
+                else:
+                    self._seeded_from = None
+                    self._fill_form(None)
+                    self._clear_results()
         finally:
             self._switching_detector = False
+        self._arrive_form(old)
         # The second door that swaps the table on screen without writing anything -- and the
         # one that can leave NO table on screen, which the surfaces must be told as well.
         self.resultSwitched.emit()
@@ -2065,6 +2244,348 @@ class AnalysisPanel(QtWidgets.QWidget):
         if not self._session.has_document(doc_id):
             return None
         return self._session.results.get(doc_id, channel, self._active_detection)
+
+    # -- the form history: one form per event table (design §3.4, §5.2, §5.3) ------------------
+    #: The Detection-form keys the detector combo re-seeds by itself as it moves
+    #: (`DetectionPanel._on_detector_changed`): the knobs both detectors share but default
+    #: differently. Read off the panel's own table, so a third shared knob comes along.
+    _DETECTOR_KNOCK_ON_KEYS: tuple[str, ...] = tuple(sorted(
+        {key for defaults in DetectionPanel._DETECTOR_DEFAULTS.values() for key in defaults}))
+
+    def _init_form_history(self) -> None:
+        """State and wiring for the form history (kept out of _build_ui, like the judge's)."""
+        #: Un-run edits per form key, ``{key: form_state()}``, for every key NOT on screen.
+        #: The key on screen keeps its edits in the widgets, and `_form_dirty` says whether
+        #: there are any; leaving files them here, arriving takes them back out.
+        self._form_drafts: dict[tuple[str, int, str | None], dict[str, Any]] = {}
+        self._form_dirty = False
+        #: The form as the last seed (or carry-over) of the key on screen left it, None when
+        #: a draft came back instead: what tells an edit nobody ran from a form an undo has
+        #: walked back (`_fill_form`). Taken when the writing guard closes (`_form_seed_due`).
+        self._form_seed: dict[str, Any] | None = None
+        self._form_seed_due = False
+        #: The key whose form the widgets hold: what the form LEAVES. Usually
+        #: :meth:`form_key`, but not while a result is landing: the store already holds the
+        #: new table when ``resultsChanged`` arrives, while the form is still the old key's.
+        self._form_shown: tuple[str, int, str | None] | None = None
+        #: The key `formLeaving` is announcing, which :meth:`form_key` answers while it is
+        #: announced: a listener checkpointing the old key must be able to read it.
+        self._form_key_leaving: tuple[str, int, str | None] | None = None
+        #: Depth of open writing guards, and whether the outermost one wrote anything.
+        self._form_writes = 0
+        self._form_wrote = False
+        #: The form key a run this panel started FROM THE FORM was launched on (None for the
+        #: stale banner's Re-run, which replays the stored run instead), and, while such a
+        #: run or a Re-measure lands, the key it came from. See :meth:`_on_results_changed`.
+        self._form_run_from: tuple[str, int, str | None] | None = None
+        self._landing_form_run: tuple[str, int, str | None] | None = None
+        #: The detector combo: the index it last settled on, the switch it asked for while
+        #: moving, whether its knock-on moved the form meanwhile, the shared knobs as they
+        #: stood before it moved, and that value laid over `form_state` while it is filed.
+        self._combo_index_settled = self._detection.detector_combo.currentIndex()
+        self._detector_switch_due: str | None = None
+        self._form_absorbed = False
+        self._form_knock_on_base: dict[str, Any] = {}
+        self._form_override: dict[str, Any] | None = None
+        self._form_settle()
+        # Connected after every other listener of these signals: the panel's own reactions
+        # (the detector switch in `_on_params_changed` above all) run first.
+        self._detection.paramsChanged.connect(self._on_detection_form_changed)
+        self._detection.mlParamsChanged.connect(self._on_form_changed)
+        self._baseline.paramsChanged.connect(self._on_form_changed)
+        # ...and after the DetectionPanel's two slots on the combo, so this one runs last.
+        self._detection.detector_combo.currentIndexChanged.connect(
+            self._on_detector_combo_settled)
+        # The actions that know their own name label their step (design §3.2).
+        self._detection.protocolRecalled.connect(
+            lambda name: self._name_form_step(f"Recall protocol ‘{name}’"))
+        self._detection.mlPresetLoaded.connect(
+            lambda key: self._name_form_step(
+                f"Load ML preset ‘{self._detection._ml_preset_label(key)}’"))
+        self._baseline.resetPerformed.connect(self._name_form_step)
+
+    def form_key(self) -> tuple[str, int, str | None] | None:
+        """WHICH FORM IS ON SCREEN: ``(doc_id, channel, module_id)`` of the event table on
+        screen -- the key Edit ▸ Undo already walks (`MainWindow._undo_key`) -- or
+        ``(doc_id, channel, None)`` while the recording and channel show no table, or None
+        with no target.
+
+        The forms are ONE set of widgets showing whichever table is selected, so the table
+        is what their history and their drafts are filed under (design §3.4): a switch of
+        table is a switch of form exactly as a switch of recording is."""
+        if self._form_key_leaving is not None:
+            return self._form_key_leaving
+        return self._form_key_showing(self._stored_detection())
+
+    def _form_key_showing(self, res: AnalysisResult | None) -> tuple[str, int, str | None] | None:
+        """:meth:`form_key` with ``res`` on screen: the key a switch is about to show."""
+        if self._sel is None:
+            return None
+        if res is not None and isinstance(res.payload, EventSet):
+            return (res.doc_id, int(res.channel), res.module_id)
+        return (self._sel[0], int(self._sel[1]), None)
+
+    def form_state(self) -> dict[str, Any]:
+        """The three forms as plain data: what :meth:`restore_form_state` puts back.
+
+        ``{"detection", "intents", "ml", "baseline"}``: the Detection form's ``params()``,
+        what its frequency boxes were set to (`DetectionPanel.frequency_intents`, which a
+        clamped box's value cannot say), ``ml_params()`` and the Baseline form's own
+        ``form_state()``. Lists, never tuples, and a copy, so a snapshot equals itself after
+        a trip through JSON and nothing later writes into it.
+
+        Left out on purpose: ``"detector"`` -- the table on screen decides which detector
+        the form shows, so a draft or an undo putting a detector back would switch tables
+        under the user -- and ``"model_path"``, which `set_ml_params` deliberately does not
+        restore (a model file can be gone; the pipeline is what a run can put back).
+        """
+        detection = self._detection.params()
+        detection.pop("detector", None)
+        if self._form_override:
+            detection.update(self._form_override)
+        ml = self._detection.ml_params()
+        ml.pop("model_path", None)
+        return self._plain_form_state({
+            "detection": detection,
+            "intents": self._detection.frequency_intents(),
+            "ml": ml,
+            "baseline": self._baseline.form_state(),
+        })
+
+    @classmethod
+    def _plain_form_state(cls, value: Any) -> Any:
+        """``value`` as plain, unshared data: mappings become dicts, tuples lists."""
+        if isinstance(value, Mapping):
+            return {key: cls._plain_form_state(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._plain_form_state(item) for item in value]
+        return deepcopy(value)
+
+    def restore_form_state(self, state: Mapping[str, Any]) -> None:
+        """SET the three forms to a :meth:`form_state` snapshot: the door an undo, a redo
+        and a draft coming back all use.
+
+        A SET, NOT A SEED. Each part goes back through its form's own exact restore, never
+        through a seed: ``BaselinePanel.set_params`` steps aside for a confirmed form, which
+        is right for a stored run arriving on its own and wrong for the user's own state
+        coming back. The Detection form takes ``set_params`` and then what its frequency
+        boxes were set to, so a value clamped here comes back as the value set. A part that
+        is absent is left alone.
+
+        Under the writing guard, so none of it reads as an edit, and it says so ONCE at the
+        end (`formWritten`), after the chain notice and the amber line have been judged
+        again. The form now holds edits nothing has run: the key on screen counts as edited.
+        """
+        with self._writing_form():
+            self._form_wrote = True
+            detection = state.get("detection")
+            if isinstance(detection, Mapping):
+                self._detection.set_params(
+                    {key: value for key, value in detection.items() if key != "detector"})
+            intents = state.get("intents")
+            if isinstance(intents, Mapping):
+                self._detection.restore_frequency_intents(intents)
+            ml = state.get("ml")
+            if isinstance(ml, Mapping) and ml:
+                self._detection.set_ml_params(
+                    {key: value for key, value in ml.items() if key != "model_path"})
+            baseline = state.get("baseline")
+            if isinstance(baseline, Mapping):
+                self._baseline.restore_form_state(baseline)
+            self._form_dirty = True
+            res = self._stored_detection()
+            if res is not None:
+                self._check_staleness(res)
+            self.refresh_chain_status()
+
+    def form_drafts(self) -> dict[tuple[str, int, str | None], dict[str, Any]]:
+        """Every draft, ``{(doc_id, channel, module_id or None): form_state}``, as a copy:
+        the un-run edits of each table the user left, and of the one on screen when it has
+        any -- they are a draft too, and a project saved now must keep them (decision 4)."""
+        drafts = {key: deepcopy(state) for key, state in self._form_drafts.items()}
+        key = self._form_shown
+        if key is not None and self._form_dirty and self._session.has_document(key[0]):
+            drafts[key] = self.form_state()
+        return drafts
+
+    def set_form_drafts(self, drafts: Mapping[Any, Any]) -> None:
+        """Replace every draft (a project restore). A key on screen that has one shows it
+        at once, as an arrival would; one that has none is no longer edited. A key that is
+        not ``(doc_id, channel, module_id or None)`` or a state that is not a mapping is
+        dropped: this panel cannot file it."""
+        kept: dict[tuple[str, int, str | None], dict[str, Any]] = {}
+        for key, state in dict(drafts or {}).items():
+            if (isinstance(key, (tuple, list)) and len(key) == 3 and isinstance(key[0], str)
+                    and isinstance(key[1], int) and (key[2] is None or isinstance(key[2], str))
+                    and isinstance(state, Mapping)):
+                kept[(key[0], int(key[1]), key[2])] = self._plain_form_state(state)
+        self._form_drafts = kept
+        on_screen = self._form_shown
+        draft = self._form_drafts.pop(on_screen, None) if on_screen is not None else None
+        if draft is not None:
+            self._form_seed = None
+            self.restore_form_state(draft)
+        else:
+            self._form_dirty = False
+
+    @contextlib.contextmanager
+    def _writing_form(self):
+        """THE WRITING GUARD: every write the APP makes to the forms runs inside it -- a seed
+        from a stored run, a draft coming back, :meth:`restore_form_state`, a clamp or the
+        baseline reset of a new target, a project restore.
+
+        While it is up the forms' change signals are not the user's edits: no `formEdited`,
+        and the form is not marked edited. When the outermost one closes it says
+        `formWritten` once if anything was written, so the history adopts the result rather
+        than recording it -- the race design §3.9 names, of a seed taken for a step.
+        Re-entrant: an inner write is part of the outer one."""
+        self._form_writes += 1
+        try:
+            yield
+        finally:
+            self._form_writes -= 1
+            if not self._form_writes:
+                # A write that moved the table under the form without a switch (the project
+                # restore's own choice of table) leaves the form filed under that table.
+                if self._form_key_leaving is None:
+                    self._form_shown = self.form_key()
+                if self._form_seed_due:
+                    self._form_seed_due = False
+                    self._form_seed = self.form_state()
+                self._form_settle()
+                if self._form_wrote:
+                    self._form_wrote = False
+                    self.formWritten.emit()
+
+    def _form_settle(self) -> None:
+        """Remember the knobs the detector combo re-seeds, as the form holds them now: what
+        a draft is filed with if the combo moves next (`_show_detector_choice`)."""
+        params = self._detection.params()
+        self._form_knock_on_base = {key: params.get(key) for key in self._DETECTOR_KNOCK_ON_KEYS}
+
+    def _combo_moving(self) -> bool:
+        """The detector combo is mid-move with a switch of table due once it settles."""
+        return (self._detector_switch_due is not None and self._combo_index_settled
+                != self._detection.detector_combo.currentIndex())
+
+    def _on_detection_form_changed(self, params: dict[str, Any]) -> None:
+        if not self._form_writes and not self._combo_moving():
+            self._form_knock_on_base = {
+                key: params.get(key) for key in self._DETECTOR_KNOCK_ON_KEYS}
+        self._on_form_changed(params)
+
+    def _on_form_changed(self, *_a) -> None:
+        """One of the three forms changed: a write of the app's under the guard, the detector
+        combo's own knock-on while it moves, or else the user's edit."""
+        if self._form_writes:
+            self._form_wrote = True
+        elif self._combo_moving():
+            self._form_absorbed = True
+        else:
+            self._form_dirty = True
+            self.formEdited.emit()
+
+    def _on_detector_combo_settled(self, *_a) -> None:
+        """The detector combo has finished moving -- this slot is connected after the
+        DetectionPanel's own two, so every knock-on has landed: make the switch it asked
+        for now (:meth:`_show_detector_choice`)."""
+        self._combo_index_settled = self._detection.detector_combo.currentIndex()
+        module_id, self._detector_switch_due = self._detector_switch_due, None
+        absorbed, self._form_absorbed = self._form_absorbed, False
+        if module_id is None:
+            return
+        shown = self._form_shown
+        self._show_detector_choice(module_id)
+        if absorbed and self._form_shown == shown:
+            # No other form came on screen (the ML table is shown, or neither detector has
+            # a table here): what the combo moved is an edit of this one.
+            self._form_settle()
+            self._form_dirty = True
+            self.formEdited.emit()
+
+    def _name_form_step(self, label: str) -> None:
+        """A user action that knows its own name changed the form: forward the label its step
+        goes by (`formStepNamed`). A recall, a preset load or a reset made by the app's own
+        writes is not a step and says nothing."""
+        if self._form_writes:
+            return
+        self._form_dirty = True
+        self.formStepNamed.emit(label)
+
+    def _leave_form(self, old: tuple[str, int, str | None] | None,
+                    new: tuple[str, int, str | None] | None) -> None:
+        """The form for ``old`` is about to leave the screen for ``new``: say so
+        (`formLeaving`) BEFORE anything moves it, and file what it leaves behind.
+
+        Its un-run edits become its draft, taken now -- before a clamp to the next
+        recording's Nyquist or the baseline reset of a new target can touch them, so the
+        draft holds the 20 kHz typed and not the 12.5 kHz a slower recording reads (design
+        §5.3). A key left with no edits keeps no draft; a closed recording keeps none at all.
+        ``new`` only says whether the key changes at all (None: it does)."""
+        if old is None or old == new:
+            return
+        if self._form_dirty and self._session.has_document(old[0]):
+            self._form_drafts[old] = self.form_state()
+        else:
+            self._form_drafts.pop(old, None)
+        self._form_dirty = False
+        self._form_key_leaving = old
+        try:
+            self.formLeaving.emit(old)
+        finally:
+            self._form_key_leaving = None
+
+    def _arrive_form(self, old: tuple[str, int, str | None] | None) -> None:
+        """Say which form is on screen now (`formArrived`), once it is in place."""
+        new = self.form_key()
+        if new != old:
+            self.formArrived.emit(old, new)
+
+    def _fill_form(self, res: AnalysisResult | None) -> None:
+        """Put the form for the key now on screen in place: its draft, or the seed.
+
+        The rule "the settings on the tab are the settings that produced the table on
+        screen" (:meth:`_seed_form_from`) becomes: they are, unless you changed them
+        (design §5.2). Measured on ``27ec0eb``: an edit of the low-pass on A was gone after a
+        look at B and back -- the return re-seeded A from its stored run -- and when A had no
+        run, the form kept B's numbers. So:
+
+        * a key ARRIVING with a draft gets the draft back instead of the seed (and instead
+          of the baseline reset and the carry-over before it), and stays edited;
+        * a key arriving with none is seeded as before, and is not edited;
+        * the SAME key with a new result object (an event undo or redo, a batch run, a
+          merge) is re-seeded unless the form holds edits nobody ran -- edited, and no
+          longer what the last seed put there. Re-seeding over those threw them away when
+          the user took back a curation step; a form an undo has walked back to the seed
+          has nothing to lose, and follows the table as before.
+        """
+        with self._writing_form():
+            key = self.form_key()
+            shown, self._form_shown = self._form_shown, key
+            if key != shown:
+                draft = self._form_drafts.pop(key, None) if key is not None else None
+                if draft is not None:
+                    self._form_seed = None
+                    self.restore_form_state(draft)
+                    return
+            elif self._form_dirty and (self._form_seed is None
+                                       or self.form_state() != self._form_seed):
+                self._form_drafts.pop(key, None)
+                # The form on screen is the user's now. The seed it was compared with belongs
+                # to an OLDER table than the one just installed under it (measured: after the
+                # redo of a press the seed still held the first run's form), so a value typed
+                # back to it would read as "an undo walked it back" and the next event undo
+                # would re-seed the edit away. Only a real seed sets it again.
+                self._form_seed = None
+                return
+            if res is not None:
+                # The seed writes the baseline windows with no signal of their own.
+                self._form_wrote = True
+                self._seed_form_from(res)
+            self._form_dirty = False
+            # Read when the guard closes, with the table shown: showing it can put a
+            # standing baseline mark back (`_restore_baseline_mark`).
+            self._form_seed_due = True
 
     def can_run(self) -> bool:
         """Whether detection can run on the panel's CURRENT (resolved) target — the single source of
@@ -2803,6 +3324,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         # a table from before it. See :attr:`willReplaceEvents`.
         self.willReplaceEvents.emit()
         self._pending, self._pending_sel = "detect", self._sel
+        self._form_run_from = self.form_key()
         return True
 
     @staticmethod
@@ -3036,6 +3558,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         # past. See :attr:`willReplaceEvents`.
         self.willReplaceEvents.emit()
         self._pending, self._pending_sel = "ml_detect", self._sel
+        self._form_run_from = self.form_key()
         return True
 
     def _visible_sample_range(self, doc_id: str, channel: int,
@@ -3221,6 +3744,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             launched = self._run_detection(self._rerun_params(res))
         if launched:
             self._stale.setVisible(False)
+            # Started here, but not FROM THE FORM: it replays the stored run, so whatever
+            # the form holds that nobody ran is still un-run when it lands (design §5.2).
+            self._form_run_from = None
 
     # -- surrogate studies (off-thread; they re-detect on full-trace surrogates) -----------------
     def _surrogate_builder(self, detect_params: dict[str, Any]):
@@ -4195,8 +4721,16 @@ class AnalysisPanel(QtWidgets.QWidget):
             # re-opened 4,000-sample load, all five events past the end of the file and
             # ``analyzed_duration_s`` 1.0 s against a true 0.04 s, so the capture rate was
             # wrong by 25x with nothing on screen to say so.
+            # A run started from the form lands on the form that made it, which then holds
+            # no un-run edits (`_on_results_changed`); the key it was started on says where.
+            launched_from, self._form_run_from = self._form_run_from, None
             if self._session.has_document(obj.doc_id):
-                self.install_detection_result(obj)
+                self._landing_form_run = (launched_from if pending in ("detect", "ml_detect")
+                                          else None)
+                try:
+                    self.install_detection_result(obj)
+                finally:
+                    self._landing_form_run = None
             else:
                 self._announce_discarded(obj)
             return
@@ -4464,10 +4998,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         # detect on channel 0 put channel 1's old Schmitt over its CUSUM). The session says
         # which channel it is announcing; a write to another one changes nothing shown here.
         if self._sel is None or doc_id != self._sel[0]:
+            self._table_landed_elsewhere(doc_id, module_id)
             return
         written = self._session.announcing
         if (written is not None and written[0] == doc_id and written[2] == module_id
                 and written[1] != self._sel[1]):
+            self._table_landed_elsewhere(doc_id, module_id)
             return
         # A source table can be replaced while its derived Reconciled snapshot is on
         # screen (Undo/Redo, a scripted install, or another detector run). Preserve and
@@ -4500,26 +5036,65 @@ class AnalysisPanel(QtWidgets.QWidget):
                     f"event{'s' if n != 1 else ''}. Choose it in the Table selector to see it.")
                 return
             if res is not None:
-                # A freshly (re-)computed detection becomes the active one shown, so
-                # its events populate the table/overlays regardless of which detector
-                # produced them.
-                self._set_active_detection(module_id)
-                # ...and the form follows the table, here as on selection change and
-                # project reopen: "the settings on the tab are the settings that
-                # produced the table on screen" (`_seed_form_from`). This signal also
-                # carries Edit ▸ Undo/Redo (`EventHistory.undo` installs the restored
-                # run through `session.add_result`, the same door as everything else),
-                # which used to leave the NEWER run's stages ticked over the restored
-                # table — Detect then re-ran with filters the shown events never had.
-                # Guarded by identity, exactly like `set_selection`'s same-target
-                # branch: a redraw of the result the form was already seeded from must
-                # not stamp over what the user has dialled in since.
-                if res is not self._seeded_from:
-                    self._seeded_from = res
-                    self._seed_form_from(res)
-                self._show_result(res)
+                # The form that leaves is the one in the widgets: the store holds the new
+                # table already, so `form_key` names it before the form has followed.
+                old, new = self._form_shown, self._form_key_showing(res)
+                # A recording and channel's first table lands on the key that stood for
+                # it, ``(doc, ch, None)`` (design §3.4).
+                first = (old is not None and new is not None and old[2] is None
+                         and new[:2] == old[:2])
+                if (self._landing_form_run is not None and self._landing_form_run == old
+                        and (new == old or first)):
+                    # A run this panel started from the form lands on the form that made
+                    # it (Detect, Run ML, Re-measure; not a batch run, an undo, or the
+                    # banner's Re-run, which replays the stored run): that form holds no
+                    # un-run edits any more, and the key's draft goes (design §5.2).
+                    self._form_dirty = False
+                    self._form_drafts.pop(new, None)
+                self._leave_form(old, new)
+                if first:
+                    # `_leave_form` filed the form that stood for the table as a draft of NO
+                    # table, which nothing would ever take out again: it would be saved with
+                    # the project and come back on the first detector that has no table. The
+                    # table seeds the form, as a first table always has, and the edit stays
+                    # reachable as the undo step that moves onto the table (`formArrived`).
+                    self._form_drafts.pop(old, None)
+                with self._writing_form():
+                    # A freshly (re-)computed detection becomes the active one shown, so
+                    # its events populate the table/overlays regardless of which detector
+                    # produced them.
+                    self._set_active_detection(module_id)
+                    # ...and the form follows the table, here as on selection change and
+                    # project reopen: "the settings on the tab are the settings that
+                    # produced the table on screen" (`_seed_form_from`). This signal also
+                    # carries Edit ▸ Undo/Redo (`EventHistory.undo` installs the restored
+                    # run through `session.add_result`, the same door as everything else),
+                    # which used to leave the NEWER run's stages ticked over the restored
+                    # table — Detect then re-ran with filters the shown events never had.
+                    # Guarded by identity, exactly like `set_selection`'s same-target
+                    # branch: a redraw of the result the form was already seeded from must
+                    # not stamp over what the user has dialled in since -- nor may a new
+                    # result of the same table, while the form holds edits nobody has run
+                    # (`_fill_form`).
+                    if new != old or res is not self._seeded_from:
+                        self._seeded_from = res
+                        self._fill_form(res)
+                    self._show_result(res)
+                self._arrive_form(old)
         elif module_id in ("fit.dwell", "fit.depth"):
             self._refresh_fit_text()
+
+    def _table_landed_elsewhere(self, doc_id: str, module_id: str) -> None:
+        """A table landed on a recording and channel this panel is not showing (a batch run, or
+        a Detect that lands after a look away). The panel never arrives at it, so what
+        :meth:`_on_results_changed` does for a table born on screen does not happen: the form
+        that stood for the table, ``(doc, ch, None)``, stays filed as a draft of no table, and
+        nothing would ever take it out. It has nothing to come back to, and is dropped. The
+        steps made on that form change hands in MainWindow (`_on_table_landed`)."""
+        written = self._session.announcing
+        if (written is not None and written[0] == doc_id and written[2] == module_id
+                and module_id in _DETECTION_MODULE_IDS):
+            self._form_drafts.pop((doc_id, written[1], None), None)
 
     def take_results_widget(self) -> QtWidgets.QWidget:
         """Hand the results surface to a host (MainWindow's Results dock). Only the Qt
@@ -5171,13 +5746,18 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._session.add_result(res)
         return self._session.results.get(doc_id, channel, MANUAL_MODULE_ID)
 
-    def _manual_stale_reason(self, res: AnalysisResult) -> str | None:
+    def _manual_stale_reason(self, res: AnalysisResult, *,
+                             on_screen: bool = True) -> str | None:
         """Why a Manual table cannot take another row as it stands, in its own words, or
         ``None``. The three stamps a detector table is judged by, with "Rebuild" for the
-        way forward: a Manual table is never re-run."""
-        if self._sel is None or not isinstance(res.payload, EventSet):
+        way forward: a Manual table is never re-run.
+
+        Asked of the table's OWN recording, so the Plots window can ask it of a Manual table
+        that is not on screen; ``on_screen=False`` then leaves the estimator out, as
+        :meth:`_staleness` does, because the form it is judged against is another table's."""
+        if not isinstance(res.payload, EventSet) or not self._session.has_document(res.doc_id):
             return None
-        live_fs = self._session.document(self._sel[0]).meta.sample_rate_hz
+        live_fs = self._session.document(res.doc_id).meta.sample_rate_hz
         stamped = stale_rate_hz(res.payload.provenance, live_fs)
         if stamped is not None:
             now = "unknown" if not live_fs else f"{float(live_fs):,.6g} Hz"
@@ -5187,7 +5767,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         if self._calibration_moved(res):
             return ("The calibration changed since this Manual table was built, so its depths "
                     "are on the old gain. Rebuild the Manual table first.")
-        if self._baseline_staleness(res) is not None:
+        if on_screen and self._baseline_staleness(res) is not None:
             return ("The open-pore estimator changed since this Manual table was built, so "
                     "its depths are stale. Rebuild the Manual table first.")
         return None
@@ -5274,32 +5854,27 @@ class AnalysisPanel(QtWidgets.QWidget):
             f"Rebuilt the Manual table: {n:,} event{'s' if n != 1 else ''} re-measured at "
             f"{float(contract.provenance['fs']):,.6g} Hz. {self._undo_hint()} undoes it.")
 
-    def _judge_manual_staleness(self, res: AnalysisResult) -> None:
-        """The amber line for a Manual table: the three stamps, each repaired by Rebuild."""
-        live_fs = self._session.document(self._sel[0]).meta.sample_rate_hz
+    def _judge_manual_staleness(self, res: AnalysisResult, *,
+                                on_screen: bool = True) -> _Staleness | None:
+        """The amber line for a Manual table: the three stamps, each repaired by Rebuild.
+        :meth:`_staleness`'s verdict for this kind of table, ``on_screen`` as it reads it."""
+        live_fs = self._session.document(res.doc_id).meta.sample_rate_hz
         calibration_moved = self._calibration_moved(res)
         if stale_rate_hz(res.payload.provenance, live_fs) is not None:
-            self._stale.show_message(
-                self._manual_stale_reason(res), kind=_STALE_SAMPLE_RATE,
-                action_label="Rebuild",
-                summary="Times and depths stale — the sample rate changed")
-            self._sync_stale_action(res)
-            self._table.set_stale_columns(
-                _RATE_COLUMNS + tuple(c for c in REMEASURED_COLUMNS if c not in _RATE_COLUMNS)
-                if calibration_moved else _RATE_COLUMNS)
-            return
-        reason = self._manual_stale_reason(res)
-        if reason is not None:
-            self._stale.show_message(
-                reason, kind=_STALE_CALIBRATION if calibration_moved else _STALE_BASELINE,
-                action_label="Rebuild",
-                summary=("Depths stale — the calibration changed" if calibration_moved
-                         else "Depths stale — the open-pore estimator changed"))
-            self._sync_stale_action(res)
-            self._table.set_stale_columns(REMEASURED_COLUMNS)
-            return
-        self._stale.setVisible(False)
-        self._table.set_stale_columns(())
+            return _Staleness(
+                text=self._manual_stale_reason(res, on_screen=on_screen),
+                kind=_STALE_SAMPLE_RATE, action_label="Rebuild",
+                summary="Times and depths stale — the sample rate changed",
+                columns=_badged_columns(times=True, amplitudes=calibration_moved))
+        reason = self._manual_stale_reason(res, on_screen=on_screen)
+        if reason is None:
+            return None
+        return _Staleness(
+            text=reason, kind=_STALE_CALIBRATION if calibration_moved else _STALE_BASELINE,
+            action_label="Rebuild",
+            summary=("Depths stale — the calibration changed" if calibration_moved
+                     else "Depths stale — the open-pore estimator changed"),
+            columns=REMEASURED_COLUMNS)
 
     # -- converting the old measurement list ----------------------------------------------------------
     def converted_measurement_ids(self) -> set[int]:
@@ -6600,6 +7175,11 @@ class AnalysisPanel(QtWidgets.QWidget):
         stale = self._stale_edit_refusal(res, "Nothing was re-measured.")
         if stale is not None:
             return self._refuse_baseline_job("stale_rate", stale)
+        if self._calibration_moved(res):
+            # A re-measure reads the LIVE calibration and keeps the table's old calibration
+            # stamp, so it would install depths under the new gain stamped as the old one,
+            # and the line above the table would go on saying they are stale.
+            return self._refuse_baseline_job("stale_calibration")
         if self._reference_redetection_needed(res):
             return self._refuse_baseline_job("reference_redetect")
         signal, fs = self._active_signal(res.payload.provenance)
@@ -6666,6 +7246,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         "no_config": "The open-pore baseline controls are not set — open the "
                      "Preprocess tab and choose (or probe for) a window.",
         "reconciled": _RECONCILED_BASELINE_REFUSAL,
+        "stale_calibration": "Nothing was re-measured. Re-run first — the calibration "
+                             "changed since this table was detected.",
         "reference_redetect": "The user open-pore reference changed. Preview it, then press Detect "
                               "to recompute noise, polarity and event candidates. Depth-only "
                               "re-measurement would leave the old detection in place.",
@@ -6857,8 +7439,13 @@ class AnalysisPanel(QtWidgets.QWidget):
             baseline_fingerprint=result.fingerprint,
         )
         # Through the store, so the SAME refresh path a merge and a curation edit use
-        # repaints the table, the spans, the summary and the staleness banner.
-        self._session.add_result(new_res)
+        # repaints the table, the spans, the summary and the staleness banner. A Re-measure
+        # is run from the form on screen as Detect is (`_on_results_changed`).
+        self._landing_form_run = target
+        try:
+            self._session.add_result(new_res)
+        finally:
+            self._landing_form_run = None
         self._last_comparison = result.comparison
         c = result.comparison
         self._say_baseline(
@@ -7005,16 +7592,25 @@ class AnalysisPanel(QtWidgets.QWidget):
 
         Fits that share a reason and a source are named in one sentence, so a Schmitt pair
         sitting under CUSUM reads as one fact rather than two copies of it.
+
+        THE EVENTS CAN CHANGE WHERE THE COUNT CANNOT SEE IT. A fit records a digest of the
+        values it fitted (``FitVerdict.digest_moved``), so an event swapped, resized or
+        re-measured at an unchanged count is caught -- and the count sentence would then read
+        "made on 316 accepted events and the table has 316 now", a change described as none.
+        Where the counts agree (or the fit recorded none), the digest is the only witness and
+        the sentence says what it saw. A re-measure moves ``frac_depth`` and not ``dwell_s``,
+        so it stales the depth fit alone; ``digest_moved`` is in the grouping key so the two
+        halves of a pair are named together only when one sentence is true of both.
         """
         if not elsewhere:
             return []
-        groups: dict[tuple[str, str, int | None], list[str]] = {}
+        groups: dict[tuple[str, str, int | None, bool], list[str]] = {}
         for kind, v in elsewhere:
-            groups.setdefault((v.reason, v.made_on, v.n_fit), []).append(kind)
+            groups.setdefault((v.reason, v.made_on, v.n_fit, v.digest_moved), []).append(kind)
         n_now = elsewhere[0][1].n_now             # the same table, so the same count, for all
         this = f"this {detector_name(res.module_id)} table"
         notes: list[str] = []
-        for (reason, made_on, n_fit), kinds in groups.items():
+        for (reason, made_on, n_fit, digest_moved), kinds in groups.items():
             one = len(kinds) == 1
             subject = f"The stored {' and '.join(kinds)} {'fit' if one else 'fits'}"
             was = "was" if one else "were"
@@ -7024,6 +7620,11 @@ class AnalysisPanel(QtWidgets.QWidget):
                     where += f" ({n_fit:,} accepted events)"
                 notes.append(f"{subject} belong{'s' if one else ''} to {where}, not to {this} "
                              f"— press Fit to fit this one.")
+            elif reason == FIT_EVENTS_CHANGED and digest_moved and n_fit in (None, n_now):
+                notes.append(
+                    f"{subject} predate{'s' if one else ''} a change to {this}: the fitted "
+                    f"events changed since the fit (swapped, resized or re-measured) — press "
+                    f"Fit to fit it as it stands.")
             elif reason == FIT_EVENTS_CHANGED:
                 notes.append(
                     f"{subject} predate{'s' if one else ''} a change to {this}: "
@@ -7305,7 +7906,6 @@ class AnalysisPanel(QtWidgets.QWidget):
             # missing detection can never reach the fitters.
             self._stats.set_fit_text("Run detection first — there are no events to fit.")
             return
-        events = res.payload
         fp = self._session.calibration(doc_id, channel).fingerprint()
         # THIS target's recovery map, never "the last one anybody ran". eta(t) is a property
         # of a pore and its detector settings; dividing B's dwell distribution by A's
@@ -7323,9 +7923,14 @@ class AnalysisPanel(QtWidgets.QWidget):
         # other settings — and left in the slot it was printed beside the other half's fresh
         # fit (one detector's dwell fit next to another's depth fit, measured on the -600 mV
         # recording) and handed to the figure export as "your saved fit".
+        #
+        # The STORED RESULT is handed in, not its bare EventSet: besides the values it fitted
+        # and the table's rate, a fit records the table's open-pore estimator stamp, and that
+        # stamp lives on the result (``modules._stamp_fit_input``), so a fit can say what it
+        # was made from the way its table does (``analysis.lineage.made_with``).
         failed: dict[str, str] = {}
         try:
-            dwell_res = fit_dwell(events, doc_id=doc_id, channel=channel,
+            dwell_res = fit_dwell(res, doc_id=doc_id, channel=channel,
                                   n_components=int(opts.get("n_components_dwell", 1)),
                                   efficiency=eff, use_filter_limited=use_fl,
                                   calibration_fingerprint=fp,
@@ -7335,7 +7940,7 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._session.results.drop(doc_id, channel, "fit.dwell")
             failed["dwell"] = f"dwell fit failed: {exc}"
         try:
-            depth_res = fit_depth(events, doc_id=doc_id, channel=channel,
+            depth_res = fit_depth(res, doc_id=doc_id, channel=channel,
                                   n_components=int(opts.get("n_components_depth", 1)),
                                   use_filter_limited=use_fl,
                                   calibration_fingerprint=fp,
@@ -7355,6 +7960,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         the badge-set ones and the clear one alike, because a surface that only hears
         "went stale" keeps its marks after the banner is gone."""
         self._judge_staleness(res)
+        if not self._stale.isHidden():
+            self._stale.refresh_inputs()
         self.stalenessChanged.emit()
         self._schedule_chain_judge()     # after the existing logic; never raises
 
@@ -7371,14 +7978,37 @@ class AnalysisPanel(QtWidgets.QWidget):
         (this table predates the stamp -- and absence is exactly the signal: those
         are the rows the 10 ms block median measured) or when it differs from the
         estimator now configured in the Preprocess tab.
+
+        The verdict is :meth:`_staleness`'s, the judge the Plots window asks too; this puts
+        it on the line and on the table's badges.
         """
-        if self._sel is None:
+        stale = None if self._sel is None else self._staleness(res)
+        if stale is None:
             self._stale.setVisible(False)
             self._table.set_stale_columns(())
             return
+        self._stale.show_message(stale.text, kind=stale.kind, action_label=stale.action_label,
+                                 summary=stale.summary)
+        self._sync_stale_action(res)
+        self._table.set_stale_columns(stale.columns)
+
+    def _staleness(self, res: AnalysisResult, *, on_screen: bool = True) -> _Staleness | None:
+        """What the amber line says about ``res``, or ``None`` when it says nothing.
+
+        THE ONE JUDGE of a stored table. :meth:`_judge_staleness` puts it on screen and the
+        Plots window asks it of every table it draws (:meth:`table_staleness`), so a column
+        the event table badges and a column the plot marks are one answer, not two copies of
+        the rules that drift (the window used to check the calibration alone, and its own
+        docstring said so).
+
+        ``on_screen=False`` judges a table that is NOT the one on screen: its rate and its
+        calibration, each asked of the table's own recording and channel, and its reconciled
+        sources. The open-pore estimator and the open-pore reference are left out: they are
+        judged against the Baseline form, and the form on screen belongs to the table on
+        screen, so another table would be called stale against settings that are not its own.
+        """
         if res.module_id == MANUAL_MODULE_ID and isinstance(res.payload, EventSet):
-            self._judge_manual_staleness(res)
-            return
+            return self._judge_manual_staleness(res, on_screen=on_screen)
         reconciled = res.module_id == CONSENSUS_MODULE_ID
         # The rate stamp first: it is the one that moves the TIME columns, and a
         # re-detection is the only repair for a table whose filters, dwell limits and
@@ -7392,32 +8022,17 @@ class AnalysisPanel(QtWidgets.QWidget):
                 rate_reason += (" The calibration changed since this detection ran as well, "
                                 "so its amplitude columns are stale too; one re-run repairs "
                                 "both.")
-            self._stale.show_message(
-                rate_reason + (" Refresh the source detector results, then reconcile again."
-                               if reconciled else ""),
+            return _Staleness(
+                text=rate_reason + (" Refresh the source detector results, then reconcile "
+                                    "again." if reconciled else ""),
                 kind=_STALE_SAMPLE_RATE,
                 action_label="Refresh sources first" if reconciled else "Re-run",
                 summary=("Times and depths stale — rate and calibration changed"
-                         if calibration_moved else None))
-            self._sync_stale_action(res)
-            self._table.set_stale_columns(
-                _RATE_COLUMNS + tuple(c for c in REMEASURED_COLUMNS if c not in _RATE_COLUMNS)
-                if calibration_moved else _RATE_COLUMNS)
-            return
+                         if calibration_moved else None),
+                columns=_badged_columns(times=True, amplitudes=calibration_moved))
         if self._calibration_moved(res):
-            reference_changed = not reconciled and self._reference_redetection_needed(res)
-            self._stale.show_message(
-                "Calibration changed since this detection ran — the blockade depths and "
-                "ECDs are computed against the old gain/offset and are now stale."
-                + (" Refresh the source detector results, then reconcile again."
-                   if reconciled else " The user reference also changed; run detection with the live settings."
-                   if reference_changed else ""),
-                kind=_STALE_CALIBRATION,
-                action_label=("Refresh sources first" if reconciled else "Run detection"
-                              if reference_changed else "Re-run"),
-                summary=("Calibration and open-pore reference changed"
-                         if reference_changed else None))
-            self._sync_stale_action(res)
+            reference_changed = (on_screen and not reconciled
+                                 and self._reference_redetection_needed(res))
             # The amplitude columns are stale either way, and badging them is about
             # the NUMBERS, not about which stamp moved.
             #
@@ -7426,50 +8041,152 @@ class AnalysisPanel(QtWidgets.QWidget):
             # FROM. Leaving it unbadged beside a badged ``depth_pA`` puts the wrong
             # open-pore reference on screen with no mark on it, and invites reading it
             # as the trustworthy number that explains the badge next to it.
-            self._table.set_stale_columns(REMEASURED_COLUMNS)
-            return
+            return _Staleness(
+                text=("Calibration changed since this detection ran — the blockade depths and "
+                      "ECDs are computed against the old gain/offset and are now stale."
+                      + (" Refresh the source detector results, then reconcile again."
+                         if reconciled else
+                         " The user reference also changed; run detection with the live "
+                         "settings." if reference_changed else "")),
+                kind=_STALE_CALIBRATION,
+                action_label=("Refresh sources first" if reconciled else "Run detection"
+                              if reference_changed else "Re-run"),
+                summary=("Calibration and open-pore reference changed"
+                         if reference_changed else None),
+                columns=REMEASURED_COLUMNS)
         source_reason = self._reconciliation_source_staleness(res)
         if source_reason is not None:
-            self._stale.show_message(
-                source_reason,
-                kind=_STALE_RECONCILIATION_SOURCE,
-                action_label="Review sources first",
-            )
-            self._sync_stale_action(res)
             # The preserved snapshot's frozen measurements have not changed. This is a
             # lineage warning, not a claim that its amplitude columns are numerically bad.
-            self._table.set_stale_columns(())
-            return
+            return _Staleness(text=source_reason, kind=_STALE_RECONCILIATION_SOURCE,
+                              action_label="Review sources first", summary=None, columns=())
+        if not on_screen:
+            return None
         reason = self._baseline_staleness(res)
         reference_changed = not reconciled and self._reference_redetection_needed(res)
         if reference_changed:
             reason = ("The user open-pore reference changed. The existing event table is unchanged. "
                       "Preview the reference, then run detection to recompute noise, polarity "
                       "and candidates. Review any existing curation before replacing it.")
-        if reason is not None:
-            if reference_changed:
-                verdict = "Open-pore reference changed"
-            elif reconciled:
-                verdict = "Estimator changed — refresh the sources"
-            elif not res.baseline_fingerprint:
-                # The migration case: no stamp at all, so nothing "changed" — the table
-                # simply predates the estimator now in use.
-                verdict = "Depths stale — predates the current estimator"
+        if reason is None:
+            return None
+        if reference_changed:
+            verdict = "Open-pore reference changed"
+        elif reconciled:
+            verdict = "Estimator changed — refresh the sources"
+        elif not res.baseline_fingerprint:
+            # The migration case: no stamp at all, so nothing "changed" — the table
+            # simply predates the estimator now in use.
+            verdict = "Depths stale — predates the current estimator"
+        else:
+            verdict = None
+        return _Staleness(
+            text=reason + (" Refresh the source detector results, then reconcile again."
+                           if reconciled else ""),
+            kind=_STALE_BASELINE,
+            action_label=("Refresh sources first"
+                          if reconciled else "Run detection"
+                          if reference_changed else "Re-measure depths"),
+            summary=verdict,
+            columns=REMEASURED_COLUMNS)
+
+    def table_staleness(self, doc_id: str, channel: int,
+                        module_id: str) -> tuple[tuple[str, ...], str]:
+        """The columns of a stored table that the event table badges ⚠, and the amber line's
+        sentence for them -- ``((), "")`` when it badges none.
+
+        The Plots window's staleness provider (``PlotsWindow.set_staleness_provider``, which
+        MainWindow sets): that window draws the tables of every open recording, and its marks
+        are :meth:`_staleness`'s verdict, the line's own. The rate and the calibration are
+        judged for every table, on its own recording; the open-pore estimator only for the
+        table on screen, whose form it is judged against. A verdict that badges nothing (a
+        reconciled snapshot whose sources moved) gives no columns."""
+        if not self._session.has_document(doc_id):
+            return (), ""
+        res = self._session.results.get(doc_id, int(channel), str(module_id))
+        if res is None or not isinstance(res.payload, EventSet):
+            return (), ""
+        stale = self._staleness(res, on_screen=res is self._stored_detection())
+        return ((), "") if stale is None else (stale.columns, stale.text)
+
+    def _stale_inputs_text(self, res: AnalysisResult | None = None) -> str:
+        """The amber line's Details list: every input the table on screen was made with, each
+        judged on its own (:func:`~nanoscope.analysis.lineage.judge_inputs`), as made → now,
+        with the action that repairs it. ``""`` when there is no table to list.
+
+        The live side is the one the line itself judges: the recording's rate, the channel's
+        calibration, the Detection form's chain and thresholds (the chain notice's form), and
+        the estimator a fresh run would stamp here, from :meth:`_live_baseline_stamp` -- the
+        one place that stamp is computed, dormant windows under an unchanged reference
+        included. Where :meth:`_baseline_staleness` calls the estimator current (that rule,
+        an imported study table's fixed baseline), the list says the same, so the line and
+        the list under it cannot disagree.
+
+        The actions are the line's own buttons, by kind of table: a Manual table is rebuilt,
+        a reconciled one is refreshed from its sources, and a changed open-pore reference
+        means a fresh detection. A rate the recording no longer knows is declared first: a
+        bare Re-run has no clock to run on.
+        """
+        if res is None:
+            res = self._stored_detection()
+        if (res is None or self._sel is None or not isinstance(res.payload, EventSet)
+                or not self._session.has_document(res.doc_id)):
+            return ""
+        rate = self._session.document(res.doc_id).meta.sample_rate_hz
+        resolved = self._live_baseline_for_run()
+        if resolved is None:
+            estimator = None
+        elif self._baseline_staleness(res) is None:
+            estimator = res.baseline_fingerprint or None
+        else:
+            cfg, _token, _form, fs, _n = resolved
+            estimator = self._live_baseline_stamp(res, cfg, fs)
+        form = self._detection.params()
+        verdicts = judge_inputs(made_with(res), LiveInputs(
+            rate_hz=rate,
+            calibration=tuple(
+                self._session.calibration(res.doc_id, int(res.channel)).fingerprint()),
+            baseline_fingerprint=estimator, chain=form, thresholds=form), fs=rate)
+
+        manual = res.module_id == MANUAL_MODULE_ID
+        reconciled = res.module_id == CONSENSUS_MODULE_ID
+        reference_changed = not (manual or reconciled) and self._reference_redetection_needed(res)
+        if manual:
+            rerun = remeasure = "Rebuild"
+        elif reconciled:
+            rerun = remeasure = "Refresh sources first"
+        else:
+            rerun, remeasure = "Re-run", "Re-measure depths"
+        actions = {
+            "rate": rerun if rate else (
+                "Declare the rate (Inspector ▸ File Info ▸ Sample rate / time unit…), then "
+                + rerun),
+            "calibration": "Run detection" if reference_changed else rerun,
+            "baseline": "Run detection" if reference_changed else remeasure,
+            "chain": "Revert, or re-run to apply",
+            "thresholds": "Revert, or re-run to apply",
+        }
+        lines = ["Inputs, as made → now:"]
+        for v in verdicts:
+            title = _INPUT_TITLES[v.name]
+            if v.action:
+                was, now = v.was, v.now
+                if v.name == "baseline" and resolved is not None:
+                    # The stamps are digests; say which estimators they are, as the line's
+                    # sentence does -- the live one resolved at this rate, as the stored one
+                    # was, so a decimation reads as what a run here would use -- and keep
+                    # the digests only where the words agree.
+                    was = describe_stored_baseline(res.payload.provenance)
+                    now = resolved[0].resolve(resolved[3]).describe()
+                    if was == now:
+                        was, now = f"{was} ({v.was})", f"{now} ({v.now})"
+                lines.append(f"• {title}: {was} → {now} — {actions[v.name]}")
+            elif v.state == "same":
+                lines.append(f"• {title}: {v.was} — unchanged"
+                             if v.name in ("rate", "calibration") else f"• {title}: unchanged")
             else:
-                verdict = None
-            self._stale.show_message(
-                reason + (" Refresh the source detector results, then reconcile again."
-                          if reconciled else ""),
-                kind=_STALE_BASELINE,
-                action_label=("Refresh sources first"
-                              if reconciled else "Run detection"
-                              if reference_changed else "Re-measure depths"),
-                summary=verdict)
-            self._sync_stale_action(res)
-            self._table.set_stale_columns(REMEASURED_COLUMNS)
-            return
-        self._stale.setVisible(False)
-        self._table.set_stale_columns(())
+                lines.append(f"• {v.sentence}")
+        return "\n".join(lines)
 
     def _sample_rate_staleness(self, res: AnalysisResult) -> str | None:
         """The THIRD stamp, read where the detectors already wrote it: the ``fs`` in the
@@ -7481,11 +8198,15 @@ class AnalysisPanel(QtWidgets.QWidget):
         and this is also THE QUESTION THE EDITING DOORS ASK (:meth:`_stale_edit_refusal`):
         what the amber line says is stale is what hand-add, the merges and the re-measure
         entry points refuse to write into, so no door can edit where the line is up or
-        refuse where it offers no Re-run (S8-DATA1)."""
-        if self._sel is None or not isinstance(res.payload, EventSet):
+        refuse where it offers no Re-run (S8-DATA1).
+
+        Asked of the table's OWN recording, as :meth:`_calibration_moved` is, so the Plots
+        window can ask it of a table that is not on screen; for the table on screen that is
+        the selected recording, as it always was."""
+        if not isinstance(res.payload, EventSet) or not self._session.has_document(res.doc_id):
             return None
         return stale_rate_reason(
-            res.payload.provenance, self._session.document(self._sel[0]).meta.sample_rate_hz)
+            res.payload.provenance, self._session.document(res.doc_id).meta.sample_rate_hz)
 
     def _calibration_moved(self, res: AnalysisResult) -> bool:
         """Whether ``res`` was measured under another calibration than its channel has now: the
@@ -7587,7 +8308,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         if resolved is None:
             return None
         cfg, token, live, fs, n = resolved
-        want = cfg.fingerprint(fs)
+        want = self._live_baseline_stamp(res, cfg, fs)
         have = res.baseline_fingerprint
         if have == want:
             return None
@@ -7615,6 +8336,35 @@ class AnalysisPanel(QtWidgets.QWidget):
             f"The open-pore estimator changed since this detection ran: these events "
             f"were measured with {old}, and {now} is configured now. "
             "Depth, frac_depth, ECD, mean/max deviation and SNR are stale.")
+
+    @staticmethod
+    def _live_baseline_stamp(res: AnalysisResult, cfg: Any, fs: float) -> str:
+        """The estimator stamp ``res``'s rows are judged against: what a fresh run here would
+        stamp them with, ``cfg`` being the live config a run would resolve
+        (:meth:`_live_baseline_for_run`). THE one place the live side of the comparison is
+        computed.
+
+        UNDER A USER-PROVIDED OPEN-PORE REFERENCE THE ESTIMATOR'S WINDOWS ARE DORMANT —
+        "retained, not applied" (``BaselineConfig``) — yet the fingerprint still hashes
+        them, and must: a stored reference table records the windows it carried, and without
+        them every such table would read stale. So when the table was measured under the
+        SAME reference the form holds now, the live side takes the table's own dormant
+        fields and only the reference and the rate are judged. Measured before this: Back to
+        default under a constant reference moved only those windows, and the table read "The
+        open-pore estimator changed since this detection ran", naming the one reference as
+        both the old estimator and the new, over a Re-measure that changed no number. A
+        CHANGED reference is not this rule's: it needs a fresh detection
+        (``reference_change_requires_detection``), and is judged there."""
+        from ..analysis.baseline import BaselineConfig
+
+        if cfg.open_pore_reference is not None and isinstance(res.payload, EventSet):
+            try:
+                old = BaselineConfig.reproducible_from(res.payload.provenance)
+                if old is not None and old.open_pore_reference == cfg.open_pore_reference:
+                    cfg = cfg.replace(**{f: getattr(old, f) for f in BaselineConfig._FIELDS})
+            except (TypeError, ValueError):
+                pass          # an unrebuildable recipe is judged as it stands, never as same
+        return cfg.fingerprint(fs)
 
     def _live_baseline_for_run(self):
         """The estimator a fresh run WOULD use on the selected recording, or ``None``:
@@ -7689,10 +8439,13 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
         channel = self._sel[1]
         fs = self._session.document(doc_id).meta.sample_rate_hz
-        self._detection.set_recording(fs)
-        rate_and_length = self._active_rate_and_length()
-        duration = (rate_and_length[1] / rate_and_length[0]) if rate_and_length else None
-        self._baseline.set_recording(fs, (doc_id, channel), duration_s=duration)
+        # A clamp to the new Nyquist is the app's write, not the user's edit.
+        with self._writing_form():
+            self._detection.set_recording(fs)
+            self._say_clamp()      # final here: nothing re-seeds the form after a re-declaration
+            rate_and_length = self._active_rate_and_length()
+            duration = (rate_and_length[1] / rate_and_length[0]) if rate_and_length else None
+            self._baseline.set_recording(fs, (doc_id, channel), duration_s=duration)
         runnable, reason = self._regate()
         self._baseline.set_gate(runnable, reason)
         res = self._stored_detection()
@@ -7891,10 +8644,13 @@ class AnalysisPanel(QtWidgets.QWidget):
         if entry is None:
             return
         proposal, health = entry
-        self._baseline.set_proposal(proposal)
-        self._baseline.set_health(health, measured_for="proposal")
-        self._baseline.apply_proposal(override=True)
-        self._baseline.set_proposal(None)
+        # The replay confirms through the form's own door, which a hand confirmation uses
+        # too: under the writing guard it is the app's write, not an edit to keep.
+        with self._writing_form():
+            self._baseline.set_proposal(proposal)
+            self._baseline.set_health(health, measured_for="proposal")
+            self._baseline.apply_proposal(override=True)
+            self._baseline.set_proposal(None)
         if not self._baseline.accepted_condemned():
             # The replay did not re-raise it (a proposal whose health no longer condemns
             # it cannot be "accepted over" anything). Forget it rather than leave a memory
@@ -7909,7 +8665,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         # ...and the standing baseline mark with them, for the same reason: it names the
         # windows of ONE load, and a kept entry would re-raise "ACCEPTED OVER 2 FAILED
         # HEALTH CHECKS" over a re-opened file whose user has been refused nothing.
-        for store in (self._recovery, self._fdr, self._baseline_marks, self._chosen_table):
+        # ...and the drafts of its tables: they name this load, which no table will show
+        # again, and a project saved later must not carry them.
+        for store in (self._recovery, self._fdr, self._baseline_marks, self._chosen_table,
+                      self._form_drafts):
             for key in [k for k in store if k[0] == doc_id]:
                 del store[key]
         # ...and the hand-made-event machinery keyed on this load: the table choice (above), the
@@ -8020,6 +8779,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._schedule_chain_judge()
 
     def _show_empty(self) -> None:
+        # The form leaves before the two resets below move it (a closed recording's form
+        # keeps no draft: `_leave_form`), and arrives as no form at all.
+        old = self._form_shown
+        self._leave_form(old, None)
         self._baseline_view_timer.stop()
         self._baseline_conditioned_cache = None
         self._clear_overlays()
@@ -8040,24 +8803,30 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._sync_surrogate_readouts()   # no target -> no FDR, no efficiency
         self._title.setText("No channel selected")
         self._detection.set_runnable(False, "Select a CURRENT channel to run detection.")
-        self._detection.set_recording(None)
-        # Same message as the detector's, because it is the same first blocker: a
-        # proposal and a health block both belong to a recording, and with none
-        # selected there is nothing they could be about.
-        #
-        # `_NOTHING_SELECTED` rather than the ``None`` this used to pass: ``None`` means
-        # "do not judge" to `BaselinePanel.set_recording`, so it dropped the proposal and
-        # the health block but left the WINDOWS, the source line and the standing
-        # ACCEPTED-OVER mark exactly as the closed recording had them — the panel went on
-        # saying "These values: measured on this recording, and confirmed — ACCEPTED OVER
-        # 2 FAILED HEALTH CHECKS … see Baseline health below" under the title "No channel
-        # selected", pointing at a health block this method had just emptied. Naming the
-        # empty selection as a target is the same repoint every other readout here gets.
-        self._clear_baseline_notice()
-        self._baseline.set_recording(None, _NOTHING_SELECTED)
-        self._baseline.set_gate(False, "Select a CURRENT channel to measure its baseline.")
+        with self._writing_form():
+            self._detection.set_recording(None)
+            # Same message as the detector's, because it is the same first blocker: a
+            # proposal and a health block both belong to a recording, and with none
+            # selected there is nothing they could be about.
+            #
+            # `_NOTHING_SELECTED` rather than the ``None`` this used to pass: ``None``
+            # means "do not judge" to `BaselinePanel.set_recording`, so it dropped the
+            # proposal and the health block but left the WINDOWS, the source line and the
+            # standing ACCEPTED-OVER mark exactly as the closed recording had them — the
+            # panel went on saying "These values: measured on this recording, and
+            # confirmed — ACCEPTED OVER 2 FAILED HEALTH CHECKS … see Baseline health
+            # below" under the title "No channel selected", pointing at a health block this
+            # method had just emptied. Naming the empty selection as a target is the same
+            # repoint every other readout here gets.
+            self._clear_baseline_notice()
+            self._baseline.set_recording(None, _NOTHING_SELECTED)
+            self._baseline.set_gate(False, "Select a CURRENT channel to measure its baseline.")
         self._sync_baseline_workspace()
         self._clear_results()
+        self._form_shown = None
+        self._form_dirty = False
+        self._form_seed = None
+        self._arrive_form(old)
 
 
     # -- the signal chain: judge, protocols, Copy as Python -----------------------------------
@@ -8088,16 +8857,29 @@ class AnalysisPanel(QtWidgets.QWidget):
             status = ChainStatus.unknown()
         self._apply_chain_status(status)
 
-    def _compute_chain_status(self) -> ChainStatus:
+    def _judged_run(self) -> tuple[str, dict[str, Any] | None, float | None] | None:
+        """What the chain judge compares the form with: the module of the detection on
+        screen, the params it ran with (None for a table this chain did not make, ``{}``
+        when nothing was recorded) and the recording's rate. None when nothing is shown.
+
+        One reader for the judge and for a stage's Revert, so the Signal Conditioning
+        window never offers a stage Revert that the notice beside it denies."""
         res = self._stored_detection()
         if res is None or not isinstance(res.payload, EventSet):
-            return ChainStatus.none()
+            return None
         module_id = str(res.module_id)
         run = (schmitt_params_from_result(res)
                if module_id in (_MODULE_ID, _CUSUM_MODULE_ID) else None)
         fs = None
         if self._sel is not None and self._session.has_document(self._sel[0]):
             fs = self._session.document(self._sel[0]).meta.sample_rate_hz
+        return module_id, run, fs
+
+    def _compute_chain_status(self) -> ChainStatus:
+        judged = self._judged_run()
+        if judged is None:
+            return ChainStatus.none()
+        module_id, run, fs = judged
         return judge_chain(self._detection.params(), run, module_id=module_id,
                            detector_label=detector_name(module_id), fs=fs)
 
@@ -8106,9 +8888,15 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._chain_status = status
         differs = status.kind == "differs"
         self._detection.set_chain_status(status.sentence, differs)
-        self._table.set_notice("⚠ Chain changed" if differs else "",
-                               status.sentence if differs else "")
-        if (previous.kind, previous.sentence) != (status.kind, status.sentence):
+        # "Settings" once a threshold differs: the difference is no longer the chain's alone,
+        # and Revert puts the thresholds back too (design 7.2).
+        notice = "⚠ Settings changed" if status.thresholds_differ else "⚠ Chain changed"
+        self._table.set_notice(notice if differs else "", status.sentence if differs else "")
+        self._table.set_notice_revert(settings=status.thresholds_differ,
+                                      enabled=bool(status.revert_params))
+        # Every field, not the sentence alone: the sentence names three differences, so a
+        # fourth could change under it, and the window's stage marks follow every one.
+        if previous != status:
             self.conditioningStateChanged.emit()
 
     def chain_status(self) -> ChainStatus:
@@ -8122,15 +8910,116 @@ class AnalysisPanel(QtWidgets.QWidget):
         return self._chain_status
 
     def revert_chain_to_shown_detection(self) -> bool:
-        """Put the shown detection's chain back on the form. False when there is none."""
+        """Put back on the form what differs from the run of the detection on screen, as
+        one named step: the stages that differ and, for a Schmitt/CUSUM run, the thresholds
+        it recorded. Nothing else is written. This used to rewrite all 37 chain keys and
+        fill the ones the run never recorded with defaults (defect 7).
+
+        False, with nothing written, when nothing differs. When the run did not record a
+        setting that differs, Revert cannot put the form back (``revert_params`` is None),
+        so the judge's sentence, which says so and offers a run, goes to the status line:
+        the chip menu and the window disable their Revert then, but a click that does
+        nothing must still say why.
+        """
         status = self.refresh_chain_status()
-        if status.kind != "differs" or not status.revert_params:
+        if status.kind != "differs":
             return False
+        if not status.revert_params:
+            self.statusMessage.emit(status.sentence)
+            return False
+        what = "settings" if status.thresholds_differ else "chain"
         self._detection.set_params(status.revert_params)
         self.refresh_chain_status()
+        self.formStepNamed.emit(f"Revert {what} to {status.detector_label}'s run")
         self.statusMessage.emit(
-            f"Form reverted to the chain the {status.detector_label} detection on screen "
+            f"Form reverted to the {what} the {status.detector_label} detection on screen "
             f"ran with.")
+        return True
+
+    # -- one stage at a time: Revert and Reset (design §6) ----------------------------------
+    def _stage_inputs(self) -> tuple[dict[str, Any], dict[str, Any], float | None, str] | None:
+        """``(form, run, fs, detector label)`` for a stage's Revert, or None when there is
+        no recorded run to put a stage back to: no detection shown, a table this chain did
+        not make, or a run that recorded nothing (the judge's "unknown")."""
+        # As in the judge: a legacy provenance that will not project must never break a
+        # slot, nor the window push that asks this with every verdict.
+        try:
+            judged = self._judged_run()
+        except Exception:  # noqa: BLE001
+            return None
+        if judged is None or not judged[1]:
+            return None
+        module_id, run, fs = judged
+        return self._detection.params(), run, fs, detector_name(module_id)
+
+    def stages_that_differ(self) -> frozenset[str]:
+        """The stages whose settings differ from the run of the detection on screen: the
+        rows the Signal Conditioning window marks. Empty when nothing is compared."""
+        inputs = self._stage_inputs()
+        if inputs is None:
+            return frozenset()
+        form, run, fs, _label = inputs
+        return stages_that_differ(form, run, fs=fs)
+
+    def _stage_revert(self, key: str) -> tuple[dict[str, Any] | None, str]:
+        """``(what stage key's Revert writes, the status line that says so)``, or
+        ``(None, why it may not)``: there is no recorded run to put the stage back to, the
+        stage does not differ, or it differs on a setting the run never recorded, which a
+        Revert would leave differing (``revert_params`` None). ``key`` is a stage key."""
+        title = STAGE_TITLES[key]
+        inputs = self._stage_inputs()
+        if inputs is None:
+            return None, (f"Nothing to revert the {title} stage to: no Schmitt/CUSUM "
+                          f"detection on screen recorded the chain it ran with.")
+        form, run, fs, label = inputs
+        if key not in stages_that_differ(form, run, fs=fs):
+            return None, (f"The {title} stage already holds the settings the {label} "
+                          f"detection on screen ran with.")
+        params = revert_params(form, run, stages=key, fs=fs)
+        if params is None:
+            return None, (f"The {title} stage differs on a setting the {label} run did not "
+                          f"record, so Revert cannot put it back. Run detection to apply it.")
+        return params, (f"{title} stage reverted to the settings the {label} detection on "
+                        f"screen ran with.")
+
+    def can_revert_stage(self, key: str) -> bool:
+        """Whether stage ``key`` differs from the run AND its Revert can put it back."""
+        return key in STAGE_KEYS and self._stage_revert(key)[0] is not None
+
+    def revert_stage(self, key: str) -> bool:
+        """Put the run's settings back on stage ``key`` alone, as one named step. The other
+        stages and the thresholds stay as they are. False, with the reason on the status
+        line, when it cannot (see :meth:`can_revert_stage`)."""
+        if key not in STAGE_KEYS:
+            return False
+        params, sentence = self._stage_revert(key)
+        if params is not None:
+            self._detection.set_params(params)
+            self.refresh_chain_status()
+            self.formStepNamed.emit(f"Revert {STAGE_TITLES[key]} stage")
+        self.statusMessage.emit(sentence)
+        return params is not None
+
+    def reset_stage(self, key: str) -> bool:
+        """Put stage ``key``'s default settings (``CHAIN_DEFAULTS``) on the form, as one
+        named step. Its on/off stays as it is: a running stage keeps running, and the
+        low-pass, whose on/off is its cutoff, keeps its cutoff. False, with nothing
+        written, when the stage already holds its defaults."""
+        title = STAGE_TITLES.get(key)
+        if title is None:
+            return False
+        defaults = reset_stage_params(key)
+        form = self._detection.params()
+        if recipes_equal(form, {**form, **defaults}):
+            self.statusMessage.emit(f"The {title} stage already holds its default settings.")
+            return False
+        self._detection.set_params(defaults)
+        self.refresh_chain_status()
+        self.formStepNamed.emit(f"Reset {title} stage")
+        switch = STAGE_ENABLE_KEY[key]
+        kept = ("its cutoff is unchanged" if switch is None
+                else f"it is still {'on' if form.get(switch) else 'off'}")
+        self.statusMessage.emit(f"{title} stage reset to its default settings; {kept}.")
         return True
 
     def _on_chain_notice_action(self, key: str) -> None:

@@ -709,12 +709,15 @@ def test_a_confirmed_configuration_does_not_follow_the_user_to_another_recording
     assert float(bp.rough_s.value()) == DEFAULT_BASELINE.rough_s
     assert float(bp.base_s.value()) == DEFAULT_BASELINE.base_s
 
-    # ...and going back is a new target too, so it does not resurrect the old value:
-    # a confirmation is per-visit, and the app says so in the source badge rather
-    # than remembering something the user cannot see.
+    # ...and going back to the first file brings ITS values back, because they are an edit
+    # that stays with its table (design 5.2, the owner's decision 4), not a confirmation that
+    # follows the user around. They return as the user's own, which the source badge says:
+    # not as a measurement of the file, and not as the defaults they replaced.
     win._on_selection(doc_id, 0)
     QtWidgets.QApplication.processEvents()
-    assert bp.param_source() == "default"
+    assert bp.param_source() == "user"
+    assert float(bp.rough_s.value()) == 2.0
+    assert float(bp.base_s.value()) == 0.5
 
 
 def test_every_baseline_job_says_it_finished(qapp, qtbot, tmp_path, monkeypatch):

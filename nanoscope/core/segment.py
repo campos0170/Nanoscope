@@ -186,7 +186,9 @@ class SegmentDocument(TraceDocument):
     full in-memory document.
 
     It IS a :class:`TraceDocument` (same frozen value-object contract: float32,
-    contiguous, one array per channel), so every per-recording path runs on it unchanged.
+    contiguous, read-only, one array per channel — the inherited ``__post_init__`` sets the
+    flag on its copies exactly as on a file's), so every per-recording path runs on it
+    unchanged.
     The extra ``origin`` stamp makes it identifiable as a segment and traceable to its
     parent, and drives project persistence.
 

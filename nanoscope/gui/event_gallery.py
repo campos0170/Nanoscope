@@ -88,6 +88,7 @@ from ..core.session import Session
 from ..plot.style import LEVEL_INK
 from .categorical import NOISE_HEX, category_colour
 from .curation_keys import CurationKeyGuard
+from .key_sequences import redo_sequences
 
 __all__ = ["TRACE_CALIBRATED", "TRACE_DETRENDED", "EventGalleryWindow"]
 
@@ -1506,6 +1507,7 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         selected_event_ids() -> list[int]
         select_all_shown() / clear_selection() / select_inverse()   # the batch gestures
         set_undo_state(enabled, label="")        # MainWindow's Edit ▸ Undo, mirrored here
+        set_redo_state(enabled, label="")        # ...and its Edit ▸ Redo
         set_accepted_selected(bool)              # curate every selected tile
         accept_all() / reject_all()              # curate the whole CURRENT SUBSET
         reflect_acceptance(event_id, accepted)   # inbound mirror; never re-emits
@@ -1553,6 +1555,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
     # back the other way), so the gesture reaches the one stack from the window the batch
     # gesture happened in.
     undoRequested = Signal()
+    # ...and "redo that", the same intent for Edit ▸ Redo (this window's Redo button and
+    # ⇧⌘Z): an undo taken here had no way forward again from here.
+    redoRequested = Signal()
     # The user ticked/unticked "Advance after decision"; MainWindow mirrors it on the inspector.
     advanceAfterDecisionChanged = Signal(bool)
     # Project saving is intent only: MainWindow owns the path, dirty flag, validation and
@@ -1655,6 +1660,10 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         #: affordance starts disabled and never re-derives itself downwards.
         self._undo_enabled = False
         self._undo_label = ""
+        #: ...and Edit ▸ Redo's, which this window never guesses: its own writes END a redo
+        #: branch rather than start one, so only :meth:`set_redo_state` moves it.
+        self._redo_enabled = False
+        self._redo_label = ""
         #: The selection size the status line currently prints, so a selection signal that
         #: does not move the number does not rebuild the line. See _on_selection_changed.
         self._shown_sel_count = 0
@@ -2007,6 +2016,10 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self.undo_btn.setEnabled(False)
         self.undo_btn.clicked.connect(lambda _=False: self._request_undo())
         foot.addWidget(self.undo_btn)
+        self.redo_btn = QtWidgets.QPushButton("Redo")
+        self.redo_btn.setEnabled(False)
+        self.redo_btn.clicked.connect(lambda _=False: self.redoRequested.emit())
+        foot.addWidget(self.redo_btn)
         self.accept_all_btn = QtWidgets.QPushButton("Accept all shown")
         self.accept_all_btn.setToolTip(_ACCEPT_ALL_TIP)
         self.accept_all_btn.clicked.connect(self.accept_all)
@@ -2030,6 +2043,14 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self.act_undo.setEnabled(False)
         self.act_undo.triggered.connect(lambda _=False: self._request_undo())
         self.addAction(self.act_undo)
+        # ⇧⌘Z (and Ctrl+Y where that is the platform's Redo), each resolved key once: on a
+        # Mac the standard Redo IS ⇧⌘Z, and one key registered twice fires nothing.
+        self.act_redo = QtGui.QAction("Redo", self)
+        self.act_redo.setShortcuts(redo_sequences())
+        self.act_redo.setShortcutContext(Qt.WindowShortcut)
+        self.act_redo.setEnabled(False)
+        self.act_redo.triggered.connect(lambda _=False: self.redoRequested.emit())
+        self.addAction(self.act_redo)
         self._sync_undo_affordance()
 
         # THIS WINDOW'S KEYS ARE RESOLVED AGAINST THIS WINDOW'S OWN WIDGETS, NOT AGAINST
@@ -4196,8 +4217,18 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         self._undo_label = str(label or "")
         self._sync_undo_affordance()
 
+    def set_redo_state(self, enabled: bool, label: str = "") -> None:
+        """MainWindow's Edit ▸ Redo, mirrored onto this window's Redo button and ⇧⌘Z
+        (``label`` is that action's own text, e.g. "Redo Curate 45 events"). The state is
+        only ever pushed: unlike Undo there is no lower bound this window could prove, since
+        its own curation ends a redo branch rather than starting one."""
+        self._redo_enabled = bool(enabled)
+        self._redo_label = str(label or "")
+        self._sync_undo_affordance()
+
     def _sync_undo_affordance(self) -> None:
-        """One writer for the Undo button and the ⌘Z action: both read :attr:`_undo_enabled`.
+        """One writer for the Undo button and the ⌘Z action: both read :attr:`_undo_enabled`
+        (and the Redo pair :attr:`_redo_enabled`).
 
         The KEY is gated with the button on purpose. A shortcut that fires into a disabled
         stack is the defect this window already had -- ⌘Z did nothing here and said nothing --
@@ -4217,6 +4248,15 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
             if self._undo_enabled else
             "Nothing to undo yet. Curate some tiles and this walks the last step back.")
         self.act_undo.setEnabled(self._undo_enabled)
+        # Redo, by the same rules: gated with its key, and its text never changes.
+        seq = self.act_redo.shortcut().toString(QtGui.QKeySequence.SequenceFormat.NativeText)
+        self.redo_btn.setEnabled(self._redo_enabled)
+        self.redo_btn.setToolTip(
+            f"{self._redo_label or 'Redo'} ({seq}). The same step as the main window's "
+            f"Edit ▸ Redo, without leaving the gallery."
+            if self._redo_enabled else
+            "Nothing to redo. An undo taken here (or in the main window) can be redone here.")
+        self.act_redo.setEnabled(self._redo_enabled)
 
     def set_stale_columns(self, columns: tuple[str, ...] = (), note: str = "") -> None:
         """Mark ``columns`` as measured by a superseded estimator (clear with ``()``).
@@ -4415,8 +4455,9 @@ class EventGalleryWindow(QtWidgets.QMainWindow):
         for act in self.actions():
             if not act.isEnabled():
                 continue
-            shortcut = act.shortcut()
-            if not shortcut.isEmpty() and shortcut == seq:
+            # EVERY key the action holds, not only its first: Redo is Ctrl+Y and ⇧⌘Z where
+            # the platform's standard Redo is not ⇧⌘Z.
+            if any(not key.isEmpty() and key == seq for key in act.shortcuts()):
                 if event.isAutoRepeat() and not act.autoRepeat():
                     return True              # a held decision key: consumed, not repeated
                 act.trigger()

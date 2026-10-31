@@ -15,10 +15,11 @@ Design rules honoured here (see ``gui/main_window.py`` for the wiring contract):
 * This module imports ONLY core/analysis value types — never a GUI panel, never Qt at
   runtime. ``Session`` is referenced for typing only (guarded by ``TYPE_CHECKING``), so
   importing this module does not pull in PySide6.
-* The legacy "calibrated" state ID REUSES the model's user-set-vs-default notion — the exact
-  test ``core.calibration.save_sidecar`` uses to decide whether a channel differs from
-  ``CalibrationSet.default_for(info)``. The chip and the sidecar can therefore never
-  disagree about whether settings changed. It is not a scientific verification flag.
+* The legacy "calibrated" state ID REUSES the model's user-set-vs-default notion — the
+  test ``core.calibration.save_sidecar`` uses to decide whether a channel's conversion
+  differs from the default it opened with (``Session.opened_default``). The chip and the
+  sidecar can therefore never disagree about whether settings changed. It is not a
+  scientific verification flag.
 * Detection is read through the ``ResultStore`` (``session.results``), the same access the
   analysis panel uses — this never reimplements detection or touches the frozen 20-column
   EventSet schema.
@@ -53,7 +54,6 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from ..analysis.events import EventSet, REVIEW_COL, REVIEW_DONE, REVIEW_NONE, review_of
-from ..core.calibration import CalibrationSet
 from ..core.sources import DETECTION_MODULE_IDS
 from ..core.types import ChannelKind
 
@@ -271,13 +271,19 @@ def _no_current_reason(verb: str, note: str) -> str:
 
 
 def _is_user_calibrated(session: "Session", doc_id: str, info) -> bool:
-    """The authoritative "gain is user-set, not the default" test — byte-for-byte the notion
-    ``core.calibration.save_sidecar`` uses to decide a channel differs from its default: the
-    live calibration's (gain, offset) fingerprint OR its target units differ from
-    ``CalibrationSet.default_for(info)``. For a current channel the default is identity, so
-    this reports only whether conversion settings differ, not whether they are correct."""
+    """The authoritative "gain is user-set, not the default" test — the comparison
+    ``core.calibration.save_sidecar`` makes to decide a channel differs from its default: the
+    live calibration's (gain, offset) fingerprint OR its target units differ from the default
+    the channel OPENED with (``Session.opened_default``). The sidecar also counts a "Treat
+    this channel as" override, which says what the channel is, not how it converts, so it is
+    left out here. For a current channel the default is identity, so this reports only
+    whether conversion settings differ, not whether they are correct.
+
+    The OPENED default, not ``CalibrationSet.default_for(info)`` asked again: without the
+    channel's median that answer is gain 0.1 for every voltage-mV channel, so a host-guest
+    voltage channel that opened at 1.0 read as "gain settings entered" with nothing entered."""
     cal = session.calibration(doc_id, info.index)
-    default = CalibrationSet.default_for(info)
+    default = session.opened_default(doc_id, info.index)
     return not (cal.fingerprint() == default.fingerprint()
                 and cal.target_units == default.target_units)
 

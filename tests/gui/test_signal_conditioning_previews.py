@@ -836,5 +836,7 @@ def test_the_window_class_reaches_only_the_allowed_gui_seams():
     tree = ast.parse(inspect.getsource(mod))
     gui = {n.module for n in ast.walk(tree)
            if isinstance(n, ast.ImportFrom) and n.level == 1}
-    assert gui == {"axes", "trace_view", "worker_thread"}
+    # key_sequences: the one rule for the Undo/Redo keys the window forwards (design §3.7);
+    # a widgetless leaf that imports nothing from gui/ (test_measure_navigation proves it).
+    assert gui == {"axes", "key_sequences", "trace_view", "worker_thread"}
     assert SignalConditioningWindow.DEBOUNCE_MS == 250

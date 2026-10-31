@@ -264,7 +264,25 @@ def test_c24_a_genuinely_new_table_on_the_same_target_still_seeds_the_form(win, 
 
 
 def test_c24_selecting_another_recording_still_seeds_from_that_one(win, tmp_path):
-    """The guard must not disable seeding across a real target change."""
+    """The guard must not disable seeding across a real target change: a recording the user
+    left unedited is seeded from its own stored run when they come back to it, whatever the
+    recording in between put into the form."""
+    id_a, ch = _install(win, _doc(tmp_path / "a.dat", _trace()))
+    _detect_into(win, id_a, ch)
+    win._on_selection(id_a, ch)
+
+    id_b, _ = _install(win, _doc(tmp_path / "b.dat", _trace(seed=3)))
+    win._analysis_panel._detection.k_in.setValue(6.5)
+    win._on_selection(id_a, ch)            # back to A, whose stored run says 5.0
+
+    assert win._analysis_panel._detection.k_in.value() == 5.0
+
+
+def test_c24_selecting_another_recording_brings_back_the_edit_made_on_that_one(win, tmp_path):
+    """...and a recording the user DID edit comes back as they left it, not seeded over: an
+    edit nobody ran stays with its table (design 5.2, the owner's decision 4). It used to be
+    re-seeded from the stored run here, which threw the 7.0 away. B's own edit still does not
+    follow them to A."""
     id_a, ch = _install(win, _doc(tmp_path / "a.dat", _trace()))
     _detect_into(win, id_a, ch)
     win._on_selection(id_a, ch)
@@ -272,9 +290,9 @@ def test_c24_selecting_another_recording_still_seeds_from_that_one(win, tmp_path
 
     id_b, _ = _install(win, _doc(tmp_path / "b.dat", _trace(seed=3)))
     win._analysis_panel._detection.k_in.setValue(6.5)
-    win._on_selection(id_a, ch)            # back to A, whose stored run says 5.0
+    win._on_selection(id_a, ch)            # back to A, which holds its own 7.0
 
-    assert win._analysis_panel._detection.k_in.value() == 5.0
+    assert win._analysis_panel._detection.k_in.value() == 7.0
 
 
 # ================================================================================================

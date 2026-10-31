@@ -4,14 +4,28 @@ import os
 import struct
 import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..analysis.reconcile import CONSENSUS_CURATION_CONFLICT_COL, CONSENSUS_MODULE_ID
-from ..core.history import MAX_BYTES, MAX_DEPTH, EventHistory, MeasurementHistory
+from ..core.calibration import (
+    SIDECAR_KEPT,
+    SIDECAR_NONE,
+    SIDECAR_RECORDING_MOVED,
+    ChannelCalibration,
+    restore_sidecar,
+    sidecar_bytes,
+)
+from ..core.history import (
+    MAX_BYTES,
+    MAX_DEPTH,
+    EventHistory,
+    MeasurementHistory,
+    SettingsHistory,
+)
 from ..core.identity import same_source, source_of
 from ..core.layer import ColourRegistry, ViewMode
 from ..core.analysis_workspace import (
@@ -70,10 +84,11 @@ from .trace_keys import TraceKeyController
 from .analysis_catalog import ANALYSIS_LABELS, PAGE_HOME, PAGE_IDS
 from .analysis_worker import AnalysisController, BatchDetectController
 from ..core import clock
-from .calibration_panel import CalibrationPanel
+from .calibration_panel import CalibrationPanel, sidecar_outcome_text
 from .export_paths import ask_export_path
 from .file_dock import FileDock
 from .file_info_panel import FileInfoPanel
+from .key_sequences import redo_sequences, undo_sequences
 from .navigator import Navigator
 from .pan_scrollbar import PanScrollBar
 from .reconcile_dialog import ReconcileDialog, can_reconcile_sources
@@ -251,6 +266,9 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
                                    "undo in this application. Whatever that undo restores "
                                    "reaches every surface on the history's own signals; the "
                                    "request itself moves nothing",
+    "event_gallery.redoRequested": "⇧⌘Z / the Redo button INSIDE the gallery — the same "
+                                   "request for MainWindow's own Edit ▸ Redo; it moves "
+                                   "nothing itself",
     "event_inspector.undoRequested": "⌘Z INSIDE the Event inspector — a request to run "
                                      "MainWindow's own undo (_undo_events). Whatever that "
                                      "undo restores reaches every surface on the history's "
@@ -280,6 +298,38 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
                                     "Edit ▸ Undo/Redo (see _note_step); the TABLE change "
                                     "that caused it reaches the refresher through "
                                     "``changed``, which is wired above",
+    # -- the settings stack: bookkeeping only. A setting it writes back on an undo goes
+    #    through the session's own door, so the change reaches the surfaces on
+    #    ``calibrationChanged`` / ``sampleRateChanged`` (wired above) exactly as the edit
+    #    did; the acquisition override is metadata either way.
+    "settings_history.changed": "the settings steps moved (pushed, undone, redone, dropped) "
+                                "— Edit ▸ Undo/Redo's text; what an undo WROTE arrives on "
+                                "the session's own calibration or time-base signal",
+    "settings_history.stepRecorded": "a settings step landed — the journal entry that "
+                                     "decides what Ctrl+Z takes back first (see "
+                                     "_note_step); the setting itself moved on the "
+                                     "session's own signal",
+    "settings_history.stepsDepthDropped": "the 30-step ceiling dropped a settings step — a "
+                                          "status line; nothing drawn moves",
+    # -- the forms' history (design §3.2-3.6). A form holds the settings the NEXT run will
+    #    use; no surface window draws a setting. What a run measures with them lands on
+    #    ``resultsChanged``, and a switch of the table on screen arrives on the selection or
+    #    on ``resultSwitched``, which say so for themselves.
+    "analysis_panel.formEdited": "a hand edit of the Detection, ML or Baseline form — it "
+                                 "starts the pause before the edit becomes an undo step and "
+                                 "dirties the project (see _on_form_edited); no frame moved",
+    "analysis_panel.formWritten": "the app wrote a form itself (a seed from a stored run, a "
+                                  "draft, an undo) — the settings history adopts it without a "
+                                  "step (see _on_form_written); no frame moved",
+    "analysis_panel.formLeaving": "a table's form is about to leave the screen — its pending "
+                                  "edit becomes a step first (see _on_form_leaving); no frame "
+                                  "moved",
+    "analysis_panel.formArrived": "another table's form is on screen — the settings history "
+                                  "adopts it (see _on_form_arrived); the switch that brought "
+                                  "it reaches the surfaces on its own signal",
+    "analysis_panel.formStepNamed": "an action that knows its name changed the form ('Recall "
+                                    "protocol …', 'Reset baseline estimator') — one undo step "
+                                    "under that name (see _on_form_step_named); no frame moved",
     # -- status / chrome ----------------------------------------------------------------
     "analysis_panel.baselineJobStatus": "progress text for the baseline probe",
     "analysis_panel.runRefused": "the run gate declining a start — nothing ran, nothing moved",
@@ -350,6 +400,194 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
 #: journal in :meth:`MainWindow._note_step`.
 _UNDO_EVENTS = "events"
 _UNDO_MEASUREMENTS = "measurements"
+#: ...and the settings (``core/history.py``'s third sibling). A journal entry names what it
+#: is a step OF wherever there is more than one: ``(_UNDO_SETTINGS, scope)`` for a setting
+#: and ``(_UNDO_EVENTS, key)`` for an event table, while the one measurement table's entry
+#: stays the bare string. An event entry used to name no table, so the journal took a newer
+#: curation on ANOTHER recording for a step of the table on screen: on recording A, Ctrl+Z
+#: passed over A's newest step, a calibration, to re-accept an older event of A's (B1's
+#: review), where design §3.1 says the press takes back the newest step on screen.
+_UNDO_SETTINGS = "settings"
+#: ...and ONE PRESS FOR A RUN (design §3.6, the owner's decision 3). ``(_UNDO_RUN, scope, n)``
+#: is a step that installed a new run on the table ``scope[1:]`` together with the ``n``
+#: settings steps of that table's form that came right before it. Taking the old table back
+#: re-seeds the form from it, so those steps would otherwise be left pointing at a form that
+#: has already moved; they go in the same press, as one Ctrl+Z always restored table and
+#: form together. The ``scope`` is the form's ``("form", doc_id, channel, module_id)``, whose
+#: tail is the table's key: the entry names the table AND its form, and a press acts only
+#: while both are on screen. See :meth:`MainWindow._note_event_step`.
+_UNDO_RUN = "run"
+#: ...and where that fold must stop although no step says so: a table born on screen. A
+#: first detection is the table's baseline, not an undo step, so without this the settings
+#: that produced a table's FIRST run would join its second run's press. ``(_UNDO_BREAK,
+#: key)`` names the table born, so that closing its recording takes the break with the rest
+#: of the recording's entries. Nothing undoes it (:meth:`MainWindow._can_undo` is False for
+#: it); it only separates.
+_UNDO_BREAK = "break"
+#: The event steps that put a new run on a table — the ones §3.6's single press is for.
+_RUN_STEP_LABELS = frozenset({"Re-run detection", "Re-measure depths"})
+#: How long a form edit waits for the next one before it becomes a step of its own: the
+#: Plots window's pause (``plots_panel._HISTORY_COALESCE_MS``, design §3.2), spelled again
+#: here so that building the main window does not import the Plots window. A test holds
+#: the two together.
+_FORM_COALESCE_MS = 700
+
+
+def _setting_changes(n: int) -> str:
+    """The tail a run's press carries in its name: " and 2 setting changes"."""
+    return f" and {n} setting change{'s' if n != 1 else ''}" if n else ""
+
+
+#: ML form fields that are not settings of their own: the deviation list and its flag are
+#: DERIVED from the two configs, and the top-level enter/exit repeat the decode config's
+#: thresholds. Counting them would make one edit read as three.
+_ML_DERIVED_KEYS = frozenset({"ml_preprocess", "ml_decode", "ml_preset_customized",
+                              "ml_preset_deviations", "enter", "exit", "model_path"})
+#: The two ML fields whose key is not what the tab calls them.
+_ML_SETTING_WORDS = {"range_source": "analysed range", "ml_preset": "preset"}
+
+
+def _moved_form_settings(before: Mapping, after: Mapping) -> list[tuple[str, str]]:
+    """``(part, setting)`` for every SETTING that differs between two form states — what a
+    user would count as one change each: a box, a tick, a combo.
+
+    Read from the state's own parts (``AnalysisPanel.form_state``): every detection key but
+    the detector, which the table on screen decides; the Baseline form's two windows and its
+    reference, with the source and the accepted-over-health mark counted only when nothing
+    else of it moved (they follow an edit of the windows); every field of the two ML
+    configs and the ML keys that are not derived. The frequency boxes' remembered values
+    ("intents") shadow the frequencies themselves and are counted only when they alone
+    moved, which a value typed into a box already at its Nyquist ceiling does."""
+    def keys(a: Mapping, b: Mapping):
+        return dict.fromkeys([*a, *b])
+
+    def part(state: Mapping, name: str) -> Mapping:
+        value = state.get(name)
+        return value if isinstance(value, Mapping) else {}
+
+    moved: list[tuple[str, str]] = []
+    det_b, det_a = part(before, "detection"), part(after, "detection")
+    moved += [("detection", k) for k in keys(det_b, det_a)
+              if k != "detector" and det_b.get(k) != det_a.get(k)]
+    base_b, base_a = part(before, "baseline"), part(after, "baseline")
+    own = [("baseline", k) for k in ("rough_s", "base_s", "reference")
+           if base_b.get(k) != base_a.get(k)]
+    if not own and any(base_b.get(k) != base_a.get(k) for k in keys(base_b, base_a)):
+        own = [("baseline", "estimator")]
+    moved += own
+    ml_b, ml_a = part(before, "ml"), part(after, "ml")
+    for group in ("ml_preprocess", "ml_decode"):
+        g_b, g_a = part(ml_b, group), part(ml_a, group)
+        moved += [("ml", k) for k in keys(g_b, g_a) if k != "preset" and g_b.get(k) != g_a.get(k)]
+    moved += [("ml", k) for k in keys(ml_b, ml_a)
+              if k not in _ML_DERIVED_KEYS and ml_b.get(k) != ml_a.get(k)]
+    if not moved:
+        int_b, int_a = part(before, "intents"), part(after, "intents")
+        moved = [("intents", k) for k in keys(int_b, int_a) if int_b.get(k) != int_a.get(k)]
+    return moved
+
+
+def _with_stage_on(params: Mapping, stage: str) -> dict:
+    """``params`` with ``stage`` switched on, so a setting of a stage that is OFF can be worded
+    in that stage's own words ("notch Q 30 → 20") by the same diff that words it when on."""
+    from ..analysis import conditioning_recipes as cr
+
+    switch = cr.STAGE_ENABLE_KEY[stage]
+    if switch is not None:
+        return {**params, switch: True}
+    # The low-pass is on while it has a cutoff; one cutoff for both sides moves nothing.
+    return {**params, "filter_cutoff_hz": params.get("filter_cutoff_hz") or 1000.0}
+
+
+def _name_detection_change(key: str, before: Mapping, after: Mapping, *,
+                           fs: float | None, module_id: str | None) -> str:
+    """One detection setting's change in the words the chain notice uses for it, through the
+    same two diffs (``conditioning_recipes``), read before → after: "Change k_in 5 → 6",
+    "Change low-pass 10000 → 5000 Hz", "Turn on notch"."""
+    from ..analysis import conditioning_recipes as cr
+
+    for module in dict.fromkeys((module_id, *cr.THRESHOLD_KEYS_BY_MODULE)):
+        if key in cr.THRESHOLD_KEYS_BY_MODULE.get(module or "", ()):
+            diffs = cr.threshold_differences(after, before, module)
+            if diffs:
+                return f"Change {diffs[0].text}"
+            break
+    # chain_differences(form, run) words run → form, so the step's "after" is the form.
+    diffs = cr.chain_differences(after, before, fs=fs)
+    if not diffs:
+        stage = next((s for s, ks in cr.STAGE_PARAM_KEYS.items() if key in ks), None)
+        if stage is not None:
+            diffs = cr.chain_differences(_with_stage_on(after, stage),
+                                         _with_stage_on(before, stage), fs=fs)
+    if diffs:
+        diff = diffs[0]
+        if diff.key == "enabled":
+            on = " off → on" in diff.text
+            stage_words = diff.text.split(" off → on" if on else " on → off", 1)[0]
+            return f"Turn {'on' if on else 'off'} {stage_words}"
+        return f"Change {diff.text}"
+    return f"Change {key.replace('_', ' ')}"
+
+
+def _form_step_label(before: Mapping, after: Mapping, *, fs: float | None = None,
+                     module_id: str | None = None) -> str:
+    """The name of a form step nobody named (design §3.2): one change in its own words, more
+    than one by their number — "Change low-pass 10000 → 5000 Hz", "Turn on notch", "Change
+    k_in 5 → 6", "Change baseline rough window 0.5 → 2 s", "Change open-pore reference",
+    "Change ML enter threshold", "Change 4 settings". An action that knows its own name
+    ("Recall protocol ‘HG student’") names its step instead
+    (:meth:`MainWindow._on_form_step_named`)."""
+    moved = _moved_form_settings(before, after)
+    if len(moved) != 1:
+        return f"Change {len(moved)} settings" if moved else "Change settings"
+    part, key = moved[0]
+    if part == "detection":
+        return _name_detection_change(key, before["detection"], after["detection"],
+                                      fs=fs, module_id=module_id)
+    if part == "baseline":
+        if key in ("rough_s", "base_s"):
+            which = "rough" if key == "rough_s" else "base"
+            old, new = before["baseline"].get(key), after["baseline"].get(key)
+            if isinstance(old, (int, float)) and isinstance(new, (int, float)):
+                return f"Change baseline {which} window {old:g} → {new:g} s"
+            return f"Change baseline {which} window"
+        return ("Change open-pore reference" if key == "reference"
+                else "Change baseline estimator")
+    if part == "ml":
+        return f"Change ML {_ML_SETTING_WORDS.get(key, key.replace('_', ' '))}"
+    return "Change settings"
+
+
+
+@dataclass(frozen=True)
+class _CalibrationState:
+    """One channel's calibration as Edit ▸ Undo holds it (design §3.2), with what the commit
+    that produced it did to ``<datafile>.npcal.json``.
+
+    THE FILE TRAVELS WITH THE STEP; it is not re-derived on the way back. Written back through
+    Apply's door, an undo rebuilt the file from the calibration it returned to, by the payload
+    rule (only channels that differ from their opened default are stored): a note on a
+    channel at its default numbers went out of the user's own file, the file went when that
+    was its only entry, and after a project restore the file came back holding the project's
+    gain instead of its own -- none of it asked, all of it under "Undone: Apply calibration
+    · saved to …" (measured in B1's review). Design §5.4 promises the file "exactly as it
+    was before the step", and the owner's decision 6 (an undo rewrites the file without
+    asking) rests on that, so the step keeps the bytes it found and the bytes it left.
+
+    EQUAL BY THE CALIBRATION ALONE (``compare=False``, which ``SettingsHistory``'s comparison
+    honours). A step is a change of the calibration and the file rides along: compared too,
+    an Apply of the values already there -- a file move, no number changed -- would have been
+    a step that takes nothing back.
+
+    ``sidecar`` is ``(before, after)``, the file's bytes on each side of the commit (``None``
+    where there was no file); ``None`` when the commit wrote no file (a segment, a recording
+    that moved, a change made by anything but the Calibration panel); or the OS's words when
+    the file could not be read around it, which leaves it out of the undo's reach.
+    """
+
+    calibration: ChannelCalibration
+    sidecar: Any = field(default=None, compare=False)
+
 
 # The two extra answers to the "this recording has segments cut from it" close prompt (see
 # _confirm_close_with_segments); _CLOSE_CANCEL above is the third. Same plain-string discipline.
@@ -770,10 +1008,52 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: self._analysis_panel.measure_panel.measurements_df,
             lambda df: self._analysis_panel.measure_panel.set_measurements_df(df),
             self)
+        # ...and the analysis SETTINGS, one stack per scope: a channel's calibration, a
+        # recording's time base, a channel's acquisition-bandwidth override and each event
+        # table's Detection, ML and Baseline form (design §3.2-3.4). The class holds no
+        # schema; what each kind of scope reads, writes and is called lives here, in
+        # :attr:`_settings_kinds`.
+        self._settings_history = SettingsHistory(
+            self._read_settings, self._write_settings, self._describe_settings, self)
+        #: scope[0] -> ``(read, write, describe)``: the one table the three callables above
+        #: dispatch on. A kind missing from it reads ``None`` ("cannot be read now"), which
+        #: SettingsHistory never records.
+        self._settings_kinds = {
+            "calibration": (self._read_calibration, self._write_calibration,
+                            self._describe_calibration),
+            "time_base": (self._read_time_base, self._write_time_base,
+                          self._describe_time_base),
+            "acquisition": (self._read_acquisition, self._write_acquisition,
+                            self._describe_acquisition),
+            # ("form", doc_id, channel, module_id or None): the form of the event table on
+            # screen, keyed as Edit ▸ Undo keys the table (design §3.4).
+            "form": (self._read_form, self._write_form, self._describe_form),
+        }
+        #: The pause a form edit waits for the next one before it is committed as a step
+        #: of its own (design §3.2), so a burst of typing is one step, as in the Plots
+        #: window. See :meth:`_on_form_edited`.
+        self._form_pause = QtCore.QTimer(self)
+        self._form_pause.setSingleShot(True)
+        self._form_pause.setInterval(_FORM_COALESCE_MS)
+        self._form_pause.timeout.connect(lambda: self._checkpoint_form())
+        #: The name an action gave the step it is about to make ("Apply calibration"),
+        #: per scope, for that scope's next checkpoint. See
+        #: :meth:`_on_calibration_commit_starting`.
+        self._settings_labels: dict[tuple, str] = {}
+        #: Per calibration scope, the sidecar move (:class:`_CalibrationState`'s
+        #: ``sidecar``) of the commit that produced the calibration it holds NOW: what an
+        #: undo puts back, kept in step with every push, undo, redo and rebase of the scope.
+        self._sidecar_moves: dict[tuple, Any] = {}
+        #: The file as a Calibration-panel commit found it, per scope, from
+        #: ``commitStarting`` to that commit's own ``calibrationChanged``.
+        self._sidecar_found: dict[tuple, Any] = {}
         #: Which stack each undoable step landed on, oldest first — the only thing that
-        #: decides which one a plain Ctrl+Z acts on. See :meth:`_note_step`.
-        self._undo_journal: list[str] = []
-        self._redo_journal: list[str] = []
+        #: decides which one a plain Ctrl+Z acts on. See :meth:`_note_step`. An entry is
+        #: ``(_UNDO_EVENTS, key)``, :data:`_UNDO_MEASUREMENTS`, ``(_UNDO_SETTINGS, scope)``,
+        #: a run's press ``(_UNDO_RUN, form scope, n)`` or, only in the undo journal, a
+        #: ``(_UNDO_BREAK, key)`` that no press takes.
+        self._undo_journal: list[str | tuple] = []
+        self._redo_journal: list[str | tuple] = []
         self._controller = LoadController(self)
         self._analysis_controller = AnalysisController(self._session, self)
         # Batch detection runs on its OWN controller (never the panel's), so a
@@ -1308,9 +1588,10 @@ class MainWindow(QtWidgets.QMainWindow):
         act_quit.setShortcut(QtGui.QKeySequence.Quit)
         act_quit.triggered.connect(self.close)
 
-        # ``&Edit`` exists for exactly one thing: walking back an event-table mutation.
-        # Its two actions are the visible half of core/history.py — everything else in
-        # this application is either non-destructive or guarded by a confirmation.
+        # ``&Edit`` exists for exactly one thing: walking back a step — an event table, the
+        # measurement table or an analysis setting. Its two actions are the visible half of
+        # core/history.py — everything else in this application is either non-destructive
+        # or guarded by a confirmation.
         edit_menu = menubar.addMenu("&Edit")
         self._act_undo = edit_menu.addAction("Undo")
         # The STANDARD sequence (Cmd+Z on macOS, Ctrl+Z elsewhere), at the default
@@ -1318,12 +1599,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # and line edits: Qt sends a ShortcutOverride first and QLineEdit accepts it for
         # the editing keys, so typing Cmd+Z in a parameter field still undoes the typing
         # rather than rolling back the event table (verified).
-        self._act_undo.setShortcut(QtGui.QKeySequence.Undo)
+        self._act_undo.setShortcuts(undo_sequences())
         self._act_undo.setEnabled(False)
         self._act_undo.triggered.connect(self._undo_from_menu)
         self._act_redo = edit_menu.addAction("Redo")
-        self._act_redo.setShortcuts([QtGui.QKeySequence.Redo,
-                                     QtGui.QKeySequence("Ctrl+Shift+Z")])
+        # Each RESOLVED key once. Redo resolves to ⇧⌘Z on a Mac, so the standard key and
+        # "Ctrl+Shift+Z" registered side by side were one key twice, which Qt answers with
+        # "Ambiguous shortcut overload" and nothing: ⇧⌘Z did nothing here on the platform
+        # the app is used on, while every offscreen test (Redo is Ctrl+Y there) passed.
+        self._act_redo.setShortcuts(redo_sequences())
         self._act_redo.setEnabled(False)
         self._act_redo.triggered.connect(self._redo_events)
         # The menu text is the ONLY place this can explain itself: a disabled QAction
@@ -2353,7 +2637,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_panel._result_selector.currentIndexChanged.connect(self._sync_study_curation_bar)
         self._history.changed.connect(self._sync_undo_actions)
         self._history.stepRecorded.connect(self._on_step_recorded)
-        self._history.stepRecorded.connect(lambda *_: self._note_step(_UNDO_EVENTS))
+        # The entry names its TABLE (the key the push just set): see _UNDO_SETTINGS's note.
+        # A step that put a new run on it also takes the form steps that led there (§3.6).
+        self._history.stepRecorded.connect(lambda label, _summary: self._note_event_step(label))
         # An eviction is the one way a step leaves the stack that the user neither asked
         # for nor can see coming, so it is said out loud where every other loss is said.
         self._history.stepsEvicted.connect(self._on_steps_evicted)
@@ -2379,6 +2665,52 @@ class MainWindow(QtWidgets.QMainWindow):
         # Adopt the (empty) table as the starting point NOW, so the very first Add is a
         # step with somewhere to go back to rather than the silent baseline-setting one.
         self._checkpoint_measurements()
+
+        # The SETTINGS stack, off the same shape once more: the session announces each of
+        # the three settings it holds after it changes, the checkpoint is free when nothing
+        # moved, and the push journals itself. Its `changed` drives the menu text but NOT
+        # the dirty flag, unlike its siblings'. Every setting it holds already dirties the
+        # project through the session's own signal (wired above), and `changed` also fires
+        # when a closed recording takes its scopes with it — the "open two, close one" path
+        # that `_mark_dirty_for_document_set` exists to keep clean.
+        self._settings_history.changed.connect(self._sync_undo_actions)
+        self._settings_history.stepRecorded.connect(
+            lambda scope, _label: self._note_step((_UNDO_SETTINGS, scope)))
+        self._settings_history.stepsDepthDropped.connect(
+            lambda scope, total: self._on_steps_depth_dropped(scope[1], total))
+        self._session.calibrationChanged.connect(self._checkpoint_calibration)
+        self._session.sampleRateChanged.connect(
+            lambda doc_id: self._settings_history.checkpoint(("time_base", doc_id)))
+        self._session.acquisitionBandwidthChanged.connect(
+            lambda doc_id, ch: self._settings_history.checkpoint(
+                ("acquisition", doc_id, int(ch))))
+        self._calibration_panel.commitStarting.connect(self._on_calibration_commit_starting)
+        # A recording's settings are adopted the moment it OPENS. The session announces
+        # them only after a change, so a scope first seen on `calibrationChanged` would take
+        # the first Apply on a fresh recording as its baseline, and that Apply could never
+        # be undone.
+        self._session.documentOpened.connect(self._rebase_settings_of)
+        # ...and each event table's FORM, off the five signals the Analysis panel gives its
+        # forms (design §3.2-3.6). The panel says what happened: the user edited, the app
+        # wrote a form itself, a table's form is about to leave the screen or has arrived,
+        # an action named the change it made. What each means for the history is decided in
+        # the slots, in the order design §3.9 gives: commit the outgoing form, switch, adopt
+        # the incoming one.
+        self._analysis_panel.formEdited.connect(self._on_form_edited)
+        self._analysis_panel.formWritten.connect(self._on_form_written)
+        self._analysis_panel.formLeaving.connect(self._on_form_leaving)
+        self._analysis_panel.formArrived.connect(self._on_form_arrived)
+        self._analysis_panel.formStepNamed.connect(self._on_form_step_named)
+        # ...and a table born where the panel is not looking never reaches `formArrived`.
+        self._session.resultsChanged.connect(self._on_table_landed)
+        # "At once before a run" (design §3.2) holds for a re-measure and a batch too. Detect
+        # and Run ML commit everything through `willReplaceEvents` below; a re-measure and a
+        # batch announce their start only here, and a form edit still in its pause must be a
+        # step BEFORE their tables land, or the run and its settings could not be one press
+        # (§3.6), and the re-seed that follows would adopt the edit without a step at all.
+        self._analysis_panel.baselineJobStatus.connect(
+            lambda token, _message: self._checkpoint_form() if token == "started" else None)
+        self._batch_controller.started.connect(lambda *_: self._checkpoint_form())
 
         # Every announcement of an EventSet mutation, routed to the ONE recorder.
         # Redundancy is deliberate and free: a checkpoint that finds nothing changed
@@ -2406,6 +2738,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_panel.willReplaceEvents.connect(self._checkpoint_everything)
         # A closed recording's history can no longer be applied to anything.
         self._session.documentClosed.connect(self._history.drop_doc)
+        self._session.documentClosed.connect(self._settings_history.drop_doc)
+        self._session.documentClosed.connect(self._drop_journal_entries_of)
         # ...and neither can a closed recording's refusal record: its lineage is gone.
         self._session.documentClosed.connect(self._drop_refusals_for_doc)
         self._session.resultsChanged.connect(lambda *_: self._sync_undo_actions())
@@ -3992,6 +4326,10 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self, "Create segment", f"Could not create the segment:\n{exc}")
             return
+        # The segment inherited its parent's calibration and override AFTER it was announced
+        # (silently, by design: no sidecar, no signal), so what the open adopted is not what
+        # it holds. Adopt again, or the next checkpoint records the inheritance as an edit.
+        self._rebase_settings_of(seg_id)
         # Layer it like a freshly opened recording so its trace + detection overlays are viewable,
         # SHOW it (a segment you just cut is what you want on screen — same rule as an open),
         # then select it (which repoints every panel to the segment).
@@ -4775,9 +5113,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # happened to leave in the always-live panel".
             default = self._workspace_default_analysis
             if default is not None:
-                restore_analysis_workspace(
-                    AnalyticalWorkspace(artifacts=[default]),
-                    analysis_panel=self._analysis_panel)
+                with self._analysis_panel._writing_form():
+                    restore_analysis_workspace(
+                        AnalyticalWorkspace(artifacts=[default]),
+                        analysis_panel=self._analysis_panel)
         finally:
             self._workspace_installing = False
         self._sync_saved_subpop_action()
@@ -5997,6 +6336,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._plots_window is None:
             self._plots_window = PlotsWindow(self._session, self)
+            # The window marks a stale column by the Results panel's OWN judge of each table
+            # it draws (a re-declared rate on any of them, a changed estimator on the one on
+            # screen), not by a second copy of the rules that checked the calibration alone.
+            self._plots_window.set_staleness_provider(self._analysis_panel.table_staleness)
             self._plots_window.refreshRequested.connect(
                 lambda: self._replace_workspace_surface(
                     PLOTS_ARTIFACT_ID, self._refresh_plots))
@@ -7727,6 +8070,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda g=gal: g.set_undo_state(self._act_undo.isEnabled(),
                                                self._act_undo.text()))
             gal.set_undo_state(self._act_undo.isEnabled(), self._act_undo.text())
+            # ...and Redo beside it, through the same door and back the same way: an undo
+            # taken in the gallery had no way forward again from where it was taken.
+            gal.redoRequested.connect(self._act_redo.trigger)
+            self._act_redo.changed.connect(
+                lambda g=gal: g.set_redo_state(self._act_redo.isEnabled(),
+                                               self._act_redo.text()))
+            gal.set_redo_state(self._act_redo.isEnabled(), self._act_redo.text())
             gal.advanceAfterDecisionChanged.connect(self._mirror_advance_after_decision)
             self._wire_surface_refresh("event_gallery", gal)
             self._event_gallery = gal
@@ -7788,6 +8138,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ws.stageEnableRequested.connect(det.set_stage_enabled)
         det.stageShown.connect(ws.show_stage)
         ws.revertRequested.connect(lambda: ap.revert_chain_to_shown_detection())
+        # One stage at a time (design §6): the panel owns the form and the run it is
+        # compared with, so it decides what a stage's Revert or Reset writes.
+        ws.stageRevertRequested.connect(ap.revert_stage)
+        ws.stageResetRequested.connect(ap.reset_stage)
         ws.runDetectionRequested.connect(self._run_detection)
         ws.exportProtocolsRequested.connect(lambda: ap.export_protocols(ws))
         ws.importProtocolsRequested.connect(lambda: ap.import_protocols(ws))
@@ -7798,6 +8152,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ws.notchLinesRequested.connect(self._add_notch_lines_from_spectrum)
         ws.saveProjectRequested.connect(lambda w=ws: self._save_project_from(w, save_as=False))
         ws.saveProjectAsRequested.connect(lambda w=ws: self._save_project_from(w, save_as=True))
+        # ⌘Z / ⇧⌘Z in the window the chain is edited in reach the ONE undo, through the
+        # doors the inspector's keys use.
+        ws.undoRequested.connect(self._undo_events)
+        ws.redoRequested.connect(self._redo_events)
         self._signal_conditioning = ws
         # Listed in the Window menu; its own placement and geometry keys stay in charge.
         self._register_child_window(ws, "signal_conditioning")
@@ -7881,7 +8239,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ws.set_source_label(ap.conditioning_source_label())
         ws.set_source(ap.conditioning_source())
         self._push_conditioning_chain(force=True)
-        ws.set_chain_status(ap.refresh_chain_status())
+        ap.refresh_chain_status()
+        self._push_conditioning_status()
         self._sync_detection_action()        # the gate itself, not the action's last copy
         # A window kept for another recording/channel slices nothing on this one.
         key = ap.conditioning_source_key()
@@ -7939,9 +8298,16 @@ class MainWindow(QtWidgets.QMainWindow):
         ws.set_chain(det.params(), det.sample_rate(), det.lowpass_design_hz())
 
     def _push_conditioning_status(self) -> None:
+        """The verdict, and with it which stages differ from the run and which of those a
+        stage Revert can put back: one push, so the marks and the stage buttons never lag
+        the status row (a window built after the last verdict gets them on its first open)."""
         ws = self._signal_conditioning
-        if ws is not None:
-            ws.set_chain_status(self._analysis_panel.chain_status())
+        if ws is None:
+            return
+        ap = self._analysis_panel
+        ws.set_chain_status(ap.chain_status())
+        differ = ap.stages_that_differ()
+        ws.set_stage_states(differ, frozenset(k for k in differ if ap.can_revert_stage(k)))
 
     def _push_conditioning_window(self, *, force: bool = False) -> None:
         ws = self._signal_conditioning
@@ -8258,6 +8624,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if _on_screen(self._event_gallery):
             self._refresh_event_gallery(quiet=True)
         self._refresh_subpop_views()
+        # ...and Edit ▸ Undo, which is keyed to the table on screen. Left alone, it kept the
+        # previous table's state: a table WITH history came back under a disabled Undo, and
+        # ⌘Z on a disabled action does nothing, until the Edit menu was next opened.
+        self._sync_undo_actions()
 
     # -- the shared refusal ledger (one record per detection lineage) ---------------------------
     def _refusal_ledger_for(self, res) -> Any:
@@ -10402,7 +10772,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         The event-statistics figures are data-model-agnostic (they eat the EventSet); the
         trace preview is threaded from the CalibratedChannel + XAxis so its y-label carries
-        the channel's own units instead of a hard-coded pA (PORT_PLAN R9)."""
+        the channel's own units instead of a hard-coded pA (PORT_PLAN R9).
+
+        THE TABLE IS JUDGED AS THE EVENT EXPORTS JUDGE IT. A table detected at a rate the
+        recording no longer has is refused before anything is built or asked
+        (:meth:`_refuse_stale_export`): its dwell histogram would be in seconds the trace no
+        longer has. One the amber line calls stale on its calibration or its estimator is
+        exported -- a stale table stays "readable, plottable and exportable" -- and the line
+        that reports the export names it, since the figures carry no badge of their own.
+        Before this only the fit guard ran (``_stored_fit``), and a figure of depths under
+        a replaced gain was written under "Wrote 4 figure(s)" and nothing else."""
         from ..analysis.events import EventSet
         from ..plot import figures
 
@@ -10411,6 +10790,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, "Export figure",
                 "Run detection on a current channel first — there is no analysis to export.")
+            return
+        if self._refuse_stale_export(res):
             return
         events = res.payload
 
@@ -10605,6 +10986,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         msg = f"Wrote {len(written)} figure(s) next to {stem.name} (PDF + PNG + CSV each)."
+        # The amber line's own verdict on the table the figures drew, in its own sentence:
+        # the columns it badges are the numbers these figures plot as they stand.
+        stale_columns, stale = self._analysis_panel.table_staleness(
+            res.doc_id, res.channel, res.module_id)
+        if stale_columns:
+            from ..core.sources import detector_name
+
+            msg += (f" ⚠ They draw the {detector_name(res.module_id)} table of "
+                    f"“{Path(source_of(res.doc_id)).name}”, which is stale: {stale}")
         msg += "\n" + self._fit_provenance_note(dwell_fit, depth_fit)
         self.statusBar().showMessage(msg, 12000)
         # A figure that could not be built is not merely "skipped": if a file of that name
@@ -11575,6 +11965,28 @@ class MainWindow(QtWidgets.QMainWindow):
         if live_choices or CHOICE_KEY in workspace.extra:
             workspace.extra[CHOICE_KEY] = capture_table_choices(
                 live_choices, workspace.extra.get(CHOICE_KEY))
+        # ...and each table's un-run form edits (design §5.2, the owner's decision 4), keyed
+        # the same way. The live session speaks for every channel it holds, so a draft its
+        # own run has since settled is not carried on from the file it was opened from.
+        from ..core.form_draft_state import (
+            WORKSPACE_KEY as DRAFT_KEY, capture_form_drafts, prepare_form_draft_workspace,
+        )
+        prepare_form_draft_workspace(workspace.extra)
+        live_drafts = []
+        for (draft_doc, draft_ch, draft_module), form in (
+                self._analysis_panel.form_drafts().items()):
+            if not session.has_document(draft_doc):
+                continue
+            info = chinfo.get(draft_doc, {}).get(int(draft_ch))
+            live_drafts.append({
+                "doc_id": pkey.get(draft_doc, draft_doc), "channel": int(draft_ch),
+                "channel_name": None if info is None else channel_identity(info)[0],
+                "module_id": draft_module, "state": form})
+        if live_drafts or DRAFT_KEY in workspace.extra:
+            workspace.extra[DRAFT_KEY] = capture_form_drafts(
+                live_drafts, workspace.extra.get(DRAFT_KEY),
+                [(pkey[doc_id], {ch: channel_identity(info)[0] for ch, info in infos.items()})
+                 for doc_id, infos in chinfo.items()])
         state = ProjectState(
             documents=documents, segments=segments, calibrations=calibrations, layers=layers,
             view_mode=self._session.view_mode.value, results=results,
@@ -12129,8 +12541,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # would be an undo the user could see offered and never see happen.
         self._history.clear()
         self._measure_history.clear()
+        self._form_pause.stop()
+        self._settings_history.clear()
+        self._settings_labels.clear()
+        self._sidecar_moves.clear()
+        self._sidecar_found.clear()
         self._undo_journal.clear()
         self._redo_journal.clear()
+        # ...and the forms' un-run edits, which are the outgoing project's: the incoming one
+        # brings its own (see _apply_restore_for_doc), and one never inherits the other's.
+        self._analysis_panel.set_form_drafts({})
         # The whole-recording baseline memo is per-trace session state like everything else
         # here, and it had no caller anywhere in `nanoscope/`. It is keyed on a trace's
         # object identity through a weakref, so this is delayed RELEASE rather than a stale
@@ -12171,6 +12591,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restoring = True
         self._history.set_suspended(True)   # a reconstruction is not an undoable edit
         self._measure_history.set_suspended(True)
+        self._settings_history.set_suspended(True)
         from ..core.project import stamp_legacy_result_sources
         stamp_legacy_result_sources(state)
         self._restore_state = state
@@ -12535,6 +12956,26 @@ class MainWindow(QtWidgets.QMainWindow):
                                 if 0 <= ch < len(doc_info) else None)):
                 if message not in self._restore_notes:
                     self._restore_notes.append(message)
+        # ...and the un-run form edits each table was saved with (decision 4), handed to the
+        # panel NOW, while the restore still holds the selection back: the arrival that
+        # `_select_after_restore` causes is what puts the draft for the table on screen into
+        # the form, so the draft has to be there before it.
+        from ..core.form_draft_state import (
+            WORKSPACE_KEY as DRAFT_KEY, restore_form_drafts,
+        )
+        if DRAFT_KEY in state.workspace.extra:
+            drafts, messages = restore_form_drafts(
+                state.workspace.extra.get(DRAFT_KEY), key,
+                {int(info.index): channel_identity(info)[0]
+                 for info in self._session.document(doc_id).meta.channels})
+            for message in messages:
+                if message not in self._restore_notes:
+                    self._restore_notes.append(message)
+            if drafts:
+                held = self._analysis_panel.form_drafts()
+                held.update({(doc_id, ch, module_id): form
+                             for (ch, module_id), form in drafts.items()})
+                self._analysis_panel.set_form_drafts(held)
 
         # v6 -- the derived fits. Both staleness stamps come back from the FILE, never from
         # the live calibration/baseline, for the reason the block above spells out: a
@@ -12750,8 +13191,23 @@ class MainWindow(QtWidgets.QMainWindow):
             # The panel recipe is applied only after documents/results and the final target
             # exist.  Its setters can emit ordinary widget signals, so this remains inside
             # both restore guards and can neither launch a job nor create a phantom revision.
-            self._restore_workspace_surface(
-                ANALYSIS_PANEL_ARTIFACT_ID, self._analysis_panel)
+            # Under the forms' own writing guard as well: a restore is no edit of the user's,
+            # and unguarded it marked the form on screen as edited, so the next save wrote a
+            # draft for a table nobody had touched.
+            #
+            # THE DRAFTS ARE HELD ACROSS IT. The recipe puts the detector combo where it was
+            # saved, and a detector this recording has no table for leaves no table on screen:
+            # the table moves under the form with no switch, so nothing files the form the
+            # arrival had just put on screen, and the guard re-files it under the key it
+            # landed on. Measured: the table's own draft was nowhere after the reopen and the
+            # next save dropped it; an edit of the no-table form read as no edit at all, and
+            # the first look away dropped it. Put back afterwards, the key the recipe left on
+            # screen takes its own draft and the rest stay where they were.
+            held = self._analysis_panel.form_drafts()
+            with self._analysis_panel._writing_form():
+                self._restore_workspace_surface(
+                    ANALYSIS_PANEL_ARTIFACT_ID, self._analysis_panel)
+            self._analysis_panel.set_form_drafts(held)
 
         # Restore mode ends only HERE — after the restore's own selection has been made.
         # ``_select_after_restore`` drives the File Manager, and selecting a recording now SHOWS
@@ -12770,6 +13226,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._history.set_suspended(False)
         self._measure_history.set_suspended(False)
         self._measure_history.checkpoint()   # adopt the restored table as the starting point
+        # ...and every restored setting, the same way: a scope the restore wrote with no
+        # signal (a segment's inherited calibration) must not be read as an edit later.
+        self._settings_history.set_suspended(False)
+        for doc in self._session.documents():
+            self._rebase_settings_of(doc.doc_id)
         self._sync_undo_actions()
 
         self._sync_export_action()
@@ -13531,18 +13992,49 @@ class MainWindow(QtWidgets.QMainWindow):
         s.sync()
 
     # -- unsaved-work guard (dirty tracking + close confirmation) --------------------------------
-    # -- undo / redo over the event tables (core/history.py is the recorder) ----------------------
-    def _note_step(self, kind: str) -> None:
-        """Record WHICH of the two tables just gained a step.
+    # -- undo / redo over the tables and the settings (core/history.py is the recorder) -----------
+    def _note_step(self, kind: str | tuple) -> None:
+        """Record WHICH stack just gained a step.
 
-        There is one Edit ▸ Undo and two stacks (the event tables, and the hand-measurement
-        table — ``core/history.py`` explains why they cannot be one). This journal is what
-        decides which a press acts on, and the rule is the only one a user would guess:
-        **the most recent thing that happened is the first thing undone.** A new step
-        invalidates the redo branch, exactly as it does inside each stack.
+        There is one Edit ▸ Undo and three stacks (the event tables, the hand-measurement
+        table and the analysis settings — ``core/history.py`` explains why they cannot be
+        one). This journal is what decides which a press acts on, and the rule is the only
+        one a user would guess: **the most recent thing that happened is the first thing
+        undone.** A new step invalidates the redo branch, exactly as it does inside each
+        stack.
+
+        A SETTINGS STEP ENDS ITS OWN SCOPE'S BRANCH AND NO OTHER, and a table step leaves
+        every settings branch alone (the owner's decision 2): changing a calibration does
+        not throw away a curation the user just undid, nor the other way round.
+        ``SettingsHistory`` has already ended the scope's own branch on the push, so all
+        that is left here is the journal's entries for it.
+
+        A RUN'S PRESS (:data:`_UNDO_RUN`) is a table step and settings steps at once, and
+        each kind of step ends only its own half: a step of that form leaves the run's table
+        redo standing, and a step on that table leaves the settings that led to the run
+        redoable as settings steps of their own. A step anywhere else leaves the press whole
+        (:meth:`_split_redo_runs`).
+
+        A FORM EDIT STILL IN ITS PAUSE GOES FIRST. It is no step until 700 ms after its last
+        keystroke, while every other step is journalled the moment it is pushed, so anything
+        done inside the pause would be journalled BEFORE the older edit it found waiting, and
+        the newest-first rule would run on the wrong order: Ctrl+Z took the edit while the menu
+        named the curation (measured), and an edit that a curation had separated from a run
+        joined the run's press (§3.6's last bullet). Committing it here puts its entry in
+        front. It cannot recurse: ending the pause stops the timer first, so the form's own
+        step finds none running.
         """
-        self._undo_journal.append(kind)
-        self._redo_journal.clear()
+        if self._form_pause.isActive():
+            self._checkpoint_form()
+        self._journal_undo(kind)
+        scope = self._settings_scope_of(kind)
+        if scope is not None:
+            self._redo_journal[:] = [e for e in self._redo_journal if e != kind]
+            self._split_redo_runs()
+            return
+        self._redo_journal[:] = [e for e in self._redo_journal
+                                 if self._run_of(e) is not None
+                                 or self._settings_scope_of(e) is not None]
         # ...AND THE BRANCH ITSELF, on BOTH stacks — BUT ONLY FOR THE RECORDING THE STEP
         # BELONGS TO. Clearing only the journal left the entries alive inside whichever
         # stack the journal was not naming, and `_redo_target`'s fallback reaches straight
@@ -13564,17 +14056,134 @@ class MainWindow(QtWidgets.QMainWindow):
         doc_ids, doc_keys = self._step_scope(kind)
         self._history.clear_redo(doc_ids)
         self._measure_history.clear_redo(doc_keys)
-        # Bounded, and the bound is a HEURISTIC one: this journal only decides WHICH OF THE
-        # TWO STACKS a press acts on, never which entry, and past the bound `_undo_target`
-        # falls back to asking the stacks directly (event table first) — the degradation the
-        # method already documents. It is not a bound on recoverable work. It was described
-        # as "entries beyond them are dead anyway" while MAX_DEPTH capped the whole session;
-        # depth is per event table now, so a session with several detections can hold more
-        # steps than this, and the fallback is what carries them.
+        self._split_redo_runs()
+
+    def _journal_undo(self, entry: str | tuple) -> None:
+        """Put ``entry`` at the newest end of the undo journal, within its bound.
+
+        Bounded, and the bound is a HEURISTIC one: this journal only decides WHICH STACK a
+        press acts on, never which entry, and past the bound `_undo_target` falls back to
+        asking the stacks directly (event table first) — the degradation the method
+        already documents. It is not a bound on recoverable work. It was described as
+        "entries beyond them are dead anyway" while MAX_DEPTH capped the whole session;
+        depth is per event table now, so a session with several detections can hold more
+        steps than this, and the fallback is what carries them. A run's press that falls
+        off the end is carried the same way, as its table step and its settings steps."""
+        self._undo_journal.append(entry)
         if len(self._undo_journal) > 2 * MAX_DEPTH:
             del self._undo_journal[0]
 
-    def _step_scope(self, kind: str):
+    def _split_redo_runs(self) -> None:
+        """Let each run's press in the redo journal keep exactly the halves its stacks still
+        hold (decision 2, the owner's: each kind of step ends only its own half).
+
+        A pending press is a table redo and the redo of the form steps that led to it, kept
+        by two stacks, and a new step ends the branch of the stack it was pushed on: a step
+        of that form ends the form's, a step on that table — or on the hand-measurement
+        table, for its recording — ends the table's. The stacks have already pruned
+        themselves by the time this runs, so it asks them rather than working the scopes out
+        a second time, and the press comes apart into what is left: the table's step, or the
+        form's ``n`` steps. A step anywhere else leaves it whole."""
+        parts: list[str | tuple] = []
+        for entry in self._redo_journal:
+            run = self._run_of(entry)
+            if run is None:
+                parts.append(entry)
+                continue
+            scope, n = run
+            key = tuple(scope[1:])
+            table, form = self._history.can_redo(key), self._settings_history.can_redo(scope)
+            if table and form:
+                parts.append(entry)
+            elif table:
+                parts.append((_UNDO_EVENTS, key))
+            elif form:
+                parts.extend([(_UNDO_SETTINGS, scope)] * n)
+        self._redo_journal[:] = parts
+
+    @staticmethod
+    def _settings_scope_of(entry) -> tuple | None:
+        """The scope a journal entry names when it is a settings step; ``None`` for the two
+        tables' entries (and for no entry at all)."""
+        if isinstance(entry, tuple) and entry and entry[0] == _UNDO_SETTINGS:
+            return entry[1]
+        return None
+
+    @staticmethod
+    def _events_key_of(entry) -> tuple | None:
+        """The event table a journal entry names when it is a step of one; ``None`` for the
+        others (and for an entry naming no table)."""
+        if isinstance(entry, tuple) and entry and entry[0] == _UNDO_EVENTS:
+            return entry[1]
+        return None
+
+    @staticmethod
+    def _run_of(entry) -> tuple[tuple, int] | None:
+        """``(form scope, n)`` when a journal entry is a run's press (:data:`_UNDO_RUN`), else
+        ``None``. The scope's tail is the table's key, so the press names both."""
+        if isinstance(entry, tuple) and len(entry) == 3 and entry[0] == _UNDO_RUN:
+            return entry[1], int(entry[2])
+        return None
+
+    @staticmethod
+    def _break_of(entry) -> tuple | None:
+        """The table a journal entry says was born there when it is a break
+        (:data:`_UNDO_BREAK`), else ``None``."""
+        if isinstance(entry, tuple) and entry and entry[0] == _UNDO_BREAK:
+            return entry[1]
+        return None
+
+    def _note_event_step(self, label: str) -> None:
+        """Journal an event step — and when it put a new run on a table, take the settings
+        steps that led to that run into the same press (design §3.6, the owner's decision 3).
+
+        THE ENTRY NAMES ITS TABLE, as every event entry does, and the press it may become
+        names the table's form as well: ``(_UNDO_RUN, ("form", *key), n)``. A press therefore
+        acts only while that table is on screen and its form is the one shown, as a plain
+        event step acts only for the table on screen.
+
+        THE STEPS TAKEN are the settings steps of that table's form standing RIGHT BEFORE the
+        run in the journal, and only those: "change settings, run, Ctrl+Z" restores table and
+        form in one press, as it always did, while a setting changed before other work — a
+        curation, a calibration, another table's form, the birth of a table
+        (:data:`_UNDO_BREAK`) — stays a step of its own (§3.6's last bullet). The key is
+        the one the step was pushed for, which is the table the run replaced: a run that
+        lands while the user looks at another recording still takes its own form's steps.
+        """
+        key = self._history.last_step_key
+        self._note_step((_UNDO_EVENTS, key))
+        if label not in _RUN_STEP_LABELS or key is None:
+            return
+        entry = (_UNDO_SETTINGS, ("form", *key))
+        journal = self._undo_journal
+        first = len(journal) - 1                  # the event entry just journalled
+        while first > 0 and journal[first - 1] == entry:
+            first -= 1
+        n = len(journal) - 1 - first
+        if n:
+            journal[first:] = [(_UNDO_RUN, entry[1], n)]
+
+    def _drop_journal_entries_of(self, doc_id: str) -> None:
+        """``documentClosed``: forget the journal entries of a closed recording's tables and
+        settings — a run's press and the break behind a table's birth with them — and what its
+        calibration steps kept of its sidecar. Their stacks went with it (``drop_doc``); left
+        here, the entries are dead weight that brings the bounded journal to its fallback
+        sooner, and the redo journal is never trimmed."""
+        def recording(entry):
+            run = self._run_of(entry)
+            scope = run[0] if run is not None else self._settings_scope_of(entry)
+            if scope is not None:
+                return scope[1]
+            key = self._events_key_of(entry) or self._break_of(entry)
+            return key[0] if key is not None else None   # the measurement table: nobody's
+
+        for journal in (self._undo_journal, self._redo_journal):
+            journal[:] = [e for e in journal if recording(e) != doc_id]
+        for table in (self._sidecar_moves, self._sidecar_found):
+            for scope in [s for s in table if s[1] == doc_id]:
+                del table[scope]
+
+    def _step_scope(self, kind: str | tuple):
         """``(doc_ids, doc_keys)`` — whose redo branch on the OTHER stack a step just ended.
 
         One tuple, read two ways, because the two stacks name recordings differently: the
@@ -13634,44 +14243,107 @@ class MainWindow(QtWidgets.QMainWindow):
         of what made the cross-stack redo branch reachable."""
         return self._measure_history.checkpoint()
 
-    def _can_undo(self, kind: str) -> bool:
+    def _can_undo(self, kind: str | tuple) -> bool:
+        if self._break_of(kind) is not None:
+            return False
         if kind == _UNDO_MEASUREMENTS:
             return self._measure_history.can_undo()
-        return self._history.can_undo(self._undo_key())
+        run = self._run_of(kind)
+        if run is not None:
+            return self._run_on_screen(run[0]) and self._history.can_undo(tuple(run[0][1:]))
+        scope = self._settings_scope_of(kind)
+        if scope is not None:
+            return self._settings_on_screen(scope) and self._settings_history.can_undo(scope)
+        key = self._undo_key()
+        return self._events_key_of(kind) == key and self._history.can_undo(key)
 
-    def _can_redo(self, kind: str) -> bool:
+    def _can_redo(self, kind: str | tuple) -> bool:
+        if self._break_of(kind) is not None:
+            return False
         if kind == _UNDO_MEASUREMENTS:
             return self._measure_history.can_redo()
-        return self._history.can_redo(self._undo_key())
+        run = self._run_of(kind)
+        if run is not None:
+            return self._run_on_screen(run[0]) and self._history.can_redo(tuple(run[0][1:]))
+        scope = self._settings_scope_of(kind)
+        if scope is not None:
+            return (self._settings_on_screen(scope) and self._settings_history.can_redo(scope)
+                    and not self._form_edit_waits(scope))
+        key = self._undo_key()
+        return self._events_key_of(kind) == key and self._history.can_redo(key)
 
-    def _undo_target(self) -> str | None:
-        """Which table the next Undo acts on: the most recent step that CAN be undone.
+    def _settings_on_screen(self, scope: tuple) -> bool:
+        """Is ``scope``'s recording the one on screen — the recording the Analysis panel
+        targets? The settings stack keeps the event stack's rule: Ctrl+Z never silently
+        changes a recording that is not shown (design §3.1), it takes back the newest step
+        of the one that is.
+
+        A FORM is narrower: one set of widgets shows the form of the table on screen, so a
+        form scope is on screen only while ITS table is (``AnalysisPanel.form_key``). Another
+        table's form steps on the same recording wait for that table, as its curation does."""
+        if scope[0] == "form":
+            key = self._analysis_panel.form_key()
+            return key is not None and tuple(scope[1:]) == tuple(key)
+        target = self._analysis_panel.current_target()
+        return target is not None and scope[1] == target[0]
+
+    def _run_on_screen(self, scope: tuple) -> bool:
+        """Can a run's press act now? Its table must be the one Edit ▸ Undo walks, and its
+        form the one shown: the press moves both."""
+        return self._settings_on_screen(scope) and tuple(scope[1:]) == self._undo_key()
+
+    def _form_edit_waits(self, scope: tuple) -> bool:
+        """Is ``scope`` the form on screen, with an edit of it still in its pause? That edit
+        ends the form's redo branch the moment it is committed, and every press commits it
+        first, so what the form could redo is as good as gone: it is not offered. The Plots
+        window and the appearance widget withdraw their Redo the same way while an edit is
+        open (``PlotsWindow._sync_config_buttons``): an item that names a step and takes
+        nothing is worse than a disabled one."""
+        return (scope[0] == "form" and self._form_pause.isActive()
+                and tuple(scope[1:]) == self._analysis_panel.form_key())
+
+    def _settings_entries(self) -> list[tuple]:
+        """A journal entry for every settings scope holding a step — the settings half of
+        the fallback, for when the bounded journal has run out."""
+        return [(_UNDO_SETTINGS, scope)
+                for scope in self._settings_history.scopes_with_history()]
+
+    def _undo_target(self) -> str | tuple | None:
+        """Which stack the next Undo acts on: the most recent step that CAN be undone.
 
         "Can be undone" matters as much as "most recent": the event stack is per
         (recording, channel, detector), so its newest step may belong to a table that is
-        not on screen, and offering it would repaint nothing. The journal is scanned newest
-        first and the first live candidate wins; if the journal has run out (it is bounded)
-        the stacks are asked directly, event table first.
+        not on screen, and offering it would repaint nothing — and a settings step may
+        belong to another recording. The journal is scanned newest first and the first
+        live candidate wins; if the journal has run out (it is bounded) the stacks are
+        asked directly: the event table on screen, then the measurements, then the
+        settings of the recording on screen.
         """
         for kind in reversed(self._undo_journal):
             if self._can_undo(kind):
                 return kind
-        for kind in (_UNDO_EVENTS, _UNDO_MEASUREMENTS):
+        for kind in self._fallback_entries():
             if self._can_undo(kind):
                 return kind
         return None
 
-    def _redo_target(self) -> str | None:
+    def _redo_target(self) -> str | tuple | None:
         for kind in reversed(self._redo_journal):
             if self._can_redo(kind):
                 return kind
-        for kind in (_UNDO_EVENTS, _UNDO_MEASUREMENTS):
+        for kind in self._fallback_entries():
             if self._can_redo(kind):
                 return kind
         return None
 
+    def _fallback_entries(self) -> list:
+        """The entries the stacks themselves would journal, in the order the fallback asks
+        them, for when the bounded journal has run out."""
+        return [(_UNDO_EVENTS, self._undo_key()), _UNDO_MEASUREMENTS,
+                *self._settings_entries()]
+
     @staticmethod
-    def _take_last(journal: list[str], kind: str) -> None:
+    def _take_last(journal: list, kind: str | tuple) -> None:
         """Remove the newest journal entry naming ``kind`` (it has just been applied)."""
         for i in range(len(journal) - 1, -1, -1):
             if journal[i] == kind:
@@ -13679,11 +14351,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
     def _checkpoint_everything(self) -> None:
-        """Commit BOTH tables. The four moments at which "what happened last" has to be
+        """Commit EVERY stack. The four moments at which "what happened last" has to be
         true — an undo/redo, the Edit menu opening, a project save and a quit — are about
-        every table the user can lose work in, not only the event ones."""
+        every table and every setting the user can lose work in, not only the event
+        ones. A form edit still in its pause is committed with them, and the pause is
+        ended: firing later, it would find nothing new, but a press must not depend on it."""
         self._history.checkpoint_all()
         self._checkpoint_measurements()
+        self._end_form_pause()
+        self._settings_history.checkpoint_all()
 
     def active_detection_key(self):
         """The ``(doc_id, channel, module_id)`` of the detection ON SCREEN, or None.
@@ -13972,32 +14648,61 @@ class MainWindow(QtWidgets.QMainWindow):
         (the history is real and one detector switch away); "Undo — this table's oldest
         history was dropped at the 30-step ceiling (4 steps lost)" (it existed and a
         ceiling took it — see the comment at that branch, which names each ceiling);
+        "Undo — this recording's oldest settings history was dropped at the 30-step
+        ceiling (1 step lost)" (the same, for a setting of the recording on screen);
         "Undo — nothing to undo on this event table" (there IS history in this session,
-        but not for this recording); and a bare "Undo" when there is none at all. Every
-        count in them is pluralised where it is built, so those are real labels.
+        but none this table can take: another recording's, or the form of another table of
+        this one); "Undo — nothing on this recording" (the only steps left are settings of
+        recordings not on screen); and a bare "Undo" when there is none at all. Every
+        count in them is pluralised where it is built, so those are real labels. A
+        settings step names itself like any other ("Undo Apply calibration"), and a run's
+        press names its run and what it takes with it ("Undo Re-run detection and 2
+        setting changes", design §3.6). A form edit still in its pause, with nothing else
+        to take back, offers a bare "Undo": it is no step yet, and a press commits it first.
 
         THE DETECTOR-SWITCH LABEL EXISTS FOR ONE CASE. Running the ML detector on a
         curated channel used to land on "nothing to undo on this event table": honest,
         and indistinguishable from "your curation is gone". The threshold detector's
         stack was intact the whole time — under the same recording and channel, keyed by
-        the other detector — and nothing pointed at it."""
+        the other detector — and nothing pointed at it. A table's FORM steps are counted
+        there with its curation: they too are one table switch away, and "nothing on this
+        recording" would be false about them."""
         key = self._undo_key()
-        siblings = self._history.siblings_with_history(key)
+        siblings = dict(self._history.siblings_with_history(key))
+        settings = self._settings_history
+        for module_id, n in self._form_siblings(key).items():
+            siblings[module_id] = siblings.get(module_id, 0) + n
+        settings_dropped = sum(settings.depth_dropped(s) for s in settings.scopes_with_history()
+                               if self._settings_on_screen(s))
+        shown = self._analysis_panel.current_target()
         undo_target, redo_target = self._undo_target(), self._redo_target()
         for act, target, verb in ((self._act_undo, undo_target, "Undo"),
                                   (self._act_redo, redo_target, "Redo")):
+            scope = self._settings_scope_of(target)
+            run = self._run_of(target)
             if target == _UNDO_MEASUREMENTS:
                 label = (self._measure_history.undo_label() if verb == "Undo"
                          else self._measure_history.redo_label())
-            elif target == _UNDO_EVENTS:
+            elif self._events_key_of(target) is not None:     # the table on screen: key
                 label = (self._history.undo_label(key) if verb == "Undo"
                          else self._history.redo_label(key))
+            elif run is not None:
+                label = self._run_label(*run, undo=verb == "Undo")
+            elif scope is not None:
+                label = (settings.undo_label(scope) if verb == "Undo"
+                         else settings.redo_label(scope))
             else:
                 label = ""
-            act.setEnabled(target is not None)
+            held = [s for s in settings.scopes_with_history()
+                    if (settings.can_undo(s) if verb == "Undo" else settings.can_redo(s))]
+            # An edit of a form still in its pause is no step yet, but a press commits it first
+            # (`_undo_events`) and takes it back: Undo is offered for it, nameless until it is
+            # committed, instead of staying dead while it waits.
+            waiting = verb == "Undo" and target is None and self._form_pause.isActive()
+            act.setEnabled(target is not None or waiting)
             if target is not None and label:
                 act.setText(f"{verb} {label}")
-            elif target is not None:
+            elif target is not None or waiting:
                 act.setText(verb)
             elif siblings:
                 where = ", ".join(
@@ -14025,43 +14730,564 @@ class MainWindow(QtWidgets.QMainWindow):
                 act.setText(
                     f"{verb} — this table's oldest history was dropped at "
                     + " and ".join(lost))
-            elif self._history.has_any():
+            elif settings_dropped:
+                # The same statement for the settings of the recording on screen, at the one
+                # ceiling they have: they HAD history and the app threw it away.
+                act.setText(
+                    f"{verb} — this recording's oldest settings history was dropped at the "
+                    f"{MAX_DEPTH}-step ceiling ({settings_dropped} step"
+                    f"{'s' if settings_dropped != 1 else ''} lost)")
+            elif self._history.has_any() or any(
+                    shown is not None and s[1] == shown[0] for s in held):
+                # A form's steps wait for ITS table, so the recording on screen can hold
+                # steps that are not the target (another channel's table, say) while
+                # "nothing on this recording" would be false about them.
                 act.setText(f"{verb} — nothing to {verb.lower()} on this event table")
+            elif held:
+                # Every step left belongs to a recording that is not on screen (an on-screen
+                # one would have been the target, or is a form handled above), and Ctrl+Z
+                # does not reach behind it.
+                act.setText(f"{verb} — nothing on this recording")
             else:
                 act.setText(verb)
 
+    def _run_label(self, scope: tuple, n: int, *, undo: bool) -> str:
+        """A run's press in the Edit menu: "Re-run detection and 2 setting changes". The
+        count is what the press would move now, so the menu never names a step that a
+        ceiling has already taken."""
+        key = tuple(scope[1:])
+        settings = self._settings_history
+        if undo:
+            table, held = self._history.undo_label(key), settings.undo_depth(scope)
+        else:
+            table, held = self._history.redo_label(key), settings.redo_depth(scope)
+            if self._form_edit_waits(scope):
+                held = 0           # the form's half ends when the edit is committed
+        return table + _setting_changes(min(n, held)) if table else ""
+
+    def _form_siblings(self, key) -> dict[str, int]:
+        """``{module_id: n}`` — the other tables of this recording and channel whose FORM
+        holds undo steps, for the detector-switch wording of :meth:`_sync_undo_actions`."""
+        if key is None:
+            return {}
+        doc_id, channel, module_id = key
+        settings = self._settings_history
+        return {scope[3]: settings.undo_depth(scope)
+                for scope in settings.scopes_with_history()
+                if scope[0] == "form" and scope[1] == doc_id and scope[2] == channel
+                and scope[3] not in (None, module_id) and settings.undo_depth(scope)}
+
     def _undo_events(self) -> None:
-        """Edit ▸ Undo — on whichever of the two tables moved most recently."""
+        """Edit ▸ Undo — on whichever stack moved most recently.
+
+        Every stack is committed FIRST, since Ctrl+Z is one of the four moments: an edit
+        still waiting on its checkpoint becomes the newest step before the target is
+        chosen, so the press takes that edit back rather than jumping past it."""
+        self._checkpoint_everything()
         target = self._undo_target()
         if target is None:
             self._sync_undo_actions()
             return
-        if target == _UNDO_MEASUREMENTS:
-            label = self._measure_history.undo()
-        else:
-            label = self._keeping_curation_place(
-                lambda: self._history.undo(self._undo_key()))
-        if label:
+        said = self._take_step(target, "Undone")
+        if said:
             self._take_last(self._undo_journal, target)
             self._redo_journal.append(target)
-            self.statusBar().showMessage(f"Undone: {label}.", 8000)
+            self.statusBar().showMessage(said, 8000)
         self._sync_undo_actions()
 
     def _redo_events(self) -> None:
+        self._checkpoint_everything()
         target = self._redo_target()
         if target is None:
             self._sync_undo_actions()
             return
-        if target == _UNDO_MEASUREMENTS:
-            label = self._measure_history.redo()
-        else:
-            label = self._keeping_curation_place(
-                lambda: self._history.redo(self._undo_key()))
-        if label:
+        said = self._take_step(target, "Redone")
+        if said:
             self._take_last(self._redo_journal, target)
             self._undo_journal.append(target)
-            self.statusBar().showMessage(f"Redone: {label}.", 8000)
+            self.statusBar().showMessage(said, 8000)
         self._sync_undo_actions()
+
+    def _take_step(self, target: str | tuple, verb: str) -> str:
+        """Undo (``verb`` "Undone") or redo ("Redone") the newest step of ``target``'s
+        stack. Returns the status line that says so, or ``""`` when nothing moved, which
+        leaves the journal as it was."""
+        undo = verb == "Undone"
+        scope = self._settings_scope_of(target)
+        if scope is not None:
+            return self._take_settings_step(scope, verb)
+        run = self._run_of(target)
+        if run is not None:
+            return self._take_run_step(*run, verb)
+        if target == _UNDO_MEASUREMENTS:
+            label = self._measure_history.undo() if undo else self._measure_history.redo()
+        else:
+            label = self._keeping_curation_place(
+                lambda: (self._history.undo if undo else self._history.redo)(
+                    self._undo_key()))
+        return f"{verb}: {label}." if label else ""
+
+    def _take_settings_step(self, scope: tuple, verb: str) -> str:
+        """:meth:`_take_step` for a settings scope. A write-back that raises has undone
+        nothing (``SettingsHistory`` puts the step back), so the press says why on the
+        status bar and the journal stays as it was.
+
+        A CALIBRATION step then puts its sidecar back (:meth:`_put_back_sidecar`). What its
+        commit did to the file travels with the state that commit produced
+        (:class:`_CalibrationState`): an undo takes back the state on screen, whose move is
+        therefore known before the press, and a redo writes the state the step produced,
+        whose move is known after it."""
+        history = self._settings_history
+        undo = verb == "Undone"
+        label = history.undo_label(scope) if undo else history.redo_label(scope)
+        moved = self._sidecar_moves.get(scope)
+        try:
+            done = history.undo(scope) if undo else history.redo(scope)
+        except Exception as exc:               # noqa: BLE001 - a slot must never raise into Qt
+            self.statusBar().showMessage(
+                f"Nothing was {'undone' if undo else 'redone'} — “{label}” could not be put "
+                f"back: {exc}", 12000)
+            return ""
+        if not done:
+            return ""
+        said = f"{verb}: {done}"
+        if scope[0] == "calibration":
+            said = self._put_back_sidecar(
+                scope, moved if undo else self._sidecar_moves.get(scope), undo, said)
+        return said if said.endswith(".") else said + "."
+
+    def _put_back_sidecar(self, scope: tuple, moved: Any, undo: bool, done: str) -> str:
+        """Put ``<datafile>.npcal.json`` back as it was on the far side of the calibration
+        step just taken — before its commit on an undo, after it on a redo — and return
+        ``done`` with what happened to the file, in the Calibration panel's own words.
+
+        Without asking, by the owner's decision 6, so the sentence is the only place the
+        user learns the file moved: the status bar says it, and so does the panel's own
+        sidecar line, which otherwise went on describing the commit just taken back. A step
+        whose commit wrote no file writes none now; nothing is written beside a recording
+        that has moved away; and a file that is not as the step left it is left as it is
+        (``core.calibration.restore_sidecar`` says why)."""
+        doc_id = scope[1]
+        if not self._session.has_document(doc_id):
+            return done
+        path = self._session.document(doc_id).meta.path
+        reason: list[str] = []
+        if moved is None:
+            outcome = SIDECAR_NONE
+        elif self._session.recording_moved(doc_id):
+            outcome = SIDECAR_RECORDING_MOVED
+        elif isinstance(moved, str):             # unreadable around the commit
+            outcome = SIDECAR_KEPT
+            reason.append(moved)
+        else:
+            before, after = moved
+            outcome = restore_sidecar(path, before if undo else after,
+                                      expect=after if undo else before, reason=reason)
+        text = sidecar_outcome_text(outcome, path, reason, done=done,
+                                    session_only=f"{done}, in this session only")
+        self._calibration_panel.show_status(doc_id, text)
+        return text
+
+    def _take_run_step(self, scope: tuple, n: int, verb: str) -> str:
+        """:meth:`_take_step` for a run's press (design §3.6): the run that a table step put on
+        ``scope``'s table, and the ``n`` settings steps of its form that led to it.
+
+        UNDO TAKES THE TABLE BACK FIRST. Restoring the older run re-seeds the form from it,
+        and that seed is adopted before any settings step moves — through ``formWritten``
+        (:meth:`_on_form_written`) and once more here, because the order is the press's to
+        keep and not the panel's. Left unadopted, ``SettingsHistory.undo``'s leading
+        checkpoint would record the seed as a fresh step, end the form's redo branch and undo
+        that phantom instead of the settings that led to the run. Then the ``n`` settings
+        steps are undone, newest first. REDO replays them oldest first, then the table, whose
+        re-seed is adopted the same way.
+
+        ALL OR NOTHING, B1's rule for a settings step: a write-back that raises puts back what
+        this press had already moved, says why on the status bar, and leaves the journal as it
+        was (returns ``""``)."""
+        undo = verb == "Undone"
+        key = tuple(scope[1:])
+        settings = self._settings_history
+
+        def table(back: bool) -> str:
+            move = self._history.undo if back else self._history.redo
+            return self._keeping_curation_place(lambda: move(key))
+
+        label = self._history.undo_label(key) if undo else self._history.redo_label(key)
+        if undo:
+            if not table(True):
+                return ""
+            settings.rebase(scope)
+        moved = 0
+        try:
+            while moved < n and (settings.undo(scope) if undo else settings.redo(scope)):
+                moved += 1
+            if not undo and not table(False):
+                raise RuntimeError("the table could not be put back")
+        except Exception as exc:               # noqa: BLE001 - a slot must never raise into Qt
+            # What the failed write left on screen is adopted first, so putting the press
+            # back does not record it as a step of its own.
+            settings.rebase(scope)
+            try:
+                for _ in range(moved):
+                    if undo:
+                        settings.redo(scope)
+                    else:
+                        settings.undo(scope)
+                if undo:
+                    table(False)
+                    settings.rebase(scope)
+            except Exception:                  # noqa: BLE001 - said below either way
+                pass
+            self.statusBar().showMessage(
+                f"Nothing was {'undone' if undo else 'redone'} — “{label}"
+                f"{_setting_changes(n)}” could not be put back: {exc}", 12000)
+            return ""
+        settings.rebase(scope)
+        return f"{verb}: {label}{_setting_changes(moved)}."
+
+    # -- what the settings stack holds: read, write and name, per kind of scope ---------------
+    #
+    # A scope is ``(kind, doc_id, ...)``: ``("calibration", doc_id, channel)``,
+    # ``("time_base", doc_id)`` and ``("acquisition", doc_id, channel)``. SettingsHistory
+    # asks the three callables below and they dispatch on ``kind`` through
+    # ``_settings_kinds``. ``None`` from a reader means "cannot be read now" (the recording
+    # closed), never a value: a setting whose own value can be None is read wrapped.
+    def _read_settings(self, scope: tuple) -> Any:
+        kind = self._settings_kinds.get(scope[0])
+        return None if kind is None else kind[0](scope)
+
+    def _write_settings(self, scope: tuple, state: Any) -> None:
+        """Write ``state`` back during an undo or a redo, then checkpoint every scope while
+        the history is still applying, so whatever the write moved ELSEWHERE is adopted
+        there rather than recorded later as the user's edit: a time base taken back
+        re-clamps the Detection form's frequency boxes, and a "Treat this channel as" taken
+        back can move the analysis target. Nothing user-made is pending at that moment —
+        :meth:`_undo_events` and :meth:`_redo_events` commit every stack first."""
+        self._settings_kinds[scope[0]][1](scope, state)
+        self._settings_history.checkpoint_all()
+
+    def _describe_settings(self, scope: tuple, before: Any, after: Any) -> str:
+        return self._settings_kinds[scope[0]][2](scope, before, after)
+
+    def _read_calibration(self, scope: tuple):
+        _kind, doc_id, ch = scope
+        if not self._session.has_document(doc_id):
+            return None
+        return _CalibrationState(self._session.calibration(doc_id, ch),
+                                 self._sidecar_moves.get(scope))
+
+    def _write_calibration(self, scope: tuple, state: _CalibrationState) -> None:
+        """Into the session alone (``write_sidecar=False``). The file is put back by
+        :meth:`_put_back_sidecar`, from what the step kept of it, once the press knows which
+        way it went: through Apply's door it was re-derived from the calibration, and that
+        lost notes (see :class:`_CalibrationState`). The state written becomes the scope's,
+        its sidecar move included, so the next undo or redo here reads the right one."""
+        _kind, doc_id, ch = scope
+        self._session.set_calibration(doc_id, ch, state.calibration, write_sidecar=False)
+        self._sidecar_moves[scope] = state.sidecar
+
+    @staticmethod
+    def _describe_calibration(_scope: tuple, before: _CalibrationState,
+                              after: _CalibrationState) -> str:
+        """The name of a calibration change nobody announced. The Calibration panel names
+        its own ("Apply calibration", "Reset calibration": see
+        :meth:`_on_calibration_commit_starting`), which a diff cannot: a Reset that moved
+        only the gain reads like any gain edit."""
+        before, after = before.calibration, after.calibration
+        moved = [f"{name} {old:g} → {new:g}"
+                 for name, old, new in (("gain", before.gain, after.gain),
+                                        ("offset", before.offset, after.offset))
+                 if old != new]
+        if before.target_units != after.target_units:
+            moved.append(f"units {before.target_units or 'as read'} → "
+                         f"{after.target_units or 'as read'}")
+        if moved:
+            return f"Change calibration ({', '.join(moved)})"
+        if before.kind != after.kind:
+            return ("Treat channel as the file declares" if after.kind is None
+                    else f"Treat channel as {after.kind.value}")
+        if before.note != after.note:
+            return "Edit calibration note"
+        return "Change calibration"
+
+    def _read_time_base(self, scope: tuple):
+        """``{"declaration": ...}``, wrapped because ``None`` — the file's own time base —
+        is a state to return to here. A SEGMENT reads ``None``, i.e. is not tracked: it
+        cannot be declared on its own (``Session.set_sample_rate_declaration`` refuses), it
+        follows the recording it was cut from, so one declaration is one step on that
+        recording and not one more per segment that followed it."""
+        from ..core.segment import SegmentDocument
+
+        doc_id = scope[1]
+        if (not self._session.has_document(doc_id)
+                or isinstance(self._session.document(doc_id), SegmentDocument)):
+            return None
+        return {"declaration": self._session.sample_rate_declaration(doc_id)}
+
+    def _write_time_base(self, scope: tuple, state: dict) -> None:
+        self._session.set_sample_rate_declaration(scope[1], state["declaration"])
+
+    @staticmethod
+    def _describe_time_base(_scope: tuple, _before: dict, after: dict) -> str:
+        """The declaration in the words of its own dialog: "Declare 50,000 Hz", "Declare the
+        time column in milliseconds", "Use the file's own time base"."""
+        declaration = after["declaration"]
+        if declaration is None:
+            return "Use the file's own time base"
+        if declaration.mode == "time_unit":
+            from ..core.sample_rate import TIME_UNITS
+
+            return f"Declare the time column in {TIME_UNITS[declaration.time_unit][0]}"
+        return f"Declare {declaration.sample_rate_hz:,.6g} Hz"
+
+    def _read_acquisition(self, scope: tuple):
+        """``{"override": ...}``, wrapped for the time base's reason: no override is a
+        state to return to."""
+        _kind, doc_id, ch = scope
+        if not self._session.has_document(doc_id):
+            return None
+        return {"override": self._session.acquisition_bandwidth_override(doc_id, ch)}
+
+    def _write_acquisition(self, scope: tuple, state: dict) -> None:
+        _kind, doc_id, ch = scope
+        self._session.set_acquisition_bandwidth(doc_id, ch, state["override"])
+
+    @staticmethod
+    def _describe_acquisition(_scope: tuple, _before: dict, after: dict) -> str:
+        return ("Use the file's acquisition bandwidth" if after["override"] is None
+                else "Change acquisition bandwidth")
+
+    def _read_form(self, scope: tuple):
+        """The form of the event table ``scope`` names — ``("form", doc_id, channel,
+        module_id or None)`` — and only while that table is the one on screen. One set of
+        widgets shows every table's form, so reading another table's scope would file THIS
+        table's form under that table's name."""
+        panel = self._analysis_panel
+        key = panel.form_key()
+        if key is None or tuple(scope[1:]) != tuple(key):
+            return None
+        return panel.form_state()
+
+    def _write_form(self, scope: tuple, state: dict) -> None:
+        """Through the panel's SET (``restore_form_state``), never a seed: the Baseline form's
+        seed steps aside for a confirmed choice, and an undo is the user's own act. Only onto
+        the table the state belongs to; Ctrl+Z offers no other table's form step, so a write
+        for one is a race, and raising keeps that step where writing nothing would spend it."""
+        panel = self._analysis_panel
+        key = panel.form_key()
+        if key is None or tuple(scope[1:]) != tuple(key):
+            raise RuntimeError("its event table is no longer on screen")
+        panel.restore_form_state(state)
+
+    def _describe_form(self, scope: tuple, before: dict, after: dict) -> str:
+        """See :func:`_form_step_label`; the recording's rate prunes the notch lines, as the
+        chain notice's own diff does."""
+        doc_id = scope[1]
+        fs = (self._session.document(doc_id).meta.sample_rate_hz
+              if self._session.has_document(doc_id) else None)
+        return _form_step_label(before, after, fs=fs, module_id=scope[3])
+
+    def _checkpoint_calibration(self, doc_id: str, ch: int) -> None:
+        """``calibrationChanged``: commit that channel's calibration, under the name its
+        action announced when one did, carrying what that action's commit did to the
+        sidecar (:class:`_CalibrationState`)."""
+        scope = ("calibration", doc_id, int(ch))
+        held = self._sidecar_moves.get(scope)
+        self._sidecar_moves[scope] = self._sidecar_move_of(scope)   # what a push here reads
+        if not self._settings_history.checkpoint(
+                scope, label=self._settings_labels.pop(scope, None)):
+            self._sidecar_moves[scope] = held       # no step: the state is still the old one
+
+    def _sidecar_move_of(self, scope: tuple) -> Any:
+        """What the commit the Calibration panel announced on ``scope`` did to the sidecar:
+        ``(before, after)``, or the OS's words when the file could not be read; ``None``
+        when nothing was announced (whatever changed this calibration wrote no file)."""
+        if scope not in self._sidecar_found:
+            return None
+        before = self._sidecar_found.pop(scope)
+        if isinstance(before, str):
+            return before
+        try:
+            return before, sidecar_bytes(self._session.document(scope[1]).meta.path)
+        except OSError as exc:
+            return str(exc)
+
+    def _on_calibration_commit_starting(self, doc_id: str, ch: int, action: str) -> None:
+        """The Calibration panel is about to commit ``action`` ("Apply" or "Reset") on this
+        channel: the step it makes is called "Apply calibration" or "Reset calibration", and
+        the sidecar as the commit finds it is kept for that step's undo. A segment writes no
+        sidecar and neither does a recording that has moved away (``Session.set_calibration``),
+        so for those there is nothing to keep."""
+        from ..core.segment import SegmentDocument
+
+        scope = ("calibration", doc_id, int(ch))
+        self._settings_labels[scope] = f"{action} calibration"
+        doc = self._session.document(doc_id)
+        if isinstance(doc, SegmentDocument) or self._session.recording_moved(doc_id):
+            return
+        try:
+            self._sidecar_found[scope] = sidecar_bytes(doc.meta.path)
+        except OSError as exc:
+            self._sidecar_found[scope] = str(exc)
+
+    def _rebase_settings_of(self, doc_id: str) -> None:
+        """Adopt every setting of ``doc_id`` as it stands, without a step: when it opens,
+        after a segment inherits its parent's, and when a project restore settles. No
+        commit produced what is adopted, so a calibration's sidecar move is forgotten."""
+        if not self._session.has_document(doc_id):
+            return
+        for info in self._session.document(doc_id).meta.channels:
+            self._sidecar_moves.pop(("calibration", doc_id, info.index), None)
+            self._settings_history.rebase(("calibration", doc_id, info.index))
+            self._settings_history.rebase(("acquisition", doc_id, info.index))
+        self._settings_history.rebase(("time_base", doc_id))
+
+    # -- each event table's form (design §3.2-3.6): the five signals the panel gives ----------
+    def _form_scope(self) -> tuple | None:
+        """``("form", doc_id, channel, module_id or None)`` for the form on screen, or None
+        when the Analysis panel has no target. Keyed by the event table on screen, the same
+        key Edit ▸ Undo walks; ``None`` for a channel that has no table yet (design §3.4)."""
+        key = self._analysis_panel.form_key()
+        return None if key is None else ("form", *key)
+
+    def _end_form_pause(self) -> None:
+        """The pause is over: it ran out, or a moment that commits came first. What it was
+        waiting for is a step or nothing from here, and Undo was offered for it only while it
+        waited (:meth:`_sync_undo_actions`), so the menu is brought up to date. It is not asked
+        whether the pause was running: a single-shot timer is already inactive when its own
+        timeout lands here."""
+        self._form_pause.stop()
+        self._sync_undo_actions()
+
+    def _checkpoint_form(self, label: str | None = None) -> None:
+        """Commit the form on screen now, under ``label`` when an action named its change."""
+        self._end_form_pause()
+        scope = self._form_scope()
+        if scope is not None:
+            self._settings_history.checkpoint(scope, label=label)
+
+    def _on_form_edited(self) -> None:
+        """``formEdited``: the user changed a form. It becomes a step after the pause, so a
+        burst of typing is one step, or sooner: before a run, a switch, Ctrl+Z, the Edit menu,
+        a save or a quit, whichever comes first.
+
+        It dirties the project as well. Since the owner's decision 4 a form's un-run edits
+        are saved with the project, so an edit of ANY form is unsaved work — the ML form's
+        included, which never reached the dirty flag before (only the Detection and Baseline
+        forms' ``paramsChanged`` did)."""
+        waited = self._form_pause.isActive()
+        self._form_pause.start()
+        self._on_workspace_changed(ANALYSIS_PANEL_ARTIFACT_ID)
+        if not waited:
+            # Ctrl+Z commits an edit still in its pause and takes it back, but a disabled Undo
+            # never receives the key: the first edit of a form, with nothing else to take back,
+            # would leave Ctrl+Z dead for the 700 ms the pause lasts.
+            self._sync_undo_actions()
+
+    def _on_form_step_named(self, label: str) -> None:
+        """``formStepNamed``: an action that knows its own name ("Recall protocol ‘HG
+        student’", "Reset baseline estimator") changed the form. One step, under that name,
+        at once — the diff would only say "Change 9 settings"."""
+        self._checkpoint_form(label)
+
+    def _on_form_leaving(self, key) -> None:
+        """``formLeaving``: a table's form is about to leave the screen. Its pending edit
+        becomes a step NOW, while the form still holds it — after the switch the form shows
+        another table, and a Nyquist clamp on arrival must not join the outgoing edit (design
+        §3.9's order: commit the outgoing form, switch, adopt the incoming one)."""
+        self._end_form_pause()
+        if key is not None:
+            self._settings_history.checkpoint(("form", *key))
+
+    def _on_form_written(self) -> None:
+        """``formWritten``: the app wrote the form on screen itself — a seed from a stored run
+        (a run landing, an event undo or redo), a draft put back, an undo. Adopted without a
+        step: what the app wrote is no edit of the user's, and left unadopted it would be
+        recorded as one by the next checkpoint (design §3.9)."""
+        scope = self._form_scope()
+        if scope is not None:
+            self._settings_history.rebase(scope)
+
+    def _on_form_arrived(self, old, new) -> None:
+        """``formArrived(old, new)``: the form of table ``new`` is on screen. Adopt it as it
+        arrived, seeded or drafted, without a step.
+
+        THE FIRST TABLE TAKES OVER THE STEPS MADE BEFORE IT (design §3.4). Before a recording
+        and channel has a table its form is keyed ``(doc, ch, None)``; when a table is BORN
+        there — it lands while the session is announcing it — those settings produced it, so
+        they move to it, and the journal's entries for them are re-pointed at the same
+        moment (an entry naming a scope with no steps is dead). A switch to a table that
+        already existed is not a birth, and moves nothing (:meth:`_hand_over_form_steps`).
+
+        A table born on screen also leaves an :data:`_UNDO_BREAK` behind the form steps
+        before it: its first run is no undo step, so nothing else would stop the NEXT run's
+        press from taking those steps too (:meth:`_break_behind_form_steps`)."""
+        if new is None:
+            self._sync_undo_actions()
+            return
+        scope = ("form", *new)
+        born = self._session.announcing == tuple(new)
+        if (born and old is not None and old[2] is None and new[2] is not None
+                and tuple(old[:2]) == tuple(new[:2])):
+            self._hand_over_form_steps(new)
+        elif born:
+            self._break_behind_form_steps(new)
+        self._settings_history.rebase(scope)
+        self._sync_undo_actions()
+
+    def _hand_over_form_steps(self, key) -> None:
+        """Table ``key`` is the first its recording and channel have got: the steps made on
+        the form before it, filed under ``(doc, ch, None)``, are its first steps — they
+        produced it — and the journals' entries for them are re-pointed at the same moment.
+        A break goes behind them (:meth:`_break_behind_form_steps`).
+
+        ONE DOOR FOR EVERY BIRTH, whoever is looking: the panel's arrival does it for a table
+        born on screen, and :meth:`_on_table_landed` for one that lands while another
+        recording is shown (a batch run, or a Detect that lands after a look away)."""
+        first, scope = ("form", key[0], key[1], None), ("form", *key)
+        self._settings_history.move_scope(first, scope)
+        self._rename_form_scope(first, scope)
+        self._break_behind_form_steps(key)
+
+    def _break_behind_form_steps(self, key) -> None:
+        """A table was born: if the journal ends in the steps of ITS form, put an
+        :data:`_UNDO_BREAK` behind them. Its first run is no undo step, so nothing else would
+        stop the NEXT run's press from taking those steps too (:meth:`_note_event_step`).
+        Another form's steps at the end need none, since a press takes only what stands right
+        before it and cannot reach past them, and a break behind them would stand between THEM
+        and the run they led to."""
+        tail = self._settings_scope_of(self._undo_journal[-1]) if self._undo_journal else None
+        if tail == ("form", *key):
+            self._journal_undo((_UNDO_BREAK, tuple(key)))
+
+    @QtCore.Slot(str, str)
+    def _on_table_landed(self, doc_id: str, module_id: str) -> None:
+        """``resultsChanged``: a table landed on a recording and channel the Analysis panel is
+        NOT showing — the panel returns at once for those, so it never arrives at the table and
+        :meth:`_on_form_arrived` is never asked. If that recording and channel hold steps made
+        before any table, they are the new table's now (design §3.4)."""
+        written = self._session.announcing
+        if (written is None or written[0] != doc_id or written[2] != module_id
+                or module_id not in self._detection_module_ids()):
+            return
+        key = (doc_id, written[1], module_id)
+        if self._analysis_panel.current_target() == key[:2]:
+            return                             # on screen: the panel arrives at it
+        if ("form", doc_id, key[1], None) in self._settings_history.scopes_with_history():
+            self._hand_over_form_steps(key)
+            self._sync_undo_actions()
+
+    def _rename_form_scope(self, old: tuple, new: tuple) -> None:
+        """Re-point both journals' entries for form scope ``old`` at ``new``, as
+        ``SettingsHistory.move_scope`` moves the steps themselves."""
+        def renamed(entry):
+            if entry == (_UNDO_SETTINGS, old):
+                return (_UNDO_SETTINGS, new)
+            run = self._run_of(entry)
+            return (_UNDO_RUN, new, run[1]) if run is not None and run[0] == old else entry
+
+        for journal in (self._undo_journal, self._redo_journal):
+            journal[:] = [renamed(entry) for entry in journal]
 
     def _keeping_curation_place(self, step) -> str:
         """Run an event-table undo/redo ``step`` so the re-feeds it causes keep the

@@ -282,10 +282,13 @@ class IVWindow(QtWidgets.QMainWindow):
         self.workspaceChanged.emit()
 
     def set_appearance_state(self, state) -> None:
-        """Restore graphical overrides silently, without re-gathering or fitting."""
+        """Restore graphical overrides silently, without re-gathering or fitting.
+
+        A restored figure starts its appearance history over (design §4.2)."""
         self._appearance = (state if isinstance(state, PlotAppearance)
                             else PlotAppearance.from_mapping(state))
         self._appearance_widget.set_state(self._appearance)
+        self._appearance_widget.clear_history()
         self._apply_appearance()
 
     def appearance_state(self) -> dict:

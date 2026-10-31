@@ -191,7 +191,12 @@ def test_judge_chain_kinds():
     assert differs.sentence.startswith("⚠ The form differs from the chain the CUSUM detection")
     assert "low-pass 10000 → 5000 Hz" in differs.sentence
     assert differs.revert_params is not None
-    assert {k: differs.revert_params[k] for k in cr.CHAIN_KEYS} == cr.complete_recipe(run)
+    # UPDATED (editing foundation: defect 7, section 6 "Chain notice ▸ Revert"): Revert puts
+    # back only the stages that differ (the low-pass, and the drift stage whose polarity
+    # changed), not all 37 chain keys.
+    keys = (*cr.STAGE_PARAM_KEYS["detrend"], *cr.STAGE_PARAM_KEYS["lowpass"])
+    assert {k: v for k, v in differs.revert_params.items() if k != "polarity"} == {
+        k: cr.complete_recipe(run)[k] for k in keys}
     assert differs.revert_params["polarity"] == -1           # named by the diff
     no_pol = cr.judge_chain(dict(run, filter_cutoff_hz=5_000.0), run, module_id="detect.schmitt")
     assert "polarity" not in no_pol.revert_params

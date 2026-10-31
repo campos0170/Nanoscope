@@ -7,7 +7,9 @@ the SAME stage-editor widgets the DetectionPanel builds and owns — reparented 
 
 * a stage list in EXECUTION order (notch → … → low-pass "applied inside detection"),
   rendered from ``conditioning_recipes.stage_rows``; ticking a row writes the stage's own
-  enable checkbox through MainWindow, selecting a row raises that stage's form;
+  enable checkbox through MainWindow, selecting a row raises that stage's form; a row whose
+  stage differs from the run of the detection on screen is marked;
+* the shown stage's own Revert stage / Reset stage, under its form;
 * the chain-versus-detection status with Revert / Run detection…;
 * a toolbar: Follow main trace, Show main trace, Copy as Python, ML chain… and protocol
   Import / Export (JSON);
@@ -71,6 +73,7 @@ from ..analysis.filter_views import (
 from ..analysis.modules import notch_freqs_param
 from ..core import clock
 from .axes import ReadableLinearAxis, ReadableLogAxis
+from .key_sequences import redo_sequences, undo_sequences
 from .trace_view import ChannelPane
 from .worker_thread import DEFAULT_JOIN_MS, JOB_NONE, retire_worker_thread, start_worker_thread
 
@@ -79,7 +82,8 @@ __all__ = ["SignalConditioningWindow", "clamp_rect", "default_window_rect"]
 #: The stage rows' tooltip: what the list is, and what the chain does NOT feed.
 _STAGE_LIST_TIP = (
     "The signal chain in the order it runs. Tick a stage to enable it; select it to edit "
-    "it below. The low-pass is applied inside detection, after every other stage.\n\n"
+    "it below. The low-pass is applied inside detection, after every other stage. A stage "
+    "in bold amber differs from the run of the detection on screen.\n\n"
     + SCOPE_SENTENCE)
 
 _FOLLOW_TIP = (
@@ -94,6 +98,13 @@ _EXACT_TIP = (
 
 #: The exact button's three states (it is as wide as the widest, so it never reflows).
 _EXACT_TEXTS = ("Compute exact", "Computing…", "Retry exact")
+
+#: The status row's Revert, for a chain-only difference and once a threshold differs too
+#: (Revert then puts thresholds back as well). As wide as the wider, so it never reflows.
+_REVERT_TEXTS = ("Revert to detection's chain", "Revert to detection's settings")
+
+#: A stage-list row whose stage differs from the run: the chain notice's own amber.
+_DIFFERS_INK = "#FFB74D"
 
 #: A step response probe up to this many samples is computed on the GUI thread (a few
 #: ms; a 1 Hz low-pass's is ~800k samples and goes to the worker).
@@ -374,6 +385,18 @@ def _segmented(labels: Sequence[tuple[str, str]], tips: Mapping[str, str] | None
     return host, group, buttons
 
 
+def _fit_widest(button: QtWidgets.QPushButton, texts: Sequence[str]) -> None:
+    """Fix ``button`` at the width of the widest of ``texts``, the words it can show, so a
+    change of words never moves what sits beside it."""
+    shown = button.text()
+    widths = []
+    for text in texts:
+        button.setText(text)
+        widths.append(button.sizeHint().width())
+    button.setText(shown)
+    button.setFixedWidth(max(widths))
+
+
 def _legend(item: pg.PlotItem) -> pg.LegendItem:
     """A one-row legend right-aligned in the plot's own title row: inside the data area it
     hid the baseline band of a trace (and the plateau of a step) under its box."""
@@ -509,7 +532,10 @@ class SignalConditioningWindow(QtWidgets.QWidget):
     Emits (MainWindow routes every one):
         stageSelected(str): a stage row was selected — raise that stage's form.
         stageEnableRequested(str, bool): a stage row's tick changed.
-        revertRequested(): put the shown detection's chain back on the form.
+        stageRevertRequested(str) / stageResetRequested(str): the shown stage's Revert
+            stage (the run's settings back on that stage alone) or Reset stage (its
+            defaults, its on/off kept).
+        revertRequested(): put back what differs from the shown detection's run.
         runDetectionRequested(): Analysis ▸ Run detection (the prompted menu door).
         exportProtocolsRequested() / importProtocolsRequested(): protocol JSON exchange.
         copyPythonRequested(): put a script rebuilding the processed trace on the clipboard.
@@ -519,10 +545,14 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         notchLinesRequested(object): spectrum lines (a list of Hz) to add to the notch.
         saveProjectRequested() / saveProjectAsRequested(): ⌘S / ⌘⇧S while this window is
             the active one — MainWindow runs its own project save.
+        undoRequested() / redoRequested(): ⌘Z / ⇧⌘Z while this window is the active one —
+            MainWindow runs its own Edit ▸ Undo / Redo.
     """
 
     stageSelected = QtCore.Signal(str)
     stageEnableRequested = QtCore.Signal(str, bool)
+    stageRevertRequested = QtCore.Signal(str)
+    stageResetRequested = QtCore.Signal(str)
     revertRequested = QtCore.Signal()
     runDetectionRequested = QtCore.Signal()
     exportProtocolsRequested = QtCore.Signal()
@@ -534,6 +564,8 @@ class SignalConditioningWindow(QtWidgets.QWidget):
     notchLinesRequested = QtCore.Signal(object)
     saveProjectRequested = QtCore.Signal()
     saveProjectAsRequested = QtCore.Signal()
+    undoRequested = QtCore.Signal()
+    redoRequested = QtCore.Signal()
     #: GUI thread -> the worker (queued): a request is waiting in the mailbox.
     _previewPosted = QtCore.Signal()
 
@@ -560,6 +592,10 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self._window_range: tuple[int, int] | None = None
         self._status = ChainStatus.none()
         self._stage_key = ""
+        #: The stages that differ from the run (marked rows), and those of them a stage
+        #: Revert can put back; pushed by MainWindow with every verdict.
+        self._stage_differ: frozenset[str] = frozenset()
+        self._stage_revertable: frozenset[str] = frozenset()
         # Preview state.
         self._source: ConditioningSource | None = None
         self._memo = ConditionedTraceMemo(capacity=2)
@@ -648,6 +684,20 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self.act_save_project_as.triggered.connect(
             lambda *_: self.saveProjectAsRequested.emit())
         self.addAction(self.act_save_project_as)
+        # ⌘Z / ⇧⌘Z, forwarded the same way: the chain is edited HERE, and Edit ▸ Undo is a
+        # window shortcut of the main window behind this one, so the keys did nothing in the
+        # window the edit was made in. A focused spin box or line edit still keeps ⌘Z for its
+        # own typing: Qt asks it first (ShortcutOverride), as in the main window.
+        self.act_undo = QtGui.QAction("Undo", self)
+        self.act_undo.setShortcuts(undo_sequences())
+        self.act_undo.setShortcutContext(QtCore.Qt.WindowShortcut)
+        self.act_undo.triggered.connect(lambda *_: self.undoRequested.emit())
+        self.addAction(self.act_undo)
+        self.act_redo = QtGui.QAction("Redo", self)
+        self.act_redo.setShortcuts(redo_sequences())
+        self.act_redo.setShortcutContext(QtCore.Qt.WindowShortcut)
+        self.act_redo.triggered.connect(lambda *_: self.redoRequested.emit())
+        self.addAction(self.act_redo)
 
         self.scope_line = _ElidedLine(SCOPE_SENTENCE)
         self.scope_line.setObjectName("signalConditioningScope")
@@ -664,16 +714,15 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self.status_line = _ElidedLine("")
         self.status_line.setObjectName("signalConditioningStatus")
         srl.addWidget(self.status_line, 1)
-        self.revert_button = QtWidgets.QPushButton("Revert to detection's chain")
+        self.revert_button = QtWidgets.QPushButton(_REVERT_TEXTS[0])
         self.revert_button.setObjectName("signalConditioningRevert")
-        self.revert_button.setToolTip(
-            "Put the chain the detection on screen ran with back on the form.")
         self.revert_button.setEnabled(False)
         # Neither status button may be where focus lands on open, nor keep it after a
         # click: a stray Space would revert the form or start a run.
         self.revert_button.setFocusPolicy(QtCore.Qt.TabFocus)
         self.revert_button.clicked.connect(lambda *_: self.revertRequested.emit())
         srl.addWidget(self.revert_button)
+        self._fit_revert_button()
         self.run_button = QtWidgets.QPushButton("Run detection…")
         self.run_button.setObjectName("signalConditioningRun")
         self.run_button.setToolTip(
@@ -743,6 +792,29 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self.form_area.setWidget(self._form_host)
         self._left_layout.addWidget(self.form_area, 1)
 
+        # -- the shown stage's own Revert and Reset, under its form (design §6) ------------
+        # Outside the scrolled form, so a long stage never scrolls them away; always
+        # present, enabled or not, so the column never reflows.
+        stage_buttons = QtWidgets.QWidget()
+        stage_buttons.setObjectName("signalConditioningStageButtons")
+        sbl = QtWidgets.QHBoxLayout(stage_buttons)
+        sbl.setContentsMargins(0, 0, 0, 0)
+        sbl.setSpacing(6)
+        self.stage_revert_button = QtWidgets.QPushButton("Revert stage")
+        self.stage_revert_button.setObjectName("signalConditioningStageRevert")
+        self.stage_reset_button = QtWidgets.QPushButton("Reset stage")
+        self.stage_reset_button.setObjectName("signalConditioningStageReset")
+        for button, signal in ((self.stage_revert_button, self.stageRevertRequested),
+                               (self.stage_reset_button, self.stageResetRequested)):
+            button.setEnabled(False)
+            # As the status row's: never where focus lands, so a stray Space cannot
+            # rewrite a stage.
+            button.setFocusPolicy(QtCore.Qt.TabFocus)
+            button.clicked.connect(lambda *_, s=signal: self._request_for_shown_stage(s))
+            sbl.addWidget(button)
+        sbl.addStretch(1)
+        self._left_layout.addWidget(stage_buttons)
+
         self.preview_tabs = QtWidgets.QTabWidget()
         self.preview_tabs.setObjectName("signalConditioningPreview")
         self._build_time_tab()
@@ -781,6 +853,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             sc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(lambda i=i: self.preview_tabs.setCurrentIndex(i))
         self.set_chain_status(None)
+        self._sync_stage_buttons()
         self._refresh_time_controls()
         self._refresh_status_texts()
 
@@ -1089,8 +1162,8 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self._order_tab_chain()
 
     def _order_tab_chain(self) -> None:
-        """Tab from the stage list goes straight into the shown stage's form, then the
-        previews, the protocol bar and the status buttons.
+        """Tab from the stage list goes straight into the shown stage's form, then its
+        Revert and Reset, the previews, the protocol bar and the status buttons.
 
         Reparented widgets join the focus chain AFTER the window's own, which put the
         tab bar and the protocol bar between the list and the form."""
@@ -1108,6 +1181,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         # The tab widget goes in itself (it proxies focus to its bar): left behind, it
         # would be the stop Tab wraps to instead of the stage list.
         order = ([self.stage_list] + stops(parts.stage_stack) + stops(parts.notices)
+                 + [self.stage_revert_button, self.stage_reset_button]
                  + [self.preview_tabs] + stops(self._time_page) + stops(self._spectrum_page)
                  + stops(self._response_tab_page)
                  + stops(parts.protocol_bar) + [self.revert_button, self.run_button])
@@ -1163,17 +1237,54 @@ class SignalConditioningWindow(QtWidgets.QWidget):
                 state = QtCore.Qt.Checked if row.enabled else QtCore.Qt.Unchecked
                 if item.checkState() != state:
                     item.setCheckState(state)
-                tip = (f"{row.title}: {row.summary}"
-                       + (f" ({row.detail})" if row.detail else "")
-                       + (f" — {row.role}" if row.role else ""))
-                if not row.linear:
-                    tip += "\nNot a linear filter: it has no fixed frequency response."
+        finally:
+            self.stage_list.blockSignals(was)
+            self._rendering = False
+        self._render_marks()
+
+    def _render_marks(self) -> None:
+        """Mark the rows whose stage differs from the run, and give every row its tooltip.
+
+        The mark is the chain notice's amber, in bold, with the differences leading the
+        row's tooltip. Font and ink only: a marked row keeps its height (the list is sized
+        to show all eight rows) and its text (the setting before the role note)."""
+        bold = QtGui.QFont(self.stage_list.font())
+        bold.setBold(True)
+        ink = QtGui.QColor(_DIFFERS_INK)
+        self._rendering = True
+        was = self.stage_list.blockSignals(True)
+        try:
+            for i, row in enumerate(self._rows):
+                item = self.stage_list.item(i)
+                marked = row.key in self._stage_differ
+                font, color = (bold, ink) if marked else (None, None)
+                if item.data(QtCore.Qt.FontRole) != font:
+                    item.setData(QtCore.Qt.FontRole, font)
+                if item.data(QtCore.Qt.ForegroundRole) != color:
+                    item.setData(QtCore.Qt.ForegroundRole, color)
+                tip = self._row_tip(row, marked)
                 if item.toolTip() != tip:
                     item.setToolTip(tip)
         finally:
             self.stage_list.blockSignals(was)
             self._rendering = False
         self.stage_list.viewport().update()
+
+    def _row_tip(self, row, marked: bool) -> str:
+        """A row's tooltip: its setting and role, led, on a marked row, by what differs."""
+        tip = (f"{row.title}: {row.summary}"
+               + (f" ({row.detail})" if row.detail else "")
+               + (f" — {row.role}" if row.role else ""))
+        if not row.linear:
+            tip += "\nNot a linear filter: it has no fixed frequency response."
+        if not marked:
+            return tip
+        diffs = "; ".join(d.text for d in self._status.diffs if d.stage == row.key)
+        run = self._status.detector_label or "detection"
+        head = f"Differs from the {run} run" + (f": {diffs}." if diffs else ".")
+        if row.key not in self._stage_revertable:
+            head += " Revert stage cannot put it back: the run did not record that setting."
+        return f"{head}\n{tip}"
 
     def stage_rows(self) -> tuple:
         """The rows last rendered (StageRow tuples), after any pending render."""
@@ -1186,6 +1297,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             return
         if key != self._stage_key:
             self._stage_key = key
+            self._sync_stage_buttons()
             if self.preview_tab() == "response" and not self._combined_response():
                 self._on_view_changed()
         row = STAGE_KEYS.index(key)
@@ -1211,10 +1323,73 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         style = "color:#FFB74D; font-weight:600;" if warn else "color:#8b9199;"
         if self.status_line.styleSheet() != style:
             self.status_line.setStyleSheet(style)
-        self.revert_button.setEnabled(warn and bool(status.revert_params))
+        settings = status.thresholds_differ
+        text = _REVERT_TEXTS[1 if settings else 0]
+        if self.revert_button.text() != text:
+            self.revert_button.setText(text)
+        can = warn and bool(status.revert_params)
+        if can or not warn:
+            what = "stages and thresholds" if settings else "stages"
+            tip = (f"Put back the {what} that differ from the run of the detection on "
+                   f"screen. Nothing else on the form changes.")
+        else:
+            tip = ("Revert cannot restore a setting the run did not record. Run detection "
+                   "to apply the form.")
+        if self.revert_button.toolTip() != tip:
+            self.revert_button.setToolTip(tip)
+        self.revert_button.setEnabled(can)
+        # The rows' tooltips name this verdict's differences.
+        self._render_marks()
 
     def chain_status(self) -> ChainStatus:
         return self._status
+
+    def set_stage_states(self, differ: frozenset, revertable: frozenset) -> None:
+        """Which stages differ from the run of the detection on screen (their rows are
+        marked), and which of those their Revert can put back (the shown stage's Revert is
+        enabled only for these). MainWindow pushes both with every verdict."""
+        self._stage_differ = frozenset(differ)
+        self._stage_revertable = frozenset(revertable) & self._stage_differ
+        self._render_marks()
+        self._sync_stage_buttons()
+
+    def stage_states(self) -> tuple[frozenset, frozenset]:
+        """``(differ, revertable)`` as last pushed."""
+        return self._stage_differ, self._stage_revertable
+
+    def _sync_stage_buttons(self) -> None:
+        """Enable, and explain, the shown stage's Revert and Reset."""
+        key = self._stage_key
+        title = STAGE_TITLES.get(key, "")
+        revertable = key in self._stage_revertable
+        if not title:
+            revert_tip = reset_tip = "Select a stage first."
+        else:
+            if revertable:
+                revert_tip = (f"Put back the {title} settings the detection on screen ran "
+                              f"with. The other stages and the thresholds stay as they are.")
+            elif key in self._stage_differ:
+                revert_tip = (f"The {title} stage differs on a setting the run did not "
+                              f"record, so Revert cannot put it back. Run detection to "
+                              f"apply it.")
+            else:
+                revert_tip = (f"Enabled when the {title} stage differs from the run of the "
+                              f"detection on screen.")
+            # The low-pass has no switch of its own: its cutoff is its on/off.
+            kept = ("Its cutoff, which turns it on and off, stays as it is."
+                    if STAGE_ENABLE_KEY.get(key) is None else
+                    "It stays on or off as it is.")
+            reset_tip = f"Put the {title} stage's default settings on the form. {kept}"
+        self.stage_revert_button.setEnabled(revertable)
+        self.stage_reset_button.setEnabled(bool(title))
+        for button, tip in ((self.stage_revert_button, revert_tip),
+                            (self.stage_reset_button, reset_tip)):
+            if button.toolTip() != tip:
+                button.setToolTip(tip)
+
+    def _request_for_shown_stage(self, signal) -> None:
+        if self._stage_key:
+            signal.emit(self._stage_key)
 
     def set_run_enabled(self, enabled: bool) -> None:
         self.run_button.setEnabled(bool(enabled))
@@ -2078,14 +2253,11 @@ class SignalConditioningWindow(QtWidgets.QWidget):
 
     def _fit_exact_button(self) -> None:
         """As wide as its widest state, so a state change never moves the status beside it."""
-        button = self.exact_button
-        shown = button.text()
-        widths = []
-        for text in _EXACT_TEXTS:
-            button.setText(text)
-            widths.append(button.sizeHint().width())
-        button.setText(shown)
-        button.setFixedWidth(max(widths))
+        _fit_widest(self.exact_button, _EXACT_TEXTS)
+
+    def _fit_revert_button(self) -> None:
+        """As wide as its wider wording, so "settings" never moves the status line."""
+        _fit_widest(self.revert_button, _REVERT_TEXTS)
 
     def _refresh_status_texts(self) -> None:
         self.time_status.setText(self._time_status_text())
@@ -2233,6 +2405,8 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
             self._fit_stage_list()
             self._fit_exact_button()
+            self._fit_revert_button()
+            self._render_marks()            # the marked rows' bold is of the list's font
             self._time_status_row.setFixedHeight(max(
                 self.time_status.height(), self.exact_button.sizeHint().height()))
 

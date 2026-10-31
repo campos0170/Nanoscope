@@ -209,6 +209,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     def set_appearance_state(self, mapping) -> None:
         self._appearance = PlotAppearance.from_mapping(mapping)
         self._appearance_widget.set_state(self._appearance)
+        # A restored figure starts its appearance history over (design §4.2).
+        self._appearance_widget.clear_history()
         if not self._updating:
             self._apply_appearance()
 

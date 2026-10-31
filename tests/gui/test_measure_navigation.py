@@ -956,7 +956,13 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           # Measure tab with ("what would an event here be?"). It is a
                           # NamedTuple, so the two panels can exchange it without importing
                           # each other.
-                          "busy_cursor", "hand_row_preview"}
+                          "busy_cursor", "hand_row_preview",
+                          # key_sequences (2026-10-30): the one rule for a list of
+                          # shortcut keys -- each RESOLVED sequence once, or Qt fires
+                          # none of a doubled pair. plot_appearance binds its Undo/Redo
+                          # keys through it (design §4.2). Functions only, no widget,
+                          # nothing imported from gui; the guard below proves both.
+                          "key_sequences"}
 
 
 def test_the_non_panel_allowlist_holds_no_panel():
@@ -1008,6 +1014,10 @@ def test_the_non_panel_allowlist_holds_no_panel():
         "figure_bundle": {"plot_export", "plot_export_options"},
         "plot_export": {"export_paths", "figure_bundle", "plot_export_options"},
         "plot_export_options": {"plot_print_preflight"},
+        # 2026-10-30: each plot window's own appearance Undo/Redo (design §4.2) binds
+        # the platform's keys through the shared dedupe rule rather than a private copy
+        # of it. key_sequences reaches nothing further and defines no widget.
+        "plot_appearance": {"key_sequences"},
     }
 
     for name in _NON_PANEL_GUI_MODULES:
@@ -1133,9 +1143,14 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
     # no widget and imports nothing from ``gui``. PSD and the report window do NOT reach
     # it — neither runs anything in the background — and stating the measured set means
     # the day one of them does, it is reviewed here rather than assumed.
+    #
+    # ``key_sequences`` (2026-10-30): the Plots window binds its Undo/Redo keys through
+    # the one shared dedupe rule (design §3.7) instead of the private copy it kept. On
+    # the allowlist, proven widgetless and gui-free by the guard above.
     assert _gui_modules_reached(plots_mod) == {
         "export_paths", "combos", "axes", "categorical", "worker_thread",
-        "analysis_catalog", "plot_export", "plot_appearance", "figure_bundle", "plot_lasso"}
+        "analysis_catalog", "plot_export", "plot_appearance", "figure_bundle", "plot_lasso",
+        "key_sequences"}
     # ``plot_export`` is the shared, non-panel seam for staged PNG/SVG/PDF and
     # exact-CSV export; reaching it preserves the no-sibling-panel boundary.
     assert _gui_modules_reached(psd_mod) == {

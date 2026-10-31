@@ -149,7 +149,8 @@ class Session(QObject):
 
     # -- documents -------------------------------------------------------------------------------
     def add_document(self, doc: Document) -> str:
-        """Seeds CalibrationSet.default_for() for every channel, then applies any .npcal.json
+        """Seeds CalibrationSet.default_for() for every channel, records it as the default
+        that channel OPENED with (:meth:`opened_default`), then applies any .npcal.json
         sidecar over the top. Emits documentOpened. Does NOT create layers — main_window does,
         so the default-visible policy lives in one place."""
         doc_id = doc.doc_id
@@ -170,8 +171,12 @@ class Session(QObject):
                         med = float(np.median(np.asarray(arr[::step], dtype=np.float64)))
                 except Exception:      # noqa: BLE001 - a default must never break a load
                     med = None
-            self._calibration.set(doc_id, info.index,
-                                  CalibrationSet.default_for(info, med))
+            default = CalibrationSet.default_for(info, med)
+            # Recorded HERE, before the sidecar lands, because this is the only moment the
+            # median is in hand: Reset, the sidecar and the workflow chip all mean "this", and
+            # default_for(info) asked again later has no median to detect the encoding from.
+            self._calibration.set_opened_default(doc_id, info.index, default)
+            self._calibration.set(doc_id, info.index, default)
 
         # A segment is an in-memory derived recording, not a file: it has no sidecar of its own,
         # and its meta.path points at the PARENT file (whose sidecar belongs to the parent, not
@@ -204,8 +209,9 @@ class Session(QObject):
         return doc_id
 
     def close_document(self, doc_id: str) -> None:
-        """Drops layers for the doc, invalidates its cache entries and calibration.
-        Emits documentClosed, then layersChanged if any layer went away."""
+        """Drops layers for the doc, invalidates its cache entries and calibration (with the
+        defaults its channels opened with). Emits documentClosed, then layersChanged if any
+        layer went away."""
         if doc_id not in self._documents:
             return
         del self._documents[doc_id]
@@ -310,9 +316,16 @@ class Session(QObject):
         # Inherit the parent's LIVE per-channel calibration over the seeded defaults. Set straight
         # on the CalibrationSet (not via set_calibration) so no sidecar is written and no signal
         # fires: a freshly derived segment is not a user calibration edit.
+        #
+        # ...and the parent's OPENED default with it, over the one add_document just measured
+        # from the window. The voltage encoding is the file's, decided from the whole channel;
+        # a window cut where the bias was low reads plausible in an inflated file, and Reset on
+        # the segment would then install 1.0 where its parent resets to 0.1.
         for info in seg.meta.channels:
             self._calibration.set(seg_id, info.index,
                                   self._calibration.get(parent_doc_id, info.index))
+            self._calibration.set_opened_default(
+                seg_id, info.index, self._calibration.opened_default(parent_doc_id, info))
             override = self.acquisition_bandwidth_override(parent_doc_id, info.index)
             if override is not None:
                 self._acquisition_overrides[(seg_id, info.index)] = override
@@ -326,6 +339,14 @@ class Session(QObject):
     # -- calibration -----------------------------------------------------------------------------
     def calibration(self, doc_id: str, ch: int) -> ChannelCalibration:
         return self._calibration.get(doc_id, ch)
+
+    def opened_default(self, doc_id: str, ch: int) -> ChannelCalibration:
+        """The default channel ``ch`` OPENED with — what Reset to default restores, and what
+        the sidecar and the workflow chip compare with to decide whether the user changed
+        anything. See :meth:`CalibrationSet.opened_default` for why it is a record and not
+        ``default_for`` asked again."""
+        info = self._documents[doc_id].meta.channels[ch]
+        return self._calibration.opened_default(doc_id, info)
 
     def acquisition_bandwidth_override(self, doc_id: str, ch: int) -> AcquisitionBandwidth | None:
         self._acquisition_channel(doc_id, ch)
@@ -539,7 +560,7 @@ class Session(QObject):
             return SIDECAR_NONE
         if self.recording_moved(doc_id):
             return SIDECAR_RECORDING_MOVED      # nothing beside the old path is touched
-        probe = CalibrationSet(entries=dict(self._calibration.entries))
+        probe = self._calibration.copy()
         probe.set(doc_id, ch, cal)
         return sidecar_effect(doc.meta.path, doc_id, probe, doc.meta.channels)
 
@@ -562,7 +583,7 @@ class Session(QObject):
             return ()
         if self.recording_moved(doc_id):
             return ()                            # the orphan sidecar is not rewritten
-        probe = CalibrationSet(entries=dict(self._calibration.entries))
+        probe = self._calibration.copy()
         probe.set(doc_id, ch, cal)
         return notes_lost_by(doc.meta.path, doc_id, probe, doc.meta.channels)
 
@@ -742,15 +763,25 @@ class Session(QObject):
 
         Exists so :meth:`calibration_issues` can read the array without recursing through
         the constructor that asks it for the issues.
+
+        READ-ONLY, WHICHEVER BRANCH ANSWERS. At an identity calibration this IS the
+        recording's own array (read-only since :class:`TraceDocument` was built); otherwise
+        it is the one cached copy every curve, panel and worker of this calibration shares
+        by reference. Either way one stray in-place write would change what every surface
+        reads for the rest of the session, so the computed array is frozen too, and such a
+        write raises at the line that tried it.
         """
         doc = self._documents[doc_id]
         cal = self._calibration.get(doc_id, ch)
         if cal.fingerprint() == (1.0, 0.0):
             return doc.raw(ch)
-        return self._cache.get_or_compute(
-            ("cal", doc_id, ch) + cal.fingerprint(),
-            lambda: cal.apply(doc.raw(ch)),
-        )
+
+        def compute() -> np.ndarray:
+            out = cal.apply(doc.raw(ch))
+            out.setflags(write=False)
+            return out
+
+        return self._cache.get_or_compute(("cal", doc_id, ch) + cal.fingerprint(), compute)
 
     # -- x axis ----------------------------------------------------------------------------------
     def x_axis(self, doc_id: str, time_offset_s: float = 0.0) -> XAxis:

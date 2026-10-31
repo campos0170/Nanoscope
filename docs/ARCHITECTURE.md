@@ -35,7 +35,22 @@ a test that walks the `gui/` ASTs.
   non-monotonic at 15 M samples and breaks rendering).
 - **Calibration** is separate from the document (`core/calibration`): the same raw data can be viewed
   under different gains/offsets. Calibrated arrays are produced on demand and cached; identity
-  calibration returns the raw array by reference (no copy).
+  calibration returns the raw array by reference (no copy) — read-only, like every cached
+  calibrated array (see *Load-bearing invariants*).
+  **"Back at its default" means the default the channel OPENED with.** A voltage channel's default
+  is detected from the channel's own median: past `_MAX_PLAUSIBLE_BIAS_MV` (1200 mV) it is the
+  10×-inflated encoding and opens at gain 0.1, below it the number IS the bias and it opens at 1.0.
+  `default_for(info)` asked again without the median answers 0.1 for every voltage-mV channel, so
+  Reset to default installed that on a host-guest channel that opened at 1.0 — 10× on every
+  voltage, conductance and V-dependence figure — and the sidecar, comparing with the same answer,
+  stored the untouched voltage channel on every write. `Session.add_document` therefore records
+  `default_for(info, median)` per channel before any sidecar is applied
+  (`CalibrationSet.opened_defaults`, read through `Session.opened_default`), and Reset, the sidecar
+  payload (`_sidecar_payload`, so `save_sidecar`, `sidecar_effect` and `notes_lost_by`) and the
+  workflow chip all compare with it. A segment takes its PARENT's opened default: the encoding
+  belongs to the file, and a window cut where the bias was low would read as a plausible bias.
+  Reset resets gain, offset and units only; the note is the user's record and the kind override
+  has its own reset.
 - **Signal loading** is eager (whole channel into RAM) and happens **off the Qt main thread** via a
   worker; ~15 M samples/channel is the design ceiling, above which the loader offers a sample range.
 - **Identity** is three questions, not one, and `core/identity.py` is where they are kept apart.
@@ -102,6 +117,113 @@ a test that walks the `gui/` ASTs.
   the wirer supplies, so the class stays free of Qt widgets and of the measurement schema. There is
   still exactly ONE Edit ▸ Undo: `main_window` keeps a small journal of which stack each step landed
   on and a press takes back the most recent step that can actually be applied.
+- **The analysis settings get the rule a third time**, from `core/history.SettingsHistory`, for
+  `MeasurementHistory`'s reason: the rule is reused and the payload is not — here it is not even
+  one shape. A scope is `("calibration", doc_id, channel)`, `("time_base", doc_id)`,
+  `("acquisition", doc_id, channel)` or `("form", doc_id, channel, module_id)`: the Detection, ML
+  and Baseline forms of one event table, `module_id` `None` until the recording and channel have
+  a table. Each scope has its own stack, `MAX_DEPTH` deep, read, written and named
+  through three callables `main_window` supplies, dispatched on `scope[0]` through one table
+  (`_settings_kinds`), so the class holds no widget and no schema. `None` from a reader means
+  "cannot be read now", never a value: a setting whose own value can be `None` — the file's own
+  time base, no bandwidth override — is read wrapped (`{"declaration": None}`) or it could never be
+  undone back to. A scope is adopted silently when it appears (`rebase` on `documentOpened`, after a
+  segment cut, when a restore settles), or the first Apply on a fresh recording would be its
+  baseline and could never be undone; and a form is rebased whenever it arrives through a switch, a
+  seed or a restore, an event undo that re-installs a run included, so a re-seed is never recorded
+  as the user's edit. The form's steps made before a table existed move to the first table its
+  recording and channel get (`move_scope`), but only to a table BORN there, one that lands while the
+  session is announcing it (`Session.announcing`): a switch to a table that already existed would
+  put its steps in front of that table's own. A write-back runs
+  `checkpoint_all()` while the history is still applying, so what it moved in ANOTHER scope — a
+  time base taken back re-clamps the form's frequency boxes — is adopted there rather than recorded
+  later as the user's edit. The stack's `changed` drives the menu text but NOT the
+  dirty flag — every setting it holds already dirties the project through the session's own
+  signal (a form's through `formEdited`), and `changed` also fires when a closing recording takes
+  its scopes with it.
+
+  **A calibration step carries its sidecar.** What a calibration scope holds is the calibration and
+  the bytes of `<datafile>.npcal.json` on each side of the commit that made it (`_CalibrationState`;
+  the file is not compared, or an Apply that moved no number would be a step that takes nothing
+  back). The Calibration panel announces each commit (`commitStarting`), so the step keeps the file
+  as the commit found it. An undo or redo installs the calibration alone
+  (`set_calibration(..., write_sidecar=False)`) and `_put_back_sidecar` then puts the file back
+  through `core.calibration.restore_sidecar`, byte for byte and without asking (the owner's
+  decision 6): a rewrite, a deletion, or a deleted file written back with its note. It writes only
+  while the file still holds what the step left; otherwise it returns `SIDECAR_KEPT` and leaves the
+  file as it is, which is what another channel's step still in effect, or an edit made outside the
+  app, looks like. Written back through `save_sidecar` as Apply is, the file was re-derived by the
+  payload rule, which took a note off a channel at its default numbers, deleted a file whose only
+  entry that was, and after a project restore wrote a gain the file had never held. The status
+  line, and the Calibration panel's own line (`show_status`), say what happened to the file in the
+  panel's words (`calibration_panel.sidecar_outcome_text`).
+
+  The journal's entries are `(_UNDO_EVENTS, key)`, `_UNDO_MEASUREMENTS` and
+  `(_UNDO_SETTINGS, scope)`. An event entry names its table: a bare entry answered for whichever
+  table was on screen and put a newer step on ANOTHER recording in front of the newest step on this
+  one. A press acts on the newest entry that can act ON SCREEN — **Ctrl+Z never silently changes a
+  recording that is not on screen** (decision 1). An event table is on screen while it is the one
+  `_undo_key()` names, a form scope while `scope[1:] == AnalysisPanel.form_key()` (the same key: a
+  form is filed under the table shown), and a calibration, time base or acquisition scope while its
+  recording is the Analysis panel's target. The journal is bounded to `2 * MAX_DEPTH` entries
+  through one door, `_journal_undo`; past it the stacks are asked directly: the table on screen,
+  then the measurements, then the settings on screen. When nothing can be taken, the menu says where
+  the history is instead of going quiet, in the order of `_sync_undo_actions`: another detector of
+  this channel holds steps; a ceiling dropped this table's or this recording's settings history;
+  "Undo — nothing to undo on this event table" when any event table of the session holds history
+  or the recording on screen holds settings that wait for another table or channel; and "Undo —
+  nothing on this recording" only when no event table holds any history and every step left is a
+  setting of a recording that is not on screen. Redo is per scope (decision 2): a settings step
+  ends only its own scope's redo entries and never calls the tables' `clear_redo`, and a table step
+  leaves every settings entry alone; the cross-stack rule between the two tables is unchanged.
+
+  One entry can be COMPOUND (decision 3): `(_UNDO_RUN, ("form",) + K, n)`. When "Re-run detection"
+  or "Re-measure depths" lands on table K, the `n` contiguous settings entries of `("form",) + K`
+  immediately before it fold into it (`_note_event_step`), so one press undoes the run and the
+  setting changes that led to it ("Undo Re-run detection and 2 setting changes"). Anything else
+  between them — a curation, a calibration, another table's form — stops the fold, and so does the
+  `(_UNDO_BREAK, K)` that `_on_form_arrived` leaves behind the form steps of a table BORN on screen:
+  a first detection is no undo step, so without it the settings that produced a table's first run
+  would join its second run's press. A break lives in the undo journal only and nothing undoes it.
+  The press undoes the event step first, rebases the form the restore re-seeded, then the settings
+  steps newest first; its redo replays them oldest first, then the event step (`_take_run_step`),
+  all or nothing. A pending press keeps exactly the halves its stacks still hold
+  (`_split_redo_runs` asks them): a step on the table ends the table's half, a step of the form
+  ends the form's. No stack is saved with a project.
+
+  Every Undo and Redo key list is built by `gui/key_sequences.py`, which registers each RESOLVED key
+  once. On a Mac the standard Redo resolves to ⇧⌘Z, so the standard key beside an explicit
+  "Ctrl+Shift+Z" was one key twice, which Qt answers with "Ambiguous shortcut overload" and nothing;
+  offscreen, where Redo is Ctrl+Y, no test saw it.
+- **One set of form widgets, one form per event table.** The Detection, ML and Baseline forms show
+  whichever table is selected, so what they hold is filed under `AnalysisPanel.form_key()`:
+  `(doc_id, channel, module_id)`, and `(doc_id, channel, None)` while the recording and channel have
+  no table. `form_state()` is the snapshot — `detection`, `intents`, `ml`, `baseline`, JSON-safe,
+  with neither the detector (the table on screen decides it) nor the model path (a model file can
+  be gone) — and `restore_form_state()` is a SET and not a seed, because the Baseline form's
+  `set_params` is a seed that refuses a confirmed choice. `intents` is what each frequency box was
+  last SET to: `params()` holds what a box reads, which on a slower recording is the Nyquist clamp,
+  so a snapshot of `params()` alone put the clamp back as the user's value. Every write the app
+  makes itself runs under the writing guard (`_writing_form()`) and is no edit. The panel knows
+  nothing of undo; it gives five signals: `formEdited` (the user edited), `formWritten` (the app
+  wrote the form), `formLeaving` (before the form changes, while `form_key()` still names the old
+  key, so the outgoing form is read before a Nyquist clamp touches it), `formArrived(old, new)`
+  and `formStepNamed(label)` (a recall, a preset load, a Revert or a Reset names its own step).
+  `MainWindow` decides what each means for the history: an edit starts a 700 ms pause, and a run,
+  a switch, Ctrl+Z, the Edit menu, a save, a quit or any other step recorded inside it ends it
+  (`_note_step` commits a waiting edit first, so the journal keeps the order things were done in),
+  and a form with an edit waiting offers no Redo, since committing the edit ends that branch.
+  Leaving files an edited form as its table's draft and drops an unedited one; arriving takes the
+  draft back instead of seeding from the stored run, so a switch never throws away what was typed.
+  A run the panel started from the form settles its draft, a closed recording drops its drafts,
+  and the rest are saved with the project (`analysis_form_drafts_v1`, under *The project file*).
+  A recording and channel's first table consumes the draft and the steps of the form that stood
+  for it, `(doc, ch, None)`, wherever it is born: the panel's arrival does it for a table on
+  screen, and the panel (`_table_landed_elsewhere`) and `MainWindow` (`_on_table_landed`) for one
+  that lands while another recording is shown. A form the panel keeps over a new table clears its
+  `_form_seed`, which belongs to an older table than the one installed under it, and a project
+  restore holds the drafts across the recipe it replays, which can leave the detector combo on a
+  detector that has no table.
 - **A channel the user unticked is `Layer.excluded`, not a deleted layer.** `visible` answers "is
   this the recording on screen"; `excluded` answers "did the user say no". Conflating them forced the
   untick to be destructive — `show_only` re-shows every layer of the recording it switches to, so a
@@ -123,9 +245,12 @@ a test that walks the `gui/` ASTs.
   conservative rule for a fit that names no table** — anything a project saved before the stamp,
   anything the Plots window files — is that it is *kept* (store, project, and the figure export,
   exactly as before) but never *assumed* to match: the tab shows a sentence in place of its numbers
-  until Fit is pressed. The accepted COUNT is the export's proxy for "the same events", so a
-  curation that swaps one accepted event for another, or an event resized in place, leaves a fit
-  standing; a sample digest would close that and is a separate decision.
+  until Fit is pressed. The accepted COUNT was the export's only proxy for "the same events", and
+  it cannot see a curation that swaps one accepted event for another, or an event resized or
+  re-measured in place. So `fit_dwell` / `fit_depth` also record a digest of the values they were
+  handed (the `FitResult.meta` keys under *The project file*), and `judge_stored_fit` and
+  `stored_fit_problem` compare it when a fit carries one (the owner's decision 10); a fit without
+  one keeps the count rule.
 - **What the analysis windows may plot** is `core/sources.discover_plot_sources` — a PURE (Qt-free,
   Session-free) rule that turns the open documents plus a result lookup into a list of `PlotSource`
   value objects: one per `(document, channel)` with a stored detection, segments included, plus the
@@ -310,6 +435,7 @@ open_document (io) ──▶ Session.add_document
 | `analysis/merge.py` | Post-detection sub-event merge (window-based and selection-based), re-characterizing each merged span through `characterize`; the occupancy floor that refuses a merge whose span would be mostly open pore. Reuses `detect.group_starts_by_gap`, so the gap rule is not re-derived. |
 | `analysis/characterize.py` | Per-event dwell, **median** depth, ECD, SNR, rise/fall, sub-state count → the events DataFrame. |
 | `analysis/events.py` | The frozen 20-column event schema + `EventSet` (accept filtering, pooling that refuses cross-pore). |
+| `analysis/lineage.py` | What a stored result was made with — `made_with` reads the rate, calibration and estimator stamps, the chain and the thresholds it already records, and adds none — and one judge of each against now: `judge_inputs` gives every input its own verdict (same, changed, unknown) with the action that repairs it. It reuses the amber line's rate rule and the chain notice's chain and threshold rules rather than restating them, so the Details list and the notice cannot disagree. Pure, Qt-free. |
 | `analysis/stats.py` | Censored-MLE exponential dwell fit; hand-rolled Gaussian-mixture amplitude fit; log-bin histograms with the Jacobian. |
 | `analysis/populations.py` | GMM/k-means clustering (BIC k-selection), PCA, and linear/power-law fits — all scikit-learn/NumPy. |
 | `analysis/measure.py` | Manual-selection statistics (dwell, amplitude by method, skewness, kurtosis, …) + a 28-column measurement schema (`MEASUREMENT_SCHEMA`), separate from the frozen 20-column event schema. |
@@ -486,6 +612,15 @@ Preserved deliberately; changing them silently corrupts the science:
   crossings: a filter can reshape an edge, which is why high-pass-derived boundaries, dwell,
   rise/fall and ECD limits remain explicitly disclosed.
 - Signals stored **float32 contiguous**; time axis **float64**.
+- **A recording's samples are read-only in memory.** `TraceDocument.__post_init__` sets the
+  read-only flag on every channel array (`_freeze_samples` — the flag, never a copy), and
+  `Session.calibrated_array` freezes each array it caches. `frozen=True` froze the attributes, never
+  the samples, and at an identity calibration the session hands out the recording's OWN array, so
+  one in-place `arr -= baseline` anywhere changed the recording for every curve, panel and worker,
+  silently, for the rest of the session. Now that write raises `ValueError: assignment destination
+  is read-only` at the line that tried it — the contract the worker snapshots already kept
+  (`FrozenChannelSource.capture`). Segments and `dataclasses.replace` pass through the same
+  `__post_init__`. A caller that needs to write takes a copy first.
 - **A recording has at least one sample.** `n_samples == 0` is refused at `TraceDocument`
   construction — the one door the four readers and every segment pass through — and again in
   `io.base.probe_path`, which builds no document. HDF5 and TDMS both used to accept one with
@@ -608,6 +743,31 @@ Two smaller rules keep the round-trip honest. Provenance dicts are coerced JSON-
 numpy scalars and arrays down to builtins, an unrecognised leaf to `str`, so a stray object can never
 abort a save). And the per-result **overlay hints are not stored** — their sample-index arrays are
 rebuilt from the event frame on restore, so a numpy array never reaches the JSON in the first place.
+
+**Some additions need no version bump**, because they ride in a container the format already writes
+whole and an older v11 build carries through untouched:
+
+- **`FitResult.meta`**, which `stats.fit_to_json` writes wholesale. `fit_dwell` / `fit_depth` record
+  there the table they were made on (`detection_module_id`), the column they fitted
+  (`input_column`) and `input_digest` — `sha256:` over the `start_idx` and the fitted column of the
+  rows the fitter was handed, in stable start order and not by `event_id`, because a merge
+  renumbers the ids and re-sorts the rows — plus the table's own rate and estimator stamps, spelled
+  as the table spells them (`fs`, `baseline_fingerprint`). `modules.judge_stored_fit` and
+  `stored_fit_problem` compare the digest when a fit has one, and a fit without it keeps the count
+  rule. The Plots window's fits record no digest: it may fit a narrowed range or another column of
+  the same events, which a digest of the table's rows would not describe.
+- **The v11 `workspace.extra` map**, whose unknown keys a v11 build preserves byte for byte. Each
+  addition there is one versioned key with one contract — records keyed by the PERSISTENT key and
+  matched with `identity.same_source`, unknown or malformed records kept verbatim and never
+  applied, an unreadable section quarantined rather than overwritten: `sample_rate_declarations_v1`,
+  `acquisition_bandwidth_overrides_v1`, `event_table_choices_v1`, and `analysis_form_drafts_v1`,
+  the un-run Detection, ML and Baseline form each event table was left with — one record per
+  `(doc_id, channel, module_id or None)`, written by `core/form_draft_state.py` and restored before
+  the form on screen arrives. A draft differs from a table choice in one rule: a choice outlives the
+  session's interest in it, so only another live choice replaces a saved one, while a draft is
+  dropped when its own run settles it, and that absence is information. The live session therefore
+  replaces every saved record about a channel it holds, present or not, and keeps the records of a
+  recording that is not open.
 
 **The save is atomic**, via `atomic_write.staged_write` (see the next section; `_staged_write` here is
 a one-line pass-through kept for this module's callers). This is not defensive decoration:

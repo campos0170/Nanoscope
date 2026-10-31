@@ -10,11 +10,11 @@ from ..core.calibration import (
     KIND_OVERRIDES,
     SIDECAR_DELETE_FAILED,
     SIDECAR_FAILED,
+    SIDECAR_KEPT,
     SIDECAR_NONE,
     SIDECAR_RECORDING_MOVED,
     SIDECAR_REMOVED,
     SIDECAR_WRITTEN,
-    CalibrationSet,
     ChannelCalibration,
     sidecar_path,
 )
@@ -22,7 +22,7 @@ from ..core.document import TraceDocument
 from ..core.session import Session
 from ..core.types import ChannelKind, Provenance
 
-__all__ = ["CalibrationPanel"]
+__all__ = ["CalibrationPanel", "sidecar_outcome_text"]
 
 # Strided sample size for the live MEDIAN (and the conductance / reconciliation medians).
 # The median is robust to a stride on a stationary trace -- exact to 6 s.f. on all three of
@@ -69,15 +69,83 @@ def _fmt_voltage(value: float, units: str) -> str:
     return f"{value:.4g} {units}" if units else f"{value:.4g} (units unknown)"
 
 
+def sidecar_outcome_text(outcome: str, data_path, reason: list[str] | None = None, *,
+                         done: str = "Applied", session_only: str | None = None) -> str:
+    """What a calibration commit did to the sidecar, in the user's words. ``done`` names the
+    commit: the panel's own "Applied", or MainWindow's "Undone: Apply calibration" when Edit
+    ▸ Undo or Redo put the file back (``core.calibration.restore_sidecar``) — the one other
+    door that rewrites or deletes ``<datafile>.npcal.json``, and it must describe the file
+    in the same words. ``session_only`` leads the two failures, which landed in the session
+    alone: "Applied to this session only" unless given, since "Undone: Reset calibration to
+    this session only" reads as the name of the step.
+
+    The failure branch reports THE OS'S OWN REASON. It used to say "(the folder is not
+    writable)" for every ``OSError`` — one of at least five things that error means
+    here (a full disk, a read-only file, a disconnected network volume, a name too long,
+    a permission denied), and the one a user cannot act on when their folder is in fact
+    writable. A guess in a failure message costs more than no explanation, because it
+    sends the user to check something that is already correct.
+
+    The two failures get OPPOSITE consequence sentences because their consequences are
+    opposite. A failed WRITE (``SIDECAR_FAILED``) leaves nothing next to the data: the
+    calibration really is gone on reopen. A failed DELETE (``SIDECAR_DELETE_FAILED``)
+    leaves the OLD file in place: its values silently re-apply on reopen. One shared
+    string used to tell a user who had just confirmed "Reset and delete the file" that
+    the calibration "will be gone when you reopen" — the exact inverse of what the
+    surviving sidecar was about to do to them.
+
+    ``SIDECAR_KEPT`` is an undo's alone: the file was not as the step had left it, so it was
+    left as it is, and what is on screen differs from it until the user applies it again.
+    """
+    name = sidecar_path(data_path).name
+    why = f" — {reason[0]}" if reason else ""
+    lead = session_only or f"{done} to this session only"
+    cause = (f"it could not be read ({reason[0]})" if reason
+             else "it has changed since this step")
+    return {
+        SIDECAR_WRITTEN: f"{done} · saved to {name}",
+        # The recording's file was beside that path on open and is not there now. The
+        # old text said "saved to pore.abf.npcal.json" and wrote the file into the
+        # folder the recording had LEFT; reopening it where it now lived gave gain 1.0.
+        SIDECAR_RECORDING_MOVED: (
+            f"{done} · not saved beside the recording: {data_path.name} is no longer "
+            f"at {data_path.parent}; the calibration lives only in this session (and "
+            f"in a saved project). Move the recording back, or save a project, to keep it."),
+        SIDECAR_REMOVED: f"{done} · {name} deleted (all channels are back at default)",
+        SIDECAR_NONE: done,
+        SIDECAR_FAILED: (f"{lead} · could NOT update {name}{why}. "
+                         f"The calibration is NOT stored next to your data and will be "
+                         f"gone when you reopen the recording."),
+        SIDECAR_DELETE_FAILED: (
+            f"{lead} · could NOT delete {name}{why}. "
+            f"The OLD calibration file is still next to your data and WILL re-apply "
+            f"its values (and any note) when you reopen the recording."),
+        # Putting the step's side of the file back would also have taken back whatever
+        # changed it since (another channel's step, an edit outside the app).
+        SIDECAR_KEPT: (
+            f"{done} · {name} left as it is: {cause}. The calibration just put back is in "
+            f"this session only (and in a saved project); Apply it in the Calibration panel "
+            f"to store it in {name}."),
+    }.get(outcome, done)
+
+
 class CalibrationPanel(QtWidgets.QWidget):
     """Edit gain / offset / target units for one (document, channel), previewing RAW vs CALIBRATED
     statistics live so the user can dial in the deferred current gain and SEE the effect before
     committing. Apply commits to Session (which re-renders the affected curves in ~8.5 ms without a
-    reload); Reset restores CalibrationSet.default_for().
+    reload); Reset restores the gain, offset and units the channel opened with
+    (Session.opened_default) and keeps its note and kind.
 
     Selection is pushed in by MainWindow via set_selection(); this panel never talks to another
     panel.
     """
+
+    #: ``(doc_id, channel, action)`` — a commit is about to land, past every confirmation:
+    #: ``action`` is the button pressed, "Apply" or "Reset". Edit ▸ Undo names the step it
+    #: makes after it ("Undo Reset calibration"), which a diff of the two calibrations
+    #: cannot: a Reset that moved only the gain reads like any gain edit. It also keeps the
+    #: sidecar as the commit finds it, so the step's undo can put that file back exactly.
+    commitStarting = QtCore.Signal(str, int, str)
 
     def __init__(self, session: Session, parent=None) -> None:
         super().__init__(parent)
@@ -300,6 +368,13 @@ class CalibrationPanel(QtWidgets.QWidget):
 
         btns = QtWidgets.QHBoxLayout()
         self._btn_reset = QtWidgets.QPushButton("Reset to default")
+        # "Before any saved calibration": a recording whose sidecar set gain 2.5 also "opened
+        # with" 2.5, and Reset does not go back to that -- it goes back to the app's default.
+        self._btn_reset.setToolTip(
+            "Resets gain, offset and units to the values this channel opened with — the app's "
+            "default for it, before any saved calibration was applied. Keeps the channel's "
+            "note and its 'Treat this channel as' choice; to undo that choice, set it back to "
+            "'as the file declares' and press Apply.")
         self._btn_reset.clicked.connect(self._reset)
         self._btn_apply = QtWidgets.QPushButton("Apply")
         self._btn_apply.setDefault(True)
@@ -472,6 +547,15 @@ class CalibrationPanel(QtWidgets.QWidget):
     def status_text(self) -> str:
         """What the panel last reported about the sidecar (public for the suite)."""
         return self._status.text()
+
+    def show_status(self, doc_id: str, text: str) -> None:
+        """Put ``text`` on the sidecar line when this panel shows ``doc_id``: MainWindow's
+        account of what Edit ▸ Undo or Redo just did to that recording's file. The line is
+        written by :meth:`_commit` alone otherwise, so after an undo it went on reading
+        "Applied · saved to pore.dat.npcal.json" over a file the undo had just deleted, and
+        it outlasts the status bar's 8 s -- the one place left that named the file."""
+        if self._sel is not None and self._sel[0] == doc_id:
+            self._set_status(text)
 
     def _set_treat_as(self, kind) -> None:
         """Point the combo at ``kind`` (``None`` == "as the file declares").
@@ -807,8 +891,9 @@ class CalibrationPanel(QtWidgets.QWidget):
         something the user has to discover later on disk. There are TWO such things and the
         rule is asked about at the level the damage happens:
 
-        * the sidecar FILE is deleted (every channel back at its default) — the unlink is
-          not undoable;
+        * the sidecar FILE is deleted (every channel back at its default) — Edit ▸ Undo
+          puts it back exactly as it was, note and all, but only while this session holds
+          the step;
         * the file survives but a channel's ``note`` goes out of it. Guarding only the first
           left this one silent: reset one channel of a recording whose other channel is
           still calibrated and the note was dropped from a file that stayed exactly where it
@@ -840,6 +925,7 @@ class CalibrationPanel(QtWidgets.QWidget):
                 self._set_status("Nothing changed.")
                 return False
         reason: list[str] = []
+        self.commitStarting.emit(doc_id, ch, action)
         outcome = self._session.set_calibration(doc_id, ch, cal, reason=reason)
         self._set_status(self._outcome_text(outcome, doc_id, reason))
         return True
@@ -909,45 +995,9 @@ class CalibrationPanel(QtWidgets.QWidget):
         return box.clickedButton() is go
 
     def _outcome_text(self, outcome: str, doc_id: str, reason: list[str] | None = None) -> str:
-        """What the last commit did to the sidecar, in the user's words.
-
-        The failure branch reports THE OS'S OWN REASON. It used to say "(the folder is not
-        writable)" for every ``OSError`` — one of at least five things that error means
-        here (a full disk, a read-only file, a disconnected network volume, a name too long,
-        a permission denied), and the one a user cannot act on when their folder is in fact
-        writable. A guess in a failure message costs more than no explanation, because it
-        sends the user to check something that is already correct.
-
-        The two failures get OPPOSITE consequence sentences because their consequences are
-        opposite. A failed WRITE (``SIDECAR_FAILED``) leaves nothing next to the data: the
-        calibration really is gone on reopen. A failed DELETE (``SIDECAR_DELETE_FAILED``)
-        leaves the OLD file in place: its values silently re-apply on reopen. One shared
-        string used to tell a user who had just confirmed "Reset and delete the file" that
-        the calibration "will be gone when you reopen" — the exact inverse of what the
-        surviving sidecar was about to do to them.
-        """
-        data_path = self._session.document(doc_id).meta.path
-        name = sidecar_path(data_path).name
-        why = f" — {reason[0]}" if reason else ""
-        return {
-            SIDECAR_WRITTEN: f"Applied · saved to {name}",
-            # The recording's file was beside that path on open and is not there now. The
-            # old text said "saved to pore.abf.npcal.json" and wrote the file into the
-            # folder the recording had LEFT; reopening it where it now lived gave gain 1.0.
-            SIDECAR_RECORDING_MOVED: (
-                f"Applied · not saved beside the recording: {data_path.name} is no longer "
-                f"at {data_path.parent}; the calibration lives only in this session (and "
-                f"in a saved project). Move the recording back, or save a project, to keep it."),
-            SIDECAR_REMOVED: f"Applied · {name} deleted (all channels are back at default)",
-            SIDECAR_NONE: "Applied",
-            SIDECAR_FAILED: (f"Applied to this session only · could NOT update {name}{why}. "
-                             f"The calibration is NOT stored next to your data and will be "
-                             f"gone when you reopen the recording."),
-            SIDECAR_DELETE_FAILED: (
-                f"Applied to this session only · could NOT delete {name}{why}. "
-                f"The OLD calibration file is still next to your data and WILL re-apply "
-                f"its values (and any note) when you reopen the recording."),
-        }.get(outcome, "Applied")
+        """What the last commit did to the sidecar, in the user's words: see
+        :func:`sidecar_outcome_text`, which an undo of the commit speaks through too."""
+        return sidecar_outcome_text(outcome, self._session.document(doc_id).meta.path, reason)
 
     def _apply(self) -> None:
         if self._sel is None:
@@ -967,11 +1017,30 @@ class CalibrationPanel(QtWidgets.QWidget):
         self._commit(cal, action="Apply")
 
     def _reset(self) -> None:
+        """Gain, offset and units back to the values the channel OPENED with; the note and
+        the "Treat this channel as" choice stay.
+
+        The opened default, not ``default_for(info)`` asked again: that has no median to
+        detect the voltage encoding from, so it put gain 0.1 on a host-guest voltage channel
+        that opened at 1.0 — 10x on every voltage, conductance and V-dependence figure.
+
+        One thing reset, not three. The note is the user's record of how the channel was
+        calibrated, and a reset of the numbers is not a statement that the record is wrong.
+        The kind decides which pane the channel draws in and whether detection acts on it,
+        and it has its own reset in its own control ("as the file declares", then Apply).
+        Still committed through :meth:`_commit`, so a reset that would delete the sidecar,
+        or drop a note out of it, asks first exactly as before.
+        """
         if self._sel is None:
             return
         doc_id, ch = self._sel
-        info = self._session.document(doc_id).meta.channels[ch]
-        self._commit(CalibrationSet.default_for(info), action="Reset")
+        opened = self._session.opened_default(doc_id, ch)
+        existing = self._session.calibration(doc_id, ch)
+        self._commit(ChannelCalibration(gain=opened.gain, offset=opened.offset,
+                                        target_units=opened.target_units,
+                                        provenance=opened.provenance,
+                                        note=existing.note, kind=existing.kind),
+                     action="Reset")
 
     # -- reactions --------------------------------------------------------------------------------
     def _on_calibration_changed(self, doc_id: str, ch: int) -> None:

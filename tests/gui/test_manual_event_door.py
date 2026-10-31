@@ -860,7 +860,10 @@ def test_the_density_figure_draws_one_table_per_recording_and_channel(private_se
 # converting the old measurement list
 # ================================================================================================
 def _seed_measurements(win, doc_id, spans_labels):
-    """Put rows in the legacy list the way a project restore does: ``set_measurements_df``."""
+    """Put rows in the legacy list the way a project restore does: ``set_measurements_df``
+    with the measurement history suspended, then the list adopted as its starting point.
+    Without the adoption the seed is an edit nobody announced, and Ctrl+Z -- one of the
+    moments that commit every stack first -- would take it back before the conversion."""
     from nanoscope.analysis.measure import coerce_measurements
     from nanoscope.core.segment import persistent_key
 
@@ -869,7 +872,14 @@ def _seed_measurements(win, doc_id, spans_labels):
              "channel_index": 0, "start_idx": s, "end_idx": e, "label": label, "units": "pA",
              "cal_gain": 1.0, "cal_offset": 0.0}
             for i, (s, e, label) in enumerate(spans_labels)]
-    win._analysis_panel.measure_panel.set_measurements_df(coerce_measurements(pd.DataFrame(recs)))
+    history = win._measure_history
+    history.set_suspended(True)
+    try:
+        win._analysis_panel.measure_panel.set_measurements_df(
+            coerce_measurements(pd.DataFrame(recs)))
+        history.checkpoint()
+    finally:
+        history.set_suspended(False)
 
 
 def test_old_measurements_become_events_in_one_undoable_step(win, tmp_path):

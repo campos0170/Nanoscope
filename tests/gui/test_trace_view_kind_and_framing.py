@@ -359,18 +359,29 @@ def test_the_panel_shows_the_override_the_channel_already_has(qapp, tmp_path):
     assert panel._treat_as.currentData() is ChannelKind.CONDUCTANCE
 
 
-def test_reset_to_default_clears_the_override(qapp, tmp_path):
+def test_reset_to_default_keeps_the_override_and_its_own_control_clears_it(qapp, tmp_path):
+    """Reset to default resets gain, offset and units; what the channel IS has its own reset,
+    in its own control. This test used to pin that Reset cleared the override too; the owner
+    chose otherwise (EDITING_FOUNDATION_DESIGN §6, decision 5): a reset of the numbers must
+    not move the panes or take detection off the channel."""
     doc = _doc(tmp_path, _UNDECLARED_AND_VOLTAGE)
     session = _session(doc)
     session.set_calibration(doc.doc_id, 0,
                             ChannelCalibration(target_units="pA", kind=ChannelKind.CURRENT))
     panel = CalibrationPanel(session)
     panel.set_selection(doc.doc_id, 0)
-    # Everything is back at its default afterwards, so the commit path wants to DELETE the
-    # sidecar and asks first; answer yes without a live modal.
+    # The override's own reset leaves everything at its default, so that commit wants to
+    # DELETE the sidecar and asks first; answer yes without a live modal.
     panel._confirm_sidecar_removal = lambda *_a, **_k: True
 
     panel._reset()
+    assert session.calibration(doc.doc_id, 0).target_units == ""
+    assert session.calibration(doc.doc_id, 0).kind is ChannelKind.CURRENT
+    assert panel._treat_as.currentData() is ChannelKind.CURRENT
+    assert [s.kind for s in plan_panes(session)] == [ChannelKind.CURRENT, ChannelKind.VOLTAGE]
+
+    panel._treat_as.setCurrentIndex(panel._treat_as.findData(None))   # "as the file declares"
+    panel._apply()
     assert session.calibration(doc.doc_id, 0).kind is None
     assert panel._treat_as.currentData() is None
     assert [s.kind for s in plan_panes(session)] == [ChannelKind.VOLTAGE, ChannelKind.UNKNOWN]

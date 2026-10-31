@@ -198,8 +198,12 @@ class StudyFigureWindow(QtWidgets.QMainWindow):
             self._status.setText('Appearance could not be applied: '+str(exc));return False
 
     def reset_style(self):
+        # Resetting EVERYTHING ends the appearance history too: set_state is no step, so
+        # a history kept past it would step back from the blank styling to the state
+        # before the last appearance edit, skipping the one the reset replaced.
         self._style={'appearance':{},'panels':{},'colors':{}}
-        self._appearance_widget.set_state({});self._show_panel();self.apply_appearance()
+        self._appearance_widget.set_state({});self._appearance_widget.clear_history()
+        self._show_panel();self.apply_appearance()
 
     def fit(self):
         if self._item is not None:self._view.fitInView(self._item.boundingRect(),QtCore.Qt.KeepAspectRatio)
