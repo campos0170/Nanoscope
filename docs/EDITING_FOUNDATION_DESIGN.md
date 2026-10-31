@@ -194,7 +194,9 @@ Decision 3.
 - The Signal Conditioning window forwards ⌘Z and ⇧⌘Z to the main window, as it already does for ⌘S (defect 3).
 - The Event gallery gets a Redo button beside its Undo.
 - The Inspector, the docked inspector and the gallery already send their key presses to Edit ▸ Undo (`gui/main_window.py:6767-6768, 7048-7058, 7716`).
-- A focused text field keeps ⌘Z for its own typing, as today (`gui/main_window.py:1316-1320`). The edit becomes an undo step after the 700 ms pause, or when focus leaves the field.
+- A focused text field keeps ⌘Z for its own typing, as today (`gui/main_window.py:1316-1320`), and
+  only while it has typing to undo: a spin box stepped with its arrows or an editable combo picked
+  from its list lets the key through (`gui/app.py` `_UndoKeyGuard`, sweep 10 S10-PLOT1). The edit becomes an undo step after the 700 ms pause, or when focus leaves the field.
 - Redo's key list is deduped on the resolved key sequence, through one helper shared with the Plots window (defect 1).
 - `_on_result_switched` refreshes Undo and Redo (defect 2).
 
@@ -717,7 +719,11 @@ Each item says what the build does where this design says something else, or not
   chip menu's entry are then disabled, and the judge's sentence says why: "Run detection to apply it —
   Revert cannot restore a setting the run did not record." A stage's on/off the run never recorded
   comes back as off, a recorded `detrend_decim` of None (the automatic stride) comes back as 0, and
-  polarity comes back with the baseline-drift stage when it ran.
+  polarity comes back with the baseline-drift stage when it ran. It is withheld too when a frequency
+  the run recorded is at or above the recording's Nyquist now (a slower rate declared since), since the
+  form's box cannot hold it: "Revert cannot restore the run's low-pass 10 kHz, which is above this
+  recording's Nyquist (8 kHz)" (`revert_withheld`). The Details list's chain and threshold rows follow
+  the same verdict ("Re-run to apply"). Sweep 10 S10-STAGE1/2.
 - **The notice's words.** The headline is "⚠ Settings changed: k_in 5 → 6", with no detector label, and
   the sentence is "⚠ Settings changed since the Schmitt detection on screen ran: k_in 5 → 6. Revert,
   or run detection to apply them." The chip reads "⚠ Settings changed", the window's button "Revert
@@ -845,9 +851,11 @@ Edges that are known and left as they are:
   older step restores; it only matters for how a later clamp is put back.
 - **"Redo — nothing on this table; the CUSUM detector (1 step) on this channel"** can name undo steps,
   as `siblings_with_history` always did for events.
-- **After a project restore whose gain differs from the file's,** an undo that deletes the file still
-  says "(all channels are back at default)". The file did not exist before the step, so that
-  describes the disk and not the session.
+- **An undo that deletes the sidecar says "(all channels are back at default)"** whenever the file
+  did not exist before the step, which describes the disk and not the session. Another channel can
+  still be calibrated in this session only: after a project restore whose gain differs from the
+  file's, after an Apply whose write was refused, or when the sidecar was deleted outside the app
+  before the step (sweep 10 S10-CAL2, judged not a defect).
 - **The Signal Conditioning window's own Undo and Redo are never disabled;** a press with nothing to
   take is a no-op.
 - **`Session.x_axis`'s cached time arrays** are shared by reference and still writeable (13.2).
@@ -945,3 +953,46 @@ Edges that are known and left as they are:
   `docs/inventory.json` still describes the old Edit ▸ Undo and Redo, Reset to default, Revert to
   detection's chain and Back to default, and has no entry for Clear reference, Revert stage, Reset
   stage, the gallery's Redo, appearance Undo and Redo or the delete prompt. Nothing is committed.
+
+### 13.6 Sweep 10 (2026-10-31)
+
+A fast bug sweep of `7e4e0f6` found 13 defects: 3 major, 10 minor. The findings, repros and
+skeptics' verdicts are in the session notes (`fast-sweep/FINDINGS.md`). Five builders fixed them in
+parallel, and an integrated-tree review followed. What changed in the design's terms:
+
+- **Calibration.** `save_sidecar` writes nothing when the file already opens as the write would
+  leave it, so a v1 file is not re-encoded. A commit that moves no number but does change the file
+  is a step all the same (`SettingsHistory.checkpoint(force=True)` from `_checkpoint_calibration`):
+  a project's gain written over the file's own, or the Apply the `SIDECAR_KEPT` line advises. The
+  journal's expected bytes are therefore always the bytes the app last wrote (S10-DATA1).
+- **Journal.**
+  - The "born table" test is `Session.announcing_new`: the key held no table before the add (S10-FORM2).
+  - 3.6's fold keys on `EventHistory.last_step_run`, not on the step's label. A run's step is named
+    as a run (S10-UNDO2).
+  - A landing drops the redo steps it has already reached (`SettingsHistory.drop_redo_reached`, S10-LIFE1).
+  - After a table step, the redo journal mirrors what the stacks still hold (S10-UNDO1).
+  - Draft records are type-checked (`_VALUE_KINDS`), and a draft the form cannot take is dropped
+    whole (S10-FORM1).
+- **Export.** Generate Report figures asks `report_fit_problem`. The fit's column must be the
+  figure's (`dwell_s` / `frac_depth` or an alias of the same quantity), and a fit that records
+  another table is refused. A fit that records none keeps the count rule (S8-RD1) (S10-LIN3).
+- **Details.**
+  - Once the rate moved, the estimator is judged at the table's own rate, and its action is Re-run (S10-LIN1).
+  - The Fits box is redrawn on a calibration change (S10-LIN2).
+  - Revert is withheld above Nyquist (7 above, S10-STAGE1/2).
+- **Keys.** `_UndoKeyGuard` (13.1, 3.7), and appearance sizes step from Default to the figure's
+  floor (S10-PLOT1/2).
+
+Left open:
+
+- **A Plots fit over a typed Fit range** records the full accepted count and names no table, so it
+  passes the export's count rule and is drawn on the full-range histogram. A fix needs an owner
+  call; the options are in the notes (`fast-sweep/fixes/fitguard.md`).
+- **An edit typed into a CUSUM no-table form while a batch runs** can still be overwritten by the
+  run's values when that run seeds the form. This is 13.3's typed-during-run edge, reached by the
+  batch.
+- **Batch detect stamps the combo's detector into a Schmitt run's params** (`detector:
+  detect.cusum` when the combo shows CUSUM). `_fill_form` copes with it; the batch itself is
+  unchanged.
+- **A focused plain `QLineEdit` keeps ⌘Z with nothing typed in it.** The guard covers spin boxes
+  and editable combos only.

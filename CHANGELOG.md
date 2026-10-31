@@ -292,6 +292,55 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- **⌘Z and ⇧⌘Z work after a spin box's arrows or a pick from a list.** A spin box changed with its
+  arrows or Page Up/Down, or an editable list such as the plot windows' Font, kept the key while it
+  had focus and did nothing with it, so the plot windows' appearance Undo/Redo, Edit ▸ Undo/Redo
+  and the Signal Conditioning window's ⌘Z were dead until focus moved. The control now keeps the
+  key only while it has typing of its own to undo (`gui/app.py`, `_UndoKeyGuard`).
+- **The plot appearance size boxes step from Default straight to the smallest size a figure draws**
+  (6 pt for title, axis, tick and legend text) and back, instead of through 1–5 pt, which changed
+  nothing.
+- **A calibration Apply that changes no number writes nothing when the file already holds those
+  values** (a version-1 `.npcal.json` is no longer re-encoded by it), so a Redo kept for another
+  channel can still put its step back. An Apply that does change the file without moving a number
+  (after opening a project whose calibration differs from the file, or the Apply the "left as it
+  is" line advises) is now an undo step, and Undo puts the file back byte for byte, note and all.
+  Before, it had no Undo, and later undos could leave calibrations you had undone in the file, to
+  rescale the recording on its next open.
+- **Generate Report figures no longer draws a saved fit of another quantity.** A Plots-window
+  Gaussian fit of `depth_pA` was drawn over the dI/I0 histogram as "your saved fit" — a flat
+  curve, with μ in pA. A saved fit that records another table of the recording is refused too,
+  even when the accepted counts agree. Such a histogram is refit afresh and the status line says
+  why (*saved fit is of depth_pA, not the frac_depth this figure draws*; *saved fit belongs to the
+  CUSUM table*). A fit that records no table is used as before when its calibration and count
+  agree.
+- **Undo and Redo keep their promises in five more cases.**
+  - Detect after a Baseline-only change is one ⌘Z, named *Undo Re-run detection and 1 setting
+    change*. It could read *Undo Resize N event masks* and need a second press.
+  - ⌘Z pressed while a run is in flight no longer leaves a Redo that does nothing once the run
+    lands.
+  - A step on another recording no longer changes the order in which this recording's undone
+    steps are redone.
+  - A batch *Re-run all* over a table that already exists no longer takes an un-run edit made on a
+    detector with no table: the edit's draft and its undo steps stay with that form. Only a
+    recording's first table takes them, as before.
+  - A project draft holding a value of the wrong type is not applied (the open says so), and a
+    draft the form cannot take is dropped without leaving the form half written.
+- **Revert is withheld when the run's frequency is above the recording's Nyquist now.** After a
+  slower sample rate was declared, Revert, the chip menu's Revert and a stage's Revert stage stayed
+  enabled for a low-pass (or high-pass or notch) the run recorded above the new Nyquist; each press
+  said "reverted" and changed nothing. They are now disabled, and the notice says why (*Revert
+  cannot restore the run's low-pass 10 kHz, which is above this recording's Nyquist (8 kHz)*).
+  Reset stage on a recording slower than twice a default frequency no longer resets again on
+  every press.
+- **The amber line's Details list agrees with the controls.**
+  - It no longer offers Revert for the signal chain or the thresholds when every Revert control is
+    disabled; it says *Re-run to apply*.
+  - A rate-only declaration no longer lists the open-pore estimator as changed, since its
+    decimation is derived from the rate. The estimator row's action is then Re-run, never the
+    Re-measure the panel refuses for such a table.
+- **The Fits box is redrawn when the calibration changes or is undone,** so its advice (*press Fit*
+  or *re-run detection*) agrees with the amber line.
 - **⇧⌘Z redoes in the main window on a Mac.** Edit ▸ Redo registered the standard Redo key and
   Ctrl+Shift+Z, which resolve to the same key on a Mac; Qt answers a key registered twice with
   "Ambiguous shortcut overload" and triggers nothing, so only the menu item redid, while every test

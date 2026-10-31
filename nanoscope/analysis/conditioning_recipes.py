@@ -56,6 +56,7 @@ __all__ = [
     "STAGE_PARAM_KEYS",
     "STAGE_TITLES",
     "THRESHOLD_KEYS_BY_MODULE",
+    "UNRECORDED",
     "ChainDiff",
     "ChainStatus",
     "MergeReport",
@@ -74,6 +75,7 @@ __all__ = [
     "recipes_equal",
     "reset_stage_params",
     "revert_params",
+    "revert_withheld",
     "stage_rows",
     "stages_that_differ",
     "threshold_differences",
@@ -663,6 +665,88 @@ def _recorded_chain(run: Mapping[str, Any]) -> dict[str, Any]:
         run[k] is not None or k in _NONE_IS_A_VALUE or k in _NONE_IS_AUTO))}
 
 
+#: The form's frequency boxes, by stage. Each holds only values below the recording's Nyquist
+#: (``DetectionPanel._apply_nyquist_ranges``; the kernels refuse the rest), so a run's value
+#: at or above it -- a slower rate declared since the run -- lands as the clamp, never itself.
+_NYQUIST_KEYS = {"filter_cutoff_hz": "lowpass", "hp_cutoff_hz": "highpass",
+                 "notch_freq_hz": "notch"}
+#: Why Revert is withheld when the run never recorded a setting that differs: the words after
+#: "Revert cannot restore".
+UNRECORDED = "a setting the run did not record"
+
+
+def _hz(v: float) -> str:
+    return f"{v / 1e3:g} kHz" if v >= 1e3 else f"{v:g} Hz"
+
+
+def _past_nyquist(values: Mapping[str, Any], fs: float | None) -> dict[str, float]:
+    """The frequencies among ``values`` that the form's boxes cannot hold at ``fs``."""
+    if not fs:
+        return {}
+    nyquist = float(fs) / 2.0
+    out: dict[str, float] = {}
+    for key in _NYQUIST_KEYS:
+        try:
+            hz = float(values[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if hz >= nyquist:
+            out[key] = hz
+    return out
+
+
+def _nyquist_clause(past: Mapping[str, float], fs: float) -> str:
+    """``"the run's low-pass 10 kHz, which is above this recording's Nyquist (8 kHz)"``."""
+    nyquist = float(fs) / 2.0
+    named = " and ".join(f"{_STAGE_PHRASE[_NYQUIST_KEYS[k]]} {_hz(v)}" for k, v in past.items())
+    # As the form's clamp notice says it: a value exactly ON Nyquist is not "above" it.
+    where = "above" if all(v > nyquist for v in past.values()) else "at or above"
+    which = "which is" if len(past) == 1 else "which are"
+    return f"the run's {named}, {which} {where} this recording's Nyquist ({_hz(nyquist)})"
+
+
+def _revert(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None,
+            stages: str | Iterable[str] | None, fs: float | None,
+            module_id: str | None) -> tuple[dict[str, Any] | None, str]:
+    """``(what revert_params returns, why it is None)``; the why is ``""`` when it is not."""
+    form, run = form or {}, run or {}
+    if isinstance(stages, str):
+        stages = (stages,)
+    chosen = stages_that_differ(form, run, fs=fs) if stages is None else frozenset(stages)
+    keys = {k for stage in chosen for k in STAGE_PARAM_KEYS[stage]}
+    out = {k: v for k, v in _recorded_chain(run).items() if k in keys}
+    ran = effective_chain(run, fs).get("detrend") if "detrend" in chosen else None
+    if ran is not None and "polarity" in run and ran["polarity"] != _polarity(form):
+        out["polarity"] = run["polarity"]
+    reverted = dict(form, **out)
+    if stages_that_differ(reverted, run, fs=fs) & chosen:
+        return None, UNRECORDED
+    # Judged on what the form can HOLD: a run's frequency at or above this Nyquist lands as
+    # the box's clamp, so a Revert offered for it said "reverted" press after press while
+    # the notice kept the difference (S10-STAGE1).
+    past = _past_nyquist(out, fs)
+    if past:
+        below = math.nextafter(float(fs) / 2.0, 0.0)
+        still = stages_that_differ(dict(reverted, **dict.fromkeys(past, below)), run,
+                                   fs=fs) & chosen
+        if still:
+            named = {k: v for k, v in past.items() if _NYQUIST_KEYS[k] in still} or past
+            return None, _nyquist_clause(named, fs)
+    if stages is None:
+        for diff in threshold_differences(form, run, module_id):
+            out[diff.key] = _threshold(run, diff.key)
+    return out, ""
+
+
+def revert_withheld(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None, *,
+                    stages: str | Iterable[str] | None = None,
+                    fs: float | None = None) -> str:
+    """Why :func:`revert_params` is None, as the words after "Revert cannot restore"
+    (:data:`UNRECORDED`, or the run's frequencies this recording's Nyquist cannot hold);
+    ``""`` when Revert can put the form back."""
+    return _revert(form, run, stages, fs, None)[1]
+
+
 def revert_params(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None, *,
                   stages: str | Iterable[str] | None = None, fs: float | None = None,
                   module_id: str | None = None) -> dict[str, Any] | None:
@@ -686,23 +770,10 @@ def revert_params(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None,
     the run never recorded (a knob newer than the build that made the table) at its default,
     which Revert will not invent; offered anyway, it reports the form reverted while the
     notice still names the difference, press after press. Thresholds never cause this: only
-    the ones the run recorded are judged.
+    the ones the run recorded are judged. A recorded frequency at or above ``fs``'s Nyquist
+    does too: the form's box holds only values below it (:func:`revert_withheld` says which).
     """
-    form, run = form or {}, run or {}
-    if isinstance(stages, str):
-        stages = (stages,)
-    chosen = stages_that_differ(form, run, fs=fs) if stages is None else frozenset(stages)
-    keys = {k for stage in chosen for k in STAGE_PARAM_KEYS[stage]}
-    out = {k: v for k, v in _recorded_chain(run).items() if k in keys}
-    ran = effective_chain(run, fs).get("detrend") if "detrend" in chosen else None
-    if ran is not None and "polarity" in run and ran["polarity"] != _polarity(form):
-        out["polarity"] = run["polarity"]
-    if stages_that_differ(dict(form, **out), run, fs=fs) & chosen:
-        return None
-    if stages is None:
-        for diff in threshold_differences(form, run, module_id):
-            out[diff.key] = _threshold(run, diff.key)
-    return out
+    return _revert(form, run, stages, fs, module_id)[0]
 
 
 def reset_stage_params(stage: str) -> dict[str, Any]:
@@ -732,6 +803,9 @@ class ChainStatus:
     table did not come from this chain at all). ``revert_params`` holds only what
     differs (:func:`revert_params`), never the whole form; on a ``differs`` it is None
     when Revert cannot put the form back, and the sentence then offers only a run.
+    ``withheld`` then says why, as the words after "Revert cannot restore"
+    (:func:`revert_withheld`), and ``stage_withheld`` the same for each differing stage
+    whose own Revert is withheld, so every Revert control can say why it is greyed.
     """
 
     kind: str
@@ -739,6 +813,8 @@ class ChainStatus:
     diffs: tuple[ChainDiff, ...] = ()
     revert_params: dict[str, Any] | None = None
     detector_label: str = ""
+    withheld: str = ""
+    stage_withheld: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def headline(self) -> str:
@@ -805,18 +881,23 @@ def judge_chain(form_params: Mapping[str, Any] | None,
         return ChainStatus("match", (
             f"The form's chain is the one the {label} detection on screen ran with."),
             detector_label=label)
-    revert = revert_params(form_params, run_params, fs=fs, module_id=module_id)
+    revert, withheld = _revert(form_params, run_params, None, fs, module_id)
     it = "them" if thresholds else "it"
     advice = (f"Revert, or run detection to apply {it}." if revert is not None else
-              f"Run detection to apply {it} — Revert cannot restore a setting the run did "
-              f"not record.")
+              f"Run detection to apply {it} — Revert cannot restore {withheld}.")
     if thresholds:
         sentence = (f"⚠ Settings changed since the {label} detection on screen ran: "
                     f"{_describe_settings(diffs + thresholds)}. {advice}")
     else:
         sentence = (f"⚠ The form differs from the chain the {label} detection on screen "
                     f"ran with: {describe_differences(diffs)}. {advice}")
-    return ChainStatus("differs", sentence, diffs + thresholds, revert, label)
+    stage_withheld = {}
+    for stage in dict.fromkeys(d.stage for d in diffs):
+        why = _revert(form_params, run_params, stage, fs, None)[1]
+        if why:
+            stage_withheld[stage] = why
+    return ChainStatus("differs", sentence, diffs + thresholds, revert, label, withheld,
+                       stage_withheld)
 
 
 # ---------------------------------------------------------------------------

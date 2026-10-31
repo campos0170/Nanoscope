@@ -72,6 +72,7 @@ from ..analysis.conditioning_recipes import (
     STAGE_ENABLE_KEY,
     STAGE_KEYS,
     STAGE_TITLES,
+    UNRECORDED,
     ChainStatus,
     judge_chain,
     python_script,
@@ -79,6 +80,7 @@ from ..analysis.conditioning_recipes import (
     recipes_equal,
     reset_stage_params,
     revert_params,
+    revert_withheld,
     stages_that_differ,
     write_protocols_file,
 )
@@ -2422,9 +2424,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._form_drafts = kept
         on_screen = self._form_shown
         draft = self._form_drafts.pop(on_screen, None) if on_screen is not None else None
-        if draft is not None:
+        if draft is not None and self._restore_draft(draft):
             self._form_seed = None
-            self.restore_form_state(draft)
         else:
             self._form_dirty = False
 
@@ -2564,9 +2565,8 @@ class AnalysisPanel(QtWidgets.QWidget):
             shown, self._form_shown = self._form_shown, key
             if key != shown:
                 draft = self._form_drafts.pop(key, None) if key is not None else None
-                if draft is not None:
+                if draft is not None and self._restore_draft(draft):
                     self._form_seed = None
-                    self.restore_form_state(draft)
                     return
             elif self._form_dirty and (self._form_seed is None
                                        or self.form_state() != self._form_seed):
@@ -2582,10 +2582,34 @@ class AnalysisPanel(QtWidgets.QWidget):
                 # The seed writes the baseline windows with no signal of their own.
                 self._form_wrote = True
                 self._seed_form_from(res)
+                if self._form_shown != key:
+                    # The run's own detector moved the combo, and the form of the table it
+                    # switched to has taken the screen with its draft (a batch run made while
+                    # the combo showed CUSUM carries ``detector: detect.cusum``). That form's
+                    # bookkeeping is its own; marking it unedited here dropped the edit from
+                    # the next save (S10-FORM2, on screen).
+                    return
             self._form_dirty = False
             # Read when the guard closes, with the table shown: showing it can put a
             # standing baseline mark back (`_restore_baseline_mark`).
             self._form_seed_due = True
+
+    def _restore_draft(self, draft: Mapping[str, Any]) -> bool:
+        """Put ``draft`` on the form, or nothing: a draft the form cannot take (a project
+        edited by hand, or written by another build) would raise half way and leave the form
+        holding another table's values, unmarked (S10-FORM1). The form goes back to what it
+        held, the draft is dropped, the status line says so, and the caller seeds as for a
+        key with no draft. Returns whether the draft was put back."""
+        before = self.form_state()
+        try:
+            self.restore_form_state(draft)
+            return True
+        except Exception as exc:  # noqa: BLE001 - a slot must never raise into Qt
+            self.restore_form_state(before)
+            self.statusMessage.emit(
+                f"The unsaved settings edits kept for this table could not be put back, and "
+                f"were dropped ({exc}).")
+            return False
 
     def can_run(self) -> bool:
         """Whether detection can run on the panel's CURRENT (resolved) target — the single source of
@@ -5040,9 +5064,13 @@ class AnalysisPanel(QtWidgets.QWidget):
                 # table already, so `form_key` names it before the form has followed.
                 old, new = self._form_shown, self._form_key_showing(res)
                 # A recording and channel's first table lands on the key that stood for
-                # it, ``(doc, ch, None)`` (design §3.4).
+                # it, ``(doc, ch, None)`` (design §3.4). Only a table BORN here: a re-run of
+                # a table that existed lands from a batch while the combo shows a detector
+                # with no table, and taking that form's edit with it lost it (S10-FORM2).
                 first = (old is not None and new is not None and old[2] is None
-                         and new[:2] == old[:2])
+                         and new[:2] == old[:2]
+                         and (self._session.announcing is None
+                              or self._session.announcing_new))
                 if (self._landing_form_run is not None and self._landing_form_run == old
                         and (new == old or first)):
                     # A run this panel started from the form lands on the form that made
@@ -5090,10 +5118,13 @@ class AnalysisPanel(QtWidgets.QWidget):
         :meth:`_on_results_changed` does for a table born on screen does not happen: the form
         that stood for the table, ``(doc, ch, None)``, stays filed as a draft of no table, and
         nothing would ever take it out. It has nothing to come back to, and is dropped. The
-        steps made on that form change hands in MainWindow (`_on_table_landed`)."""
+        steps made on that form change hands in MainWindow (`_on_table_landed`).
+
+        Only for a table BORN by this landing: a re-run of a table that already existed did
+        not come from that form, which keeps its edit (design 13.4 Q6; S10-FORM2)."""
         written = self._session.announcing
         if (written is not None and written[0] == doc_id and written[2] == module_id
-                and module_id in _DETECTION_MODULE_IDS):
+                and module_id in _DETECTION_MODULE_IDS and self._session.announcing_new):
             self._form_drafts.pop((doc_id, written[1], None), None)
 
     def take_results_widget(self) -> QtWidgets.QWidget:
@@ -8133,7 +8164,7 @@ class AnalysisPanel(QtWidgets.QWidget):
                 or not self._session.has_document(res.doc_id)):
             return ""
         rate = self._session.document(res.doc_id).meta.sample_rate_hz
-        resolved = self._live_baseline_for_run()
+        resolved = self._live_baseline_judged(res)
         if resolved is None:
             estimator = None
         elif self._baseline_staleness(res) is None:
@@ -8157,15 +8188,22 @@ class AnalysisPanel(QtWidgets.QWidget):
             rerun = remeasure = "Refresh sources first"
         else:
             rerun, remeasure = "Re-run", "Re-measure depths"
+        # Re-measure refuses a table on another clock (stale_rate): its re-run repairs both.
+        rate_moved = any(v.name == "rate" and v.state == "changed" for v in verdicts)
         actions = {
             "rate": rerun if rate else (
                 "Declare the rate (Inspector ▸ File Info ▸ Sample rate / time unit…), then "
                 + rerun),
             "calibration": "Run detection" if reference_changed else rerun,
-            "baseline": "Run detection" if reference_changed else remeasure,
-            "chain": "Revert, or re-run to apply",
-            "thresholds": "Revert, or re-run to apply",
+            "baseline": ("Run detection" if reference_changed else
+                         rerun if rate_moved else remeasure),
         }
+        # The chain and the thresholds follow the Revert controls' own verdict: when Revert
+        # cannot put the form back (lineage says "re-run"), every Revert is greyed (S10-STAGE2).
+        for v in verdicts:
+            if v.name in ("chain", "thresholds"):
+                actions[v.name] = ("Revert, or re-run to apply" if v.action == "revert"
+                                   else f"{rerun} to apply")
         lines = ["Inputs, as made → now:"]
         for v in verdicts:
             title = _INPUT_TITLES[v.name]
@@ -8304,7 +8342,7 @@ class AnalysisPanel(QtWidgets.QWidget):
                 cfg = BaselineConfig.reproducible_from(prov)
                 if cfg is not None and cfg.method == "constant":
                     return None
-        resolved = self._live_baseline_for_run()
+        resolved = self._live_baseline_judged(res)
         if resolved is None:
             return None
         cfg, token, live, fs, n = resolved
@@ -8393,6 +8431,23 @@ class AnalysisPanel(QtWidgets.QWidget):
         cfg, token = adapt_to_length(live, n, fs)
         return cfg, token, live, fs, n
 
+    def _live_baseline_judged(self, res: AnalysisResult):
+        """:meth:`_live_baseline_for_run`, resolved at the rate ``res`` was DETECTED at when
+        that is not the recording's rate now. The estimator's decimation is counted in samples
+        and derived from the rate, so a rate declared since moved the stamp with no estimator
+        setting touched: Details listed the estimator as changed and offered a Re-measure that
+        the table refuses until it is re-run (S10-LIN1). The rate verdict carries that change;
+        this one judges the settings the user sets."""
+        resolved = self._live_baseline_for_run()
+        if resolved is None or not isinstance(res.payload, EventSet):
+            return resolved
+        cfg, token, live, fs, n = resolved
+        stamped = stale_rate_hz(res.payload.provenance, fs)
+        if stamped is None:
+            return resolved
+        cfg, token = adapt_to_length(live, n, stamped)
+        return cfg, token, live, stamped, n
+
     def _live_baseline_config(self):
         """The estimator the Preprocess tab is currently set to, or ``None``.
 
@@ -8480,6 +8535,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         res = self._stored_detection()
         if res is not None:
             self._check_staleness(res)
+            # The Fits box words a calibration-withheld fit by the LIVE calibration ("re-run
+            # detection" or "press Fit"), so it is redrawn with the line it sits under, or
+            # it contradicted that line both ways after an Apply or its Undo (S10-LIN2).
+            self._refresh_fit_text()
             # THE CAPTION FOLLOWS A LABEL EDIT, NEVER A GAIN EDIT. `target_units` is a
             # label and does not touch the array ("Only gain/offset alter the ARRAY;
             # target_units is a label" — core/calibration.fingerprint), so declaring the
@@ -8977,6 +9036,10 @@ class AnalysisPanel(QtWidgets.QWidget):
                           f"detection on screen ran with.")
         params = revert_params(form, run, stages=key, fs=fs)
         if params is None:
+            why = revert_withheld(form, run, stages=key, fs=fs)
+            if why and why != UNRECORDED:
+                return None, (f"Revert cannot restore {why}, so the {title} stage cannot be "
+                              f"put back. Run detection to apply it.")
             return None, (f"The {title} stage differs on a setting the {label} run did not "
                           f"record, so Revert cannot put it back. Run detection to apply it.")
         return params, (f"{title} stage reverted to the settings the {label} detection on "
@@ -9010,7 +9073,13 @@ class AnalysisPanel(QtWidgets.QWidget):
             return False
         defaults = reset_stage_params(key)
         form = self._detection.params()
-        if recipes_equal(form, {**form, **defaults}):
+        # Judged on what the boxes can hold: a default at or above this recording's Nyquist
+        # (the 100 Hz high-pass under 200 Hz) reads as the box's ceiling once set, so
+        # comparing with the default itself reset again on every press.
+        held = {k: min(float(v), getattr(self._detection, k).maximum())
+                for k, v in defaults.items()
+                if k in ("filter_cutoff_hz", "hp_cutoff_hz", "notch_freq_hz") and v is not None}
+        if recipes_equal(form, {**form, **defaults, **held}):
             self.statusMessage.emit(f"The {title} stage already holds its default settings.")
             return False
         self._detection.set_params(defaults)

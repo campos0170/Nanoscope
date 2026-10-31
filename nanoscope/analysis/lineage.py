@@ -34,6 +34,7 @@ from .conditioning_recipes import (
     THRESHOLD_KEYS_BY_MODULE,
     chain_differences,
     describe_differences,
+    revert_withheld,
     stage_rows,
     threshold_differences,
 )
@@ -107,8 +108,8 @@ class InputVerdict:
     and the thresholds, only the stages or thresholds that differ, as each side sets them
     (``"k_in 5"`` and ``"k_in 6"``). ``action`` is what repairs it: ``"re-run"`` (rate,
     calibration), ``"re-measure"`` (the estimator), ``"revert"`` (the chain and the thresholds,
-    which a re-run would settle as well), or ``""``. ``sentence`` says all of it in plain
-    English.
+    which a re-run would settle as well; ``"re-run"`` when Revert cannot put them back), or
+    ``""``. ``sentence`` says all of it in plain English.
     """
 
     name: str
@@ -210,7 +211,7 @@ def judge_inputs(made: MadeWith, now: LiveInputs, *,
         _judge_calibration(made, now),
         _judge_baseline(made, now),
         _judge_chain(made, now, fs),
-        _judge_thresholds(made, now),
+        _judge_thresholds(made, now, fs),
     )
 
 
@@ -340,12 +341,32 @@ def _judge_chain(made: MadeWith, now: LiveInputs, fs: float | None) -> InputVerd
     if not diffs:
         return InputVerdict("chain", "same", "", "", "",
                             "Signal chain: the form's is the one this table ran with.")
+    withheld = _revert_withheld(made, now, fs)
+    if withheld:
+        return InputVerdict("chain", "changed", was, is_, "re-run",
+                            f"Signal chain: {describe_differences(diffs)}. Re-run to apply it "
+                            f"— Revert cannot restore {withheld}.")
     return InputVerdict("chain", "changed", was, is_, "revert",
                         f"Signal chain: {describe_differences(diffs)}. "
                         "Revert, or re-run to apply it.")
 
 
-def _judge_thresholds(made: MadeWith, now: LiveInputs) -> InputVerdict:
+def _revert_withheld(made: MadeWith, now: LiveInputs, fs: float | None) -> str:
+    """Why the form's Revert cannot put the form back, or ``""``: the chain notice's own rule
+    (``revert_withheld``) on the same run, so this list never offers a Revert that every Revert
+    control withholds (S10-STAGE2). One Revert puts back the chain and the thresholds together,
+    so it is the verdict of both rows."""
+    if made.chain is None or now.chain is None:
+        return ""
+    run = {**made.chain, **(made.thresholds or {})}
+    form = {**now.chain, **(now.thresholds or {})}
+    try:
+        return revert_withheld(form, run, fs=fs)
+    except (TypeError, ValueError, KeyError):
+        return ""   # an unreadable stamp: the chain row already says so
+
+
+def _judge_thresholds(made: MadeWith, now: LiveInputs, fs: float | None = None) -> InputVerdict:
     if made.thresholds is None:
         return _not_recorded("thresholds", "Thresholds", made.module_id)
     form = now.thresholds or {}
@@ -362,6 +383,11 @@ def _judge_thresholds(made: MadeWith, now: LiveInputs) -> InputVerdict:
     # what precedes its arrow, and the form's are the same differences taken form → run.
     back = threshold_differences(made.thresholds, form, made.module_id)
     was, is_ = ("; ".join(d.text.partition(" → ")[0] for d in side) for side in (diffs, back))
+    withheld = _revert_withheld(made, now, fs)
+    if withheld:
+        return InputVerdict("thresholds", "changed", was, is_, "re-run",
+                            f"Thresholds: {describe_differences(diffs)}. Re-run to apply them "
+                            f"— Revert cannot restore {withheld}.")
     return InputVerdict("thresholds", "changed", was, is_, "revert",
                         f"Thresholds: {describe_differences(diffs)}. "
                         "Revert, or re-run to apply them.")

@@ -424,8 +424,6 @@ _UNDO_RUN = "run"
 #: of the recording's entries. Nothing undoes it (:meth:`MainWindow._can_undo` is False for
 #: it); it only separates.
 _UNDO_BREAK = "break"
-#: The event steps that put a new run on a table — the ones §3.6's single press is for.
-_RUN_STEP_LABELS = frozenset({"Re-run detection", "Re-measure depths"})
 #: How long a form edit waits for the next one before it becomes a step of its own: the
 #: Plots window's pause (``plots_panel._HISTORY_COALESCE_MS``, design §3.2), spelled again
 #: here so that building the main window does not import the Plots window. A test holds
@@ -577,7 +575,9 @@ class _CalibrationState:
     EQUAL BY THE CALIBRATION ALONE (``compare=False``, which ``SettingsHistory``'s comparison
     honours). A step is a change of the calibration and the file rides along: compared too,
     an Apply of the values already there -- a file move, no number changed -- would have been
-    a step that takes nothing back.
+    a step that takes nothing back. Such an Apply writes nothing now (``save_sidecar`` leaves
+    a file that already opens the same), and one that does change what the file holds is
+    pushed by ``MainWindow._checkpoint_calibration`` itself, so its Undo puts the file back.
 
     ``sidecar`` is ``(before, after)``, the file's bytes on each side of the commit (``None``
     where there was no file); ``None`` when the commit wrote no file (a segment, a recording
@@ -11076,20 +11076,24 @@ class MainWindow(QtWidgets.QMainWindow):
         """The FitResult already computed for this selection under ``module_id``.
 
         Returns ``(fit, reason)`` — ``fit`` is None when the export must fall back
-        to refitting, and ``reason`` says why, for the status line. Two guards, and
-        both matter because a figure is where a number stops being reviewable:
+        to refitting, and ``reason`` says why, for the status line. Every guard
+        matters because a figure is where a number stops being reviewable:
 
         * calibration fingerprint — a fit taken against a different gain/offset
           describes different depths;
         * sample size — re-running detection (or curating events) leaves the old
           fit in the store, and stamping a fit of yesterday's events onto today's
-          histogram is worse than a documented refit.
+          histogram is worse than a documented refit;
+        * the column and the table — a fit of another quantity, or one that records
+          another table, describes something else.
 
-        The two guards live in ``modules.stored_fit_problem`` so the Results dock's Fits
-        tab applies the very same rule (``modules.judge_stored_fit`` adds the table a fit
-        records to them); what this method returns, and says, is what it always did.
+        ``modules.report_fit_problem`` applies them: the first two are
+        ``modules.stored_fit_problem``, the table is the Results dock's Fits tab's
+        verdict (``modules.judge_stored_fit``). A Plots-window fit of ``depth_pA`` sits
+        in ``fit.depth`` too, and was drawn on the ``frac_depth`` histogram as "your
+        saved fit". A fit that records no table is still used, as it always was.
         """
-        from ..analysis.modules import stored_fit_problem
+        from ..analysis.modules import report_fit_problem
 
         try:
             stored = self._session.results.get(res.doc_id, res.channel, module_id)
@@ -11097,7 +11101,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None, "no saved fit"
         if stored is None or not hasattr(stored.payload, "predict"):
             return None, "no saved fit"
-        problem = stored_fit_problem(stored, res)
+        problem = report_fit_problem(stored, res)
         if problem:
             return None, problem
         return stored.payload, ""
@@ -14032,9 +14036,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._redo_journal[:] = [e for e in self._redo_journal if e != kind]
             self._split_redo_runs()
             return
-        self._redo_journal[:] = [e for e in self._redo_journal
-                                 if self._run_of(e) is not None
-                                 or self._settings_scope_of(e) is not None]
         # ...AND THE BRANCH ITSELF, on BOTH stacks — BUT ONLY FOR THE RECORDING THE STEP
         # BELONGS TO. Clearing only the journal left the entries alive inside whichever
         # stack the journal was not naming, and `_redo_target`'s fallback reaches straight
@@ -14055,8 +14056,42 @@ class MainWindow(QtWidgets.QMainWindow):
         # still drops everything, because an unknown scope is not a narrow one.
         doc_ids, doc_keys = self._step_scope(kind)
         self._history.clear_redo(doc_ids)
-        self._measure_history.clear_redo(doc_keys)
+        kept = self._measure_history.clear_redo(doc_keys)
+        # The redo journal then drops exactly the entries whose branch just ended and keeps
+        # every other one where it stood. Dropping every table entry by KIND, whoever's it
+        # was, left another recording's undone curation reachable only through
+        # `_redo_target`'s fallback, after its own older settings step: on A, Redo
+        # re-applied a calibration (and wrote its sidecar) before the curation undone after
+        # it, once anything had been curated on B (S10-UNDO1).
+        self._drop_ended_measurement_entries(kept)
+        self._redo_journal[:] = [e for e in self._redo_journal if self._redo_held(e)]
         self._split_redo_runs()
+
+    def _drop_ended_measurement_entries(self, kept: tuple[bool, ...]) -> None:
+        """Drop the redo journal's measurement entries whose step ``MeasurementHistory.clear_redo``
+        just ended (``kept``, oldest first, as it returns them). The entries name no recording,
+        and the table keeps another recording's steps, so "the stack still holds a redo" would
+        keep B's ended entry while A has one and replay A's measurement ahead of A's newer
+        undone step. Journal and stack are both newest-last, so they are matched from that end;
+        an entry beyond the steps held names none and goes too."""
+        flags = list(kept)
+        out: list = []
+        for entry in reversed(self._redo_journal):
+            if entry == _UNDO_MEASUREMENTS and not (flags and flags.pop()):
+                continue
+            out.append(entry)
+        self._redo_journal[:] = out[::-1]
+
+    def _redo_held(self, entry) -> bool:
+        """Does the stack a table entry of the redo journal names still hold a redo for it?
+        A run's press and a settings entry are not a table step's to end here
+        (:meth:`_split_redo_runs` and decision 2)."""
+        if entry == _UNDO_MEASUREMENTS:
+            return self._measure_history.can_redo()
+        key = self._events_key_of(entry)
+        if key is not None:
+            return self._history.can_redo(key)
+        return self._run_of(entry) is not None or self._settings_scope_of(entry) is not None
 
     def _journal_undo(self, entry: str | tuple) -> None:
         """Put ``entry`` at the newest end of the undo journal, within its bound.
@@ -14149,10 +14184,14 @@ class MainWindow(QtWidgets.QMainWindow):
         (:data:`_UNDO_BREAK`) — stays a step of its own (§3.6's last bullet). The key is
         the one the step was pushed for, which is the table the run replaced: a run that
         lands while the user looks at another recording still takes its own form's steps.
+
+        A RUN IS WHAT THE STEP SAYS IT WAS (``EventHistory.last_step_run``), not its label:
+        keyed on the label, a Detect after a Baseline-only edit that the diff named "Resize
+        3 event masks" left its setting for a second press (S10-UNDO2).
         """
-        key = self._history.last_step_key
+        key, run = self._history.last_step_key, self._history.last_step_run
         self._note_step((_UNDO_EVENTS, key))
-        if label not in _RUN_STEP_LABELS or key is None:
+        if not run or key is None:
             return
         entry = (_UNDO_SETTINGS, ("form", *key))
         journal = self._undo_journal
@@ -15090,12 +15129,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def _checkpoint_calibration(self, doc_id: str, ch: int) -> None:
         """``calibrationChanged``: commit that channel's calibration, under the name its
         action announced when one did, carrying what that action's commit did to the
-        sidecar (:class:`_CalibrationState`)."""
+        sidecar (:class:`_CalibrationState`).
+
+        A commit that moved no number but changed the file's bytes is a step all the same
+        (S10-DATA1): after a project restore an Apply writes the project's gain over the
+        user's own, and after a redo the file kept, the Apply the status line advises stores
+        values a later undo must take out again. Left without a step, those bytes were
+        recorded nowhere, the user's file had no Undo, and every later undo or redo here
+        found the file "changed since this step" and left it holding what had been undone."""
         scope = ("calibration", doc_id, int(ch))
         held = self._sidecar_moves.get(scope)
-        self._sidecar_moves[scope] = self._sidecar_move_of(scope)   # what a push here reads
+        move = self._sidecar_move_of(scope)
+        self._sidecar_moves[scope] = move           # what a push here reads
+        rewrote = isinstance(move, tuple) and move[0] != move[1]
         if not self._settings_history.checkpoint(
-                scope, label=self._settings_labels.pop(scope, None)):
+                scope, label=self._settings_labels.pop(scope, None), force=rewrote):
             self._sidecar_moves[scope] = held       # no step: the state is still the old one
 
     def _sidecar_move_of(self, scope: tuple) -> Any:
@@ -15203,10 +15251,26 @@ class MainWindow(QtWidgets.QMainWindow):
         """``formWritten``: the app wrote the form on screen itself — a seed from a stored run
         (a run landing, an event undo or redo), a draft put back, an undo. Adopted without a
         step: what the app wrote is no edit of the user's, and left unadopted it would be
-        recorded as one by the next checkpoint (design §3.9)."""
+        recorded as one by the next checkpoint (design §3.9).
+
+        A RUN LANDING withdraws the Redo it has made empty (S10-LIFE1). Ctrl+Z pressed while
+        the run was in flight took the form back; the landing re-seeds it with the settings
+        the run was launched with, which is where that step's Redo led, so the menu would
+        offer a named Redo that writes nothing — the item `_form_edit_waits` withholds. An
+        event undo or redo installs a run too, but its press keeps the form's branch."""
         scope = self._form_scope()
-        if scope is not None:
-            self._settings_history.rebase(scope)
+        if scope is None:
+            return
+        history = self._settings_history
+        history.rebase(scope)
+        if self._session.announcing is None or self._history.is_applying():
+            return
+        dropped = history.drop_redo_reached(scope)
+        if dropped:
+            for _ in range(dropped):
+                self._take_last(self._redo_journal, (_UNDO_SETTINGS, scope))
+            self._split_redo_runs()
+            self._sync_undo_actions()
 
     def _on_form_arrived(self, old, new) -> None:
         """``formArrived(old, new)``: the form of table ``new`` is on screen. Adopt it as it
@@ -15226,7 +15290,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sync_undo_actions()
             return
         scope = ("form", *new)
-        born = self._session.announcing == tuple(new)
+        # A re-run of a table that existed is announced too, and is no birth (S10-FORM2).
+        born = self._session.announcing == tuple(new) and self._session.announcing_new
         if (born and old is not None and old[2] is None and new[2] is not None
                 and tuple(old[:2]) == tuple(new[:2])):
             self._hand_over_form_steps(new)
@@ -15268,7 +15333,8 @@ class MainWindow(QtWidgets.QMainWindow):
         before any table, they are the new table's now (design §3.4)."""
         written = self._session.announcing
         if (written is None or written[0] != doc_id or written[2] != module_id
-                or module_id not in self._detection_module_ids()):
+                or module_id not in self._detection_module_ids()
+                or not self._session.announcing_new):   # a re-run is no birth (S10-FORM2)
             return
         key = (doc_id, written[1], module_id)
         if self._analysis_panel.current_target() == key[:2]:

@@ -30,6 +30,13 @@ from .key_sequences import redo_sequences, undo_sequences
 APPEARANCE_HISTORY_DEPTH = 200
 APPEARANCE_COALESCE_MS = 700
 
+#: The sizes a figure draws, per field: ``from_mapping`` drops anything outside, and each
+#: size spin box runs 0 ("Default") then this range, so the two cannot disagree.
+_SIZE_RANGES: dict[str, tuple[float, float]] = {
+    "title_size": (6, 48), "axis_size": (6, 36), "tick_size": (6, 30),
+    "line_width": (.25, 10), "marker_size": (1, 30), "legend_size": (6, 30),
+}
+
 
 @dataclass(frozen=True)
 class PlotAppearance:
@@ -64,9 +71,7 @@ class PlotAppearance:
         family = values.get("font_family")
         if isinstance(family, str) and family.strip() and not any(c in family for c in ";{}<>"):
             valid["font_family"] = family.strip()[:200]
-        for key, low, high in (("title_size", 6, 48), ("axis_size", 6, 36),
-                               ("tick_size", 6, 30), ("line_width", .25, 10),
-                               ("marker_size", 1, 30), ("legend_size", 6, 30)):
+        for key, (low, high) in _SIZE_RANGES.items():
             value = values.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if math.isfinite(value) and low <= value <= high:
@@ -232,6 +237,38 @@ class _AppearanceHistory:
         self.dropped = 0
 
 
+class _SizeSpinBox(QtWidgets.QDoubleSpinBox):
+    """A size whose 0 is Default and whose next value is the smallest size a figure draws.
+
+    Run from 0 by single steps, the title, axis, tick and legend sizes showed 1-5 pt while
+    ``from_mapping`` dropped them, so the figure and the history did nothing (sweep 10,
+    S10-PLOT2). A step up from below ``floor`` lands on it and a step down below it lands on
+    Default; a typed size below it is not taken until it grows (``"1"`` on the way to
+    ``"12"``), and Return or leaving the box puts the last size back.
+    """
+
+    def __init__(self, floor: float, maximum: float) -> None:
+        super().__init__()
+        self._floor = floor
+        self.setRange(0, maximum)
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 -- Qt API
+        target = self.value() + steps * self.singleStep()
+        if not 0 < target < self._floor:
+            super().stepBy(steps)
+            return
+        self.setValue(self._floor if steps > 0 else self.minimum())
+        if self.style().styleHint(QtWidgets.QStyle.SH_SpinBox_SelectOnStep, None, self):
+            self.selectAll()
+
+    def validate(self, text: str, pos: int):
+        state, text, pos = super().validate(text, pos)
+        if (state == QtGui.QValidator.State.Acceptable
+                and 0 < self.valueFromText(text) < self._floor):
+            state = QtGui.QValidator.State.Intermediate
+        return state, text, pos
+
+
 class PlotAppearanceWidget(QtWidgets.QWidget):
     """Compact common controls. ``set_state`` is silent; user edits emit once.
 
@@ -334,14 +371,13 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self.background.currentIndexChanged.connect(
             lambda: self._edit("background", self.background.currentData()))
         self._add_control(layout, 1, 2, "Background", self.background)
-        for key, label, row, col, maximum in (
-                ("title_size", "Title (pt)", 2, 0, 48),
-                ("axis_size", "Axis labels (pt)", 2, 2, 36),
-                ("tick_size", "Ticks (pt)", 3, 0, 30),
-                ("line_width", "Line width", 4, 0, 10),
-                ("marker_size", "Marker size", 4, 2, 30)):
-            spin = QtWidgets.QDoubleSpinBox()
-            spin.setRange(0, maximum)
+        for key, label, row, col in (
+                ("title_size", "Title (pt)", 2, 0),
+                ("axis_size", "Axis labels (pt)", 2, 2),
+                ("tick_size", "Ticks (pt)", 3, 0),
+                ("line_width", "Line width", 4, 0),
+                ("marker_size", "Marker size", 4, 2)):
+            spin = _SizeSpinBox(*_SIZE_RANGES[key])
             spin.setDecimals(1)
             spin.setSingleStep(.5 if key == "line_width" else 1)
             spin.setSpecialValueText("Default")
@@ -410,8 +446,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             self.legend_visible.addItem(label, value)
         self.legend_visible.currentIndexChanged.connect(
             lambda: self._edit("legend_visible", self.legend_visible.currentData()))
-        self.legend_size = QtWidgets.QDoubleSpinBox()
-        self.legend_size.setRange(0, 30)
+        self.legend_size = _SizeSpinBox(*_SIZE_RANGES["legend_size"])
         self.legend_size.setSpecialValueText("Default")
         self.legend_size.valueChanged.connect(lambda value: self._edit("legend_size", value or None))
         for label, control in (("Legend", self.legend_visible), ("Legend text (pt)", self.legend_size)):

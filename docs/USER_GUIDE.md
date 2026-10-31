@@ -587,6 +587,9 @@ the status line, and the Calibration panel's own line under it, name what happen
 left it — another channel's later step, say, or an edit made outside NanoScope — it is left as it
 is, and the line says so (*… pore.abf.npcal.json left as it is: it has changed since this step. …*).
 That holds while the session holds the step; undo history is not saved with a project.
+An *Apply* that changes no number writes nothing when the file already holds those values. If it
+does change the file (say, after opening a project whose gain differs from the file's own), it is a
+step like any other, and Undo puts your file back as it was, note and all.
 
 **A gain of zero is refused,** at the box you typed it into, with the reason. Zero is not a small
 gain: it flattens the whole channel to a single constant, and every number downstream — RMS noise,
@@ -811,7 +814,10 @@ everything else as you set it. It used to rewrite the whole chain, filling any s
 not recorded with its default. It never invents a setting now: when a difference is in one the run
 did not record (a table made before that setting existed, say), Revert is withheld and the line
 says why — *Run detection to apply it — Revert cannot restore a setting the run did not record.*
-The window's **Revert** and the button's menu entry are greyed then. A Revert is one step of
+The window's **Revert** and the button's menu entry are greyed then. The same holds when the run's
+frequency is above this recording's Nyquist now, after a slower rate was declared (*Revert cannot
+restore the run's low-pass 10 kHz, which is above this recording's Nyquist (8 kHz)*), and the
+Details list then says *Re-run to apply*. A Revert is one step of
 Edit ▸ Undo (*"Undo Revert chain to Schmitt's run"*, or *"Undo Revert settings to CUSUM's run"*
 once a threshold was among what it put back; §9b).
 
@@ -1855,7 +1861,8 @@ form's **Redo** is not offered, because the edit ends it.
 Conditioning window, where the chain is edited, as they do from the Event inspector and the Event
 gallery; the gallery has a **Redo** button beside its **Undo**, and each says in its tooltip which
 step it would take. A text field or spin box you are typing in keeps ⌘Z for its own typing, in
-every window. Plot windows are the exception, on purpose: there ⌘Z undoes the plot's own history
+every window. Stepping a value with a spin box's arrows, or picking from a list, is not typing:
+⌘Z then undoes the change. Plot windows are the exception, on purpose: there ⌘Z undoes the plot's own history
 (§10), and Edit ▸ Undo never reaches a plot.
 
 **What it does not reach.** The view — zoom, which has its own Back / Forward, layer visibility,
@@ -2753,7 +2760,8 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   under the declared rate first. …*), and a table stale on its calibration or open-pore estimator
   is named on the status line rather than exported in silence.
   A saved fit that no longer describes the table is not drawn: that histogram is refit afresh, and
-  the status line says why (§9a).
+  the status line says why (§9a). This includes a fit of another quantity (a Plots-window fit of
+  `depth_pA` on the dI/I0 histogram) and a fit made on another table of the recording.
 - **Analysis Explorer ▸ Export current figure…** — the plot that is actually on
   screen, including companion axes such as density marginals and spectrogram colour bars. The
   Distributions page exposes the same choices from **Export ▾**. This is distinct from the standard

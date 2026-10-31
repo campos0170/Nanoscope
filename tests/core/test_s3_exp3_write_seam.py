@@ -238,6 +238,9 @@ def test_the_calibration_sidecar_now_discloses(tmp_path: Path):
     alias = tmp_path / "rec_calibration_backup.json"
     os.link(first, alias)
 
+    # A changed gain: a file that already holds this calibration is not rewritten at all
+    # (S10-DATA1), and an unbroken link has nothing to disclose.
+    calib.set("doc-1", 0, ChannelCalibration(gain=2600.0, target_units="pA"))
     save_sidecar(data, "doc-1", calib, (info,))
     assert any("hard link" in n for n in take_identity_notes())
 

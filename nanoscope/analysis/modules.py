@@ -141,6 +141,7 @@ __all__ = [
     "FitVerdict",
     "judge_stored_fit",
     "stored_fit_problem",
+    "report_fit_problem",
     "NO_TMIN_WARNING",
 ]
 
@@ -2969,6 +2970,19 @@ _EXPORT_WORDS = {
     FIT_EVENTS_CHANGED: "saved fit is stale (the accepted events changed since it ran)",
 }
 
+#: The column each fit slot's report histogram draws (``plot.figures.dwell_histogram`` and
+#: ``depth_histogram``), which is also the column :func:`fit_dwell` / :func:`fit_depth` fit,
+#: with the names a fit of that same quantity may carry: the dwell's aliases are the ones the
+#: Plots window fits as dwells (``stats.DWELL_QUANTITY_NAMES``). ``frac_depth`` has none: the
+#: Plots window files a fit of ``depth_pA``, ``max_dev_pA`` or ``mean_dev_pA`` under
+#: ``fit.depth`` too, and a pA curve over a dI/I0 axis is flat zero.
+from .stats import DWELL_QUANTITY_NAMES  # noqa: E402  (beside its one reader)
+
+_REPORT_FIT_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "fit.dwell": ("dwell_s", tuple(DWELL_QUANTITY_NAMES)),
+    "fit.depth": ("frac_depth", ("frac_depth",)),
+}
+
 
 class FitVerdict(NamedTuple):
     """What :func:`judge_stored_fit` found, with the numbers a sentence about it needs.
@@ -3040,8 +3054,9 @@ def stored_fit_problem(stored: AnalysisResult, table: AnalysisResult) -> str:
     """Why ``stored`` cannot stand for the events ``table`` holds now, in the figure export's
     own words -- or ``""`` when neither of its two guards objects.
 
-    This is the rule ``MainWindow._stored_fit`` applies before a saved fit is allowed onto an
-    exported histogram: a fit taken under another gain/offset describes different depths, and a
+    These are the two guards the figure export has always applied before a saved fit is allowed
+    onto an exported histogram (it now asks :func:`report_fit_problem`, which adds the fit's
+    column and its table): a fit taken under another gain/offset describes different depths, and a
     fit of a different number of accepted events (the table was curated, merged or re-run
     since) is "worse than a documented refit". So is a fit of as many events that are no longer
     the same ones -- swapped, resized or re-measured -- which the fit's digest catches where the
@@ -3094,6 +3109,34 @@ def judge_stored_fit(stored: AnalysisResult, table: AnalysisResult) -> FitVerdic
     if moved:
         return verdict(moved, digest_moved)
     return verdict(FIT_CURRENT if made_on else FIT_UNRECORDED)
+
+
+def report_fit_problem(stored: AnalysisResult, table: AnalysisResult) -> str:
+    """Why Generate Report figures must not draw ``stored`` over its histogram of ``table`` --
+    ``""`` when it may -- in the words of the export's status line.
+
+    :func:`stored_fit_problem`'s two guards, plus the column and the table. A fit of another
+    quantity is refused first: the Plots window files a fit of ``depth_pA`` under ``fit.depth``,
+    and the export drew it over its ``frac_depth`` histogram as "your saved fit" (a flat curve,
+    mu in pA on a dI/I0 axis). The column is the one the fit recorded
+    (:data:`FIT_INPUT_COLUMN_KEY`, else the Plots window's ``params['column']``); a fit that
+    recorded none predates both and was made by the Fits box, whose column is the figure's. Then
+    :func:`judge_stored_fit` decides: a fit that names another table is refused, as the Fits tab
+    withholds it, whatever its count. A fit that names NO table is judged by the two guards
+    alone and drawn as before -- the export's rule for an earlier build's fit and the Plots
+    window's (S8-RD1, owner note #16), although the Fits tab withholds it.
+    """
+    meta = getattr(stored.payload, "meta", None) or {}
+    fitted = meta.get(FIT_INPUT_COLUMN_KEY) or (stored.params or {}).get("column")
+    column, names = _REPORT_FIT_COLUMNS.get(stored.module_id, ("", ()))
+    if fitted and column and str(fitted) not in names:
+        return f"saved fit is of {fitted}, not the {column} this figure draws"
+    verdict = judge_stored_fit(stored, table)
+    if verdict.reason == FIT_OTHER_TABLE:
+        from ..core.sources import detector_name
+
+        return f"saved fit belongs to the {detector_name(verdict.made_on)} table"
+    return _EXPORT_WORDS.get(verdict.reason, "")      # FIT_UNRECORDED and FIT_CURRENT: ""
 
 
 def _fit_result(

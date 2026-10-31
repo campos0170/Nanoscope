@@ -38,6 +38,47 @@ _FIELDS = {"doc_id", "channel", "channel_name", "module_id", "state"}
 #: naming any other part was written by a build that knows more than this one, so its draft
 #: is kept for that build and never half-applied by this one.
 _PARTS = frozenset({"detection", "intents", "ml", "baseline"})
+#: What the forms' restores cast each value of a part to (``DetectionPanel.set_params``,
+#: ``BaselinePanel.restore_form_state``): a value they would refuse, or read as something
+#: else (``bool("no")``), makes the draft one this build cannot apply (S10-FORM1). A key
+#: not named here is not checked; the panel's restore stays the last guard for those.
+_NUMBER, _NUMBER_OR_NONE, _FLAG, _TEXT = "number", "number or None", "bool", "str"
+_VALUE_KINDS: dict[str, dict[str, str]] = {
+    "detection": {
+        **dict.fromkeys((
+            "k_in", "k_out", "cusum_k", "cusum_h", "min_dwell_s", "filter_order",
+            "detrend_window_s", "detrend_percentile", "detrend_asls_lam", "detrend_asls_p",
+            "detrend_asls_niter", "detrend_asls_decim", "detrend_rough_s", "detrend_base_s",
+            "detrend_mask_sigma", "detrend_dilate_ms", "detrend_sg_poly", "detrend_sg_decim",
+            "notch_freq_hz", "notch_harmonics", "notch_q", "median_window_s", "hp_cutoff_hz",
+            "hp_order", "rmean_window_s", "savgol_window_s", "savgol_polyorder",
+            "normalize_clip_sigma"), _NUMBER),
+        **dict.fromkeys(("max_dwell_s", "merge_gap_s", "filter_cutoff_hz", "detrend_decim",
+                         "polarity"), _NUMBER_OR_NONE),
+        **dict.fromkeys(("detrend_enabled", "notch_enabled", "median_enabled", "hp_enabled",
+                         "rmean_enabled", "savgol_enabled", "normalize_enabled"), _FLAG),
+        **dict.fromkeys(("filter_kind", "detrend_method", "hp_kind", "normalize_mode"),
+                        _TEXT),
+    },
+    "baseline": {"rough_s": _NUMBER_OR_NONE, "base_s": _NUMBER_OR_NONE, "source": _TEXT},
+}
+
+
+def _kind_ok(kind: str, value: Any) -> bool:
+    if kind == _FLAG:
+        return isinstance(value, bool)
+    if kind == _TEXT:
+        return isinstance(value, str)
+    if value is None:
+        return kind == _NUMBER_OR_NONE
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _values_readable(state: dict) -> bool:
+    """Does every value :data:`_VALUE_KINDS` names hold what its form's restore takes?"""
+    return all(_kind_ok(kind, state[part][key])
+               for part, kinds in _VALUE_KINDS.items() if part in state
+               for key, kind in kinds.items() if key in state[part])
 
 
 def prepare_form_draft_workspace(extra: dict) -> tuple[str, ...]:
@@ -72,7 +113,8 @@ def _readable(rec: Any) -> tuple[str, int, str | None, str | None, dict] | None:
     if module_id is not None and (not isinstance(module_id, str) or not module_id):
         return None
     if (not isinstance(state, dict) or not state or not set(state) <= _PARTS
-            or not all(isinstance(part, dict) for part in state.values())):
+            or not all(isinstance(part, dict) for part in state.values())
+            or not _values_readable(state)):
         return None
     return doc_id, channel, name, module_id, state
 

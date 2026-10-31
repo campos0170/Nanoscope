@@ -532,6 +532,8 @@ def _looks_like_remeasure(before: AnalysisResult, after: AnalysisResult) -> bool
 
 #: Sentinel for "this key was absent", so a key added by a re-measure counts as moved.
 _MISSING = object()
+#: The names a step that put a new run on its table goes by (:attr:`EventHistory.last_step_run`).
+_RUN_LABELS = frozenset({"Re-run detection", "Re-measure depths"})
 
 
 def _hand_curation(df: pd.DataFrame) -> dict[str, int]:
@@ -630,6 +632,13 @@ def _is_carried_rerun(before: AnalysisResult, after: AnalysisResult) -> bool:
     pa = after.payload.provenance or {}
     pb = before.payload.provenance or {}
     return bool(pa.get("carried_hand_rows")) and pa.get("detected_at") != pb.get("detected_at")
+
+
+def _new_run_stamp(before: AnalysisResult, after: AnalysisResult) -> bool:
+    """Does ``after`` carry a run stamp ``before`` did not? ``detected_at`` is new on every run
+    and copied intact by every edit (:func:`_is_carried_rerun`)."""
+    stamp = (after.payload.provenance or {}).get("detected_at")
+    return stamp is not None and stamp != (before.payload.provenance or {}).get("detected_at")
 
 
 def _params_moved_outside_baseline(before: AnalysisResult, after: AnalysisResult) -> bool:
@@ -847,6 +856,10 @@ class EventHistory(QObject):
         #: redo invalidation to the recording the step belongs to — see
         #: :meth:`clear_redo` and :meth:`~nanoscope.gui.main_window.MainWindow._note_step`.
         self.last_step_key: EventKey | None = None
+        #: Did the last step PUSHED put a new run on its table (a detection or a re-measure)?
+        #: MainWindow folds the form steps that led to a run into its press on this (design
+        #: §3.6), never on the step's label.
+        self.last_step_run = False
         #: The last COMMITTED state of each live table. Everything is measured
         #: against this; a key absent from it has never been seen.
         self._pristine: dict[EventKey, AnalysisResult] = {}
@@ -961,10 +974,26 @@ class EventHistory(QObject):
                 text = "Re-measure depths"
             if text == "Re-measure depths" and not _looks_like_remeasure(prior, res):
                 text = "Re-run detection"
+        # A RUN, whatever the frames say: a Detect after a Baseline-only edit moves no detector
+        # setting and can move a few spans, so the diff names it "Resize 3 event masks", and
+        # the fold of design §3.6 keyed on the name left its setting for a second press
+        # (S10-UNDO2). The run's own stamp says what it was, and a new stamp is a detection
+        # even when only the baseline block moved; a re-measure keeps the stamp and is told
+        # by its baseline block.
+        stamped = replaced and _new_run_stamp(prior, res)
+        remeasure = replaced and not stamped and _looks_like_remeasure(prior, res)
+        run = detection or remeasure or stamped
+        if not label:
+            if stamped:
+                text = "Re-run detection"
+            elif run and text not in _RUN_LABELS:
+                text = "Re-measure depths" if remeasure else "Re-run detection"
+            run = run or text in _RUN_LABELS
         self._undo.append(_Entry(key, prior, text, _sizeof(prior)))
         self._redo = [e for e in self._redo if e.key != key]
         self._remember(key, res)
         self.last_step_key = key
+        self.last_step_run = run
         self._trim()
         self.stepRecorded.emit(text, _summarise(prior.payload.df))
         self.changed.emit()
@@ -1449,7 +1478,7 @@ class MeasurementHistory(QObject):
         self.last_step_seq = 0
         self.last_step_docs = None
 
-    def clear_redo(self, doc_keys: Iterable[str] | None = None) -> None:
+    def clear_redo(self, doc_keys: Iterable[str] | None = None) -> tuple[bool, ...]:
         """End this table's redo branch for the recordings named by ``doc_keys``, silently.
 
         :meth:`EventHistory.clear_redo`'s twin — read that one for why a step on the OTHER
@@ -1463,15 +1492,21 @@ class MeasurementHistory(QObject):
         name the recordings; an entry whose own scope is unknown (a frame with no
         ``doc_key``, or one this module could not diff) is dropped by any scoped call for
         the same reason — an unknown scope is not a narrow one.
+
+        Returns, for each redo step held before the call (oldest first), whether it is still
+        held: the journal's entries for this table name no recording, so MainWindow matches
+        them to the steps by position to drop exactly the ones ended here.
         """
         if doc_keys is None:
+            kept = tuple(False for _ in self._redo)
             self._redo.clear()
-            return
+            return kept
         doomed = {str(k) for k in doc_keys}
         if not doomed:
-            return
-        self._redo = [e for e in self._redo
-                      if e[2] is not None and not (e[2] & doomed)]
+            return tuple(True for _ in self._redo)
+        kept = tuple(e[2] is not None and not (e[2] & doomed) for e in self._redo)
+        self._redo = [e for e, keep in zip(self._redo, kept) if keep]
+        return kept
 
     def _trim(self) -> None:
         # One table, so ``MAX_DEPTH`` is already per-table here and the far end is this
@@ -1791,13 +1826,19 @@ class SettingsHistory(QObject):
             return _SETTINGS_LABEL
         return text if isinstance(text, str) and text else _SETTINGS_LABEL
 
-    def checkpoint(self, scope: SettingsScope | None, *, label: str | None = None) -> bool:
+    def checkpoint(self, scope: SettingsScope | None, *, label: str | None = None,
+                   force: bool = False) -> bool:
         """Commit whatever has happened to ``scope`` since its last checkpoint.
 
         Returns True if a step was pushed. Free when nothing changed, so MainWindow can call
         it after the 700 ms pause, before a run or a switch, and from every signal that might
         mean an edit, without inventing steps. ``label`` names the step when the caller knows
         better than the diff ("Recall protocol ‘HG student’"); otherwise ``describe`` does.
+
+        ``force`` pushes a step although the state compares equal: for a change the
+        comparison leaves out on purpose, which the caller knows happened (a calibration
+        commit that rewrote the sidecar and moved no number). Suspended or applying, it is
+        adopted like any other.
         """
         if scope is None:
             return False
@@ -1809,7 +1850,7 @@ class SettingsHistory(QObject):
             # First sight: nothing to return to yet, so this is the baseline, not a step.
             self._pristine[scope] = _detached(state)
             return False
-        if _settings_equal(prior, state):
+        if _settings_equal(prior, state) and not force:
             return False
         if self._suspended or self._applying:
             self._pristine[scope] = _detached(state)
@@ -1858,6 +1899,28 @@ class SettingsHistory(QObject):
         state = self._read(scope)
         if state is not None:
             self._pristine[scope] = _detached(state)
+
+    def drop_redo_reached(self, scope: SettingsScope) -> int:
+        """Drop the redo steps of ``scope`` that the state it holds now has already reached:
+        the newest-to-redo step whose ``after`` is that state, and every step redone before
+        it. Returns how many went. Silent, as :meth:`EventHistory.clear_redo` is.
+
+        For a state that ARRIVED where an undone step led, which no step recorded: a run
+        launched from a form lands and re-seeds it after Ctrl+Z took that form back, and
+        the step's Redo would then name a change and write what the form already holds. A
+        branch that does not pass through the state is left whole."""
+        steps = self._redo.get(scope)
+        current = self._pristine.get(scope)
+        if not steps or current is None:
+            return 0
+        for i in range(len(steps) - 1, -1, -1):
+            if _settings_equal(steps[i].after, current):
+                dropped = len(steps) - i
+                del steps[i:]
+                if not steps:
+                    del self._redo[scope]
+                return dropped
+        return 0
 
     def forget(self, scope: SettingsScope) -> None:
         """Drop ``scope``'s pristine copy and keep its steps: the next checkpoint adopts what

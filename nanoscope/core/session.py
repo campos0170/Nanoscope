@@ -92,6 +92,7 @@ class Session(QObject):
         #: ``(doc_id, channel, module_id)`` of the result :meth:`add_result` is announcing, for
         #: as long as its ``resultsChanged`` runs (the signal carries no channel); else None.
         self._announcing: tuple[str, int, str] | None = None
+        self._announcing_new = False
         # What the CALIBRATION did to a channel, keyed exactly like the cached calibrated
         # array — (doc_id, ch, gain, offset) — so the scan runs once per distinct calibration
         # and an A->B->A edit reuses the answer instead of re-scanning 3 M samples.
@@ -1020,12 +1021,15 @@ class Session(QObject):
         (the worker returns the object; the controller installs it here), so no
         lock — same discipline as every other mutator. Emits
         resultsChanged(doc_id, module_id) so panels refresh and redraw overlays."""
+        new = self._results.get(res.doc_id, int(res.channel), res.module_id) is None
         self._results.put(res)
         outer, self._announcing = self._announcing, (res.doc_id, int(res.channel), res.module_id)
+        outer_new, self._announcing_new = self._announcing_new, new
         try:
             self.resultsChanged.emit(res.doc_id, res.module_id)
         finally:
             self._announcing = outer
+            self._announcing_new = outer_new
 
     @property
     def announcing(self) -> tuple[str, int, str] | None:
@@ -1033,3 +1037,10 @@ class Session(QObject):
         else ``None``: the signal carries no channel, and a panel showing one channel of a
         recording must not take a write to another channel for its own."""
         return self._announcing
+
+    @property
+    def announcing_new(self) -> bool:
+        """Is the result :attr:`announcing` names a table its key did not hold before this add
+        (a BORN table), rather than a replacement? The store already holds it when
+        ``resultsChanged`` runs, so a listener cannot ask afterwards."""
+        return self._announcing is not None and self._announcing_new

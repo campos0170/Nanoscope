@@ -558,9 +558,18 @@ def save_sidecar(data_path: Path, doc_id: str, calib: CalibrationSet,
     disk, a read-only file, a disconnected network volume, a name too long, a permission
     denied — and telling a user to check a permission that is already correct sends them
     looking in the wrong place.
+
+    A file that already OPENS as this write would leave it is not rewritten, and the call
+    still answers :data:`SIDECAR_WRITTEN`, since the file holds this calibration
+    (:func:`_opens_as`). An Apply of the values already there is no undo step, so a rewrite
+    it made -- a version-1 file re-encoded as version 2, same numbers -- was recorded
+    nowhere: a redo kept for another channel then found the file not as its step had left it
+    and refused to put it back (S10-DATA1).
     """
     payload = _sidecar_payload(doc_id, calib, channels)
     path = sidecar_path(data_path)
+    if payload and _opens_as(data_path, doc_id, calib, channels, payload):
+        return SIDECAR_WRITTEN
     if not payload:
         # DELETE branch: every channel is back at its default, so any stale sidecar must go.
         # Its failure is its own outcome (SIDECAR_DELETE_FAILED, never SIDECAR_FAILED): the
@@ -589,6 +598,33 @@ def save_sidecar(data_path: Path, doc_id: str, calib: CalibrationSet,
         if reason is not None:
             reason.append(_os_reason(exc))
         return SIDECAR_FAILED
+
+
+def _opens_as(data_path: Path, doc_id: str, calib: CalibrationSet,
+              channels: tuple[ChannelInfo, ...], payload: dict) -> bool:
+    """True when the sidecar on disk opens, every channel, as a file holding ``payload``
+    would: the same gain, offset, units, note and kind override, and nothing said on open.
+
+    Judged by what an open INSTALLS, not by the JSON, because a version-1 entry carries no
+    channel identity and so never equals what this build writes, though it opens the same.
+    Any issue on open (an entry refused or re-attached) answers False: that file is not
+    this calibration, and the write puts it right as before."""
+    if not channels or not sidecar_path(data_path).exists():
+        return False
+    probe = CalibrationSet(opened_defaults=dict(calib.opened_defaults))
+    for info in channels:
+        probe.set(doc_id, info.index, calib.opened_default(doc_id, info))
+    if load_sidecar(data_path, doc_id, probe, channels):
+        return False
+
+    def opens(cal: ChannelCalibration) -> tuple:
+        return cal.gain, cal.offset, cal.target_units, cal.note, cal.kind
+
+    return all(
+        opens(probe.get(doc_id, info.index)) == opens(
+            calib.get(doc_id, info.index) if str(info.index) in payload
+            else calib.opened_default(doc_id, info))
+        for info in channels)
 
 
 def _os_reason(exc: OSError) -> str:

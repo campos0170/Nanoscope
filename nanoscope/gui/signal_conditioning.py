@@ -60,6 +60,7 @@ from ..analysis.conditioning_recipes import (
     STAGE_ENABLE_KEY,
     STAGE_KEYS,
     STAGE_TITLES,
+    UNRECORDED,
     ChainStatus,
     chain_signature,
     stage_rows,
@@ -1283,7 +1284,9 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         run = self._status.detector_label or "detection"
         head = f"Differs from the {run} run" + (f": {diffs}." if diffs else ".")
         if row.key not in self._stage_revertable:
-            head += " Revert stage cannot put it back: the run did not record that setting."
+            why = self._status.stage_withheld.get(row.key, "")
+            head += (f" Revert stage cannot restore {why}." if why and why != UNRECORDED else
+                     " Revert stage cannot put it back: the run did not record that setting.")
         return f"{head}\n{tip}"
 
     def stage_rows(self) -> tuple:
@@ -1333,7 +1336,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             tip = (f"Put back the {what} that differ from the run of the detection on "
                    f"screen. Nothing else on the form changes.")
         else:
-            tip = ("Revert cannot restore a setting the run did not record. Run detection "
+            tip = (f"Revert cannot restore {status.withheld or UNRECORDED}. Run detection "
                    "to apply the form.")
         if self.revert_button.toolTip() != tip:
             self.revert_button.setToolTip(tip)
@@ -1369,9 +1372,13 @@ class SignalConditioningWindow(QtWidgets.QWidget):
                 revert_tip = (f"Put back the {title} settings the detection on screen ran "
                               f"with. The other stages and the thresholds stay as they are.")
             elif key in self._stage_differ:
-                revert_tip = (f"The {title} stage differs on a setting the run did not "
-                              f"record, so Revert cannot put it back. Run detection to "
-                              f"apply it.")
+                why = self._status.stage_withheld.get(key, "")
+                revert_tip = (
+                    f"Revert cannot restore {why}, so the {title} stage cannot be put back. "
+                    f"Run detection to apply it." if why and why != UNRECORDED else
+                    f"The {title} stage differs on a setting the run did not "
+                    f"record, so Revert cannot put it back. Run detection to "
+                    f"apply it.")
             else:
                 revert_tip = (f"Enabled when the {title} stage differs from the run of the "
                               f"detection on screen.")

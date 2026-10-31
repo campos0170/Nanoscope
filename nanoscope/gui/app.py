@@ -129,6 +129,63 @@ class _WheelGuard(QtCore.QObject):
         return True
 
 
+class _UndoKeyGuard(QtCore.QObject):
+    """⌘Z / ⇧⌘Z belong to a spin box or an editable combo only while it has typing to undo.
+
+    Qt offers a shortcut to the focused widget first (``ShortcutOverride``), and the line
+    edit inside every QAbstractSpinBox and editable QComboBox claims Undo and Redo
+    UNCONDITIONALLY, with nothing to undo. Stepping a spin box (arrows, PageUp, its arrow
+    buttons) or picking from a combo's list sets that line edit's text, which clears its
+    own undo history, and leaves the control focused: so after the usual way of changing
+    one of these values the key reached no one -- not Edit ▸ Undo, not a plot window's
+    appearance history, not Signal Conditioning's forwarded Undo (sweep 10, S10-PLOT1).
+    The rule the docs give (USER_GUIDE §9b, design §3.7) is that a field the user is
+    TYPING in keeps ⌘Z for its typing; that is exactly ``isUndoAvailable()``.
+
+    So the override is let through to the window's shortcut unless the line edit can
+    undo (or, for Redo, redo) itself. Installed on the QApplication in :func:`create_app`,
+    like :class:`_WheelGuard`, so every such control in every window is covered.
+    """
+
+    def __init__(self, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        from .key_sequences import redo_sequences, undo_sequences
+
+        # Resolved once, against the running app's theme (key_sequences says why).
+        self._undo = undo_sequences()
+        self._redo = redo_sequences()
+
+    @staticmethod
+    def _line_edit(obj) -> QtWidgets.QLineEdit | None:
+        if isinstance(obj, QtWidgets.QAbstractSpinBox):
+            return obj.findChild(QtWidgets.QLineEdit, options=QtCore.Qt.FindDirectChildrenOnly)
+        if isinstance(obj, QtWidgets.QComboBox):
+            return obj.lineEdit()           # None for a combo that is not editable
+        if isinstance(obj, QtWidgets.QLineEdit) and isinstance(
+                obj.parentWidget(), (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox)):
+            return obj
+        return None
+
+    def eventFilter(self, obj, event):  # noqa: N802 -- Qt API
+        if event.type() != QtCore.QEvent.ShortcutOverride:
+            return False
+        edit = self._line_edit(obj)
+        if edit is None:
+            return False
+        key = QtGui.QKeySequence(event.keyCombination())
+        if event.matches(QtGui.QKeySequence.StandardKey.Undo) or key in self._undo:
+            own = edit.isUndoAvailable()
+        elif event.matches(QtGui.QKeySequence.StandardKey.Redo) or key in self._redo:
+            own = edit.isRedoAvailable()
+        else:
+            return False
+        if own:
+            return False
+        # Not claimed: Qt goes on to the shortcut, as for a button or a list.
+        event.ignore()
+        return True
+
+
 def create_app(argv: list[str]) -> QtWidgets.QApplication:
     """Return the singleton QApplication, naming it so QSettings has an org/app to key on."""
     app = QtWidgets.QApplication.instance()
@@ -143,6 +200,9 @@ def create_app(argv: list[str]) -> QtWidgets.QApplication:
     if getattr(app, "_nanoscope_wheel_guard", None) is None:
         app._nanoscope_wheel_guard = _WheelGuard(app)
         app.installEventFilter(app._nanoscope_wheel_guard)
+    if getattr(app, "_nanoscope_undo_key_guard", None) is None:
+        app._nanoscope_undo_key_guard = _UndoKeyGuard(app)
+        app.installEventFilter(app._nanoscope_undo_key_guard)
     return app
 
 
