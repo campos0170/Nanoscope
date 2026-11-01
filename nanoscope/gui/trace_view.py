@@ -11,6 +11,7 @@ import shiboken6
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core.analysis import OverlayHint, OverlayKind
+from ..core.confidence import ConfidenceTrack
 from ..core.layer import LAYER_INKS, Layer, ViewMode
 from ..core.session import Session
 from ..core import clock
@@ -22,7 +23,8 @@ from .display_residual import DisplayResidualCache
 __all__ = ["PaneSpec", "plan_panes", "effective_kind", "ChannelPane", "TraceView", "Crosshair", "TraceViewBox",
            "PREVIEW_CHANNEL_NOT_SHOWN", "MAX_X_SPAN_FACTOR", "MEASURE_MAX_VIEW_FRACTION",
            "MEASURE_HANDLE_SIZE_PX", "WHEEL_Y_PAN_FRACTION", "WHEEL_X_PAN_FRACTION",
-           "DRAW_CLICK_MAX_PX", "SWIPE_LOCK_PX", "layer_ink", "FILTER_PREVIEW_HEX"]
+           "DRAW_CLICK_MAX_PX", "SWIPE_LOCK_PX", "layer_ink", "FILTER_PREVIEW_HEX",
+           "CONFIDENCE_HEX", "CONFIDENCE_PANE_MIN_PX", "CONFIDENCE_PANE_MAX_PX"]
 
 #: The filter-preview curve's ink. NOT a layer colour and deliberately outside
 #: :data:`~nanoscope.core.layer.LAYER_INKS`: it is a "what this filter would do to the
@@ -35,6 +37,23 @@ __all__ = ["PaneSpec", "plan_panes", "effective_kind", "ChannelPane", "TraceView
 #: constant because ``tests/gui/test_s3_repoint_preview_rebuild.py`` identifies the
 #: preview item on the plot by this exact colour.
 FILTER_PREVIEW_HEX = "#e69f00"
+
+#: The ML confidence pane's curve ink and its two threshold lines. The curve sits in a pane
+#: of its own (never over a layer), so it cannot be misread as an overlaid recording and is
+#: not one of the reserved layer-adjacent inks; it is only kept off the event-span amber and
+#: the layer blues so the pane does not look like a fragment of the trace above it. The
+#: ENTER line takes the amber of the Results advisories link, the line that starts an event
+#: being the one to look at; EXIT takes the grey of the Results status text, because it only
+#: ever ends one.
+CONFIDENCE_HEX = "#c9b6ff"
+_CONFIDENCE_ENTER_HEX = "#ffb454"
+_CONFIDENCE_EXIT_HEX = "#8b9199"
+
+#: The confidence pane is a STRIP, not a channel: a fixed band of pixels under the trace
+#: rather than a share of the stretch, so turning it on takes the same few rows from the
+#: trace on a laptop and on a 4K screen, and never halves a current pane.
+CONFIDENCE_PANE_MIN_PX = 56.0
+CONFIDENCE_PANE_MAX_PX = 90.0
 
 #: *** THE ZOOM-OUT CEILING. *** The widest x-span any pane may show, as a multiple of the
 #: recording's full extent. The y-side has had a floor since v1 (``minYRange`` in
@@ -966,6 +985,10 @@ class TraceView(pg.GraphicsLayoutWidget):
     #: preview error line) must not be starved of the one emission that would have told the
     #: user why a ticked box draws nothing.
     sigFilterPreviewChanged = QtCore.Signal(str)
+    #: Whether Zoom Back / Zoom Forward would move the view: ``(back, forward)``, the pair
+    #: :meth:`zoom_history_state` returns. Emitted only when it changes. View ▸ Zoom Back /
+    #: Forward follow it, so they grey out when there is nowhere to go.
+    sigZoomHistoryChanged = QtCore.Signal(bool, bool)
 
     def __init__(self, session: Session, parent=None) -> None:
         super().__init__(parent)
@@ -994,6 +1017,12 @@ class TraceView(pg.GraphicsLayoutWidget):
         #: that can change under a standing rail. Storing only the drawn numbers made
         #: the second toggle of "subtract" draw a rail 566 pA off the curve.
         self._baseline_tracks: dict[str, tuple[str, np.ndarray, np.ndarray, str]] = {}
+        #: ``layer_id -> [(overlay_id, label, name, idx, ABSOLUTE values, ink), ...]`` for the
+        #: detector's threshold rails on that layer. Kept as MEASURED for the reason
+        #: `_baseline_tracks` is: the subtracted view moves them, and re-deriving them from
+        #: what was last drawn would subtract the baseline twice.
+        self._threshold_tracks: dict[
+            str, list[tuple[str, str, str, np.ndarray, np.ndarray, str]]] = {}
         self._filter_preview: pg.PlotDataItem | None = None    # D4 managed low-pass preview curve
         self._filter_preview_plot: pg.PlotItem | None = None
         #: THE STANDING REQUEST behind that curve — ``(doc_id, channel, data)``, or None
@@ -1008,6 +1037,25 @@ class TraceView(pg.GraphicsLayoutWidget):
         #: Why that request is not on screen (``""`` when it is, or when there is none).
         #: Mirrors what was last emitted on `sigFilterPreviewChanged`.
         self._filter_preview_reason: str = ""
+        #: THE ML CONFIDENCE PANE's standing request -- ``(doc_id, channel, track, note)``,
+        #: or None when nobody is asking for one. ``track`` is the ML table's kept
+        #: `ConfidenceTrack`, or None when the table has none, in which case the pane says
+        #: ``note`` instead of drawing. Same rule as `_filter_preview_req`: the pane dies in
+        #: every `rebuild` and the REQUEST does not, so View > Stacked/Overlay and a channel
+        #: toggle put it back (`_reattach_confidence`).
+        self._confidence_req: tuple[str, int, ConfidenceTrack | None, str] | None = None
+        self._confidence_plot: pg.PlotItem | None = None
+        self._confidence_curve: pg.PlotDataItem | None = None
+        self._confidence_lines: list[pg.InfiniteLine] = []
+        self._confidence_caption: _PaneLabel | None = None
+        #: What the pane says about itself: the boxed caption when there is no curve, the
+        #: pane's tooltip when there is one (a box over a 60 px strip hides the curve).
+        self._confidence_note: str = ""
+        self._confidence_cursor: tuple[pg.InfiniteLine, pg.TextItem] | None = None
+        #: The channel pane whose bottom axis (tick values + clock label) the confidence pane
+        #: took over, and the label text, so removing the pane hands both back.
+        self._confidence_axis_from: pg.PlotItem | None = None
+        self._confidence_axis_label: str = ""
         self._placeholder: pg.LabelItem | None = None
         # Manual-measurement region (the Measure tool). A single movable LinearRegionItem whose two
         # edges ARE the boundary cursors; lives on the current-channel pane. _measure_active /
@@ -1057,6 +1105,8 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._settle.setSingleShot(True)
         self._settle.setInterval(250)
         self._settle.timeout.connect(self._commit_view)
+        #: The ``(back, forward)`` pair last put on ``sigZoomHistoryChanged``.
+        self._history_state: tuple[bool, bool] = (False, False)
 
         self.setMinimumHeight(240)
         self.setBackground(None)   # inherit the pg global background
@@ -1065,6 +1115,10 @@ class TraceView(pg.GraphicsLayoutWidget):
         # One scene for the whole layout; connect mouse-move once. Panes are recreated per rebuild,
         # but the scene persists, so this connection survives rebuilds.
         self.scene().sigMouseMoved.connect(self.crosshair.on_mouse_moved)
+        # The confidence pane is not a ChannelPane (the crosshair walks channel panes only),
+        # so it follows the shared cursor itself, and a hover over it moves that cursor.
+        self.scene().sigMouseMoved.connect(self._on_confidence_mouse)
+        session.cursorMoved.connect(self._position_confidence_cursor)
 
         session.layersChanged.connect(self.rebuild)
         session.viewModeChanged.connect(self.rebuild)
@@ -1176,6 +1230,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._measure_region = None          # died with its plot in clear(); reattached below if active
         self._measure_plot = None
         self._target_label = None            # a child of the old ViewBox: gone with it
+        self._forget_confidence_pane()       # died in clear(); re-attached below on request
         self._placeholder = None
 
         specs = plan_panes(self.session)
@@ -1285,12 +1340,17 @@ class TraceView(pg.GraphicsLayoutWidget):
                 self._seed_history()
 
         self.crosshair.attach(self._panes)
+        # The fresh lines start at x = 0 with their readouts hidden; put them back on the
+        # session's cursor (once one was placed), as the ML p strip re-attached below does,
+        # so the stack never shows two cursors after an Overlay/Stacked switch or a toggle.
+        self.crosshair.refresh()
         self._reattach_measure()
         # ...and the other two managed items, on the same rule as the first: a managed
         # item whose REQUEST outlives the pane is re-applied by the view that tore it
         # down, never by a listener that was never told the pane went away.
         self._reattach_overlays()
         self._reattach_filter_preview()
+        self._reattach_confidence()
         self._finish_rebuild(draw_aborted)
 
     def refresh_channel(self, doc_id: str, channel: int) -> None:
@@ -1527,7 +1587,10 @@ class TraceView(pg.GraphicsLayoutWidget):
         """
         if not self._panes:
             return ""
-        item = self._panes[-1].plot.getAxis("bottom")
+        # The confidence pane, when shown, is the bottom of the stack and carries the axis.
+        carrier = self._confidence_plot if self._confidence_plot is not None \
+            else self._panes[-1].plot
+        item = carrier.getAxis("bottom")
         return str(item.labelText or "")
 
     def sample_dx(self, doc_id: str, channel: int = 0) -> float:
@@ -1564,11 +1627,16 @@ class TraceView(pg.GraphicsLayoutWidget):
             return
         self._view_hist = [tuple(anchor.vb.viewRange()[0])]  # type: ignore[list-item]
         self._view_ptr = 0
+        self._announce_history()
 
     def _on_x_changed(self, *_args) -> None:
         # Debounce: only record once the view stops moving (one entry per settled zoom, not per frame).
         if not self._restoring:
             self._settle.start()
+            # ...but the MENU cannot wait for the debounce: a pending zoom is already a step
+            # Back will take (see zoom_history_state), and a Zoom Back still greyed out for
+            # those 250 ms would swallow the quick Ctrl+← that _commit_pending exists to honour.
+            self._announce_history()
 
     def _commit_view(self) -> None:
         anchor = self.anchor_plot()
@@ -1576,10 +1644,12 @@ class TraceView(pg.GraphicsLayoutWidget):
             return
         cur = tuple(anchor.vb.viewRange()[0])
         if self._view_hist and self._same_range(cur, self._view_hist[self._view_ptr]):
+            self._announce_history()    # a zoom that came back to where it started
             return
         del self._view_hist[self._view_ptr + 1:]      # a new zoom prunes any forward branch
         self._view_hist.append(cur)                    # type: ignore[arg-type]
         self._view_ptr = len(self._view_hist) - 1
+        self._announce_history()
 
     def _restore_view(self, rng: tuple[float, float]) -> None:
         anchor = self.anchor_plot()
@@ -1597,6 +1667,34 @@ class TraceView(pg.GraphicsLayoutWidget):
     def can_go_forward(self) -> bool:
         return 0 <= self._view_ptr < len(self._view_hist) - 1
 
+    def zoom_history_state(self) -> tuple[bool, bool]:
+        """``(back, forward)``: whether :meth:`view_back` / :meth:`view_forward` would move the
+        view NOW. What View ▸ Zoom Back / Forward are enabled by.
+
+        Not :meth:`can_go_back` / :meth:`can_go_forward`, which answer about the COMMITTED
+        trail. Back and Forward flush a still-debouncing zoom first (:meth:`_commit_pending`),
+        so a framing on screen that differs from the current entry is a step Back will take —
+        and the commit it triggers prunes the forward branch, so Forward has nowhere to go.
+        Greying the menu by the committed answer would disable Ctrl+← for the 250 ms after
+        every dive, because a disabled QAction drops its shortcut too: the quick Back the
+        flush was written for would be swallowed again, by the menu this time.
+        """
+        anchor = self.anchor_plot()
+        if anchor is None or not self._view_hist or not 0 <= self._view_ptr < len(self._view_hist):
+            return False, False
+        if self._settle.isActive():
+            cur = tuple(anchor.vb.viewRange()[0])
+            if not self._same_range(cur, self._view_hist[self._view_ptr]):    # type: ignore[arg-type]
+                return True, False
+        return self.can_go_back(), self.can_go_forward()
+
+    def _announce_history(self) -> None:
+        """Emit ``sigZoomHistoryChanged`` when :meth:`zoom_history_state` changed."""
+        state = self.zoom_history_state()
+        if state != self._history_state:
+            self._history_state = state
+            self.sigZoomHistoryChanged.emit(*state)
+
     def _commit_pending(self) -> None:
         """Flush an in-flight (still-debouncing) zoom into the history NOW. The 250 ms settle is
         a recording optimisation, not a semantic one: the framing on screen when the user presses
@@ -1612,6 +1710,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         if self.can_go_back():
             self._view_ptr -= 1
             self._restore_view(self._view_hist[self._view_ptr])
+        self._announce_history()
 
     def view_forward(self) -> None:
         # Same flush: an uncommitted zoom prunes the forward branch exactly as it would have
@@ -1621,6 +1720,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         if self.can_go_forward():
             self._view_ptr += 1
             self._restore_view(self._view_hist[self._view_ptr])
+        self._announce_history()
 
     # -- accessors -------------------------------------------------------------------------------
     def anchor_plot(self) -> pg.PlotItem | None:
@@ -1846,6 +1946,63 @@ class TraceView(pg.GraphicsLayoutWidget):
         """Is a baseline rail STANDING on this layer (drawn or waiting for its pane)?"""
         return f"{doc_id}#{int(channel)}" in self._baseline_tracks
 
+    # -- the detector's thresholds, as rails beside the baseline's -------------------------------
+    def set_threshold_tracks(self, doc_id: str, channel: int, rails) -> bool:
+        """Show the rails a detector compared (doc_id, channel) with, or (``None``) stop.
+
+        ``rails`` is a sequence of ``(label, name, idx, values, ink)``: int64 knot indices
+        and the ABSOLUTE current there, from `analysis.detection_thresholds`. One standing
+        request per layer, REPLACED by a second call, and moved with the curve by the
+        baseline-subtracted view exactly as the baseline rail is -- the producer always hands
+        over the numbers as measured and this view, which alone knows what its y axis means
+        right now, puts them where the curve is.
+
+        Returns whether the rails are on the plot now (False = the channel is not layered;
+        the request stands and a rebuild draws it, as every `add_overlay` request does).
+        """
+        layer_id = f"{doc_id}#{int(channel)}"
+        if rails is None:
+            for oid, *_rest in self._threshold_tracks.pop(layer_id, []):
+                self.remove_overlay(oid)
+            return False
+        clean = [(str(label), str(name),
+                  np.ascontiguousarray(np.asarray(idx, dtype=np.int64)),
+                  np.ascontiguousarray(np.asarray(values, dtype=np.float64)), str(ink))
+                 for label, name, idx, values, ink in rails]
+        return self._draw_threshold_tracks(doc_id, int(channel), clean)
+
+    def _draw_threshold_tracks(self, doc_id: str, channel: int, rails) -> bool:
+        """THE ONE PLACE THE THRESHOLD RAILS ARE ISSUED (first draw and every mode change)."""
+        layer_id = f"{doc_id}#{channel}"
+        for oid, *_rest in self._threshold_tracks.pop(layer_id, []):
+            self.remove_overlay(oid)
+        base = self._subtracted.get(layer_id)
+        b = None if base is None or not np.asarray(base).size else np.asarray(base, dtype=np.float64)
+        standing = []
+        drawn = True
+        for label, name, starts, absolute, ink in rails:
+            vals = absolute if b is None else absolute - b[np.clip(starts, 0, b.size - 1)]
+            hint = OverlayHint(kind=OverlayKind.THRESHOLD, starts=starts, values=vals,
+                               label=label, color=ink, name=name)
+            oid = self.add_overlay(doc_id, channel, hint)
+            drawn = drawn and oid in self._overlays
+            standing.append((oid, label, name, starts, absolute, ink))
+        if standing:
+            self._threshold_tracks[layer_id] = standing
+        return bool(standing) and drawn
+
+    def has_threshold_tracks(self, doc_id: str, channel: int) -> bool:
+        """Are threshold rails STANDING on this layer (drawn or waiting for its pane)?"""
+        return f"{doc_id}#{int(channel)}" in self._threshold_tracks
+
+    def clear_threshold_tracks(self) -> None:
+        """Take every threshold rail off every layer -- the one gesture its owner needs, for
+        the reason `clear_baseline_views` gives: the request is per layer, the toggle is
+        per table on screen, so the owner clears and re-applies on every change."""
+        for layer_id in list(self._threshold_tracks):
+            doc_id, _, ch = layer_id.rpartition("#")
+            self.set_threshold_tracks(doc_id, int(ch), None)
+
     def set_baseline_subtracted(self, doc_id: str, channel: int,
                                 baseline: np.ndarray | None) -> bool:
         """Draw (doc_id, channel) as ``signal - baseline``, centred on zero. Or stop.
@@ -1890,6 +2047,12 @@ class TraceView(pg.GraphicsLayoutWidget):
         if standing is not None:
             _, starts, absolute, ink = standing
             self._draw_baseline_track(doc_id, int(channel), starts, absolute, ink)
+        # ...and so do the detector's threshold rails, by the same rule and from the same
+        # kind of record: the values as measured.
+        if layer_id in self._threshold_tracks:
+            self._draw_threshold_tracks(doc_id, int(channel), [
+                (label, name, starts, absolute, ink)
+                for _oid, label, name, starts, absolute, ink in self._threshold_tracks[layer_id]])
         layer = self.session.layer(layer_id)
         pane = self.pane_for_layer(layer_id)
         if layer is None or pane is None:
@@ -2052,6 +2215,256 @@ class TraceView(pg.GraphicsLayoutWidget):
     def filter_preview_reason(self) -> str:
         """Why the standing request is not drawn ("" when it is, or when there is none)."""
         return self._filter_preview_reason
+
+    # -- ML confidence pane ----------------------------------------------------------------------
+    def set_confidence_track(self, doc_id: str, channel: int, track: ConfidenceTrack | None,
+                             *, note: str = "") -> bool:
+        """Show the ML table's kept probability as a thin pane under the trace.
+
+        A STANDING REQUEST, exactly like :meth:`set_filter_preview`: it survives every
+        `rebuild` and is re-drawn there. ``track=None`` asks for the pane with ``note`` in
+        place of a curve -- an ML table with no kept probability says so where the curve
+        would be, rather than leaving the user to wonder whether the option is broken.
+
+        THE PANE IS ADDED AND REMOVED WITHOUT A REBUILD. A rebuild re-frames every pane's y
+        axis, and turning on a readout must not cost the user the amplitude zoom they are
+        inspecting a blockade at; the x zoom is untouched because the pane is x-linked to the
+        anchor. Display only: nothing here reads or writes a measured sample.
+
+        Idempotent: the panel calls this on every re-show of the table on screen (each
+        curation edit re-shows it), and the same request is a no-op rather than a redraw of
+        a 15 M-sample curve. Returns whether the pane is on screen now (False = the channel
+        is not layered, or there are no panes).
+        """
+        req = (str(doc_id), int(channel), track, str(note))
+        cur = self._confidence_req
+        if (cur is not None and cur[0] == req[0] and cur[1] == req[1] and cur[2] is track
+                and cur[3] == req[3] and self._confidence_plot is not None):
+            return True
+        self._confidence_req = req
+        return self._draw_confidence()
+
+    def clear_confidence_track(self) -> None:
+        """WITHDRAW the request and remove the pane. Safe when there is none."""
+        self._confidence_req = None
+        self._remove_confidence_pane()
+
+    def confidence_requested(self) -> bool:
+        """Whether a confidence-pane request stands, drawn or not."""
+        return self._confidence_req is not None
+
+    def confidence_plot(self) -> pg.PlotItem | None:
+        """The confidence pane's PlotItem while it is on screen, else None."""
+        return self._confidence_plot
+
+    def confidence_curve(self) -> pg.PlotDataItem | None:
+        """The probability curve on that pane (None when the pane shows only a note)."""
+        return self._confidence_curve
+
+    def confidence_threshold_lines(self) -> tuple[pg.InfiniteLine, ...]:
+        """The enter / exit lines on that pane, enter first."""
+        return tuple(self._confidence_lines)
+
+    def confidence_note(self) -> str:
+        """What the pane says about itself ("" when there is no pane): the boxed caption on
+        a pane with no curve, or the tooltip of one with a curve."""
+        return self._confidence_note
+
+    def _forget_confidence_pane(self) -> None:
+        """Drop the references to a pane that `clear()` has already destroyed."""
+        if self._confidence_caption is not None:
+            self._confidence_caption.detach()
+        self._confidence_plot = None
+        self._confidence_curve = None
+        self._confidence_lines = []
+        self._confidence_caption = None
+        self._confidence_note = ""
+        self._confidence_cursor = None
+        self._confidence_axis_from = None
+        self._confidence_axis_label = ""
+
+    def _remove_confidence_pane(self) -> None:
+        """Take the pane out of the layout and hand the time axis back to the channel pane
+        it was taken from, leaving the request alone."""
+        plot, source = self._confidence_plot, self._confidence_axis_from
+        label = self._confidence_axis_label
+        self._forget_confidence_pane()
+        if plot is None:
+            return
+        try:
+            # Unlinked first: a removed plot still x-linked to the anchor would go on being
+            # driven by every pan of the trace, off screen, for as long as it is alive.
+            plot.setXLink(None)
+            self.removeItem(plot)
+        except Exception:  # noqa: BLE001 - pyqtgraph raises a bare Exception for "not in layout"
+            pass           # already torn down with the layout
+        if source is not None and any(pane.plot is source for pane in self._panes):
+            try:
+                source.getAxis("bottom").setStyle(showValues=True)
+                source.setLabel("bottom", label)
+            except RuntimeError:
+                pass
+
+    def _draw_confidence(self) -> bool:
+        """THE ONE PLACE THE PANE IS BUILT, for a first request and every rebuild alike."""
+        self._remove_confidence_pane()
+        req = self._confidence_req
+        if req is None or not self._panes:
+            return False
+        doc_id, channel, track, note = req
+        if self.pane_for_layer(f"{doc_id}#{channel}") is None:
+            return False                         # channel hidden: reversible, request stands
+        layer = self.session.layer(f"{doc_id}#{channel}")
+        offset = layer.time_offset_s if layer is not None else 0.0
+
+        row = len(self._panes)
+        plot = self.addPlot(row=row, col=0,
+                            axisItems={"bottom": ReadableLinearAxis(orientation="bottom"),
+                                       "left": ReadableLinearAxis(orientation="left")})
+        self.ci.layout.setRowStretchFactor(row, 0)
+        plot.setMinimumHeight(CONFIDENCE_PANE_MIN_PX)
+        plot.setMaximumHeight(CONFIDENCE_PANE_MAX_PX)
+        # A READOUT STRIP, not a place to zoom: y is the probability's whole range, always,
+        # and x follows the trace through the link. No menu for the reason the trace panes
+        # have none (Log Y of a probability would blank it), and no autorange button.
+        plot.setMenuEnabled(False)
+        plot.hideButtons()
+        plot.vb.setMouseEnabled(x=False, y=False)
+        plot.vb.disableAutoRange()
+        plot.vb.setYRange(0.0, 1.0, padding=0.06)
+        plot.showGrid(x=True, y=False, alpha=0.15)
+        plot.getAxis("left").setTicks([[(0.0, "0"), (0.5, "0.5"), (1.0, "1")]])
+        plot.setLabel("left", "ML p")
+        plot.setXLink(self._panes[0].plot)
+
+        # THE TIME AXIS MOVES DOWN WITH THE BOTTOM OF THE STACK. `rebuild` gives tick values
+        # and the clock label to the last pane only, so the stack reads as one time span with
+        # one axis; leaving them on the channel pane would put the axis BETWEEN the trace and
+        # the strip that shares it. Handed back by `_remove_confidence_pane`.
+        source = self._panes[-1].plot
+        source_axis = source.getAxis("bottom")
+        self._confidence_axis_from = source
+        self._confidence_axis_label = str(source_axis.labelText or "")
+        source_axis.setStyle(showValues=False)
+        source.setLabel("bottom", "")
+        axis = plot.getAxis("bottom")
+        axis.enableAutoSIPrefix(False)           # same reason as the channel panes' axis
+        axis.setStyle(showValues=True)
+        plot.setLabel("bottom", self._confidence_axis_label)
+
+        self._confidence_plot = plot
+        if track is None:
+            # No curve to hide, so the sentence goes IN the pane, where the curve would be.
+            caption = _PaneLabel(plot.vb)
+            caption.set_text(note)
+            self._confidence_caption = caption
+            self._confidence_note = note
+        else:
+            xs = self.session.x_axis(doc_id, offset).values
+            # Only the samples a model window SAW. Past `covered_stop` the inference loop
+            # wrote 0 for "never asked"; drawing that as a confident "no event" is the one
+            # misreading this pane must not invite, so the curve simply stops.
+            lo, hi = track.start, min(track.covered_stop, int(xs.size))
+            if hi > lo:
+                curve = ChannelPane.make_curve(plot, CONFIDENCE_HEX)    # four-step order
+                curve.setData(x=xs[lo:hi], y=track.probability(lo, hi))  # data LAST
+                self._confidence_curve = curve
+            # Both labels sit ABOVE their line at the right edge: below it, the exit label
+            # ran into the time axis on a strip this thin.
+            for value, ink, word, anchor in (
+                    (track.enter, _CONFIDENCE_ENTER_HEX, "enter", (1, 1)),
+                    (track.exit, _CONFIDENCE_EXIT_HEX, "exit", (1, 1))):
+                if word == "exit" and track.exit == track.enter:
+                    continue
+                line = pg.InfiniteLine(
+                    pos=float(value), angle=0, movable=False,
+                    pen=pg.mkPen(ink, width=1, style=QtCore.Qt.DashLine),
+                    label=f"{word} {value:.2f}",
+                    labelOpts={"position": 0.995, "color": ink, "anchors": [anchor, anchor]})
+                line.setZValue(4)
+                plot.addItem(line, ignoreBounds=True)
+                self._confidence_lines.append(line)
+            # ON HOVER, NOT OVER THE CURVE. A boxed caption on a strip this thin covered
+            # half its height, i.e. half of every event's probability. What the curve is
+            # (model output, before the decode's median) and what it leaves out (an
+            # uncovered tail, clipped values) is one hover away instead, and in the guide.
+            self._confidence_note = self._confidence_caption_text(track)
+            plot.setToolTip(self._confidence_note)
+        vline = pg.InfiniteLine(angle=90, movable=False,
+                                pen=pg.mkPen("#9aa2ab", width=1, style=QtCore.Qt.DashLine))
+        vline.setZValue(20)
+        plot.addItem(vline, ignoreBounds=True)
+        # The trace panes' own readout (B1's `_CrosshairReadout`): the same backing, the
+        # same flip to the line's left in the right half, hidden when empty, mouse
+        # transparent -- one crosshair readout across the stack, not two looks.
+        readout = _CrosshairReadout()
+        readout.setZValue(21)
+        plot.addItem(readout, ignoreBounds=True)
+        self._confidence_cursor = (vline, readout)
+        if self.crosshair._placed:
+            # Before the first hover the shared cursor sits at 0.0, a place nobody chose.
+            self._position_confidence_cursor(self.session.cursor_x)
+        return True
+
+    @staticmethod
+    def _confidence_caption_text(track: ConfidenceTrack) -> str:
+        """What the curve IS, in one line: the model's output, and the decode step between
+        it and the thresholds drawn over it (a k-sample median), plus anything the curve
+        does not show (an uncovered tail, clipped values)."""
+        bits = ["ML probability · model output"]
+        if track.smoothing_kernel > 1:
+            bits[0] += f" (thresholds apply after a {track.smoothing_kernel}-sample median)"
+        if track.covered < track.n:
+            dur = track.uncovered_s
+            bits.append(f"last {dur * 1e3:.3g} ms not reached by a model window" if dur < 1
+                        else f"last {dur:.3g} s not reached by a model window")
+        if track.n_out_of_range:
+            bits.append(f"{track.n_out_of_range:,} values outside 0–1 clipped")
+        return " · ".join(bits)
+
+    def _reattach_confidence(self) -> None:
+        """After a rebuild: put the standing confidence request back on the new panes."""
+        if self._confidence_req is not None:
+            self._draw_confidence()
+
+    def _position_confidence_cursor(self, x: float) -> None:
+        """Mirror the shared cursor on the confidence pane, with p at the cursor's sample."""
+        cursor, req = self._confidence_cursor, self._confidence_req
+        if cursor is None or req is None or x is None:
+            return
+        vline, readout = cursor
+        try:
+            vline.setPos(float(x))
+            text = ""
+            doc_id, channel, track, _note = req
+            layer = self.session.layer(f"{doc_id}#{channel}")
+            if track is not None and layer is not None and self.session.has_document(doc_id):
+                idx = self.session.time_to_index(doc_id, channel, float(x), layer.time_offset_s)
+                p = track.at(idx) if idx is not None else None
+                text = "" if p is None else f"p = {p:.2f}"
+            readout.show_at(float(x), text)
+        except RuntimeError:
+            pass   # the pane is being torn down with the layout
+
+    def _on_confidence_mouse(self, scene_pos) -> None:
+        """A hover over the confidence pane moves the shared cursor, snapped to a sample of
+        the channel it belongs to, the way a hover over a trace pane does."""
+        plot, req = self._confidence_plot, self._confidence_req
+        if plot is None or req is None:
+            return
+        try:
+            if not plot.sceneBoundingRect().contains(scene_pos):
+                return
+            x = float(plot.vb.mapSceneToView(scene_pos).x())
+        except RuntimeError:
+            return
+        doc_id, channel, _track, _note = req
+        layer = self.session.layer(f"{doc_id}#{channel}")
+        if layer is not None and self.session.has_document(doc_id):
+            idx = self.session.time_to_index(doc_id, channel, x, layer.time_offset_s)
+            if idx is not None:
+                x = float(self.session.x_axis(doc_id, layer.time_offset_s).values[idx])
+        self.session.set_cursor(x)
 
     # -- manual measurement region (the Measure tool) --------------------------------------------
     def set_measure_active(self, doc_id: str, channel: int, on: bool, *, seed: bool = True) -> None:
@@ -2498,6 +2911,9 @@ class TraceView(pg.GraphicsLayoutWidget):
 
     def _finish_rebuild(self, draw_aborted: bool) -> None:
         """The end of every rebuild, including the one with nothing to draw."""
+        # Nothing drawn means nothing to go back to; a rebuild that kept the trail (a layer
+        # toggle) keeps the menu as it was.
+        self._announce_history()
         self._sync_draw_mode()
         self._refresh_pane_decorations()
         if draw_aborted:
@@ -2995,6 +3411,81 @@ class TraceView(pg.GraphicsLayoutWidget):
 # ------------------------------------------------------------------------------------------------
 # Crosshair — the live blockade-depth readout.
 # ------------------------------------------------------------------------------------------------
+class _CrosshairReadout(pg.TextItem):
+    """One pane's crosshair readout: it hangs from the pane's top edge beside the cursor line.
+
+    HANGS DOWN FROM THE TOP EDGE, INSIDE THE PANE. It was anchored by its bottom edge ((0, 1))
+    at the top of the view, which put every line of it above the ViewBox — and a ViewBox clips
+    its children, so not one pixel of the readout was ever drawn (measured: 0 pixels before,
+    523 after, on a 780x400 trace). The fill is the theme's plot background, translucent, so
+    the numbers stay legible over a dense trace without hiding it. Inside the pane it sits
+    where a box zoom starts, so it is transparent to the mouse, as the target caption
+    (_PaneLabel) is.
+
+    IT FOLLOWS THE VIEW, NOT ONLY THE CURSOR. Its place is in data coordinates (the line's x,
+    the view's top y), so a y zoom, an autorange or a pan made with the cursor standing still
+    would leave it where the OLD top edge was — wholly above the pane after a y zoom, clipped
+    again. pyqtgraph calls :meth:`viewRangeChanged` on every item of a ViewBox whose range
+    changed (``GraphicsItem._updateView`` wires it), so the readout re-places itself there:
+    nothing for the crosshair to connect, and nothing to disconnect when a rebuild drops the
+    pane. HIDDEN WHEN EMPTY: with no sample under the line (past the end of a shorter layer)
+    the text is empty, and the backing alone would still draw a small dark box at the top.
+    """
+
+    # Class defaults, so a view hook pyqtgraph fires while TextItem.__init__ is still running
+    # finds them.
+    _x: float | None = None
+    _shown = False
+
+    def __init__(self) -> None:
+        super().__init__(anchor=(0, 0), color="#e6eaef", fill=pg.mkBrush(17, 19, 22, 190))
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self.setAcceptHoverEvents(False)
+        self.setVisible(False)
+
+    def show_at(self, x: float, text: str) -> None:
+        """Say ``text`` at data-x ``x``; an empty ``text`` hides the readout, backing and all."""
+        self._x = float(x)
+        self._shown = bool(text)
+        self.setText(text)
+        self.setVisible(self._shown)
+        self._place()
+
+    def viewRangeChanged(self) -> None:  # noqa: N802  (pyqtgraph's hook name)
+        super().viewRangeChanged()
+        if self._shown:
+            self._place()
+
+    def _place(self) -> None:
+        vb = self.getViewBox()
+        if self._x is None or vb is None or not _alive(vb):
+            return
+        try:
+            (xmin, xmax), (_ymin, ymax) = vb.viewRange()
+            pane_w = float(vb.width())
+        except Exception:  # noqa: BLE001  (a ViewBox mid-teardown)
+            return
+        # A line panned out of view takes its readout with it, rather than leaving a box cut
+        # in half at the pane's edge with no line beside it.
+        self.setVisible(self._shown and xmin <= self._x <= xmax)
+        # Right of the line in the left half of the view, left of it in the right half, so
+        # the readout never runs off the pane's right edge (where the ViewBox clips it)...
+        side = 1.0 if self._x > 0.5 * (xmin + xmax) else 0.0
+        # ...and where neither side has room — a narrow pane with the line near the middle,
+        # which is exactly where Go to time puts it — slid along until it fits, over the line.
+        # The anchor is the fraction of the readout's width left of the line, so the room on
+        # each side of the line, in pixels, bounds it. (TextItem undoes the view's scaling,
+        # so its own width is in the ViewBox's pixels.)
+        text_w = float(self.textItem.boundingRect().width())
+        if pane_w > 0.0 and xmax > xmin and text_w > 0.0:
+            line_px = (self._x - xmin) / (xmax - xmin) * pane_w
+            least = max(0.0, (line_px + text_w - pane_w) / text_w)  # keeps the right edge in
+            most = min(1.0, max(0.0, line_px / text_w))              # keeps the left edge in
+            side = min(max(side, least), most)
+        self.setAnchor((side, 0))
+        self.setPos(self._x, ymax)
+
+
 class Crosshair(QtCore.QObject):
     """One vertical InfiniteLine + one TextItem per pane, added ignoreBounds=True so they stay out
     of autorange. Driven by the shared scene's sigMouseMoved. Snaps to the true sample via
@@ -3010,7 +3501,11 @@ class Crosshair(QtCore.QObject):
         super().__init__(parent)
         self._view = view
         self._session = session
-        self._items: list[tuple[ChannelPane, pg.InfiniteLine, pg.TextItem]] = []
+        self._items: list[tuple[ChannelPane, pg.InfiniteLine, _CrosshairReadout]] = []
+        #: Whether the cursor has been placed at all. ``Session.cursor_x`` starts at 0.0, a
+        #: position nobody chose, so :meth:`refresh` before the first hover must not draw a
+        #: full readout there.
+        self._placed = False
         session.cursorMoved.connect(self._position)
 
     def attach(self, panes: list[ChannelPane]) -> None:
@@ -3022,7 +3517,7 @@ class Crosshair(QtCore.QObject):
             vline = pg.InfiniteLine(angle=90, movable=False, pen=pen)
             vline.setZValue(20)
             pane.plot.addItem(vline, ignoreBounds=True)
-            label = pg.TextItem(anchor=(0, 1), color="#e6eaef")
+            label = _CrosshairReadout()      # inside the pane's top edge; see the class
             label.setZValue(21)
             pane.plot.addItem(label, ignoreBounds=True)
             self._items.append((pane, vline, label))
@@ -3044,8 +3539,10 @@ class Crosshair(QtCore.QObject):
             return
 
     def refresh(self) -> None:
-        """Re-render labels at the current cursor (e.g. after a calibration change)."""
-        self._position(self._session.cursor_x)
+        """Re-render labels at the current cursor (e.g. after a calibration change) — once the
+        cursor has been placed; before the first hover there is no readout to re-render."""
+        if self._placed:
+            self._position(self._session.cursor_x)
 
     def _x_text(self, layer: Layer, xax, idx: int) -> str:
         """The cursor's x, stated on BOTH clocks when they differ.
@@ -3064,9 +3561,42 @@ class Crosshair(QtCore.QObject):
             self._session.document(layer.doc_id).meta, layer.time_offset_s)
         if clock.clocks_agree(offset) or offset is None:
             return f"{x:.6g} {xax.unit}"
-        return clock.both_clocks(offset, instrument_s=x)
+        # The axis is drawn at recording seconds + the NUMERIC offset (t0 + the layer's
+        # nudge), and that offset is 0 on a rebased cut, whose axis is the cut's own clock,
+        # not the instrument's. So recover the recording instant from the axis and let
+        # ``both_clocks`` add the rebase origin back: calling x itself "instrument" here
+        # turned a segment's 0.2010 s into "-0.1990 s in".
+        return clock.both_clocks(offset, recording_s=x - float(offset))
+
+    def _index_text(self, layer: Layer, idx: int) -> str:
+        """The snapped sample's INDEX, in the numbering the event table's ``start_idx`` /
+        ``end_idx`` use — and, when that is not the file's own numbering, the file's too.
+
+        The event table counts from the document's first LOADED sample: a partial load's
+        sample 0 is the first sample of the window, a segment's is the first sample of the
+        cut. That is the number to compare with a row of the table, so it is the one this
+        line leads with, and it says so; the readout used to give a time and a value and
+        leave the user to divide by the rate (and to know which zero to divide from). A
+        windowed load or a segment then adds where that sample sits in the file or in the
+        parent, so a number read here can also be found again in the source.
+
+        On a recording with no sample rate this line REPLACES the x line rather than joining
+        it: the axis there is ``arange(n)`` (Session.x_axis), so the x already is this index,
+        and printing it twice — once as ``%.6g``, which reads 1.23457e+06 past a million —
+        would only make the reader check that the two agree.
+        """
+        text = f"sample {idx:,} (event-table index)"
+        doc = self._session.document(layer.doc_id)
+        origin = getattr(doc, "origin", None)          # a SegmentDocument's provenance
+        if origin is not None:
+            return f"{text}\nparent sample {int(origin.i0) + idx:,}"
+        loaded = doc.meta.loaded_range
+        if loaded is not None:
+            return f"{text}\nfile sample {int(loaded.start) + idx:,}"
+        return text
 
     def _position(self, x: float) -> None:
+        self._placed = True
         for pane, vline, label in self._items:
             vline.setPos(x)
             layer = pane.first_layer()
@@ -3078,10 +3608,11 @@ class Crosshair(QtCore.QObject):
                     xax = self._session.x_axis(layer.doc_id, layer.time_offset_s)
                     yval = float(chan.data[idx])
                     units = f" {chan.units}" if chan.units else ""
-                    text = f"{self._x_text(layer, xax, idx)}\n{yval:.6g}{units}"
-            label.setText(text)
-            try:
-                ymax = pane.plot.vb.viewRange()[1][1]
-            except Exception:
-                ymax = 0.0
-            label.setPos(x, ymax)
+                    value = f"{yval:.6g}{units}"
+                    index = self._index_text(layer, idx)
+                    if xax.is_time:
+                        text = f"{self._x_text(layer, xax, idx)}\n{value}\n{index}"
+                    else:                       # the x IS the index here (see _index_text)
+                        head, _, source = index.partition("\n")
+                        text = "\n".join(s for s in (head, value, source) if s)
+            label.show_at(x, text)

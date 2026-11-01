@@ -24,7 +24,7 @@
       "Save Project refuses to silently overwrite a project another window (or program) wrote since this one last read it — a conflict dialog with Cancel as the default offers Save Project As… to keep both versions.",
       "At the per-table undo ceiling the Edit menu says the history was evicted (\"…is at its 30-step ceiling — N of your steps have been evicted\"), never the never-edited wording.",
       "Project files preserve recording references, calibration notes, supported analytical workspaces, fitted substates and Figure Library snapshots; raw recordings are not embedded. Keep referenced source data accessible.",
-      "Recovery is a safety net, not a replacement for explicit project saves. Recover opens unsaved work; Discard permanently removes both recovery generations; Not now preserves the offer."
+      "Recovery is a safety net, not a replacement for explicit project saves. Recover opens unsaved work; Discard moves both recovery generations to the Discarded folder, where they are kept for 7 days; Not now preserves the offer."
     ],
     "controls": [
       {
@@ -152,7 +152,7 @@
         "group": "View",
         "shortcut": "Ctrl+Left or Alt+Left",
         "what_it_does": "Return to the previous view — reject an event and keep scanning. (Verbatim tooltip.)",
-        "notes": "Steps back through the trace's own zoom/pan history; it does not undo any data change."
+        "notes": "Steps back through the trace's own zoom/pan history; it does not undo any data change. Greyed out when there is no earlier view to go back to; a zoom made in the last quarter of a second already counts, so a quick Ctrl+Left right after a dive still works."
       },
       {
         "label": "Zoom Forward",
@@ -160,7 +160,7 @@
         "group": "View",
         "shortcut": "Ctrl+Right or Alt+Right",
         "what_it_does": "Steps forward again through the zoom history after using Zoom Back.",
-        "notes": "No tooltip is set on this action."
+        "notes": "No tooltip is set on this action. Greyed out when there is no later view to go forward to (nothing has been stepped back from, or a new zoom ended that branch)."
       },
       {
         "label": "Reset zoom",
@@ -179,11 +179,41 @@
         "notes": "DISABLED until a Measure region exists on the trace (turn on Analysis > Measure event and drag). Unlike Create segment it accepts even a one-sample cursor pair. If you trigger it with nothing selected, the status bar tells you to turn on Measure and drag a region."
       },
       {
+        "label": "Go to event…",
+        "kind": "menu-action",
+        "group": "View",
+        "shortcut": "Ctrl+J",
+        "what_it_does": "Type an event ID (the event table's event_id column) to select that event and zoom the trace to it. (Verbatim tooltip.)",
+        "notes": "The ID is the event_id column, not a row number and not the Event inspector's position in its filter. It selects and frames the event as a click on its row does, even when it is already selected. An ID the table does not have moves nothing, and the status bar gives the table's ID range. A docked Event inspector hands its own Ctrl+J to this action; in its own window the inspector's Ctrl+J jumps by ID there."
+      },
+      {
+        "label": "Go to time…",
+        "kind": "menu-action",
+        "group": "View",
+        "shortcut": "Ctrl+Shift+J",
+        "what_it_does": "Type a time as the trace's x axis reads it (on the clock its label names, as the crosshair reads it) to centre the view there without changing the zoom. (Verbatim tooltip.)",
+        "notes": "The prompt quotes the axis label: the instrument clock on a recording, the cut's own clock on a segment. Where the axis differs from the event table's t_start_s (a t0 that is not 0, or a layer shifted for alignment) the prompt gives the number to add to a t_start_s. The crosshair is put on the nearest sample. At the full-trace zoom there is nothing to pan; near either end the view stops at the end of the recording. The status bar says which happened. On a recording with no sample rate the prompt is in samples."
+      },
+      {
         "label": "Drag draws zoom box",
         "kind": "checkbox",
         "group": "View",
         "what_it_does": "On: left-drag frames a region and zooms into it (dive inside an event). Off: left-drag pans. The mouse wheel moves the signal vertically; use −/+ in the Scan strip to change the time scale. (Verbatim tooltip.)",
         "notes": "Checkable menu item, ON by default. This is a mouse-behaviour switch, not a view change — nothing on screen moves when you toggle it."
+      },
+      {
+        "label": "Show detection thresholds",
+        "kind": "checkbox",
+        "group": "View",
+        "what_it_does": "Draw the thresholds the event table on screen was detected with: Schmitt enter (dashed) and exit (dotted) levels, or the CUSUM drift level (dash-dot), as tracks that follow the detector's moving baseline. Nothing is drawn, with the reason on the status bar, for a stale table, an ML or hand-made table, or a chain whose signal is not at the trace's level (high-pass, drift removal, Normalize). (Verbatim tooltip.)",
+        "notes": "Checkable, OFF by default, no shortcut. Display only: it changes no number, no table and not the zoom. The tracks are rebuilt from the table's own record (its conditioning chain, low-pass, estimator and polarity, not the form's current settings) and checked against the noise sigma and median baseline the run stamped; if the rebuild does not land on them, nothing is drawn. The status bar says what is drawn, and hovering the menu item repeats it."
+      },
+      {
+        "label": "ML confidence track",
+        "kind": "checkbox",
+        "group": "View",
+        "what_it_does": "Show the ML detector's probability in a thin pane under the trace while an ML table is shown, with the enter and exit thresholds the run used. Display only. The probability is kept for the session that ran the detector and is not saved in projects. (Verbatim tooltip.)",
+        "notes": "Checkable, OFF at every launch, no shortcut. The pane is labelled ML p and shares the trace's time axis; the crosshair shows p at the cursor's sample. The curve is the model's own output, before the detector's median filter, gates, merge and minimum duration, so a crossing of the drawn line is not always an event. Samples no model window reached are blank. A table from a reopened project has no probability: the pane says to re-run ML detection. With a Schmitt, CUSUM, Manual or reconciled table on screen there is no pane."
       },
       {
         "label": "Panels",
@@ -857,8 +887,8 @@
         "label": "Discard",
         "kind": "button",
         "group": "Recover unsaved NanoScope work",
-        "what_it_does": "Permanently remove both recovery generations.",
-        "notes": "Destructive: choose only if the offered unsaved work is no longer needed. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
+        "what_it_does": "Move both recovery generations of the named session to the Discarded folder inside the recovery folder, where they are kept for 7 days.",
+        "notes": "Choose it only if the offered unsaved work is no longer needed; for 7 days it can still be taken back out of the Discarded folder. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
       },
       {
         "label": "Show in Finder",
@@ -4191,24 +4221,24 @@
         "kind": "combo",
         "group": "Plot",
         "what_it_does": "Plot type: one numeric column as a binned distribution, with optional fitted curve. Selecting it swaps the control page below to the histogram controls.",
-        "notes": "The plot-type combo is the first (unlabelled) control in the Plot box; its four entries are Histogram / Scatter / KDE (density) / PCA. Switching plot type clears any pinned Axis range (the new plot has different axes).",
-        "correction": "These are the four ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for four separate combos will not find them."
+        "notes": "The plot-type combo is the first (unlabelled) control in the Plot box; its five entries are Histogram / Scatter / KDE (density) / Event-count heatmap / PCA. Switching plot type clears any pinned Axis range (the new plot has different axes).",
+        "correction": "These are the five ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"Event-count heatmap\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for five separate combos will not find them."
       },
       {
         "label": "Scatter",
         "kind": "combo",
         "group": "Plot",
         "what_it_does": "Plot type: any two numeric columns as an X-Y point cloud, optionally coloured by cluster and with a best-fit line.",
-        "notes": "Same combo as Histogram / KDE (density) / PCA. Switching plot type clears any pinned Axis range.",
-        "correction": "These are the four ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for four separate combos will not find them."
+        "notes": "Same combo as Histogram / KDE (density) / Event-count heatmap / PCA. Switching plot type clears any pinned Axis range.",
+        "correction": "These are the five ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"Event-count heatmap\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for five separate combos will not find them."
       },
       {
         "label": "PCA",
         "kind": "combo",
         "group": "Plot",
         "what_it_does": "Plot type: the shared feature set projected onto its two principal components, with the explained variance in the axis labels and title.",
-        "notes": "Same combo as Histogram / Scatter / KDE (density). Shows \"Select ≥2 feature columns on the left, then click Run PCA.\" until you actually run it. PCA always uses the PRIMARY (first ticked) source only.",
-        "correction": "These are the four ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for four separate combos will not find them."
+        "notes": "Same combo as Histogram / Scatter / KDE (density) / Event-count heatmap. Shows \"Select ≥2 feature columns on the left, then click Run PCA.\" until you actually run it. PCA always uses the PRIMARY (first ticked) source only.",
+        "correction": "These are the five ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"Event-count heatmap\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for five separate combos will not find them."
       },
       {
         "label": "Time unit",
@@ -4528,9 +4558,9 @@
         "label": "Plot area",
         "kind": "table",
         "group": "Plot canvas",
-        "what_it_does": "The plot itself. It is mouse zoom/pan-able (scroll to zoom, drag to pan, right-click for pyqtgraph's own menu), and it carries the legend for overlays, fits and clusters.",
+        "what_it_does": "The plot itself. It is mouse zoom/pan-able (scroll to zoom, drag to pan), and it carries the legend for overlays, fits and clusters. Right-click gives NanoScope's own menu: Reset view, Zoom back, Zoom forward, Export current figure…, Export plot data…. The Reset view button in the toolbar beside Section does the same reset, and its drop-down arrow holds Zoom back / Zoom forward. The status line at the bottom of the window reads the values under the pointer.",
         "notes": "Mouse zooming does NOT fill in the Axis range boxes, and a redraw re-fits the view unless you pinned limits there. Legend labels longer than 34 characters are middle-elided with \"…\" — the full name is in Details. On a dwell histogram the region below the detector's shortest reportable event is shaded grey with a dashed line labelled \"below detection limit\"; that region is an artefact of the detector, not of the physics.",
-        "correction": "No such string exists anywhere in plots_panel.py. The plot is an unlabelled pyqtgraph PlotWidget (self._plot_widget, minimum 420×320) in the right-hand splitter; it has no title, no caption and is not a table. It is mouse zoom/pan-able and carries pyqtgraph's own right-click context menu. When there is nothing to draw it shows a centred grey message instead — the exact strings are \"No data yet — run detection or add measurements, then Refresh.\", \"Tick a source on the left — none of the checked ones has rows to plot.\", \"This source has no rows to plot.\", \"Pick a numeric column to histogram.\""
+        "correction": "No such string exists anywhere in plots_panel.py. The plot is an unlabelled pyqtgraph PlotWidget (self._plot_widget, minimum 420×320) in the right-hand splitter; it has no title, no caption and is not a table. It is mouse zoom/pan-able. Its right-click menu is the app's own (nanoscope/gui/plot_interaction.py): Reset view, Zoom back, Zoom forward and the page's two exports. It replaced pyqtgraph's generic menu, whose log, FFT and invert transforms changed the picture outside the saved PlotConfig and whose Export… dialog bypassed the page's export. When there is nothing to draw it shows a centred grey message instead — the exact strings are \"No data yet — run detection or add measurements, then Refresh.\", \"Tick a source on the left — none of the checked ones has rows to plot.\", \"This source has no rows to plot.\", \"Pick a numeric column to histogram.\""
       },
       {
         "label": "s",
@@ -4538,7 +4568,7 @@
         "group": "Plot ▸ Time unit",
         "what_it_does": "Item of the \"Time unit\" combo (_TIME_UNITS). Shows time columns on the axis in seconds. Tooltip: \"Unit for time columns (dwell_s, rise_s, fall_s, t_start_s, t_end_s).\\nThis rescales the AXIS only — the data, and every fit computed on it, stay in seconds, so the dwell fit keeps the detector's own min_dwell_s.\"",
         "from_crosscheck": true,
-        "correction": "These are the four ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for four separate combos will not find them."
+        "correction": "These are the five ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"Event-count heatmap\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for five separate combos will not find them."
       },
       {
         "label": "ms",
@@ -5887,7 +5917,7 @@
         "kind": "combo",
         "group": "Event waveforms ▸ Ensemble",
         "what_it_does": "Real-time alignment reference (used only when 'Normalize time' is off).",
-        "notes": "Choices: start, center. It is greyed out (genuinely disabled) whenever 'Normalize time' is ticked — un-tick that checkbox to enable it."
+        "notes": "Choices: start, center, extremum. start / center put each event's first sample or midpoint at t = 0; extremum puts each event's deepest sample there (the sample of maximum excursion, read with the event table's polarity), and an event with no finite sample in its own span is left out and counted in the title and Details. It is greyed out (genuinely disabled) whenever 'Normalize time' is ticked — un-tick that checkbox to enable it."
       },
       {
         "label": "Points",
@@ -5902,6 +5932,20 @@
         "group": "Event waveforms ▸ Ensemble",
         "what_it_does": "Pre/post padding as a percentage of each event's dwell — how much open-pore baseline is shown either side of the event.",
         "notes": "0–200, default 20. Larger padding pushes more events past the trace edge; those are excluded and counted as 'edge-skipped' in the title. If padding excludes every event the plot says 'Every accepted event is too close to the trace edge for this padding.'"
+      },
+      {
+        "label": "Events",
+        "kind": "combo",
+        "group": "Event waveforms ▸ Ensemble",
+        "what_it_does": "Which accepted events the ensemble uses: all of them, or one of the Event gallery's curation subsets (unreviewed, unlabelled, a label, hand-made or detected) within them. Rejected events are never drawn. The Event-count heatmap always uses every accepted event. (Verbatim tooltip.)",
+        "notes": "Default All accepted; the other items read 'Accepted · <subset>'. Changing it redraws the ensemble from the recording. Saved with the project and in an Event waveforms template."
+      },
+      {
+        "label": "Band",
+        "kind": "combo",
+        "group": "Event waveforms ▸ Ensemble",
+        "what_it_does": "Shade the spread of the events around a summary curve: mean ± 1 sample SD around the solid mean, or the 25th–75th percentile band around the dashed median. Drawn from the traces already on screen — choosing one never re-reads the recording. Details gives how many events each point uses. (Verbatim tooltip.)",
+        "notes": "Choices: None (default), Mean ± 1 SD, Median IQR (25–75 %). A changed band only re-shades: the zoom and the traces stay. Saved with the project and in an Event waveforms template."
       },
       {
         "label": "Title",

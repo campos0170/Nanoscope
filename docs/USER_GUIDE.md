@@ -628,14 +628,60 @@ checked". Likewise the PSD panel now distinguishes *this channel has no noise in
   - **Full** in the Scan strip returns to the complete trace. **Reset zoom** (Ctrl+0) and
     trace-focused **Home** do the same.
   - **Zoom Back / Forward** (Ctrl+← / Ctrl+→) step through your view history — dive into an event,
-    reject it, and pop back to where you were browsing.
+    reject it, and pop back to where you were browsing. In the View menu they are greyed out when
+    there is nowhere to go; a zoom you have just made counts at once, so Ctrl+← straight after a
+    dive still steps back.
   - **View ▸ Drag draws zoom box** toggles between box-zoom and pan.
 - **Scan at the current zoom.** The **◀ / ▶** buttons beside the zoomed-in scrollbar move to the
   previous / next view while preserving the current scale. Each move advances by 90% of the window,
   leaving **10% overlap** so an event at a boundary is not lost. If the Measure cursors are active,
   they move forward with the view, ready to bracket the next event. **Shift+← / Shift+→** perform the
   same scan, and **Shift+↑ / Shift+↓** zoom in / out, while focus is on the trace.
-- **Crosshair.** Hovering shows the time and the value at the nearest sample, in the channel's units.
+- **Crosshair.** Hovering shows, at the top of the pane beside the cursor line, the time (on both
+  clocks when they differ), the value at the nearest sample in the channel's units, and that
+  sample's index — *sample 5,000 (event-table index)*. The index is in the numbering the event
+  table's `start_idx` / `end_idx` use: 0 is the first **loaded** sample, and a segment counts from
+  its own first sample. When that is not the file's numbering a fourth line gives the file's own
+  sample (*file sample 6,005,000* on a partial load) or the parent's (*parent sample 301,234* on a
+  segment). On a recording with no sample rate the x axis already is that index, so the readout
+  gives it once, in place of the time. In an Overlay pane the readout is about the pane's first
+  layer. The readout stays at the pane's top edge when you zoom or pan under it.
+- **Go to an event or a time.** **View ▸ Go to event…** (Ctrl+J) takes an event ID — the event
+  table's `event_id` column, not a row number and not the Event inspector's position in its filter —
+  selects that event and zooms the trace to it, as a click on its row does, even when it is already
+  selected. An ID the table does not have moves nothing; the status bar gives the table's ID range.
+  **View ▸ Go to time…** (Ctrl+Shift+J) takes a time **as the trace's x axis reads it** — the
+  instrument clock on a recording (§2), the cut's own clock on a segment — and the prompt quotes the
+  axis label. Type the number as the axis and the crosshair show it. The event table's `t_start_s`
+  counts from the first loaded sample; where the axis differs from it (a t₀ that is not 0, or a
+  layer shifted for alignment) the prompt gives the number to add to a `t_start_s`, and where they
+  agree it says so. The view pans to centre that time without changing the zoom, and the crosshair
+  is put on the nearest sample. At the full-trace zoom there is nothing to pan, and the crosshair
+  line marks the time; near either end the view stops at the end of the recording, so the time is in
+  view but not centred. The status bar says which happened. On a recording with no sample rate the
+  axis, and so the prompt, is in samples.
+- **Detection marks.** **View ▸ Show detection thresholds** draws the levels the detector of the
+  table on screen compared the signal with (§6, *Seeing the thresholds on the trace*). Dashed and
+  dotted vertical lines on event edges mark boundaries moved or drawn by hand (§9).
+- **ML confidence track.** **View ▸ ML confidence track** adds a thin **ML p** pane under the trace
+  while an ML detector's table is shown in Results. It draws the model's probability (0–1) over the
+  range the detector analysed, with the run's **enter** and **exit** thresholds as dashed lines, on
+  the same time axis as the trace, which moves down to the strip. The crosshair shows **p** at the
+  cursor's sample. The pane only displays the run: turning it on or off changes no event and no
+  sample, and keeps your x and y zoom. It is off at every launch.
+  - The curve is the model's own output. The detector compares the thresholds with that output
+    after a median filter (the **smoothing** kernel in the ML tab's **Model decode** group; 1 means
+    none), and its gates, merge and minimum duration act after that, so a crossing of the drawn
+    line is not always an event, and with a long kernel the two can differ visibly. Hover over the
+    pane for the kernel the run used and for anything the curve leaves out.
+  - Samples that no model window reached (the end of the range, under the notebook presets) are
+    left blank rather than drawn as 0.
+  - The probability is kept for the session that ran the detector, at one byte per analysed sample
+    (rounded to 1/255). **It is not saved in projects.** For a table from a reopened project, the
+    pane reads *ML probability is not saved in projects — re-run ML detection to draw it*.
+  - With a Schmitt, CUSUM, Manual or reconciled table on screen there is no pane; switch the
+    Table selector back to the ML table to see it again. If the ML table's channel is hidden in
+    the trace, the status bar says so and the pane appears when you show the channel.
 
 ---
 
@@ -1109,11 +1155,11 @@ parent's.
 ## 6. Event detection
 
 **Analysis ▸ Run detection** (Ctrl+D). Choose either classical detector in the Detection controls.
-**Schmitt** is a two-threshold trigger: an event starts when the signal crosses
-`baseline ± k_in·σ` and ends when it returns within `baseline ± k_out·σ`, where σ is the **MAD**
-noise estimate. **CUSUM** accumulates one-sided evidence sample by sample and reports an estimated
-changepoint when that evidence crosses `h`. Both operate over the whole current channel and return
-the same event-table schema.
+**Schmitt** is a two-threshold trigger: an event is a run where the signal stays beyond
+`baseline ± k_out·σ`, kept only if it also passes `baseline ± k_in·σ`, so it starts and ends at
+the `k_out` crossings; σ is the **MAD** noise estimate. **CUSUM** accumulates one-sided evidence
+sample by sample and reports an estimated changepoint when that evidence crosses `h`. Both operate
+over the whole current channel and return the same event-table schema.
 
 Polarity (blockade vs enhancement) is **measured from the data**, not assumed. In an Auto run with
 high-pass enabled, the no-high-pass characterization branch owns the physical polarity decision. If
@@ -1139,8 +1185,8 @@ greyed with an honest reason (e.g. a legacy TDMS file has no rate → dwell woul
 | Parameter | Effect | To reduce over-detection |
 |---|---|---|
 | **Detector** | **Schmitt** uses threshold crossings; **CUSUM** accumulates evidence and estimates a changepoint. | Start with Schmitt for the familiar, fast threshold detector; try CUSUM for shallow persistent events. |
-| **Schmitt k_in** (enter, in σ) | Threshold to *start* an event. The primary Schmitt knob. | Raise it (5 → 6, 7). |
-| **Schmitt k_out** (exit, in σ) | Threshold to *end* an event; must be `< k_in` (hysteresis). | Keep well below k_in (default 2.0). |
+| **Schmitt k_in** (enter, in σ) | Level a run must reach to count as an event. The primary Schmitt knob. | Raise it (5 → 6, 7). |
+| **Schmitt k_out** (exit, in σ) | Level where an event *starts and ends*; must be `< k_in` (hysteresis). | Keep well below k_in (default 2.0). |
 | **CUSUM k** (drift, in σ) | Minimum sustained deviation that can accumulate evidence. | Raise it to ignore shallow noise; lower it to reach shallow events. |
 | **CUSUM h** (threshold, in σ·samples) | Accumulated evidence required to fire; larger values trade sensitivity for delay. The reported onset is the estimated changepoint, not the crossing sample. | Raise it to require more sustained evidence. |
 | **min dwell** | Events shorter than this are dropped. | Raise it to kill brief noise blips. |
@@ -1151,6 +1197,42 @@ greyed with an honest reason (e.g. a legacy TDMS file has no rate → dwell woul
 
 After a run the **Summary** shows counts and rates, the event table fills, and events appear as a
 single batched **span overlay** on the current pane.
+
+### Seeing the thresholds on the trace
+
+**View ▸ Show detection thresholds** (off by default) draws, for the event table on screen, the
+levels its detector compared the signal with:
+
+- **Schmitt:** the **enter** level (dashed amber) and the **exit** level (dotted amber). An event
+  is a run where the signal stays beyond the exit level, and it counts only if it also reaches the
+  enter level, so a span starts and ends where the signal crosses the dotted line, a little before
+  it reaches the dashed one.
+- **CUSUM:** the **drift** level `k·σ` (dash-dot amber). Evidence builds up while the signal is
+  beyond it; an event is called when that evidence reaches `h`, which is an amount of evidence
+  (σ·samples), not a current, so `h` has no line.
+
+They are **tracks, not flat lines**. The detector measures each deviation against its moving
+open-pore baseline (§5a), so the enter level is that baseline plus `k_in·σ` in the event direction
+(the exit level likewise with `k_out·σ`), and both follow every sag of the open pore. The track is
+rebuilt from the table's own record (its conditioning chain, low-pass, estimator and polarity, not
+the form's current settings) and checked against the noise σ and median baseline the run stamped;
+if the rebuild does not land on them, nothing is drawn. The levels apply to the signal the detector
+compared: with a low-pass on, the raw trace is noisier than that signal, so raw noise can cross a
+line the detector's signal did not. In the baseline-subtracted view the tracks move with the
+trace. Drawing them changes no number, no table and not your zoom. The status bar says what is
+drawn, and hovering the menu item repeats it.
+
+Nothing is drawn, and the status bar says why, when the lines would not be true of this trace:
+
+- the table is **stale** (the calibration or the sample rate changed since it ran): re-run it;
+- the table's depths were **re-measured** against another estimator (§9a), so the baseline its
+  thresholds were set against is no longer recorded;
+- **high-pass**, **baseline-drift removal** or **Normalize** was in the chain. The thresholds then
+  acted on a signal that is not at the trace's level (with high-pass, the localization branch of
+  §5 sits near zero), so a line on the raw trace would mark crossings the detector never saw;
+- an **ML** table (the model scores windows; it compares no current level), a **Manual** table, or
+  a **reconciled** table (several detectors, no single threshold);
+- a table that does not record which estimator set its thresholds (older than that record).
 
 ### Merging fragmented events
 
@@ -1505,7 +1587,10 @@ part under the toolbar scrolls rather than pushing the main window past the scre
 Open the Inspector before choosing the target event, or reselect that event after opening it.
 A new Inspector can start at the first event regardless of an earlier table selection. The
 Event spinner is a position in the filtered subset, not `event_id`; verify the ID and sample bounds.
-For the current −700mV gallery table, position147 in All corresponds to ID146.
+For the current −700mV gallery table, position147 in All corresponds to ID146. To go to an event by
+its ID, use **ID…** beside ▶ (Ctrl/⌘+J in the inspector's own window; docked, Ctrl/⌘+J is View ▸ Go
+to event…, which moves the inspector the same way). An ID outside the current filter moves the
+filter to **All**, so the Event box shows a true position, and the progress line says why.
 
 - **Waveform.** The current around the event in the recorded **measurement domain**, replaying
   conditioning and low-pass filtering where recorded. The event region is shaded; the baseline
@@ -1521,7 +1606,8 @@ For the current −700mV gallery table, position147 in All corresponds to ID146.
   reads **⚠ Details** and its tooltip carries the sentence; the readout's first line is that
   sentence as a one-line chip (hover it for all of it), and each stale number keeps its own ⚠. On a
   short waveform the current axis is labelled **I** rather than "Measurement current".
-- **Navigate.** ◀ / ▶, an "Event *i* of *N*" index, and a **Filter** — All, Accepted only,
+- **Navigate.** ◀ / ▶, an "Event *i* of *N*" index (a position in the filter), **ID…** (go to an
+  event by its `event_id`), and a **Filter** — All, Accepted only,
   Rejected only, Unreviewed, and (once a label palette exists or any event carries a label)
   Unlabelled and one **Labelled: key=value** entry per label. Keyboard: **←/→** move, **A/R**
   accept/reject, **Space** toggles. See *A curation pass* below for Unreviewed, **Advance after
@@ -1542,6 +1628,17 @@ For the current −700mV gallery table, position147 in All corresponds to ID146.
 - **Curate.** Accepting/rejecting writes to the shared event table, so it flows to the table
   checkbox, the trace span overlay, the summary counts, the plots, and exports — all at once, in both
   directions. Navigating also zooms the main trace to the event.
+- **Corrected boundaries on the trace.** On the main trace, an edge that is no longer where the
+  detector put it (a mask drag here, **Merge with next** or another merge) is marked with a
+  **dashed** vertical line, and an event drawn by hand (including one placed and fitted with the
+  trace keys) has **dotted** lines at both edges. A merge that took in a hand-drawn event is dashed
+  where it moved a detected edge, or at both edges when the hand-drawn event came first. Unmarked
+  edges are the detector's own. **Revert** puts the edge back and
+  the mark goes with it. A table saved before the app recorded the detector's own bounds cannot
+  tell a moved edge from an original one, so it marks only its hand-drawn events (dotted) and the
+  merges that took one in (dashed at both edges). In a reconciled table, an event whose span came
+  from a hand-drawn event is dotted too. The Events tab's tooltip in the Results panel says the
+  same.
 - **Save without leaving the window.** The status bar names the current project and says whether it
   has unsaved changes. Press **Save Project** (use its arrow for **Save Project As…**), **Ctrl/⌘+S**,
   or **Ctrl/⌘+Shift+S**. These controls use the same guarded project writer as the main File menu;
@@ -1588,6 +1685,7 @@ Both the inspector and the gallery offer the same tools for working through a de
 | A / R / Space | Accept / reject / toggle the event on screen (moves on with Advance) | Same on every selected tile (moves on only for one tile with Advance) |
 | 1–9, custom label keys | Label the event on screen (moves on with Advance) | Label every selected tile (moves on only for one tile with Advance) |
 | T | Show the event in the main trace | — |
+| Ctrl/⌘+J | Go to an event by its ID (own window; docked, View ▸ Go to event…) | — |
 | Ctrl/⌘+U | First unreviewed event of the filter | First unreviewed tile of the Show subset, in sort order |
 | Ctrl/⌘+Z | Undo (main window's history) | Undo (main window's history) |
 | Ctrl/⌘+Shift+Z | Redo | Redo (main window's history), as the **Redo** button beside **Undo** |
@@ -1883,8 +1981,8 @@ editing keeps ⌘Z while its editor is open; press Esc first. Plot windows are t
 
 **What it does not reach.** The view — zoom, which has its own Back / Forward, layer visibility,
 colour and time offset, Overlay / Stacked; your libraries of protocols, model presets and plot
-templates, which are preferences kept on this computer rather than part of a project (deleting one
-asks first instead); fits, which a Fit press simply replaces; and the study windows, which keep
+presets and templates, which are preferences kept on this computer (a saved project carries a copy
+of the plot presets and templates, §11c; deleting one asks first instead); fits, which a Fit press simply replaces; and the study windows, which keep
 their own records.
 
 Two things to know:
@@ -1917,6 +2015,10 @@ or, for a setting of the recording on screen, *"Undo — this recording's oldest
 dropped at the 30-step ceiling (1 step lost)"*. If the memory budget binds first, the status bar
 and the menu name that ceiling instead — *Undo history for “pore.abf” is at the 128 MiB memory
 ceiling — its oldest step was dropped and cannot be undone.*, and *the memory ceiling* in the menu.
+Each step that holds an earlier ML run also holds that run's probability (the **ML confidence
+track**, §4: one byte per analysed sample), and that counts toward the budget, so on a long
+recording a handful of ML re-runs can reach the memory ceiling well before 30 steps. Curation steps
+on one run share its probability and count it once.
 
 **Undo history lasts for the session.** It is not saved with a project and crash recovery does not
 keep it (§11b), so a reopened project has its tables and settings as they were saved, and nothing
@@ -2072,8 +2174,9 @@ audit trail.
 1. Choose **Section → Data**. Check the source rows you intend to analyze and verify their
    recording, channel and detector identity. A highlighted row is only the row selected for
    editing its name or source colour; its checkbox decides whether its events enter the plot.
-2. Choose **Histogram**, **Scatter**, **KDE (density)** or **PCA** and the appropriate measurement
-   columns. Check **Use accepted events only**, units and normalization deliberately.
+2. Choose **Histogram**, **Scatter**, **KDE (density)**, **Event-count heatmap** or **PCA** and
+   the appropriate measurement columns. Check **Use accepted events only**, units and
+   normalization deliberately.
 3. Press **Plot / Apply** in the fixed toolbar. The local **Plot** button and the **Apply fit**
    buttons perform the same commit: all pending source, plot-type, column and fit proposals are
    applied together. Do not assume Apply fit commits only the fit while leaving a proposed source
@@ -2090,10 +2193,12 @@ analytical snapshot explicitly returns that view to current inputs. Save a Figur
 first if you need to retain the old picture and numbers.
 
 Not every numerical control waits for Plot: bin count, normalization and some log/geometry
-controls redraw an already active plot. Source, plot-type, column and fit proposals use the
-explicit commit described above. Appearance-only edits restyle the existing result without
-running those analyses or applying pending proposals. After changing any numerical control,
-inspect the result and its state before assuming the canvas is unchanged.
+controls redraw an already active plot. Source, plot-type, column and fit proposals, and the
+histogram's **KDE overlay**, use the explicit commit described above; a bin, normalization or log
+change redraws the bars but does not draw a ticked overlay that has not been applied.
+Appearance-only edits restyle the existing result without running those analyses or applying
+pending proposals. After changing any numerical control, inspect the result and its state before
+assuming the canvas is unchanged.
 
 **A source measured under settings that have since changed says so.** When a drawn source's table
 is stale — its calibration, its sample rate or its open-pore estimator changed after it was
@@ -2178,6 +2283,22 @@ Three behaviors help organize the comparison; none establishes scientific compar
   **include filter-limited events**, off by
   default, which excludes events whose dwell is within ~2× the filter rise time (depth attenuated,
   dwell biased long) and reports the excluded count in **Details**.
+
+  **KDE overlay** draws one Gaussian kernel density estimate per drawn series — per ticked source,
+  or per cluster when the histogram is split by cluster — as a dotted line in that series' colour,
+  so it cannot be mistaken for a fit. The bandwidth is Scott's rule, the one the violins use, and
+  the curve covers each series' observed range. It is drawn in the bars' own y quantity: for
+  **count** it is `n × bin width × f`, for **density** it is `f` per the column's stored unit (per
+  second for a dwell, whatever the ticks say, exactly as the bars are), and for **probability per
+  bin** it is `bin width × f`. On a **log x** axis the bins are evenly spaced in log10, so the KDE
+  is estimated on log10 of the column too and drawn to match the bars at every decade. Ticking the
+  box is a proposal: press **Plot / Apply** to draw it. **Details** names each series' bandwidth,
+  in the axis's time unit or, on log x, in decades. A Gaussian kernel spreads a little probability
+  past the data's edges (below zero for a dwell on a linear axis), so next to a hard edge such as
+  the detection limit the curve reads below the bars. A series with fewer than three values, or
+  only one distinct value, gets no curve, and Details says so. Nothing is sampled: a series of more
+  than 250,000 values gets no curve rather than a curve of a subset. Opening a project does not
+  recompute a saved overlay; the plot shows **Plot ●** until you press it.
 - **Scatter** — any X vs any Y (e.g. amplitude vs dwell), per-axis log, colour-by-cluster or
   colour-by-source, and an optional **best-fit line** per source: **linear** (`y = m·x + b`) or
   **power law (log-log)** (`y = a·x^b`), with **R²** and `n`. The same confirmation applies —
@@ -2203,6 +2324,23 @@ Three behaviors help organize the comparison; none establishes scientific compar
   points per source; anything dropped is disclosed in **Details**, along with each source's bandwidth
   factor. (**Analysis ▸ Export density figure…** is still the separate publication export — the same
   view with marginal distributions, written as PNG + PDF + a CSV of the plotted points.)
+- **Event-count heatmap** — any two numeric columns binned into a two-dimensional grid of **event
+  counts**, coloured by count, with a colour bar labelled *Event count*. It uses the same binning
+  as the heatmap in **Analysis ▸ Event waveforms…**, so their counts agree bin for bin on the same
+  events (§14 still asks you not to read dwell-depth coordinates off the Event waveforms *image*
+  until a verified fix is installed; **Export plot data** writes this heatmap's cells, with
+  their edges and counts, as numbers): **Bins** sets the cells per axis (40 × 40 by default), each axis spans the source's own
+  minimum to maximum, and **Log x** (on by default) and **Log y** space the bins evenly in log10.
+  Rows that are not finite, or not positive on a log axis, are dropped and counted in **Details**.
+  The time axes follow the **Time unit** like every plot here. It shows **one source at a time:
+  the first ticked source**, which the title names; Details says how many other ticked sources are
+  not drawn. The colours are counts, not a density and not smoothed — use **KDE (density)** for a
+  smoothed estimate. **Details** carries the same comparability and amplitude warnings that
+  Scatter gives for the same two columns, judged for the drawn source. The **Heatmap colormap** in
+  the Appearance section recolours it without re-binning or moving your zoom; the colour bar has no
+  colormap menu of its own. A configuration file naming a colormap this build does not offer opens
+  in viridis, and the import note names it among the settings not taken. Lasso and point-click
+  selection are not available on a heatmap, because it has no points.
 - **PCA** — projects a chosen feature set to two components, coloured by cluster (with a legend),
   and shows the explained variance. Its points have the same click-to-event handoff as Scatter,
   including the exact kept-row mapping after non-finite rows are removed.
@@ -2228,11 +2366,11 @@ tool. Clustering runs on the **first ticked** source.
 - **Axis range** — type explicit X/Y limits in the displayed units (stored in data units and converted to log internally on a log axis)
   that persist across redraws; **Auto** releases them. The plot is also mouse zoom/pan-able.
 - **Appearance** — a custom title and axis labels, font family + size, data-series and fit colours,
-  marker size, line width, grid and background. An empty Title, X label or Y label box uses the
-  automatic label, in every plot window; type a single space to show no label, and a hidden title
-  leaves no gap above the plot. These controls, legend edits and fit-decoration
-  toggles update the existing picture without recalculating bins, KDE, PCA or fits, collecting
-  source data, or resetting manual zoom. Appearance-only Undo/Redo has the same guarantee.
+  the Event-count heatmap's colormap, marker size, line width, grid and background. An empty
+  Title, X label or Y label box uses the automatic label, in every plot window; type a single
+  space to show no label, and a hidden title leaves no gap above the plot. These controls, legend
+  edits and fit-decoration toggles update the existing picture without recalculating bins, KDE,
+  PCA or fits, collecting source data, or resetting manual zoom. Appearance-only Undo/Redo has the same guarantee.
   Pending analytical changes stay pending until **Plot / Apply** or **Apply fit**.
 - **Legend** — a **Show legend** toggle, a **Legend position** (upper right, the default, / upper
   left / lower right / lower left; the legend is drawn over the data, so move it off whichever
@@ -2245,7 +2383,9 @@ tool. Clustering runs on the **first ticked** source.
   source-colored plots; press **Plot/Generate** explicitly to use it. The current frozen picture,
   single-series data color, fit color and cluster palette are not silently recolored.
 - **Export ▾** keeps the outputs together: **Export current figure…** writes the live plot as PNG, SVG, or
-  vector PDF; **Export plot data…** writes the exact plotted values as CSV; and **Export
+  vector PDF; **Export plot data…** writes the exact plotted values as CSV (a KDE overlay as
+  `kde` rows in the bars' y quantity, named for the series it smooths; a heatmap as one `cell` row
+  per bin with its x and y edges and its count, empty bins included); and **Export
   configuration JSON…** saves the reproducible plot recipe. Figure export opens a shared format/size
   dialog first: choose native size or physical dimensions in mm/in, optionally lock the aspect
   ratio, and set PNG resolution. A frozen graphical preview shows the current figure. If a residual
@@ -2266,7 +2406,7 @@ tool. Clustering runs on the **first ticked** source.
   template — plot type, columns, fit recipe, axes and style at once, leaving your ticked sources
   alone — and **Save as…**, **Rename** and **Delete** manage them. **Delete** asks first and names
   the template, with **Cancel** as the default: a template is a preference kept on this computer,
-  not part of a project, so no undo brings it back.
+  so no undo brings it back. A project saved earlier keeps its own copy (§11c).
 
 ### A consistent plotting workflow
 
@@ -2284,7 +2424,31 @@ plot are disabled with an explanation. Category-coloured plots retain category i
 heatmap colour scales have their own palette controls. Use **Save appearance preset…** to reuse
 your style across plot types. Presets are local application preferences and contain appearance
 only—not recordings, event filters, bins, axis scaling, fitting choices or detector settings.
-Reset restores that plot's existing defaults. Appearance used by a figure is saved in its project.
+Reset restores that plot's existing defaults. Appearance used by a figure is saved in its project,
+and a saved project also carries a copy of your presets and templates (§11c).
+
+**Templates keep a page's recipe.** Noise spectrum, Voltage dependence, Event waveforms,
+Distribution summaries and Comparison figures have a **Templates** group in their **Export**
+section: a template combo, **Save as template…**, **Rename** and **Delete**. A template keeps the
+page's analysis settings and its appearance. It never keeps the sources, the Noise spectrum's
+recordings or time span, per-source colours or any result, so you can put it on another recording.
+
+| Page | A template keeps | Recalling it |
+| --- | --- | --- |
+| Distribution summaries | Measurement, summary type, violin grid points, accepted-only, appearance | A draft, marked unapplied, until **Generate** |
+| Comparison figures | Figure type, measurements, pair features, bins, columns, layout, log axes, box, accepted-only, appearance | A draft, marked unapplied, until **Generate** |
+| Voltage dependence | Metric, chosen fit, \|V\|, log y, accepted-only, appearance | The fit arrives selected and waits for **Apply fit**. A changed metric or accepted-only re-gathers the points, as picking it does |
+| Noise spectrum | Welch length, window and overlap, PSD/ASD, log axes, RMS band, the view shown and its options (the spectrogram's colour limits and log-frequency axis included), style, appearance | Recomputes once over the recording and span already chosen, only if its Welch settings differ. Changed PSD/ASD or log axes redraw; a changed view option redraws only that view |
+| Event waveforms | Heatmap metrics, log axes, bins and colormap; ensemble normalisation, alignment (extremum included), points, padding, Events subset and band; the view shown; appearance | Redraws the heatmap or the ensemble from the events already bound, only if one of its settings differs. A changed colormap only recolours, and a changed band only re-shades |
+
+A recall does only what changing the same controls by hand would do. A template that matches
+the page's analysis settings, and differs only in appearance or style, keeps your zoom and
+recomputes nothing; in Distribution summaries and Comparison figures it does not mark the figure
+unapplied. A recalled template's appearance is one step of that plot's appearance Undo.
+**Rename** moves the saved settings unchanged; it does not re-save what is on screen. **Delete** asks first and names
+the template, with **Cancel** as the default. A template saved by a newer NanoScope is refused with
+its version, and nothing changes. I-V / conductance has no template: its only settings are
+appearance, which a preset keeps.
 
 **Each plot keeps its own appearance Undo.** Event waveforms, Noise spectrum, I-V / conductance,
 Voltage dependence, Distribution summaries, Comparison figures, Subpopulations and the study figure
@@ -2301,10 +2465,46 @@ outside — a project opened, a saved state restored, or **Reset all figure styl
 figure editor. Distributions has no second one: its **Configuration** Undo already covers its
 appearance.
 
+**Exploring a plot: Reset view, zoom history and the pointer readout.** Distributions, Noise
+spectrum, I-V / conductance, Voltage dependence, Event waveforms, Distribution summaries and
+Subpopulations work the same way:
+
+- **Reset view** (in the toolbar beside **Section**, and on the right-click menu) puts the zoom and
+  pan back to the plot's own framing: the fit to the data it was drawn with, the full category
+  slots of a box or violin, or in Distributions your typed **Axis range**. It changes nothing
+  else. It does not re-plot, restyle, change a setting or add a step to the plot's Undo. On a
+  page with several views (Noise spectrum, Event waveforms) it acts on the view on screen.
+  Subpopulations shows two figures at once, so it has no toolbar button: Reset view, Zoom back
+  and Zoom forward are on each figure's right-click menu only.
+- **Zoom back / Zoom forward** (the arrow beside Reset view, and the right-click menu) step
+  through the places you zoomed or panned to, as View ▸ Zoom Back / Forward do on the trace. A
+  zoom or pan made on a strip linked to the plot (Distributions' residual strip) counts too. A
+  view counts once it has stayed still for a quarter of a second. Both are greyed out when there
+  is nowhere to go. The history starts again when the plot is drawn anew (**Plot / Apply**,
+  **Analyze / refresh**, **Generate**, another plot type, a log toggle). An appearance edit keeps
+  it. It is not saved with the project, and neither ⌘Z nor Edit ▸ Undo reaches it.
+- **Right-click** a plot for **Reset view**, **Zoom back**, **Zoom forward** and the page's own
+  exports. It replaces pyqtgraph's generic menu, whose log, FFT and invert transforms changed the
+  picture outside the plot's saved settings, and whose Export… dialog bypassed the page's export.
+  The colour bars of the event-count heatmap and the spectrogram have no right-click menu: their
+  colours come from the page's own colormap control, which is the one saved.
+- **The status line at the bottom of the window** (in Subpopulations, the middle of the toolbar
+  row) shows the values under the pointer, named as the axes are (your own axis label, if you
+  typed one), in the units the axes show. On a log axis it gives the real value, not its log10.
+  In Distributions it follows the **Time unit**, so a dwell axis in ms reads in ms. Over a box
+  or violin it names the source. Over Event waveforms' density map and Distributions'
+  Event-count heatmap it adds the count of the cell under the pointer (*Event count N*, as the
+  colour bar is labelled; over Event waveforms' map, mind the §14 caveat before reading
+  coordinates), and over the spectrogram its log₁₀ PSD. On a log-frequency spectrogram it gives the true frequency and the value of the
+  original frequency bin under the pointer, not of the resampled display row. On a Distributions
+  Scatter or PCA it also names the nearest point within a few pixels, with its source and
+  event_id (the event a click there would select). The readout is on screen only: it is never
+  part of an exported figure or a Figure Library snapshot.
+
 Warnings remain beside the figure as a short summary and count. Expand **Full details** (or
 **Details — methods and provenance** in Distributions) for the complete warnings and audit text.
-An **Event-count heatmap** displays counts in two-dimensional bins; **KDE probability density**
-is a smoothed density estimate. They are different quantities, not interchangeable names for the
+An **Event-count heatmap** (Event waveforms, and a plot type in Distributions) displays counts in
+two-dimensional bins; **KDE probability density** is a smoothed density estimate. They are different quantities, not interchangeable names for the
 same plot. Counts, probability-per-bin and density retain their existing numerical definitions.
 
 ### Figure Library
@@ -2403,8 +2603,9 @@ versions or damaged panel resources block revision without replacing the stored 
 ### Lasso selection in Scatter and PCA
 
 In the **Distributions** page, generate a Scatter or PCA plot, then enable **Lasso select** in the
-toolbar. Drag an outline inside the plotting area and release to select the enclosed displayed
-events. Selection uses event identifiers, not point positions or table row numbers; it follows the
+toolbar. Histograms, KDE contours and the Event-count heatmap have no points to select, so Lasso
+select is unavailable there. Drag an outline inside the plotting area and release to select the
+enclosed displayed events. Selection uses event identifiers, not point positions or table row numbers; it follows the
 displayed logarithmic coordinates when applicable. Ctrl/Cmd/Shift toggles the enclosed events in
 the selection. A plain outline around no points clears the current plot selection.
 
@@ -2527,6 +2728,41 @@ subsampled. Figures can be used as frozen panels in compositions; detached share
 is not offered for these already-multi-panel canvases. These comparisons do not change baseline
 removal, detection, calibration, amplitude estimation, fitting defaults or existing numerical exports.
 
+### Event waveforms: alignment, band and events
+
+The **Ensemble** tab of **Event waveforms** resamples each accepted event onto **Points**
+samples and overlays them, with the mean (solid) and median (dashed) on top.
+
+- **Align** applies when **Normalize time** is off. **start** and **center** put each event's
+  first sample or midpoint at t = 0. **extremum** puts each event's deepest sample at t = 0: the
+  sample inside the event where polarity × (current − baseline) is largest, the sign the event
+  table measures depth with. A blockade that lowers the current and one that raises it (a
+  negative open-pore current, or an enhancement) are both aligned on their deepest point. The
+  polarity is the detection's; a table that recorded none has it measured from the trace, and
+  **Full details** says which. The extremum can be anywhere in an event, so the window reaches the
+  longest dwell plus **Pad %** to both sides of it, and every drawn event lies wholly inside. As
+  with start and center, an event whose window runs off the trace is skipped and counted in the
+  title. An event with no finite sample inside its own span has no deepest sample; it is skipped
+  too, and counted separately as *with no finite sample* (the CSV's `no_finite_sample_count`).
+- **Band** shades the spread of the events: **Mean ± 1 SD** (the sample standard deviation)
+  around the mean, or **Median IQR (25–75 %)** around the median. The default is **None**. The
+  band is worked out from the traces already drawn, so choosing one does not re-read the
+  recording and keeps your zoom. It uses the same events as the mean and median at every point.
+  Where any event's window holds a non-finite sample (a gap in the trace), the mean and median are
+  not defined, and the band is left out there with them; **Full details** says at how many points.
+  With fewer than 2 events no band is drawn. **Export data (CSV)…** adds `band_lower`,
+  `band_upper`, `band_kind` and `n_events_at_point` to every row; `n_events_at_point` is the
+  number of events behind that row's mean and median, 0 where they are not defined.
+- **Events** limits the ensemble to one of the Event gallery's subsets of the accepted events:
+  **Unreviewed**, **Unlabelled**, a **Labelled:** label, or **Hand-made only** / **Detected only**
+  when the table holds hand-made events. The default, **All accepted**, is the old behaviour.
+  Rejected events are never drawn. The Event-count heatmap always uses every accepted event.
+  Subpopulation subsets are not offered here yet. The title and the CSV's `ensemble_subset` column
+  name the subset.
+
+The alignment, band, subset and the band's numbers are saved with the project's figure snapshot.
+A reopened ensemble draws the saved band without recomputing it.
+
 ---
 
 ## 11. Noise spectra (PSD)
@@ -2570,6 +2806,32 @@ says so.
 > calibration — a PSD value is a squared current, so it carries the amplifier gain. The window
 > prints that caution, and calls out curves that are in different units.
 
+### Spectrogram colour limits and frequency axis
+
+The spectrogram's colour runs over log₁₀ PSD. **Spectrogram colour limits**, under Style beside the
+colormap, is **Auto** by default: the 2nd to 99.8th percentile of the spectrogram's cells, so one
+bright line cannot wash out the rest. **Manual** takes the **Low** and **High** you type, in the
+colour bar's unit (−6 means 10⁻⁶ in the PSD's squared units per Hz), so two spectrograms can be
+put on one scale. Switching to Manual starts from the limits on screen. **High** always stays
+above **Low**: each box stops one step short of the other. Cells outside the limits take the end
+colours. The caption gives the limits in force and their linear values in either mode; Auto
+percentiles are always taken on the original frequency grid.
+
+**Log frequency (display resampling)**, in the Spectrogram's view options, draws frequency on a
+log axis. The spectrogram's bins are evenly spaced in frequency, and an image can only stretch an
+even grid. So the bins are averaged, weighted by overlap and in linear power, onto 512 log-spaced
+display rows. A row inside one bin repeats that bin, so the lowest bins show as blocks of their true
+width. The 0 Hz bin has no place on a log axis and is not drawn. The caption says all this, and
+the axis is labelled *display resampled*. **Export data (CSV)…** keeps the original
+linear-frequency grid on either axis; its metadata row records the axis and the display rows. Auto
+colour limits come from the original grid, so switching the axis does not change the colour scale.
+
+Neither control recomputes the spectrogram or resets your zoom. Switching the axis keeps the time
+range. A frequency range you narrowed is carried into the new axis; a view that shows the whole
+spectrogram is fitted again, so switching there and back returns to the same view. Zoom back and
+Zoom forward start again after a switch, because the views they held were on the other axis.
+Both are saved with the project.
+
 ### Spectrogram timing and large selections
 
 The spectrogram caption distinguishes four quantities that are easy to confuse: the FFT source-block
@@ -2596,7 +2858,9 @@ loaded, and everything you cannot cheaply recreate (calibrations, the acquisitio
 sample-rate / time-unit declarations made in File Info, layer view state and stable recording
 colours, curated event tables, the form settings you changed for a table and have not run yet,
 manual measurements, segments). Reopening it reopens those files from disk. Undo
-history is not part of it (§9b).
+history is not part of it (§9b), and neither is the ML detector's probability (the **ML
+confidence track**, §4): an ML table reopens with its events, and the probability comes back with
+a re-run.
 
 **If a source file has changed, the app says so.** A path is a *name*, not a recording — re-exporting
 from Clampex over the same filename leaves the name identical and the data completely different. The
@@ -2673,19 +2937,23 @@ retries every 30 seconds); until then, save the project. If another NanoScope wi
 retired this window's recovery folder, the banner says crash recovery is off for as long as the
 window stays open. The checkpoint contains the same
 restorable analysis state as a project — calibrations, view state, detector tables, curation,
-labels, fits, segments and manual measurements. As with a project, recordings are path references;
-their raw signal is not duplicated.
+labels, fits, segments, manual measurements, the analytical workspace of §11c and the copy of your
+plot presets and templates. As with a project, recordings are path references; their raw signal
+is not duplicated, and the ML detector's probability (§4) is not kept.
 
 After NanoScope or the computer stops unexpectedly, the next launch presents **Recover unsaved
-NanoScope work**. It names the work: the project (or *unnamed analysis*), the recordings, each event
-table with how many of its events are accepted, when it was last edited, and the NanoScope build that
-wrote it. A checkpoint that belongs to another NanoScope window that is still open is never offered.
+NanoScope work**. It names the work: the project file (or *an unnamed analysis*) and its revision,
+when it was last edited, the recordings, each event table with how many of its events are
+accepted, how many old hand measurements it holds, and the NanoScope build that wrote it. A
+checkpoint that belongs to another NanoScope window that is still open is never offered.
 Choose:
 
 - **Recover** — open that checkpoint. The title begins with `•` and Gallery/Inspector say
   **Unsaved changes**. This is intentional: the private checkpoint has not become a durable project.
   Press **Ctrl/⌘+S** and choose a `.nanoscope` file to keep it. If the recovered work came from a
   named project, that path is suggested, but NanoScope does not silently overwrite it.
+  Recovering adds any plot preset or template in the checkpoint that this computer does not have,
+  as opening a project does (§11c), and the banner names it.
 - **Discard** — move both checkpoint generations of only the session named in the question to the
   **Discarded** folder inside the recovery folder, where they are kept for 7 days. If another
   crashed NanoScope window also left work, it is offered separately.
@@ -2730,7 +2998,8 @@ copy the recovery folder (`~/Library/Application Support/NanoScope/Recovery`) if
 
 ## 11c. Complete analytical projects — Stage 3
 
-Project format v11 makes the ordinary `.nanoscope` file a complete analytical project. It saves the
+Project format v11 made the ordinary `.nanoscope` file a complete analytical project, and v12
+(below) keeps that design. It saves the
 durable session underneath the analysis windows and the project-owned analytical workspace: live
 analysis-panel configuration, plot/source choices and styling, exact PCA and clustering outputs
 with their preprocessing and random seeds, complete subpopulation reports, PSD and comparison
@@ -2739,7 +3008,7 @@ recordings and model bytes remain external files rather than being copied into t
 
 The important distinction is between a **saved result** and a **redrawn view**:
 
-| After a v11 reopen | What happens |
+| After a v11 or v12 reopen | What happens |
 | --- | --- |
 | PCA, clustering, subpopulation, PSD, I-V and voltage-dependence numbers | Restored from the saved snapshot. NanoScope does not silently run them again. |
 | Histogram bins, scatter/KDE geometry, contours, fitted-line drawing, captions and plot widgets | Redrawn from saved structured data and settings. |
@@ -2750,9 +3019,35 @@ Population Plots preserves a KDE's recipe but does not store its sampled density
 reopen it shows **Press Plot to recompute** instead of silently running the KDE. The Event Density
 view does store and restore its frozen count grid and physical bin edges.
 
+**Plot presets and templates travel with the project.** Your appearance presets, Distributions
+templates and window templates are kept on this computer. Save Project also writes a copy of all of
+them into the project. When the project is opened, on this computer or another, the ones the
+computer does not have are added to it and the banner names them:
+
+- A preset or template the computer already has is never replaced. If one of the same name has
+  different settings, the project's copy comes in as *Name (from project)* and yours is unchanged.
+- One this version cannot read (saved by a newer NanoScope, or damaged, for example holding NaN)
+  is not added and the banner names it. It stays in the project and is saved back with it, and the
+  project still opens.
+- A Distributions template with the name of a shipped one comes in as *Name (from project)*, so
+  it can be picked beside the shipped one.
+- Adding them does not mark the project unsaved. Deleting one later still asks first, and a
+  project saved earlier keeps its own copy.
+- A computer with no presets or templates writes no copy. The copy is an optional section of the
+  analytical workspace and needed no format change of its own; it is saved in a version 12
+  project all the same, which a version 11 app refuses as a whole (next paragraph).
+
+**Project format v12** adds, inside the same workspace, the Distributions KDE overlay and
+Event-count heatmap settings, the Noise spectrum's spectrogram colour limits and log-frequency
+axis, and the Event waveforms ensemble's band, extremum alignment and Events subset. A v11 app
+(the 2026-10-31 and 2026-11-01 releases) would have opened such a project, shown a heatmap as a
+histogram and an extremum-aligned ensemble as *start*, and dropped those settings on its next save;
+with the version at 12 it says the project needs a newer NanoScope instead, and it lists a
+crash-recovery copy written by this build as one it cannot read, and keeps it.
+
 Older projects will continue to open with empty defaults for the new analytical blocks. The reverse
-is intentionally refused: an app limited to project v10 must tell you a v11 project needs a newer
-NanoScope instead of opening it and stripping fields on the next save. The full implementation and
+is intentionally refused: an app limited to an older project version (v10, or v11) must tell you a
+newer project needs a newer NanoScope instead of opening it and stripping fields on the next save. The full implementation and
 test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS.md).
 
 ---
@@ -2951,7 +3246,9 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Signal Conditioning:** Ctrl+1 / Ctrl+2 / Ctrl+3 | Time / Spectrum / Response preview tab |
 | **Signal Conditioning:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Edit ▸ Undo / Redo without leaving the window (a field you are typing in keeps them for its typing) |
 | Ctrl+0 / trace-focused Home / **Full** button | Reset zoom to the complete trace |
-| Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history) |
+| Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history; greyed out in the View menu when there is nowhere to go) |
+| **Ctrl/⌘+J** | **Go to event…: select an event by its ID and zoom the trace to it (in the Event inspector's own window: its ID…)** |
+| **Ctrl/⌘+Shift+J** | **Go to time…: centre the trace on a time as its x axis reads it (the clock its label names), zoom kept** |
 | Ctrl+E | Centre the view on the current selection |
 | **Trace focused: Shift+← / Shift+→** | **Scan to the previous / next view at the current zoom, with 10% overlap; carry active Measure cursors with it** |
 | **Trace focused: Shift+↑ / Shift+↓** | **Zoom in / out one incremental step around the pointer (the centre when the pointer is off the trace)** |
@@ -2972,6 +3269,7 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Event gallery:** Home / End | First / last page |
 | **Event gallery:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo on the main window's history, as the **Undo** and **Redo** buttons do |
 | **Plot windows:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo the plot's own history — its appearance while the Appearance controls are on screen; in Distributions, the whole plot recipe. Never Edit ▸ Undo (§10) |
+| **Plot windows:** right-click a plot | Reset view, Zoom back / Zoom forward and the page's exports. No key is bound to them; ⌘Z stays the plot's Undo (§10) |
 | **Event inspector & Event gallery:** 1–9 | Apply the matching label from the palette (**Analysis ▸ Event labels…**) — same digits, same meanings, in both windows |
 | **Event inspector & Event gallery:** custom one-character label hotkey | Apply that palette label (reserved and duplicate keys cannot be saved) |
 
@@ -3036,8 +3334,10 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
   *shapes* are unaffected.
 - **Crash recovery is not a project save or a backup.** NanoScope keeps a private, bounded emergency
   checkpoint (§11b), but a durable or shareable analysis still requires **File ▸ Save Project**
-  (⌘S). Closing and choosing **Discard** removes unsaved recovery data. A project written by this
-  build cannot be opened by a build older than it — every older project still opens here.
+  (⌘S). Closing and choosing **Discard** moves the unsaved recovery data to the recovery folder's
+  **Discarded** folder, which keeps it for 7 days. A project or recovery copy written by this build
+  (project version 12) cannot be opened by an older build — the 2026-10-31 and 2026-11-01 builds
+  read up to version 11 — and every older project still opens here.
 - **`CPYA`-variant ABF files** cannot be read; they are refused with a specific message.
 - **Legacy TDMS** files declare no sample rate → the x-axis is in samples and detection is disabled,
   until you declare the rate under **Inspector ▸ File Info ▸ Sample rate / time unit…** (§2).

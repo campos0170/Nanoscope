@@ -504,7 +504,12 @@ def _relative_sibling_imports(module) -> list[str]:
 #:
 #: It is an ALLOW-LIST and not a predicate on purpose: the next relative import added
 #: here fails this test and has to argue for itself in the same place.
-_ALLOWED_SIBLING_IMPORTS = ["analysis_catalog", "plot_appearance", "plot_workflow", "categorical"]
+#:
+#: ``gui.plot_interaction`` argued for itself the same way: the Reset view / zoom history /
+#: right-click menu / pointer readout that every plot window installs. It imports no gui
+#: module and wires nothing; the alternative was a private copy per window.
+_ALLOWED_SIBLING_IMPORTS = ["analysis_catalog", "plot_appearance", "plot_interaction",
+                            "plot_workflow", "categorical"]
 
 
 def test_the_report_window_imports_only_the_shared_leaf():

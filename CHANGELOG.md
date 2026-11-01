@@ -75,9 +75,10 @@ tags identify tested development baselines and do not promise a stable file or A
   rejected events stays current; a fit saved by an earlier build has no digest and keeps the count
   rule.
 - **Deleting a protocol, a saved ML preset or a plot template asks first**, naming it, with Cancel
-  as the default and the escape button. All three are preferences kept on this computer, outside
-  any project and so outside Edit ▸ Undo, and each was one click with nothing asked. Deleting the
-  ML preset the tab is on also says which default preset the tab falls back to.
+  as the default and the escape button. All three are preferences kept on this computer and
+  outside Edit ▸ Undo (a project saved earlier keeps its own copy of a plot template, but deleting
+  it here is not undone), and each was one click with nothing asked. Deleting the ML preset the
+  tab is on also says which default preset the tab falls back to.
 - **A frequency clamped to a slower recording's Nyquist is announced, and comes back.** The status
   bar names the clamp — *Low-pass 20 kHz is above this recording's Nyquist (12.5 kHz); the form now
   reads 12.4999 kHz.* — for a stage that is on and a value someone set, never a box's built-in
@@ -119,9 +120,178 @@ tags identify tested development baselines and do not promise a stable file or A
 - Standard report PDF/PNG files retain diagnostic context in document/image
   metadata. New Figure Library captures include full Details text; existing frozen
   figures and previously generated guides are not rewritten.
+- **View ▸ Zoom Back and Zoom Forward are greyed out when there is nowhere to go.** A zoom you have
+  just made counts at once, so Ctrl+← straight after a dive still steps back.
 
 ### Added
 
+- **Reset view, zoom history and a pointer readout in the plot windows.** Distributions, Noise
+  spectrum, I-V / conductance, Voltage dependence, Event waveforms, Distribution summaries and
+  Subpopulations share them (§10, *A consistent plotting workflow*).
+  - **Reset view** returns the zoom and pan to the plot's own framing: the fit to its data, the
+    category slots of a box or violin, or Distributions' typed Axis range. It does not re-plot,
+    restyle, change a setting or add an Undo step.
+  - **Zoom back / Zoom forward** step through the places you zoomed or panned to, on the plot or
+    on a strip linked to it. They are greyed out when there is nowhere to go. The history starts
+    again when the plot is drawn anew, and an appearance edit keeps it.
+  - **The right-click menu is the app's own:** Reset view, Zoom back, Zoom forward and the page's
+    exports. pyqtgraph's generic menu is gone, with its log, FFT and invert transforms, which
+    changed the plot outside its saved settings, and its Export… dialog. Subpopulations, which had
+    no menu, now has this one; it has no toolbar button, since it shows two figures at once. The
+    colour bars of the event-count heatmap and the spectrogram lost their colour-map menu, which
+    recoloured them behind the page's saved colormap control.
+  - **A status line shows the values under the pointer** in the units the axes show: the real value
+    on a log axis, Distributions' Time unit, the source over a box or violin, and the count or log₁₀
+    PSD over Event waveforms' density map, Distributions' Event-count heatmap or a spectrogram.
+    On a log-frequency spectrogram it gives the true frequency and the log₁₀ PSD of the original
+    frequency bin under the pointer, not of the display row. On a Distributions Scatter or PCA it
+    also names the nearest point's source and event_id. It is never part of an exported figure.
+- **Go to an event by its ID, or to a time, on the main trace.**
+  - **View ▸ Go to event…** (Ctrl/⌘+J) takes an `event_id` of the event table on screen, selects
+    it and zooms the trace to it, as a click on its row does. It frames the event again even when
+    it is already the selected one. An ID the table does not have (IDs have gaps after a merge or
+    a delete) moves nothing and the status bar gives the table's ID range.
+  - **View ▸ Go to time…** (Ctrl/⌘+Shift+J) takes a time as the trace's x axis reads it (the
+    instrument clock on a recording, the cut's own clock on a segment), and the prompt quotes the
+    axis label. Where the axis and the event table's `t_start_s` differ (t₀, an alignment shift) it
+    gives the number to add to a `t_start_s`. The view pans to centre the time without changing the
+    zoom, and the crosshair is put on the nearest sample; the status bar says when the view could
+    not move (full-trace zoom) or stopped at the end of the recording. A time outside the trace is
+    refused with the trace's range.
+  - **The Event inspector's ID… button** (Ctrl/⌘+J in its own window) goes to an event by its ID.
+    The Event box beside ◀ ▶ stays a position in the filter, and its tooltip now says it is not the
+    ID. An ID outside the current filter moves the filter to All, so the box shows a true position,
+    and the progress line says why. Docked, Ctrl/⌘+J is View ▸ Go to event…, which moves the
+    inspector the same way.
+- **The trace crosshair names the sample index.** A third line reads *sample 5,000 (event-table
+  index)*: the snapped sample in the numbering the event table's `start_idx` / `end_idx` use, from
+  the first loaded sample. A partial load adds the file's own sample number, and a segment its
+  parent's. On a recording with no sample rate, where the x axis already is that index, it is given
+  once, in place of the time.
+- **View ▸ Show detection thresholds draws what the detector compared the signal with.** Off by
+  default. For a Schmitt table, the enter level (dashed) and the exit level (dotted): an event is a
+  run beyond the exit level, so it starts and ends there, and it counts only if it reaches the enter
+  level. For a CUSUM table, the drift level k·σ (dash-dot), since h is an amount of evidence and not
+  a current. They are tracks, not flat lines: each is the detector's own moving open-pore baseline
+  plus its threshold, rebuilt from the table's record and checked against the noise and baseline it
+  stamped. A step in that baseline is drawn at its own sample. They follow the baseline-subtracted
+  view, change no number and keep your zoom. Nothing is drawn, and the status bar says why, for a
+  stale table, an ML, hand-made or reconciled table, or a table whose detection signal is not at the
+  trace's level (high-pass, baseline-drift removal or Normalize in the chain). Hover the menu item
+  to read the sentence again.
+- **Edges moved by hand are marked on the trace.** A boundary that is no longer where the detector
+  put it (an Event inspector mask drag, a merge) gets a dashed vertical line; an event drawn by hand,
+  including one placed and fitted with the trace keys, gets dotted lines at both edges. Revert
+  removes the mark. Tables saved before the app recorded the detector's own bounds mark only the
+  hand-drawn events and the merges that took one in. A reconciled row is marked by the event its
+  span came from. The Events tab's tooltip says what the marks mean.
+- **View ▸ ML confidence track.** The ML detector now keeps the model's probability with its table,
+  and this option draws it in a thin **ML p** pane under the trace while an ML table is on screen:
+  0–1 over the analysed range, with the run's enter and exit thresholds as dashed lines, on the
+  trace's time axis, and **p** at the crosshair. The curve is drawn with the trace's peak-preserving
+  decimation, and samples no model window reached are left blank instead of drawn as 0. It is
+  display only: turning it on or off changes no event and keeps the x and y zoom. The probability is
+  held at one byte per analysed sample, rounded to 1/255, and only for the session that ran the
+  detector. Edit ▸ Undo of an ML re-run brings back the earlier run's probability with its table,
+  and each earlier run's probability counts toward the 128 MiB undo memory budget. It is not saved
+  in projects; a reopened ML table says so in the pane and needs a re-run to draw it. Turning the
+  option on while the ML table's channel is hidden says so on the status bar. Off at every launch.
+- **A KDE overlay on Distributions histograms.** Tick **KDE overlay** on the Histogram page and
+  press **Plot / Apply**: each drawn series — each ticked source, or each cluster of a split
+  histogram — gets one Gaussian KDE with Scott's bandwidth (the violins' rule), drawn dotted in its
+  colour over its observed range and scaled to the bars' y quantity (count: `n × bin width × f`;
+  density: `f` per the column's stored unit; probability per bin: `bin width × f`). On a log x axis
+  it is estimated on log10 of the column, matching the log-spaced bins. **Details** names each
+  series' bandwidth, the legend has a *KDE (Gaussian, Scott)* row, and **Export plot data** writes
+  the curves as `kde` rows. The setting is saved with undo, templates, the configuration JSON, the
+  project and Figure Library captures; opening a project does not recompute it (Plot shows ●). A
+  bin, normalization or log change before **Plot / Apply** redraws the bars without drawing a ticked
+  overlay, and a Figure Library capture records the overlay only once it is on the picture.
+- **An Event-count heatmap plot type in Distributions.** Any two numeric columns binned into a 2-D
+  grid of event counts, with a colormap and a colour bar labelled *Event count*, using the same
+  binning as Event waveforms' heatmap (`event_shape.density_2d`): Bins per axis, Log x (on by
+  default) and Log y, the Time unit on time axes. It shows the first ticked source only and says
+  so in the title and Details. Details carries the same comparability and amplitude warnings as
+  Scatter for the same columns. The **Heatmap colormap** (Appearance) recolours it without
+  re-binning or moving the zoom; an imported colormap this build does not offer opens as viridis
+  and is named in the import note. **Export plot data** writes one `cell` row per bin with its
+  edges and count; the exported figure carries the colour bar. Lasso and point-click selection are
+  not available on it.
+- **Event waveforms ▸ Ensemble aligns on the extremum.** **Align ▸ extremum** puts each event's
+  deepest sample at t = 0, read with the event table's polarity, so a blockade that lowers the
+  current and one that raises it are both aligned on their deepest point. The window reaches the
+  longest dwell plus the padding to both sides, so every drawn event lies wholly inside it. The
+  polarity used, and where it came from, is in the ensemble's Full details and the CSV. An event
+  with no finite sample to align on is counted apart from the edge skips. After a project reopen
+  the CSV's skip counts come from the count saved with the draw, as the title's do.
+- **A variability band in the ensemble.** **Band** shades mean ± 1 SD around the mean or the
+  25–75 % interquartile range around the median (default None). It is worked out from the traces
+  on screen, so it never re-reads the recording or resets the zoom. It uses the same events as
+  the mean and median, and is left out with them where an event's window holds a non-finite
+  sample; Full details says where. The CSV adds the band and `n_events_at_point` (the events
+  behind that row's mean and median), and the project saves the band.
+- **The ensemble can use the Event gallery's subsets.** **Events** offers All accepted (the
+  default), Unreviewed, Unlabelled, each label, and Hand-made or Detected only, always within the
+  accepted events. The title and the CSV name the subset, and the project saves it. Subpopulation
+  subsets are not offered yet.
+- **Spectrogram colour limits.** **Spectrogram colour limits** is Auto (the 2nd–99.8th
+  percentile, as before) or Manual, with Low and High in the colour bar's log₁₀ PSD. Changing them
+  re-levels the image without recomputing it or moving the zoom. High always stays above Low.
+  The caption gives the limits and their linear values in either mode, and the project saves them.
+- **A log-frequency spectrogram, labelled as a display resampling.** **Log frequency (display
+  resampling)** averages the evenly spaced bins, weighted by overlap, onto 512 log-spaced rows;
+  the 0 Hz bin is not drawn. The axis and caption say so, and **Export data (CSV)…** keeps the
+  original linear grid. The time range is kept, a narrowed frequency range is carried into the new
+  axis, and a whole-spectrogram view is fitted again. Zoom back and forward start again, since
+  the earlier views were on the other axis. The project saves the choice. Before the first
+  spectrogram, or after one could not be computed, the page is blank, on a linear axis, with
+  nothing for the pointer readout or Reset view to read.
+- **Plot configuration files are version 3.** They add the KDE overlay, the heatmap's settings and
+  its colormap. Version 1 and 2 files still open; a build that reads only up to version 2 refuses a
+  version 3 file by name instead of dropping those settings. (That refusal covers the sidecar
+  files; inside a project the same settings are protected by the project version, next.)
+- **Projects are version 12.** A project now carries the Distributions KDE overlay and heatmap
+  settings, the Noise spectrum's spectrogram colour limits and frequency axis, and the Event
+  waveforms ensemble's band, extremum alignment and Events subset. A version 11 build (the
+  2026-10-31 and 2026-11-01 releases) would have opened such a project, shown a heatmap as a
+  histogram and an extremum-aligned ensemble as *start* without a word, and dropped those settings
+  on its next save; with the version at 12 it refuses the project with *needs a newer NanoScope*
+  instead, and it lists a crash-recovery copy written by this build as one it cannot read, and
+  keeps it. Every older project, version 1 to 11, still opens here as before.
+- **Templates in Noise spectrum, Voltage dependence, Event waveforms, Distribution summaries and
+  Comparison figures.** Each page's Export section has a **Templates** group: a template combo,
+  **Save as template…**, **Rename** and **Delete**. A template keeps the page's analysis settings
+  and its appearance, never its sources, the Noise spectrum's time span or any result. A Noise
+  spectrum template includes the spectrogram's colour limits and frequency axis; an Event
+  waveforms template includes the ensemble's alignment (extremum too), band and Events subset.
+  - Recalling one changes the controls, and does only what changing those same controls by hand
+    would do. In Distribution summaries and Comparison figures it is a draft, marked unapplied,
+    until you press **Generate**; a template that matches the controls marks nothing. In Voltage
+    dependence the fit arrives selected and waits for **Apply fit**. Noise spectrum recomputes
+    only when the template's Welch settings differ, and Event waveforms redraws a view only when
+    one of its settings differs.
+  - A template that differs only in appearance or style keeps your zoom and recomputes nothing,
+    so recalling one on a project whose recording is missing keeps the saved spectrum or count
+    grid.
+  - The template's appearance is one step of that plot's appearance Undo.
+  - **Rename** moves the saved settings unchanged. **Delete** asks first, with Cancel as the
+    default. A template saved by a newer NanoScope, or for another window, is refused with a
+    message that says so.
+  - I-V / conductance has no template: its only settings are appearance, which **Save appearance
+    preset…** already keeps.
+- **A saved project carries copies of your plot presets and templates.** Appearance presets,
+  Distributions templates and the new window templates are kept on the computer that saved them.
+  Save Project now also writes a copy into the project. Opening the project adds the ones this
+  computer does not have, and the banner names them.
+  - A preset or template on this computer is never replaced. One of the same name with different
+    settings comes in as *Name (from project)*, and the banner says so.
+  - One this version cannot read is not added. It stays in the project and is saved back with it.
+    A damaged one (for example holding NaN) is treated the same way, and the project still opens.
+  - A carried Distributions template with the name of a shipped one comes in as *Name (from
+    project)*, so it can be picked.
+  - A computer with no presets or templates writes no copy. The copy is an optional section of
+    the analytical workspace and needed no format change of its own, but it is saved in a version
+    12 project, which a version 11 build refuses as a whole (*Projects are version 12*, above).
 - **Edit ▸ Undo takes back analysis settings, on the recording on screen.** A third undo stack,
   `core/history.SettingsHistory`, beside the event tables and the measurement list, covers each
   event table's Detection, ML and Baseline forms, a channel's calibration, a recording's time base
@@ -211,7 +381,8 @@ tags identify tested development baselines and do not promise a stable file or A
   move together) or the sample rate it was acquired at (the only option for a legacy TDMS, which
   declares none). A column the 1 Hz floor refuses keeps the interval it measured, so its unit
   can be declared the same way. The declaration is saved with the project under a new
-  workspace key (older v11 builds preserve it; no format bump), never written beside the raw
+  workspace key (no format bump of its own; a version 11 build kept it, and refuses the version 12
+  project this build now writes), never written beside the raw
   file, shown in File Info as `100,000 Hz · user (file: 100 Hz · measured)` (the status bar
   prints the declared rate and its provenance), and followed by the recording's segments.
   Detections made at the old rate are marked stale (*Times stale — sample rate changed*) and
@@ -366,6 +537,19 @@ tags identify tested development baselines and do not promise a stable file or A
   - A crash (segmentation fault or abort) leaves a Python stack trace in the log.
   - An error the app survives, in a button, menu or background thread, is logged with its time
     and thread.
+- **The trace crosshair's readout is drawn.** It was placed above the top of its pane, where the
+  plot clips it, so the time and value it was meant to show never appeared. It now hangs from the
+  pane's top edge beside the cursor line, on a translucent backing, and moves to the line's left in
+  the right half of the view so it is never cut off. It keeps to the top edge when the view is
+  zoomed or panned under a still cursor, and draws nothing where there is no sample under the line.
+- **The crosshair's time on a segment.** On a cut, whose axis is its own clock, the crosshair took
+  the axis value for the instrument time and printed a negative time *in*: 0.2010 s into a cut
+  made 0.4 s into its parent read *-0.1990 s in · 0.2010 s instrument*. It now reads *0.2010 s in
+  · 0.6010 s instrument*, which agrees with the *parent sample* line under it.
+- **One cursor across the trace after a rebuild.** Switching Overlay / Stacked or toggling a
+  channel left the trace panes' cursor line at 0 with no readout, while the ML p pane kept its
+  line and *p* at the cursor. The trace panes now put their line and readout back on the cursor
+  too.
 - **Re-measure keeps an old table's run.** On a table from a v1 or v2 project (no stored settings,
   its run known from the detector's own stamp), **Re-measure depths** stored only the open-pore
   estimator's settings as the table's run.
@@ -699,7 +883,8 @@ tags identify tested development baselines and do not promise a stable file or A
   restored — while Export figure refused that very fit as "saved fit is stale" — and a Fit whose
   dwell half failed left one table's dwell fit beside another's depth fit. Each fit now records
   the table it was made on (`detection_module_id`, a new key in the fit's saved metadata; no
-  project format change, and older builds read the project as before). The tab prints a fit only
+  project format change of its own, and a version 11 build read it as before, though it refuses the
+  version 12 project this build now writes). The tab prints a fit only
   when that table is the one on screen, with the calibration and accepted events it was fitted
   to (the figure export's two checks plus the table). Otherwise it says which table the fit
   belongs to, or that the table has changed since (curated, merged, re-run or undone), or that

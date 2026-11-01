@@ -1474,6 +1474,15 @@ def capture_psd(window: Any) -> WorkspaceArtifact:
             "view": str(window.current_view()),
             "spectrogram_nperseg": str(_widget_value(window, "_spec_nperseg_combo", "currentText", "Auto")),
             "spectrogram_colormap": str(_widget_value(window, "_spec_cmap_combo", "currentText", "viridis")),
+            # Presentation of the saved spectrogram: Auto or Manual colour limits (the
+            # typed pair is kept either way, as the spin boxes keep it) and the frequency
+            # axis it is drawn on. Older snapshots lack them and reopen as Auto, linear.
+            "spectrogram_levels_mode": str(_widget_value(window, "_spec_levels_combo",
+                                                         "currentData", "auto") or "auto"),
+            "spectrogram_level_low": float(_widget_value(window, "_spec_level_lo", "value", -6.0)),
+            "spectrogram_level_high": float(_widget_value(window, "_spec_level_hi", "value", 0.0)),
+            "spectrogram_log_frequency": bool(_widget_value(window, "_spec_logf_check",
+                                                            "isChecked", False)),
             "histogram_bins": str(_widget_value(window, "_hist_bins_combo", "currentText", "256")),
             "histogram_clip": bool(_widget_value(window, "_hist_clip_check", "isChecked", False)),
             "histogram_levels": bool(_widget_value(window, "_hist_levels_check", "isChecked", True)),
@@ -1589,6 +1598,21 @@ def restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
             paint(getattr(window, "_fit_swatch"), live_style.fit_color)
         _set_combo_text(window, "_spec_nperseg_combo", config.get("spectrogram_nperseg", "Auto"))
         _set_combo_text(window, "_spec_cmap_combo", config.get("spectrogram_colormap", "viridis"))
+        # Low and High bound each other, so they are set as a pair (the window lifts and
+        # re-ties the bounds); a pair saved out of order is put in order, and said so.
+        set_levels = getattr(window, "_set_spec_level_values", None)
+        if callable(set_levels) and set_levels(
+                float(config.get("spectrogram_level_low", -6.0)),
+                float(config.get("spectrogram_level_high", 0.0))):
+            warnings.append("saved spectrogram colour limits had High at or below Low; "
+                            "High is set one decade above Low")
+        levels_combo = getattr(window, "_spec_levels_combo", None)
+        if levels_combo is not None:
+            index = levels_combo.findData(str(config.get("spectrogram_levels_mode", "auto")))
+            if index < 0:
+                warnings.append("saved spectrogram colour-limit mode is not known; Auto is used")
+            levels_combo.setCurrentIndex(max(index, 0))
+        _set_checked(window, "_spec_logf_check", config.get("spectrogram_log_frequency", False))
         _set_combo_text(window, "_hist_bins_combo", config.get("histogram_bins", "256"))
         _set_checked(window, "_hist_clip_check", config.get("histogram_clip", False))
         _set_checked(window, "_hist_levels_check", config.get("histogram_levels", True))
@@ -1783,6 +1807,9 @@ def capture_event_plots(window: Any) -> WorkspaceArtifact:
             "align": str(_widget_value(window, "_align_combo", "currentText", "start")),
             "n_points": int(_widget_value(window, "_npoints", "value", 120)),
             "pad_percent": int(_widget_value(window, "_pad", "value", 20)),
+            "ensemble_subset": str(_widget_value(window, "_subset_combo", "currentData", "")
+                                   or "Accepted only"),
+            "ensemble_band": str(_widget_value(window, "_band_combo", "currentData", "") or ""),
             "ensemble_title": str(_widget_value(window, "_e_title", "text", "")),
             "appearance": _capture_appearance(window),
         },
@@ -1791,8 +1818,24 @@ def capture_event_plots(window: Any) -> WorkspaceArtifact:
         "amplitude_snapshot_units": str(getattr(window, "_amplitude_snapshot_units", "")),
         "density_edges": _encode(density_edges, resources, "density.edges"),
         "ensemble": _encode(window.ensemble_traces(), resources, "ensemble"),
+        # The band, the polarity an extremum alignment used and the subset's size are
+        # frozen beside the traces, so a reopened ensemble draws and describes exactly
+        # what was on screen without reading the recording again.
+        "ensemble_band": _encode(_call_or_none(window, "ensemble_band"), resources,
+                                 "ensemble.band"),
+        "ensemble_alignment": (None if getattr(window, "_ensemble_alignment", None) is None
+                               else [int(window._ensemble_alignment[0]),
+                                     str(window._ensemble_alignment[1])]),
+        "ensemble_input_count": (None if getattr(window, "_ensemble_input_count", None) is None
+                                 else int(window._ensemble_input_count)),
+        "ensemble_unalignable_count": int(getattr(window, "_ensemble_unalignable", 0) or 0),
     }
     return _artifact(EVENT_PLOTS_ARTIFACT_ID, payload, resources)
+
+
+def _call_or_none(owner: Any, name: str) -> Any:
+    method = getattr(owner, name, None)
+    return method() if callable(method) else None
 
 
 def _set_text(owner: Any, attr: str, value: Any) -> None:
@@ -1836,6 +1879,26 @@ def restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreRepo
                  lambda: getattr(window, "_npoints").setValue(int(config.get("n_points", 120))))
         _blocked(getattr(window, "_pad"),
                  lambda: getattr(window, "_pad").setValue(int(config.get("pad_percent", 20))))
+        # Snapshots written before the subset and the band existed carry neither key and
+        # restore as they were drawn: every accepted event, no band.
+        set_subset = getattr(window, "set_ensemble_subset", None)
+        if callable(set_subset):
+            subset = str(config.get("ensemble_subset") or "Accepted only")
+            try:
+                _blocked(getattr(window, "_subset_combo"), lambda: set_subset(subset))
+            except ValueError:
+                warnings.append(f"saved ensemble subset {subset!r} cannot be drawn; "
+                                "every accepted event is shown")
+                _blocked(getattr(window, "_subset_combo"), lambda: set_subset("Accepted only"))
+        set_band = getattr(window, "set_band", None)
+        if callable(set_band):
+            band_kind = str(config.get("ensemble_band") or "")
+            try:
+                _blocked(getattr(window, "_band_combo"), lambda: set_band(band_kind))
+            except ValueError:
+                warnings.append(f"saved ensemble band {band_kind!r} is not known; no band "
+                                "is drawn")
+                _blocked(getattr(window, "_band_combo"), lambda: set_band(""))
         _set_text(window, "_d_title", config.get("density_title", ""))
         _set_text(window, "_d_xlabel", config.get("density_x_label", ""))
         _set_text(window, "_d_ylabel", config.get("density_y_label", ""))
@@ -1889,6 +1952,21 @@ def restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreRepo
                 np.asarray(density_edges[0]).copy(), np.asarray(density_edges[1]).copy())
         ensemble = _decode(artifact.payload.get("ensemble"), artifact.tables, artifact.blobs)
         window._ensemble = None if ensemble is None else tuple(ensemble)
+        band = _decode(artifact.payload.get("ensemble_band"), artifact.tables, artifact.blobs)
+        if hasattr(window, "_ensemble_band"):
+            window._ensemble_band = None if band is None else tuple(band)
+        alignment = artifact.payload.get("ensemble_alignment")
+        if hasattr(window, "_ensemble_alignment"):
+            window._ensemble_alignment = (
+                (int(alignment[0]), str(alignment[1]))
+                if isinstance(alignment, (list, tuple)) and len(alignment) == 2
+                and alignment[0] in (-1, 1) else None)
+        input_count = artifact.payload.get("ensemble_input_count")
+        if hasattr(window, "_ensemble_input_count"):
+            window._ensemble_input_count = None if input_count is None else int(input_count)
+        if hasattr(window, "_ensemble_unalignable"):
+            window._ensemble_unalignable = int(
+                artifact.payload.get("ensemble_unalignable_count", 0) or 0)
         _restore_appearance(window, config)
         render = getattr(window, "_render_workspace_snapshot", None)
         if callable(render):

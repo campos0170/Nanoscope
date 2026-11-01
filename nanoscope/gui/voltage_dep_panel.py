@@ -69,7 +69,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
 from ..analysis import stats, voltage_dep
@@ -80,11 +80,14 @@ from .analysis_catalog import ANALYSIS_LABELS
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
+                               window_readout)
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
                             ensure_item_legend, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
                           choose_live_plot_export, data_write_failure_text, write_live_plot_image,
                           write_plot_csv)
+from .plot_templates import WindowTemplateControls
 
 __all__ = ["VDepWindow"]
 
@@ -377,13 +380,31 @@ class VDepWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(1, 0)
         root.addWidget(splitter, 1)
         self.setCentralWidget(central)
+        exports = (("Export current figure…", lambda: self.save_image()),
+                   ("Export data (CSV)…", lambda: self.export_data()))
         self._workflow = install_plot_workflow(
             self, sections={"Data": (self._data_section,), "Analysis": (self._analysis_section,),
                             "Appearance": (self._appearance_section,), "Export": (self._export_section,)},
             actions=(("Analyze / refresh", self._refresh_from_user),
                      ("Apply fit", self._apply_fit_from_user)),
-            exports=(("Export current figure…", lambda: self.save_image()),
-                     ("Export data (CSV)…", lambda: self.export_data())))
+            exports=exports)
+        # View only (plot_interaction): Reset view, zoom history, the app right-click menu
+        # in place of pyqtgraph's, and the pointer readout (log y shows the real value).
+        self._readout = window_readout(self)
+        self._plot_nav = install_plot_interaction(self._plot, readout=self._readout,
+                                                  exports=exports)
+        self._workflow.add_view_control(view_button(lambda: self._plot_nav, (self._plot_nav,)))
+        # Named recipes for another series: metric, fit proposal, axes and appearance --
+        # never the recordings or their points. A recalled fit waits for Apply fit.
+        self._templates = WindowTemplateControls(
+            "voltage-dependence", capture=self.template_settings,
+            recall=self.apply_template_settings,
+            note="A template keeps the metric, the chosen fit, |V|, log y, accepted-only and "
+                 "appearance. It never keeps the recordings or their points. Recalling one "
+                 "re-gathers the points only if its metric or accepted-only differ, as picking "
+                 "them does; its fit arrives selected, and you press Apply fit.")
+        root.insertWidget(root.indexOf(self._export_section) + 1, self._templates)
+        self._workflow.add_section_widget("Export", self._templates)
 
         # Wire the change signals AFTER construction so populating them never redrew.
         self._metric_combo.currentTextChanged.connect(self.refresh)
@@ -429,6 +450,55 @@ class VDepWindow(QtWidgets.QMainWindow):
 
     def figure_export_target(self):
         return self._plot
+
+    # -- window templates ------------------------------------------------------------------------
+    def template_settings(self) -> tuple[dict, dict]:
+        """``(settings, appearance)`` for a window template, keyed as the project saves them
+        (``capture_voltage_dependence``): the proposed fit, not the applied one."""
+        return ({"metric": self._metric(), "selected_fit": self._fit_combo.currentText(),
+                 "absolute_voltage": self._abs_v.isChecked(), "log_y": self._log_y.isChecked(),
+                 "accepted_only": self._accepted_only.isChecked()},
+                self.appearance_state())
+
+    def apply_template_settings(self, settings: dict, appearance: dict) -> None:
+        """A recalled template, as one gesture.
+
+        The fit is a PROPOSAL (owner note #12): the combo moves, the drawn trend does not,
+        and Apply fit shows it is armed. A changed metric or accepted-only re-gathers the
+        points once, exactly as picking either by hand does -- this window has no draft for
+        them -- a changed |V| or log y only redraws, and a template that changes neither
+        (appearance only, say) leaves the points and the zoom alone, as a hand appearance
+        edit does. Validated whole before any control moves.
+        """
+        current, _appearance = self.template_settings()
+        metric = settings.get("metric", self._metric())
+        fit = settings.get("selected_fit", self._fit_combo.currentText())
+        flags = {key: settings.get(key, widget.isChecked()) for key, widget in (
+            ("absolute_voltage", self._abs_v), ("log_y", self._log_y),
+            ("accepted_only", self._accepted_only))}
+        if (metric not in _METRIC_LABEL or fit not in (_FIT_NONE, _FIT_LINEAR, _FIT_EXP)
+                or any(type(value) is not bool for value in flags.values())):
+            raise ValueError("Its voltage-dependence settings are not ones this window offers.")
+        for widget, action in (
+                (self._metric_combo, lambda: self.set_metric(metric)),
+                (self._fit_combo, lambda: self._fit_combo.setCurrentText(fit)),
+                (self._abs_v, lambda: self._abs_v.setChecked(flags["absolute_voltage"])),
+                (self._log_y, lambda: self._log_y.setChecked(flags["log_y"])),
+                (self._accepted_only, lambda: self._accepted_only.setChecked(
+                    flags["accepted_only"]))):
+            with QtCore.QSignalBlocker(widget):
+                action()
+        self._sync_fit_apply_btn()
+        after, _appearance = self.template_settings()
+        moved = {key for key in after if after[key] != current[key]}
+        if moved & {"metric", "accepted_only"}:
+            self.refresh()          # the metric combo's and accepted-only's own signal
+        elif moved & {"absolute_voltage", "log_y"}:
+            self._redraw()          # |V| and log y's own signal
+        # The shared look answers through _appearance_from_user, zoom-preserving.
+        self._appearance_widget.apply_appearance(appearance)
+        if moved:
+            self.workspaceChanged.emit()
 
     # -- current control state -------------------------------------------------------------------
     def _metric(self) -> str:
@@ -636,6 +706,7 @@ class VDepWindow(QtWidgets.QMainWindow):
     # -- rendering -------------------------------------------------------------------------------
     def _clear(self) -> None:
         self._plot.clear()
+        reset_plot_history(self._plot)   # new geometry: old zoom ranges mean nothing now
         self._plot.setTitle(None)
         self._plot.titleLabel.setText("")
         self._scatter_item = self._fit_item = self._message_item = None

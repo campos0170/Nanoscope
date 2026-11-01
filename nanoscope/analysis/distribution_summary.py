@@ -129,3 +129,82 @@ def summarize_distribution(values, *, kind="ecdf", violin_points=256) -> Distrib
                         "No censoring or missed-event correction is inferred.")
     return DistributionSummary(kind, _frozen(sample), _frozen(x), _frozen(y),
                                MappingProxyType(stats), n_total, excluded, tuple(warnings))
+
+
+@dataclass(frozen=True)
+class KdeCurve:
+    """One 1-D Gaussian KDE, sampled where a histogram overlay draws it.
+
+    ``x`` is ALWAYS in the column's stored unit, even when ``log`` is set: the overlay
+    draws on the histogram's own abscissa, and the histogram keeps its data in stored
+    units and leaves the log to the axis. ``density`` is f(x) per stored unit, which is
+    the unit a ``density`` histogram's heights are in, so the two can share one y axis.
+    With ``log`` the estimate is made on ``u = log10(x)``: ``per_decade`` is g(u), and
+    ``density`` is g(u) / (x ln 10), the same function seen per stored unit.
+    ``bandwidth`` is the kernel's standard deviation in the space it was fitted in --
+    stored units, or decades with ``log``.
+    """
+    x: np.ndarray
+    density: np.ndarray
+    per_decade: np.ndarray | None
+    log: bool
+    bandwidth: float
+    scott_factor: float
+    n: int
+
+
+def kde_curve(values, *, log: bool = False, points: int = 256) -> KdeCurve:
+    """A Scott-bandwidth Gaussian KDE of ``values``, over their observed range.
+
+    The violin's rule, deliberately (``summarize_distribution(kind="violin")``): the same
+    estimator, the same bandwidth and the same "observed range only" grid, so a
+    histogram overlay and a violin of one column describe one smoothing, not two.
+
+    ``log`` fits the kernel to log10 of the values. A log-x histogram's bins are uniform
+    in log10, so that is the smoothing that matches the bars there; a linear-space kernel
+    under log bins would be wide across the short events and narrow across the long ones
+    by a factor of the dynamic range, which is not one estimate drawn on two axes.
+
+    REFUSES rather than degrades, with :class:`ValueError`: fewer than three finite
+    values, a constant sample, non-positive values under ``log``, or more than
+    :data:`MAX_VIOLIN_SAMPLES` values -- nothing here subsamples. Non-finite values are
+    the caller's to drop and disclose (the histogram already does, by count).
+    """
+    if type(points) is not int or not 32 <= points <= 2048:
+        raise ValueError("KDE grid size must be an integer from 32 to 2048.")
+    sample = np.asarray(values, dtype=np.float64).ravel()
+    if not np.all(np.isfinite(sample)):
+        raise ValueError("KDE values must be finite; drop non-finite rows first.")
+    if sample.size > MAX_VIOLIN_SAMPLES:
+        raise ValueError(f"KDE is limited to {MAX_VIOLIN_SAMPLES:,} values per series "
+                         f"({sample.size:,} given); no sampling is performed automatically.")
+    if log:
+        if np.any(sample <= 0):
+            raise ValueError("A log-space KDE needs positive values.")
+        space = np.log10(sample)
+    else:
+        space = sample
+    if space.size < 3:
+        raise ValueError(f"a KDE needs at least 3 values ({space.size} given)")
+    if np.all(space == space[0]):
+        raise ValueError("a KDE of a constant sample has no width")
+    try:
+        kernel = gaussian_kde(space, bw_method="scott")
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(f"the sample is degenerate ({exc})") from exc
+    grid = np.linspace(float(space.min()), float(space.max()), points)
+    f = np.asarray(kernel(grid), dtype=np.float64)
+    bandwidth = float(np.sqrt(kernel.covariance[0, 0]))
+    if not np.all(np.isfinite(f)) or not np.isfinite(bandwidth) or bandwidth <= 0:
+        raise ValueError("non-finite density or bandwidth")
+    if log:
+        x = np.power(10.0, grid)
+        # The endpoints are pinned back onto the sample's own extremes: 10**log10(v)
+        # can land an ulp inside v, and the curve must not start inside the bars.
+        x[0], x[-1] = float(sample.min()), float(sample.max())
+        density = f / (x * np.log(10.0))
+        per_decade = _frozen(f)
+    else:
+        x, density, per_decade = grid, f, None
+    return KdeCurve(_frozen(x), _frozen(density), per_decade, bool(log), bandwidth,
+                    float(kernel.factor), int(sample.size))

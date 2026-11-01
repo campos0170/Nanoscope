@@ -335,6 +335,11 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     # -- status / chrome ----------------------------------------------------------------
     "analysis_panel.baselineJobStatus": "progress text for the baseline probe",
     "analysis_panel.runRefused": "the run gate declining a start — nothing ran, nothing moved",
+    "analysis_panel.thresholdLinesChanged": "View ▸ Show detection thresholds: the sentence "
+                                            "describing the rails drawn on the main trace "
+                                            "(or why none are) — status bar text (see "
+                                            "_on_threshold_lines_changed); no surface window "
+                                            "draws the rails, and no frame moved",
     "analysis_panel.stalenessChanged": "the shown result was re-judged for staleness — wired "
                                        "separately to _push_stale_columns (S7-POP1), which "
                                        "pushes the table's badge tuple + the banner sentence "
@@ -1657,6 +1662,13 @@ class MainWindow(QtWidgets.QMainWindow):
         act_forward = view_menu.addAction("Zoom &Forward")
         act_forward.setShortcuts([QtGui.QKeySequence("Ctrl+Right"), QtGui.QKeySequence("Alt+Right")])
         act_forward.triggered.connect(self._trace_view.view_forward)
+        # Greyed out when there is nowhere to go. The view decides, because only it knows
+        # that a zoom still inside its 250 ms debounce is already a step Back will take — a
+        # disabled action drops its shortcut as well, so a menu that followed the committed
+        # trail alone would swallow the quick Ctrl+← after a dive (TraceView.zoom_history_state).
+        self._act_zoom_back, self._act_zoom_forward = act_back, act_forward
+        self._trace_view.sigZoomHistoryChanged.connect(self._sync_zoom_history_actions)
+        self._sync_zoom_history_actions(*self._trace_view.zoom_history_state())
 
         act_reset = view_menu.addAction("&Reset zoom")
         act_reset.setShortcut(QtGui.QKeySequence("Ctrl+0"))
@@ -1716,6 +1728,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_centre_selection.setEnabled(False)
         self._act_centre_selection.triggered.connect(self._centre_selection_in_view)
 
+        # JUMPS, BY THE TWO NAMES A NUMBER HAS ON THIS SCREEN: an event's ID (the table's
+        # event_id column — not a row number and not the inspector's position in a filter)
+        # and a time on the trace axis's own clock. Ctrl+J / Ctrl+Shift+J are bound nowhere
+        # else: the trace's own G / Shift+G (next / previous window) are bare letters, the
+        # event table's j / k are too, and key_sequences.py holds only Undo / Redo. Window
+        # context like the rest of this menu; a docked Event inspector gives its own Ctrl+J up
+        # to this action (EventInspectorWindow.set_host), which routes to the same jump.
+        view_menu.addSeparator()
+        self._act_go_to_event = view_menu.addAction("&Go to event…")
+        self._act_go_to_event.setShortcut(QtGui.QKeySequence("Ctrl+J"))
+        self._act_go_to_event.setToolTip(
+            "Type an event ID (the event table's event_id column) to select that event and "
+            "zoom the trace to it.")
+        self._act_go_to_event.triggered.connect(self._go_to_event_dialog)
+        self._act_go_to_time = view_menu.addAction("Go to &time…")
+        self._act_go_to_time.setShortcut(QtGui.QKeySequence("Ctrl+Shift+J"))
+        self._act_go_to_time.setToolTip(
+            "Type a time as the trace's x axis reads it (on the clock its label names, as the "
+            "crosshair reads it) to centre the view there without changing the zoom.")
+        self._act_go_to_time.triggered.connect(self._go_to_time_dialog)
+
         self._act_boxzoom = view_menu.addAction("Drag draws &zoom box")
         self._act_boxzoom.setCheckable(True)
         self._act_boxzoom.setChecked(True)   # default: drag a box around an event to dive in
@@ -1739,6 +1772,40 @@ class MainWindow(QtWidgets.QMainWindow):
             "Needs Measure event.")
         self._act_draw_mode.setEnabled(False)
         self._act_draw_mode.toggled.connect(self._on_draw_mode_toggled)
+
+        # What the detector compared the signal with, for the table on screen. Off by
+        # default and no shortcut: an inspection aid, not a mode. The panel that owns the
+        # table draws it (or refuses, with a reason); the sentence it answers with goes to
+        # the status bar AND stays on the action as its status tip, so hovering the item
+        # says again why a ticked box drew nothing.
+        self._act_thresholds = view_menu.addAction("Show detection t&hresholds")
+        self._act_thresholds.setCheckable(True)
+        self._act_thresholds.setChecked(False)
+        self._act_thresholds.setToolTip(
+            "Draw the thresholds the event table on screen was detected with: Schmitt enter "
+            "(dashed) and exit (dotted) levels, or the CUSUM drift level (dash-dot), as "
+            "tracks that follow the detector's moving baseline. Nothing is drawn, with the "
+            "reason on the status bar, for a stale table, an ML or hand-made table, or a "
+            "chain whose signal is not at the trace's level (high-pass, drift removal, "
+            "Normalize).")
+        self._act_thresholds.toggled.connect(
+            self._analysis_panel.set_detection_thresholds_shown)
+        self._analysis_panel.thresholdLinesChanged.connect(self._on_threshold_lines_changed)
+        # The ML table's kept probability as a strip under the trace. A view preference, so
+        # always enabled and never a recompute: the AnalysisPanel draws it while an ML table
+        # is on screen and says on the status bar when there is none. No shortcut: it is set
+        # once per session rather than toggled while scanning, and a key would need an owner
+        # in gui/key_sequences.py / gui/trace_keys.py first.
+        self._act_confidence_track = view_menu.addAction("ML confidence tr&ack")
+        self._act_confidence_track.setCheckable(True)
+        self._act_confidence_track.setChecked(False)
+        self._act_confidence_track.setToolTip(
+            "Show the ML detector's probability in a thin pane under the trace while an ML "
+            "table is shown, with the enter and exit thresholds the run used. Display only. "
+            "The probability is kept for the session that ran the detector and is not saved "
+            "in projects.")
+        self._act_confidence_track.toggled.connect(
+            self._analysis_panel.set_confidence_track_shown)
 
         view_menu.addSeparator()
         panels = view_menu.addMenu("&Panels")
@@ -4004,6 +4071,13 @@ class MainWindow(QtWidgets.QMainWindow):
             f"(+ the chain in {out['meta'].name}).", 8000)
         self._disclose_identity_notes("Export processed trace", list(out.values()))
 
+    def _on_threshold_lines_changed(self, note: str) -> None:
+        """The threshold lines' sentence: on the status bar now, and on the action for later.
+        Empty (the toggle is off) clears the status tip and says nothing."""
+        self._act_thresholds.setStatusTip(note)
+        if note:
+            self.statusBar().showMessage(note, 12000)
+
     def _on_draw_mode_toggled(self, checked: bool) -> None:
         """The menu item turns draw mode on or off through the trace keys' own door, and the
         item follows the mode back when the view changes it itself (the target pane went)."""
@@ -4296,6 +4370,178 @@ class MainWindow(QtWidgets.QMainWindow):
         # x shifts sub-sample cursor positions, and stop_idx==n maps back to the last sample rather
         # than the legal half-open edge one sample later.
         self._pan_scrollbar.centre_on(0.5 * (x0 + x1))
+
+    # -- View ▸ Zoom Back / Forward state, Go to event…, Go to time… ----------------------------
+    def _sync_zoom_history_actions(self, back: bool, forward: bool) -> None:
+        """Grey out Zoom Back / Forward when the view says there is nowhere to go."""
+        self._act_zoom_back.setEnabled(bool(back))
+        self._act_zoom_forward.setEnabled(bool(forward))
+
+    def _ask_event_id(self, value: int, lo: int, hi: int) -> int | None:
+        """Prompt for an event ID (prefilled, cancellable). None if cancelled. A single
+        injectable seam so the suite never faces a live modal."""
+        number, ok = QtWidgets.QInputDialog.getInt(
+            self, "Go to event",
+            "Event ID — the event table's event_id column, not a row number and not the "
+            "Event inspector's position in its filter:", int(value), int(lo), int(hi), 1)
+        return int(number) if ok else None
+
+    def _go_to_event_dialog(self) -> None:
+        """View ▸ Go to event… (Ctrl+J): ask for an ID of the event table on screen."""
+        ids = self._analysis_panel.event_ids()
+        if ids.size == 0:
+            self.statusBar().showMessage(
+                "There is no event table on screen to go to an event in. Run detection, or "
+                "choose a table in the Results panel.", 8000)
+            return
+        selected = self._analysis_panel.selected_event_id()
+        start = selected if selected is not None else int(ids.min())
+        event_id = self._ask_event_id(start, int(ids.min()), int(ids.max()))
+        if event_id is not None:
+            self._go_to_event_id(event_id)
+
+    def _go_to_event_id(self, event_id: int) -> bool:
+        """Select ``event_id`` of the table on screen and frame the trace on it.
+
+        The same jump as a click on its row (AnalysisPanel.go_to_event, which re-frames even
+        when the row is already selected), and an open Event inspector follows by ID through
+        its own door, so an event outside the inspector's filter is shown under a filter that
+        holds it rather than under a position that belongs to another event. Refused with a
+        sentence, moving nothing, when the table has no such ID: IDs have gaps after a merge
+        or a delete, so the range alone does not say an ID exists.
+        """
+        event_id = int(event_id)
+        ids = self._analysis_panel.event_ids()
+        if not self._analysis_panel.go_to_event(event_id):
+            where = (f"its IDs run {int(ids.min())}–{int(ids.max())} over {ids.size:,} events"
+                     if ids.size else "there is no event table on screen")
+            self.statusBar().showMessage(
+                f"No event {event_id} in this event table — {where}.", 8000)
+            return False
+        insp = self._event_inspector
+        res = self._analysis_panel.current_detection()
+        if (insp is not None and res is not None
+                and insp.frame() is getattr(res.payload, "df", None)):
+            insp.go_to_event_id(event_id)
+        self.statusBar().showMessage(f"Event {event_id} selected and framed on the trace.", 6000)
+        return True
+
+    def _trace_axis_layer(self):
+        """The layer whose clock the trace's x axis is drawn on: the first pane's first layer,
+        the one the bottom axis label describes (TraceView.rebuild). None with nothing drawn."""
+        panes = self._trace_view.panes()
+        return panes[0].first_layer() if panes else None
+
+    def _ask_trace_time(self, label: str, value: float, lo: float, hi: float,
+                        decimals: int) -> float | None:
+        """Prompt for a value on the trace's x axis (prefilled, cancellable). None if
+        cancelled. A single injectable seam so the suite never faces a live modal."""
+        number, ok = QtWidgets.QInputDialog.getDouble(
+            self, "Go to time", label, float(value), float(lo), float(hi), int(decimals))
+        return float(number) if ok else None
+
+    def _go_to_time_dialog(self) -> None:
+        """View ▸ Go to time… (Ctrl+Shift+J): ask for a time ON THE AXIS'S CLOCK.
+
+        One clock, and the prompt names it. The axis (and the crosshair) are on the
+        instrument clock; the event table's ``t_start_s``, a hand measurement and every
+        seconds field in a panel are on the recording clock, zero at the first loaded
+        sample (USER_GUIDE §2). Typing a number from one into a control that wants the
+        other is how a headline noise figure came out 5.7x wrong, so this takes the
+        number the user reads off the axis — the one beside where they will land — and
+        quotes the axis label, which already says where t₀ is, rather than guessing which
+        clock a bare number was meant on.
+
+        The ``t_start_s`` sentence is about the NUMBERS ON SCREEN: the axis is
+        ``t_start_s`` plus the drawn offset (t₀ and the layer's alignment shift), so the
+        sentence gives that offset when it is not zero and says the two read alike when it
+        is. A
+        rebased segment is the latter — its axis is the cut's own clock, as its label says
+        — so the check is on the bare number (``float``), not on :func:`clock.clocks_agree`,
+        which answers False there on purpose, about the instrument clock behind the cut.
+        """
+        extent = self._trace_view.full_x_extent()
+        layer = self._trace_axis_layer()
+        if extent is None or layer is None:
+            self.statusBar().showMessage("Open a recording to go to a time on its trace.", 6000)
+            return
+        xax = self._trace_view.x_axis_for(layer.doc_id, layer.channel)
+        lo, hi = extent
+        view = self._trace_view.anchor_plot().vb.viewRange()[0]
+        start = min(max(0.5 * (float(view[0]) + float(view[1])), lo), hi)
+        if xax.is_time:
+            offset = self._trace_view.clock_offset_for(layer.doc_id, layer.channel)
+            drawn = 0.0 if offset is None else float(offset)
+            if clock.clocks_agree(drawn):
+                table = "The event table's t_start_s reads the same number here."
+            else:
+                # Six decimals, as the box takes, not format_t0's four: this is a number
+                # to add, and 10 µs of rounding is samples at these rates.
+                shift = f"{drawn:.6f}".rstrip("0").rstrip(".")
+                table = (f"The event table's t_start_s counts from the first loaded sample: "
+                         f"add {shift} s to one to type it here.")
+            label = (f"A time on the trace's x axis, which reads\n"
+                     f"{self._trace_view.x_axis_label()}.\n"
+                     f"Type it as the axis and the crosshair show it. {table}")
+            decimals = 6
+        else:
+            label = ("A sample number on the trace's x axis (this recording declares no "
+                     "sample rate, so the axis is in samples).")
+            decimals = 0
+        x = self._ask_trace_time(label, start, lo, hi, decimals)
+        if x is not None:
+            self._go_to_time(x)
+
+    def _go_to_time(self, x: float) -> bool:
+        """Centre the trace on axis value ``x`` (zoom kept) and put the crosshair there.
+
+        Pans through the Scan bar's own :meth:`PanScrollBar.centre_on`, the same move as
+        Centre selection in view, so the width the user chose is kept and the view stays
+        clamped to the recording. At the full-trace zoom there is nothing to pan and the
+        crosshair alone marks the instant. The crosshair is snapped to the nearest sample of
+        the axis layer, so its readout (time, value, sample index) is about a real sample.
+        """
+        extent = self._trace_view.full_x_extent()
+        layer = self._trace_axis_layer()
+        if extent is None or layer is None:
+            self.statusBar().showMessage("Open a recording to go to a time on its trace.", 6000)
+            return False
+        x = float(x)
+        lo, hi = extent
+        half = 0.5 * abs(self._trace_view.sample_dx(layer.doc_id, layer.channel))
+        if not (lo - half <= x <= hi + half):
+            self.statusBar().showMessage(
+                f"{x:.6g} is outside the trace, which runs {lo:.6g}–{hi:.6g} on its x axis "
+                f"({self._trace_view.x_axis_label()}).", 8000)
+            return False
+        idx = self._session.time_to_index(layer.doc_id, layer.channel, x, layer.time_offset_s)
+        if idx is not None:
+            x = float(self._session.x_axis(layer.doc_id, layer.time_offset_s).values[idx])
+        vb = self._trace_view.anchor_plot().vb
+        before = tuple(float(v) for v in vb.viewRange()[0])
+        self._pan_scrollbar.centre_on(x)
+        self._session.set_cursor(x)
+        after = tuple(float(v) for v in vb.viewRange()[0])
+        where = f" — sample {idx:,} (event-table index)" if idx is not None else ""
+        # SAY WHAT HAPPENED, not what was asked. At the full-trace zoom (or with the time
+        # already central) nothing pans, and near either end the clamp keeps the view inside
+        # the recording, so the time lands in view but off centre. Only the line moved then.
+        width = max(after[1] - after[0], 0.0)
+        tol = 1e-9 * max(width, 1.0)
+        if all(abs(a - b) <= tol for a, b in zip(before, after)):
+            if after[0] - tol <= x <= after[1] + tol:
+                text = (f"{x:.6g} is already in view, so the view stays as it is; the crosshair "
+                        f"marks it{where}.")
+            else:
+                text = (f"The crosshair marks {x:.6g}{where}, outside the view, which cannot "
+                        f"pan there at this zoom: View ▸ Reset zoom shows it.")
+        elif abs(0.5 * (after[0] + after[1]) - x) <= max(tol, 0.5 * half):
+            text = f"Centred the trace on {x:.6g}{where}."
+        else:
+            text = (f"Moved the trace to {x:.6g}{where}, in view but not centred: the view "
+                    f"stops where the recording does.")
+        self.statusBar().showMessage(text, 6000)
+        return True
 
     def _default_segment_name(self, parent_id: str, i0: int, i1: int) -> str:
         """The prefilled name for a new segment: ``‹parent short name› [t0–t1 s]`` (or a sample
@@ -12266,6 +12512,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 live_drafts, workspace.extra.get(DRAFT_KEY),
                 [(pkey[doc_id], {ch: channel_identity(info)[0] for ch, info in infos.items()})
                  for doc_id, infos in chinfo.items()])
+        # ...and a copy of this computer's plot presets and templates, which otherwise live
+        # in its preferences only: a project opened elsewhere then still offers the looks
+        # and recipes its figures were made with. Nothing is written for a computer that
+        # has none, so such a project's file is exactly what it was.
+        from ..core.plot_preset_state import (
+            WORKSPACE_KEY as PRESET_KEY, capture_plot_presets, has_any,
+            prepare_plot_preset_workspace,
+        )
+        from .plot_preset_sync import local_plot_presets, unreadable_preset
+        prepare_plot_preset_workspace(workspace.extra)
+        local_presets = local_plot_presets()
+        if has_any(local_presets) or PRESET_KEY in workspace.extra:
+            workspace.extra[PRESET_KEY] = capture_plot_presets(
+                local_presets, workspace.extra.get(PRESET_KEY), keep=unreadable_preset)
         state = ProjectState(
             documents=documents, segments=segments, calibrations=calibrations, layers=layers,
             view_mode=self._session.view_mode.value, results=results,
@@ -12901,6 +13161,19 @@ class MainWindow(QtWidgets.QMainWindow):
         from ..core.sample_rate_state import prepare_sample_rate_workspace
         self._restore_notes = list(prepare_acquisition_workspace(self._analytical_workspace.extra))
         self._restore_notes.extend(prepare_sample_rate_workspace(self._analytical_workspace.extra))
+        # The project's copies of plot presets and templates: added to this computer where it
+        # lacks them, never over its own, and said in the banner. A preference is never worth
+        # a failed open: this runs before the restore has opened a single recording, so an
+        # exception here would leave the window in restore mode with every history suspended.
+        from .plot_preset_sync import install_project_presets
+        try:
+            self._restore_notes.extend(install_project_presets(self._analytical_workspace.extra))
+        except Exception as exc:  # noqa: BLE001 -- reported in the banner, never aborts a restore
+            import traceback
+            traceback.print_exc()
+            self._restore_notes.append(
+                f"The plot presets and templates saved in this project could not be added to "
+                f"this computer ({exc}). They stay in the project; nothing else was affected.")
         self._restore_channel_moved = []
         self._restore_channel_lost = []
         self._restore_path_moved = []

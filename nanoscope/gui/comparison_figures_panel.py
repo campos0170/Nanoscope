@@ -21,6 +21,7 @@ from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget
 from .plot_export import DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export, write_live_plot_image, write_plot_csv
+from .plot_templates import WindowTemplateControls
 from .plot_workflow import WarningSummary, bounded_controls, control_group, install_plot_workflow
 from .source_appearance import SourceAppearanceEditor
 
@@ -209,6 +210,16 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         export = control_group("Export the generated figure", "Export the full publication canvas as PNG, PDF or SVG. "
             "Canvas zoom is only a magnifier. Save to Figure Library keeps observations, plotted geometry, "
             "settings and full Details together. Draft controls never change a saved picture.")
+        # Named recipes for another recording: figure type, measurements, layout and
+        # appearance, never the ticked sources or the generated figure. Recall is a draft.
+        self._templates = WindowTemplateControls(
+            "comparison-figures", capture=self.template_settings,
+            recall=self.apply_template_settings,
+            note="A template keeps the figure type, measurements, pair features, bins, layout, "
+                 "log axes, accepted-only choice and appearance. It never keeps your ticked "
+                 "sources, per-source colours or the generated figure. Recalling one changes "
+                 "the controls only: press Generate to use them.")
+        export.layout().addWidget(self._templates)
         for widget in (data, analysis_scroll, appearance, export):
             layout.addWidget(widget)
 
@@ -319,6 +330,26 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
             self._update_method_note()
         finally:
             self._loading = previous
+
+    def template_settings(self):
+        """``(settings, appearance)`` for a window template: the draft recipe without sources."""
+        settings = self.config()
+        settings.pop("source_keys", None)
+        return settings, self.appearance_state()
+
+    def apply_template_settings(self, settings, appearance):
+        """A recalled template: the draft controls and one appearance step, never Generate.
+
+        ``set_config`` validates the merged recipe before any control moves, so a damaged
+        template is refused whole. Sources stay as ticked. Like a hand edit, it marks the
+        figure unapplied only when a draft control actually moved.
+        """
+        before, _appearance = self.template_settings()
+        draft = {key: value for key, value in settings.items() if key != "source_keys"}
+        self.set_config(draft)
+        if self.template_settings()[0] != before:
+            self._draft_changed()
+        self._appearance_widget.apply_appearance(appearance)
 
     def selected_sources(self):
         return [self._sources[key] for key in self._selected_keys if key in self._sources]

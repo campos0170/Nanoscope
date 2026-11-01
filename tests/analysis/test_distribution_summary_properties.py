@@ -74,3 +74,64 @@ def test_sparse_and_constant_violin_uses_only_observed_points(values):
 def test_nonreal_nonvector_or_inexact_integer_inputs_refused(values):
     with pytest.raises(ValueError):
         summarize_distribution(values)
+
+
+# -- kde_curve: the histogram overlay's estimator -------------------------------------------------
+
+def test_kde_curve_is_the_violins_scott_kde_over_the_observed_range():
+    """Same estimator, bandwidth and grid rule as the violin, so one column's violin and
+    its histogram overlay describe one smoothing."""
+    from scipy.stats import gaussian_kde
+
+    from nanoscope.analysis.distribution_summary import kde_curve
+
+    values = np.random.default_rng(5).normal(3.0, 0.5, 800)
+    curve = kde_curve(values)
+    reference = gaussian_kde(values, bw_method="scott")
+    assert curve.x[0] == values.min() and curve.x[-1] == values.max()
+    np.testing.assert_allclose(curve.density, reference(curve.x), rtol=1e-12)
+    assert curve.scott_factor == pytest.approx(800 ** (-1 / 5))
+    assert curve.bandwidth == pytest.approx(np.sqrt(reference.covariance[0, 0]))
+    assert curve.per_decade is None and not curve.log and curve.n == 800
+    violin = summarize_distribution(values, kind="violin")
+    assert violin.stats["bandwidth"] == pytest.approx(curve.bandwidth)
+    assert not curve.x.flags.writeable and not curve.density.flags.writeable
+
+
+def test_kde_curve_on_log_is_fitted_in_decades_and_reported_per_stored_unit():
+    """f(x) = g(log10 x) / (x ln 10): the same density seen per stored unit, so it
+    integrates to ~1 over x, and g integrates to ~1 over decades."""
+    from nanoscope.analysis.distribution_summary import kde_curve
+
+    values = 10.0 ** np.random.default_rng(6).normal(-3.0, 0.4, 2000)
+    curve = kde_curve(values, log=True)
+    assert curve.log and curve.per_decade is not None
+    u = np.log10(curve.x)
+    np.testing.assert_allclose(curve.density, curve.per_decade / (curve.x * np.log(10.0)),
+                               rtol=1e-12)
+    over_x = np.sum(0.5 * (curve.density[1:] + curve.density[:-1]) * np.diff(curve.x))
+    over_u = np.sum(0.5 * (curve.per_decade[1:] + curve.per_decade[:-1]) * np.diff(u))
+    assert 0.97 < over_x <= 1.0 and 0.97 < over_u <= 1.0
+    assert curve.bandwidth == pytest.approx(
+        np.std(np.log10(values), ddof=1) * 2000 ** (-1 / 5), rel=1e-6)
+
+
+@pytest.mark.parametrize("values,log,match", [
+    ([1.0, 2.0], False, "at least 3"),
+    ([2.0, 2.0, 2.0, 2.0], False, "constant"),
+    ([1.0, -1.0, 2.0, 3.0], True, "positive"),
+    ([1.0, np.nan, 2.0, 3.0], False, "finite"),
+])
+def test_kde_curve_refuses_instead_of_degrading(values, log, match):
+    from nanoscope.analysis.distribution_summary import kde_curve
+
+    with pytest.raises(ValueError, match=match):
+        kde_curve(np.asarray(values), log=log)
+
+
+def test_kde_curve_never_subsamples(monkeypatch):
+    import nanoscope.analysis.distribution_summary as ds
+
+    monkeypatch.setattr(ds, "MAX_VIOLIN_SAMPLES", 10)
+    with pytest.raises(ValueError, match="no sampling"):
+        ds.kde_curve(np.arange(11, dtype=float))

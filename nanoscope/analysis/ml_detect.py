@@ -88,6 +88,7 @@ __all__ = [
     "create_multiscale_features_A",
     "clip_activation",
     "predict_probability",
+    "window_starts",
     "decode_regions",
     "ml_detect_regions",
 ]
@@ -857,6 +858,47 @@ def create_multiscale_features_A(
 # ---------------------------------------------------------------------------
 # Inference: sliding window, 50 % overlap, overlap-average. TF only inside.
 # ---------------------------------------------------------------------------
+def window_starts(
+    n: int,
+    window: int,
+    *,
+    anchor_tail: bool = True,
+    last_start_inclusive: bool = False,
+) -> list[int]:
+    """The first sample of every window :func:`predict_probability` feeds the model, for a
+    signal of ``n`` samples and a model window of ``window``; windows step by ``window // 2``.
+
+    THE ONE PLACE THE TAIL POLICY IS SPELLED. It is a function of its own, rather than lines
+    inside the inference loop, because the loop is no longer its only reader: the kept
+    probability (`core.confidence.ConfidenceTrack`) records how far the windows reached, so a
+    view can leave the samples no window saw EMPTY instead of drawing them as the 0 the loop
+    leaves there. Two copies of this rule would be two answers to "which samples did the
+    model see". See :func:`predict_probability` for what each policy reproduces.
+    """
+    n = int(n)
+    W = int(window)
+    step = max(1, W // 2)
+    if anchor_tail:
+        starts = list(range(0, max(1, n - W + 1), step))
+        if n >= W and starts[-1] != n - W:  # anchor a final window; the tail is covered
+            starts.append(n - W)
+    elif last_start_inclusive:
+        # Apo notebook contract: `np.arange(0, max(1, n - W + 1), step)`. The bound
+        # is INCLUSIVE of n - W, so a recording whose length lands exactly on a
+        # stride is fully covered; otherwise the tail past the last start stays at
+        # probability 0, same as the ferritin loop. `max(1, ...)` is the notebook's
+        # own guard and yields the single zero-padded window when n <= W.
+        starts = list(range(0, max(1, n - W + 1), step))
+    else:
+        # Ferritin notebook contract: `for start in range(0, n - W, step)`. The tail
+        # past the last full stride gets no window at all and stays at probability 0.
+        # The `or [0]` only fires when n <= W, where the notebook loop would emit NO
+        # windows and hand back an all-zero trace; one zero-padded window is strictly
+        # more useful and cannot affect any n > W run.
+        starts = list(range(0, max(0, n - W), step)) or [0]
+    return starts
+
+
 def predict_probability(
     model_wrapper: KerasEventModel,
     signal: np.ndarray,
@@ -929,27 +971,10 @@ def predict_probability(
                 "the multiscale features per window"
             )
         fs = float(fs)
-    step = max(1, W // 2)
     batch = max(1, int(batch))
 
-    if anchor_tail:
-        starts = list(range(0, max(1, n - W + 1), step))
-        if n >= W and starts[-1] != n - W:  # anchor a final window; the tail is covered
-            starts.append(n - W)
-    elif last_start_inclusive:
-        # Apo notebook contract: `np.arange(0, max(1, n - W + 1), step)`. The bound
-        # is INCLUSIVE of n - W, so a recording whose length lands exactly on a
-        # stride is fully covered; otherwise the tail past the last start stays at
-        # probability 0, same as the ferritin loop. `max(1, ...)` is the notebook's
-        # own guard and yields the single zero-padded window when n <= W.
-        starts = list(range(0, max(1, n - W + 1), step))
-    else:
-        # Ferritin notebook contract: `for start in range(0, n - W, step)`. The tail
-        # past the last full stride gets no window at all and stays at probability 0.
-        # The `or [0]` only fires when n <= W, where the notebook loop would emit NO
-        # windows and hand back an all-zero trace; one zero-padded window is strictly
-        # more useful and cannot affect any n > W run.
-        starts = list(range(0, max(0, n - W), step)) or [0]
+    starts = window_starts(n, W, anchor_tail=anchor_tail,
+                           last_start_inclusive=last_start_inclusive)
     total = len(starts)
 
     out = np.zeros(n, dtype=np.float32)

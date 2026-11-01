@@ -160,6 +160,7 @@ from ..analysis.reconcile import (
 )
 from ..analysis.scoring import ADDED_COLUMN, ensure_added_column, score_detection
 from ..core.analysis import AnalysisResult, OverlayHint, OverlayKind
+from ..core.confidence import NOT_KEPT_NOTE, ConfidenceTrack
 from ..core import clock
 from ..core.segment import persistent_key
 from ..core.session import Session
@@ -178,7 +179,8 @@ from .hand_row_preview import HandRowPreview
 from .measure_panel import MeasurePanel
 from .merge_panel import MergePanel
 from .panels import DetectionPanel, EventTable, ScorePanel, StatsPanel, SweepDialog, _near
-from .overlays import STEP_LEVEL_HEX
+from .overlays import (EDGE_CORRECTED, EDGE_HAND, EDGE_MARK_HEX, STEP_LEVEL_HEX,
+                       THRESHOLD_TRACK_HEX)
 from .trace_view import TraceView
 
 __all__ = ["AnalysisPanel", "MergeReport"]
@@ -1247,6 +1249,10 @@ class AnalysisPanel(QtWidgets.QWidget):
     conditioningStateChanged = QtCore.Signal()
     #: A sentence for the status bar (protocol import/export, Copy as Python).
     statusMessage = QtCore.Signal(str)
+    #: What the detection-threshold lines on the trace now show, or why there are none
+    #: (`detection_thresholds_note`). Emitted when the toggle moves and whenever the
+    #: sentence changes; ``""`` when the toggle is off.
+    thresholdLinesChanged = QtCore.Signal(str)
     #: A hand-made event was filed: its ``event_id`` and the table's module id. The windows that
     #: show the table land on it quietly (no zoom, no pan), which `resultsChanged` cannot tell
     #: them to do.
@@ -1290,6 +1296,23 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._gate_shown: tuple[bool, str] | None = None
         self._overlay_ids: list[str] = []      # span overlays for the current result
         self._marker_id: str | None = None      # the single selected-event marker
+        #: View > Show detection thresholds. OFF by default and not saved: a display
+        #: preference for the table on screen, owned here because this panel owns that table.
+        self._thresholds_shown = False
+        self._threshold_note = ""
+        #: ``(key, ThresholdTracks | message)`` for the last table reproduced, keyed on
+        #: everything the rails depend on (`threshold_signal_key` plus the recording, its
+        #: calibration and length) -- so a curation edit, which re-judges staleness, never
+        #: rebuilds the baseline.
+        self._threshold_cache: tuple[tuple, object] | None = None
+        #: The key the rails now standing on the trace were drawn from, so a re-judge that
+        #: changed nothing re-issues nothing.
+        self._threshold_drawn_key: tuple | None = None
+        #: View > ML confidence track: whether the user asked for the ML table's probability
+        #: pane. A PREFERENCE, not a fact about a table -- it stands across table switches
+        #: and recordings, and the pane is drawn only while an ML table is on screen
+        #: (`_sync_confidence_track`). Off at every launch.
+        self._confidence_shown = False
         #: event_id -> subpopulation id, or None. A VIEW of a finished report, installed by
         #: MainWindow (see set_subpop_labels); never read from, and never written to, the
         #: events frame.
@@ -1673,7 +1696,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         self.results_tabs.addTab(InspectorScrollArea(self._stats.fits_page), "Fits")
         self.results_tabs.addTab(InspectorScrollArea(self._score), "Quality")
         for index, tip in enumerate((
-                "The event table: one row per event, curated with the checkbox or a/r/f.",
+                "The event table: one row per event, curated with the checkbox or a/r/f. "
+                "On the trace, a dashed edge is a boundary moved by hand (an Event Inspector "
+                "mask drag or a merge) and dotted edges mark an event drawn by hand; "
+                "unmarked edges are where the detector put them. A table saved before the "
+                "detector's own bounds were recorded can mark only hand-drawn events and "
+                "merges that took one in.",
                 "Counts, rates and distributions of this table, with its advisories.",
                 "Dwell and depth fits of the accepted events of the table shown. A fit "
                 "made on another table, or before this one changed, is not shown.",
@@ -1864,6 +1892,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._baseline_conditioned_cache = None
         self._clear_overlays()
         self._clear_marker()
+        self._clear_threshold_lines()
         self._selected_id = None
         self._trace_view.clear_filter_preview()
         self._baseline_workspace.clear_preview(
@@ -5430,6 +5459,7 @@ class AnalysisPanel(QtWidgets.QWidget):
             if hint.kind is OverlayKind.SPAN:
                 continue   # spans come from the curated df above, not the frozen detection snapshot
             self._overlay_ids.append(self._trace_view.add_overlay(doc_id, channel, hint))
+        self._sync_confidence_track(res)
 
         self._check_staleness(res)
         self._refresh_fit_text()
@@ -5750,6 +5780,11 @@ class AnalysisPanel(QtWidgets.QWidget):
             return   # nothing accepted -> no shaded spans (an honest empty overlay)
         for hint in self._span_hints(df, accepted, starts, stops):
             self._overlay_ids.append(self._trace_view.add_overlay(doc_id, channel, hint))
+        # The edges a person moved or drew, marked over the same accepted spans. Built here,
+        # beside the spans, so every path that redraws the spans -- a curation edit, a mask
+        # drag, Revert, a merge, an undo -- redraws the marks from the same rows.
+        for hint in self._edge_hints(df, accepted):
+            self._overlay_ids.append(self._trace_view.add_overlay(doc_id, channel, hint))
         # ...and the fitted sub-state levels ON TOP of those spans, whenever a level fit
         # is stored for this selection. Tracked in the same _overlay_ids list, so every
         # path that clears/rebuilds the spans clears/rebuilds the levels with them.
@@ -5833,6 +5868,151 @@ class AnalysisPanel(QtWidgets.QWidget):
                 name=(f"subpop {cid}" if cid >= 0 else "not in the report"),
             ))
         return out
+
+    # -- marks on the edges a person moved or drew -----------------------------------------------
+    def _edge_hints(self, df, accepted: np.ndarray) -> list[OverlayHint]:
+        """At most TWO EDGE hints for the accepted rows: corrected edges, hand-made events.
+
+        The rule is `analysis.boundary_marks` (detector rows compared with their recorded
+        original bounds; hand-made rows by the one hand-made definition), so the trace and the
+        Inspector's Revert agree about which edges moved. An edge is its row's ``start_idx`` or
+        its half-open ``end_idx``, the same indices the span shade is drawn from. A table with
+        neither kind of row adds nothing, so a fresh detection's overlays are what they were.
+        """
+        from ..analysis.boundary_marks import boundary_marks
+
+        marks = boundary_marks(df)
+        starts = df["start_idx"].to_numpy(dtype=np.int64)
+        ends = df["end_idx"].to_numpy(dtype=np.int64)
+        acc = np.asarray(accepted, dtype=bool)
+        hand = acc & marks.hand
+        corrected = np.concatenate((starts[acc & marks.start_corrected],
+                                    ends[acc & marks.end_corrected]))
+        out: list[OverlayHint] = []
+        if corrected.size:
+            out.append(OverlayHint(OverlayKind.EDGE, starts=corrected, label=EDGE_CORRECTED,
+                                   color=EDGE_MARK_HEX, name="boundary moved by hand"))
+        if hand.any():
+            out.append(OverlayHint(OverlayKind.EDGE,
+                                   starts=np.concatenate((starts[hand], ends[hand])),
+                                   label=EDGE_HAND, color=EDGE_MARK_HEX,
+                                   name="event drawn by hand"))
+        return out
+
+    # -- View > Show detection thresholds ----------------------------------------------------------
+    def set_detection_thresholds_shown(self, on: bool) -> str:
+        """Draw (or stop drawing) the thresholds the table on screen was detected with.
+
+        Returns the sentence that now describes them -- what is drawn, or why nothing is --
+        and emits it (`thresholdLinesChanged`) even when it did not change: a toggle the user
+        just moved deserves an answer on the status bar.
+        """
+        self._thresholds_shown = bool(on)
+        before = self._threshold_note
+        self._apply_threshold_lines()
+        if self._threshold_note == before:     # `_say_thresholds` emitted only on a change
+            self.thresholdLinesChanged.emit(self._threshold_note)
+        return self._threshold_note
+
+    def detection_thresholds_shown(self) -> bool:
+        return self._thresholds_shown
+
+    def detection_thresholds_note(self) -> str:
+        """What the threshold lines on the trace show, or why there are none ("" when off)."""
+        return self._threshold_note
+
+    def _say_thresholds(self, note: str) -> None:
+        if note != self._threshold_note:
+            self._threshold_note = note
+            self.thresholdLinesChanged.emit(note)
+
+    def _clear_threshold_lines(self) -> None:
+        self._trace_view.clear_threshold_tracks()
+        self._threshold_drawn_key = None
+
+    def _apply_threshold_lines(self) -> None:
+        """Put on the trace exactly what the toggle asks for the table on screen, or say why not.
+
+        CLEAR-THEN-APPLY, the rule `_apply_baseline_views` keeps and for its reason: the rails
+        are a per-layer request behind a per-table toggle, so a rail left from the previous
+        table would be claimed by nothing on screen. The only exception is a re-judge that
+        changed nothing (the same table, the same key): the standing rails are left alone.
+
+        Every refusal is a sentence and draws nothing -- the rule the app's other honest
+        surfaces keep: a stale table, an ML/hand-made/reconciled table, a chain that moves
+        the localization signal off the trace's level, or a record the reproduction does not
+        land on (`analysis.detection_thresholds`). Display only: no table, sample or zoom is
+        touched, and the reproduction is cached so curation never pays for it twice.
+        """
+        from ..analysis.detection_thresholds import (
+            ThresholdsUnavailable, detection_threshold_tracks, threshold_refusal,
+            threshold_signal_key)
+
+        prefix = "Detection thresholds are not drawn: "
+        if not self._thresholds_shown:
+            self._clear_threshold_lines()
+            self._say_thresholds("")
+            return
+        res = self._stored_detection()
+        if res is None or not isinstance(res.payload, EventSet):
+            self._clear_threshold_lines()
+            self._say_thresholds(prefix + "there is no event table on screen.")
+            return
+        doc_id, channel = res.doc_id, int(res.channel)
+        if not self._session.has_document(doc_id):
+            self._clear_threshold_lines()
+            self._say_thresholds(prefix + "the table's recording is closed.")
+            return
+        prov = res.payload.provenance or {}
+        # THE AMBER LINE'S OWN JUDGE, not a second copy of its rules: what it calls stale
+        # for the sample indices or the gain is stale for the thresholds too.
+        if self._sample_rate_staleness(res) is not None or self._calibration_moved(res):
+            self._clear_threshold_lines()
+            self._say_thresholds(
+                prefix + "this table is stale (the calibration or the sample rate changed "
+                "since it was detected), so its thresholds are not levels of the trace drawn "
+                "now. Re-run the detection to draw them.")
+            return
+        chan = self._session.calibrated(doc_id, channel)
+        n = int(np.asarray(chan.data).size)
+        reason = threshold_refusal(res.module_id, prov, n_samples=n)
+        if reason is not None:
+            self._clear_threshold_lines()
+            self._say_thresholds(prefix + reason)
+            return
+        try:
+            calib = tuple(self._session.calibration(doc_id, channel).fingerprint())
+        except Exception:  # noqa: BLE001 — a missing calibration is a key, not an error
+            calib = None
+        key = (doc_id, channel, res.module_id, n, chan.sample_rate_hz, calib,
+               threshold_signal_key(prov))
+        if key == self._threshold_drawn_key and self._trace_view.has_threshold_tracks(
+                doc_id, channel):
+            return
+        cached = self._threshold_cache
+        if cached is not None and cached[0] == key:
+            outcome = cached[1]
+        else:
+            try:
+                signal, fs = self._active_signal(prov, strict=True, key=(doc_id, channel))
+                if signal is None or fs is None:
+                    raise ThresholdsUnavailable("the recording has no sample rate.")
+                outcome = detection_threshold_tracks(signal, fs, prov, module_id=res.module_id)
+            except ThresholdsUnavailable as exc:
+                outcome = str(exc)
+            except Exception as exc:                 # noqa: BLE001
+                # A display toggle must not take the window down, and must not go silent.
+                outcome = f"the detector's signal could not be rebuilt ({exc})."
+            self._threshold_cache = (key, outcome)
+        self._clear_threshold_lines()
+        if isinstance(outcome, str):
+            self._say_thresholds(prefix + outcome)
+            return
+        self._trace_view.set_threshold_tracks(doc_id, channel, [
+            (rail.label, rail.name, rail.idx, rail.values, THRESHOLD_TRACK_HEX)
+            for rail in outcome.rails])
+        self._threshold_drawn_key = key
+        self._say_thresholds(outcome.description)
 
     # -- detector score (vs the user's curation) -------------------------------------------------
     def _refresh_score(self) -> None:
@@ -7721,6 +7901,35 @@ class AnalysisPanel(QtWidgets.QWidget):
         :meth:`_on_event_selected`. The panel stays the owner of the table + overlays."""
         self._table.select_event(int(event_id))
 
+    def event_ids(self) -> np.ndarray:
+        """The ``event_id`` column of the event table on screen (empty when there is none)."""
+        res = self._stored_detection()
+        if res is None or not isinstance(res.payload, EventSet):
+            return np.empty(0, dtype=np.int64)
+        df = res.payload.df
+        if "event_id" not in df.columns:
+            return np.empty(0, dtype=np.int64)
+        return df["event_id"].to_numpy(dtype=np.int64)
+
+    def go_to_event(self, event_id: int) -> bool:
+        """View ▸ Go to event…: select ``event_id`` AND frame the trace on it, every time.
+
+        :meth:`select_event` is a table-row click, and a click on the row that is already
+        current changes no selection, so nothing re-zooms: after panning away from the
+        selected event, "go to" it would have done nothing at all. When the selection did
+        not run (the marker is the one that was there before) this runs the same framing a
+        selection change runs (:meth:`_on_event_selected`), so the two ways in cannot frame
+        differently. ``False`` when the table on screen has no such event — nothing is
+        moved then.
+        """
+        if not np.any(self.event_ids() == int(event_id)):
+            return False
+        before = (self._selected_id, self._marker_id)
+        self._table.select_event(int(event_id))
+        if (self._selected_id, self._marker_id) == before:
+            self._on_event_selected(int(event_id))
+        return True
+
     def set_event_accepted(self, event_id: int, accepted: bool) -> None:
         """Public entry point (the Event Inspector) to curate one event THROUGH the table model,
         so the checkbox repaints and the summary + span overlays refresh via the model's
@@ -8201,6 +8410,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._stale.refresh_inputs()
         self.stalenessChanged.emit()
         self._schedule_chain_judge()     # after the existing logic; never raises
+        # The threshold lines are judged at the same moment, by the same judge: a table the
+        # amber line calls stale has thresholds that are not this trace's either.
+        self._apply_threshold_lines()
 
     def _judge_staleness(self, res: AnalysisResult) -> None:
         """Mark the shown result stale when either stamp no longer matches. Never fix it.
@@ -8963,6 +9175,55 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._trace_view.remove_overlay(self._marker_id)
             self._marker_id = None
 
+    # -- the ML confidence pane (View > ML confidence track) ------------------------------------
+    def set_confidence_track_shown(self, on: bool) -> None:
+        """Ask for (or withdraw) the confidence pane under the trace for ML tables.
+
+        Called by MainWindow's View action. Turning it on with no ML table on screen draws
+        nothing, and says so on the status bar: an option that does nothing silently reads
+        as an option that is broken."""
+        self._confidence_shown = bool(on)
+        res = self._stored_detection()
+        drawn = self._sync_confidence_track(res)
+        if self._confidence_shown and not drawn:
+            if self._trace_view.confidence_requested():
+                # An ML table IS on screen, but its channel is not a pane of the trace (the
+                # layer is hidden). The request stands and the pane appears with the channel.
+                self.statusMessage.emit(
+                    "ML confidence track: the ML table's channel is hidden in the trace. "
+                    "Show the channel to draw it.")
+            else:
+                self.statusMessage.emit(
+                    "ML confidence track: no ML table on screen. It is drawn under the trace "
+                    "while an ML detection's table is shown.")
+
+    def confidence_track_shown(self) -> bool:
+        """Whether the user has asked for the confidence pane (drawn or not)."""
+        return self._confidence_shown
+
+    def _sync_confidence_track(self, res: AnalysisResult | None) -> bool:
+        """THE ONE WRITER of the confidence-pane request, from the table on screen.
+
+        Called from both halves of a repoint (:meth:`_show_result` and its negative twin
+        :meth:`_clear_results`, and :meth:`_show_empty`), so the pane can only ever describe
+        the table the Results dock is showing: an ML table's pane never survives a switch to
+        the Schmitt table or to another recording. An ML table with no kept probability (one
+        restored from a project, or detected before it was kept) gets the pane with
+        :data:`NOT_KEPT_NOTE` instead of a curve. Display only -- nothing here touches the
+        table. Returns whether the pane is ON SCREEN now: an ML table whose channel is hidden
+        gets a standing request (drawn when the channel comes back) and returns False, so
+        the View action can say why nothing appeared."""
+        if (not self._confidence_shown or res is None or res.module_id != _ML_MODULE_ID
+                or not isinstance(res.payload, EventSet)):
+            if self._trace_view.confidence_requested():
+                self._trace_view.clear_confidence_track()
+            return False
+        track = getattr(res, "confidence", None)
+        if isinstance(track, ConfidenceTrack):
+            return self._trace_view.set_confidence_track(res.doc_id, res.channel, track)
+        return self._trace_view.set_confidence_track(res.doc_id, res.channel, None,
+                                                     note=NOT_KEPT_NOTE)
+
     def _clear_results(self) -> None:
         """THE NEGATIVE TWIN OF :meth:`_show_result` — the other half of one repoint.
 
@@ -9040,8 +9301,11 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._measure.set_detection_present(False)
         self._merge.set_detection_present(False)
         self._stats.set_detection_present(False)
+        self._sync_confidence_track(None)
         self._sync_result_selector()
         self._schedule_chain_judge()
+        # ...and the threshold lines, whose absence is said rather than left standing.
+        self._apply_threshold_lines()
 
     def _show_empty(self) -> None:
         # The form leaves before the two resets below move it (a closed recording's form
@@ -9052,8 +9316,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._baseline_conditioned_cache = None
         self._clear_overlays()
         self._clear_marker()
+        self._clear_threshold_lines()   # `_clear_results` below says why there are none
         self._selected_id = None
         self._trace_view.clear_filter_preview()
+        self._sync_confidence_track(None)
         # The preview error line belongs to the recording it named; with none
         # selected there is nothing it could be about (same rule as set_selection).
         self._detection.set_preview_error("")

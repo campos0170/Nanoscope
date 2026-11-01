@@ -36,6 +36,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui
 
+from ..analysis.detection_thresholds import RAIL_DRIFT, RAIL_ENTER, RAIL_EXIT
 from ..core.analysis import OverlayHint, OverlayKind
 from ..core.session import Session
 from ..plot.style import BASELINE_TRACK_INK, LEVEL_INK
@@ -44,12 +45,19 @@ from .trace_view import register_overlay_renderer
 __all__ = [
     "SpanOverlayItem",
     "StepOverlayItem",
+    "EdgeOverlayItem",
     "STEP_LEVEL_HEX",
     "render_spans",
     "render_hline",
     "BASELINE_TRACK_HEX",
+    "THRESHOLD_TRACK_HEX",
+    "EDGE_MARK_HEX",
+    "EDGE_CORRECTED",
+    "EDGE_HAND",
     "render_step",
     "render_marker",
+    "render_threshold",
+    "render_edges",
     "register_all_renderers",
 ]
 
@@ -141,6 +149,31 @@ _STEP_MIN_PX = 3.0
 BASELINE_TRACK_HEX = BASELINE_TRACK_INK
 _BASELINE_TRACK_WIDTH = 2   # 1 px of dash inside a noisy 1-2 px trace is speckle, not a line
 _BASELINE_CASING_WIDTH = 5  # always > the ink: the rail is a border, not a second line
+
+# -- the detector's thresholds, drawn as the rails it compared the signal with -------------------
+#: The threshold rails' ink: the event-span amber, because the rail says where the detector
+#: drew the line that made those spans. Laid on the same dark casing as the baseline rail, for
+#: the measured reason `render_hline` gives -- no ink is legible over every layer colour, the
+#: casing-plus-ink composite is. Amber at full opacity reads clearly over its own 60/255 shade.
+THRESHOLD_TRACK_HEX = "#FFB74D"
+#: FORM CARRIES WHICH RAIL IS WHICH, not colour (all three share one ink): dashed is where an
+#: event starts, dotted where it ends, dash-dot the CUSUM drift. A pattern survives every
+#: colour-vision deficiency and a greyscale print; a fourth amber shade would not.
+_THRESHOLD_DASHES = {
+    RAIL_ENTER: QtCore.Qt.DashLine,
+    RAIL_EXIT: QtCore.Qt.DotLine,
+    RAIL_DRIFT: QtCore.Qt.DashDotLine,
+}
+
+# -- the marks on edges a person moved or drew ---------------------------------------------------
+#: The edge marks' identities (``OverlayHint.label``) and their ink. A near-white, not a hue:
+#: the span under the mark may be coloured by SUBPOPULATION, and a coloured edge would read
+#: as a class. Dashed and dotted carry the two meanings, for the same reason as the rails.
+EDGE_CORRECTED = "edges.corrected"
+EDGE_HAND = "edges.hand"
+EDGE_MARK_HEX = "#E8EAED"
+_EDGE_DASHES = {EDGE_CORRECTED: QtCore.Qt.DashLine, EDGE_HAND: QtCore.Qt.DotLine}
+_EDGE_WIDTH = 2             # cosmetic px; a 1 px dash pattern on a dark pane is a dotted haze
 
 
 # ------------------------------------------------------------------------------------------------
@@ -454,6 +487,99 @@ class StepOverlayItem(pg.PlotDataItem):
 
 
 # ------------------------------------------------------------------------------------------------
+# The edge-mark item — every moved or hand-drawn edge in ONE paint(), one line per pixel column.
+# ------------------------------------------------------------------------------------------------
+class EdgeOverlayItem(pg.GraphicsObject):
+    """Full-height vertical marks at event edges a person moved (dashed) or drew (dotted).
+
+    The same contract as :class:`SpanOverlayItem`, because the same 1e3-1e5 rows can carry
+    it: ONE graphics item per hint, a ``boundingRect`` that follows the view, and a paint
+    whose cost is bounded by what is visible. Cheaper still than the span's: the edges are
+    kept SORTED, so the visible slice is two ``searchsorted`` calls rather than a mask over
+    every edge, and the slice is then merged to one mark per device pixel column -- two edges
+    closer than a pixel are one mark on screen however many there are, so the loop that
+    draws is O(min(visible edges, viewport pixels)).
+
+    NO PIXEL FLOOR IS NEEDED and none is applied: a mark is a cosmetic stroke, 2 px wide
+    whatever the zoom, so unlike a span it cannot round to nothing. Drawn behind the trace
+    (z -4, just above the span shade at -5): a mark annotates where an edge is, and the
+    signal across it must stay readable.
+    """
+
+    def __init__(self, x: np.ndarray, *, color: str = EDGE_MARK_HEX,
+                 label: str = "", name: str = "") -> None:
+        super().__init__()
+        self._x = np.sort(np.ascontiguousarray(np.asarray(x, dtype=np.float64)))
+        self.label = label
+        self.name = str(name)
+        pen = pg.mkPen(color, width=_EDGE_WIDTH,
+                       style=_EDGE_DASHES.get(label, QtCore.Qt.DashLine))
+        pen.setCosmetic(True)
+        self._pen = pen
+        self.setZValue(-4)
+
+    @property
+    def n_edges(self) -> int:
+        return int(self._x.size)
+
+    def pen(self) -> QtGui.QPen:
+        return QtGui.QPen(self._pen)
+
+    def boundingRect(self) -> QtCore.QRectF:  # noqa: N802  (Qt signature)
+        vb = self.getViewBox()
+        if vb is None:
+            if self._x.size == 0:
+                return QtCore.QRectF()
+            return QtCore.QRectF(float(self._x[0]), 0.0,
+                                 float(self._x[-1] - self._x[0]), 1.0)
+        (x0, x1), (y0, y1) = vb.viewRange()
+        return QtCore.QRectF(x0, y0, x1 - x0, y1 - y0)
+
+    def visible_marks(self, x_range: tuple[float, float], pixel_width: float) -> np.ndarray:
+        """The x of every mark a paint over ``x_range`` at ``pixel_width`` data units per
+        device pixel draws, the first edge of each occupied pixel column.
+
+        THE RULE LIVES HERE AND :meth:`paint` CALLS IT (the reason `SpanOverlayItem` gives
+        for `visible_names`): a test can ask what is drawn without a paint device, and the
+        painter cannot quietly disagree with the answer.
+        """
+        lo = int(np.searchsorted(self._x, float(x_range[0]), side="left"))
+        hi = int(np.searchsorted(self._x, float(x_range[1]), side="right"))
+        xs = self._x[lo:hi]
+        px = float(pixel_width)
+        if xs.size > 1 and np.isfinite(px) and px > 0.0:
+            cols = np.floor((xs - float(x_range[0])) / px).astype(np.int64)
+            keep = np.empty(xs.size, dtype=bool)
+            keep[0] = True
+            np.not_equal(cols[1:], cols[:-1], out=keep[1:])
+            xs = xs[keep]
+        return xs
+
+    def paint(self, painter: QtGui.QPainter, option, widget=None) -> None:  # noqa: N802
+        if self._x.size == 0:
+            return
+        vb = self.getViewBox()
+        if vb is None:
+            return
+        (vx0, vx1), (vy0, vy1) = vb.viewRange()
+        try:
+            ps = vb.viewPixelSize()
+            px = float(ps[0]) if ps is not None else 0.0
+        except Exception:  # noqa: BLE001 — no viewport yet; draw every edge
+            px = 0.0
+        xs = self.visible_marks((vx0, vx1), px)
+        if xs.size == 0:
+            return
+        painter.setPen(self._pen)
+        for x in xs.tolist():
+            painter.drawLine(QtCore.QPointF(x, vy0), QtCore.QPointF(x, vy1))
+
+    def viewRangeChanged(self) -> None:  # noqa: N802  (pyqtgraph hook)
+        self.prepareGeometryChange()
+        self.update()
+
+
+# ------------------------------------------------------------------------------------------------
 # Index -> x helpers.
 # ------------------------------------------------------------------------------------------------
 def _x_values(session: Session, doc_id: str, time_offset_s: float = 0.0) -> np.ndarray:
@@ -653,6 +779,60 @@ def render_marker(plot: pg.PlotItem, session: Session, doc_id: str,
     return [line]
 
 
+def render_threshold(plot: pg.PlotItem, session: Session, doc_id: str,
+                     hint: OverlayHint, *,
+                     time_offset_s: float = 0.0) -> list[pg.GraphicsObject]:
+    """Render one detector threshold rail ON the trace — cased, dashed by meaning.
+
+    The producer is `analysis.detection_thresholds`: ``starts`` are int64 knot indices and
+    ``values`` the current the detector compared the signal with there (its moving baseline
+    plus ``polarity * k * sigma``). ``hint.label`` says which rail it is and therefore which
+    dash it gets (`_THRESHOLD_DASHES`); ``hint.color`` is respected, like `render_hline`'s.
+
+    THE SAME RAIL AS THE BASELINE'S, with one deliberate difference: PEAK auto-downsampling,
+    not subsample. `render_hline` inverts the app's rule because a baseline has no spike to
+    lose; a threshold rail is checked AGAINST brief excursions, and its knots already keep each
+    bin's extremes and its largest step, each with the sample before it (`decimate_extrema`),
+    so a step in the moving baseline under it must survive the second, render-time decimation
+    too. On a smooth stretch a min/max pair per bin is the line itself (its extremes are the
+    bin's ends), so nothing becomes a band.
+    """
+    values = _x_values(session, doc_id, time_offset_s)
+    x = _map_indices(values, np.asarray(hint.starts, dtype=np.int64))
+    y = (np.asarray(hint.values, dtype=np.float64)
+         if hint.values is not None else np.zeros_like(x))
+    dash = _THRESHOLD_DASHES.get(hint.label, QtCore.Qt.DashLine)
+    items: list[pg.GraphicsObject] = []
+    for pen, z in ((pg.mkPen(_STEP_CASING_HEX, width=_BASELINE_CASING_WIDTH), 3),
+                   (pg.mkPen(hint.color, width=_BASELINE_TRACK_WIDTH, style=dash), 4)):
+        curve = pg.PlotDataItem()                                  # 1  four-step order
+        plot.addItem(curve, ignoreBounds=True)                     # 2  annotation, not data
+        curve.setDownsampling(auto=True, method="peak")            # 3
+        curve.setClipToView(True)
+        curve.setPen(pen)
+        curve.setZValue(z)
+        curve.setData(x=x, y=y)                                    # 4  data LAST
+        items.append(curve)
+    return items
+
+
+def render_edges(plot: pg.PlotItem, session: Session, doc_id: str,
+                 hint: OverlayHint, *,
+                 time_offset_s: float = 0.0) -> list[pg.GraphicsObject]:
+    """Render the edges a person moved or drew as ONE batched :class:`EdgeOverlayItem`.
+
+    ``starts`` are the edges' sample indices: an event's ``start_idx`` for its left edge and
+    its half-open ``end_idx`` for its right one, mapped exactly as `render_spans` maps them,
+    so a mark lies on the edge of the shade it qualifies at every zoom.
+    """
+    values = _x_values(session, doc_id, time_offset_s)
+    x = _map_indices(values, np.asarray(hint.starts, dtype=np.int64))
+    item = EdgeOverlayItem(x, color=hint.color, label=hint.label, name=hint.name)
+    # ignoreBounds for the reason `render_spans` gives: the item's rect IS the view.
+    plot.addItem(item, ignoreBounds=True)
+    return [item]
+
+
 # ------------------------------------------------------------------------------------------------
 # Registration — installs the renderers into trace_view's registry.
 # ------------------------------------------------------------------------------------------------
@@ -664,3 +844,5 @@ def register_all_renderers() -> None:
     register_overlay_renderer(OverlayKind.HLINE, render_hline)
     register_overlay_renderer(OverlayKind.STEP, render_step)
     register_overlay_renderer(OverlayKind.MARKER, render_marker)
+    register_overlay_renderer(OverlayKind.THRESHOLD, render_threshold)
+    register_overlay_renderer(OverlayKind.EDGE, render_edges)

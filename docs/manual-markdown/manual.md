@@ -2872,8 +2872,8 @@ This Markdown source does not retain a second stale copy of those rows. The inve
 in the manual ZIP. It covers reviewed specialist workflows rather than claiming an exhaustive
 census of every dynamically created widget. Read a row's notes together with its action label.
 
-The Distributions plot-type selector is one combo, not four separate controls; in source,
-where _PLOT_TYPES = ("Histogram", "Scatter", "KDE (density)", "PCA"). Its analytical recipe
+The Distributions plot-type selector is one combo, not five separate controls; in source,
+where _PLOT_TYPES = ("Histogram", "Scatter", "KDE (density)", "Event-count heatmap", "PCA"). Its analytical recipe
 and the displayed result are separate until the relevant action is applied.
 
 ### Event gallery label-key reference

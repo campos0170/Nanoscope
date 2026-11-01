@@ -164,6 +164,15 @@ MAX_DEPTH = 30
 #: length, and it is what the comparison is against, so trimming it would disable the
 #: feature rather than shrink it — but ``nbytes()`` reports the stack only, and the
 #: resident cost of the history is that number PLUS one copy of every live table.
+#:
+#: WHAT IT DOES COUNT BESIDES THE FRAMES: the ML detector's kept probability
+#: (``AnalysisResult.confidence``, one byte per analysed sample — 15 MB at the 15 M-sample
+#: ceiling). Snapshots share that track by reference, so ten curation steps on one run hold
+#: ONE track, but every re-run of the detector is its own step holding its own: thirty
+#: re-runs held 429 MiB the frame-only count never saw, because an ML table's frame is
+#: small. So :meth:`EventHistory.nbytes` adds each DISTINCT track the stack holds once, and
+#: leaves out a track a live table still holds (the pristine side above: dropping a step
+#: would not free it). Old re-runs are then evicted by this ceiling like any large frame.
 MAX_BYTES = 128 * 1024 * 1024
 
 #: ``(doc_id, channel, module_id)`` — the ResultStore's own key. An ML detection
@@ -806,10 +815,28 @@ def _results_equal(a: AnalysisResult, b: AnalysisResult) -> bool:
 
 
 def _sizeof(res: AnalysisResult) -> int:
+    """The snapshot's OWN bytes: its deep-copied frame. A kept ML probability track is not
+    in here because it is not the entry's own -- every curation step after a run shares the
+    run's one track -- so :meth:`EventHistory.nbytes` counts tracks once per distinct track,
+    across the stack (see :data:`MAX_BYTES`)."""
     try:
         return int(res.payload.df.memory_usage(deep=True).sum())
     except Exception:                          # noqa: BLE001 - accounting must never raise
         return 0
+
+
+def _track_nbytes(res: AnalysisResult | None) -> tuple[int, int] | None:
+    """``(id, nbytes)`` of the ML probability track ``res`` holds, or None when it holds none.
+
+    The id is what makes a SHARED track count once. Read duck-typed (``nbytes``), so the
+    history needs no import of `core.confidence` for the one number it wants from it."""
+    track = getattr(res, "confidence", None)
+    if track is None:
+        return None
+    try:
+        return id(track), int(getattr(track, "nbytes", 0) or 0)
+    except Exception:                          # noqa: BLE001 - accounting must never raise
+        return None
 
 
 class EventHistory(QObject):
@@ -944,6 +971,13 @@ class EventHistory(QObject):
         # ``_pristine`` (and ``_seen``) holding the previous run, which the next ordinary
         # curation click then quietly restored. See _results_equal.
         if prior is not None and _results_equal(prior, res):
+            # An ML re-run with the same settings lands here: the kept probability track is
+            # compared by identity, which `_values_equal` reads as equal, so no step. The
+            # committed state still has to hold the LIVE run's track, or it keeps the
+            # superseded run's alive beside it (two tracks for one table, outside every
+            # budget) and the next step it becomes would restore that older track.
+            if getattr(prior, "confidence", None) is not getattr(res, "confidence", None):
+                self._pristine[key] = replace(prior, confidence=res.confidence)
             return False
 
         replaced = self._was_replaced(key, res)
@@ -1057,8 +1091,33 @@ class EventHistory(QObject):
         return len(self._undo)
 
     def nbytes(self) -> int:
-        """Bytes held by undo + redo together."""
-        return sum(e.nbytes for e in self._undo) + sum(e.nbytes for e in self._redo)
+        """Bytes held by undo + redo together: every entry's frame, plus each distinct ML
+        probability track the stack holds that no live table does (see :data:`MAX_BYTES`)."""
+        frames = sum(e.nbytes for e in self._undo) + sum(e.nbytes for e in self._redo)
+        return frames + sum(self._held_track_bytes((self._undo, self._redo)).values())
+
+    def _held_track_bytes(self, stacks) -> dict[EventKey, int]:
+        """Per key, the bytes of the ML probability tracks ``stacks`` keep alive, each
+        DISTINCT track once, leaving out any a committed (live) table holds.
+
+        Charged to the key of the first entry that holds it; a track belongs to one table, so
+        that is its own key. Leaving out the committed tracks is the same rule as for the
+        pristine frames: dropping a step would not free them, so a budget that counted them
+        would evict history for memory it cannot get back."""
+        seen: set[int] = set()
+        for res in self._pristine.values():
+            held = _track_nbytes(res)
+            if held is not None:
+                seen.add(held[0])
+        out: dict[EventKey, int] = {}
+        for stack in stacks:
+            for entry in stack:
+                held = _track_nbytes(entry.result)
+                if held is None or held[0] in seen:
+                    continue
+                seen.add(held[0])
+                out[entry.key] = out.get(entry.key, 0) + held[1]
+        return out
 
     def has_any(self) -> bool:
         return bool(self._undo or self._redo)
@@ -1288,6 +1347,11 @@ class EventHistory(QObject):
         weight: dict[EventKey, int] = {}
         for entry in stack:
             weight[entry.key] = weight.get(entry.key, 0) + entry.nbytes
+        # A table re-run with the ML detector spends the budget on its kept tracks, not its
+        # small frames, so its weight has to include them or a big Schmitt table would be
+        # the one evicted while the re-runs went on holding the memory.
+        for key, extra in self._held_track_bytes((stack,)).items():
+            weight[key] = weight.get(key, 0) + extra
         victim_key = max(weight, key=lambda k: (weight[k], k))
         index = next(i for i, e in enumerate(stack) if e.key == victim_key)
         del stack[index]

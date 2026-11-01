@@ -89,6 +89,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..plot.style import PALETTE
 from .analysis_catalog import ANALYSIS_LABELS
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_interaction import PlotReadout, install_plot_interaction, reset_plot_history
 from .plot_workflow import PlotWorkflowBar, WarningSummary, bounded_controls, control_group
 from .categorical import (
     add_category_scatter,
@@ -719,6 +720,7 @@ class EmbeddingScatterView(QtWidgets.QWidget):
         # once, which is a picture claiming seven classes.
         self._legend.clear()
         self._plot.getPlotItem().clear()
+        reset_plot_history(self._plot)   # new geometry: old zoom ranges mean nothing now
         self._legend_entries = []
         self._legend_n = 0
         self._drawn = (np.empty(0), np.empty(0), np.empty(0, dtype=np.int64))
@@ -895,6 +897,7 @@ class WaveformOverlayView(QtWidgets.QWidget):
     def _redraw(self) -> None:
         self._legend.clear()          # see EmbeddingScatterView._redraw
         self._plot.getPlotItem().clear()
+        reset_plot_history(self._plot)
         self._series = []
         self._legend_n = 0
         rep = self._report
@@ -1213,6 +1216,19 @@ class SubpopReportWindow(QtWidgets.QWidget):
         self._live_note_probe.hide()
         root.addWidget(self._live_note)
         root.addLayout(buttons)
+        # View only (plot_interaction). Both figures get the app right-click menu -- Reset
+        # view, Zoom back / forward, Export -- where `_plot_widget` had switched pyqtgraph's
+        # generic one off, which left a zoomed figure with no way back but the corner "A".
+        # The pointer readout rides in the workflow bar's empty middle rather than on a line
+        # of its own: this window's height budget is spent (test_lay_subpop_window_fits_the_
+        # screen), and a new line would be paid for out of the scatter. There is no toolbar
+        # button: two figures are on screen at once and one button would have to guess
+        # which it means; the menu is on the figure it acts on.
+        self._readout = PlotReadout()
+        self._workflow.add_view_control(self._readout, stretch=1)
+        exports = (("Export report and tables…", self.exportRequested.emit, self.can_export),)
+        for view in (self._embed_view, self._wave_view):
+            install_plot_interaction(view._plot, readout=self._readout, exports=exports)
 
         self._workflow.set_sections({
             "Data": (self._data_section, self._gallery_btn, self._trace_btn),

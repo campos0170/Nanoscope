@@ -525,8 +525,15 @@ def test_the_project_version_moved_and_old_projects_still_load(tmp_path):
     than manifest JSON. A v1-v10 project has no workspace and still opens as an empty one;
     a v10 reader must refuse v11 because accepting it would strip the entire workspace on
     the next save.
+
+    Moved to 12 for new fields INSIDE three artifacts a v11 build already owns: the
+    spectrogram colour limits and log-frequency axis (builtin.psd), the ensemble's subset,
+    band and frozen alignment (builtin.event-plots), and the PlotConfig v3 KDE and heatmap
+    sections (builtin.plots). A v11 build restores its own artifacts from the keys it knows
+    and re-captures them on save, so it would show a heatmap as a histogram and strip the
+    rest; v11's opaque carry-through covers only kinds and fields it does not own.
     """
-    assert VERSION == 11
+    assert VERSION == 12
     from nanoscope.core.project import MIN_READ_VERSION
     assert MIN_READ_VERSION == 1
 

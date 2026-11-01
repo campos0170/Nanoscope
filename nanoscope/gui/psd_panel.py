@@ -62,7 +62,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
 from PySide6.QtCore import QRectF
@@ -80,6 +80,9 @@ from .axes import ReadableLogAxis
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_interaction import (image_value, install_plot_interaction, navigation_for,
+                               reset_plot_history, view_button, window_readout)
+from .plot_templates import WindowTemplateControls
 from .plot_workflow import WarningSummary, control_group, install_plot_workflow
 from .plot_export import (
     DATA_FILTERS,
@@ -195,6 +198,26 @@ _SPEC_MAX_COLUMNS = 900
 MAX_SPECTROGRAM_CSV_ROWS = 250_000
 
 _SPEC_COLORMAPS = ("viridis", "inferno", "magma", "cividis")
+
+#: The spectrogram's automatic colour limits: these percentiles of the finite log₁₀ PSD
+#: cells on the ORIGINAL (linear-frequency) grid, so the drawn frequency axis never moves
+#: them. "Manual" replaces them by two typed values in the colour bar's own unit.
+_SPEC_AUTO_PERCENTILES = (2.0, 99.8)
+_SPEC_LEVELS_AUTO = "auto"
+_SPEC_LEVELS_MANUAL = "manual"
+_SPEC_LEVEL_MODES = ((f"Auto ({_SPEC_AUTO_PERCENTILES[0]:g}nd–"
+                      f"{_SPEC_AUTO_PERCENTILES[1]:g}th percentile)", _SPEC_LEVELS_AUTO),
+                     ("Manual", _SPEC_LEVELS_MANUAL))
+#: The outer bound of the Manual Low / High spin boxes, in log₁₀ PSD.
+_SPEC_LEVEL_BOUND = 1000.0
+
+#: Rows of the log-frequency DISPLAY. The image rows are linear in f, and ImageItem can
+#: only stretch one uniform grid over a rectangle, so a log axis is drawn by area-averaging
+#: the linear bins onto this many log-spaced rows (see :func:`_log_frequency_rows`). 512
+#: resolves the lowest bins as their true width on screen (a row inside one bin repeats it)
+#: while the top decade averages its many narrow bins the way the time axis already merges
+#: columns -- mean-preserving, nothing dropped. Export data keeps the linear grid.
+_SPEC_LOG_ROWS = 512
 
 _HIST_BIN_CHOICES = ("128", "256", "512", "1024", "2048", "4096")
 
@@ -359,6 +382,54 @@ def _level_occupancy(hist: ap_mod.AllPointsHistogram, levels: list[dict]) -> lis
         return [0.0] * len(levels)
     nearest = np.abs(hist.centers[:, None] - centers[None, :]).argmin(axis=1)
     return [float(counts[nearest == k].sum()) / binned for k in range(centers.size)]
+
+
+def _log_frequency_rows(freqs: np.ndarray, psd: np.ndarray, df: float,
+                        n_rows: int = _SPEC_LOG_ROWS) -> tuple[np.ndarray, np.ndarray] | None:
+    """A spectrogram's linear-frequency bins area-averaged onto log-spaced DISPLAY rows.
+
+    Returns ``(edges_hz, power)``: ``n_rows + 1`` geometric row edges and the
+    ``(n_rows, n_time)`` PSD of each row, or ``None`` when no bin has a positive frequency.
+
+    Bin ``k`` stands for ``[f_k - df/2, f_k + df/2)`` -- the same footprint the linear
+    image draws it with. Each display row's value is the overlap-weighted mean of the bins
+    it covers, in LINEAR power (the log is taken by the caller): a row inside one bin
+    repeats that bin, a row across many is their mean, so a narrow mains line is diluted
+    by the row's width the way time columns already are when merged, and never dropped.
+    Non-finite bins contribute no width; a row made only of them is NaN. The 0 Hz bin has
+    no place on a log axis and is left out -- the rows start at the lower edge of the
+    first positive bin.
+    """
+    f = np.asarray(freqs, dtype=np.float64)
+    p = np.asarray(psd, dtype=np.float64)
+    keep = f > 0.0
+    if not keep.any() or not (np.isfinite(df) and df > 0.0):
+        return None
+    k0 = int(np.flatnonzero(keep)[0])
+    f, p = f[k0:], p[k0:]
+    lo = float(f[0] - df / 2.0)
+    if lo <= 0.0:                     # a first positive bin closer to 0 Hz than df/2
+        lo = float(f[0]) / 2.0
+    hi = float(f[-1] + df / 2.0)
+    edges = np.logspace(np.log10(lo), np.log10(hi), int(n_rows) + 1)
+    edges[0], edges[-1] = lo, hi      # exact outer edges despite the log10 round trip
+    bin_edges = np.concatenate([f - df / 2.0, [f[-1] + df / 2.0]])
+    finite = np.isfinite(p)
+    widths = np.diff(bin_edges)[:, None]
+    # Running integrals of power and of finite width, so every row is a difference of
+    # two interpolated values: O(bins + rows) per column, no Python loop.
+    power_int = np.vstack([np.zeros((1, p.shape[1])),
+                           np.cumsum(np.where(finite, p, 0.0) * widths, axis=0)])
+    width_int = np.vstack([np.zeros((1, p.shape[1])),
+                           np.cumsum(finite * widths, axis=0)])
+    idx = np.clip(np.searchsorted(bin_edges, edges, side="right") - 1, 0, f.size - 1)
+    frac = np.clip((edges - bin_edges[idx]) / widths[idx, 0], 0.0, 1.0)[:, None]
+    at_power = power_int[idx] + frac * (power_int[idx + 1] - power_int[idx])
+    at_width = width_int[idx] + frac * (width_int[idx + 1] - width_int[idx])
+    covered = np.diff(at_width, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        power = np.where(covered > 0.0, np.diff(at_power, axis=0) / covered, np.nan)
+    return edges, power
 
 
 def _fmt_band_edge(f: float) -> str:
@@ -564,6 +635,14 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._view_cache: dict[str, tuple[tuple, object]] = {}
         self._fft: psd_mod.FFTSpectrum | None = None
         self._spec: psd_mod.Spectrogram | None = None
+        # The spectrogram as drawn: log₁₀ PSD on its ORIGINAL [time, frequency] grid (what
+        # Export data writes, whichever frequency axis is on screen), the automatic colour
+        # limits taken from it, the span it was drawn for (the caption's clock), and the
+        # log-frequency display rows' edges in Hz when that axis is on (else None).
+        self._spec_grid_z: np.ndarray | None = None
+        self._spec_auto_levels: tuple[float, float] | None = None
+        self._spec_drawn_span: _Span | None = None
+        self._spec_log_edges: np.ndarray | None = None
         self._hist: ap_mod.AllPointsHistogram | None = None
         self._hist_levels: list[dict] = []
 
@@ -652,6 +731,65 @@ class PSDWindow(QtWidgets.QMainWindow):
             exports=(("Export current figure…", lambda: self.save_image()),
                      ("Export data (CSV)…", lambda: self.export_data())))
         self._refresh_btn.hide()
+        self._install_plot_interaction()
+
+    def _install_plot_interaction(self) -> None:
+        """View only (plot_interaction): Reset view, zoom history, app menu, pointer readout.
+
+        One history per view page, because the four pages are four different coordinate
+        systems (a log-log spectrum, a linear spectrogram, a log-count histogram); the
+        toolbar button acts on the page on screen, as *Export current figure…* does. The
+        readout follows each axis' own log mode and tick scale, so it reads in the units
+        the ticks show; over the spectrogram it adds the image's log10 PSD under the pointer.
+        """
+        exports = (("Export current figure…", lambda: self.save_image()),
+                   ("Export data (CSV)…", lambda: self.export_data()))
+        self._readout = window_readout(self)
+
+        def spectrogram_value(vx: float, vy: float) -> str:
+            value = self._spectrogram_cell_value(vx, vy)
+            if value is None:
+                return ""
+            label = (self._spec_bar.getAxis("right").labelText
+                     if self._spec_bar is not None else "") or "log₁₀ PSD"
+            return f"{label} {value:.4g}"
+
+        navigations = []
+        for plot, extra in ((self._plot, None), (self._fft_plot, None),
+                            (self._spec_plot, spectrogram_value), (self._hist_plot, None)):
+            navigations.append(install_plot_interaction(
+                plot, readout=self._readout, exports=exports, extra=extra))
+        self._workflow.add_view_control(view_button(
+            lambda: navigation_for(self.active_plot_item()), navigations))
+
+    def _spectrogram_cell_value(self, vx: float, vy: float) -> float | None:
+        """The ORIGINAL spectrogram cell's log₁₀ PSD under view position (vx, vy).
+
+        On the linear axis the image is that grid, so the pixel is the cell. On the log
+        frequency axis the image is a display resampling (rows area-averaged from the
+        linear bins), so reading its pixel would report a row mean as if it were a cell:
+        the pointer's frequency (10**vy) is mapped back onto the linear bin that holds it,
+        and the time column comes from the image, whose x is not resampled.
+        """
+        if self._spec_log_edges is None:
+            return image_value(self._spec_image, vx, vy)
+        sg, grid = self._spec, self._spec_grid_z
+        if sg is None or grid is None or not self._spec_image.isVisible():
+            return None
+        edges = self._spec_log_edges
+        try:
+            f = 10.0 ** float(vy)
+        except OverflowError:
+            return None
+        if not (float(edges[0]) <= f < float(edges[-1])):
+            return None
+        column = self._spec_image.mapFromView(QtCore.QPointF(vx, vy)).x()
+        i = int(np.floor(column))
+        df = float(sg.freqs[1] - sg.freqs[0]) if sg.freqs.size > 1 else sg.fs / 2.0
+        k = int(np.floor((f - (float(sg.freqs[0]) - df / 2.0)) / df))
+        if 0 <= i < grid.shape[0] and 0 <= k < grid.shape[1]:
+            return float(grid[i, k])
+        return None
 
     def _refresh_warning_summary(self) -> None:
         warnings = self._export_warnings() + self._comparison_cautions()
@@ -706,7 +844,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         frequency axis would leave every row where a linear axis put it and silently
         mislabel the whole picture. So the spectrogram is linear in f and logarithmic in
         POWER (the colour scale), which is the convention every spectrogram uses and the
-        one that keeps the drawn thing and the axis in agreement.
+        one that keeps the drawn thing and the axis in agreement. The optional log
+        frequency axis keeps that agreement another way: it draws log-spaced DISPLAY rows
+        resampled from the linear bins (:func:`_log_frequency_rows`) and says so.
         """
         w = pg.PlotWidget()
         w.setMinimumSize(460, 360)
@@ -715,6 +855,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         # The rendered matrix is [time, frequency], independent of the app-wide
         # row-major default used by other image consumers.
         self._spec_image = pg.ImageItem(axisOrder="col-major")
+        self._spec_image.setVisible(False)    # nothing to read until a spectrogram is drawn
         self._spec_plot.addItem(self._spec_image)
         self._spec_bar: pg.ColorBarItem | None = None
         self._spec_msg: pg.TextItem | None = None
@@ -752,6 +893,16 @@ class PSDWindow(QtWidgets.QMainWindow):
             "Export", "Export the view currently on screen. Image sizing and format are "
             "chosen in the export dialog; CSV preserves the numerical data and provenance.")
         root.addWidget(self._export_info)
+        # Named recipes for another recording: the estimator, the views' options and the
+        # look, never the recordings or the time span (those are the data, not the recipe).
+        self._templates = WindowTemplateControls(
+            "noise-spectrum", capture=self.template_settings,
+            recall=self.apply_template_settings,
+            note="A template keeps the Welch settings, PSD/ASD and log axes, the RMS band, the "
+                 "view shown and its options, and the style and appearance. It never keeps the "
+                 "recordings, the compared curves or the time span. Recalling one recomputes "
+                 "the spectrum only if its Welch settings differ, as changing them does.")
+        self._export_info.layout().addWidget(self._templates)
 
         self._save_btn = QtWidgets.QPushButton("Export current figure…")
         self._save_btn.setToolTip(
@@ -879,7 +1030,45 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._spec_cmap_combo.setToolTip(
             "Colour map for log₁₀ power. All four are perceptually uniform, so equal "
             "colour steps are equal power steps.")
-        return self._options_page([("Time resolution", self._spec_nperseg_combo)])
+        # Colour limits live beside the colormap in Style (they are presentation: applied
+        # to the image already computed). Built here so every spectrogram control is made
+        # in one place.
+        self._spec_levels_combo = QtWidgets.QComboBox()
+        for text, mode in _SPEC_LEVEL_MODES:
+            self._spec_levels_combo.addItem(text, mode)
+        self._spec_levels_combo.setToolTip(
+            "Which log₁₀ PSD values the colour map's two ends stand for. Auto takes the "
+            "2nd and 99.8th percentiles of the spectrogram's cells, so one hot line cannot "
+            "wash out the rest; Manual uses the Low and High you type, in the colour "
+            "bar's unit, so two spectrograms can share one scale. Cells outside the "
+            "limits take the end colours. Nothing is recomputed.")
+        self._spec_level_lo = QtWidgets.QDoubleSpinBox()
+        self._spec_level_hi = QtWidgets.QDoubleSpinBox()
+        for spin, edge in ((self._spec_level_lo, "Low"), (self._spec_level_hi, "High")):
+            spin.setDecimals(3)
+            spin.setRange(-_SPEC_LEVEL_BOUND, _SPEC_LEVEL_BOUND)
+            spin.setSingleStep(0.1)
+            spin.setKeyboardTracking(False)
+            spin.setToolTip(f"{edge} colour limit in log₁₀ PSD — the colour bar's unit "
+                            "(−6 means 10⁻⁶ in the PSD's squared units per Hz). High is "
+                            "always above Low.")
+        self._set_spec_level_values(-6.0, 0.0)
+        self._spec_levels_row = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(self._spec_levels_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QtWidgets.QLabel("Low"))
+        row.addWidget(self._spec_level_lo)
+        row.addWidget(QtWidgets.QLabel("High"))
+        row.addWidget(self._spec_level_hi)
+        self._spec_logf_check = QtWidgets.QCheckBox("Log frequency (display resampling)")
+        self._spec_logf_check.setToolTip(
+            "Draw frequency on a log axis. The spectrogram's bins are evenly spaced in "
+            "frequency and an image can only stretch an even grid, so the bins are "
+            "area-averaged onto log-spaced display rows; the 0 Hz bin has no place on a "
+            "log axis and is not drawn. Export data (CSV) keeps the original "
+            "linear-frequency grid. Nothing is recomputed.")
+        return self._options_page([("Time resolution", self._spec_nperseg_combo),
+                                   ("", self._spec_logf_check)])
 
     def _hist_options_page(self) -> QtWidgets.QWidget:
         self._hist_bins_combo = QtWidgets.QComboBox()
@@ -1026,6 +1215,8 @@ class PSDWindow(QtWidgets.QMainWindow):
         for legacy in (self._title_edit, self._data_swatch, self._fit_swatch, self._bg_combo):
             form.setRowVisible(legacy, False)
         form.addRow("Spectrogram colormap", self._spec_cmap_combo)
+        form.addRow("Spectrogram colour limits", self._spec_levels_combo)
+        form.addRow("", self._spec_levels_row)
         form.addRow(self._appearance_widget)
         return box
 
@@ -1060,6 +1251,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._view_combo.currentIndexChanged.connect(self._on_view_changed)
         self._spec_nperseg_combo.currentTextChanged.connect(self._on_view_option_changed)
         self._spec_cmap_combo.currentTextChanged.connect(self._on_colormap_changed)
+        # Colour limits and the log-frequency display redraw the image already computed.
+        self._spec_levels_combo.currentIndexChanged.connect(self._on_spec_levels_mode_changed)
+        self._spec_level_lo.valueChanged.connect(self._on_spec_levels_changed)
+        self._spec_level_hi.valueChanged.connect(self._on_spec_levels_changed)
+        self._spec_logf_check.toggled.connect(self._on_spec_axis_changed)
         self._hist_bins_combo.currentTextChanged.connect(self._on_view_option_changed)
         self._hist_clip_check.toggled.connect(self._on_view_option_changed)
         self._hist_levels_check.toggled.connect(self._on_view_option_changed)
@@ -1357,6 +1553,186 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._spec_bar.setColorMap(cmap)
         self.workspaceChanged.emit()
 
+    # -- spectrogram colour limits and frequency axis (presentation of the drawn image) ----------
+    def _spec_levels_mode(self) -> str:
+        return str(self._spec_levels_combo.currentData() or _SPEC_LEVELS_AUTO)
+
+    def _sync_spec_level_enablement(self) -> None:
+        on_spec = self.current_view() == VIEW_SPECTROGRAM
+        self._spec_levels_combo.setEnabled(on_spec)
+        manual = self._spec_levels_mode() == _SPEC_LEVELS_MANUAL
+        for spin in (self._spec_level_lo, self._spec_level_hi):
+            spin.setEnabled(on_spec and manual)
+
+    def spectrogram_levels(self) -> tuple[float, float] | None:
+        """The colour limits in force, in log₁₀ PSD: the typed pair or the automatic one."""
+        if self._spec_levels_mode() == _SPEC_LEVELS_MANUAL:
+            lo, hi = float(self._spec_level_lo.value()), float(self._spec_level_hi.value())
+            # The spin boxes bound each other (_retie_spec_levels), so hi > lo here; the
+            # fallback only guards a pair set behind their back.
+            return (lo, hi) if hi > lo else (lo, lo + 1.0)
+        return self._spec_auto_levels
+
+    def _retie_spec_levels(self) -> None:
+        """Bound Low below High and High above Low, one display step apart.
+
+        So the pair on screen -- and the pair the project saves -- is always the pair in
+        force: a Low typed at or above High (or a High at or below Low) is refused by the
+        spin box itself instead of being quietly replaced when the image is levelled.
+        """
+        step = 10.0 ** -self._spec_level_lo.decimals()
+        self._spec_level_hi.setMinimum(self._spec_level_lo.value() + step)
+        self._spec_level_lo.setMaximum(self._spec_level_hi.value() - step)
+
+    def _set_spec_level_values(self, lo: float, hi: float) -> bool:
+        """Put ``(lo, hi)`` in the Low / High boxes, kept ordered; True if it was changed.
+
+        The boxes' mutual bounds are lifted first (a new Low above the old High would
+        otherwise be clamped by the old bound), and re-tied after. A pair that is not
+        ordered once rounded to the boxes' decimals -- a hand-edited snapshot -- keeps its
+        Low and gets High one decade above it, the substitution the image would otherwise
+        have made unseen. Signals stay blocked: callers apply the levels themselves.
+        """
+        lo_spin, hi_spin = self._spec_level_lo, self._spec_level_hi
+        blocked = (lo_spin.blockSignals(True), hi_spin.blockSignals(True))
+        try:
+            for spin in (lo_spin, hi_spin):
+                spin.setRange(-_SPEC_LEVEL_BOUND, _SPEC_LEVEL_BOUND)
+            lo_spin.setValue(float(lo))
+            hi_spin.setValue(float(hi))
+            changed = not hi_spin.value() > lo_spin.value()
+            if changed:
+                lo_spin.setValue(min(lo_spin.value(), _SPEC_LEVEL_BOUND - 1.0))
+                hi_spin.setValue(lo_spin.value() + 1.0)
+            self._retie_spec_levels()
+        finally:
+            lo_spin.blockSignals(blocked[0])
+            hi_spin.blockSignals(blocked[1])
+        return changed
+
+    def set_spectrogram_levels(self, levels: tuple[float, float] | None) -> None:
+        """``None`` = Auto; a ``(low, high)`` pair in log₁₀ PSD = Manual at those limits.
+
+        An unordered pair keeps Low and puts High one decade above it, on screen too.
+        """
+        self._updating, previous = True, self._updating
+        try:
+            if levels is not None:
+                self._set_spec_level_values(float(levels[0]), float(levels[1]))
+            self._spec_levels_combo.setCurrentIndex(self._spec_levels_combo.findData(
+                _SPEC_LEVELS_AUTO if levels is None else _SPEC_LEVELS_MANUAL))
+        finally:
+            self._updating = previous
+        if not self._updating:
+            self._apply_spec_levels()
+            self.workspaceChanged.emit()
+
+    def _on_spec_levels_mode_changed(self, *_a) -> None:
+        if self._updating:
+            return
+        if self._spec_levels_mode() == _SPEC_LEVELS_MANUAL and self._spec_auto_levels:
+            # Start Manual from the limits on screen, so the picture does not jump the
+            # moment the mode is chosen; the user then moves Low and High from there.
+            decimals = self._spec_level_lo.decimals()
+            self._set_spec_level_values(*(round(float(v), decimals)
+                                          for v in self._spec_auto_levels))
+        self._apply_spec_levels()
+        self.workspaceChanged.emit()
+
+    def _on_spec_levels_changed(self, *_a) -> None:
+        # Re-tie first, whatever the mode: the bounds must follow every accepted value.
+        self._retie_spec_levels()
+        if self._updating or self._spec_levels_mode() != _SPEC_LEVELS_MANUAL:
+            return
+        self._apply_spec_levels()
+        self.workspaceChanged.emit()
+
+    def _apply_spec_levels(self) -> None:
+        """Re-level the drawn image and its bar. No spectrogram, no trace, no zoom change."""
+        self._sync_spec_level_enablement()
+        levels = self.spectrogram_levels()
+        if levels is None or self._spec is None or not self._spec_image.isVisible():
+            return
+        self._spec_image.setLevels(levels)
+        if self._spec_bar is not None:
+            self._spec_bar.setLevels(levels)
+        self._refresh_spec_caption()
+
+    def _refresh_spec_caption(self) -> None:
+        if self._spec is not None and self._spec_drawn_span is not None:
+            self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(
+                self._spec, self._spec_drawn_span, self.spectrogram_levels()))
+
+    def _spec_image_y_extent(self) -> tuple[float, float] | None:
+        """The drawn image's frequency extent in the plot's y coordinates (Hz or log₁₀ Hz)."""
+        sg = self._spec
+        if sg is None or sg.freqs.size == 0:
+            return None
+        if self._spec_log_edges is not None:
+            edges = self._spec_log_edges
+            return float(np.log10(edges[0])), float(np.log10(edges[-1]))
+        df = float(sg.freqs[1] - sg.freqs[0]) if sg.freqs.size > 1 else sg.fs / 2.0
+        low = float(sg.freqs[0]) - df / 2.0          # the rect _place_spectrogram_image sets
+        return low, low + df * sg.freqs.size
+
+    def _on_spec_axis_changed(self, *_a) -> None:
+        if self._updating:
+            return
+        # The same spectrogram on another frequency axis: re-place the image already
+        # computed. Each axis is handled on its own. Time keeps its coordinates, so its
+        # range is kept exactly (or left auto-ranging if it was). A frequency range that
+        # shows the whole image -- the view a draw fitted, or a wider one -- is fitted
+        # again on the new axis, so switching there and back returns to the same view,
+        # 0 Hz bin included; only a frequency range the user NARROWED is carried into the
+        # new axis (Hz <-> log10 Hz), rather than refitting it away.
+        view = self._spec_plot.getViewBox()
+        (x0, x1), (y0, y1) = view.viewRange()
+        auto_x, auto_y = (bool(a) for a in view.autoRangeEnabled())
+        was_log = self._spec_log_edges is not None
+        if self._spec is not None and self._spec_grid_z is not None \
+                and self._spec_drawn_span is not None and self._spec_image.isVisible():
+            want_log = self._spec_logf_check.isChecked()
+            extent = self._spec_image_y_extent()
+            whole_y = auto_y or (extent is not None and y0 <= extent[0] and y1 >= extent[1])
+            log_range = None
+            if want_log and not was_log and not whole_y:
+                # The lowest drawn frequency bounds the log view: below it is no data.
+                sg = self._spec
+                df = float(sg.freqs[1] - sg.freqs[0]) if sg.freqs.size > 1 else sg.fs / 2.0
+                positive = sg.freqs[sg.freqs > 0]
+                floor = float(positive[0] - df / 2.0) if positive.size else 1.0
+                floor = floor if floor > 0 else float(positive[0]) / 2.0
+                log_range = tuple(float(np.log10(max(v, floor))) for v in (y0, y1))
+                if log_range[1] <= log_range[0]:
+                    log_range = None
+            self._place_spectrogram_image(self._spec, self._spec_drawn_span,
+                                          log_y_range=log_range)
+            now_log = self._spec_log_edges is not None
+            if now_log != was_log:
+                # New coordinates (Hz <-> log₁₀ Hz): every recorded view means something
+                # else now, so the zoom history restarts here, as at a log toggle on any
+                # other page. The view itself is carried over below.
+                reset_plot_history(self._spec_plot)
+                if not auto_x:
+                    view.setXRange(x0, x1, padding=0)
+                if auto_y:
+                    view.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+                elif whole_y:
+                    # padding=None pads exactly as a fit (autoRange) does.
+                    view.setYRange(*self._spec_image_y_extent())
+                else:
+                    if now_log:
+                        if log_range is not None:
+                            y0, y1 = log_range
+                        else:
+                            y0, y1 = (np.log10(float(e))
+                                      for e in self._spec_log_edges[[0, -1]])
+                    else:
+                        y0, y1 = 10.0 ** y0, 10.0 ** y1
+                    view.setYRange(float(y0), float(y1), padding=0)
+            self._refresh_spec_caption()
+        self.workspaceChanged.emit()
+
     def _restyle_existing_views(self) -> None:
         """Change only scene appearance; never read a trace or rebuild a result."""
         views = (
@@ -1429,6 +1805,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             getattr(self.active_plot_item(), "legend", None) is not None)
         self._appearance_widget.data_color.setEnabled(view != VIEW_SPECTROGRAM)
         self._spec_cmap_combo.setEnabled(view == VIEW_SPECTROGRAM)
+        self._sync_spec_level_enablement()
         self._appearance_widget.data_color.setToolTip(
             "Colour of the plotted data curves." if view != VIEW_SPECTROGRAM else
             "A spectrogram uses its colormap, not a single data colour.")
@@ -1617,6 +1994,169 @@ class PSDWindow(QtWidgets.QMainWindow):
 
     def style(self) -> PSDStyle:
         return self._style
+
+    # -- window templates ------------------------------------------------------------------------
+    def template_settings(self) -> tuple[dict, dict]:
+        """``(settings, appearance)`` for a window template, keyed as the project saves them
+        (``capture_psd``'s config), without the target, the comparisons or the span."""
+        style = self._style
+        return ({"nperseg": self._nperseg_combo.currentText(),
+                 "window": self._window_combo.currentText(),
+                 "overlap_percent": self._overlap_spin.value(),
+                 "log_log": self._loglog_check.isChecked(), "asd": self._asd_check.isChecked(),
+                 "rms_lo_hz": self._rms_lo_spin.value(), "rms_hi_hz": self._rms_hi_spin.value(),
+                 "view": self.current_view(),
+                 "spectrogram_nperseg": self._spec_nperseg_combo.currentText(),
+                 "spectrogram_colormap": self._spec_cmap_combo.currentText(),
+                 "spectrogram_levels_mode": self._spec_levels_mode(),
+                 "spectrogram_level_low": float(self._spec_level_lo.value()),
+                 "spectrogram_level_high": float(self._spec_level_hi.value()),
+                 "spectrogram_log_frequency": self._spec_logf_check.isChecked(),
+                 "histogram_bins": self._hist_bins_combo.currentText(),
+                 "histogram_clip": self._hist_clip_check.isChecked(),
+                 "histogram_levels": self._hist_levels_check.isChecked(),
+                 "style": {"title": str(style.title), "data_color": str(style.data_color),
+                           "fit_color": str(style.fit_color),
+                           "background": str(style.background),
+                           "export_w": int(style.export_w), "export_h": int(style.export_h)}},
+                self.appearance_state())
+
+    def apply_template_settings(self, settings: dict, appearance: dict) -> None:
+        """A recalled template, as one gesture: every control set, then each CHANGED group
+        handled the way its own hand edit is.
+
+        This window has no draft, so the recall does what setting the controls by hand
+        would, once instead of once per control -- and only for what actually moved: a new
+        Welch setup recomputes over the recording and span already chosen, PSD/ASD or log
+        axes redraw, a view option drops only its own view's cache, and the RMS band, the
+        style and the appearance never touch the data or the zoom. A template whose
+        analysis settings equal the window's own therefore computes nothing, which keeps a
+        snapshot restored from a project (recording missing) on screen and in the next save
+        (``_render_workspace_snapshot``: only a deliberate edit may replace it). Validated
+        whole before any control moves; the RMS band is clamped to this recording's Nyquist
+        by its own boxes, as typing it would be.
+        """
+        current, _appearance = self.template_settings()
+        merged = {**current, **{key: settings[key] for key in current
+                                if key in settings and key != "style"}}
+        raw_style = settings.get("style", {})
+        style = {**current["style"], **(raw_style if isinstance(raw_style, dict) else {})}
+
+        def offered(combo: QtWidgets.QComboBox, text: object) -> bool:
+            return isinstance(text, str) and combo.findText(text) >= 0
+
+        nperseg = merged["nperseg"]
+        if (not (offered(self._nperseg_combo, nperseg)
+                 or isinstance(nperseg, str) and nperseg.isdigit() and int(nperseg) > 0)
+                or not offered(self._window_combo, merged["window"])
+                or not offered(self._spec_nperseg_combo, merged["spectrogram_nperseg"])
+                or not offered(self._spec_cmap_combo, merged["spectrogram_colormap"])
+                or not offered(self._hist_bins_combo, merged["histogram_bins"])
+                or merged["view"] not in {key for key, _label in VIEWS}
+                or type(merged["overlap_percent"]) is not int
+                or not 0 <= merged["overlap_percent"] <= 95
+                or merged["spectrogram_levels_mode"] not in (_SPEC_LEVELS_AUTO,
+                                                             _SPEC_LEVELS_MANUAL)
+                or any(type(merged[key]) is not bool for key in (
+                    "log_log", "asd", "histogram_clip", "histogram_levels",
+                    "spectrogram_log_frequency"))
+                or any(isinstance(merged[key], bool) or not isinstance(merged[key], (int, float))
+                       or not np.isfinite(merged[key]) for key in ("rms_lo_hz", "rms_hi_hz"))
+                or any(isinstance(merged[key], bool) or not isinstance(merged[key], (int, float))
+                       or not abs(merged[key]) <= _SPEC_LEVEL_BOUND
+                       for key in ("spectrogram_level_low", "spectrogram_level_high"))
+                or not isinstance(style["title"], str)
+                or style["background"] not in ("light", "dark")
+                or any(not isinstance(style[key], str) or not QtGui.QColor(style[key]).isValid()
+                       for key in ("data_color", "fit_color"))
+                or any(type(style[key]) is not int or not 0 <= style[key] <= 20000
+                       for key in ("export_w", "export_h"))):
+            raise ValueError("Its noise-spectrum settings are not ones this window offers.")
+        previous, self._updating = self._updating, True
+        try:
+            if self._nperseg_combo.findText(nperseg) < 0:
+                self._nperseg_combo.addItem(nperseg)
+            self._nperseg_combo.setCurrentText(nperseg)
+            self._window_combo.setCurrentText(merged["window"])
+            self._overlap_spin.setValue(merged["overlap_percent"])
+            self._loglog_check.setChecked(merged["log_log"])
+            self._asd_check.setChecked(merged["asd"])
+            self._rms_lo_spin.setValue(float(merged["rms_lo_hz"]))
+            self._rms_hi_spin.setValue(float(merged["rms_hi_hz"]))
+            self._spec_nperseg_combo.setCurrentText(merged["spectrogram_nperseg"])
+            self._spec_cmap_combo.setCurrentText(merged["spectrogram_colormap"])
+            # Low and High bound each other, so they go in as a pair (an unordered pair
+            # keeps Low and gets High one decade above, as a restore does).
+            self._set_spec_level_values(float(merged["spectrogram_level_low"]),
+                                        float(merged["spectrogram_level_high"]))
+            self._spec_levels_combo.setCurrentIndex(
+                self._spec_levels_combo.findData(merged["spectrogram_levels_mode"]))
+            self._spec_logf_check.setChecked(merged["spectrogram_log_frequency"])
+            self._hist_bins_combo.setCurrentText(merged["histogram_bins"])
+            self._hist_clip_check.setChecked(merged["histogram_clip"])
+            self._hist_levels_check.setChecked(merged["histogram_levels"])
+            self.set_view(merged["view"])
+            self._style.title = style["title"].strip()
+            self._style.data_color = QtGui.QColor(style["data_color"]).name()
+            self._style.fit_color = QtGui.QColor(style["fit_color"]).name()
+            self._style.background = style["background"]
+            self._style.export_w, self._style.export_h = style["export_w"], style["export_h"]
+            self._title_edit.setText(self._style.title)
+            self._bg_combo.setCurrentText("Light" if self._style.background == "light" else "Dark")
+            self._export_w.setValue(self._style.export_w)
+            self._export_h.setValue(self._style.export_h)
+            self._paint_swatch(self._data_swatch, self._style.data_color)
+            self._paint_swatch(self._fit_swatch, self._style.fit_color)
+        finally:
+            self._updating = previous
+        # What moved, read back from the controls (a spin box may have clamped a value), and
+        # each group sent where its own signal sends a hand edit (_wire_signals).
+        after, _appearance = self.template_settings()
+        moved = {key for key in after if after[key] != current[key]}
+        view_inputs = {VIEW_SPECTROGRAM: {"spectrogram_nperseg"},
+                       VIEW_ALLPOINTS: {"histogram_bins", "histogram_clip",
+                                        "histogram_levels"}}
+        for view, keys in view_inputs.items():
+            if moved & keys:
+                # Only that view's cache, as _on_view_option_changed: a histogram option
+                # must not throw away a spectrogram that took 160 ms to compute.
+                self._view_cache.pop(view, None)
+        display = bool(moved & {"log_log", "asd"})
+        refresh_view = (display or "view" in moved
+                        or bool(moved & view_inputs.get(after["view"], set())))
+        refreshed = False
+        if moved & {"nperseg", "window", "overlap_percent"}:
+            self._recompute()                       # _on_param_changed (draws the new flags)
+            # It ends in _refresh_view only when the primary computed; otherwise a moved
+            # view would leave the combo naming one page and the stack showing another.
+            refreshed = bool(self._curves)
+        elif display:
+            self._redraw_and_views()                # _on_display_changed
+            refreshed = True
+        if refresh_view and not refreshed:
+            # _on_view_changed / _on_view_option_changed. Not _redraw_and_views after a
+            # failed recompute: redrawing no curves would wipe the message saying why.
+            self._refresh_view()
+        if "view" in moved:
+            self._apply_appearance()
+        if "spectrogram_colormap" in moved:         # _on_colormap_changed: the LUT only
+            cmap = pg.colormap.get(self._spec_cmap_combo.currentText())
+            self._spec_image.setColorMap(cmap)
+            if self._spec_bar is not None:
+                self._spec_bar.setColorMap(cmap)
+        if "spectrogram_log_frequency" in moved:
+            self._on_spec_axis_changed()            # the image re-placed, the view carried
+        if moved & {"spectrogram_levels_mode", "spectrogram_level_low",
+                    "spectrogram_level_high"}:
+            self._apply_spec_levels()               # _on_spec_levels_*: levels only
+        if moved & {"rms_lo_hz", "rms_hi_hz"}:
+            self._update_rms_readout()              # _on_rms_changed
+        if "style" in moved:
+            self._restyle_existing_views()          # _on_style_changed: scene appearance only
+        # The shared look answers through _on_appearance_changed, zoom-preserving.
+        self._appearance_widget.apply_appearance(appearance)
+        if moved:
+            self.workspaceChanged.emit()
 
     # -- compute ---------------------------------------------------------------------------------
     def _resolve_welch_params(self, n: int) -> tuple[int, int]:
@@ -2402,6 +2942,7 @@ class PSDWindow(QtWidgets.QMainWindow):
     # -- plot state ------------------------------------------------------------------------------
     def _clear_plot(self) -> None:
         self._plot.clear()
+        reset_plot_history(self._plot)   # new geometry: old zoom ranges mean nothing now
         self._plot.setTitle(None)
         self._plot.titleLabel.setText("")
         self._view_titles.pop(VIEW_PSD, None)
@@ -2513,13 +3054,30 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._view_cache.clear()
         self._fft_plot.clear()
         self._fft_item = None
-        self._spec_image.setImage(np.zeros((1, 1), dtype=np.float32), autoLevels=False)
+        self._clear_spectrogram_image()
         self._clear_hist_marks()
         self._hist_plot.clear()
         self._hist_item = None
+        reset_plot_history(self._fft_plot, self._spec_plot, self._hist_plot)
         for view in (VIEW_FFT, VIEW_SPECTROGRAM, VIEW_ALLPOINTS):
             self._view_titles.pop(view, None)
             self._captions[view].setPlainText(message)
+
+    def _clear_spectrogram_image(self) -> None:
+        """Leave the spectrogram page with nothing to read: no placeholder pixel, no axis.
+
+        The 1x1 placeholder stays HIDDEN (the draw shows the image again), so the pointer
+        readout finds no cell and Reset view finds no stale bounds to frame; the log-frequency
+        rows and the log axis go with the image they belonged to, as does its colour bar.
+        """
+        self._spec_image.setImage(np.zeros((1, 1), dtype=np.float32), autoLevels=False)
+        self._spec_image.setVisible(False)
+        self._spec_grid_z = None
+        self._spec_log_edges = None
+        if self._spec_bar is not None:
+            self._spec_bar.setVisible(False)
+        self._spec_plot.setLogMode(x=False, y=False)
+        self._spec_plot.setLabel("left", "Frequency (Hz)", **self._label_style())
 
     def _clear_hist_marks(self) -> None:
         for line in self._hist_marks:
@@ -2618,6 +3176,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             # Do not call `_clear_views`: it would delete the other saved results and make
             # an unavailable recording lossy on the next project save.
             message = "No saved result is available for this view."
+            reset_plot_history(self.active_plot_item())
             if view == VIEW_FFT:
                 self._fft_plot.clear()
                 self._fft_item = None
@@ -2685,6 +3244,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._fft = spec
 
         self._fft_plot.clear()
+        reset_plot_history(self._fft_plot)   # new geometry: old zoom ranges mean nothing now
         self._fft_item = None
         log_log = self._loglog_check.isChecked()
         xs, ys = spec.freqs, spec.mag
@@ -2787,12 +3347,20 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._view_cache[VIEW_SPECTROGRAM] = (
                 self._view_signature(VIEW_SPECTROGRAM, rec, span), sg)
         self._spec = sg
+        # The image is replaced in place rather than cleared, so the history restarts here.
+        reset_plot_history(self._spec_plot)
 
         if self._spec_msg is not None:
             self._spec_plot.removeItem(self._spec_msg)
             self._spec_msg = None
         self._apply_view_background(self._spec_widget, self._spec_plot)
         self._spec_plot.setLogMode(x=False, y=False)   # the image rows are linear in f
+        # Nothing of the previous target's drawing may outlive this one, least of all into
+        # an export: the grid, its automatic limits and the display rows are rebuilt below.
+        self._spec_grid_z = None
+        self._spec_auto_levels = None
+        self._spec_log_edges = None
+        self._spec_drawn_span = span
 
         with np.errstate(divide="ignore", invalid="ignore"):
             z = np.log10(sg.psd)
@@ -2829,40 +3397,85 @@ class PSDWindow(QtWidgets.QMainWindow):
             return
 
         self._spec_image.setVisible(True)
-        lo, hi = (float(v) for v in np.percentile(z[finite], [2.0, 99.8]))
+        lo, hi = (float(v) for v in np.percentile(z[finite], list(_SPEC_AUTO_PERCENTILES)))
         if hi <= lo:
             hi = lo + 1.0
+        self._spec_auto_levels = (lo, hi)
         # Explicit col-major orientation maps image[x, y] to [time, frequency].
-        self._spec_image.setImage(np.asarray(z.T, dtype=np.float32), autoLevels=False)
-        self._spec_image.setLevels((lo, hi))
+        self._spec_grid_z = np.asarray(z.T, dtype=np.float32)
+        self._place_spectrogram_image(sg, span)
+        levels = self.spectrogram_levels() or (lo, hi)
         cmap = pg.colormap.get(self._spec_cmap_combo.currentText())
         self._spec_image.setColorMap(cmap)
 
-        t0 = span.i0 / sg.fs                       # RECORDING seconds: the segment spins' clock
-        dt = float(sg.times[1] - sg.times[0]) if sg.times.size > 1 else sg.time_step_s
-        df = float(sg.freqs[1] - sg.freqs[0]) if sg.freqs.size > 1 else sg.fs / 2.0
-        self._spec_image.setRect(QRectF(
-            t0 + float(sg.times[0]) - dt / 2.0, float(sg.freqs[0]) - df / 2.0,
-            dt * sg.times.size, df * sg.freqs.size))
-
         if self._spec_bar is None:
-            self._spec_bar = pg.ColorBarItem(values=(lo, hi), colorMap=cmap, interactive=False)
+            # No colour-map menu: its pick would recolour behind the Spectrogram colormap
+            # control, which is the one the page saves (plot_interaction's rule).
+            self._spec_bar = pg.ColorBarItem(values=levels, colorMap=cmap, interactive=False,
+                                             colorMapMenu=False)
             self._spec_bar.setImageItem(self._spec_image, insert_in=self._spec_plot)
         else:
             self._spec_bar.setVisible(True)
             self._spec_bar.setColorMap(cmap)
-            self._spec_bar.setLevels((lo, hi))
+            self._spec_bar.setLevels(levels)
         self._spec_bar.getAxis("right").setLabel(f"log₁₀ PSD ({_sq_units(span.chan.units)})",
                                                  **self._label_style())
         self._spec_plot.setLabel("bottom", "Time (s from the start of this recording)",
                                  **self._label_style())
-        self._spec_plot.setLabel("left", "Frequency (Hz)", **self._label_style())
         self._view_titles[VIEW_SPECTROGRAM] = f"Spectrogram — {rec['label']}"
         self._spec_plot.setTitle(self._style.title or self._view_titles[VIEW_SPECTROGRAM],
                                  color=self._fg_hex())
         self._restyle_existing_views()
         self._spec_plot.autoRange()
-        self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(sg, span, (lo, hi)))
+        self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(sg, span, levels))
+
+    def _place_spectrogram_image(self, sg: psd_mod.Spectrogram, span: _Span, *,
+                                 log_y_range: tuple[float, float] | None = None) -> None:
+        """Put ``self._spec_grid_z`` on the plot on the chosen frequency axis, levelled.
+
+        Linear: the grid itself, one image row per frequency bin. Log: the display rows of
+        :func:`_log_frequency_rows`, placed in log₁₀ Hz with the axis in log mode so its
+        ticks read in Hz. Either way only the IMAGE changes -- ``self._spec`` and the grid
+        Export data writes are untouched.
+        """
+        z = self._spec_grid_z
+        t0 = span.i0 / sg.fs                       # RECORDING seconds: the segment spins' clock
+        dt = float(sg.times[1] - sg.times[0]) if sg.times.size > 1 else sg.time_step_s
+        df = float(sg.freqs[1] - sg.freqs[0]) if sg.freqs.size > 1 else sg.fs / 2.0
+        x0, width = t0 + float(sg.times[0]) - dt / 2.0, dt * sg.times.size
+        rows = (_log_frequency_rows(np.asarray(sg.freqs), np.asarray(sg.psd), df)
+                if self._spec_logf_check.isChecked() else None)
+        if rows is None:
+            self._spec_log_edges = None
+            self._spec_plot.setLogMode(x=False, y=False)   # the image rows are linear in f
+            self._spec_image.setImage(z, autoLevels=False)
+            self._spec_image.setRect(QRectF(
+                x0, float(sg.freqs[0]) - df / 2.0, width, df * sg.freqs.size))
+            self._spec_plot.setLabel("left", "Frequency (Hz)", **self._label_style())
+        else:
+            edges, power = rows
+            self._spec_log_edges = edges
+            with np.errstate(divide="ignore", invalid="ignore"):
+                shown = np.log10(power).T
+            # Log mode changes only the axis's tick text (10ⁿ) -- an ImageItem has no log
+            # mode, so the image is placed in log₁₀ Hz itself and the two agree.
+            lo_f, hi_f = np.log10(float(edges[0])), np.log10(float(edges[-1]))
+            # Put the view in log₁₀ Hz BEFORE the axis turns logarithmic: a log axis asked
+            # to label a range still in Hz (0–25 000) evaluates 10^25000 for its ticks.
+            view = self._spec_plot.getViewBox()
+            y_range = log_y_range if log_y_range is not None else (lo_f, hi_f)
+            auto = view.autoRangeEnabled()[1]
+            view.setYRange(float(y_range[0]), float(y_range[1]), padding=0)
+            if auto:
+                view.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+            self._spec_plot.setLogMode(x=False, y=True)
+            self._spec_image.setImage(np.asarray(shown, dtype=np.float32), autoLevels=False)
+            self._spec_image.setRect(QRectF(x0, lo_f, width, hi_f - lo_f))
+            self._spec_plot.setLabel(
+                "left", "Frequency (Hz, log axis — display resampled)", **self._label_style())
+        levels = self.spectrogram_levels() or self._spec_auto_levels
+        if levels is not None:
+            self._spec_image.setLevels(levels)
 
     def _half_block_overlap(self) -> bool:
         """Is the PSD view hopping by half a block, the way the spectrogram always does?
@@ -2990,8 +3603,28 @@ class PSDWindow(QtWidgets.QMainWindow):
                 f"screen. Boundary columns are shared fractionally: none are dropped or "
                 f"overweighted, and there is no falsely full-width trailing bin.")
         if levels is not None:
-            lines.append(f"Colour spans log₁₀ PSD {levels[0]:.3g} … {levels[1]:.3g} "
-                         f"(2nd–99.8th percentile of the drawn bins).")
+            sq = _sq_units(span.chan.units)
+            linear = f"{10.0 ** levels[0]:.3g} … {10.0 ** levels[1]:.3g} {sq}"
+            if self._spec_levels_mode() == _SPEC_LEVELS_MANUAL:
+                how = f"set by hand ({linear}); cells outside take the end colours"
+            else:
+                # Taken from the original grid on either frequency axis: on the log axis
+                # the drawn rows are display rows, and the percentiles are not theirs.
+                how = (f"{_SPEC_AUTO_PERCENTILES[0]:g}nd–{_SPEC_AUTO_PERCENTILES[1]:g}th "
+                       f"percentile of the spectrogram's cells on its original frequency "
+                       f"grid ({linear})")
+            lines.append(f"Colour spans log₁₀ PSD {levels[0]:.3g} … {levels[1]:.3g} ({how}).")
+        if self._spec_log_edges is not None:
+            edges = self._spec_log_edges
+            lines.append(
+                f"LOG FREQUENCY AXIS — A DISPLAY RESAMPLING: the {sg.freqs.size:,} "
+                f"evenly spaced bins are area-averaged (in linear power) onto "
+                f"{edges.size - 1:,} log-spaced rows from {edges[0]:.4g} to {edges[-1]:.4g} "
+                f"Hz; a row inside one bin repeats it, so the lowest bins show as blocks of "
+                f"their true width."
+                + (" The 0 Hz bin has no place on a log axis and is not drawn."
+                   if sg.freqs.size and float(sg.freqs[0]) <= 0.0 else "")
+                + " Export data (CSV) keeps the original linear-frequency grid.")
         if sg.n_nonfinite:
             lines.append(f"WARNING: {sg.n_nonfinite:,} non-finite sample(s) in this span.")
         if span.note:
@@ -3024,6 +3657,7 @@ class PSDWindow(QtWidgets.QMainWindow):
 
         self._clear_hist_marks()
         self._hist_plot.clear()
+        reset_plot_history(self._hist_plot)  # new geometry: old zoom ranges mean nothing now
         self._hist_item = None
         self._apply_view_background(self._hist_widget, self._hist_plot)
         counts = hist.counts.astype(np.float64)
@@ -3312,7 +3946,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         # ``ImageItem`` is stored [time, frequency]. Export that float32 display array
         # as well as the float64 scientific PSD so the CSV can reproduce both the
         # picture and any downstream calculation without quantising one into the other.
-        shown = np.asarray(image)
+        # On the log-frequency axis the image holds DISPLAY rows; the export stays on the
+        # original linear grid (the array the linear image shows), as the caption says.
+        shown = np.asarray(self._spec_grid_z if self._spec_grid_z is not None else image)
         n_f, n_t = sg.psd.shape
         if shown.shape != (n_t, n_f):
             return pd.DataFrame()  # unknown mapping: refuse instead of inventing one
@@ -3373,6 +4009,16 @@ class PSDWindow(QtWidgets.QMainWindow):
             "colormap": self._spec_cmap_combo.currentText(),
             "colour_level_low_log10_psd": lo,
             "colour_level_high_log10_psd": hi,
+            "colour_level_mode": self._spec_levels_mode(),
+            "spectrogram_frequency_axis": ("log (display resampled; rows here are the "
+                                           "original linear grid)"
+                                           if self._spec_log_edges is not None else "linear"),
+            "display_log_rows": (int(self._spec_log_edges.size - 1)
+                                 if self._spec_log_edges is not None else np.nan),
+            "display_log_low_hz": (float(self._spec_log_edges[0])
+                                   if self._spec_log_edges is not None else np.nan),
+            "display_log_high_hz": (float(self._spec_log_edges[-1])
+                                    if self._spec_log_edges is not None else np.nan),
             "psd_units": _sq_units(self._units),
         }])
         return pd.concat([metadata, data], ignore_index=True, sort=False)

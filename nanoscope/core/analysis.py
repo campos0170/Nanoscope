@@ -62,6 +62,8 @@ class OverlayKind(Enum):
     MARKER = "marker"
     STEP = "step"      # v4 fitted levels
     HLINE = "hline"    # baseline track
+    THRESHOLD = "threshold"  # what a classical detector compared with: knots like HLINE, styled by label
+    EDGE = "edge"      # vertical marks at event edges a person moved or drew (starts only)
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,14 @@ class AnalysisResult:
     # restored results retain recorded=True even when their historical stamp is None.
     source_fingerprint: SourceFingerprint | None = None
     source_fingerprint_recorded: bool = False
+    # The ML detector's per-sample probability, kept with the table it was decoded into
+    # (a `core.confidence.ConfidenceTrack`; None for every other module, and for an ML table
+    # restored from a project, which does not save it). Immutable and identity-compared, so
+    # `dataclasses.replace` on an edit or an undo snapshot shares it instead of copying it.
+    # Out of `compare`: whether two results differ is `history._results_equal`'s question
+    # (it walks `dataclasses.fields`, so it sees this field anyway), and a dataclass `==`
+    # that reached a probability array would be a comparison nobody asked for.
+    confidence: object = field(default=None, compare=False, repr=False)
 
 
 @runtime_checkable

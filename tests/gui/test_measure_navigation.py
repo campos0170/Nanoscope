@@ -962,7 +962,19 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           # none of a doubled pair. plot_appearance binds its Undo/Redo
                           # keys through it (design §4.2). Functions only, no widget,
                           # nothing imported from gui; the guard below proves both.
-                          "key_sequences"}
+                          "key_sequences",
+                          # plot_interaction (Plot Studio step 1/5): the one Reset view /
+                          # zoom history / right-click menu / pointer readout every plot
+                          # window installs, instead of seven private copies. It imports
+                          # nothing from gui; its only widgets are the embedded readout
+                          # line and a tool button (exempted below, like plot_workflow's).
+                          "plot_interaction",
+                          # plot_templates (Plot Studio step 6): the named-template control
+                          # five analytical windows embed in their Export section, the way
+                          # they embed plot_appearance. It reaches only plot_appearance; the
+                          # project copy, which must read PlotsWindow's templates, lives in
+                          # plot_preset_sync, which only MainWindow imports.
+                          "plot_templates"}
 
 
 def test_the_non_panel_allowlist_holds_no_panel():
@@ -1018,6 +1030,9 @@ def test_the_non_panel_allowlist_holds_no_panel():
         # the platform's keys through the shared dedupe rule rather than a private copy
         # of it. key_sequences reaches nothing further and defines no widget.
         "plot_appearance": {"key_sequences"},
+        # Plot Studio step 6: a template's appearance is recalled through the appearance
+        # widget's own one-step apply, so the control knows PlotAppearance and nothing else.
+        "plot_templates": {"plot_appearance"},
     }
 
     for name in _NON_PANEL_GUI_MODULES:
@@ -1052,11 +1067,16 @@ def test_the_non_panel_allowlist_holds_no_panel():
         #                        a QObject, not a QWidget, so it never trips this check
         #                        at all.
         # None of the four is ever constructed by MainWindow as a standalone page.
+        #   plot_interaction  -- PlotReadout, the embedded one-line pointer readout
+        #                        each plot window puts on its status line.
         if name in ("trace_view", "plot_appearance", "plot_workflow", "plot_lasso",
-                    "plot_export_options"):
+                    "plot_export_options", "plot_interaction",
+                    "plot_templates"):
             # plot_export_options's ExportOptionsDialog is the shared "Export current
             # figure" dialog (CHANGELOG), embedded from every export path -- not a
-            # wired panel, same category as the three above.
+            # wired panel, same category as the three above. plot_templates's
+            # WindowTemplateControls is the template group embedded in five pages'
+            # Export sections, never a page of its own.
             continue
         assert widgets == [], f"nanoscope.gui.{name} defines widget(s) {widgets} — it is a panel"
 
@@ -1150,18 +1170,20 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
     assert _gui_modules_reached(plots_mod) == {
         "export_paths", "combos", "axes", "categorical", "worker_thread",
         "analysis_catalog", "plot_export", "plot_appearance", "figure_bundle", "plot_lasso",
-        "key_sequences"}
+        "key_sequences", "plot_interaction"}
     # ``plot_export`` is the shared, non-panel seam for staged PNG/SVG/PDF and
     # exact-CSV export; reaching it preserves the no-sibling-panel boundary.
     assert _gui_modules_reached(psd_mod) == {
         "export_paths", "combos", "axes", "plot_export",
-        "analysis_catalog", "plot_appearance", "plot_workflow"}
+        "analysis_catalog", "plot_appearance", "plot_workflow", "plot_interaction",
+        "plot_templates"}
     # The report window is the third standalone window and is held to the same rule.
     # It has its own allow-list guard in ``test_subpop_gui``; this one is stronger,
     # because ``_gui_modules_reached`` catches every spelling of the import and that
     # one only catches the relative form.
     assert _gui_modules_reached(subpop_mod) == {
-        "categorical", "analysis_catalog", "plot_appearance", "plot_workflow"}
+        "categorical", "analysis_catalog", "plot_appearance", "plot_workflow",
+        "plot_interaction"}
     for mod in (plots_mod, psd_mod, subpop_mod):
         assert _gui_modules_reached(mod) <= _NON_PANEL_GUI_MODULES
         # specifically: no PANEL, by any spelling

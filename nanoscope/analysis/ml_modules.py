@@ -46,7 +46,10 @@ What the module does, given ``ctx``:
      then OFFSET the sample-index columns back to full-file coordinates so the
      spans/markers/zoom land on the right samples.
   5. Wrap it as an :class:`AnalysisResult` (``module_id='detect.keras'``) with a
-     SPAN overlay and the provenance (model file, thresholds, window, range).
+     SPAN overlay and the provenance (model file, thresholds, window, range), and the
+     model's per-sample probability kept as ``result.confidence`` (a
+     :class:`~nanoscope.core.confidence.ConfidenceTrack`, one byte per analysed sample)
+     for the trace's confidence pane. It is not saved in projects.
 
 The model is loaded lazily and CPU is forced inside ``ml_detect`` -- merely
 importing this module never touches TensorFlow (it only probes for it), so the
@@ -61,6 +64,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from ..core.analysis import AnalysisResult, OverlayHint, OverlayKind
+from ..core.confidence import ConfidenceTrack
 from ..core.identity import doc_id_for_meta
 from ..core.types import ChannelKind
 from . import ml_detect
@@ -384,7 +388,7 @@ class MLDetect:
         # general Preprocess-tab chain) and auto-selects the RAW/FEATURE path from
         # model.channels; regions come back in slice-local samples.
         try:
-            regions, _prob, ml_prov = ml_detect.ml_detect_regions(
+            regions, prob, ml_prov = ml_detect.ml_detect_regions(
                 sig,
                 fs,
                 model,
@@ -405,6 +409,15 @@ class MLDetect:
             # WITHOUT importing gui: the worker sees ctx.cancelled() is True and
             # drops this (empty) result, emitting cancelled() rather than failed().
             return self._cancelled_result(doc_id, channel, fp, params, fs, i0, i1)
+
+        # KEEP THE PROBABILITY. It used to be bound to ``_prob`` and dropped here, so the one
+        # quantity an ML table is decoded from was the one thing no surface could show. It is
+        # quantised to one byte per analysed sample NOW, before characterisation allocates
+        # its float64 copies of the channel, so the float32 trace is released before the
+        # run's memory peaks rather than held through it. See `core.confidence`.
+        confidence = self._confidence_track(
+            prob, model, run_cfg, fs, i0, enter, exit_thr, ml_prov, model_path)
+        del prob
 
         # A deviation from the preset the model was trained under is a CORRECTNESS
         # risk, not a preference, so it is recorded against the named preset rather
@@ -607,9 +620,35 @@ class MLDetect:
             scalars=scalars,
             warnings=tuple(warnings),
             baseline_fingerprint=prov.get("baseline_fingerprint"),
+            confidence=confidence,
         )
 
     # -- helpers ----------------------------------------------------------------
+    @staticmethod
+    def _confidence_track(prob, model, run_cfg, fs, i0, enter, exit_thr, ml_prov,
+                          model_path) -> ConfidenceTrack:
+        """The run's probability as a :class:`ConfidenceTrack`, on the samples it was made on.
+
+        ``prob`` is slice-local (sample 0 is ``i0``), so ``start=i0`` puts it back on the
+        document's samples exactly as the event columns are offset below. The window starts
+        come from `ml_detect.window_starts` with the tail flags the inference loop was given
+        (``run_cfg`` differs from ``pre_cfg`` only in ``normalize``), so ``covered`` is the
+        loop's own answer to how far the windows reached, not a re-derivation of it. The
+        thresholds are the ones this run DECODED with (adopted from the decode config at
+        the top of ``run``), and the smoothing kernel is the one the core stamped.
+        """
+        n = int(np.asarray(prob).size)
+        W = int(model.window)
+        starts = ml_detect.window_starts(
+            n, W, anchor_tail=bool(run_cfg.anchor_tail),
+            last_start_inclusive=bool(run_cfg.last_start_inclusive))
+        covered = min(n, (max(starts) + W) if starts else 0)
+        return ConfidenceTrack.from_probability(
+            prob, start=int(i0), fs=float(fs), window=W, hop=max(1, W // 2),
+            n_windows=len(starts), covered=covered, enter=float(enter),
+            exit=float(exit_thr), smoothing_kernel=int(ml_prov.get("smooth_kernel", 1) or 1),
+            model_file=os.path.basename(str(model_path)))
+
     def _provenance(
         self, ml_prov, model, model_path, params, fs, n_total, i0, i1,
         enter, exit_thr, noise, base_result, polarity, measured_polarity,

@@ -81,6 +81,8 @@ from ..plot.style import OKABE_ITO
 from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
+                               window_readout)
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
                             ensure_item_legend, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
@@ -269,12 +271,19 @@ class IVWindow(QtWidgets.QMainWindow):
         root.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
+        exports = (("Export current figure…", lambda: self.save_image()),
+                   ("Export data (CSV)…", lambda: self.export_data()))
         self._workflow = install_plot_workflow(
             self, sections={"Data": (self._data_section,), "Analysis": (self._analysis_section,),
                             "Appearance": (self._appearance_section,), "Export": (self._export_section,)},
             actions=(("Analyze / refresh", self._refresh_from_user),),
-            exports=(("Export current figure…", lambda: self.save_image()),
-                     ("Export data (CSV)…", lambda: self.export_data())))
+            exports=exports)
+        # View only (plot_interaction): Reset view, zoom history, the app right-click menu
+        # in place of pyqtgraph's, and the pointer readout on the status line.
+        self._readout = window_readout(self)
+        self._plot_nav = install_plot_interaction(self._plot, readout=self._readout,
+                                                  exports=exports)
+        self._workflow.add_view_control(view_button(lambda: self._plot_nav, (self._plot_nav,)))
 
     def _appearance_from_user(self, state: PlotAppearance) -> None:
         self._appearance = state
@@ -519,6 +528,7 @@ class IVWindow(QtWidgets.QMainWindow):
     def _clear(self) -> None:
         self._warning_summary.set_warnings(())
         self._plot.clear()
+        reset_plot_history(self._plot)   # new geometry: old zoom ranges mean nothing now
         self._plot.setTitle(None)
         self._plot.titleLabel.setText("")
         self._scatter_item = self._fit_item = self._message_item = None

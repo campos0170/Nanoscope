@@ -50,9 +50,36 @@ class PlotWorkflowBar(QtWidgets.QWidget):
         self.export_button.setEnabled(bool(exports))
         layout.addWidget(self.export_button)
 
+    def add_view_control(self, widget: QtWidgets.QWidget, stretch: int = 0) -> None:
+        """Put a view-only control (``plot_interaction.view_button``, or a pointer readout
+        given ``stretch``) after the section selector and any view control already there.
+
+        On the left with the other non-analytical control, so the explicit analysis verbs
+        and Export keep their place at the right end of the bar."""
+        layout = self.layout()
+        index = layout.indexOf(self.sections) + 1
+        while index < layout.count() and layout.itemAt(index).widget() is not None and \
+                layout.itemAt(index).widget().property("nanoscopeViewControl"):
+            index += 1
+        widget.setProperty("nanoscopeViewControl", True)
+        layout.insertWidget(index, widget, stretch)
+
     def set_sections(self, mapping: Mapping[str, Sequence[QtWidgets.QWidget]]) -> None:
         self._sections = {name: tuple(mapping.get(name, ())) for name in SECTIONS}
         self._show_section(self.sections.currentText())
+
+    def add_section_widget(self, name: str, widget: QtWidgets.QWidget) -> None:
+        """Show ``widget`` with section ``name`` too, for a control a page adds after the bar.
+
+        The window templates (``gui.plot_templates``) join a page's Export section this way
+        where that section is a row of buttons rather than a group they could sit inside.
+        """
+        if name not in SECTIONS:
+            raise ValueError(f"Unknown plot section: {name}")
+        self._sections[name] = (*self._sections.get(name, ()), widget)
+        # Only this widget's visibility: re-running _show_section would re-announce the
+        # section to listeners that already know it.
+        widget.setVisible(self.sections.currentText() == name)
 
     def set_section(self, name: str) -> None:
         if name not in SECTIONS:

@@ -126,7 +126,8 @@ from pyqtgraph.exporters import ImageExporter
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
-from ..analysis import events, modules, populations, scoring, stats
+from ..analysis import event_shape, events, modules, populations, scoring, stats
+from ..analysis.distribution_summary import kde_curve
 from ..analysis._compat import trapezoid as _trapezoid
 from ..analysis.cancel import OperationCancelled, cancel_scope, check_cancelled
 from ..analysis.remeasure import REMEASURED_COLUMNS
@@ -157,7 +158,9 @@ from .categorical import category_brushes, category_colour, category_counts, leg
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
 from .key_sequences import redo_sequences, undo_sequences
-from .plot_appearance import PlotAppearance, PlotAppearanceWidget
+from .plot_appearance import PlotAppearance, PlotAppearanceWidget, preset_store
+from .plot_interaction import (image_value, install_plot_interaction, keep_plot_history,
+                               reset_plot_history, view_button, window_readout)
 from .plot_lasso import PlotLasso, RowIdentityIndex, toggled_rows, unique_rows
 from .plot_export import (
     apply_png_resolution, apply_svg_physical_size, choose_live_plot_export,
@@ -297,7 +300,15 @@ HISTOGRAM = "Histogram"
 SCATTER = "Scatter"
 PCA = "PCA"
 KDE = "KDE (density)"
-_PLOT_TYPES = (HISTOGRAM, SCATTER, KDE, PCA)
+#: The name Event waveforms already gives the same picture (``event_plot_panel.
+#: DENSITY_LABEL``), so one quantity has one name across the app -- and it says COUNT,
+#: because the guide's own rule is that a count heatmap is not a KDE density.
+HEATMAP = "Event-count heatmap"
+_PLOT_TYPES = (HISTOGRAM, SCATTER, KDE, HEATMAP, PCA)
+
+#: The heatmap's colour maps: Event waveforms' list, all perceptually uniform and
+#: sequential, so a count reads as a brightness and no hue boundary invents a level.
+_HEATMAP_COLORMAPS = ("viridis", "magma", "plasma", "inferno", "cividis")
 
 # Fit-overlay labels for the histogram.
 _FIT_NONE = "none"
@@ -1206,6 +1217,12 @@ class StyleSettings:
     #: for the same reason the fit-values box is: a second axis appearing on every fitted
     #: histogram unasked is clutter, not presentation.
     show_residuals: bool = False
+    #: The Event-count heatmap's colour map (one of :data:`_HEATMAP_COLORMAPS`).
+    #: APPEARANCE, not analysis: it recolours counts already binned, so a change restyles
+    #: the drawn image and its colour bar and never re-bins -- the rule every other field
+    #: here keeps. Kept in the style rather than on the heatmap page for that reason, and
+    #: so it rides undo, templates and JSON with the rest of the look.
+    heatmap_colormap: str = "viridis"
 
     # -- mapping-field helpers -------------------------------------------------------------------
     # The two ``FrozenMap`` fields cannot be written in place, and spelling
@@ -1347,6 +1364,12 @@ class HistogramConfig:
     log_x: bool = False
     log_y: bool = False
     include_filter_limited: bool = False
+    #: A 1-D Gaussian KDE (Scott bandwidth) over each drawn series, scaled to the bars'
+    #: y quantity. AN ANALYSIS SETTING, not presentation: it estimates a new curve from
+    #: the sample, so a hand tick goes behind the Plot / Apply gate (see
+    #: :meth:`PlotsWindow._on_kde_overlay_toggled`) and, like every field here, is
+    #: carried by templates, undo, the JSON sidecar and the project snapshot.
+    kde_overlay: bool = False
 
     def __post_init__(self) -> None:
         """Rewrite a pre-S6-03 ``normalization`` spelling into today's. The ONE place the
@@ -1443,6 +1466,26 @@ class KdeConfig:
 
 
 @dataclass(frozen=True)
+class HeatmapConfig:
+    """The Event-count heatmap page: two columns binned into a 2-D COUNT image.
+
+    Its own pair of columns, as the KDE page has, rather than the scatter's: a page
+    remembers the axes chosen for it, and moving between a scatter and a heatmap of
+    different columns must not drag one page's choice onto the other.
+
+    ``log_x`` DEFAULTS ON for :class:`KdeConfig`'s reason, and because Event waveforms'
+    heatmap -- the same kernel, ``event_shape.density_2d`` -- defaults its dwell axis to
+    log: a log-distributed dwell drawn linearly lands in the first column of bins.
+    ``bins`` is per axis (``bins`` x ``bins``), Event waveforms' default and range.
+    """
+    x: str = ""
+    y: str = ""
+    log_x: bool = True
+    log_y: bool = False
+    bins: int = 40
+
+
+@dataclass(frozen=True)
 class ClusterConfig:
     """Clustering and PCA share the feature set, so it lives here rather than per page."""
     features: tuple[str, ...] = ()
@@ -1522,6 +1565,7 @@ class PlotConfig:
     histogram: HistogramConfig = field(default_factory=HistogramConfig)
     scatter: ScatterConfig = field(default_factory=ScatterConfig)
     kde: KdeConfig = field(default_factory=KdeConfig)
+    heatmap: HeatmapConfig = field(default_factory=HeatmapConfig)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
     fit: FitConfig = field(default_factory=FitConfig)
     axes: AxesConfig = field(default_factory=AxesConfig)
@@ -1544,6 +1588,8 @@ class PlotConfig:
             x, y = self.scatter.x, self.scatter.y
         elif self.plot_type == KDE:
             x, y = self.kde.x, self.kde.y
+        elif self.plot_type == HEATMAP:
+            x, y = self.heatmap.x, self.heatmap.y
         else:
             x, y = "", ""
         return AnalysisIdentity(plot_type=self.plot_type, x_column=x, y_column=y,
@@ -1572,6 +1618,8 @@ class PlotConfig:
             return bool(self.scatter.log_x), bool(self.scatter.log_y)
         if self.plot_type == KDE:
             return bool(self.kde.log_x), bool(self.kde.log_y)
+        if self.plot_type == HEATMAP:
+            return bool(self.heatmap.log_x), bool(self.heatmap.log_y)
         return False, False
 
     def with_log_state(self, *, log_x: bool | None = None,
@@ -1595,6 +1643,8 @@ class PlotConfig:
             return _dc_replace(self, scatter=_dc_replace(self.scatter, log_x=x, log_y=y))
         if self.plot_type == KDE:
             return _dc_replace(self, kde=_dc_replace(self.kde, log_x=x, log_y=y))
+        if self.plot_type == HEATMAP:
+            return _dc_replace(self, heatmap=_dc_replace(self.heatmap, log_x=x, log_y=y))
         return self
 
     def rebased(self, was: AnalysisIdentity) -> "PlotConfig":
@@ -1718,7 +1768,7 @@ class PlotConfig:
     #: combo, :meth:`as_template` and ``tests/gui/test_plots_templates_json.py`` read ONE
     #: list instead of three copies that can disagree about where the seam is. Not a
     #: dataclass field (no annotation), so ``test_no_derived_state_ever_enters_the_config``
-    #: still sees exactly the ten fields it walks.
+    #: still sees exactly the dataclass fields it walks.
     TEMPLATE_DROPS = ("selection.source_keys", "fit.applied", "fit.applied_k",
                       "fit.applied_k_auto", "fit.applied_scatter",
                       "style.label_overrides", "style.legend_include")
@@ -1806,10 +1856,13 @@ class PlotConfig:
                               y=tpl.scatter.y or self.scatter.y)
         kde = _dc_replace(tpl.kde, x=tpl.kde.x or self.kde.x,
                           y=tpl.kde.y or self.kde.y)
+        heatmap = _dc_replace(tpl.heatmap, x=tpl.heatmap.x or self.heatmap.x,
+                              y=tpl.heatmap.y or self.heatmap.y)
         cluster = tpl.cluster if tpl.cluster.features else _dc_replace(
             tpl.cluster, features=self.cluster.features)
         return _dc_replace(
-            tpl, histogram=hist, scatter=scatter, kde=kde, cluster=cluster,
+            tpl, histogram=hist, scatter=scatter, kde=kde, heatmap=heatmap,
+            cluster=cluster,
             selection=_dc_replace(tpl.selection,
                                   source_keys=self.selection.source_keys),
             style=_dc_replace(tpl.style,
@@ -1895,7 +1948,14 @@ PLOT_CONFIG_FORMAT: str = "nanoscope-plot-config"
 # QSettings template written before the rename; and a stored template a build cannot read
 # is refused with a message naming the version (:meth:`PlotsWindow._template_config`),
 # never swallowed.
-PLOT_CONFIG_VERSION: int = 2
+#
+# v3 ADDS, AND BUMPS FOR THE SAME REASON: ``histogram.kde_overlay``, a ``heatmap`` section,
+# ``style.heatmap_colormap`` and the plot type "Event-count heatmap". A v2 build reading a
+# v3 file would ignore all four and re-save a plain histogram (or fall back off a plot
+# type it has not got) over the sender's KDE overlay and heatmap, with nothing said -- the
+# silent strip this constant converts into a refusal. Every v1 and v2 file still opens:
+# the four keys read as their defaults (overlay off, heatmap defaults, viridis).
+PLOT_CONFIG_VERSION: int = 3
 #: The oldest sidecar this build can still read. v1 is the first, so this is 1 and stays
 #: 1 until a change is genuinely un-migratable -- raising it is a promise to the user that
 #: their older files are unopenable, which no additive key ever justifies.
@@ -1918,6 +1978,7 @@ _CONFIG_SECTIONS: dict[str, type] = {
     "histogram": HistogramConfig,
     "scatter": ScatterConfig,
     "kde": KdeConfig,
+    "heatmap": HeatmapConfig,
     "cluster": ClusterConfig,
     "fit": FitConfig,
     "axes": AxesConfig,
@@ -2857,6 +2918,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._updating = False   # suppress redraws during bulk widget updates
         #: (sample digest, censoring, k) -> a computed note. See :meth:`_cached_note`.
         self._note_cache: dict[tuple, str] = {}
+        #: (sample digest, log x) -> a histogram KDE overlay's curve. See :meth:`_kde_for`.
+        self._kde_cache: dict[tuple, object] = {}
+        #: Set by a snapshot render that declined to estimate the KDE overlay.
+        self._kde_pending_after_snapshot = False
+        #: Whether the histogram's KDE overlay is ON THE PICTURE -- the box is only the
+        #: proposal. `_applied_fit`'s split, for its reason: a live redraw (a bin count, a
+        #: log toggle) must not estimate a curve the user ticked but has not committed.
+        #: Committed by :meth:`_armed_redraw`, which every run gesture ends in.
+        self._applied_kde_overlay = False
+        #: The Event-count heatmap's image and its colour bar, while one is drawn.
+        self._heatmap_image = None
+        self._heatmap_bar = None
         #: key -> zero-arg callable, for notes DEFERRED off the redraw path.
         #: See :meth:`_deferred_note`.
         self._pending_notes: dict[tuple, object] = {}
@@ -3025,6 +3098,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._event_point_items: dict[str, list[pg.ScatterPlotItem]] = {}
         self._selected_event_rows: dict[str, list[object]] = {}
         self._lasso_generation = 0
+        #: The KDE or heatmap draw's own frame ``(x0, x1, y0, y1)`` in axis coordinates,
+        #: or None for every other draw. Kept because Reset view must repeat it: the
+        #: isocurves give ``autoRange()`` no bounds to fit (see `_draw_kde`), and on the
+        #: heatmap it would pad the image's edges. View state, never saved.
+        self._kde_view_frame: tuple[float, float, float, float] | None = None
+        #: The residual strip's drawn ±span (`_render_cached_residual`), which Reset view puts
+        #: back: the strip takes wheel and drag in y, and its x follows the plot by link.
+        self._resid_view_span = 3.0
 
         #: THE Y QUANTITY THIS WINDOW WAS ASKED FOR AND COULD NOT OFFER. Written only by
         #: the one writer (:meth:`_set_config`) and cleared by any move of the combo the
@@ -3277,6 +3358,71 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(splitter)
         self._build_workflow_toolbar()
+        self._install_plot_interaction()
+
+    def _install_plot_interaction(self) -> None:
+        """View only (plot_interaction): Reset view, zoom history, app menu, pointer readout.
+
+        NONE OF IT IS CONFIG. Reset view, Zoom back and Zoom forward move the view and
+        nothing else: they never reach `_history_touch`, never edit the Axis range boxes and
+        never mark the plot stale, so this window's Cmd+Z (the whole PlotConfig) does not
+        see them. The residual strip is x-linked to the plot and shares its history. The
+        readout sits on the status line beside the Mode label, reads the drawn axes (their
+        log mode and the Time unit's tick scale), and on Scatter/PCA names the nearest
+        point's source and event_id -- the identity a click on it would select. Over the
+        Event-count heatmap it adds the count of the cell under the pointer.
+        """
+        exports = (("Export current figure…", lambda: self.save_image()),
+                   ("Export plot data…", lambda: self.export_data()))
+        self._readout = window_readout(self)
+
+        def heatmap_count(vx: float, vy: float) -> str:
+            # The drawn counts themselves (the image is placed in log10 view coordinates
+            # on a log axis, so the view position maps onto the original cell grid).
+            value = image_value(getattr(self, "_heatmap_image", None), vx, vy)
+            return "" if value is None else f"Event count {value:.0f}"
+
+        self._plot_nav = install_plot_interaction(
+            self._plot, readout=self._readout, reset=self._reset_plot_view, exports=exports,
+            points=self._readout_points, extra=heatmap_count)
+        install_plot_interaction(self._resid, readout=self._readout, exports=exports,
+                                 navigation=self._plot_nav)
+        button = view_button(lambda: self._plot_nav, (self._plot_nav,))
+        self._view_button = button
+        self._workflow_toolbar.insertWidget(self._workflow_spacer_action, button)
+
+    def _reset_plot_view(self) -> None:
+        """Reset view: the framing the last draw ended with, the user's axis pin included.
+
+        The same two steps as `_finalize_view` (or the KDE's grid frame, or the heatmap's
+        image frame, in place of the auto-fit), read off the DRAWN axes rather than the controls: a Log x ticked but not
+        yet applied must not change what "reset" means for the plot on screen. The residual
+        strip follows in x by its link and gets its drawn ±span back in y.
+        """
+        log_x = bool(self._plot.getAxis("bottom").logMode)
+        log_y = bool(self._plot.getAxis("left").logMode)
+        frame = self._kde_view_frame
+        if frame is not None:
+            self._plot.vb.setRange(xRange=frame[:2], yRange=frame[2:], padding=0)
+        else:
+            self._plot.autoRange()
+        self._apply_stored_ranges(log_x, log_y)
+        if not self._resid_widget.isHidden() and self._resid.items:
+            span = self._resid_view_span
+            self._resid.setYRange(-span, span, padding=0)
+
+    def _readout_points(self):
+        """Scatter/PCA point clouds for the readout's nearest point, with how to name one."""
+        out = []
+        for key, items in self._event_point_items.items():
+            source = self._sources.get(key)
+            label = source.label if source is not None else key
+            ident = ("event_id" if source is not None and source.kind == "detection"
+                     else "row")
+            for item in items:
+                out.append((item, lambda value, label=label, ident=ident:
+                            f"{label} {ident} {value}"))
+        return out
 
     def _build_workflow_toolbar(self) -> None:
         """Persistent section navigation and the two verbs used on every plot.
@@ -3308,7 +3454,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        bar.addWidget(spacer)
+        # Kept so the view-only Reset view button can sit left of it, beside the sections.
+        self._workflow_spacer_action = bar.addWidget(spacer)
 
         self._run_action = bar.addAction("Plot / Apply")
         self._run_action.setObjectName("populationPlotRunAction")
@@ -3562,6 +3709,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._pages.addWidget(self._build_histogram_page())
         self._pages.addWidget(self._build_scatter_page())
         self._pages.addWidget(self._build_kde_page())
+        self._pages.addWidget(self._build_heatmap_page())   # _PLOT_TYPES order
         self._pages.addWidget(self._build_pca_page())
         lay.addWidget(self._pages)
 
@@ -3646,6 +3794,22 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._hist_logy.setToolTip("Log-scale the count axis — makes an exponential tail read as a line.")
         self._hist_logy.toggled.connect(self._changed)
         form.addRow(self._hist_logy)
+
+        # THE KDE OVERLAY IS AN ANALYSIS, so unlike the two log toggles above it does
+        # not redraw on a click: it estimates a new curve from the sample, and a curve
+        # that appears the moment the box is ticked is the "a proposal took effect on
+        # its own" surprise the Plot / Apply gate exists to prevent (owner note #12).
+        self._hist_kde = QtWidgets.QCheckBox("KDE overlay")
+        self._hist_kde.setAccessibleName("Histogram KDE overlay")
+        self._hist_kde.setToolTip(
+            "Draw one Gaussian KDE (Scott bandwidth, as the violins use) per drawn series, "
+            "dotted, scaled to the y quantity the bars show — count: n × bin width × f; "
+            "density: f per the column's stored unit; probability per bin: bin width × f.\n"
+            "On a log x axis the KDE is estimated on log10 of the column, matching the "
+            "log-spaced bins.\nAn analysis setting: press Plot / Apply to draw it. "
+            "Details names each series' bandwidth.")
+        self._hist_kde.toggled.connect(self._on_kde_overlay_toggled)
+        form.addRow(self._hist_kde)
 
         self._fit_combo = QtWidgets.QComboBox()
         self._fit_combo.addItems([_FIT_NONE, _FIT_EXP, _FIT_GAMMA, _FIT_INVGAUSS,
@@ -3829,6 +3993,57 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "another has far more events.")
         self._kde_levels.valueChanged.connect(self._changed)
         form.addRow("Contours", self._kde_levels)
+        return page
+
+    def _build_heatmap_page(self) -> QtWidgets.QWidget:
+        """The Event-count heatmap: two columns binned into a 2-D count image.
+
+        THE SAME KERNEL AS EVENT WAVEFORMS' HEATMAP (``event_shape.density_2d``), so the two
+        windows cannot disagree about a bin. ONE SOURCE AT A TIME, the first ticked one: a
+        count image has one colour channel and it is spent on the count, so two sources
+        cannot share it the way two histograms share an axis, and summing them would be
+        a pooled count nobody asked for. Said here, in the title and in Details.
+        """
+        page = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(page)
+        form.setContentsMargins(0, 4, 0, 0)
+        self._heatmap_note = QtWidgets.QLabel(
+            "Event counts in two-dimensional bins — counts, not a KDE density. Shows the "
+            "first ticked source only. Lasso and point-click selection need points and "
+            "are not available on this plot.")
+        self._heatmap_note.setWordWrap(True)
+        form.addRow(self._heatmap_note)
+
+        self._heatmap_x = QtWidgets.QComboBox()
+        self._heatmap_x.currentTextChanged.connect(
+            lambda t, w=self._heatmap_x: self._on_axis_column_changed(t, w))
+        form.addRow("X", self._heatmap_x)
+
+        self._heatmap_y = QtWidgets.QComboBox()
+        self._heatmap_y.currentTextChanged.connect(
+            lambda t, w=self._heatmap_y: self._on_axis_column_changed(t, w))
+        form.addRow("Y", self._heatmap_y)
+
+        self._heatmap_logx = QtWidgets.QCheckBox("Log x")
+        self._heatmap_logx.setChecked(HeatmapConfig().log_x)   # the default lives there
+        self._heatmap_logx.setToolTip(
+            "Bin x in log10 space (geometric edges); non-positive values are dropped and "
+            "counted in Details. On by default, as in Event waveforms.")
+        self._heatmap_logx.toggled.connect(self._changed)
+        form.addRow(self._heatmap_logx)
+        self._heatmap_logy = QtWidgets.QCheckBox("Log y")
+        self._heatmap_logy.setChecked(HeatmapConfig().log_y)
+        self._heatmap_logy.toggled.connect(self._changed)
+        form.addRow(self._heatmap_logy)
+
+        self._heatmap_bins = QtWidgets.QSpinBox()
+        self._heatmap_bins.setRange(4, 400)
+        self._heatmap_bins.setValue(HeatmapConfig().bins)
+        self._heatmap_bins.setToolTip(
+            "Bins per axis (bins × bins cells), spanning the source's own min to max on "
+            "each axis — Event waveforms' rule.")
+        self._heatmap_bins.valueChanged.connect(self._changed)
+        form.addRow("Bins", self._heatmap_bins)
         return page
 
     def _build_pca_page(self) -> QtWidgets.QWidget:
@@ -4221,6 +4436,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "Colour of the fitted overlay curve and its title.")
         form.addRow("Fit colour", self._fit_swatch)
 
+        # The heatmap's colour map, beside the other colours because it is one: it
+        # recolours the counts already drawn (see StyleSettings.heatmap_colormap).
+        self._heatmap_cmap = QtWidgets.QComboBox()
+        self._heatmap_cmap.addItems(list(_HEATMAP_COLORMAPS))
+        self._heatmap_cmap.setCurrentText(self._style.heatmap_colormap)
+        self._heatmap_cmap.setAccessibleName("Event-count heatmap colormap")
+        self._heatmap_cmap.setToolTip(
+            "Sequential colour map of the Event-count heatmap and its colour bar. "
+            "Appearance only: the counts are not re-binned and the zoom is kept.")
+        self._heatmap_cmap.currentTextChanged.connect(self._on_style_heatmap_colormap)
+        form.addRow("Heatmap colormap", self._heatmap_cmap)
+
         self._fit_values_check = QtWidgets.QCheckBox("Fit values on plot")
         self._fit_values_check.setToolTip(
             "Write the fitted parameters (τ, μ, numerical KS statistic…) as a text box on the "
@@ -4596,6 +4823,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_grid(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_grid=bool(on))
+        self._presentation_changed()
+
+    def _on_style_heatmap_colormap(self, name: str) -> None:
+        if name not in _HEATMAP_COLORMAPS:
+            return
+        self._style = _dc_replace(self._style, heatmap_colormap=str(name))
         self._presentation_changed()
 
     def _on_legend_entry_toggled(self, item) -> None:
@@ -5041,6 +5274,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             return self._scatter_x.currentText(), self._scatter_y.currentText()
         if kind == KDE:
             return self._kde_x.currentText(), self._kde_y.currentText()
+        if kind == HEATMAP:
+            return self._heatmap_x.currentText(), self._heatmap_y.currentText()
         return "", ""
 
     def _axis_unit_factors(self) -> tuple[float, float]:
@@ -5308,7 +5543,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 colour_by=self._hist_colour_by.currentText(),
                 log_x=bool(self._hist_logx.isChecked()),
                 log_y=bool(self._hist_logy.isChecked()),
-                include_filter_limited=bool(self._use_filter_limited.isChecked())),
+                include_filter_limited=bool(self._use_filter_limited.isChecked()),
+                kde_overlay=bool(self._hist_kde.isChecked())),
             scatter=ScatterConfig(
                 x=self._scatter_x.currentText(), y=self._scatter_y.currentText(),
                 log_x=bool(self._scatter_logx.isChecked()),
@@ -5319,6 +5555,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 log_x=bool(self._kde_logx.isChecked()),
                 log_y=bool(self._kde_logy.isChecked()),
                 levels=int(self._kde_levels.value())),
+            heatmap=HeatmapConfig(
+                x=self._heatmap_x.currentText(), y=self._heatmap_y.currentText(),
+                log_x=bool(self._heatmap_logx.isChecked()),
+                log_y=bool(self._heatmap_logy.isChecked()),
+                bins=int(self._heatmap_bins.value())),
             cluster=ClusterConfig(
                 features=tuple(self.feature_selection()),
                 method=self._method_combo.currentText(),
@@ -5451,6 +5692,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._hist_logx.setChecked(bool(h.log_x))
             self._hist_logy.setChecked(bool(h.log_y))
             self._use_filter_limited.setChecked(bool(h.include_filter_limited))
+            self._hist_kde.setChecked(bool(h.kde_overlay))
 
             s = cfg.scatter
             if s.x:
@@ -5469,6 +5711,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._kde_logx.setChecked(bool(k.log_x))
             self._kde_logy.setChecked(bool(k.log_y))
             self._kde_levels.setValue(int(k.levels))
+
+            hm = cfg.heatmap
+            if hm.x:
+                self._heatmap_x.setCurrentText(hm.x)
+            if hm.y:
+                self._heatmap_y.setCurrentText(hm.y)
+            self._heatmap_logx.setChecked(bool(hm.log_x))
+            self._heatmap_logy.setChecked(bool(hm.log_y))
+            self._heatmap_bins.setValue(int(hm.bins))
 
             c = cfg.cluster
             self._method_combo.setCurrentText(c.method)
@@ -5499,8 +5750,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # The style widgets each write onto `_style` from their own handler, so the
             # config's style is installed AFTER them and is the value that stands --
             # exactly the ordering `reset_state` has always used.
-            self._apply_style_widgets(cfg.style)
-            self._style = cfg.style
+            style = cfg.style
+            if style.heatmap_colormap not in _HEATMAP_COLORMAPS:
+                # A COLOUR MAP THIS BUILD HAS NOT GOT (a newer build's file, a hand-edit
+                # naming `jet`) is replaced by the default HERE, in the one writer, rather
+                # than carried: the image could only ever be drawn in viridis, so a style
+                # that went on naming `jet` would re-export a map nobody saw, and
+                # `_ConfigLosses` -- which compares the file with `config()` -- would
+                # have no difference to name. Written, it is disclosed like any other
+                # setting the window did not take.
+                style = _dc_replace(style,
+                                    heatmap_colormap=StyleSettings().heatmap_colormap)
+            self._apply_style_widgets(style)
+            self._style = style
             # THE SOURCE ROWS ARE PART OF THE CONFIG TOO, and this call is the only
             # reason they behave like it. `label_overrides` is edited THROUGH the
             # Sources list -- the row is the rename affordance (`ItemIsEditable`, see
@@ -5707,6 +5969,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._select_font_family(style.font_family)
         self._paint_swatch(self._data_swatch, style.data_color)
         self._paint_swatch(self._fit_swatch, style.fit_color)
+        # `_set_config` has already replaced a name this build has not got by the
+        # default, so this finds it; the guard only keeps a stray caller from writing a
+        # name the combo would ignore (`_heatmap_colormap` falls back to viridis too).
+        if self._heatmap_cmap.findText(style.heatmap_colormap) >= 0:
+            self._heatmap_cmap.setCurrentText(style.heatmap_colormap)
 
     def _select_font_family(self, family: str) -> None:
         """Point the Font row at ``family`` (``""`` = the application default).
@@ -6007,6 +6274,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._load_templates_into_combo()
         finally:
             self._template_updating = False
+        # A project just opened may have added templates (gui.plot_preset_sync).
+        preset_store().changed.connect(self._reload_templates_keeping_selection)
 
         # -- B3: the JSON sidecar --------------------------------------------------------
         jrow = QtWidgets.QHBoxLayout()
@@ -6597,6 +6866,17 @@ class PlotsWindow(QtWidgets.QMainWindow):
         finally:
             self._template_updating = was
 
+    def _reload_templates_keeping_selection(self) -> None:
+        """Rebuild the combo after the store changed elsewhere, keeping a named selection.
+
+        Still accurate: templates ADDED by a project open did not change these settings, and
+        the rebuild alone would drop the name to "— manual —".
+        """
+        name = self._template_combo.currentText()
+        self._load_templates_into_combo()
+        if name and name != self._TPL_MANUAL and self._template_combo.findText(name) >= 0:
+            self._select_template(name)
+
     def _set_template_buttons_enabled(self, on: bool) -> None:
         """Rename and Delete act on the SELECTED template, so they move together.
 
@@ -6931,8 +7211,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
                  (self._scatter_x, cfg.scatter.x, now.scatter.x),
                  (self._scatter_y, cfg.scatter.y, now.scatter.y),
                  (self._kde_x, cfg.kde.x, now.kde.x),
-                 (self._kde_y, cfg.kde.y, now.kde.y))
-        hist_col, sx, sy, kx, ky = [
+                 (self._kde_y, cfg.kde.y, now.kde.y),
+                 (self._heatmap_x, cfg.heatmap.x, now.heatmap.x),
+                 (self._heatmap_y, cfg.heatmap.y, now.heatmap.y))
+        hist_col, sx, sy, kx, ky, hx, hy = [
             want if want and combo.findText(want) >= 0 else have
             for combo, want, have in pairs]
         # THE Y QUANTITY IS NOT TOUCHED HERE, and that omission is load-bearing rather
@@ -6941,14 +7223,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # the refusal, and `_NormRefusal`, which keeps it visible). The request travels on
         # intact so that `_sync_template_selection`, whose whole job is to notice that a
         # template no longer describes the window, is comparing the request.
-        if (hist_col, sx, sy, kx, ky) == (cfg.histogram.column, cfg.scatter.x,
-                                          cfg.scatter.y, cfg.kde.x, cfg.kde.y):
+        if (hist_col, sx, sy, kx, ky, hx, hy) == (
+                cfg.histogram.column, cfg.scatter.x, cfg.scatter.y, cfg.kde.x, cfg.kde.y,
+                cfg.heatmap.x, cfg.heatmap.y):
             return cfg
         return _dc_replace(
             cfg,
             histogram=_dc_replace(cfg.histogram, column=hist_col),
             scatter=_dc_replace(cfg.scatter, x=sx, y=sy),
-            kde=_dc_replace(cfg.kde, x=kx, y=ky))
+            kde=_dc_replace(cfg.kde, x=kx, y=ky),
+            heatmap=_dc_replace(cfg.heatmap, x=hx, y=hy))
 
     # -- data in ---------------------------------------------------------------------------------
     def set_active_detection(self, key: tuple | None) -> None:
@@ -7001,12 +7285,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
         view = self._plot.getViewBox()
         ranges = [list(pair) for pair in view.viewRange()]
         auto = list(view.autoRangeEnabled())
-        self._redraw()
-        view = self._plot.getViewBox()
-        view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
-        for axis, enabled in enumerate(auto):
-            if enabled:
-                view.enableAutoRange(axis=axis, enable=enabled)
+        # ...and for the same reason the zoom history stays: the draw's clear restarts it
+        # as it would for new geometry, but every range in it still means what it meant.
+        with keep_plot_history(self._plot):
+            self._redraw()
+            view = self._plot.getViewBox()
+            view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
+            for axis, enabled in enumerate(auto):
+                if enabled:
+                    view.enableAutoRange(axis=axis, enable=enabled)
 
     def _stale_signature(self) -> tuple:
         """The marks a draw of the current view writes: the title's STALE headline and the
@@ -7029,8 +7316,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 cols = ([self._hist_col.currentText()] if kind == HISTOGRAM else
                         [self._scatter_x.currentText(), self._scatter_y.currentText()]
                         if kind == SCATTER else
+                        [self._heatmap_x.currentText(), self._heatmap_y.currentText()]
+                        if kind == HEATMAP else
                         [self._kde_x.currentText(), self._kde_y.currentText()])
                 sources = [src for src, _df in self._drawn_frames()]
+                if kind == HEATMAP:
+                    sources = sources[:1]   # the one source `_draw_heatmap` draws
                 colour_by = {HISTOGRAM: self._hist_colour_by,
                              SCATTER: self._colour_by}.get(kind)
                 # as _draw_histogram's `split` and _draw_scatter's `by_cluster` decide it
@@ -7489,11 +7780,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         try:
             x_prev, y_prev = self._scatter_x.currentText(), self._scatter_y.currentText()
             kx_prev, ky_prev = self._kde_x.currentText(), self._kde_y.currentText()
+            hx_prev, hy_prev = self._heatmap_x.currentText(), self._heatmap_y.currentText()
             h_prev = self._hist_col.currentText()
             feat_prev = set(self.feature_selection())
 
             for combo in (self._hist_col, self._scatter_x, self._scatter_y,
-                          self._kde_x, self._kde_y):
+                          self._kde_x, self._kde_y, self._heatmap_x, self._heatmap_y):
                 combo.clear()
                 combo.addItems(cols)
                 for i, name in enumerate(cols):
@@ -7528,6 +7820,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 ky_prev if ky_prev in cols
                 else ("frac_depth" if "frac_depth" in cols
                       else (_prefer(cols, _PREFER_AMP, fallback=1) or cols[-1])))
+            # The heatmap defaults to Event waveforms' own pair -- dwell against the
+            # median depth -- so the two count images open on the same axes.
+            self._heatmap_x.setCurrentText(hx_prev if hx_prev in cols
+                                           else (_prefer(cols, _PREFER_DWELL) or cols[0]))
+            self._heatmap_y.setCurrentText(
+                hy_prev if hy_prev in cols
+                else (_prefer(cols, _PREFER_AMP, fallback=1) or cols[-1]))
 
             keep = feat_prev & set(cols)
             if not keep:
@@ -7604,6 +7903,21 @@ class PlotsWindow(QtWidgets.QMainWindow):
         applied = getattr(self, "_figure_applied_config", None)
         return {} if applied is None else plot_config_to_json(
             _dc_replace(applied, style=self._style))
+
+    def _drawn_config(self) -> PlotConfig:
+        """:meth:`config` as the picture just drawn has it: the KDE overlay as APPLIED.
+
+        ``config()`` reports the box, which is a proposal (a hand tick waits for Plot,
+        and project open never estimates the curve); the fit needs no such step because
+        its applied state is a config field of its own. Without this a Figure Library
+        capture taken over a pending tick recorded a KDE the image and its exported data
+        do not have.
+        """
+        cfg = self.config()
+        if cfg.histogram.kde_overlay == self._applied_kde_overlay:
+            return cfg
+        return _dc_replace(cfg, histogram=_dc_replace(
+            cfg.histogram, kde_overlay=bool(self._applied_kde_overlay)))
 
     def figure_source_recipes(self) -> list[dict]:
         """Durable sources of the shown numbers, never pending source checkboxes."""
@@ -7814,6 +8128,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._restyle_committed_legend()
             self._restyle_committed_decorations()
         self._restyle_committed_items()
+        # The heatmap's colour map and its bar's ink: cached image, new LUT, no re-bin.
+        self._style_heatmap_bar()
         self._apply_background()
         self._apply_fonts()
         if self._plot_armed and self._message_item is None:
@@ -7911,6 +8227,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._plot_armed = True
         self._stale = False
         self._stale_reason = ""
+        # ...which, for the KDE overlay, is the moment the proposal becomes the picture:
+        # here rather than in `_run_plot` because every run gesture -- Plot, a setter,
+        # `apply_config`, an undo -- ends here, and one that cleared the ● without
+        # committing the box would leave a ticked overlay silently undrawn.
+        self._applied_kde_overlay = bool(self._hist_kde.isChecked())
         # The applied fit has just become the selected one, so both Apply buttons and
         # the Plot button lose their ● together — they are one gate and they must not
         # be able to disagree about whether anything is pending.
@@ -8112,6 +8433,24 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # ...and the fit itself waits for Apply. The enable/disable above is about the
         # PROPOSAL — the user has to be able to set k before committing to it.
         self._fit_selection_moved(self._fit_combo)
+
+    def _on_kde_overlay_toggled(self, _on: bool) -> None:
+        """The KDE overlay box moved: a hand tick waits for Plot, code commits at once.
+
+        The plot-type combo's rule (:meth:`_on_plot_type_changed`), because this is the
+        same kind of choice -- WHAT is estimated, not how it looks. Nothing is drawn by a
+        click, so the curve can never appear over bars it was not asked for -- and,
+        unlike the plot type, not by the NEXT live redraw either: the draw reads
+        ``_applied_kde_overlay``, which only :meth:`_armed_redraw` moves, as the fit's
+        draw reads ``_applied_fit``. Without that, a bin-count spin after a hand tick
+        drew the curve while the banner still said the plot was the previous selection.
+        """
+        if self._updating:
+            return
+        if self._from_the_user(self._hist_kde):
+            self._mark_stale("the KDE overlay")
+        else:
+            self._armed_redraw()
 
     def _on_fit_k_changed(self, _value: int) -> None:
         self._fit_selection_moved(self._fit_k)
@@ -8365,6 +8704,28 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def set_kde_log(self, x: bool, y: bool) -> None:
         self._kde_logx.setChecked(bool(x))
         self._kde_logy.setChecked(bool(y))
+
+    def set_kde_overlay(self, on: bool) -> None:
+        """The histogram's 1-D KDE overlay. APPLIED AT ONCE, for :meth:`set_fit`'s
+        reason: a caller that names the setting has made the decision the Plot gate
+        exists to wait for. A hand tick goes behind the gate instead."""
+        self._hist_kde.setChecked(bool(on))
+
+    def set_heatmap_columns(self, x: str, y: str) -> None:
+        """Both heatmap axes. RAISES on either name — same contract as the scatter's."""
+        _choose_combo_item(self._heatmap_x, x, "heatmap x column")
+        _choose_combo_item(self._heatmap_y, y, "heatmap y column")
+
+    def set_heatmap_log(self, x: bool, y: bool) -> None:
+        self._heatmap_logx.setChecked(bool(x))
+        self._heatmap_logy.setChecked(bool(y))
+
+    def set_heatmap_bins(self, n: int) -> None:
+        self._heatmap_bins.setValue(int(n))
+
+    def set_heatmap_colormap(self, name: str) -> None:
+        """The heatmap's colour map (appearance only). RAISES on a name not offered."""
+        _choose_combo_item(self._heatmap_cmap, name, "heatmap colormap")
 
     def set_colour_by(self, mode: str) -> None:
         """Scatter colour channel. RAISES on an unknown mode."""
@@ -8635,6 +8996,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         was_updating = self._updating
         self._workspace_snapshot_fits = (saved_fits, saved_columns)
         self._workspace_snapshot_rendering = True
+        self._kde_pending_after_snapshot = False
+        # Opening a project is never a KDE run, whatever page it opens on: the restored
+        # picture has no curve, so the applied state -- and with it the Figure Library's
+        # `figure_applied_config` -- says none until Plot is pressed.
+        self._applied_kde_overlay = False
         self._updating = True
         try:
             self._redraw()
@@ -8643,6 +9009,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._plot_armed = self._message_item is None
             self._stale = False
             self._stale_reason = ""
+            if self._plot_armed and self._kde_pending_after_snapshot:
+                # ...EXCEPT a KDE overlay, which the draw declined to estimate: the
+                # controls ask for a curve the picture does not have, and that is
+                # exactly what the gate's ● is for.
+                self._stale = True
+                self._stale_reason = "the KDE overlay"   # Details says it was not recomputed
             self._sync_fit_apply_buttons()
             self._sync_run_state()
         finally:
@@ -8774,6 +9146,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._presentation_residual_ready = False
         self._figure_applied_config = None
         self._plot.clear()
+        reset_plot_history(self._plot)   # new geometry: old zoom ranges mean nothing now
+        self._kde_view_frame = None
         self._plot.setTitle(None)
         self._title_presentation = (None, None, None)
         self._axis_auto_labels = {}
@@ -8808,6 +9182,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             if _sc is not None:
                 _sc.removeItem(self._prov_item)
         self._prov_item = None
+        self._remove_heatmap_bar()
         self._band_items = []
         self._clear_residual_strip()
         self._last_fit = None
@@ -9078,6 +9453,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # Symmetric about zero and never tighter than ±3, so the guides are always in
         # frame and two strips of the same data are comparable by eye.
         span = max(3.0, float(np.max(np.abs(r))) * 1.15) if r.size else 3.0
+        self._resid_view_span = span
         self._resid.setYRange(-span, span, padding=0)
         self._resid_widget.setVisible(True)
         # "approx." is not decoration: the dof came from an unbinned MLE, and a bare
@@ -9671,7 +10047,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._redraw_current()
             self._stale_drawn = self._stale_signature()
             if self._message_item is None:
-                self._figure_applied_config = self.config()
+                self._figure_applied_config = self._drawn_config()
         finally:
             # THE DRAW IS WHAT SETTLES WHICH ENTRIES EXIST, so it is where decisions
             # about entries that no longer exist are dropped -- a cluster row unticked
@@ -9720,6 +10096,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     "density contours from the attached source data.")
                 return
             self._draw_kde(drawn)
+        elif kind == HEATMAP:
+            self._draw_heatmap(drawn)
+            # ONE source is drawn, so one source is presented: the provenance caption,
+            # the legend-name disclosure and the figure's source recipes must not name
+            # a ticked source whose events are not in the image.
+            drawn = drawn[:1]
         else:
             df = self._current_frame()
             if df is None or df.shape[0] == 0:
@@ -10232,6 +10614,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 key=label if split else (src.key if src is not None else ""))
             details.append(f"  {label}: n = {v.size}")
 
+        # THE APPLIED OVERLAY, NOT THE BOX: a hand tick is a proposal until Plot (see
+        # `_on_kde_overlay_toggled`), so this draw -- also reached by a live bin-count
+        # or log change -- only estimates what was committed. On project open the box
+        # is the SAVED request and is never estimated; it is said, and left for Plot ●.
+        if getattr(self, "_workspace_snapshot_rendering", False) and self._hist_kde.isChecked():
+            self._kde_pending_after_snapshot = True
+            details.append("KDE overlay: restored as a setting and NOT recomputed on project "
+                           "open (estimating it is an analysis run). Press Plot to draw it "
+                           "from the attached source data.")
+        elif self._applied_kde_overlay:
+            details.extend(self._draw_kde_overlay(groups, col, edges, log_x, log_y,
+                                                  multi, split))
+
         # The detection floor is drawn whether or not a fit is on: the histogram's
         # left edge is the detector's, not the physics'. (figures.py, same rule.)
         # With an overlay the floors may differ, so the SHALLOWEST is shaded (the
@@ -10416,6 +10811,107 @@ class PlotsWindow(QtWidgets.QMainWindow):
             details.append("")
             details.extend(notes)
         self._set_details("\n".join(details))
+
+    #: How many KDE curves the window remembers. A curve is a function of the exact
+    #: sample and the log choice only (not of bins or normalization, which only rescale
+    #: it), so a bin-count spin or a y-quantity switch redraws without re-estimating.
+    _KDE_CACHE_SIZE = 32
+
+    def _kde_for(self, v: np.ndarray, log_x: bool):
+        """``kde_curve`` of ``v``, cached by the sample's bytes and the log choice."""
+        cache = self._kde_cache
+        key = (self._sample_digest(v), bool(log_x))
+        curve = cache.pop(key, None)
+        if curve is None:
+            curve = kde_curve(v, log=bool(log_x))
+        cache[key] = curve                      # most recent last
+        while len(cache) > self._KDE_CACHE_SIZE:
+            cache.pop(next(iter(cache)))
+        return curve
+
+    def _draw_kde_overlay(self, groups, col: str, edges: np.ndarray, log_x: bool,
+                          log_y: bool, multi: bool, split: bool) -> list[str]:
+        """One dotted Gaussian KDE per drawn histogram series, in the BARS' y quantity.
+
+        THE SCALING IS THE FIT OVERLAY'S, LINE FOR LINE (:meth:`_overlay_workspace_fit`):
+        ``n · f(x) · width(x) · _fit_scale``. So count is ``n · bin width · f``, density
+        is ``f`` per the column's STORED unit (``_fit_scale`` divides the width back
+        out -- the bars' own unit, which is why ``_density_unit_notes`` describes the
+        curve too), and probability per bin is ``bin width · f``. ``n`` is the series'
+        own count and the scale's ``n`` is its normalising total -- equal for a source,
+        the whole source for a cluster split, whose bars normalise the same way, so the
+        clusters' curves add up to the source's.
+
+        ON LOG X THE KDE IS FITTED TO log10 OF THE COLUMN, because the bins are uniform
+        there: ``width(x) = x · ln10 · Δu`` is the same model of a log bin the fit
+        overlay uses, and ``f = g(u) / (x ln 10)``, so ``f · width = g(u) · Δu`` --
+        the curve sits on the bars it smooths at every decade.
+
+        DRAWN DOTTED so it cannot be read as a fit (solid, or dashed per source), and
+        never estimated on project open: a restored snapshot is a picture, not a run --
+        the 2-D KDE page's rule -- so the caller (:meth:`_draw_histogram`) does not call
+        this then, and the gate is left showing Plot ●.
+        """
+        notes: list[str] = []
+        if log_x:
+            du = float(np.log10(edges[1]) - np.log10(edges[0]))
+        lines: list[str] = []
+        proxy = None
+        factor, unit_name = self._display_time(col)
+        for i, (label, colour, v, src, norm_n) in enumerate(groups):
+            who = label if (multi or split) else (src.label if src is not None else col)
+            try:
+                curve = self._kde_for(v, log_x)
+            except ValueError as exc:
+                notes.append(f"{who}: KDE overlay skipped — {exc}.")
+                continue
+            x = np.asarray(curve.x, dtype=np.float64)
+            width = (x * np.log(10.0) * du) if log_x else float(edges[1] - edges[0])
+            y = (float(v.size) * np.asarray(curve.density) * width
+                 * self._fit_scale(edges, width, int(norm_n)))
+            if log_y:
+                y = np.where(y > 0, y, np.nan)   # log10(0) has no place on the axis
+            pen_colour = colour if multi else self._style.data_color
+            pen = pg.mkPen(pen_colour, width=self._style.line_width + 1, style=Qt.DotLine)
+            item = pg.PlotDataItem(x=x, y=y, pen=pen, connect="finite")
+            item._presentation_role = "category" if multi else "data"
+            item._presentation_width_extra = 1
+            # Exported as `kde` rows, never as a fit: `plot_source_data` reads this tag,
+            # and `_plot_data` names the row by the series index it carries.
+            item._plot_data_part = "kde"
+            item._kde_series = i
+            self._plot.addItem(item)
+            proxy = proxy or item
+            if curve.log:
+                bw = f"{curve.bandwidth:.4g} decades of {col}"
+            elif col in _TIME_COLUMNS:
+                bw = f"{curve.bandwidth * factor:.4g} {unit_name}"
+            else:
+                quantity_unit = _column_quantity(col)[1]
+                bw = f"{curve.bandwidth:.4g}" + (f" {quantity_unit}" if quantity_unit else "")
+            lines.append(f"  {who}: n = {curve.n}, bandwidth h = {bw} "
+                         f"(Scott factor {curve.scott_factor:.3f})")
+        if proxy is not None:
+            # ONE legend row, so a saved figure says what the dotted lines are; the
+            # colour already names each source through its bars' row.
+            if multi:
+                proxy = pg.PlotDataItem(pen=pg.mkPen(_MSG_HEX, width=self._style.line_width + 1,
+                                                     style=Qt.DotLine))
+            self._legend_add(proxy, "KDE (Gaussian, Scott)", kind="kde", key="")
+        out = []
+        if lines:
+            out.append("KDE overlay (Gaussian kernel, Scott bandwidth"
+                       + (", estimated on log10 of the column" if log_x else "")
+                       + "), drawn dotted over each series' observed range:")
+            out.extend(lines)
+            out.append(
+                "  the KDE curves are in the bars' own y quantity (count: n × bin width × f; "
+                "density: f per the column's stored unit; probability per bin: bin width × "
+                "f). A Gaussian KDE spreads mass past the data's edges"
+                + ("" if log_x else " (below zero for a dwell on a linear axis)")
+                + ", so beside a hard edge such as the detection limit it reads below the "
+                "bars.")
+        return out + notes
 
     @staticmethod
     def _ks_headline(rejected: Sequence[str]) -> str:
@@ -12282,6 +12778,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._cluster_result = None
             self._pca_result = None
             self._note_cache = {}
+            self._kde_cache = {}      # curves of rows this window is about to stop having
+            self._applied_kde_overlay = False   # the blank box's applied twin
             self._empty_list_widget(self._source_list)   # see `_retire_row`
             # With no sources there are no columns to offer, so every column picker and
             # the feature list empty themselves -- which is also what stops the config
@@ -13220,6 +13718,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # The isocurves are drawn directly in (log-)axis coordinates, so the view is
         # ranged on the grid bounds by hand — autorange sees no PlotDataItems here.
         self._plot.vb.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
+        self._kde_view_frame = (x0, x1, y0, y1)   # what Reset view repeats
         # ...AND THE USER'S PIN STILL WINS OVER THAT DEFAULT (owner note #4, and the
         # half of note #18 that is real: KDE is a plot type beside the others, so it
         # has to obey the same controls). The three other draws end with
@@ -13232,6 +13731,180 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._apply_stored_ranges(log_x, log_y)
         if drops or details:
             self._set_details("\n".join(details))
+
+    def _heatmap_colormap(self) -> pg.ColorMap:
+        """The style's heatmap colour map, falling back to viridis for a name this
+        build does not carry (a newer build's template, a hand-edit) rather than raising
+        in the middle of a draw."""
+        name = self._style.heatmap_colormap
+        if name not in _HEATMAP_COLORMAPS:
+            name = "viridis"
+        try:
+            return pg.colormap.get(name)
+        except Exception:   # noqa: BLE001 - a missing bundled map must not break a plot
+            return pg.colormap.get(name, source="matplotlib")
+
+    def _remove_heatmap_bar(self) -> None:
+        """Take the colour bar out of the PlotItem's own layout.
+
+        It lives IN the PlotItem's layout -- not in a widget beside it -- because export
+        renders the PlotItem, and a colour bar the saved figure does not carry leaves
+        the colours unreadable. ``plot.clear()`` only empties the ViewBox, so the bar is
+        detached here by hand (the same reason ``_drop_legend`` exists), and the column
+        it occupied is released so the next plot gets its width back.
+        """
+        bar = getattr(self, "_heatmap_bar", None)
+        self._heatmap_bar = None
+        self._heatmap_image = None
+        if bar is None:
+            return
+        layout = self._plot.layout
+        layout.removeItem(bar)
+        bar.setParentItem(None)
+        scene = bar.scene()
+        if scene is not None:
+            scene.removeItem(bar)
+        layout.setColumnFixedWidth(4, 0)
+        layout.setColumnSpacing(4, 0)
+
+    def _style_heatmap_bar(self) -> None:
+        """Foreground, font and colour map of the colour bar, from the style. Called by
+        the draw and by the appearance-only path, which must never re-bin."""
+        bar = getattr(self, "_heatmap_bar", None)
+        image = getattr(self, "_heatmap_image", None)
+        if bar is None:
+            return
+        cmap = self._heatmap_colormap()
+        bar.setColorMap(cmap)
+        if image is not None:
+            image.setColorMap(cmap)
+        fg = self._fg_hex()
+        for side in ("left", "right", "top", "bottom"):
+            axis = bar.getAxis(side)
+            axis.setPen(pg.mkPen(fg))
+            axis.setTextPen(pg.mkPen(fg))
+            axis.setStyle(tickFont=self._qfont(self._tick_pt()))
+        bar.getAxis("left").setLabel("Event count", **self._label_style())
+
+    def _draw_heatmap(self, drawn: list[tuple[PlotSource, pd.DataFrame]]) -> None:
+        """A 2-D EVENT-COUNT image of two columns, for the first ticked source.
+
+        THE KERNEL IS EVENT WAVEFORMS' OWN (``event_shape.density_2d``): edges spanning
+        the source's min..max per axis (geometric on a log axis), points dropped where
+        either coordinate is non-finite or non-positive on a log axis. One definition of
+        "an event-count heatmap" in the app, so this one and that window's agree bin for
+        bin over the same rows -- a second binning here would be a second answer.
+
+        COUNTS ARE COUNTS. The colour is the number of events in a cell, not a density
+        and not smoothed; the KDE page is the smoothed estimate, and the guide's rule is
+        that the two are different quantities. Nothing is normalised, so the Normalize
+        combo (a histogram setting) does not apply here.
+
+        LOG AXES THE KDE PAGE'S WAY: the image is placed in log10 view coordinates by
+        hand (``setLogMode`` only transforms PlotDataItems), so the decade ticks the
+        log axis draws read the data correctly. The time unit scales the ticks only.
+        """
+        xcol, ycol = self._heatmap_x.currentText(), self._heatmap_y.currentText()
+        if not xcol or not ycol:
+            self._message("Pick numeric X and Y columns.")
+            return
+        log_x, log_y = self._heatmap_logx.isChecked(), self._heatmap_logy.isChecked()
+        src, df = drawn[0]
+        skipped = len(drawn) - 1
+        if xcol not in df.columns or ycol not in df.columns:
+            self._message(f"“{src.label}” has no “{xcol}” or “{ycol}” column to bin.")
+            return
+        x = pd.to_numeric(df[xcol], errors="coerce").to_numpy(dtype=np.float64)
+        y = pd.to_numeric(df[ycol], errors="coerce").to_numpy(dtype=np.float64)
+        nb = int(self._heatmap_bins.value())
+        counts, xe, ye = event_shape.density_2d(x, y, xbins=nb, ybins=nb,
+                                                xlog=log_x, ylog=log_y)
+        kept = int(counts.sum())
+        if kept == 0:
+            self._message(
+                "No events fall on these axes — every row is non-finite, or non-positive "
+                "on a log axis. Check the log toggles.")
+            return
+
+        details = [f"Event-count heatmap {ycol} vs {xcol}   bins = {nb} × {nb}   "
+                   f"source = {src.label}   n = {kept}",
+                   *self._incoming_notes()]
+        if skipped:
+            details.append(
+                f"ONE SOURCE AT A TIME: this heatmap shows the first ticked source only "
+                f"(“{src.label}”); {skipped} other ticked source(s) are not drawn. Untick "
+                "it to see the next ticked source.")
+        dropped = int(x.size - kept)
+        if dropped:
+            details.append(f"{dropped} of {x.size} row(s) dropped (non-finite, or "
+                           "non-positive on a log axis).")
+        # THE SAME VERDICT THE SCATTER AND KDE PAGES GIVE FOR THESE COLUMNS -- and Event
+        # waveforms' own heatmap, which audits the amplitude whenever it is on an axis. A
+        # count image of `amplitude_pA` with stale or missing selections is exactly as
+        # unreadable as a scatter of it, and a heatmap that alone stayed silent would be
+        # the page to export from to lose the caveat. Judged over the DRAWN source only,
+        # not `_comparability()`'s every drawn frame: the other ticked sources are not
+        # in this image, so their baselines cannot make it incomparable.
+        verdict = source_comparability([src], (xcol, ycol), frames=[df])
+        details.extend(self._column_notes([xcol, ycol], [src]))
+        details.extend(verdict.warnings)
+        details.extend(self._detection_notes([src]))
+        details.append(
+            "colour = events per cell (counts, not a KDE density and not normalised); "
+            f"cells span the source's own range, {'log10-spaced' if log_x else 'linear'} "
+            f"on x and {'log10-spaced' if log_y else 'linear'} on y — the binning "
+            "Event waveforms uses. Lasso and point-click selection are not available on "
+            "a heatmap.")
+
+        self._clear_plot()
+        self._cache_figure_source(src)
+        xe_v = np.log10(xe) if log_x else np.asarray(xe, dtype=np.float64)
+        ye_v = np.log10(ye) if log_y else np.asarray(ye, dtype=np.float64)
+        cmax = max(float(counts.max()), 1.0)
+        # density_2d stores counts[x_bin, y_bin]; pin the orientation (Event waveforms'
+        # rule), because the app's global imageAxisOrder is not this item's to assume.
+        image = pg.ImageItem(axisOrder="col-major")
+        image.setImage(counts, levels=(0.0, cmax))
+        image.setRect(QtCore.QRectF(float(xe_v[0]), float(ye_v[0]),
+                                    float(xe_v[-1] - xe_v[0]), float(ye_v[-1] - ye_v[0])))
+        # What `plot_source_data` exports: the drawn counts with their edges in DATA
+        # units, read off the item so the CSV is the picture, not a re-binning.
+        image._heatmap_edges = (np.asarray(xe, dtype=np.float64).copy(),
+                                np.asarray(ye, dtype=np.float64).copy())
+        self._plot.addItem(image)
+        self._heatmap_image = image
+        # `colorMapMenu=False`: pyqtgraph's own right-click menu recolours the bar and the
+        # image behind `StyleSettings.heatmap_colormap`'s back, so the picture would
+        # disagree with the combo, undo, templates and the saved project -- and the next
+        # style change would silently put the style's map back. The Style combo is the
+        # one door.
+        bar = pg.ColorBarItem(values=(0.0, cmax), colorMap=self._heatmap_colormap(),
+                              label="Event count", interactive=False, width=15,
+                              colorMapMenu=False)
+        self._heatmap_bar = bar
+        bar.setImageItem(image, insert_in=self._plot)
+        self._style_heatmap_bar()
+
+        self._plot.setLogMode(x=log_x, y=log_y)
+        self._plot.setLabel("bottom", self._axis_label_for("bottom", xcol, log_x),
+                            **self._label_style())
+        self._plot.setLabel("left", self._axis_label_for("left", ycol, log_y),
+                            **self._label_style())
+        self._apply_title(f"Event counts {ycol} vs {xcol} — {self._legend_name(src)}",
+                          warn=self._warn_headline(self._stale_headline([xcol, ycol],
+                                                                        [src]),
+                                                   verdict.headline))
+        self._apply_background()
+        self._apply_fonts()
+        # Ranged on the image by hand, as the KDE page is -- autoRange sees no
+        # PlotDataItem -- and then the user's pin wins, as on every page.
+        self._plot.vb.setRange(xRange=(float(xe_v[0]), float(xe_v[-1])),
+                               yRange=(float(ye_v[0]), float(ye_v[-1])), padding=0)
+        # What Reset view repeats: autoRange() would pad the image's bounds instead.
+        self._kde_view_frame = (float(xe_v[0]), float(xe_v[-1]),
+                                float(ye_v[0]), float(ye_v[-1]))
+        self._apply_stored_ranges(log_x, log_y)
+        self._set_details("\n".join(details))
 
     def _draw_pca(self, df: pd.DataFrame) -> None:
         if self._pca_result is None:
@@ -13726,6 +14399,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 fits.append(str(label))
             elif entry_id.startswith("cluster:") and swatches_only:
                 continue                       # a legend swatch, not a drawn series
+            elif entry_id.startswith("kde:"):
+                continue                       # the KDE key row; its curves are named below
             else:
                 series.append(str(label))
         if not series:
@@ -13798,6 +14473,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
           VERTICES would reproduce only the levels the user happened to choose; the
           grid re-contours at any level, in any tool, and is what the density actually
           is.
+        * **Histogram with a KDE overlay** -- the bars as above, plus ``kde`` rows: each
+          series' curve sampled where it was drawn, in the bars' own y quantity, named
+          for the series it smooths (never taking a fit's name).
+        * **Event-count heatmap** -- one ``cell`` row per bin, empty bins included: its x
+          and y edges in data units and its count, read off the drawn image.
         * **PCA** -- one ``points`` row per score, plus a ``loading`` row per feature
           (its weight on PC1 and PC2). Without the loadings a PCA scatter is a cloud
           nobody can interpret: the axes are combinations of columns, and the CSV would
@@ -13845,9 +14525,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # populations. Exclude them so a visibility toggle cannot invent fit rows.
         numerical_items = SimpleNamespace(items=[item for item in self._plot.items
                                                  if not getattr(item, "_presentation_band", False)])
+        # A KDE curve is named for the SERIES whose bars it smooths -- by the index the
+        # draw stamped on it, so a series the KDE skipped (too few values) cannot shift
+        # the next curve onto the wrong name.
+        kdes = [series[i] if isinstance(i, int) and 0 <= i < len(series) else ""
+                for i in (getattr(node, "_kde_series", None) for node in numerical_items.items
+                          if getattr(node, "_plot_data_part", None) == "kde")]
         df = plot_source_data(numerical_items, x_name=x_name, y_name=y_name,
                               log_x=log_x, log_y=log_y,
-                              series_labels=series, fit_labels=fits)
+                              series_labels=series, fit_labels=fits, kde_labels=kdes)
         if kind in (SCATTER, PCA):
             # THE COLOUR CHANNEL IS DATA HERE. On these two pages a clustering is drawn
             # as one item with a brush per point, so without this column the CSV would

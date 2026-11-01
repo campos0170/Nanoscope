@@ -14,7 +14,7 @@ A ``.nanoscope`` file is a ZIP archive containing:
 
       {
         "format": "nanoscope-project",
-        "version": 11,
+        "version": 12,
         "app_version": "0.1.0",
         "documents":    [{"path": "<abspath>", "loaded_range": [start, stop] | null,
                           "source": {"n_samples", "size", "digest", "mtime_ns"} | null}],
@@ -216,7 +216,28 @@ FORMAT: str = "nanoscope-project"
 # ``workspace`` remains the empty workspace on v1-v10 reads.  The project version still
 # bumps: a v10 application knows nothing about this section and would silently delete the
 # whole analytical workspace on its next save.
-VERSION: int = 11
+#
+# v12 ADDS state INSIDE three existing workspace artifacts (Plot Studio, 2026-11): the
+# Noise spectrum's spectrogram colour limits (``spectrogram_levels_mode`` /
+# ``spectrogram_level_low`` / ``spectrogram_level_high``) and ``spectrogram_log_frequency``
+# in ``builtin.psd``; the Event waveforms ensemble's ``ensemble_subset`` / ``ensemble_band``
+# settings and its frozen ``ensemble_band`` / ``ensemble_alignment`` /
+# ``ensemble_input_count`` / ``ensemble_unalignable_count`` in ``builtin.event-plots``; and
+# the PlotConfig version 3 sections (the KDE overlay and the Event-count heatmap plot type)
+# in ``builtin.plots``. No envelope key is new, and that is exactly why the version still
+# has to move: a v11 build accepts the file, restores each window from the keys it knows
+# (``_decode_like`` keeps only the PlotConfig fields it has; the PSD and Event waveforms
+# restores read only their own keys), so a heatmap reopens as a histogram and an
+# extremum-aligned ensemble is captioned "start" without a word, and its next save
+# re-captures those artifacts from its own widgets and strips the rest. v11's opaque
+# carry-through protects unknown artifacts and unknown workspace fields, not new fields of
+# artifacts the older build itself owns. Optional on read for the usual reason: a v1-v11
+# project lacks the keys and reopens as Auto colour limits, a linear frequency axis, every
+# accepted event, no band, start/centre alignment as saved, and a PlotConfig without KDE or
+# heatmap sections. (The project's appearance presets and Distributions templates live in
+# ``workspace.extra``, which a v11 build keeps byte for byte; they did not need the bump,
+# and are refused with the rest by it.)
+VERSION: int = 12
 MIN_READ_VERSION: int = 1   # oldest project this build can still read (v1 predates segments)
 MANIFEST_NAME: str = "manifest.json"
 WORKSPACE_VERSION: int = 1

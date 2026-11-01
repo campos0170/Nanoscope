@@ -278,6 +278,29 @@ class _SizeSpinBox(QtWidgets.QDoubleSpinBox):
         return state, text, pos
 
 
+class _PresetStore(QtCore.QObject):
+    """Says the saved presets or templates changed from OUTSIDE the widget that lists them.
+
+    Opening a project can add presets and templates (``gui.plot_preset_sync``) while windows
+    that list them are open. Each lister connects a bound method, which Qt disconnects when
+    that widget is destroyed -- unlike walking ``QApplication.allWidgets()``, which hands out
+    wrappers for widgets already on their way out and crashed in testing.
+    """
+
+    changed = QtCore.Signal()
+
+
+_PRESET_STORE: _PresetStore | None = None
+
+
+def preset_store() -> _PresetStore:
+    """The one :class:`_PresetStore` of this process."""
+    global _PRESET_STORE
+    if _PRESET_STORE is None:
+        _PRESET_STORE = _PresetStore()
+    return _PRESET_STORE
+
+
 class PlotAppearanceWidget(QtWidgets.QWidget):
     """Compact common controls. ``set_state`` is silent; user edits emit once.
 
@@ -477,6 +500,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         layout.addWidget(self.save_preset_button, row, 0, 1, columns)
         layout.addWidget(self.delete_preset_button, row + 1, 0, 1, columns)
         self.refresh_user_presets()
+        preset_store().changed.connect(self.refresh_user_presets)
         self.set_state(self._state)
 
     @staticmethod
@@ -587,6 +611,16 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             return False
         self._apply(PlotAppearance.from_mapping(values[name]))
         return True
+
+    def apply_appearance(self, state: PlotAppearance | Mapping[str, Any]) -> None:
+        """Install ``state`` as the USER's change: announced, and one Undo step.
+
+        For a host recalling a window template (``gui.plot_templates``), whose appearance is
+        a gesture exactly like picking a saved appearance -- never :meth:`set_state`, which
+        is the silent restore and would leave the step out of this plot's history.
+        """
+        self._apply(state if isinstance(state, PlotAppearance)
+                    else PlotAppearance.from_mapping(state))
 
     def delete_user_preset(self, name: str) -> bool:
         values = self.user_preset_states()

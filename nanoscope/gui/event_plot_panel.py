@@ -9,7 +9,11 @@ translocation paper leads with:
   right (Y). X and Y each choose among ``dwell_s`` (default X, log by default),
   ``depth_pA`` (default Y), ``frac_depth`` and the on-demand ECD / charge deficit.
 * **Ensemble** -- every accepted event resampled onto a common axis and overlaid
-  (faint), with the bold mean and median waveform drawn on top.
+  (faint), with the bold mean and median waveform drawn on top. Real-time alignment is
+  at each event's start, centre or extremum (its deepest sample, by the table's own
+  polarity); an optional band (mean +/- 1 SD, or the median's IQR) shades the spread;
+  and the events can be narrowed to one of the curation subsets the Event gallery
+  offers (always within the accepted events, which is what exports honour).
 
 Design mirrors :class:`~nanoscope.gui.voltage_dep_panel.VDepWindow` and
 :class:`~nanoscope.gui.plots_panel.PlotsWindow`: a single, lazily-built top-level
@@ -40,6 +44,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 
 from ..analysis import event_shape
+from ..analysis.curation_view import (FILTER_ACCEPTED, FILTER_ALL, FILTER_REJECTED,
+                                      curation_progress, filter_mask, filter_options)
 from ..analysis.events import EventSet
 from ..core.session import Session
 from ..core.sources import amplitude_comparability, amplitude_units_label
@@ -47,6 +53,9 @@ from ..plot.style import OKABE_ITO
 from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .plot_interaction import (axis_name, image_value, install_plot_interaction,
+                               reset_plot_history, view_button, window_readout)
+from .plot_templates import WindowTemplateControls
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
                             ensure_item_legend, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
@@ -81,6 +90,22 @@ _METRICS: tuple[tuple[str, str], ...] = (
 MAX_ENSEMBLE_CSV_ROWS = 250_000
 
 _COLORMAPS = ("viridis", "magma", "plasma", "inferno", "cividis")
+
+# Ensemble variability bands: (visible text, event_shape.ensemble_band kind). "" = none,
+# the default, so a saved or reopened ensemble looks exactly as it did before bands existed.
+_BAND_NONE = ""
+_BANDS: tuple[tuple[str, str], ...] = (
+    ("None", _BAND_NONE),
+    ("Mean ± 1 SD", "sd"),
+    ("Median IQR (25–75 %)", "iqr"),
+)
+# The ensemble subset default: every accepted event, which is what the window drew before
+# the subset existed. The other subsets are analysis.curation_view's filters -- the Event
+# gallery's, by the same names -- intersected with the accepted rows. "All" and "Rejected
+# only" are not offered: ``accepted`` is the column exports honour (events.SCHEMA), and a
+# published ensemble of rejected events is a picture of what curation threw away.
+_SUBSET_DEFAULT = FILTER_ACCEPTED
+_SUBSET_EXCLUDED = (FILTER_ALL, FILTER_REJECTED)
 
 _MSG_HEX = "#8b9199"
 _EVENT_HEX = OKABE_ITO[5]        # sky blue -- the faint per-event overlay lines
@@ -131,6 +156,19 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._top_marginal_item: pg.BarGraphItem | None = None
         self._right_marginal_item: pg.BarGraphItem | None = None
         self._ensemble: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
+        # The variability band beside the ensemble: (lower, upper, events per point), a
+        # reduction of the matrix above that is saved and exported with it.
+        self._ensemble_band: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._band_items: tuple = ()
+        # (polarity, where it came from) of the last extremum-aligned ensemble, for Details.
+        self._ensemble_alignment: tuple[int, str] | None = None
+        # How many events the last ensemble was asked to draw (the subset, before the
+        # edge skip), so a restored snapshot reports its skip count against the same base.
+        self._ensemble_input_count: int | None = None
+        # Of those, how many an extremum alignment left out because their own span holds
+        # no finite sample to find a deepest point in: skipped, but NOT for running off
+        # the trace, so the title and the CSV count them apart from the edge skips.
+        self._ensemble_unalignable: int = 0
         self._events_item: pg.PlotDataItem | None = None
         self._mean_item: pg.PlotDataItem | None = None
         self._median_item: pg.PlotDataItem | None = None
@@ -192,6 +230,65 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             exports=(("Export current figure…", lambda: self.save_image()),
                      ("Export data (CSV)…", lambda: self.export_data())))
         bar.hide()  # legacy programmatic toggle remains available; workflow owns visible chrome
+        # One template for both views: the heatmap's metrics, bins and colormap with the
+        # ensemble's alignment, and the shared appearance -- never the bound detection.
+        self._templates = WindowTemplateControls(
+            "event-waveforms", capture=self.template_settings,
+            recall=self.apply_template_settings,
+            note="A template keeps both views' settings (heatmap metrics, log axes, bins, "
+                 "colormap; ensemble normalisation, alignment (extremum included), points, "
+                 "padding, Events subset and band), the view shown and the appearance. It never "
+                 "keeps the detection or its events. Recalling one redraws a view from the "
+                 "events already bound only if its settings differ, as changing those controls "
+                 "does; a changed colormap only recolours, and a changed band only re-shades.")
+        layout.insertWidget(layout.indexOf(self._data_section) + 1, self._templates)
+        self._workflow.add_section_widget("Export", self._templates)
+        self._install_plot_interaction()
+
+    def _install_plot_interaction(self) -> None:
+        """View only (plot_interaction): Reset view, zoom history, app menu, pointer readout.
+
+        The density map draws LOG10 VALUES ON A LINEAR AXIS when Log x / Log y is ticked
+        (``_to_plot``; its axis label says "(log10)"), so the readout is told which axes hold
+        logs and shows the real value, named without the "(log10)". The name is the map's
+        DRAWN axis title, so an Appearance label typed over the metric's name is the name
+        the readout uses too (the marginals have no titles of their own). The marginals are
+        linked to the map and share its history, so their menu means the same view.
+        """
+        exports = (("Export current figure…", lambda: self.save_image()),
+                   ("Export data (CSV)…", lambda: self.export_data()))
+        self._readout = window_readout(self)
+
+        def drawn_name(side: str, combo: QtWidgets.QComboBox):
+            def name() -> str:
+                text = axis_name(self._density_main.getAxis(side))
+                if text.endswith("(log10)"):
+                    text = text[:-len("(log10)")].rstrip()
+                return text or self._metric_label(combo.currentData())
+            return name
+
+        x_name, y_name = drawn_name("bottom", self._x_combo), drawn_name("left", self._y_combo)
+        x_log, y_log = self._logx.isChecked, self._logy.isChecked
+
+        def density_count(vx: float, vy: float) -> str:
+            value = image_value(self._density_image, vx, vy)
+            return "" if value is None else f"Event count {value:.0f}"
+
+        self._density_nav = install_plot_interaction(
+            self._density_main, readout=self._readout, exports=exports, x_name=x_name,
+            y_name=y_name, x_log=x_log, y_log=y_log, extra=density_count)
+        install_plot_interaction(self._density_top, readout=self._readout, exports=exports,
+                                 navigation=self._density_nav, x_name=x_name, x_log=x_log,
+                                 y_name="count")
+        install_plot_interaction(self._density_right, readout=self._readout, exports=exports,
+                                 navigation=self._density_nav, y_name=y_name, y_log=y_log,
+                                 x_name="count")
+        self._ensemble_nav = install_plot_interaction(
+            self._ensemble_plot, readout=self._readout, exports=exports)
+        navigations = (self._density_nav, self._ensemble_nav)
+        self._workflow.add_view_control(view_button(
+            lambda: self._density_nav if self.current_view() == DENSITY else self._ensemble_nav,
+            navigations))
 
     def _show_appearance(self, visible: bool) -> None:
         self._workflow.set_section("Appearance" if visible else "Data")
@@ -239,6 +336,14 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         apply_plot_appearance(
             self._ensemble_plot, self._appearance, plot_widget=self._ensemble_widget,
             data_items=(self._events_item,), fit_items=(self._mean_item, self._median_item))
+        if len(self._band_items) == 3:
+            # The band follows the summary curve it surrounds (its colour may just have
+            # changed); restyling a brush is presentation only.
+            fill, lo_item, hi_item = self._band_items
+            hex_color = self._band_anchor_hex()
+            fill.setBrush(_alpha_brush(hex_color, 60))
+            for edge in (lo_item, hi_item):
+                edge.setPen(_alpha_pen(hex_color, 110, 1))
 
     def _build_density_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
@@ -325,7 +430,10 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._density_top = self._density_glw.addPlot(row=0, col=0)
         self._density_main = self._density_glw.addPlot(row=1, col=0)
         self._density_right = self._density_glw.addPlot(row=1, col=1)
-        self._colorbar = pg.ColorBarItem(values=(0, 1), colorMap=_get_colormap("viridis"), label="Event count")
+        # No colour-map menu on the bar: its pick would recolour the map behind the
+        # Colormap control, which is the one the page saves (plot_interaction's rule).
+        self._colorbar = pg.ColorBarItem(values=(0, 1), colorMap=_get_colormap("viridis"),
+                                         label="Event count", colorMapMenu=False)
         self._density_glw.addItem(self._colorbar, row=1, col=2)
 
         self._density_main.showGrid(x=True, y=True, alpha=0.15)
@@ -348,8 +456,11 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         root.setSpacing(6)
 
         self._ensemble_analysis_controls = QtWidgets.QWidget()
-        row1 = QtWidgets.QHBoxLayout(self._ensemble_analysis_controls)
-        row1.setContentsMargins(0, 0, 0, 0)
+        rows = QtWidgets.QVBoxLayout(self._ensemble_analysis_controls)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(4)
+        row1 = QtWidgets.QHBoxLayout()
+        rows.addLayout(row1)
         self._normalize = QtWidgets.QCheckBox("Normalize time")
         self._normalize.setChecked(True)
         self._normalize.setToolTip(
@@ -358,10 +469,15 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
         row1.addWidget(QtWidgets.QLabel("Align"))
         self._align_combo = QtWidgets.QComboBox()
-        self._align_combo.addItems(["start", "center"])
+        # The texts ARE the kernel's ids (and the saved/exported value), as before.
+        self._align_combo.addItems(list(event_shape.ENSEMBLE_ALIGNS))
         self._align_combo.setEnabled(False)     # only meaningful when NOT normalizing time
         self._align_combo.setToolTip(
-            "Real-time alignment reference (used only when 'Normalize time' is off).")
+            "Real-time alignment reference (used only when 'Normalize time' is off).\n"
+            "• start / center — each event's first sample or midpoint at t = 0;\n"
+            "• extremum — each event's deepest sample at t = 0: the sample of maximum "
+            "excursion, read with the event table's polarity, so a blockade that lowers "
+            "the current and one that raises it are both aligned on their deepest point.")
         row1.addWidget(self._align_combo)
 
         row1.addWidget(QtWidgets.QLabel("Points"))
@@ -378,6 +494,31 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._pad.setToolTip("Pre/post padding as a percentage of each event's dwell.")
         row1.addWidget(self._pad)
         row1.addStretch(1)
+
+        row1b = QtWidgets.QHBoxLayout()
+        rows.addLayout(row1b)
+        row1b.addWidget(QtWidgets.QLabel("Events"))
+        self._subset_combo = QtWidgets.QComboBox()
+        self._subset_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._subset_combo.addItem(_subset_text(_SUBSET_DEFAULT), _SUBSET_DEFAULT)
+        self._subset_combo.setToolTip(
+            "Which accepted events the ensemble uses: all of them, or one of the Event "
+            "gallery's curation subsets (unreviewed, unlabelled, a label, hand-made or "
+            "detected) within them. Rejected events are never drawn. The Event-count "
+            "heatmap always uses every accepted event.")
+        row1b.addWidget(self._subset_combo)
+        row1b.addWidget(QtWidgets.QLabel("Band"))
+        self._band_combo = QtWidgets.QComboBox()
+        for text, kind in _BANDS:
+            self._band_combo.addItem(text, kind)
+        self._band_combo.setToolTip(
+            "Shade the spread of the events around a summary curve: mean ± 1 sample SD "
+            "around the solid mean, or the 25th–75th percentile band around the dashed "
+            "median. Drawn from the traces already on screen — choosing one never "
+            "re-reads the recording. Details gives how many events each point uses.")
+        row1b.addWidget(self._band_combo)
+        row1b.addStretch(1)
         root.addWidget(self._ensemble_analysis_controls)
 
         self._ensemble_export_controls = QtWidgets.QWidget()
@@ -393,10 +534,16 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         row2.addWidget(self._e_save)
         self._e_data = QtWidgets.QPushButton("Export data (CSV)…")
         self._e_data.setToolTip(
-            "Export individual resampled traces, mean, median, and event identities.")
+            "Export individual resampled traces, mean, median, the band and its events "
+            "per point, and event identities.")
         self._e_data.clicked.connect(lambda: self.export_data())
         row2.addWidget(self._e_data)
         root.addWidget(self._ensemble_export_controls)
+
+        # The ensemble's own readout: what was aligned on, which events, and what the band
+        # is and how many events each point uses. Collapsed to its "Full details" button.
+        self._ensemble_notes = WarningSummary(title="Ensemble notes")
+        root.addWidget(self._ensemble_notes)
 
         self._ensemble_widget = pg.PlotWidget()
         self._ensemble_widget.setMinimumSize(560, 420)
@@ -418,6 +565,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._align_combo.currentTextChanged.connect(self._on_ensemble_changed)
         self._npoints.valueChanged.connect(self._on_ensemble_changed)
         self._pad.valueChanged.connect(self._on_ensemble_changed)
+        self._subset_combo.currentIndexChanged.connect(self._on_ensemble_changed)
+        self._band_combo.currentIndexChanged.connect(self._on_band_changed)
         self._e_title.textChanged.connect(self._on_ensemble_title_changed)
         self._tabs.currentChanged.connect(self._on_view_changed)
         return page
@@ -465,6 +614,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             item.setToolTip("Selected amplitude applied in Curate; use consistent methods and "
                             "interval scopes and review stale-value warnings before pooling."
                             if available else "Apply an amplitude measurement in Curate to enable this metric.")
+        self._refresh_subset_options()
         if defer_analysis:
             # Never leave another project's result available behind a newly bound
             # source if the artifact later proves malformed.  Clearing Qt items and
@@ -473,10 +623,17 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             self._density_x_edges = None
             self._density_y_edges = None
             self._ensemble = None
+            self._ensemble_band = None
+            self._band_items = ()
+            self._ensemble_alignment = None
+            self._ensemble_input_count = None
+            self._ensemble_unalignable = 0
+            self._ensemble_notes.set_warnings(())
             self._density_main.clear()
             self._density_top.clear()
             self._density_right.clear()
             self._ensemble_plot.clear()
+            reset_plot_history(self._density_main, self._ensemble_plot)
             self._density_image = None
             self._top_marginal_item = None
             self._right_marginal_item = None
@@ -492,6 +649,62 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             return None
         acc = self._eventset.accepted
         return acc if len(acc.df) else None
+
+    # -- ensemble subset -------------------------------------------------------------------------
+    def _ensemble_subset(self) -> str:
+        mode = self._subset_combo.currentData()
+        return str(mode) if mode else _SUBSET_DEFAULT
+
+    def _refresh_subset_options(self) -> None:
+        """Offer the gallery's curation subsets the bound detection actually has.
+
+        The same list the Event gallery builds (``curation_view.filter_options`` over the
+        whole frame: labels found in it, hand-made/detected once it holds a hand-made row),
+        without the two that would draw rejected events. The current choice is kept even
+        when the new source no longer offers it -- a window never drops the subset the user
+        is looking at, it reports that the subset is empty instead.
+        """
+        current = self._ensemble_subset()
+        df = self._eventset.df if self._eventset is not None else None
+        modes = [m for m in filter_options(curation_progress(df), None, current)
+                 if m not in _SUBSET_EXCLUDED]
+        if current not in modes:
+            modes.append(current)
+        blocked = self._subset_combo.blockSignals(True)
+        try:
+            self._subset_combo.clear()
+            for mode in modes:
+                self._subset_combo.addItem(_subset_text(mode), mode)
+            self._subset_combo.setCurrentIndex(max(0, self._subset_combo.findData(current)))
+        finally:
+            self._subset_combo.blockSignals(blocked)
+
+    def set_ensemble_subset(self, mode: str) -> None:
+        """Select an ensemble subset by its curation-filter name (added if not offered)."""
+        mode = str(mode or _SUBSET_DEFAULT)
+        if mode in _SUBSET_EXCLUDED:
+            raise ValueError(f"the ensemble never draws rejected events; got {mode!r}")
+        index = self._subset_combo.findData(mode)
+        if index < 0:
+            self._subset_combo.addItem(_subset_text(mode), mode)
+            index = self._subset_combo.count() - 1
+        self._subset_combo.setCurrentIndex(index)
+
+    def _ensemble_events(self) -> EventSet | None:
+        """The accepted events of the chosen subset, or ``None`` when there are none."""
+        acc = self._accepted()
+        if acc is None:
+            return None
+        mode = self._ensemble_subset()
+        if mode == _SUBSET_DEFAULT:
+            return acc
+        try:
+            keep = filter_mask(acc.df, mode)
+        except ValueError:          # a saved subset this build cannot parse keeps nothing
+            keep = np.zeros(len(acc.df), dtype=bool)
+        if not keep.any():
+            return None
+        return EventSet(acc.df[keep].copy(), {**acc.provenance, "ensemble_subset": mode})
 
     # -- current control state -------------------------------------------------------------------
     def _metric_values(self, metric_id: str, acc: EventSet) -> np.ndarray:
@@ -593,6 +806,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._density_main.clear()
         self._density_top.clear()
         self._density_right.clear()
+        reset_plot_history(self._density_main)   # new geometry: old ranges mean nothing now
         self._density_image = None
         self._top_marginal_item = None
         self._right_marginal_item = None
@@ -686,25 +900,44 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     # -- ensemble --------------------------------------------------------------------------------
     def _redraw_ensemble(self) -> None:
         self._ensemble_plot.clear()
+        reset_plot_history(self._ensemble_plot)  # new geometry: old ranges mean nothing now
         self._events_item = None
         self._mean_item = None
         self._median_item = None
         self._ensemble = None
+        self._ensemble_band = None
+        self._band_items = ()
+        self._ensemble_alignment = None
+        self._ensemble_input_count = None
+        self._ensemble_unalignable = 0
 
-        acc = self._accepted()
-        if acc is None:
+        if self._accepted() is None:
             self._ensemble_message(
                 "No accepted events.\nRun detection and accept some events, then Refresh.")
+            return
+        acc = self._ensemble_events()
+        if acc is None:
+            self._ensemble_message(
+                f"No accepted events in the subset “{self._ensemble_subset()}”.\n"
+                "Choose another subset under Events.")
             return
 
         normalize = self._normalize.isChecked()
         align = self._align_combo.currentText()
         npoints = int(self._npoints.value())
         pad_frac = float(self._pad.value()) / 100.0
+        polarity = None
+        if align == "extremum" and not normalize:
+            # Resolved HERE, once, so Details and the CSV's identity replay name the very
+            # polarity the kernel aligned with rather than re-deriving it later.
+            self._ensemble_alignment = event_shape.ensemble_polarity(self._signal, acc)
+            polarity = self._ensemble_alignment[0]
+            self._ensemble_unalignable = _count_unalignable(self._signal, acc, polarity)
         T, matrix, mean, median = event_shape.event_ensemble(
             self._signal, self._fs, acc, n_points=npoints, pad_frac=pad_frac,
-            align=align, normalize_time=normalize)
+            align=align, normalize_time=normalize, polarity=polarity)
         self._ensemble = (T, matrix, mean, median)
+        self._ensemble_input_count = int(len(acc.df))
 
         if matrix.shape[0] == 0:
             self._ensemble_message(
@@ -722,21 +955,218 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._mean_item = pg.PlotDataItem(x=T, y=mean, pen=pg.mkPen(_MEAN_HEX, width=2.5))
         self._median_item = pg.PlotDataItem(
             x=T, y=median, pen=pg.mkPen(_MEDIAN_HEX, width=2.5, style=Qt.DashLine))
+        self._compute_ensemble_band()
+        self._add_band_items()          # under everything, the faint events included
         self._ensemble_plot.addItem(self._mean_item)
         self._ensemble_plot.addItem(self._median_item)
 
-        n_acc = len(acc.df)
-        skipped = n_acc - matrix.shape[0]
+        skipped = len(acc.df) - matrix.shape[0]
         xlabel = "Normalized time (dwell)" if normalize else "Time (s)"
         self._ensemble_plot.setLabel("bottom", xlabel)
         self._ensemble_plot.setLabel("left", f"Current ({self._units})")
-        self._ensemble_auto_title = (f"Ensemble of {matrix.shape[0]} event(s)"
-                + (f"   ·   {skipped} edge-skipped" if skipped else "")
-                + "   —   mean (solid) + median (dashed)")
+        self._ensemble_auto_title = self._ensemble_title(matrix.shape[0], skipped)
         self._apply_ensemble_title()
+        self._refresh_ensemble_notes()
         self._ensemble_plot.autoRange()
 
+    # -- ensemble band ---------------------------------------------------------------------------
+    def _band_kind(self) -> str:
+        return str(self._band_combo.currentData() or _BAND_NONE)
+
+    def set_band(self, kind: str) -> None:
+        """Select the variability band by kind: ``""`` (none), ``"sd"`` or ``"iqr"``."""
+        index = self._band_combo.findData(str(kind or _BAND_NONE))
+        if index < 0:
+            raise ValueError(f"unknown ensemble band {kind!r}")
+        self._band_combo.setCurrentIndex(index)
+
+    def ensemble_band(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """``(lower, upper, events per point)`` of the band on screen, or ``None``."""
+        return self._ensemble_band
+
+    def _compute_ensemble_band(self) -> None:
+        """The chosen band from the ensemble matrix ALREADY computed -- never the trace."""
+        self._ensemble_band = None
+        kind = self._band_kind()
+        if not kind or self._ensemble is None:
+            return
+        matrix = np.asarray(self._ensemble[1], dtype=np.float64)
+        if matrix.ndim != 2 or matrix.shape[0] == 0:
+            return
+        self._ensemble_band = event_shape.ensemble_band(matrix, kind)
+
+    def _remove_band_items(self) -> None:
+        for item in self._band_items:
+            self._ensemble_plot.removeItem(item)
+        self._band_items = ()
+
+    def _add_band_items(self) -> None:
+        """Draw ``self._ensemble_band`` as a fill between two curves (NaN points left open)."""
+        self._remove_band_items()
+        kind = self._band_kind()
+        if not kind or self._ensemble is None or self._ensemble_band is None:
+            return
+        T = np.asarray(self._ensemble[0], dtype=np.float64)
+        lower, upper, _n = (np.asarray(v, dtype=np.float64) for v in self._ensemble_band)
+        if lower.shape != T.shape or upper.shape != T.shape:
+            return
+        hex_color = self._band_anchor_hex()
+        edge = _alpha_pen(hex_color, 110, 1)
+        # connect="finite" splits both edges at the same NaN points (the band shares one
+        # mask), and FillBetweenItem pairs their sub-paths -- a gap where fewer than two
+        # events contribute stays a gap instead of being bridged by a straight edge.
+        lo_item = pg.PlotCurveItem(x=T, y=lower, connect="finite", pen=edge)
+        hi_item = pg.PlotCurveItem(x=T, y=upper, connect="finite", pen=edge)
+        fill = pg.FillBetweenItem(lo_item, hi_item, brush=_alpha_brush(hex_color, 60))
+        for item in (fill, lo_item, hi_item):
+            # Below every other item wherever it is added: under the summary curves, and
+            # under the faint per-event lines too, so the shading never tints the traces
+            # it summarises.
+            item.setZValue(-1)
+            self._ensemble_plot.addItem(item)
+        self._band_items = (fill, lo_item, hi_item)
+
+    def _band_anchor_hex(self) -> str:
+        """The band takes the colour of the curve it surrounds, appearance edits included."""
+        item = self._mean_item if self._band_kind() == "sd" else self._median_item
+        if item is not None:
+            try:
+                return pg.mkPen(item.opts["pen"]).color().name()
+            except (KeyError, TypeError):
+                pass
+        return _MEAN_HEX if self._band_kind() == "sd" else _MEDIAN_HEX
+
+    def _on_band_changed(self, *_a) -> None:
+        if self._updating:
+            return
+        # A reduction of the traces on screen: no kernel, no trace read, and the user's
+        # zoom is put back exactly (adding items to an auto-ranging view would refit it).
+        view = self._ensemble_plot.getViewBox()
+        ranges = [list(axis) for axis in view.viewRange()]
+        auto = list(view.autoRangeEnabled())
+        view.disableAutoRange()
+        try:
+            self._compute_ensemble_band()
+            if self._mean_item is not None:
+                self._add_band_items()
+                self._ensemble_auto_title = self._ensemble_title(
+                    *self._ensemble_kept_and_skipped())
+                self._apply_ensemble_title()
+            else:
+                self._remove_band_items()
+            self._refresh_ensemble_notes()
+        finally:
+            view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
+            for axis, enabled in enumerate(auto):
+                if enabled:
+                    view.enableAutoRange(axis=axis, enable=enabled)
+        self.workspaceChanged.emit()
+
+    def _ensemble_kept_and_skipped(self) -> tuple[int, int]:
+        """``(drawn, skipped)`` for the ensemble on screen, live or restored.
+
+        :meth:`_ensemble_skips` splits ``skipped`` into edge skips and events with no
+        finite sample to align on.
+        """
+        n_kept = int(np.asarray(self._ensemble[1]).shape[0]) if self._ensemble else 0
+        base = self._ensemble_input_count
+        if base is None:
+            base = int(getattr(self, "_nanoscope_workspace_accepted_event_count", n_kept))
+        return n_kept, max(0, int(base) - n_kept)
+
+    def _ensemble_skips(self, skipped: int) -> tuple[int, int]:
+        """``(edge-skipped, no finite sample)`` out of the ``skipped`` events not drawn."""
+        unalignable = min(max(0, int(self._ensemble_unalignable or 0)), max(0, int(skipped)))
+        return max(0, int(skipped)) - unalignable, unalignable
+
+    def _ensemble_title(self, n_kept: int, skipped: int) -> str:
+        mode = self._ensemble_subset()
+        band = {"sd": ", shaded mean ± 1 SD", "iqr": ", shaded IQR (25–75 %)"}.get(
+            self._band_kind(), "")
+        edge, unalignable = self._ensemble_skips(skipped)
+        return (f"Ensemble of {n_kept} event(s)"
+                + ("" if mode == _SUBSET_DEFAULT else f"   ·   {mode}")
+                + (f"   ·   {edge} edge-skipped" if edge else "")
+                + (f"   ·   {unalignable} with no finite sample" if unalignable else "")
+                + "   —   mean (solid) + median (dashed)" + band)
+
+    def _ensemble_detail_lines(self, cautions: list[str] | None = None) -> list[str]:
+        """What the ensemble on screen is: subset, alignment, and the band with its n.
+
+        Lines that qualify what is drawn (events with no finite sample to align on, points
+        where the curves and their band are not defined, a band with too few events) are
+        also appended to ``cautions``, which the ensemble's notes show as its summary.
+        """
+        if self._ensemble is None:
+            return []
+        matrix = np.asarray(self._ensemble[1])
+        if matrix.ndim != 2 or matrix.shape[0] == 0:
+            return []
+        lines = [f"Events: {_subset_text(self._ensemble_subset())} "
+                 f"({matrix.shape[0]} drawn)."]
+        if not self._normalize.isChecked() and self._align_combo.currentText() == "extremum":
+            if self._ensemble_alignment is not None:
+                pol, source = self._ensemble_alignment
+                direction = "decrease" if pol < 0 else "increase"
+                lines.append(
+                    f"Aligned at each event's extremum: the sample inside the event where "
+                    f"polarity × (current − baseline) is largest, with polarity {pol:+d} "
+                    f"({source}), so the deepest point of a current {direction} sits at "
+                    f"t = 0. The window reaches the longest dwell plus the padding to both "
+                    f"sides of it, so every drawn event lies wholly inside.")
+            else:
+                lines.append("Aligned at each event's extremum (the polarity used was not "
+                             "saved with this snapshot).")
+            _edge, unalignable = self._ensemble_skips(self._ensemble_kept_and_skipped()[1])
+            if unalignable:
+                lines.append(
+                    f"{unalignable} event(s) have no finite sample inside their own span, "
+                    f"so they have no deepest sample to align on and are not drawn. They "
+                    f"are counted apart from the events whose window runs off the trace.")
+                if cautions is not None:
+                    cautions.append(lines[-1])
+        kind = self._band_kind()
+        if kind and self._ensemble_band is not None:
+            lines.append(
+                "Band: mean ± 1 sample standard deviation (ddof = 1), around the solid mean."
+                if kind == "sd" else
+                "Band: interquartile range, the 25th to 75th percentile (linear "
+                "interpolation), around the dashed median.")
+            # n is the count behind the summary curve at each point: every drawn event,
+            # or 0 where the curve itself is undefined (event_shape.ensemble_point_counts).
+            n = np.asarray(self._ensemble_band[2], dtype=np.int64)
+            n_rows = int(matrix.shape[0])
+            undefined = int(np.count_nonzero(n < n_rows))
+            if n.size and n_rows < 2:
+                lines.append("The band needs at least 2 events: one value has no spread, so "
+                             "no band is drawn.")
+                if cautions is not None:
+                    cautions.append(lines[-1])
+            elif n.size and not undefined:
+                lines.append(f"Every point of the band uses n = {n_rows} events, the same "
+                             f"events as its curve.")
+            elif n.size:
+                lines.append(
+                    f"At {undefined} of {n.size} points at least one event's window holds a "
+                    f"non-finite sample. The mean and median take every drawn event at every "
+                    f"point, so neither is defined there, and the band is left out with "
+                    f"them; everywhere else it uses all n = {n_rows} events. Export data "
+                    f"(CSV) gives n_events_at_point, 0 at those points.")
+                if cautions is not None:
+                    cautions.append(lines[-1])
+        return lines
+
+    def _refresh_ensemble_notes(self) -> None:
+        """The ensemble's readout beside the figure: cautions as the summary, all in Details.
+
+        Kept out of the title and the artwork, which carry only what the figure shows.
+        """
+        cautions: list[str] = []
+        lines = self._ensemble_detail_lines(cautions)
+        self._ensemble_notes.set_warnings(tuple(cautions), full_text="\n".join(lines))
+
     def _ensemble_message(self, text: str) -> None:
+        self._ensemble_notes.set_warnings(())
         self._ensemble_plot.setTitle(None)
         self._ensemble_plot.titleLabel.setText("")
         self._ensemble_plot.setLabel("bottom", "")
@@ -759,6 +1189,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                       if isinstance(item, pg.TextItem))
         if density:
             blocks.extend(self._amplitude_warnings)
+        else:
+            blocks.append("\n".join(self._ensemble_detail_lines()))
         blocks.append("Source provenance\n" + json.dumps(
             self._export_common("density" if density else "ensemble"),
             ensure_ascii=False, indent=2, default=self._json_default))
@@ -774,6 +1206,90 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             if self._tabs.tabText(i) == name:
                 self._tabs.setCurrentIndex(i)
                 return
+
+    # -- window templates ------------------------------------------------------------------------
+    def template_settings(self) -> tuple[dict, dict]:
+        """``(settings, appearance)`` for a window template, keyed as the project saves them
+        (``capture_event_plots``), without the source or the frozen counts."""
+        return ({"view": self.current_view(),
+                 "x_metric": self._x_combo.currentData(), "y_metric": self._y_combo.currentData(),
+                 "log_x": self._logx.isChecked(), "log_y": self._logy.isChecked(),
+                 "bins": self._bins.value(), "colormap": self._cmap_combo.currentText(),
+                 "normalize_time": self._normalize.isChecked(),
+                 "align": self._align_combo.currentText(), "n_points": self._npoints.value(),
+                 "pad_percent": self._pad.value(),
+                 "ensemble_subset": self._ensemble_subset(),
+                 "ensemble_band": self._band_kind()},
+                self.appearance_state())
+
+    def apply_template_settings(self, settings: dict, appearance: dict) -> None:
+        """A recalled template, as one gesture: every control set, then each view redrawn
+        at most once, and only if one of ITS settings moved.
+
+        This window has no draft -- each of these controls redraws its view from the bound
+        events as it moves -- so the recall does what setting them by hand would, once
+        instead of a dozen times. A heatmap or ensemble setting that did not change does not
+        redraw: that would re-bin over the zoom, and on a snapshot restored from a project
+        whose recording is missing it would erase the saved count grid
+        (``_render_workspace_snapshot``). The colormap, the view shown and the appearance are
+        presentation only. Validated whole before any control moves.
+        """
+        current, _appearance = self.template_settings()
+        merged = {**current, **{key: settings[key] for key in current if key in settings}}
+        metrics = {self._x_combo.itemData(i) for i in range(self._x_combo.count())}
+        spins = {"bins": self._bins, "n_points": self._npoints, "pad_percent": self._pad}
+        if (merged["view"] not in (DENSITY, ENSEMBLE)
+                or merged["x_metric"] not in metrics or merged["y_metric"] not in metrics
+                or merged["colormap"] not in _COLORMAPS
+                or merged["align"] not in event_shape.ENSEMBLE_ALIGNS
+                or merged["ensemble_band"] not in {kind for _text, kind in _BANDS}
+                or type(merged["ensemble_subset"]) is not str
+                or merged["ensemble_subset"] in _SUBSET_EXCLUDED
+                or any(type(merged[key]) is not bool
+                       for key in ("log_x", "log_y", "normalize_time"))
+                or any(type(merged[key]) is not int
+                       or not spin.minimum() <= merged[key] <= spin.maximum()
+                       for key, spin in spins.items())):
+            raise ValueError("Its event-waveform settings are not ones this window offers.")
+        previous, self._updating = self._updating, True
+        try:
+            self.set_x_metric(merged["x_metric"])
+            self.set_y_metric(merged["y_metric"])
+            self._logx.setChecked(merged["log_x"])
+            self._logy.setChecked(merged["log_y"])
+            self.set_bins(merged["bins"])
+            self.set_colormap(merged["colormap"])
+            self.set_normalize_time(merged["normalize_time"])
+            self.set_align(merged["align"])
+            self.set_n_points(merged["n_points"])
+            self.set_pad_percent(merged["pad_percent"])
+            self.set_ensemble_subset(merged["ensemble_subset"] or _SUBSET_DEFAULT)
+            self.set_band(merged["ensemble_band"])
+            self.set_view(merged["view"])
+        finally:
+            self._updating = previous
+        self._align_combo.setEnabled(not merged["normalize_time"])
+        # What moved, read back from the controls, each sent where its signal sends a hand
+        # edit (the connections after _build_ui).
+        after, _appearance = self.template_settings()
+        moved = {key for key in after if after[key] != current[key]}
+        if moved & {"x_metric", "y_metric", "log_x", "log_y", "bins"}:
+            self._redraw_density()                  # _on_density_changed
+        elif "colormap" in moved and self._density_image is not None:
+            # _on_density_colormap_changed: the LUT only, never the counts or the range.
+            cmap = _get_colormap(self._cmap_combo.currentText())
+            self._density_image.setColorMap(cmap)
+            self._colorbar.setColorMap(cmap)
+        if moved & {"normalize_time", "align", "n_points", "pad_percent", "ensemble_subset"}:
+            self._redraw_ensemble()                 # _on_ensemble_changed (band included)
+        elif "ensemble_band" in moved:
+            self._on_band_changed()                 # the band only: no kernel, zoom kept
+        if "view" in moved:
+            self._apply_appearance()                # _on_view_changed
+        # The shared look answers through _on_appearance_changed, zoom-preserving.
+        self._appearance_widget.apply_appearance(appearance)
+        if moved:
+            self.workspaceChanged.emit()
 
     def set_x_metric(self, metric_id: str) -> None:
         self._set_combo_data(self._x_combo, metric_id)
@@ -842,6 +1358,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._density_main.clear()
         self._density_top.clear()
         self._density_right.clear()
+        reset_plot_history(self._density_main)   # new geometry: old ranges mean nothing now
         self._density_image = None
         self._top_marginal_item = None
         self._right_marginal_item = None
@@ -926,9 +1443,11 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     def _render_ensemble_snapshot(self) -> None:
         self._ensemble_plot.clear()
+        reset_plot_history(self._ensemble_plot)  # new geometry: old ranges mean nothing now
         self._events_item = None
         self._mean_item = None
         self._median_item = None
+        self._band_items = ()
         if self._ensemble is None:
             self._ensemble_message("No saved event ensemble is available.")
             return
@@ -956,6 +1475,23 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._mean_item = pg.PlotDataItem(x=T, y=mean, pen=pg.mkPen(_MEAN_HEX, width=2.5))
         self._median_item = pg.PlotDataItem(
             x=T, y=median, pen=pg.mkPen(_MEDIAN_HEX, width=2.5, style=Qt.DashLine))
+        # The saved band is drawn as saved. A snapshot that names a band but carries no
+        # usable arrays (written by hand, or damaged) gets it reduced from the saved
+        # matrix -- the same arithmetic over the same numbers, never the trace.
+        band = self._ensemble_band
+        if self._band_kind():
+            try:
+                band = None if band is None else tuple(
+                    np.asarray(v, dtype=np.float64) for v in band)
+            except (TypeError, ValueError):
+                band = None
+            if band is None or len(band) != 3 or any(v.shape != T.shape for v in band):
+                self._compute_ensemble_band()
+            else:
+                self._ensemble_band = (band[0], band[1], band[2].astype(np.int64))
+        else:
+            self._ensemble_band = None
+        self._add_band_items()
         self._ensemble_plot.addItem(self._mean_item)
         self._ensemble_plot.addItem(self._median_item)
 
@@ -963,13 +1499,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._ensemble_plot.setLabel(
             "bottom", "Normalized time (dwell)" if normalize else "Time (s)")
         self._ensemble_plot.setLabel("left", f"Current ({self._units})")
-        n_accepted = int(getattr(self, "_nanoscope_workspace_accepted_event_count",
-                                 matrix.shape[0]))
-        skipped = max(0, n_accepted - matrix.shape[0])
-        self._ensemble_auto_title = (f"Ensemble of {matrix.shape[0]} event(s)"
-                + (f"   ·   {skipped} edge-skipped" if skipped else "")
-                + "   —   mean (solid) + median (dashed)")
+        self._ensemble_auto_title = self._ensemble_title(*self._ensemble_kept_and_skipped())
         self._apply_ensemble_title()
+        self._refresh_ensemble_notes()
         self._ensemble_plot.autoRange()
 
     def ensemble_traces(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
@@ -1129,7 +1661,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         ensemble kernel walks accepted rows positionally; replay that keep mask and
         use ``iloc`` so even duplicate indices retain their own event_id/recording.
         """
-        acc = self._accepted()
+        acc = self._ensemble_events()
         if acc is None or self._signal is None:
             return []
         df = acc.df
@@ -1143,14 +1675,19 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             valid &= (starts - pad_frac * lengths >= 0.0)
             valid &= (ends + pad_frac * lengths <= n)
         elif np.any(valid):
-            width = int(lengths[valid].max())
-            wpad = int(round(pad_frac * width))
-            total = width + 2 * wpad
-            if self._align_combo.currentText() == "center":
-                a_all = np.round((starts + ends) / 2.0 - total / 2.0).astype(np.int64)
-            else:
-                a_all = starts - wpad
-            valid &= (a_all >= 0) & (a_all + total <= n)
+            align = self._align_combo.currentText()
+            refs = None
+            if align == "extremum":
+                if self._ensemble_alignment is None:
+                    return []       # a snapshot that never recorded its polarity
+                refs = event_shape.extremum_indices(
+                    self._signal, starts, ends, self._ensemble_alignment[0])
+            # The kernel's own window arithmetic, so the replay cannot drift from it.
+            geometry = event_shape.realtime_window(starts, ends, pad_frac, align, refs)
+            if geometry is None:
+                return []
+            a_all, total, _ref, valid = geometry
+            valid = valid & (a_all >= 0) & (a_all + total <= n)
         positions = np.flatnonzero(valid)
         if positions.size != int(n_rows):
             return []
@@ -1186,13 +1723,35 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                     "then export again."))
         identities = self._ensemble_kept_identities(matrix.shape[0])
         identity_available = len(identities) == int(matrix.shape[0])
-        skipped = max(0, (len(self._accepted().df) if self._accepted() is not None else
-                          matrix.shape[0]) - matrix.shape[0])
+        # The counts the title gives, from the input size frozen with the draw: the live
+        # table may be absent (a reopened project) or curated since, and neither changes
+        # how many events this figure left out.
+        _drawn, skipped = self._ensemble_kept_and_skipped()
+        edge_skipped, unalignable = self._ensemble_skips(skipped)
+        # The band columns are written whether or not a band is chosen: band_kind says
+        # which, and n_events_at_point is the n behind the mean and median on the same
+        # row in either case -- every drawn event, or 0 where those are NaN because some
+        # event's sample there is not finite (the band is NaN there with them).
+        kind = self._band_kind()
+        band = self._ensemble_band if kind else None
+        if band is not None:
+            band_lower, band_upper, n_at_point = (np.asarray(v) for v in band)
+        else:
+            band_lower = band_upper = np.full(matrix.shape[1], np.nan)
+            n_at_point = event_shape.ensemble_point_counts(matrix)
+        alignment = self._ensemble_alignment
+        extremum = (not self._normalize.isChecked()
+                    and self._align_combo.currentText() == "extremum")
         common = {
             **self._export_common("ensemble"),
             "normalize_time": self._normalize.isChecked(),
             "align": self._align_combo.currentText(), "n_points": self._npoints.value(),
-            "pad_percent": self._pad.value(), "edge_skipped_count": skipped,
+            "pad_percent": self._pad.value(), "edge_skipped_count": edge_skipped,
+            "no_finite_sample_count": unalignable,
+            "ensemble_subset": self._ensemble_subset(),
+            "align_polarity": (alignment[0] if extremum and alignment else np.nan),
+            "align_polarity_source": (alignment[1] if extremum and alignment else ""),
+            "band_kind": {"sd": "mean_pm_1sd", "iqr": "median_iqr_25_75"}.get(kind, "none"),
         }
         rows: list[dict] = []
         for trace_i, trace in enumerate(matrix):
@@ -1211,6 +1770,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                     "event_pore_id": identity.get("event_pore_id"),
                     "sample_index": sample_i, "time": tv, "event_current": value,
                     "mean_current": mean[sample_i], "median_current": median[sample_i],
+                    "band_lower": band_lower[sample_i], "band_upper": band_upper[sample_i],
+                    "n_events_at_point": int(n_at_point[sample_i]),
                     **common,
                 })
         return pd.DataFrame(rows)
@@ -1247,6 +1808,26 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 # ================================================================================================
 # small pyqtgraph helpers
 # ================================================================================================
+
+def _subset_text(mode: str) -> str:
+    """The Events combo's text for a curation filter: every subset is WITHIN accepted."""
+    return "All accepted" if mode == _SUBSET_DEFAULT else f"Accepted · {mode}"
+
+
+def _count_unalignable(signal: np.ndarray, events: EventSet, polarity: int) -> int:
+    """Events an extremum alignment drops for having no finite sample in their own span.
+
+    The kernel drops them through the same ``extremum_indices`` (``-1``: nothing to align
+    on). Only spans that lie at least partly on the trace count: an event wholly off it
+    has no samples at all and is an edge skip, as it is for start and centre.
+    """
+    df = events.accepted.df
+    n = int(np.asarray(signal).size)
+    starts = np.clip(df["start_idx"].to_numpy(dtype=np.int64), 0, n)
+    ends = np.clip(df["end_idx"].to_numpy(dtype=np.int64), 0, n)
+    refs = event_shape.extremum_indices(signal, starts, ends, polarity)
+    return int(np.count_nonzero((ends > starts) & (refs < 0)))
+
 
 def _get_colormap(name: str) -> pg.ColorMap:
     """A pyqtgraph ColorMap by name, via matplotlib (a hard dependency), viridis on failure."""

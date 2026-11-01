@@ -125,7 +125,12 @@ other project mutation.
 
 ## Format, integrity, and opaque carry-through
 
-- The ordinary project manifest version becomes `11`; `MIN_READ_VERSION` stays `1`.
+- The ordinary project manifest version becomes `11`; `MIN_READ_VERSION` stays `1`. (It is `12`
+  since Plot Studio phase 1, 2026-11: new fields inside the `builtin.psd`, `builtin.event-plots`
+  and `builtin.plots` artifacts — spectrogram colour limits and log-frequency axis, the ensemble's
+  subset, band and frozen alignment, the PlotConfig v3 KDE and heatmap sections. A v11 build owns
+  those artifacts, restores them from the keys it knows and re-captures them on save, so opaque
+  carry-through does not protect these fields; the bump makes it refuse the file instead.)
 - New state lives under one versioned analytical-workspace section whose own optional sub-blocks
   have safe empty defaults. Large tables use Parquet as existing project tables do; numeric arrays
   use a non-executable, dtype/shape-preserving representation. Pickle and arbitrary Python object

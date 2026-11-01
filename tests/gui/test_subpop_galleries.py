@@ -1027,13 +1027,18 @@ def test_the_report_window_offers_the_entry_points_without_importing_a_surface()
     than dropped to a subset check, so a genuine future reach for "event_gallery" or
     "trace_view" (the two things this test actually exists to catch, per the
     docstring above) still fails it, and any OTHER new sibling import still has to
-    argue for a place on this list rather than passing silently."""
+    argue for a place on this list rather than passing silently.
+
+    ``plot_interaction`` argued for its place the same way: the shared Reset view, zoom
+    history, right-click menu and pointer readout of every plot window. It imports nothing
+    from gui and is not a surface."""
     import nanoscope.gui.subpop_window as subpop_mod
 
     tree = ast.parse(pathlib.Path(subpop_mod.__file__).read_text())
     siblings = {n.module for n in ast.walk(tree)
                 if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module}
-    allowed = {"categorical", "analysis_catalog", "plot_appearance", "plot_workflow"}
+    allowed = {"categorical", "analysis_catalog", "plot_appearance", "plot_workflow",
+               "plot_interaction"}
     assert siblings == allowed, (
         f"the report window reaches {sorted(siblings - allowed)} beyond the shared "
         f"infrastructure it is allowed to reuse {sorted(allowed)}; a real surface "

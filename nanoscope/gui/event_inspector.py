@@ -1332,9 +1332,22 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._index_spin = QtWidgets.QSpinBox()
         self._index_spin.setPrefix("Event ")
         self._index_spin.setRange(0, 0)
-        self._index_spin.setToolTip("Jump to the i-th event of the current filter subset.")
+        # A POSITION, NOT AN ID — and the two differ on every table (IDs start at 0, positions
+        # at 1, and a filter or a merge spreads them further). The tooltip says so and names
+        # the door that does take an ID, so "Event 147" is never read as event_id 147.
+        self._index_spin.setToolTip(
+            "Position in the current filter: the i-th event of the subset, counted from 1. "
+            "This is not the event ID — use ID… to go to an event by its event_id.")
         self._index_spin.valueChanged.connect(self._on_spin_changed)
         self._count_label = QtWidgets.QLabel("of 0")
+        self._goto_id_btn = _tool(
+            "ID…",
+            f"Go to an event by its ID — the event table's event_id column ("
+            f"{_native_key('Ctrl+J')}). The Event box beside ◀ ▶ is a position in the "
+            f"filter, not the ID; an event outside the filter switches it to All.",
+            "Go to event ID")
+        self._goto_id_btn.setObjectName("goToEventId")
+        self._goto_id_btn.clicked.connect(lambda _=False: self.go_to_event_id_dialog())
 
         self._filter_combo = _ElidingCombo()
         # A fixed width, so label filters arriving with a palette never shift the row.
@@ -1507,7 +1520,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         # 361 px. The strip scrolls sideways rather than flooring anything narrower.
         filter_label = QtWidgets.QLabel("Filter:")
         self._toolbar_wide = (
-            (self._prev_btn, self._index_spin, self._count_label, self._next_btn, 8,
+            (self._prev_btn, self._index_spin, self._count_label, self._next_btn,
+             self._goto_id_btn, 8,
              self._pan_left_btn, self._pan_right_btn, self._context_combo, 16,
              self._accept_btn, self._reject_btn, self._accept_check, 8, self._revert_btn,
              None, self._host_btn),
@@ -1518,7 +1532,9 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self._toolbar_narrow = (
             (self._prev_btn, self._index_spin, self._count_label, self._next_btn, 8,
              self._accept_btn, self._reject_btn, None),
-            (self._accept_check, self._revert_btn, self._merge_next_btn, self._delete_btn, None),
+            # ID… heads the row under ◀ Event N ▶, which is full (435 px of 436).
+            (self._goto_id_btn, 8, self._accept_check, self._revert_btn, self._merge_next_btn,
+             self._delete_btn, None),
             (self._pan_left_btn, self._pan_right_btn, self._context_combo, 8,
              self._trace_btn, self._gallery_btn, None),
             (filter_label, self._filter_combo, 8, self._accept_all_btn,
@@ -2086,6 +2102,67 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         self.show_event(target)
         return target
 
+    # -- go to an event by its ID ---------------------------------------------------------------
+    def _ask_event_id(self, value: int, lo: int, hi: int) -> int | None:
+        """Prompt for an event ID (prefilled, cancellable). None if cancelled. A single
+        injectable seam so the suite never faces a live modal."""
+        number, ok = QtWidgets.QInputDialog.getInt(
+            self, "Go to event ID",
+            "Event ID — the event table's event_id column. The Event box beside ◀ ▶ is a "
+            "position in the filter, not this number:", int(value), int(lo), int(hi), 1)
+        return int(number) if ok else None
+
+    def go_to_event_id_dialog(self) -> int | None:
+        """ID… / Ctrl+J: ask for an event ID and :meth:`go_to_event_id` it."""
+        if self._df is None or not len(self._df) or "event_id" not in self._df.columns:
+            return None
+        ids = self._df["event_id"].to_numpy(dtype=np.int64)
+        start = self._current_id if self._current_id is not None else int(ids.min())
+        event_id = self._ask_event_id(start, int(ids.min()), int(ids.max()))
+        if event_id is None:
+            return None
+        return event_id if self.go_to_event_id(event_id) else None
+
+    def go_to_event_id(self, event_id: int) -> bool:
+        """Show the event whose ``event_id`` is ``event_id``, whatever the filter.
+
+        THE FILTER FOLLOWS, NOT THE OTHER WAY ROUND. :meth:`show_event` displays any row of
+        the frame, but an event outside the browsed subset leaves "Event i of N" on a
+        position that belongs to another event — the very confusion between a position and
+        an ID this door exists to end. So an ID outside the filter moves the filter to All
+        first (which keeps the event on screen, since All holds everything) and the progress
+        line says why; an ID inside it keeps the filter. ``False``, with a note and nothing
+        moved, when this table has no such ID (IDs have gaps after a merge or a delete).
+        """
+        if self._df is None or "event_id" not in self._df.columns:
+            return False
+        event_id = int(event_id)
+        if self._row_for_id(event_id) is None:
+            ids = self._df["event_id"].to_numpy(dtype=np.int64)
+            span = f"IDs {int(ids.min())}–{int(ids.max())}" if ids.size else "no events"
+            self._note = (f"No event ID {event_id}",
+                          f"This table has no event with event_id {event_id} ({span}, "
+                          f"{ids.size:,} events).")
+            self._render_progress()
+            return False
+        moved_filter = None
+        if event_id not in self._subset_ids():
+            moved_filter = self._filter
+            self.set_filter(FILTER_ALL)
+        self.show_event(event_id)
+        if moved_filter is not None:
+            self._note = (f"Filter → All: ID {event_id} is not in {moved_filter}",
+                          f"Event ID {event_id} is not in the “{moved_filter}” filter, so the "
+                          f"filter moved to All and the Event box shows its position there.")
+            self._render_progress()
+        elif self._note != ("", ""):
+            # The event was already on screen, so show_event returned early and nothing
+            # cleared the note — "No event ID 42" from a miss a moment ago would sit beside
+            # the success it no longer describes. (A move clears it in _render_and_sync.)
+            self._note = ("", "")
+            self._render_progress()
+        return True
+
     def _request_undo(self) -> None:
         """⌘Z here: MainWindow's undo, then back to the event the last advance moved away
         from -- but only when the undo restored the same events AND changed that event.
@@ -2226,6 +2303,9 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         add(Qt.Key_Space, self.decide_toggle, repeat=False)
         add(Qt.Key_T, self._on_show_in_trace)
         add("Ctrl+U", self.first_unreviewed, repeat=False)
+        # View ▸ Go to event…'s key, here because this window has no menu bar. Docked, the
+        # main window's action answers instead (see set_host), like Undo and Save.
+        self._goto_id_shortcut = add("Ctrl+J", self.go_to_event_id_dialog, repeat=False)
         # ⌘Z / ⇧⌘Z here, on MainWindow's one stack (this window has no menu bar). Docked,
         # MainWindow's own Undo / Redo answer instead (see set_host).
         self._undo_shortcut = add("Ctrl+Z", self._request_undo)
@@ -2821,13 +2901,14 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         if docked:
             self.act_save_project.setShortcuts([])
             self.act_save_project_as.setShortcuts([])
-            for sc in (self._undo_shortcut, self._redo_shortcut):
+            for sc in (self._undo_shortcut, self._redo_shortcut, self._goto_id_shortcut):
                 sc.setKey(QtGui.QKeySequence())
         else:
             self.act_save_project.setShortcut(QtGui.QKeySequence.StandardKey.Save)
             self.act_save_project_as.setShortcut(QtGui.QKeySequence.StandardKey.SaveAs)
             self._undo_shortcut.setKey(QtGui.QKeySequence("Ctrl+Z"))
             self._redo_shortcut.setKey(QtGui.QKeySequence("Ctrl+Shift+Z"))
+            self._goto_id_shortcut.setKey(QtGui.QKeySequence("Ctrl+J"))
         # A press anywhere a widget does not take it propagates up to this window; the
         # widgets that take a press without taking the focus are named. (Not findChildren:
         # a wrapper per internal child is a zombie per teardown in this PySide6.)
@@ -4574,6 +4655,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
                 _w.setEnabled(can_label)
             if hasattr(self, "_first_unreviewed_btn"):
                 self._first_unreviewed_btn.setEnabled(self._df is not None and len(self._df) > 0)
+            # Any event of the frame, whatever the filter (an empty filter included).
+            self._goto_id_btn.setEnabled(self._df is not None and len(self._df) > 0)
             # HIDDEN, not merely greyed, with no detection at all. A disabled control is a
             # promise that it applies here and is unavailable now; under "No detection — run
             # detection to browse events." that promise is false, and the owner read the two

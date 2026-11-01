@@ -43,6 +43,7 @@ from nanoscope.gui.plots_panel import (
     ClusterConfig,
     FitConfig,
     FrozenMap,
+    HeatmapConfig,
     HistogramConfig,
     KdeConfig,
     PLOT_CONFIG_FORMAT,
@@ -126,10 +127,11 @@ def _busy_config() -> PlotConfig:
         histogram=HistogramConfig(column="frac_depth", bins=64,
                                   normalization=pp._NORM_PROB,
                                   colour_by=pp._COLOUR_CLUSTER, log_x=True, log_y=True,
-                                  include_filter_limited=True),
+                                  include_filter_limited=True, kde_overlay=True),
         scatter=ScatterConfig(x="dwell_s", y="snr", log_x=True, log_y=True,
                               colour_by=pp._COLOUR_CLUSTER),
         kde=KdeConfig(x="depth_pA", y="snr", log_x=False, log_y=True, levels=13),
+        heatmap=HeatmapConfig(x="snr", y="dwell_s", log_x=False, log_y=True, bins=17),
         cluster=ClusterConfig(features=("dwell_s", "snr"), method=pp._METHOD_KMEANS,
                               k_mode=pp._K_FIXED, k=5),
         fit=FitConfig(kind=pp._FIT_GAMMA, k=3, k_auto=True,
@@ -151,7 +153,7 @@ def _busy_config() -> PlotConfig:
             show_grid=False, title_font_size_pt=16, axis_label_font_size_pt=14,
             tick_font_size_pt=9, title_bold=True, title_italic=True,
             show_r2=False, show_gof=False, show_ci_band=True, show_provenance=True,
-            show_residuals=True),
+            show_residuals=True, heatmap_colormap="magma"),
     )
 
 
@@ -941,13 +943,15 @@ def test_the_rename_bumped_the_version_so_an_older_build_refuses_by_name(tmp_pat
     """
     p = write_plot_config(tmp_path / "today.json", replace(
         PlotConfig(), histogram=HistogramConfig(column="dwell_s", normalization="density")))
-    assert json.loads(p.read_text())["version"] == 2 == PLOT_CONFIG_VERSION, (
+    # >= 2, not == 2: v3 (the KDE overlay and the heatmap) bumped it again, by the same rule.
+    assert json.loads(p.read_text())["version"] == PLOT_CONFIG_VERSION >= 2, (
         "every sidecar this build writes declares the vocabulary it was written in")
 
     monkeypatch.setattr(pp, "PLOT_CONFIG_VERSION", 1)
     with pytest.raises(PlotConfigVersionError) as exc:
         read_plot_config(p)
-    assert "version 2" in str(exc.value) and "versions 1 to 1" in str(exc.value)
+    assert (f"version {json.loads(p.read_text())['version']}" in str(exc.value)
+            and "versions 1 to 1" in str(exc.value))
     assert "Update NanoScope" in str(exc.value)
 
 

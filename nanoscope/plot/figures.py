@@ -2280,6 +2280,9 @@ PLOT_DATA_PARTS: dict[str, str] = {
     "grid":  "one node of a 2-D KDE evaluation grid, with its density",
     "level": "one contour level of a 2-D KDE, as a density value (x and y are blank)",
     "loading": "one feature's loading on the two principal components",
+    "kde": "a sample of a 1-D KDE drawn over a histogram, in the bars' own y quantity",
+    "cell": ("one 2-D event-count bin: x edges in bin_left/bin_right, y edges in "
+             "y_bin_low/y_bin_high, its count, and the cell centre"),
 }
 
 
@@ -2310,6 +2313,7 @@ def plot_source_data(
     log_y: bool = False,
     series_labels: Sequence[str] = (),
     fit_labels: Sequence[str] = (),
+    kde_labels: Sequence[str] = (),
 ) -> pd.DataFrame:
     """The numbers behind a live pyqtgraph plot, as a long DataFrame.
 
@@ -2329,6 +2333,12 @@ def plot_source_data(
         series_labels: names for the drawn series, in draw order -- what goes in the
             ``series`` column for ``bins``/``points``/``grid`` rows.
         fit_labels: the same for ``fit`` rows, which are added after every series.
+        kde_labels: the same for ``kde`` rows -- the curves a histogram's KDE overlay
+            draws, tagged ``_plot_data_part = "kde"`` by the panel so they are never
+            mistaken for, or take the label of, a fitted curve.
+
+    A 2-D event-count image (an ``ImageItem`` carrying ``_heatmap_edges``) becomes one
+    ``cell`` row per bin, zeros included, so the CSV re-plots the exact image.
 
     Returns:
         A DataFrame with ``series``, ``part`` (see :data:`PLOT_DATA_PARTS`), the two
@@ -2369,7 +2379,48 @@ def plot_source_data(
             return str(fit_labels[i])
         return f"fit {i + 1}"
 
+    kde_i = 0
+    # A ``count`` column of the CELL rows, unless an axis is itself called that.
+    count_name = "count" if "count" not in (x_name, y_name) else "event_count"
+
     for node in list(getattr(item, "items", []) or []):
+        if isinstance(node, pg.ImageItem) and getattr(node, "_heatmap_edges", None) is not None:
+            # The panel's event-count image: ``image[i, j]`` is the count in x-bin i,
+            # y-bin j (col-major, ``density_2d``'s own order), and the edges were
+            # stashed in DATA units at the draw -- no log to undo.
+            xe, ye = (np.asarray(e, dtype=float) for e in node._heatmap_edges)
+            counts = np.asarray(node.image, dtype=float)
+            if counts.shape != (xe.size - 1, ye.size - 1):
+                continue
+            nx, ny = counts.shape
+            rows.append(pd.DataFrame({
+                "series": _series_label(series_i),
+                "part": "cell",
+                "bin_left": np.repeat(xe[:-1], ny),
+                "bin_right": np.repeat(xe[1:], ny),
+                "y_bin_low": np.tile(ye[:-1], nx),
+                "y_bin_high": np.tile(ye[1:], nx),
+                x_name: np.repeat(0.5 * (xe[:-1] + xe[1:]), ny),
+                y_name: np.tile(0.5 * (ye[:-1] + ye[1:]), nx),
+                count_name: counts.ravel(),
+            }))
+            series_i += 1
+            continue
+
+        if (isinstance(node, pg.PlotDataItem)
+                and getattr(node, "_plot_data_part", None) == "kde"):
+            xd, yd = getattr(node, "xData", None), getattr(node, "yData", None)
+            if xd is None or yd is None or len(xd) == 0 or len(xd) != len(yd):
+                continue
+            label = (str(kde_labels[kde_i]) if kde_i < len(kde_labels)
+                     and str(kde_labels[kde_i]).strip() else f"kde {kde_i + 1}")
+            rows.append(pd.DataFrame({
+                "series": label, "part": "kde",
+                x_name: np.asarray(xd, dtype=float), y_name: np.asarray(yd, dtype=float),
+            }))
+            kde_i += 1
+            continue
+
         if isinstance(node, pg.IsocurveItem):
             # A 2-D KDE. Every contour of one source shares the SAME density array --
             # ``_draw_kde`` evaluates ``z`` once and hands the identical object to
@@ -2461,8 +2512,9 @@ def plot_source_data(
     # for a density-normalised histogram, and listing it twice made pandas write the
     # column twice.
     order = list(dict.fromkeys(
-        c for c in ("series", "part", "bin_left", "bin_right", x_name, y_name,
-                    density_name) if c in out.columns))
+        c for c in ("series", "part", "bin_left", "bin_right", "y_bin_low",
+                    "y_bin_high", x_name, y_name, density_name, count_name)
+        if c in out.columns))
     return out[order]
 
 

@@ -27,6 +27,9 @@ from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
                           write_live_plot_image, write_plot_csv)
+from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
+                               window_readout)
+from .plot_templates import WindowTemplateControls
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
                             ensure_item_legend, install_plot_workflow)
 from .source_appearance import SourceAppearanceEditor
@@ -148,6 +151,16 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         export = control_group("Export the committed figure", "Export preserves the last generated figure, "
                                "including its notes and exact visible coordinates; unapplied controls do not change it. "
                                "Use Figure Library to save its numerical snapshot, source bindings and appearance together.")
+        # Named recipes for another recording: summary, measurement and appearance, never the
+        # ticked sources or the generated snapshot. Recall is a draft; Generate commits it.
+        self._templates = WindowTemplateControls(
+            "distribution-summaries", capture=self.template_settings,
+            recall=self.apply_template_settings,
+            note="A template keeps the measurement, summary type, violin grid, accepted-only "
+                 "choice and appearance. It never keeps your ticked sources, per-source colours "
+                 "or the generated figure. Recalling one changes the controls only: press "
+                 "Generate to use them.")
+        export.layout().addWidget(self._templates)
         for widget in (data, analysis, appearance, export):
             layout.addWidget(widget)
         self._plot_widget = pg.PlotWidget(background="#111316", axisItems={
@@ -163,6 +176,15 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             exports=(("Export current figure…", self.save_image),
                      ("Export plotted coordinates CSV…", self.save_csv)))
         self._workflow.export_button.setEnabled(False)
+        # View only (plot_interaction). Reset view is this page's own framing, not a bare
+        # auto-range: a box/violin keeps its full category slots. The menu's exports are
+        # greyed out with the Export button, until a figure has been generated.
+        self._readout = window_readout(self)
+        self._plot_nav = install_plot_interaction(
+            self._plot, readout=self._readout, reset=self._frame_view,
+            exports=(("Export current figure…", lambda: self.save_image(), self.has_data),
+                     ("Export plotted coordinates CSV…", lambda: self.save_csv(), self.has_data)))
+        self._workflow.add_view_control(view_button(lambda: self._plot_nav, (self._plot_nav,)))
         self._source_list.itemChanged.connect(self._source_selection_changed)
         self._metric_combo.currentIndexChanged.connect(self._draft_changed)
         self._accepted_only.toggled.connect(self._draft_changed)
@@ -194,6 +216,34 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             self._update_method_note()
         finally:
             self._loading = False
+
+    def template_settings(self):
+        """``(settings, appearance)`` for a window template: the draft recipe without sources."""
+        settings = self.config()
+        settings.pop("source_keys", None)
+        return settings, self.appearance_state()
+
+    def apply_template_settings(self, settings, appearance):
+        """A recalled template: the draft controls and one appearance step, never Generate.
+
+        Validated whole before anything moves, so a damaged template changes nothing rather
+        than half the controls. The committed figure keeps its numbers; only its appearance
+        follows, which is an appearance-only edit. Like a hand edit, it marks the figure
+        unapplied only when a draft control actually moved.
+        """
+        before, _appearance = self.template_settings()
+        draft = {key: settings[key] for key in ("accepted_only", "metric", "kind", "violin_points")
+                 if key in settings}
+        if ("metric" in draft and draft["metric"] not in dict(METRICS)
+                or "kind" in draft and draft["kind"] not in dict(VIEWS)
+                or "accepted_only" in draft and type(draft["accepted_only"]) is not bool
+                or "violin_points" in draft and (type(draft["violin_points"]) is not int
+                                                 or not 32 <= draft["violin_points"] <= 2048)):
+            raise ValueError("Its distribution settings are not ones this page offers.")
+        self.set_config({**self.config(), **draft})
+        if self.template_settings()[0] != before:
+            self._draft_changed()
+        self._appearance_widget.apply_appearance(appearance)
 
     def selected_sources(self):
         return [self._sources[key] for key in self._selected_keys if key in self._sources]
@@ -424,6 +474,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
     def _render_snapshot(self):
         """Painting only. Stored coordinates are authoritative; no estimators here."""
         self._plot.clear()
+        reset_plot_history(self._plot)   # new geometry: old zoom ranges mean nothing now
         self._data_items = []
         entries, seen = [], set()
         for primitive in self._snapshot.get("primitives", []):
@@ -462,11 +513,17 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._sync_source_appearance_editor()
         self._warnings.set_warnings(self._snapshot.get("warnings", []), full_text=self.details_text())
         self._apply_appearance()
+        self._frame_view()
+
+    def _frame_view(self):
+        """The page's own framing of the drawn figure: what a draw ends with and what
+        Reset view returns to. View only; the stored coordinates are not read again."""
         self._plot.enableAutoRange()
-        if ticks:
+        series = self._snapshot.get("series", [])
+        if self._snapshot.get("categorical") and series:
             # Category indices are not physical measurements. Reserve a complete
             # source slot even for a single box/violin, without rescaling its data.
-            self._plot.setXRange(-.6, len(ticks) - .4, padding=0)
+            self._plot.setXRange(-.6, len(series) - .4, padding=0)
 
     def details_text(self):
         if not self._snapshot:
