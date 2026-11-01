@@ -192,10 +192,16 @@ Preferences, recovery files and synthetic test artifacts were kept away from use
 
 ## Not verified for this build
 
-- **The 64 test files that name the owner's home path** were not run: 63 in the suite and one in
-  `tests/packaging`. They were not run on this build, nor on any of the ten code commits since
-  `f9488d8`. Among them, `test_s6_plots_undo_depth_disclosure` exercises the Plots window's undo
-  keys and history, which these commits changed.
+- **63 of the 64 test files that name the owner's home path** were not run: 62 in the suite and one
+  in `tests/packaging`. They were not run on this build, nor on any of the ten code commits since
+  `f9488d8`.
+  - **Added after the release, with the owner's approval:** `test_s6_plots_undo_depth_disclosure`,
+    which exercises the Plots window's undo keys and history (both changed in these commits), was
+    run on a `git archive d09f1d2` export. It passed 16 of 16 in 69 s.
+  - It ran under `sandbox-exec` with writes denied in the home folder, on `/Volumes` and in
+    `/Applications`.
+  - It reads one file of the owner's, `nanoscope-example/events/events_nm_0005.csv`. That file's
+    SHA-256 was the same afterwards, and nothing was added to its folder.
 - **⌘Z through the native menu on a real Mac** (design doc 13.4, question 5). Every key test is
   offscreen, and this release widens which focused controls pass ⌘Z to the window's Undo.
 - **The fixes in the packaged app.** Their regression tests ran against source, which the
