@@ -492,11 +492,14 @@ def test_a_table_born_off_screen_takes_over_the_steps_made_before_it(window, tmp
     window._on_selection(doc_b, 0)
     assert window._act_undo.text() == f"Undo Change k_in {k_in:g} → {k_in + 2.0:g}"
 
-    # ...and they produced THAT table, so its next run does not take them with it.
+    # ...they did NOT produce that table: the edit stays on its form as its draft (the owner's
+    # answer to 13.4 Q6), so the next run is the one they lead to, and takes them with it.
     k_out = det.k_out.value()
     det.k_out.setValue(k_out + 0.5)
     _run(window, qtbot)
-    assert window._act_undo.text() == "Undo Re-run detection and 1 setting change"
+    assert window._act_undo.text() == "Undo Re-run detection and 2 setting changes"
+    _undo(window)
+    assert det.k_in.value() == pytest.approx(k_in) and det.k_out.value() == pytest.approx(k_out)
 
 
 def test_a_table_born_off_screen_leaves_no_draft_under_no_table(window, tmp_path):

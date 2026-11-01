@@ -288,9 +288,11 @@ retain categorical identities on the multi-panel scientific figures.
                 identity = descriptor['event_identity']
                 if identity in event_titles:
                     panel['title'] = event_titles[identity]
+            # An empty override keeps the original label and a blank one hides it, as in
+            # every plot window (design 13.4 Q1).
             for field, setter in (('title', ax.set_title), ('x_label', ax.set_xlabel), ('y_label', ax.set_ylabel)):
-                if field in panel:
-                    setter(panel[field])
+                if panel.get(field):
+                    setter(panel[field].strip())
             if 'axis_size' in state:
                 ax.xaxis.label.set_fontsize(state['axis_size'])
                 ax.yaxis.label.set_fontsize(state['axis_size'])
@@ -302,8 +304,8 @@ retain categorical identities on the multi-panel scientific figures.
             if isinstance(state.get('grid'), bool):
                 if state['grid']: ax.grid(True, alpha=.2)
                 else: ax.grid(False)
-        if 'title' in state:
-            self.figure.suptitle(state['title'])
+        if state.get('title'):
+            self.figure.suptitle(state['title'].strip())
         if self.figure._suptitle is not None:
             if 'title_size' in state:
                 self.figure._suptitle.set_fontsize(state['title_size'])

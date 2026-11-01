@@ -191,10 +191,15 @@ def test_reverting_the_drift_stage_brings_back_the_polarity_it_ran_with():
     back = cr.revert_params(form, run)
     assert back["detrend_enabled"] is True and back["polarity"] == -1
     assert cr.chains_equal(dict(form, **back), run)
-    # A drift stage that did not run read no polarity, so none comes back with it.
+    # A drift stage that did not run read no polarity, so none comes back with the stage.
+    # UPDATED (owner's decision, design 13.4 question 2): the detector read it all the same,
+    # so the whole Revert brings it back, judged on its own.
     ran_off = dict(run, detrend_enabled=False)
-    back = cr.revert_params(dict(ran_off, detrend_enabled=True, polarity=1), ran_off)
+    edited = dict(ran_off, detrend_enabled=True, polarity=1)
+    back = cr.revert_params(edited, ran_off, stages="detrend")
     assert back["detrend_enabled"] is False and "polarity" not in back
+    back = cr.revert_params(edited, ran_off)
+    assert back["detrend_enabled"] is False and back["polarity"] == -1
 
 
 def test_the_judges_revert_holds_only_what_differs():

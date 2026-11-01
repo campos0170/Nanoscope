@@ -774,6 +774,10 @@ class BatchDetectController(QtCore.QObject):
             module = ANALYSIS_REGISTRY[module]
 
         base = deepcopy(dict(params or {}))
+        # The detector this pass runs, not the one the form's combo names: the params are
+        # what each table is recorded with, and a seed or a Re-run reads its detector back
+        # from them. A Schmitt pass stamped `detect.cusum` while the combo showed CUSUM.
+        base["detector"] = module.id
         jobs: list[BatchJob] = []
         for doc_id, channel in targets:
             doc = self._session.document(doc_id)

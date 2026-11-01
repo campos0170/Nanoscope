@@ -177,7 +177,7 @@ from .export_paths import ask_export_path
 from .hand_row_preview import HandRowPreview
 from .measure_panel import MeasurePanel
 from .merge_panel import MergePanel
-from .panels import DetectionPanel, EventTable, ScorePanel, StatsPanel, SweepDialog
+from .panels import DetectionPanel, EventTable, ScorePanel, StatsPanel, SweepDialog, _near
 from .overlays import STEP_LEVEL_HEX
 from .trace_view import TraceView
 
@@ -620,7 +620,8 @@ def schmitt_params_from_result(res: AnalysisResult | None) -> dict[str, Any]:
     2. the EventSet provenance — the detector's own stamp of its thresholds and its
        preprocessing chain (:func:`_params_from_stamp`, which keeps a CUSUM run's k and h).
        The fallback for a v1/v2 project, which stored no params at all and therefore came
-       back with ``params={}``.
+       back with ``params={}`` (or, re-measured before that was repaired, with the
+       estimator's ``baseline_*`` keys alone, which overlay the stamp's).
 
     ``{}`` means "the run cannot be reproduced": the caller must fall back to the live form
     rather than pretend, because a detection re-run under settings that are not the ones on
@@ -631,6 +632,17 @@ def schmitt_params_from_result(res: AnalysisResult | None) -> dict[str, Any]:
     events = res.payload
     params = dict(res.params or {})
     prov = events.provenance if isinstance(events, EventSet) else {}
+    if (params and prov and res.module_id in (_MODULE_ID, _CUSUM_MODULE_ID)
+            and all(str(k).startswith("baseline_") for k in params)):
+        # The estimator's keys alone name no run: a v1/v2 table re-measured before
+        # `_remeasure_finished` kept its stamp stored nothing else. The run is still the
+        # stamp's (its own baseline keys left out, as these replace them).
+        try:
+            stamp = _params_from_stamp({k: v for k, v in prov.items()
+                                        if not str(k).startswith("baseline_")})
+        except (TypeError, ValueError):
+            stamp = {}
+        params = {**stamp, **params}
     reference_key = "baseline_open_pore_reference"
     error_key = "baseline_reference_restore_error"
     reference_flags = ("baseline_reference_applied", "baseline_estimator_bypassed")
@@ -1241,7 +1253,7 @@ class AnalysisPanel(QtWidgets.QWidget):
     eventAdded = QtCore.Signal(int, str)
     #: Open the Signal Conditioning window on this stage key ("" = the current one).
     openSignalConditioningRequested = QtCore.Signal(str)
-    #: THE FORM HISTORY'S FIVE SIGNALS (design §3.2-3.4, §5.2). The Detection, ML and
+    #: THE FORM HISTORY'S SIX SIGNALS (design §3.2-3.4, §5.2). The Detection, ML and
     #: Baseline forms are one set of widgets showing whichever event table is on screen,
     #: filed under :meth:`form_key`; MainWindow (the sole wirer) turns these into steps.
     #: A USER edit changed a form: a hand edit, a recall, a reset, a revert.
@@ -1255,6 +1267,9 @@ class AnalysisPanel(QtWidgets.QWidget):
     formArrived = QtCore.Signal(object, object)
     #: A named user action just changed the form: the label its step goes by.
     formStepNamed = QtCore.Signal(str)
+    #: The detector combo re-seeded the shared knobs of the form on screen, ``{key: (before,
+    #: after)}``, announced while the form still reads as it stood before the combo moved.
+    formReseeded = QtCore.Signal(object)
 
     def __init__(self, session: Session, controller: AnalysisController,
                  trace_view: TraceView, parent=None) -> None:
@@ -1343,6 +1358,10 @@ class AnalysisPanel(QtWidgets.QWidget):
         #: table installed under whichever detection happens to be shown when it lands
         #: would silently replace a different recording's events with these.
         self._remeasure_target: tuple[str, int, str] | None = None
+        #: While a Re-measure's table lands, the key it lands on, else None. MainWindow names
+        #: the undo step by it: with the estimator unchanged nothing in the result tells a
+        #: Re-measure from a re-run that landed on the same rows.
+        self.landing_remeasure: tuple[str, int, str] | None = None
         #: Set by `_say_baseline`; `_on_remeasure_finished` uses it to guarantee
         #: exactly one terminal message per started job.
         self._baseline_said = False
@@ -2209,6 +2228,9 @@ class AnalysisPanel(QtWidgets.QWidget):
             params = schmitt_params_from_result(res)
             if params:
                 self._detection.set_params(params)
+                # The shared knobs are the table's now: its detector's defaults where they
+                # hold them, else the run's own values, which are not (`_form_defaulted`).
+                self._form_defaulted = self._knobs_at_defaults(res.module_id)
                 # ...and the baseline windows with them. Without this the form showed the
                 # app default over a table measured with something else -- the same defect
                 # the Schmitt seeding above exists to fix, on the parameter that decides
@@ -2281,6 +2303,21 @@ class AnalysisPanel(QtWidgets.QWidget):
         #: run or a Re-measure lands, the key it came from. See :meth:`_on_results_changed`.
         self._form_run_from: tuple[str, int, str | None] | None = None
         self._landing_form_run: tuple[str, int, str | None] | None = None
+        #: The form a batch pass was launched from, while its tables land, and what a first
+        #: table's arrival moved in the draft it took (`_move_first_draft`), until MainWindow
+        #: carries it into the steps that change hands with it (`first_table_carry`).
+        self._landing_batch_form: dict[str, Any] | None = None
+        self._first_table_moves: dict[tuple[str, int, str | None], dict[str, tuple]] = {}
+        #: The shared knobs the form on screen holds at a detector's defaults because the app
+        #: put them there -- the combo's re-seed, a seed from a table at its detector's
+        #: defaults, the panel's start -- ``{knob: value}``, and per draft as it was filed: only
+        #: those follow a first table (`_knobs_toward`), never a value the user typed that
+        #: happens to equal a default. They travel with the widgets (a look away to a form
+        #: with no table and no draft keeps them). None while unknown -- a draft a project put
+        #: back, which does not record it -- and then the combo's rule by value applies.
+        self._form_defaulted: dict[str, Any] | None = self._knobs_at_defaults(
+            self._detection.detector_choice())
+        self._draft_defaulted: dict[tuple[str, int, str | None], dict[str, Any] | None] = {}
         #: The detector combo: the index it last settled on, the switch it asked for while
         #: moving, whether its knock-on moved the form meanwhile, the shared knobs as they
         #: stood before it moved, and that value laid over `form_state` while it is filed.
@@ -2422,12 +2459,21 @@ class AnalysisPanel(QtWidgets.QWidget):
                     and isinstance(state, Mapping)):
                 kept[(key[0], int(key[1]), key[2])] = self._plain_form_state(state)
         self._form_drafts = kept
+        # A project does not record which knobs of a draft the app put there (`_form_defaulted`).
+        self._draft_defaulted = dict.fromkeys(kept)
         on_screen = self._form_shown
         draft = self._form_drafts.pop(on_screen, None) if on_screen is not None else None
         if draft is not None and self._restore_draft(draft):
             self._form_seed = None
+            self._form_defaulted = self._draft_defaulted.pop(on_screen, None)
         else:
             self._form_dirty = False
+            # The form holds what the restore wrote (a project's recipe, the defaults), no
+            # edit of anyone's: as at the panel's start, its knobs at the shown detector's
+            # defaults are the app's. Left as it was, the record described the form before the
+            # restore: a recipe's re-seeded CUSUM knobs read as typed, and rode a first Schmitt
+            # table.
+            self._form_defaulted = self._knobs_at_defaults(self._detection.detector_choice())
 
     @contextlib.contextmanager
     def _writing_form(self):
@@ -2464,6 +2510,14 @@ class AnalysisPanel(QtWidgets.QWidget):
         params = self._detection.params()
         self._form_knock_on_base = {key: params.get(key) for key in self._DETECTOR_KNOCK_ON_KEYS}
 
+    def _knobs_at_defaults(self, module_id: str) -> dict[str, Any]:
+        """The shared knobs the Detection form holds at ``module_id``'s defaults, as
+        ``{knob: value}`` (`_form_defaulted`)."""
+        params = self._detection.params()
+        return {key: params.get(key)
+                for key, default in DetectionPanel._DETECTOR_DEFAULTS.get(module_id, {}).items()
+                if _near(float(params.get(key) or 0.0), default)}
+
     def _combo_moving(self) -> bool:
         """The detector combo is mid-move with a switch of table due once it settles."""
         return (self._detector_switch_due is not None and self._combo_index_settled
@@ -2495,14 +2549,27 @@ class AnalysisPanel(QtWidgets.QWidget):
         absorbed, self._form_absorbed = self._form_absorbed, False
         if module_id is None:
             return
-        shown = self._form_shown
+        shown, base = self._form_shown, dict(self._form_knock_on_base)
         self._show_detector_choice(module_id)
         if absorbed and self._form_shown == shown:
             # No other form came on screen (the ML table is shown, or neither detector has
-            # a table here): what the combo moved is an edit of this one.
+            # a table here). The re-seed follows the detector choice, which is no step, so it
+            # is none either (the owner's answer to 13.4 Q3): `formReseeded` is announced
+            # while the form still reads as it stood before the combo moved, so an edit in
+            # its pause becomes a step without the re-seed, and the re-seed is then adopted.
+            params = self._detection.params()
+            moved = {key: (base.get(key), params.get(key)) for key in base
+                     if base.get(key) != params.get(key)}
             self._form_settle()
-            self._form_dirty = True
-            self.formEdited.emit()
+            if moved and self._form_defaulted is not None:
+                self._form_defaulted.update({key: now for key, (_was, now) in moved.items()})
+            if moved:
+                self._form_override = base
+                try:
+                    self.formReseeded.emit(moved)
+                finally:
+                    self._form_override = None
+                self.formWritten.emit()
 
     def _name_form_step(self, label: str) -> None:
         """A user action that knows its own name changed the form: forward the label its step
@@ -2527,8 +2594,11 @@ class AnalysisPanel(QtWidgets.QWidget):
             return
         if self._form_dirty and self._session.has_document(old[0]):
             self._form_drafts[old] = self.form_state()
+            defaulted = self._form_defaulted
+            self._draft_defaulted[old] = None if defaulted is None else dict(defaulted)
         else:
             self._form_drafts.pop(old, None)
+            self._draft_defaulted.pop(old, None)
         self._form_dirty = False
         self._form_key_leaving = old
         try:
@@ -2565,8 +2635,10 @@ class AnalysisPanel(QtWidgets.QWidget):
             shown, self._form_shown = self._form_shown, key
             if key != shown:
                 draft = self._form_drafts.pop(key, None) if key is not None else None
+                defaulted = self._draft_defaulted.pop(key, None) if key is not None else None
                 if draft is not None and self._restore_draft(draft):
                     self._form_seed = None
+                    self._form_defaulted = defaulted
                     return
             elif self._form_dirty and (self._form_seed is None
                                        or self.form_state() != self._form_seed):
@@ -2833,8 +2905,14 @@ class AnalysisPanel(QtWidgets.QWidget):
         """The Schmitt dict the stale banner's Re-run replays: the RESULT's stored settings,
         or the live form only when the run cannot be known (see `schmitt_params_from_result`).
         One spelling, read by the launcher (`_on_rerun`) and by the gate that decides whether
-        the button may be offered (`_stale_action_refusal`), so the two judge one dict."""
-        return schmitt_params_from_result(res) or self._detection.params()
+        the button may be offered (`_stale_action_refusal`), so the two judge one dict.
+
+        A threshold table replays its OWN detector: a batch run used to record the combo's
+        (``detector: detect.cusum`` on a Schmitt table, 13.6), and a saved project keeps it."""
+        params = schmitt_params_from_result(res)
+        if params and res.module_id in (_MODULE_ID, _CUSUM_MODULE_ID):
+            params["detector"] = res.module_id
+        return params or self._detection.params()
 
     def _stale_action_refusal(self, res: AnalysisResult | None) -> str | None:
         """Why the stale banner's offered action could not run now, or ``None`` if it can.
@@ -4834,7 +4912,8 @@ class AnalysisPanel(QtWidgets.QWidget):
     #: ``last_carry_report`` in words, for the line that names what a re-run destroyed.
     last_carry_sentence: str = ""
 
-    def install_detection_result(self, res: AnalysisResult, *, announce: bool = True
+    def install_detection_result(self, res: AnalysisResult, *, announce: bool = True,
+                                 batch_form: Mapping[str, Any] | None = None
                                  ) -> CarryReport | None:
         """Store a finished detection, keeping the hand-made events of the table it replaces.
 
@@ -4881,7 +4960,13 @@ class AnalysisPanel(QtWidgets.QWidget):
         # be overwritten afterwards. With nothing destroyed, this stays the status line.
         if announce and report is not None:
             self.statusMessage.emit(self.last_carry_sentence)
-        self._session.add_result(installed)
+        # A batch's table lands with the form the pass was launched from (``batch_form``): a
+        # first table ran a recording's draft only when that draft is this form (`_landing_ran`).
+        self._landing_batch_form = None if batch_form is None else dict(batch_form)
+        try:
+            self._session.add_result(installed)
+        finally:
+            self._landing_batch_form = None
         return report
 
     def _on_controller_failed(self, _msg: str) -> None:
@@ -5071,22 +5156,26 @@ class AnalysisPanel(QtWidgets.QWidget):
                          and new[:2] == old[:2]
                          and (self._session.announcing is None
                               or self._session.announcing_new))
-                if (self._landing_form_run is not None and self._landing_form_run == old
-                        and (new == old or first)):
+                if ((self._landing_form_run is not None and self._landing_form_run == old
+                        and (new == old or first))
+                        or (first and self._made_from_form_on_screen(res))):
                     # A run this panel started from the form lands on the form that made
                     # it (Detect, Run ML, Re-measure; not a batch run, an undo, or the
                     # banner's Re-run, which replays the stored run): that form holds no
-                    # un-run edits any more, and the key's draft goes (design §5.2).
+                    # un-run edits any more, and the key's draft goes (design §5.2). So
+                    # does a first table another door made from the form as it stands.
                     self._form_dirty = False
                     self._form_drafts.pop(new, None)
                 self._leave_form(old, new)
                 if first:
                     # `_leave_form` filed the form that stood for the table as a draft of NO
-                    # table, which nothing would ever take out again: it would be saved with
-                    # the project and come back on the first detector that has no table. The
-                    # table seeds the form, as a first table always has, and the edit stays
-                    # reachable as the undo step that moves onto the table (`formArrived`).
-                    self._form_drafts.pop(old, None)
+                    # table, which nothing would ever take out again. The table is the one
+                    # that draft stood for, so the draft moves to it and `_fill_form` puts it
+                    # back over the seed: an edit nobody ran stays on the form, edited, as on
+                    # a table that already existed (the owner's answer to 13.4 Q6). Its steps
+                    # move with it (`formArrived`). A run from the form consumed it above, and
+                    # a batch launched from this form ran it (`_landing_ran`): it is seeded.
+                    self._move_first_draft(old, new, res)
                 with self._writing_form():
                     # A freshly (re-)computed detection becomes the active one shown, so
                     # its events populate the table/overlays regardless of which detector
@@ -5117,15 +5206,119 @@ class AnalysisPanel(QtWidgets.QWidget):
         a Detect that lands after a look away). The panel never arrives at it, so what
         :meth:`_on_results_changed` does for a table born on screen does not happen: the form
         that stood for the table, ``(doc, ch, None)``, stays filed as a draft of no table, and
-        nothing would ever take it out. It has nothing to come back to, and is dropped. The
-        steps made on that form change hands in MainWindow (`_on_table_landed`).
+        nothing would ever take it out. It is the new table's draft now, as on screen (13.4
+        Q6), unless what landed ran it: the form's own run, or a batch launched from that
+        same form (`_move_first_draft`). The steps made on that form change hands in
+        MainWindow (`_on_table_landed`).
 
         Only for a table BORN by this landing: a re-run of a table that already existed did
         not come from that form, which keeps its edit (design 13.4 Q6; S10-FORM2)."""
         written = self._session.announcing
         if (written is not None and written[0] == doc_id and written[2] == module_id
                 and module_id in _DETECTION_MODULE_IDS and self._session.announcing_new):
-            self._form_drafts.pop((doc_id, written[1], None), None)
+            stood_for_it, key = (doc_id, written[1], None), (doc_id, written[1], module_id)
+            if self._landing_form_run == stood_for_it:
+                self._form_drafts.pop(stood_for_it, None)
+            self._move_first_draft(stood_for_it, key, self._session.results.get(*key))
+
+    def _move_first_draft(self, old: tuple[str, int, None], new: tuple[str, int, str],
+                          res: AnalysisResult | None) -> None:
+        """Table ``res`` (key ``new``) is the first its recording and channel have got: the
+        draft of no table, ``old``, becomes its draft, unless the landing ran it.
+
+        The draft first takes the knobs the detector combo re-seeded for ANOTHER detector
+        (`_knobs_toward`): under 13.4 Q3 that re-seed is no edit, and a Schmitt table kept
+        CUSUM's min dwell and merge gap as "Settings changed" that no Undo could take back.
+        What it moved is kept for the steps that change hands with the draft
+        (`first_table_carry`), so an Undo of them cannot put those knobs back either. A draft
+        whose only difference from what ran was that re-seed was run, and goes. A value the
+        user typed is never taken for the re-seed's (`_draft_defaulted`)."""
+        draft = self._form_drafts.pop(old, None)
+        defaulted = self._draft_defaulted.pop(old, None)
+        self._first_table_moves.pop(new, None)
+        if draft is None or res is None or self._landing_ran(draft):
+            return
+        moves = self._knobs_toward(res, draft, defaulted)
+        if moves:
+            draft["detection"].update({key: now for key, (_was, now) in moves.items()})
+            self._first_table_moves[new] = moves
+            # ...put there by the app, as the combo's re-seed is.
+            if defaulted is not None:
+                defaulted.update({key: now for key, (_was, now) in moves.items()})
+        if not self._landing_ran(draft):
+            self._form_drafts[new] = draft
+            # The record goes with the draft: dropped, the draft put back read every knob
+            # as typed, and the look-aways it rode treated the app's knobs as the user's.
+            self._draft_defaulted[new] = defaulted
+
+    def _knobs_toward(self, res: AnalysisResult, state: Mapping[str, Any],
+                      defaulted: Mapping[str, Any] | None) -> dict[str, tuple[Any, Any]]:
+        """The detector combo's rule (`DetectionPanel._on_detector_changed`) for a form that
+        meets a table of the other threshold detector without the combo moving:
+        ``{knob: (value, the table's)}`` for each knob the two share that ``state`` still
+        holds at the OTHER detector's default. The table's value, not its detector's default,
+        is what takes its place: it is what the seed would have put there.
+
+        Only a knob the app put there, ``defaulted`` (`_form_defaulted`): a merge gap of
+        0.5 ms typed on a Schmitt form is the user's, and stays. ``None`` (a draft a project
+        put back) cannot tell them apart, and takes the rule by value alone."""
+        detection, params = state.get("detection"), res.params or {}
+        if (res.module_id not in DetectionPanel._DETECTOR_DEFAULTS
+                or not isinstance(detection, Mapping)):
+            return {}
+        moves: dict[str, tuple[Any, Any]] = {}
+        for other_id, theirs in DetectionPanel._DETECTOR_DEFAULTS.items():
+            if other_id == res.module_id:
+                continue
+            for key, default in theirs.items():
+                if key not in detection or key not in params:
+                    continue
+                value, table = detection[key], params[key]
+                try:
+                    # ``None`` is "off" (`DetectionPanel.params`), the merge gap's 0.
+                    if defaulted is not None and (key not in defaulted or not _near(
+                            float(value or 0.0), float(defaulted[key] or 0.0))):
+                        continue
+                    if _near(float(value or 0.0), default) and float(value or 0.0) != float(
+                            table or 0.0):
+                        moves[key] = (value, table)
+                except (TypeError, ValueError):
+                    continue
+        return moves
+
+    def first_table_carry(self, key: tuple[str, int, str | None]) -> dict[str, tuple]:
+        """What the arrival of first table ``key`` moved in the draft it took,
+        ``{knob: (value, value it took)}`` (`_move_first_draft`), handed out once: MainWindow
+        carries it into the steps that change hands with that draft."""
+        return self._first_table_moves.pop(tuple(key), {})
+
+    def _landing_ran(self, draft: Mapping[str, Any]) -> bool:
+        """Whether the table landing now ran the form ``draft`` holds: a batch launched from
+        that very form (`_landing_batch_form`), every part of it -- the ML form, the frequency
+        intents and the baseline reference as much as the detection settings, which is all a
+        Schmitt pass records. A batch made from another form, a hand-made table and an undo's
+        install ran no draft (13.4 Q6); the form's own run is `_landing_form_run`'s."""
+        launched = self._landing_batch_form
+        plain = self._plain_form_state
+        return launched is not None and plain(draft) == plain(launched)
+
+    def _made_from_form_on_screen(self, res: AnalysisResult) -> bool:
+        """Whether threshold table ``res``, a first table landing on screen by a door that is
+        neither the form's own run nor a batch (a script's ``add_result`` of a run made from
+        `_form_params`), recorded the form as it stands: every setting a run of it reads,
+        value for value. It ran every edit the form holds, as Detect would have, so they are
+        no un-run edit to keep over it (13.4 Q6); kept, an open-pore reference the table
+        restores came back from a look away as typed, not restored. Not when the ML form,
+        which no threshold table records, was edited since this key's seed, nor when a draft
+        came back in place of a seed: those keep the draft (`_landing_ran`)."""
+        seed = self._form_seed
+        if (self._landing_batch_form is not None or seed is None
+                or res.module_id not in (_MODULE_ID, _CUSUM_MODULE_ID)
+                or self.form_state().get("ml") != seed.get("ml")):
+            return False
+        params, plain = res.params or {}, self._plain_form_state
+        return all(key in params and plain(params[key]) == plain(value)
+                   for key, value in self._form_params().items())
 
     def take_results_widget(self) -> QtWidgets.QWidget:
         """Hand the results surface to a host (MainWindow's Results dock). Only the Qt
@@ -7458,14 +7651,25 @@ class AnalysisPanel(QtWidgets.QWidget):
         # with the three filter-limited rows still accepted and still exported (S7
         # MISSED-1). The new estimator's own advisories arrive through
         # ``provenance['baseline_warnings']``, which the engine now stamps.
+        run = dict(res.params or {})
+        if (all(str(k).startswith("baseline_") for k in run)
+                and res.module_id in (_MODULE_ID, _CUSUM_MODULE_ID)):
+            # A v1/v2 table stored no params: its run is known from the detector's stamp
+            # alone. Start from that, or the estimator's keys below become the whole run,
+            # and the table is judged, reverted and re-run without its chain, thresholds or
+            # polarity (the stamp is read only while params name no run). A table re-measured
+            # before this held those keys alone, and is repaired the same way.
+            try:
+                run = schmitt_params_from_result(res)
+            except (TypeError, ValueError):
+                run = {}    # an unreadable stamp; the install must still land
         new_res = reconcile_result(
             res, EventSet(df, result.events.provenance),
             # The params a "Re-run" would reproduce this result with. Left alone, they
             # would go on naming the estimator that has just been replaced, so a
             # later calibration re-run would silently measure the depths back down
             # again -- and `params` and `provenance` would disagree about one result.
-            params={**{k: v for k, v in (res.params or {}).items()
-                       if not str(k).startswith("baseline_")},
+            params={**{k: v for k, v in run.items() if not str(k).startswith("baseline_")},
                     **(params_block or {})},
             baseline_fingerprint=result.fingerprint,
         )
@@ -7473,10 +7677,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         # repaints the table, the spans, the summary and the staleness banner. A Re-measure
         # is run from the form on screen as Detect is (`_on_results_changed`).
         self._landing_form_run = target
+        self.landing_remeasure = (doc_id, int(channel), module_id)
         try:
             self._session.add_result(new_res)
         finally:
             self._landing_form_run = None
+            self.landing_remeasure = None
         self._last_comparison = result.comparison
         c = result.comparison
         self._say_baseline(
@@ -8727,7 +8933,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         # ...and the drafts of its tables: they name this load, which no table will show
         # again, and a project saved later must not carry them.
         for store in (self._recovery, self._fdr, self._baseline_marks, self._chosen_table,
-                      self._form_drafts):
+                      self._form_drafts, self._draft_defaulted):
             for key in [k for k in store if k[0] == doc_id]:
                 del store[key]
         # ...and the hand-made-event machinery keyed on this load: the table choice (above), the

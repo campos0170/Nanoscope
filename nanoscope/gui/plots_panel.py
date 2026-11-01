@@ -2870,6 +2870,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._note_timer = QtCore.QTimer(self)
         self._note_timer.setSingleShot(True)
         self._note_timer.timeout.connect(self._settle_notes)
+        #: Coalesces the Results panel's re-judgements (a Baseline-form knob held down) into
+        #: one look at the STALE mark. See :meth:`schedule_stale_redraw`.
+        self._stale_redraw_timer = QtCore.QTimer(self)
+        self._stale_redraw_timer.setSingleShot(True)
+        self._stale_redraw_timer.setInterval(300)
+        self._stale_redraw_timer.timeout.connect(self._redraw_stale_marks)
+        #: What :meth:`_stale_signature` read at the last draw: the marks on screen.
+        self._stale_drawn: tuple = ()
         self._style = StyleSettings()   # the tunable plot design (title/colour/font/size/export)
         # Captions belong to the rendered result, which may differ from pending
         # controls. Presentation edits reuse them without reading/re-fitting data.
@@ -4456,8 +4464,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "border: 1px solid #555; padding: 2px;")
 
     # -- style-change handlers -------------------------------------------------------------------
+    @staticmethod
+    def _label_override(text: str) -> str:
+        """A label box as the style keeps it, by ``PlotAppearance``'s one rule (design 13.4
+        Q1): "" is the automatic label, a box of spaces hides it, anything else is the text."""
+        return PlotAppearance.from_mapping({"title": text}).title or ""
+
     def _on_style_title(self, text: str) -> None:
-        self._style = _dc_replace(self._style, title=text.strip())
+        self._style = _dc_replace(self._style, title=self._label_override(text))
         self._presentation_changed()
 
     def _on_style_font_family(self, index: int) -> None:
@@ -4549,11 +4563,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._presentation_changed()
 
     def _on_style_x_label(self, text: str) -> None:
-        self._style = _dc_replace(self._style, x_label=text.strip())
+        self._style = _dc_replace(self._style, x_label=self._label_override(text))
         self._presentation_changed()
 
     def _on_style_y_label(self, text: str) -> None:
-        self._style = _dc_replace(self._style, y_label=text.strip())
+        self._style = _dc_replace(self._style, y_label=self._label_override(text))
         self._presentation_changed()
 
     def _on_style_show_legend(self, on: bool) -> None:
@@ -4909,7 +4923,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """Retain the rendered unit/clock caption, including when it is overridden."""
         self._axis_auto_labels[side] = auto
         override = self._style.x_label if side == "bottom" else self._style.y_label
-        return override.strip() or auto
+        return override.strip() if override else auto      # blank: hidden (13.4 Q1)
 
     def _axis_clock_tag(self, col: str) -> str:
         """The clock clause a time axis needs, or ``""`` for a duration.
@@ -4935,8 +4949,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         return f", from recording start (t₀ = {clock.format_t0(off)} s)"
 
     def _plot_title(self, auto: str | None) -> str | None:
-        """The title to show: the user override if any, else the automatic title."""
-        return self._style.title or auto
+        """The title to show: the user override if any, else the automatic title. A blank
+        override is no title (design 13.4 Q1)."""
+        return self._style.title.strip() if self._style.title else auto
 
     def _apply_title(self, auto: str | None, accent: str | None = None,
                      warn: str | None = None) -> None:
@@ -6957,6 +6972,77 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         self._staleness_provider = provider
 
+    def schedule_stale_redraw(self) -> None:
+        """The Results panel re-judged its tables (``AnalysisPanel.stalenessChanged``).
+
+        A Baseline-form edit does that without touching the session, so no re-feed reaches
+        this window and its STALE mark waited for the next draw (design 13.4 Q4). The owner
+        chose live, once the knob stops: one look 300 ms after the last step. Any draw in
+        between answers it, since :meth:`_redraw` stops the timer."""
+        if self.isVisible():
+            self._stale_redraw_timer.start()
+
+    def _redraw_stale_marks(self) -> None:
+        """Redraw once if a drawn source's mark moved since the last draw.
+
+        The mark is written into the title and Details by the draw itself, so a moved mark
+        needs a draw and an unmoved one needs nothing. Not while the window is hidden, has
+        drawn nothing, is mid-update, or waits on Plot for a selection the user has not
+        committed: drawing would commit it for them.
+
+        The plotted table is the one already drawn (any re-feed draws first, which stops
+        the timer), so the user's zoom and pan are put back as :meth:`_presentation_changed`
+        puts them back: a mark is not a reason to lose the view."""
+        if (not self.isVisible() or self._updating or not self._plot_armed or self._stale
+                or self._message_item is not None or self._workspace_snapshot_rendering):
+            return
+        if self._stale_signature() == self._stale_drawn:
+            return
+        view = self._plot.getViewBox()
+        ranges = [list(pair) for pair in view.viewRange()]
+        auto = list(view.autoRangeEnabled())
+        self._redraw()
+        view = self._plot.getViewBox()
+        view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
+        for axis, enabled in enumerate(auto):
+            if enabled:
+                view.enableAutoRange(axis=axis, enable=enabled)
+
+    def _stale_signature(self) -> tuple:
+        """The marks a draw of the current view writes: the title's STALE headline and the
+        Details notes, for the DRAWN columns only (what the draw hands :meth:`_stale_headline`
+        and :meth:`_column_notes`). A re-judgement of a column this plot does not draw, such
+        as a Baseline edit under a ``dwell_s`` histogram, moves neither and redraws nothing.
+
+        A cluster split or cluster colours also write the clustering features' amplitude
+        note (:meth:`_cluster_amplitude_warnings`), amplitude_pA's STALE line among them,
+        so that note is a mark of those draws whatever column the axes show."""
+        try:
+            kind = self._plot_type()
+            if kind == PCA:
+                primary = self.primary_source()
+                res = self._pca_result
+                cols = list(res.columns) if res is not None else []
+                sources = [primary] if primary is not None else []
+                clustered = self._cluster_result is not None
+            else:
+                cols = ([self._hist_col.currentText()] if kind == HISTOGRAM else
+                        [self._scatter_x.currentText(), self._scatter_y.currentText()]
+                        if kind == SCATTER else
+                        [self._kde_x.currentText(), self._kde_y.currentText()])
+                sources = [src for src, _df in self._drawn_frames()]
+                colour_by = {HISTOGRAM: self._hist_colour_by,
+                             SCATTER: self._colour_by}.get(kind)
+                # as _draw_histogram's `split` and _draw_scatter's `by_cluster` decide it
+                clustered = (len(sources) == 1 and colour_by is not None
+                             and colour_by.currentText() == _COLOUR_CLUSTER
+                             and self._cluster_result is not None)
+            return (self._stale_headline(cols, sources),
+                    tuple(self._column_notes(cols, sources)),
+                    self._cluster_amplitude_warnings() if clustered else ())
+        except Exception:       # pragma: no cover - a caveat must never break a plot
+            return ()
+
     def _active_source_key(self) -> str:
         """The key of the source that IS the detection on screen in the Analysis panel,
         or ``""`` when it cannot be resolved.
@@ -7734,7 +7820,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._apply_title(*self._title_presentation)
             for side, auto in self._axis_auto_labels.items():
                 override = self._style.x_label if side == "bottom" else self._style.y_label
-                self._plot.setLabel(side, override.strip() or auto, **self._label_style())
+                self._plot.setLabel(side, override.strip() if override else auto,
+                                    **self._label_style())
         elif self._message_item is not None:
             self._message_item.setColor(self._msg_hex())
 
@@ -9579,8 +9666,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         with its own -- usually empty -- set of legend entries, and a checklist still
         listing the previous plot's rows is a control pointing at nothing.
         """
+        self._stale_redraw_timer.stop()     # this draw writes the marks a pending look wanted
         try:
             self._redraw_current()
+            self._stale_drawn = self._stale_signature()
             if self._message_item is None:
                 self._figure_applied_config = self.config()
         finally:
@@ -11313,6 +11402,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # that describes this fit before it is stamped.
         if inp is not None:
             modules.stamp_fit_provenance(fit, self._as_fitted(inp, trunc_lo, trunc_hi))
+        # ...and with the typed Fit range, which the fit carries from here on: into a
+        # project's workspace and back, where the boxes are only the boxes. A ranged fit is
+        # not filed (`_persist_results`) and not drawn by the report (S10-LIN3). `fit` is
+        # this draw's own object (a cached one is a deep copy), so the stamp is too.
+        if fit_lo is not None or fit_hi is not None:
+            fit.meta[modules.FIT_RANGE_KEY] = [fit_lo, fit_hi]
 
         # THE DEFERRED INTERVAL, RESOLVED. Cached per (model, sample bytes,
         # censoring), so the redraw that follows the worker finding the answer picks
@@ -11546,9 +11641,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
                    "renormalise its likelihood to it, so the estimates are those of a "
                    "distribution fitted to the surviving values, not of one conditioned "
                    "on the window. BIC/AIC compare only against fits over the SAME range.")
+            # Said where the range is: closing the window files a fit for the report,
+            # and this one is not (see `_persist_results`). What the report draws
+            # instead is a whole-column fit already saved for the table, when it would
+            # take that one, or a fresh fit.
+            kept = ""
+            if any(col in cols for cols, _mid in self._FIT_MODULE_IDS):
+                kept = (" This fit is not kept for Generate Report figures, which "
+                        + ("draw the whole-column fit already saved for this table."
+                           if self._report_takes_saved_fit(src, col) else
+                           "fit the whole column afresh."))
             notes.append(
                 f"FIT RANGE [{shown_lo}, {shown_hi}] {unit} — n = {fit.n} of the "
-                f"available events; {how}{narrowed}")
+                f"available events; {how}{narrowed}{kept}")
         # A COMPONENT-COUNT LADDER OVER A FAMILY THAT HAS NO COMPONENT COUNT IS THE SAME
         # FIT, FOUR TIMES, COMPARED WITH ITSELF.
         #
@@ -12023,6 +12128,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # A coalescing undo step still open belongs to a window that is about to be
         # blanked, and `reset_state` below drops the stack it would have been pushed onto.
         self._history_timer.stop()
+        self._stale_redraw_timer.stop()
         self._pending_notes = {}
         self._abort_note_job()
         self._persist_results()
@@ -12041,6 +12147,23 @@ class PlotsWindow(QtWidgets.QMainWindow):
     #: clustering is not a distribution fit and must not be read back as one.
     _CLUSTER_MODULE_ID = "plots.cluster"
     _PCA_MODULE_ID = "plots.pca"
+
+    def _report_takes_saved_fit(self, src: PlotSource | None, col: str) -> bool:
+        """Whether Generate Report figures would draw the fit the session already holds for
+        ``src``'s table in ``col``'s slot: the report's own rule
+        (``modules.report_fit_problem``, as ``MainWindow._stored_fit`` asks it)."""
+        module_id = next((mid for cols, mid in self._FIT_MODULE_IDS if col in cols), "")
+        if (not module_id or src is None or src.doc_id is None or src.channel is None
+                or not src.module_id):
+            return False
+        try:
+            stored = self._session.results.get(src.doc_id, int(src.channel), module_id)
+            table = self._session.results.get(src.doc_id, int(src.channel), src.module_id)
+            return (stored is not None and table is not None
+                    and hasattr(stored.payload, "predict")
+                    and not modules.report_fit_problem(stored, table))
+        except Exception:       # pragma: no cover - a caveat must never break a plot
+            return False
 
     def _persist_results(self) -> None:
         """Push what this window computed back into the session, before it is cleared.
@@ -12067,6 +12190,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     # A fit of `snr` or `ecd_pA_s` is a real fit, but there is no
                     # agreed key for it and inventing one would put a fit of the wrong
                     # quantity where the export expects a dwell or a depth.
+                    continue
+                if (fit.meta.get(modules.FIT_RANGE_KEY) is not None
+                        or self._fit_range(col) != (None, None)):
+                    # A fit over a typed Fit range is of a narrowed sample, so the report
+                    # would draw it over the whole column as "your saved fit". The owner's
+                    # call (S10-LIN3): not filed. The fit records its range
+                    # (`modules.FIT_RANGE_KEY`), restored from a project too; the boxes
+                    # are asked as well, for a range typed and not yet applied.
                     continue
                 self._session.results.put(self._as_result(
                     module_id, src, payload=fit,

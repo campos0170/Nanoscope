@@ -69,6 +69,7 @@ __all__ = [
     "effective_chain",
     "judge_chain",
     "merge_imported_protocols",
+    "polarity_differences",
     "python_script",
     "read_protocols_file",
     "recipe_key_differences",
@@ -78,6 +79,7 @@ __all__ = [
     "revert_withheld",
     "stage_rows",
     "stages_that_differ",
+    "summary_hidden_differences",
     "threshold_differences",
     "validate_recipe",
     "write_protocols_file",
@@ -126,11 +128,11 @@ CHAIN_DEFAULTS: Mapping[str, Any] = MappingProxyType({
 #: The detection THRESHOLDS each classical detector reads from the form, beside its chain.
 #: A stored run that recorded them can be compared with the form key for key, exactly as
 #: its chain is (``judge_chain``); before this map nothing compared them, so a k_in edited
-#: after a run left the table on screen looking current. ``polarity`` is not here: the
-#: chain judge compares it while the baseline-drift stage runs, the one stage that reads
-#: it. With that stage off nothing judges it, though ``detect_events`` reads it too: an
-#: open question for the owner. One definition, read by this module's judge and by
-#: ``analysis.lineage``.
+#: after a run left the table on screen looking current. ``polarity`` is not here: it is
+#: not a number, and while the baseline-drift stage runs the chain judge names it inside
+#: that stage. Otherwise :func:`polarity_differences` judges it on its own, since
+#: ``detect_events`` reads it whatever the chain holds (the owner's decision, design 13.4).
+#: One definition, read by this module's judge and by ``analysis.lineage``.
 THRESHOLD_KEYS_BY_MODULE: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "detect.schmitt": ("k_in", "k_out", "min_dwell_s", "max_dwell_s", "merge_gap_s"),
     "detect.cusum": ("cusum_k", "cusum_h", "min_dwell_s", "max_dwell_s", "merge_gap_s"),
@@ -417,9 +419,10 @@ def recipes_equal(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None, *,
 class ChainDiff:
     """One difference, worded run → form (``'low-pass 10000 → 5000 Hz'``).
 
-    ``stage`` is a :data:`STAGE_KEYS` stage, or ``"thresholds"`` for a detection threshold
-    (:func:`threshold_differences`); ``key`` is what differs within it (``'cutoff_hz'``,
-    ``'enabled'``; a threshold's own params key).
+    ``stage`` is a :data:`STAGE_KEYS` stage, or ``"thresholds"`` for a detection setting
+    outside the chain: a threshold (:func:`threshold_differences`) or the polarity
+    (:func:`polarity_differences`); ``key`` is what differs within it (``'cutoff_hz'``,
+    ``'enabled'``; a threshold's own params key, ``'polarity'``).
     """
 
     stage: str
@@ -571,8 +574,13 @@ def _field_diffs(key: str, run: Mapping[str, Any], form: Mapping[str, Any],
 
 def chain_differences(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None, *,
                       fs: float | None = None, rel: float = 1e-9) -> tuple[ChainDiff, ...]:
-    """Every way ``form`` differs from ``run``, in :data:`STAGE_KEYS` order."""
+    """Every way ``form`` differs from ``run``, in :data:`STAGE_KEYS` order.
+
+    The drift stage's polarity is named only when the run recorded one, as
+    :func:`polarity_differences` judges it: a run that never did is not called changed.
+    """
     a, b = effective_chain(run, fs), effective_chain(form, fs)
+    unrecorded = _polarity_setting(run or {}) is _MISSING
     diffs: list[ChainDiff] = []
     for key in STAGE_KEYS:
         name = _STAGE_PHRASE[key]
@@ -582,7 +590,8 @@ def chain_differences(form: Mapping[str, Any] | None, run: Mapping[str, Any] | N
             diffs.append(ChainDiff(key, f"{name} off → on ({_stage_summary(key, b[key])})",
                                    "enabled"))
         elif key in a:
-            diffs.extend(_field_diffs(key, a[key], b[key], rel))
+            diffs.extend(d for d in _field_diffs(key, a[key], b[key], rel)
+                         if not (unrecorded and d.key == "polarity"))
     return tuple(diffs)
 
 
@@ -641,6 +650,47 @@ def threshold_differences(form: Mapping[str, Any] | None, run: Mapping[str, Any]
     return tuple(diffs)
 
 
+def _polarity_setting(params: Mapping[str, Any]) -> Any:
+    """``params``' polarity as the form sets it, None (auto), -1 or +1; ``_MISSING`` when it
+    holds none (absent, a run that never recorded it, or a value no form could hold)."""
+    if "polarity" not in params:
+        return _MISSING
+    value = params["polarity"]
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return _MISSING
+    return number if number in (-1, 1) else _MISSING
+
+
+def _drift_runs(params: Mapping[str, Any]) -> bool:
+    """Whether :func:`effective_chain` runs the drift stage (an absent or None flag is off)."""
+    return bool(params.get("detrend_enabled"))
+
+
+def polarity_differences(form: Mapping[str, Any] | None,
+                         run: Mapping[str, Any] | None) -> tuple[ChainDiff, ...]:
+    """The polarity, judged on its own: ``()``, or one ``"thresholds"`` diff worded run →
+    form (``'polarity auto → blockade'``), so the verdict reads "Settings changed".
+
+    ``detect_events`` reads the polarity whatever the chain holds, so one edited with the
+    baseline-drift stage off left the table looking current (the owner's decision, design
+    13.4). While both sides run that stage, :func:`chain_differences` names it inside the
+    stage, and it is not named twice. As a threshold is, it is judged only where both sides
+    hold a setting: a run that never recorded its polarity is not second-guessed with auto.
+    """
+    form, run = form or {}, run or {}
+    if _drift_runs(run) and _drift_runs(form):
+        return ()
+    ran, now = _polarity_setting(run), _polarity_setting(form)
+    if ran is _MISSING or now is _MISSING or ran == now:
+        return ()
+    return (ChainDiff("thresholds", f"polarity {_polarity_text(ran)} → {_polarity_text(now)}",
+                      "polarity"),)
+
+
 # ---------------------------------------------------------------------------
 # Revert and Reset, stage by stage
 # ---------------------------------------------------------------------------
@@ -649,6 +699,25 @@ def stages_that_differ(form: Mapping[str, Any] | None, run: Mapping[str, Any] | 
     """The stages :func:`chain_differences` names: the ones a stage's Revert acts on and
     the stage list marks."""
     return frozenset(d.stage for d in chain_differences(form, run, fs=fs))
+
+
+def summary_hidden_differences(form: Mapping[str, Any] | None,
+                               run: Mapping[str, Any] | None, *,
+                               fs: float | None = None) -> tuple[ChainDiff, ...]:
+    """The :func:`chain_differences` a stage's summary (:func:`stage_rows`) does not show: the
+    drift stage's polarity, mask or dilate, which "block median · 0.5 s" leaves out. A was →
+    now built from the summaries alone would not name them, and can read the same both sides.
+    """
+    a, b = effective_chain(run, fs), effective_chain(form, fs)
+    hidden = []
+    for d in chain_differences(form, run, fs=fs):
+        if d.key in ("enabled", "method"):
+            continue    # the summary reads "off", or opens with the method
+        st = a[d.stage]
+        moved = {**st, d.key: b[d.stage].get(d.key)}    # this knob alone as the form sets it
+        if _stage_summary(d.stage, moved) == _stage_summary(d.stage, st):
+            hidden.append(d)
+    return tuple(hidden)
 
 
 def _recorded_chain(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -735,6 +804,8 @@ def _revert(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None,
     if stages is None:
         for diff in threshold_differences(form, run, module_id):
             out[diff.key] = _threshold(run, diff.key)
+        if polarity_differences(form, run):
+            out["polarity"] = _polarity_setting(run)
     return out, ""
 
 
@@ -764,7 +835,8 @@ def revert_params(form: Mapping[str, Any] | None, run: Mapping[str, Any] | None,
     ``polarity`` comes back with the baseline-drift stage when that stage ran (it reads the
     polarity) and the form's differs, so one Revert leaves nothing behind. With ``stages``
     unset and a :data:`THRESHOLD_KEYS_BY_MODULE` detector, each threshold the run recorded
-    that differs comes back too. Empty when nothing differs.
+    that differs comes back too, and so does a recorded polarity judged on its own
+    (:func:`polarity_differences`). Empty when nothing differs.
 
     ``None`` when a stage it reverts would still differ afterwards. The judge reads a setting
     the run never recorded (a knob newer than the build that made the table) at its default,
@@ -829,8 +901,9 @@ class ChainStatus:
 
     @property
     def thresholds_differ(self) -> bool:
-        """Whether a detection threshold is among the differences, which makes the verdict
-        "Settings changed" rather than the chain's alone."""
+        """Whether a detection setting outside the chain (a threshold, or the polarity judged
+        on its own) is among the differences, which makes the verdict "Settings changed"
+        rather than the chain's alone."""
         return any(d.stage == "thresholds" for d in self.diffs)
 
     @classmethod
@@ -849,11 +922,12 @@ def judge_chain(form_params: Mapping[str, Any] | None,
                 module_id: str | None, detector_label: str = "",
                 fs: float | None = None) -> ChainStatus:
     """Compare the form with what a stored detection ran with: its chain and, for a
-    Schmitt/CUSUM run, the thresholds it recorded.
+    Schmitt/CUSUM run, the thresholds and the polarity it recorded.
 
     A chain-only difference keeps the chain's wording. A threshold among the differences
     makes the verdict "Settings changed" and names the thresholds first: before they were
-    judged, a k_in edited after a run left the table on screen looking current. Revert is
+    judged, a k_in edited after a run left the table on screen looking current. So does a
+    polarity the drift stage does not name (:func:`polarity_differences`). Revert is
     offered only where :func:`revert_params` can put the form back.
     """
     if not module_id:
@@ -876,7 +950,8 @@ def judge_chain(form_params: Mapping[str, Any] | None,
             f"The chain the {label} detection on screen ran with is not recorded, so the "
             f"form cannot be compared with it."), detector_label=label)
     diffs = chain_differences(form_params, run_params, fs=fs)
-    thresholds = threshold_differences(form_params, run_params, module_id)
+    thresholds = (threshold_differences(form_params, run_params, module_id)
+                  + polarity_differences(form_params, run_params))
     if not diffs and not thresholds:
         return ChainStatus("match", (
             f"The form's chain is the one the {label} detection on screen ran with."),

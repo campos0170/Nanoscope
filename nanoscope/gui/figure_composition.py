@@ -400,7 +400,10 @@ def capture_cartesian_model(item) -> bytes | None:
                           "label_font": _font(axis.label.font()),
                           "pen": _pen(axis.pen()), "text_pen": _pen(axis.textPen()),
                           "tick_pen": _pen(axis.tickPen()), "grid": axis.grid}
-        title = {"text": item.titleLabel.text, "options": dict(item.titleLabel.opts),
+        # A hidden title row keeps its last text (pyqtgraph's setTitle(None) only hides it),
+        # and replaying that text would show a title the window does not.
+        title = {"text": item.titleLabel.text if _visible(item.titleLabel) else "",
+                 "options": dict(item.titleLabel.opts),
                  "font": _font(item.titleLabel.item.font())}
         scene = item.scene()
         if scene is None or not scene.views():
@@ -537,7 +540,11 @@ def _populate_clone(widget, model, canvas, ranges):
         axis.setVisible(state["visible"])
     title_options = {key: value for key, value in model["title"]["options"].items()
                      if key in {"color", "size", "bold", "italic"}}
-    plot.setTitle(model["title"]["text"], **title_options)
+    # The window's own rule (``apply_plot_appearance``): a blank title has no row. pyqtgraph
+    # shows one for any text but None, so "" (no title) and " " (a hidden one) became a
+    # blank band the window never drew.
+    text = model["title"]["text"]
+    plot.setTitle(text if str(text).strip() else None, **title_options)
     plot.titleLabel.item.setFont(_restore_font(model["title"]["font"]))
     plot.setLogMode(x=model["axes"]["bottom"]["log"], y=model["axes"]["left"]["log"])
     for side, state in model["axes"].items():
@@ -661,6 +668,12 @@ def _shared_pictures(snapshots, share_x, share_y, shared_legend=False):
             extent = max(axis.width() if side in ("left", "right") else axis.height() for axis in axes)
             for axis in axes:
                 (axis.setWidth if side in ("left", "right") else axis.setHeight)(extent)
+        # ...and so do identical title rows: beside a titled panel, an untitled one keeps a
+        # blank row as tall, or its plot would start higher than its neighbour's.
+        layouts = [widget.getPlotItem().layout for widget in panel_widgets]
+        title_row = max((layout.rowMinimumHeight(0) for layout in layouts), default=0.0)
+        for layout in layouts:
+            layout.setRowFixedHeight(0, title_row)
         pictures = []
         for widget, snapshot, bounds in zip(panel_widgets, snapshots, ranges):
             # The common fixed axis extents invalidated each detached layout.

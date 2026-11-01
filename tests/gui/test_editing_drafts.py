@@ -427,9 +427,10 @@ def test_leaving_fires_before_the_form_changes_and_arriving_after(window, tmp_pa
 def test_a_first_table_arrives_from_the_key_that_stood_for_it(window, tmp_path, qtbot):
     """``(doc, ch, None)`` stands for the table a recording does not have yet. Its first
     table arrives FROM it; a run the form made there consumes the edits that made it, and
-    a table that came from anywhere else is seeded like any arrival -- and leaves no draft
-    behind for a table that no longer is missing (the edit stays reachable as the undo
-    step that moves onto the table: ``test_editing_form_undo``)."""
+    a table that came from anywhere else takes the edit as its own draft (the owner's
+    answer to 13.4 Q6; it used to be seeded over) -- and leaves no draft behind for a
+    table that no longer is missing (the edit's steps move onto the table:
+    ``test_editing_form_undo``)."""
     doc = _open(window, tmp_path, "a.dat")
     ap = window._analysis_panel
     det = ap.detection_panel
@@ -446,7 +447,8 @@ def test_a_first_table_arrives_from_the_key_that_stood_for_it(window, tmp_path, 
     other = _open(window, tmp_path, "b.dat")
     _type(qtbot, det.k_in, "7")
     _detect(window, other, S, k_in=5.0)                  # written by something else
-    assert det.k_in.value() == pytest.approx(5.0), "a first table must seed the form"
+    assert det.k_in.value() == pytest.approx(7.0), "a first table seeded the edit away"
+    assert ap.form_drafts()[(other, 0, S)]["detection"]["k_in"] == pytest.approx(7.0)
     assert (other, 0, None) not in ap.form_drafts(), (
         "the form that stood for the table was left filed as a draft of no table")
 

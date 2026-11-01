@@ -7,6 +7,52 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **The owner's answers to the editing foundation's open questions (design 13.4).**
+  - **Polarity is judged on its own.** It was compared with the run only inside the Baseline drift
+    stage, so with that stage off a changed polarity left the table looking current, although the
+    detector reads it. It now reads *⚠ Settings changed: polarity auto → blockade*, the amber
+    line's Details lists it on the Thresholds row, and Revert puts it back as one step. With the
+    drift stage on, the stage names it, in the notice and on the Details list's Signal chain row. A
+    table whose run did not record its polarity is not compared on it.
+  - **A recording's first table keeps settings you changed before it and did not run.** When a
+    batch run or a hand-made event gives a recording its first table, the form keeps your edit:
+    marked edited, named by the ⚠ button, saved with the project, and taken back and forward by
+    Edit ▸ Undo and Redo. The next Detect runs it, and one Ctrl+Z takes back that run together with
+    the edit.
+    - A batch counts as having run your edit only when it was launched from that same form with
+      nothing changed since, ML and open-pore reference included.
+    - The minimum dwell and merge gap the app set to the other detector's defaults follow the new
+      table, so a Schmitt table no longer shows CUSUM's 1 ms and 500 µs as settings you changed. A
+      value you typed stays, even one equal to the other detector's default.
+  - **Switching the detector box is no longer an undo step,** and neither is the minimum dwell and
+    merge gap it moves to the chosen detector's defaults. Ctrl+Z goes to the edit before the
+    switch, and an edit typed just before or after it is its own step. A step the switch leaves
+    with nothing to change is withdrawn, and one whose change it altered is named for what it now
+    changes.
+  - **An emptied Title, X label or Y label box means the automatic label in every plot window**,
+    Comparison figures and the study figure editor included, which drew no label for it. To hide a
+    label, type a single space. This now works in every window, and a hidden title leaves no gap
+    above the plot. A Comparison or Study appearance saved with an emptied box draws the automatic
+    label when reopened.
+  - **The Plots window's STALE mark follows a Baseline-form edit as you make it.**
+    - It is redrawn once, about 0.3 s after the last knob step, and only when a mark on a column
+      the plot draws changes (or the clustering's amplitude note does).
+    - Your zoom and pan are kept.
+    - A saved snapshot on screen is left as it is.
+  - **⌘Z / ⇧⌘Z in a focused text field with nothing typed in it reach the window's Undo and
+    Redo,** as they already did in a spin box or a font box: a plot's Title box, a calibration
+    field, a search box. A field you have typed in keeps them for its typing, and a table cell you
+    are editing keeps them while its editor is open (press Esc first).
+  - **A Plots-window fit over a typed Fit range is never the report's fit.** Such a fit records its
+    range and is not saved when the window closes, and Generate Report figures never draws a saved
+    fit that records one. The report uses the table's saved whole-column fit if it can, or fits
+    that histogram afresh, and the window's FIT RANGE line says which. A project saved by an
+    earlier version keeps the fit it saved.
+  - **Batch detect records the detector it ran (Schmitt),** not the one the detector box showed. A
+    batch made while the box showed CUSUM recorded `detect.cusum`, which moved the box when that
+    table came on screen. The stale line's Re-run now always replays the table's own detector, so
+    projects saved before this are safe too.
+
 - **A recording's samples are read-only in memory.** Every channel array is flagged read-only when
   the recording is built (the flag, not a copy), and so is each calibrated array the session
   caches. At an identity calibration every panel and worker reads the recording's own array, so one
@@ -292,6 +338,25 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- **Re-measure keeps an old table's run.** On a table from a v1 or v2 project (no stored settings,
+  its run known from the detector's own stamp), **Re-measure depths** stored only the open-pore
+  estimator's settings as the table's run.
+  - The chain notice then read *⚠ Differs from the Schmitt run: low-pass off → on*, and Revert
+    turned the run's low-pass off.
+  - A polarity edit went unnoticed.
+  - A later Re-run replaced the table with a different detection.
+
+  The re-measured table now keeps the settings in its stamp, under the new estimator. A project
+  saved with only the estimator's settings stored reads its run from the stamp again when opened.
+- **A Re-measure is always named *Re-measure depths*** in Edit ▸ Undo. With the estimator
+  unchanged (Analysis ▸ Compare estimators keeps *Re-measure now* enabled), it was named *Re-run
+  detection*, and the status bar said the curation was not carried over although every
+  accept/reject was kept.
+- **Details names every Baseline drift setting that changed.** A polarity, mask, dilate or
+  percentile edit read the same on both sides of the Signal chain row (*Baseline drift block median
+  · 0.5 s → Baseline drift block median · 0.5 s*); the row now names it.
+- **Compose with shared axes no longer draws a blank title band** over a panel whose figure had no
+  title, or a hidden one. A titled and an untitled panel still line up.
 - **⌘Z and ⇧⌘Z work after a spin box's arrows or a pick from a list.** A spin box changed with its
   arrows or Page Up/Down, or an editable list such as the plot windows' Font, kept the key while it
   had focus and did nothing with it, so the plot windows' appearance Undo/Redo, Edit ▸ Undo/Redo

@@ -195,8 +195,9 @@ Decision 3.
 - The Event gallery gets a Redo button beside its Undo.
 - The Inspector, the docked inspector and the gallery already send their key presses to Edit ▸ Undo (`gui/main_window.py:6767-6768, 7048-7058, 7716`).
 - A focused text field keeps ⌘Z for its own typing, as today (`gui/main_window.py:1316-1320`), and
-  only while it has typing to undo: a spin box stepped with its arrows or an editable combo picked
-  from its list lets the key through (`gui/app.py` `_UndoKeyGuard`, sweep 10 S10-PLOT1). The edit becomes an undo step after the 700 ms pause, or when focus leaves the field.
+  only while it has typing to undo: a spin box stepped with its arrows, an editable combo picked
+  from its list, or a plain line edit with nothing typed lets the key through (`gui/app.py`
+  `_UndoKeyGuard`, sweep 10 S10-PLOT1, 13.7). An item view's open cell editor keeps the key. The edit becomes an undo step after the 700 ms pause, or when focus leaves the field.
 - Redo's key list is deduped on the resolved key sequence, through one helper shared with the Plots window (defect 1).
 - `_on_result_switched` refreshes Undo and Redo (defect 2).
 
@@ -719,7 +720,8 @@ Each item says what the build does where this design says something else, or not
   chip menu's entry are then disabled, and the judge's sentence says why: "Run detection to apply it —
   Revert cannot restore a setting the run did not record." A stage's on/off the run never recorded
   comes back as off, a recorded `detrend_decim` of None (the automatic stride) comes back as 0, and
-  polarity comes back with the baseline-drift stage when it ran. It is withheld too when a frequency
+  polarity comes back with the baseline-drift stage when it ran, and on its own when that stage does
+  not name it (13.4, question 2). It is withheld too when a frequency
   the run recorded is at or above the recording's Nyquist now (a slower rate declared since), since the
   form's box cannot hold it: "Revert cannot restore the run's low-pass 10 kHz, which is above this
   recording's Nyquist (8 kHz)" (`revert_withheld`). The Details list's chain and threshold rows follow
@@ -878,7 +880,15 @@ Edges that are known and left as they are:
   table that a batch run puts on a recording takes steps made in Schmitt mode on that recording's
   table-less form, and undoing one sets min dwell and merge gap back to Schmitt's. A fix would write
   only the keys a step changed (the before and after difference) instead of the whole snapshot. It
-  reaches every `SettingsHistory` scope, so it is left for the owner's decision.
+  reaches every `SettingsHistory` scope, so it is left for the owner's decision. After the owner's
+  answers to 13.4 (13.7), the form walk's seeds 42, 65 and 67 pass: the detector re-seed is no
+  longer a step, and a first table no longer takes steps under the other detector's knobs. The undo
+  walk's seed 1020 is the one left.
+- **A typed min dwell of 1 ms or merge gap of 0.5 ms in a draft a project puts back** follows a
+  first table of the other detector (13.7, Q6). A draft records which shared knobs the app put at a
+  detector's defaults, but that record is not saved with a project, so a restored draft is judged by
+  value. Closing this needs a field in the saved draft record (`core/form_draft_state.py`), a format
+  change.
 
 ### 13.4 Questions for the owner
 
@@ -911,6 +921,16 @@ Edges that are known and left as they are:
    pins it for a project restore. On a table that already exists the same landing keeps the edit and
    the chain notice names it. Should a first table keep it too, by moving the draft to the new
    table's key?
+
+**Answers (owner, 2026-10-31).** Questions 1, 2, 3, 4 and 6 were answered and built (13.7):
+
+1. Automatic everywhere; a box of spaces hides the label.
+2. Judged on its own.
+3. The re-seed is no step.
+4. Live, debounced.
+6. Keep the edit.
+
+Question 5 is still to be checked on a real Mac.
 
 ### 13.5 Checks, and what is left
 
@@ -983,16 +1003,92 @@ parallel, and an integrated-tree review followed. What changed in the design's t
 - **Keys.** `_UndoKeyGuard` (13.1, 3.7), and appearance sizes step from Default to the figure's
   floor (S10-PLOT1/2).
 
-Left open:
+Left open after sweep 10. 13.7 closed three of these four: the ranged Plots fit, the batch's detector
+stamp and the plain `QLineEdit`.
 
-- **A Plots fit over a typed Fit range** records the full accepted count and names no table, so it
-  passes the export's count rule and is drawn on the full-range histogram. A fix needs an owner
-  call; the options are in the notes (`fast-sweep/fixes/fitguard.md`).
 - **An edit typed into a CUSUM no-table form while a batch runs** can still be overwritten by the
   run's values when that run seeds the form. This is 13.3's typed-during-run edge, reached by the
   batch.
-- **Batch detect stamps the combo's detector into a Schmitt run's params** (`detector:
-  detect.cusum` when the combo shows CUSUM). `_fill_form` copes with it; the batch itself is
-  unchanged.
-- **A focused plain `QLineEdit` keeps ⌘Z with nothing typed in it.** The guard covers spin boxes
-  and editable combos only.
+
+### 13.7 The owner's answers (2026-10-31)
+
+The owner answered 13.4's questions 1 to 4 and 6, and the three open items of 13.6 that needed a
+call.
+
+**How it was built and checked.**
+- Three builders worked in parallel: plots, forms and polarity.
+- Independent acceptance probes, one per decision, were written from the decisions alone and
+  validated adversarially. Each fails on `3938d32` for the old reason.
+- The merged tree was reviewed by six lenses: interactions, journal, keys, plots, polarity and data
+  safety. Each finding was put to two skeptics.
+- The review's confirmed findings were fixed in three rounds, each fix checked by an adversarial
+  verifier. A last round fixed one red test the first forms fix had caused.
+- The notes, patches and verdicts are in the session notes (`fast-sweep/fixes2` to `fixes6`).
+
+**What changed, in this design's terms.**
+
+- **Q1, labels.** `PlotAppearance.from_mapping` reads an empty label as automatic and a label of
+  spaces as `HIDDEN_LABEL` (one space). Comparison and Study figures follow the same rule.
+  `apply_plot_appearance` hides a blank title as `setTitle(None)` does: no label, no height, no row.
+  `figure_composition._populate_clone` replays a blank title the same way.
+- **Q2, polarity.** `conditioning_recipes.polarity_differences` judges polarity as a detection
+  setting beside the thresholds (a `"thresholds"` difference). While both sides run the drift stage,
+  the stage names it, and the Details list's chain row shows it in the judge's words. Lineage chain
+  rows add any difference the stage summary does not show. A run that did not record its polarity
+  is not judged on it. Revert puts the polarity back (`_revert`); a stage's own Revert does not.
+- **Q3, detector re-seed.** `formReseeded` goes to `_on_form_reseeded`, which commits a pending edit
+  as its own step, then calls `SettingsHistory.carry`. The carry drops a step it empties, renames a
+  derived label it changed, and `_drop_journal_steps` prunes both journals.
+- **Q4, live STALE mark.** `stalenessChanged` goes to `PlotsWindow.schedule_stale_redraw`, a 300 ms
+  single shot. It redraws only when the marks on the drawn columns moved (`_stale_signature`, with
+  the clustering's amplitude note), and it keeps the user's view as `_presentation_changed` does.
+- **Q6, first table keeps the edit.**
+  - **Moving the draft.** A no-table draft moves to the first table (`_move_first_draft`) unless the
+    landing ran it. "Ran" means the form a Detect or a batch was launched from, whole: ML, intents
+    and the open-pore reference included (`_landing_form_run`, `MainWindow._batch_form` →
+    `_landing_batch_form` → `_landing_ran`).
+  - **Shared knobs.** The shared knobs the app put at a detector's defaults are recorded per form and
+    per draft (`_form_defaulted`, `_draft_defaulted`). Those knobs follow the landing table
+    (`_knobs_toward`), on the form and in the moved steps (`first_table_carry`, `_carry_form`).
+  - **Undo.** No undo break goes behind a kept edit's steps. The next Detect folds them, as on a
+    table that already existed.
+  - **Test.** `test_c24_a_genuinely_new_table_on_the_same_target_still_seeds_the_form` now pins the
+    kept edit.
+- **13.6 items.**
+  - **Ranged fits.** A Plots fit over a typed Fit range records it (`modules.FIT_RANGE_KEY`), so
+    `_persist_results` does not file it and `report_fit_problem` refuses it.
+  - **Batch stamp.** Batch detect stamps the detector it ran, and `_rerun_params` always replays the
+    table's detector.
+  - **Keys.** `_UndoKeyGuard` judges every line edit except an item view's open cell editor (3.7).
+- **Review fixes beyond the decisions.**
+  - **Re-measure of a stamp-only table.** A Re-measure of a table that stored no params (v1/v2)
+    starts from its stamp, so its params stay a complete run. The readers
+    (`schmitt_params_from_result`, `lineage._run_params`) treat baseline-only params as the stamp's
+    run, which repairs projects saved while that was broken.
+  - **Re-measure step name.** A Re-measure names its own step (`landing_remeasure`, "Re-measure
+    depths"), and a step named a run is a run for 3.6's fold.
+
+**Left open.**
+- **13.4 question 5,** the native-menu routing on a real Mac.
+- **The typed-value edge for drafts a project puts back (13.3).**
+- **The look-away state.** A no-table recording left on CUSUM shows CUSUM's knobs under a Schmitt
+  combo when you come back, with no batch involved. This is unchanged since `3938d32`.
+- **A batch re-run from another form's settings takes a first table's kept edit into its press.**
+  This is the same rule as 3.6 on a table that already exists.
+- **Two edges of the Baseline estimator.**
+  - A hand edit that ends at the same value marks the estimator "user" and leaves a step that moves
+    no number.
+  - A Re-measure whose result equals the stored one pushes no step.
+- **ML tables.** A v1/v2 ML table re-measured still stores baseline keys only, since its stamp is
+  not Schmitt-shaped.
+- **A Plots fit with a typed range saved by an earlier version** is still the report's fit when that
+  project is opened. Refitting the column replaces it.
+- **Two edges reached only from a script.** A first table that code makes from the form exactly as
+  it stands (`Session.add_result` of `_form_params()`, no Detect and no batch) counts as having run
+  the draft, as on `3938d32` (`_made_from_form_on_screen`). That rule keeps
+  `test_open_pore_reference_workflow` green.
+  - It drops a reference edit that no table records, such as notes typed in automatic mode.
+  - A CUSUM table added that way while the box shows Schmitt keeps the draft.
+
+  A tighter guard was tried, but it brought the draft back for a typed frequency the table did
+  record (`fast-sweep/fixes7`, not applied).

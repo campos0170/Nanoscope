@@ -330,13 +330,17 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     "analysis_panel.formStepNamed": "an action that knows its name changed the form ('Recall "
                                     "protocol …', 'Reset baseline estimator') — one undo step "
                                     "under that name (see _on_form_step_named); no frame moved",
+    "analysis_panel.formReseeded": "the detector combo re-seeded the form on screen — no "
+                                   "undo step (see _on_form_reseeded); no frame moved",
     # -- status / chrome ----------------------------------------------------------------
     "analysis_panel.baselineJobStatus": "progress text for the baseline probe",
     "analysis_panel.runRefused": "the run gate declining a start — nothing ran, nothing moved",
     "analysis_panel.stalenessChanged": "the shown result was re-judged for staleness — wired "
                                        "separately to _push_stale_columns (S7-POP1), which "
                                        "pushes the table's badge tuple + the banner sentence "
-                                       "onto the gallery and inspector; no frame moved",
+                                       "onto the gallery and inspector, and to the Plots "
+                                       "window's coalesced STALE look (13.4 Q4); no frame "
+                                       "moved",
     "analysis_panel.resultSwitched": "the Table selector / detector combo put ANOTHER stored "
                                      "table of the same recording on screen — nothing was "
                                      "written. A navigation, wired as a recording switch is: "
@@ -1060,6 +1064,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # whole-series run never collides with an interactive single detection.
         self._batch_controller = BatchDetectController(self._session, self)
         self._batch_skipped = 0                  # recordings skipped this batch (no current/rate)
+        self._batch_form: dict | None = None     # the form this batch was launched from
         #: The progress-bar label of the analysis/batch job currently running, exactly as
         #: its started-slot painted it. The bar is SHARED chrome: a load that finishes
         #: mid-run has to hand it back to the surviving job, and a sweep started without
@@ -2690,17 +2695,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # the first Apply on a fresh recording as its baseline, and that Apply could never
         # be undone.
         self._session.documentOpened.connect(self._rebase_settings_of)
-        # ...and each event table's FORM, off the five signals the Analysis panel gives its
+        # ...and each event table's FORM, off the six signals the Analysis panel gives its
         # forms (design §3.2-3.6). The panel says what happened: the user edited, the app
         # wrote a form itself, a table's form is about to leave the screen or has arrived,
-        # an action named the change it made. What each means for the history is decided in
-        # the slots, in the order design §3.9 gives: commit the outgoing form, switch, adopt
-        # the incoming one.
+        # an action named the change it made, the detector combo re-seeded the form on
+        # screen. What each means for the history is decided in the slots, in the order
+        # design §3.9 gives: commit the outgoing form, switch, adopt the incoming one.
         self._analysis_panel.formEdited.connect(self._on_form_edited)
         self._analysis_panel.formWritten.connect(self._on_form_written)
         self._analysis_panel.formLeaving.connect(self._on_form_leaving)
         self._analysis_panel.formArrived.connect(self._on_form_arrived)
         self._analysis_panel.formStepNamed.connect(self._on_form_step_named)
+        self._analysis_panel.formReseeded.connect(self._on_form_reseeded)
         # ...and a table born where the panel is not looking never reaches `formArrived`.
         self._session.resultsChanged.connect(self._on_table_landed)
         # "At once before a run" (design §3.2) holds for a re-measure and a batch too. Detect
@@ -3434,6 +3440,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # other run is stamped ``'batch'`` inside the detector.
         params = self._analysis_panel.batch_detection_params()
         self._batch_skipped = n_docs - len(targets)   # recordings without a current channel/rate
+        # A first table this pass gives a recording ran its un-run edit only when the edit IS
+        # this form, ML and baseline reference included (13.4 Q6, `AnalysisPanel._landing_ran`).
+        self._batch_form = self._analysis_panel.form_state()
         self._batch_controller.start([(d, c) for (d, c, _n) in run_targets], params)
 
     @QtCore.Slot(int)
@@ -3467,7 +3476,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._session.has_document(res.doc_id):
                 n_stale += 1
                 continue
-            report = self._analysis_panel.install_detection_result(res, announce=False)
+            report = self._analysis_panel.install_detection_result(
+                res, announce=False, batch_form=self._batch_form)
             if report is not None:
                 n_kept += len(report.kept) + len(report.moved)
             n_installed += 1
@@ -3486,6 +3496,7 @@ class MainWindow(QtWidgets.QMainWindow):
             parts.append(f"{len(errors)} failed: "
                          + "; ".join(f"{lbl} ({msg})" for lbl, msg in errors[:3]))
         self._batch_skipped = 0
+        self._batch_form = None
         self.statusBar().showMessage(" ".join(parts), 12000)
         self._sync_export_action()
         self._sync_plots_action()
@@ -3494,6 +3505,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_batch_cancelled(self) -> None:
         self._release_load_chrome()
         self._batch_skipped = 0
+        self._batch_form = None
         self.statusBar().showMessage("Batch detect cancelled.", 6000)
 
     # -- layer + selection policy ----------------------------------------------------------------
@@ -6340,6 +6352,13 @@ class MainWindow(QtWidgets.QMainWindow):
             # it draws (a re-declared rate on any of them, a changed estimator on the one on
             # screen), not by a second copy of the rules that checked the calibration alone.
             self._plots_window.set_staleness_provider(self._analysis_panel.table_staleness)
+            # ...and re-reads it when the judge does: a Baseline-form edit re-feeds nothing,
+            # so the mark followed only the next draw (design 13.4 Q4). A saved snapshot is
+            # left as every re-feed leaves it.
+            self._analysis_panel.stalenessChanged.connect(
+                lambda: None if PLOTS_ARTIFACT_ID in (self._workspace_frozen
+                                                      | self._workspace_pending)
+                else self._plots_window.schedule_stale_redraw())
             self._plots_window.refreshRequested.connect(
                 lambda: self._replace_workspace_surface(
                     PLOTS_ARTIFACT_ID, self._refresh_plots))
@@ -14574,9 +14593,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if not self._session.has_document(doc_id):
             return
+        remeasured = self._analysis_panel.landing_remeasure
         for res in self._session.results.for_doc(doc_id):
             if res.module_id == module_id and isinstance(res.payload, EventSet):
-                self._history.checkpoint((res.doc_id, int(res.channel), res.module_id))
+                key = (res.doc_id, int(res.channel), res.module_id)
+                # A Re-measure says what it was: one with the estimator unchanged moves no
+                # fingerprint, and the diff alone named it a re-run that lost the curation.
+                self._history.checkpoint(
+                    key, label="Re-measure depths" if key == remeasured else None)
 
     def _on_step_recorded(self, label: str, summary: dict) -> None:
         """Say out loud when a click just replaced curated events.
@@ -15190,7 +15214,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._settings_history.rebase(("acquisition", doc_id, info.index))
         self._settings_history.rebase(("time_base", doc_id))
 
-    # -- each event table's form (design §3.2-3.6): the five signals the panel gives ----------
+    # -- each event table's form (design §3.2-3.6): the six signals the panel gives -----------
     def _form_scope(self) -> tuple | None:
         """``("form", doc_id, channel, module_id or None)`` for the form on screen, or None
         when the Analysis panel has no target. Keyed by the event table on screen, the same
@@ -15237,6 +15261,69 @@ class MainWindow(QtWidgets.QMainWindow):
         student’", "Reset baseline estimator") changed the form. One step, under that name,
         at once — the diff would only say "Change 9 settings"."""
         self._checkpoint_form(label)
+
+    def _on_form_reseeded(self, moved) -> None:
+        """``formReseeded({key: (before, after)})``: the detector combo moved the shared knobs
+        of the form on screen to the chosen detector's defaults, with no other form coming on
+        screen. The detector choice is no step, so its re-seed is none either (the owner's
+        answer to 13.4 Q3): Undo goes to the edit before it, and leaves the detector's knobs
+        where it put them.
+
+        The panel still reads the form as it stood before the combo moved, so an edit in its
+        pause becomes a step here without the re-seed in it. Every step of the form then
+        carries the re-seed: where a state held the value the combo moved, it holds the one
+        the combo put there, so an Undo or Redo of an older edit cannot set the knobs back to
+        the other detector's (:meth:`_carry_form`). `formWritten` follows, and adopts the form."""
+        scope = self._form_scope()
+        if scope is None:
+            return
+        self._checkpoint_form()
+        self._carry_form(scope, moved)
+
+    def _carry_form(self, scope: tuple, moved) -> None:
+        """Pass ``moved``, ``{knob: (value, value it took)}``, through every state of form
+        ``scope`` (`SettingsHistory.carry`): where a state held the value, it holds the one
+        that took its place. A step the carry leaves moving nothing goes, and its journal
+        entries with it: an item that names a step and takes nothing is worse than a disabled
+        one (:meth:`_form_edit_waits`)."""
+        if not moved:
+            return
+
+        def carried(state):
+            detection = state.get("detection") if isinstance(state, dict) else None
+            if isinstance(detection, dict):
+                for key, (before, after) in moved.items():
+                    if key in detection and detection[key] == before:
+                        detection[key] = after
+            return state
+
+        undone, redone = self._settings_history.carry(scope, carried)
+        self._drop_journal_steps(self._undo_journal, scope, undone)
+        self._drop_journal_steps(self._redo_journal, scope, redone)
+        self._sync_undo_actions()
+
+    def _drop_journal_steps(self, journal: list, scope: tuple, dropped) -> None:
+        """Take out of ``journal`` the entries for the steps of form ``scope`` at ``dropped``,
+        counted from its stack's newest end as `SettingsHistory.carry` reports them. Journal
+        and stack are both newest-last, so they are matched from that end; a run's press keeps
+        the steps it has left, or becomes its table's step alone (:meth:`_split_redo_runs`)."""
+        if not dropped:
+            return
+        out: list = []
+        at = 0
+        for entry in reversed(journal):
+            run = self._run_of(entry)
+            if entry == (_UNDO_SETTINGS, scope):
+                if at not in dropped:
+                    out.append(entry)
+                at += 1
+            elif run is not None and run[0] == scope:
+                n = sum(1 for i in range(at, at + run[1]) if i not in dropped)
+                at += run[1]
+                out.append((_UNDO_RUN, scope, n) if n else (_UNDO_EVENTS, tuple(scope[1:])))
+            else:
+                out.append(entry)
+        journal[:] = out[::-1]
 
     def _on_form_leaving(self, key) -> None:
         """``formLeaving``: a table's form is about to leave the screen. Its pending edit
@@ -15308,11 +15395,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ONE DOOR FOR EVERY BIRTH, whoever is looking: the panel's arrival does it for a table
         born on screen, and :meth:`_on_table_landed` for one that lands while another
-        recording is shown (a batch run, or a Detect that lands after a look away)."""
+        recording is shown (a batch run, or a Detect that lands after a look away).
+
+        A table the form did not make keeps the edit as its draft (13.4 Q6): those steps did
+        not produce it, the NEXT run is the one they lead to, so no break goes behind them,
+        as on a table that already existed. The knobs the detector combo re-seeded for the
+        other detector follow the table in the steps as in that draft
+        (`AnalysisPanel.first_table_carry`), so no Undo puts them back."""
         first, scope = ("form", key[0], key[1], None), ("form", *key)
         self._settings_history.move_scope(first, scope)
         self._rename_form_scope(first, scope)
-        self._break_behind_form_steps(key)
+        self._carry_form(scope, self._analysis_panel.first_table_carry(key))
+        if tuple(key) not in self._analysis_panel.form_drafts():
+            self._break_behind_form_steps(key)
 
     def _break_behind_form_steps(self, key) -> None:
         """A table was born: if the journal ends in the steps of ITS form, put an

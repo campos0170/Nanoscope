@@ -30,6 +30,10 @@ from .key_sequences import redo_sequences, undo_sequences
 APPEARANCE_HISTORY_DEPTH = 200
 APPEARANCE_COALESCE_MS = 700
 
+#: A Title / X label / Y label that draws nothing: what a box holding only spaces stores.
+#: Empty (or never touched) means the window's automatic label.
+HIDDEN_LABEL = " "
+
 #: The sizes a figure draws, per field: ``from_mapping`` drops anything outside, and each
 #: size spin box runs 0 ("Default") then this range, so the two cannot disagree.
 _SIZE_RANGES: dict[str, tuple[float, float]] = {
@@ -65,9 +69,15 @@ class PlotAppearance:
         """Ignore unknown/invalid saved fields without changing analysis defaults."""
         values = values if isinstance(values, Mapping) else {}
         valid: dict[str, Any] = {}
+        # One rule in every plot window (owner, design 13.4 Q1): an emptied box is the
+        # automatic label, as one never touched, and a box holding only spaces hides the
+        # label (kept as one space, :data:`HIDDEN_LABEL`).
         for key in ("title", "x_label", "y_label"):
-            if isinstance(values.get(key), str):
-                valid[key] = values[key].strip()[:1000]
+            text = values.get(key)
+            if isinstance(text, str) and text.strip():
+                valid[key] = text.strip()[:1000]
+            elif isinstance(text, str) and text:
+                valid[key] = HIDDEN_LABEL
         family = values.get("font_family")
         if isinstance(family, str) and family.strip() and not any(c in family for c in ";{}<>"):
             valid["font_family"] = family.strip()[:200]
@@ -104,9 +114,8 @@ _BUILTIN_PRESETS: dict[str, PlotAppearance] = {
 
 #: How a step names each field, and the word for "no override" in that control's own
 #: vocabulary: the size spins and colour buttons say "Default", the three-way combos
-#: "Original", the label boxes' placeholder "Automatic". An EMPTIED label box is not
-#: that: it holds "", which Comparison and Study figures draw as no title or label at
-#: all, so a step names it "blank".
+#: "Original", the label boxes' placeholder "Automatic". An emptied label box is that
+#: too; a box of spaces (:data:`HIDDEN_LABEL`) draws no label, so a step names it "hidden".
 _STEP_WORDS: dict[str, tuple[str, str]] = {
     "title": ("title", "automatic"), "x_label": ("x label", "automatic"),
     "y_label": ("y label", "automatic"), "legend_visible": ("legend", "original"),
@@ -124,8 +133,8 @@ _TEXT_FIELDS = ("title", "x_label", "y_label")
 def _spell(key: str, value) -> str:
     if value is None:
         return _STEP_WORDS[key][1]
-    if value == "":
-        return "blank"
+    if key in _TEXT_FIELDS and not value.strip():
+        return "hidden"
     if isinstance(value, bool):
         return "shown" if value else "hidden"
     if isinstance(value, (int, float)):
@@ -934,15 +943,20 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             title.opts["color"] = foreground
         title.setText(title_prefix + state.title if state.title else defaults["title_text"])
         # setTitle(None) hides the row. An authored title must make it visible
-        # again; Reset to an empty automatic title must hide it without a gap.
-        title.setVisible(bool(title.text))
+        # again; Reset to an empty automatic title, or a hidden one, must hide it
+        # without a gap.
+        shown = bool(title.text.strip())
+        title.setVisible(shown)
         defaults["applied_title_text"] = title.text
         defaults["applied_title_color"] = title.opts.get("color")
-        if title.text:
+        if shown:
             height = max(30.0, float(title.item.boundingRect().height()) + 6)
             title.setMaximumHeight(height)
             plot.layout.setRowFixedHeight(0, height)
         else:
+            # Both, as pyqtgraph's own setTitle(None): the label's minimum height (its
+            # text's, 23 px for a space) otherwise wins over the row's 0 and leaves a band.
+            title.setMaximumHeight(0)
             plot.layout.setRowFixedHeight(0, 0)
         for item in data_items:
             _style_data_item(item, state, state.data_color)

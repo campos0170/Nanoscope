@@ -207,7 +207,7 @@ def test_render_never_recomputes_and_appearance_never_changes_geometry(kind, mon
         monkeypatch.setattr(sns, name, forbidden)
     figures = []
     for style in ({}, {"title": "Custom title", "grid": True, "background": "dark", "marker_size": 8., "line_width": 2.,
-                       "font_family": "DejaVu Sans", "legend_visible": False}, {"title": "", "grid": False}):
+                       "font_family": "DejaVu Sans", "legend_visible": False}, {"title": " ", "grid": False}):
         figure = comparison.render_comparison(snapshot, tables, style)
         FigureCanvasAgg(figure).draw()
         figures.append(figure)

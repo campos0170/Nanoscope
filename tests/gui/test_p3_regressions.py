@@ -251,7 +251,11 @@ def test_c24_reselecting_the_same_recording_does_not_revert_the_form(win, tmp_pa
 def test_c24_a_genuinely_new_table_on_the_same_target_still_seeds_the_form(win, tmp_path):
     """The guard is "same TABLE", not "same target" — a project restore installs the saved
     run into a session already pointed here, and the form has to follow it or the user is
-    shown app defaults over somebody else's numbers."""
+    shown app defaults over somebody else's numbers.
+
+    ...except for an edit typed before the recording's first table, which the table keeps
+    (the owner's answer to design 13.4 Q6). This test pinned the seed over it (k_in back to
+    5.0) until then; what the table recorded and the user did not touch still seeds."""
     doc_id, ch = _install(win, _doc(tmp_path / "a.dat", _trace()))
     det = win._analysis_panel._detection
     det.k_in.setValue(7.0)
@@ -260,7 +264,14 @@ def test_c24_a_genuinely_new_table_on_the_same_target_still_seeds_the_form(win, 
     assert res.params["k_in"] == 5.0
     win._on_selection(doc_id, ch)          # same target, a table it has not seeded from
 
-    assert det.k_in.value() == 5.0
+    assert det.k_in.value() == 7.0
+    assert win._analysis_panel.form_drafts()[(doc_id, ch, _MODULE_ID)]["detection"]["k_in"] == 7.0
+
+    id_b, _ = _install(win, _doc(tmp_path / "b.dat", _trace(seed=3)))
+    assert det.min_dwell_s.value() != 0.001
+    _detect_into(win, id_b, ch)            # min dwell 0.001 in its params, an untouched form
+    win._on_selection(id_b, ch)
+    assert det.min_dwell_s.value() == pytest.approx(0.001)
 
 
 def test_c24_selecting_another_recording_still_seeds_from_that_one(win, tmp_path):

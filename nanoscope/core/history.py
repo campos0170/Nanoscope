@@ -524,10 +524,30 @@ def _looks_like_remeasure(before: AnalysisResult, after: AnalysisResult) -> bool
     """
     if before.baseline_fingerprint == after.baseline_fingerprint:
         return False
+    moved = _moved_params(before, after)
+    return bool(moved) and all(str(k).startswith("baseline_") for k in moved)
+
+
+def _moved_params(before: AnalysisResult, after: AnalysisResult) -> set:
+    """The ``params`` keys whose value differs between the two results.
+
+    A table whose params name no run (a v1/v2 table stored ``{}``; one re-measured before the
+    fix kept the estimator's keys alone) ran under its detector's stamp, and a re-measure writes
+    that run down beside the new baseline block (``AnalysisPanel._remeasure_finished``). Those
+    keys are read against the stamp, so the same run, now named, is not a moved setting.
+    """
     pb = dict(before.params or {})
     pa = dict(after.params or {})
-    moved = {k for k in set(pb) | set(pa) if pb.get(k, _MISSING) != pa.get(k, _MISSING)}
-    return bool(moved) and all(str(k).startswith("baseline_") for k in moved)
+    if all(str(k).startswith("baseline_") for k in pb):
+        from ..analysis.modules import preprocess_params_from_provenance
+
+        try:
+            stamp = preprocess_params_from_provenance(before.payload.provenance or {})
+        except (TypeError, ValueError):        # an unreadable stamp names nothing
+            stamp = {}
+        pb.update({k: v for k, v in stamp.items()
+                   if k in pa and not str(k).startswith("baseline_")})
+    return {k for k in set(pb) | set(pa) if pb.get(k, _MISSING) != pa.get(k, _MISSING)}
 
 
 #: Sentinel for "this key was absent", so a key added by a re-measure counts as moved.
@@ -650,10 +670,7 @@ def _params_moved_outside_baseline(before: AnalysisResult, after: AnalysisResult
     block". Only a detection re-run can move a detector parameter — so a moved
     ``k_in``/``min_dwell_s`` names the operation with no help from the frame.
     """
-    pb = dict(before.params or {})
-    pa = dict(after.params or {})
-    moved = {k for k in set(pb) | set(pa) if pb.get(k, _MISSING) != pa.get(k, _MISSING)}
-    return any(not str(k).startswith("baseline_") for k in moved)
+    return any(not str(k).startswith("baseline_") for k in _moved_params(before, after))
 
 
 # ================================================================================================
@@ -988,7 +1005,9 @@ class EventHistory(QObject):
                 text = "Re-run detection"
             elif run and text not in _RUN_LABELS:
                 text = "Re-measure depths" if remeasure else "Re-run detection"
-            run = run or text in _RUN_LABELS
+        # ...and a step its caller NAMED a run is one: a Re-measure with the estimator unchanged
+        # moves no fingerprint, and its Baseline steps still go with it in one press.
+        run = run or text in _RUN_LABELS
         self._undo.append(_Entry(key, prior, text, _sizeof(prior)))
         self._redo = [e for e in self._redo if e.key != key]
         self._remember(key, res)
@@ -1921,6 +1940,51 @@ class SettingsHistory(QObject):
                     del self._redo[scope]
                 return dropped
         return 0
+
+    def carry(self, scope: SettingsScope, amend) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Pass a change that is no step through every state ``scope`` holds: each step's two
+        ends, undone or not, and its pristine copy become ``amend(copy)``. Silent.
+
+        For a change the app makes alongside a choice that is not undoable (the detector
+        combo's re-seed of the knobs both detectors share): left out of the snapshots, an
+        Undo of an older edit would write the change back out, which is a step in all but
+        name.
+
+        A step still says what it moves. One whose two ends the change made equal moves
+        nothing, and goes: Redo named it and wrote what the form held. One whose difference
+        it changed takes the label that difference derives, when its label was derived too;
+        a name an action gave it ("Recall protocol …") is kept. Returns where the dropped
+        steps stood, counted from each stack's newest end, ``(undo, redo)``: MainWindow's
+        journal names them too."""
+        def amended(state):
+            try:
+                return amend(_detached(state))
+            except Exception:                  # noqa: BLE001 - a state it cannot read stays
+                return state
+        dropped: list[tuple[int, ...]] = []
+        for stacks in (self._undo, self._redo):
+            steps = stacks.get(scope) or []
+            kept, gone = [], []
+            for at, step in enumerate(steps):
+                before, after = amended(step.before), amended(step.after)
+                if _settings_equal(before, step.before) and _settings_equal(after, step.after):
+                    kept.append(step)
+                elif _settings_equal(before, after) and not _settings_equal(step.before,
+                                                                            step.after):
+                    gone.append(len(steps) - 1 - at)
+                else:
+                    label = step.label
+                    if label == self._label(scope, step.before, step.after):
+                        label = self._label(scope, before, after)
+                    kept.append(_SettingsStep(before, after, label))
+            if kept:
+                steps[:] = kept
+            elif steps:
+                del stacks[scope]
+            dropped.append(tuple(gone))
+        if scope in self._pristine:
+            self._pristine[scope] = amended(self._pristine[scope])
+        return dropped[0], dropped[1]
 
     def forget(self, scope: SettingsScope) -> None:
         """Drop ``scope``'s pristine copy and keep its steps: the next checkpoint adopts what

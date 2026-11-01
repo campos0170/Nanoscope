@@ -678,9 +678,11 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
             panel_title = (display_labels[panel["counts"][0]["source_key"]]
                            if cfg["kind"] == "facets" else panel["title"])
             ax.set_title(panel_title, fontsize=title_size)
-            # Pair matrices always keep each feature's own unit-bearing label.
-            ax.set_xlabel(panel["x_label"] if cfg["kind"] == "pairs" else state.get("x_label", panel["x_label"]), fontsize=axis_size)
-            ax.set_ylabel(panel["y_label"] if cfg["kind"] == "pairs" else state.get("y_label", panel["y_label"]), fontsize=axis_size)
+            # Pair matrices always keep each feature's own unit-bearing label. An empty
+            # override is the automatic label and a blank one hides it, as in every plot
+            # window (design 13.4 Q1).
+            ax.set_xlabel(panel["x_label"] if cfg["kind"] == "pairs" else (state.get("x_label") or panel["x_label"]).strip(), fontsize=axis_size)
+            ax.set_ylabel(panel["y_label"] if cfg["kind"] == "pairs" else (state.get("y_label") or panel["y_label"]).strip(), fontsize=axis_size)
             if state.get("grid", False):
                 ax.grid(True, alpha=.2)
             else:
@@ -690,8 +692,8 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
             for col in range(layout["columns"]):
                 if (row, col) not in active:
                     axes[row, col].set_visible(False)
-        title = state.get("title", {"facets": "Recording comparisons", "pairs": "Event-feature pair matrix",
-                                    "events": "Individual-event comparison"}[cfg["kind"]])
+        title = (state.get("title") or {"facets": "Recording comparisons", "pairs": "Event-feature pair matrix",
+                                        "events": "Individual-event comparison"}[cfg["kind"]]).strip()
         if title:
             figure.suptitle(title, fontsize=title_size)
         if state.get("legend_visible", True) and cfg["kind"] != "facets":

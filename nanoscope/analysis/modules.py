@@ -133,6 +133,7 @@ __all__ = [
     "FIT_INPUT_DIGEST_KEY",
     "FIT_BASELINE_KEY",
     "FIT_RATE_KEY",
+    "FIT_RANGE_KEY",
     "FIT_CURRENT",
     "FIT_OTHER_TABLE",
     "FIT_CALIBRATION_MOVED",
@@ -2853,6 +2854,12 @@ FIT_INPUT_DIGEST_KEY = "input_digest"
 #: made from the way its table does (``analysis.lineage.made_with`` reads both).
 FIT_RATE_KEY = "fs"
 FIT_BASELINE_KEY = "baseline_fingerprint"
+#: ...and the Plots window's typed Fit range, ``[lo, hi]`` in the column's data units (None for
+#: an open side), on a fit made over one: a fit of a narrowed sample, which is not the column's
+#: fit (S10-LIN3). On the fit, not in the window, so a fit restored from a project still says
+#: so. An added key as the others are; a fit without it was made over the whole column, or by
+#: an earlier build.
+FIT_RANGE_KEY = "fit_range"
 
 
 def stamp_fit_provenance(
@@ -3120,7 +3127,9 @@ def report_fit_problem(stored: AnalysisResult, table: AnalysisResult) -> str:
     and the export drew it over its ``frac_depth`` histogram as "your saved fit" (a flat curve,
     mu in pA on a dI/I0 axis). The column is the one the fit recorded
     (:data:`FIT_INPUT_COLUMN_KEY`, else the Plots window's ``params['column']``); a fit that
-    recorded none predates both and was made by the Fits box, whose column is the figure's. Then
+    recorded none predates both and was made by the Fits box, whose column is the figure's. A fit
+    that records a typed Fit range (:data:`FIT_RANGE_KEY`) is of part of the column, and is
+    refused next, whatever path stored it. Then
     :func:`judge_stored_fit` decides: a fit that names another table is refused, as the Fits tab
     withholds it, whatever its count. A fit that names NO table is judged by the two guards
     alone and drawn as before -- the export's rule for an earlier build's fit and the Plots
@@ -3131,6 +3140,8 @@ def report_fit_problem(stored: AnalysisResult, table: AnalysisResult) -> str:
     column, names = _REPORT_FIT_COLUMNS.get(stored.module_id, ("", ()))
     if fitted and column and str(fitted) not in names:
         return f"saved fit is of {fitted}, not the {column} this figure draws"
+    if meta.get(FIT_RANGE_KEY) is not None:
+        return "saved fit was made over a typed Fit range, not the whole column"
     verdict = judge_stored_fit(stored, table)
     if verdict.reason == FIT_OTHER_TABLE:
         from ..core.sources import detector_name

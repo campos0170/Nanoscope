@@ -16,7 +16,8 @@ form with the run and nothing else (``docs/EDITING_FOUNDATION_DESIGN.md`` 1.4).
 The rules are the ones already in force, reused rather than restated: the rate is
 :func:`~nanoscope.analysis.events.stale_rate_hz`'s, the chain and the thresholds are the chain
 notice's (:func:`~nanoscope.analysis.conditioning_recipes.chain_differences`,
-:func:`~nanoscope.analysis.conditioning_recipes.threshold_differences`), and the calibration and
+:func:`~nanoscope.analysis.conditioning_recipes.threshold_differences` and
+:func:`~nanoscope.analysis.conditioning_recipes.polarity_differences`), and the calibration and
 the estimator are their stamps compared as the amber line compares them
 (``AnalysisPanel._calibration_moved`` and ``_baseline_staleness``). The amber line keeps its
 headline and its precedence; this is the list under it.
@@ -32,10 +33,13 @@ from .conditioning import conditioning_params
 from .conditioning_recipes import (
     CHAIN_KEYS,
     THRESHOLD_KEYS_BY_MODULE,
+    ChainDiff,
     chain_differences,
     describe_differences,
+    polarity_differences,
     revert_withheld,
     stage_rows,
+    summary_hidden_differences,
     threshold_differences,
 )
 from .events import EventSet, _usable_rate, stale_rate_hz
@@ -64,7 +68,8 @@ class MadeWith:
     the stamp of the open-pore estimator that measured its depths. ``chain`` holds the
     conditioning keys of the params the detector ran with
     (:func:`~nanoscope.analysis.conditioning.conditioning_params`: the chain keys, and the
-    polarity the detrend stage reads) and ``thresholds`` the keys of
+    polarity the detrend stage and the detector read, judged with the thresholds when the
+    drift stage does not name it) and ``thresholds`` the keys of
     :data:`~nanoscope.analysis.conditioning_recipes.THRESHOLD_KEYS_BY_MODULE` it recorded. Both
     are ``None`` for a result the Schmitt/CUSUM chain did not make (the ML detector runs its own
     model chain).
@@ -175,12 +180,14 @@ def _run_params(result: Any) -> dict[str, Any]:
     chain notice and by the Details list alike.
     """
     params = dict(getattr(result, "params", None) or {})
-    if params:
+    # The estimator's keys alone name no run (a v1/v2 table re-measured before the stamp was
+    # kept): read the stamp under them, as the panel does.
+    if any(not str(k).startswith("baseline_") for k in params):
         return params
     payload = getattr(result, "payload", None)
     if isinstance(payload, EventSet) and payload.provenance:
-        return preprocess_params_from_provenance(payload.provenance)
-    return {}
+        return {**preprocess_params_from_provenance(payload.provenance), **params}
+    return params
 
 
 def _gain_offset(value: Any) -> tuple[float, float] | None:
@@ -321,6 +328,33 @@ def _stage_settings(params: Mapping[str, Any], stages: Sequence[str], fs: float 
                      for key in stages)
 
 
+def _chain_sides(run: Mapping[str, Any], form: Mapping[str, Any], diffs: Sequence[ChainDiff],
+                 fs: float | None) -> tuple[str, str]:
+    """The chain row's was and now: each stage that differs as each side sets it, plus, in the
+    chain judge's words, what its summary does not show (the drift stage's polarity, mask,
+    dilate). A stage whose two summaries read the same is told by those words alone, each side
+    taken as the thresholds row takes it, so the row never reads "X → X" (a polarity edit with
+    the drift stage on read "Baseline drift block median · 0.5 s" on both sides)."""
+    hidden = set(summary_hidden_differences(form, run, fs=fs))
+    back = {(d.stage, d.key): d.text for d in chain_differences(run, form, fs=fs)}
+
+    def form_side(d: ChainDiff) -> str:
+        text = back.get((d.stage, d.key))
+        return text.partition(" → ")[0] if text else d.text.partition(" → ")[2]
+
+    was: list[str] = []
+    now: list[str] = []
+    for stage in dict.fromkeys(d.stage for d in diffs):
+        a, b = _stage_settings(run, (stage,), fs), _stage_settings(form, (stage,), fs)
+        told = [d for d in diffs if d.stage == stage and (a == b or d in hidden)]
+        if a != b:
+            was.append(a)
+            now.append(b)
+        was.extend(d.text.partition(" → ")[0] for d in told)
+        now.extend(form_side(d) for d in told)
+    return "; ".join(was), "; ".join(now)
+
+
 def _judge_chain(made: MadeWith, now: LiveInputs, fs: float | None) -> InputVerdict:
     if made.chain is None:
         return _not_recorded("chain", "Signal chain", made.module_id)
@@ -329,9 +363,7 @@ def _judge_chain(made: MadeWith, now: LiveInputs, fs: float | None) -> InputVerd
                             "Signal chain: the form's is not known, so it is not compared.")
     try:
         diffs = chain_differences(now.chain, made.chain, fs=fs)
-        stages = tuple(dict.fromkeys(d.stage for d in diffs))
-        was, is_ = (_stage_settings(made.chain, stages, fs),
-                    _stage_settings(now.chain, stages, fs)) if diffs else ("", "")
+        was, is_ = _chain_sides(made.chain, now.chain, diffs, fs) if diffs else ("", "")
     except (TypeError, ValueError, KeyError):
         # A recorded value the chain cannot read (a malformed legacy stamp): the judge says so
         # rather than raise, as the chain notice does (``ChainStatus.unknown``).
@@ -374,14 +406,18 @@ def _judge_thresholds(made: MadeWith, now: LiveInputs, fs: float | None = None) 
         return InputVerdict("thresholds", "unknown", "", "", "",
                             "Thresholds: the form's are not known, so they are not compared.")
     # The chain notice's own judge and words ("k_in 5 → 6", "merge gap off → 1 ms"): one rule
-    # for whether a threshold moved, so the notice and this list cannot disagree.
-    diffs = threshold_differences(form, made.thresholds, made.module_id)
+    # for whether a threshold moved, so the notice and this list cannot disagree. The polarity
+    # the drift stage does not name is the notice's "Settings changed" too, so it is listed
+    # here; it is recorded with the chain (``MadeWith.chain``).
+    diffs = (threshold_differences(form, made.thresholds, made.module_id)
+             + polarity_differences(now.chain, made.chain))
     if not diffs:
         return InputVerdict("thresholds", "same", "", "", "",
                             "Thresholds: the form's are the ones this table ran with.")
     # Each side in those same words: a difference reads run → form, so the run's settings are
     # what precedes its arrow, and the form's are the same differences taken form → run.
-    back = threshold_differences(made.thresholds, form, made.module_id)
+    back = (threshold_differences(made.thresholds, form, made.module_id)
+            + polarity_differences(made.chain, now.chain))
     was, is_ = ("; ".join(d.text.partition(" → ")[0] for d in side) for side in (diffs, back))
     withheld = _revert_withheld(made, now, fs)
     if withheld:

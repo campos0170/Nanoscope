@@ -130,7 +130,8 @@ class _WheelGuard(QtCore.QObject):
 
 
 class _UndoKeyGuard(QtCore.QObject):
-    """⌘Z / ⇧⌘Z belong to a spin box or an editable combo only while it has typing to undo.
+    """⌘Z / ⇧⌘Z belong to a text field (a spin box, an editable combo, a line edit) only while
+    it has typing to undo.
 
     Qt offers a shortcut to the focused widget first (``ShortcutOverride``), and the line
     edit inside every QAbstractSpinBox and editable QComboBox claims Undo and Redo
@@ -145,6 +146,12 @@ class _UndoKeyGuard(QtCore.QObject):
     So the override is let through to the window's shortcut unless the line edit can
     undo (or, for Redo, redo) itself. Installed on the QApplication in :func:`create_app`,
     like :class:`_WheelGuard`, so every such control in every window is covered.
+
+    A plain QLineEdit (a plot's Title box, a search field) follows the same rule, the
+    owner's call after sweep 10: one that holds no typing of its own (focused by a click
+    or Tab, or set by the app) lets ⌘Z reach the window's Undo. A read-only one never has
+    typing to undo, so it always lets the key through. A table's open cell editor is left out:
+    it keeps ⌘Z while it is open, and Esc then ⌘Z reaches the window's Undo.
     """
 
     def __init__(self, parent: QtCore.QObject | None = None) -> None:
@@ -161,9 +168,14 @@ class _UndoKeyGuard(QtCore.QObject):
             return obj.findChild(QtWidgets.QLineEdit, options=QtCore.Qt.FindDirectChildrenOnly)
         if isinstance(obj, QtWidgets.QComboBox):
             return obj.lineEdit()           # None for a combo that is not editable
-        if isinstance(obj, QtWidgets.QLineEdit) and isinstance(
-                obj.parentWidget(), (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox)):
-            return obj
+        if isinstance(obj, QtWidgets.QLineEdit):
+            # A table's open cell editor keeps the key, as it always did: an Undo that resets
+            # the table's model takes the editor away and leaves the focus nowhere.
+            holder = obj.parentWidget()
+            view = holder.parentWidget() if holder is not None else None
+            if isinstance(view, QtWidgets.QAbstractItemView) and holder is view.viewport():
+                return None
+            return obj                      # a spin box's or combo's, or a plain field
         return None
 
     def eventFilter(self, obj, event):  # noqa: N802 -- Qt API

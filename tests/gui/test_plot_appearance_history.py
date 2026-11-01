@@ -135,16 +135,19 @@ def test_a_run_of_edits_inside_the_pause_is_one_step(qtbot):
     assert _depth(w) == (3, 0)
 
 
-def test_an_emptied_label_box_is_a_blank_label_and_one_step(qtbot):
-    """An emptied box holds "", not the None it started from: Comparison and Study figures
-    draw "" as NO title or axis label, the GUI's one way to an untitled figure (the host
-    test below). So typing a character and deleting it is a real step, called "blank"."""
+def test_an_emptied_label_box_is_automatic_and_a_box_of_spaces_is_one_hidden_step(qtbot):
+    """An emptied box is the automatic label in every window (owner, design 13.4 Q1), the
+    None it started from: typing a character and deleting it is no step. A box of spaces is
+    the way to no label, and that is a step, called "hidden"."""
     w = _widget(qtbot)
     qtbot.keyClicks(w.title, "x")
     qtbot.keyClick(w.title, QtCore.Qt.Key_Backspace)
     qtbot.wait(PAUSE_MS)
-    assert w.state() == PlotAppearance(title="") and _depth(w) == (1, 0)
-    assert w.undo_button.toolTip() == "Undo: title automatic → blank"
+    assert w.state() == PlotAppearance() and _depth(w) == (0, 0)
+    qtbot.keyClicks(w.title, " ")
+    qtbot.wait(PAUSE_MS)
+    assert w.state() == PlotAppearance(title=" ") and _depth(w) == (1, 0)
+    assert w.undo_button.toolTip() == "Undo: title automatic → hidden"
     assert w.undo() and w.state() == PlotAppearance()
 
 
@@ -533,20 +536,19 @@ def test_comparison_figures_refusing_an_undo_keeps_the_step(qtbot, monkeypatch,
     assert widget.undo() and _applied("comparison", window) == PlotAppearance()
 
 
-def test_emptying_a_label_box_still_takes_the_label_off_the_figure(qtbot):
-    """Comparison and Study figures draw an EMPTY title as none and an empty axis label as
-    blank, and their own only when there is no override at all (``render_comparison``,
-    ``StudyFigureStyle.apply``). Emptying the box is the GUI's one way to the first, as it
-    was at 27ec0eb, and an undo gives the figure its own label back."""
+def test_a_box_of_spaces_takes_the_label_off_the_figure(qtbot):
+    """Comparison and Study figures draw a title or axis label of spaces as none, and their
+    own when the box is empty (``render_comparison``, ``StudyFigureStyle.apply``), as every
+    plot window does (owner, design 13.4 Q1; until then an EMPTIED box took the label off
+    here only). An undo gives the figure its own label back."""
     from nanoscope.plot.comparison_figures import render_comparison
 
     comparison = _build("comparison")
     qtbot.addWidget(comparison)
     widget = comparison._appearance_widget
     for box in (widget.title, widget.x_label):
-        qtbot.keyClicks(box, "x")
-        qtbot.keyClick(box, QtCore.Qt.Key_Backspace)
-    assert comparison.appearance_state() == {"title": "", "x_label": ""}
+        qtbot.keyClicks(box, " ")
+    assert comparison.appearance_state() == {"title": " ", "x_label": " "}
     figure = render_comparison(comparison._snapshot, comparison._tables, comparison._appearance)
     assert figure._suptitle is None
     assert {axis.get_xlabel() for axis in figure.axes if axis.get_visible()} == {""}
@@ -556,9 +558,8 @@ def test_emptying_a_label_box_still_takes_the_label_off_the_figure(qtbot):
 
     study = _study_window(suptitle="Original suptitle")
     qtbot.addWidget(study)
-    qtbot.keyClicks(study._appearance_widget.title, "x")
-    qtbot.keyClick(study._appearance_widget.title, QtCore.Qt.Key_Backspace)
-    assert study.style()["appearance"] == {"title": ""}
+    qtbot.keyClicks(study._appearance_widget.title, " ")
+    assert study.style()["appearance"] == {"title": " "}
     assert study.apply_appearance()
     assert study._figure._suptitle.get_text() == ""
 

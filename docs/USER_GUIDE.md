@@ -801,9 +801,11 @@ dwell, max dwell and the merge gap — so a threshold edited after the run no lo
 table looking current: the window's status line leads with it (*⚠ Settings changed: k_in 5 → 6*).
 The button then reads **⚠ Settings changed**, the window's **Revert to detection's chain** reads
 **Revert to detection's settings**, and the button's menu entry **Revert form to this detection's
-chain** says *settings* too. The polarity override is the exception: it is compared only while the
-Baseline drift stage is on, so with that stage off a changed polarity does not make the table look
-stale, although a new run would read it.
+chain** says *settings* too. The polarity override is compared too, since the detector reads it
+whatever the chain holds. With the Baseline drift stage off, a changed polarity reads *⚠ Settings
+changed: polarity auto → blockade*. With it on, the stage names it, in the notice and on the
+Details list's Signal chain row. A table whose run did not record its polarity is not compared on
+it.
 The rows are not marked stale: they are a faithful record of the chain they were detected with,
 and nothing changes until you run detection again (**Run detection…** in the window, enabled
 exactly when the Detect button is, or the button's menu). A table from the ML detector or a reconciled table is labelled as not produced by
@@ -839,9 +841,10 @@ switching used to re-seed the form from the stored run and throw those edits awa
 not edited is seeded from its stored run, as before. A run you start from the form — **Detect**,
 **Run ML** or **Re-measure depths** — settles its edits, since the table then is what the form
 says; the stale line's **Re-run** and a batch run replay a stored run instead, and, like an Undo of
-a curation step, leave the edits where they are. The exception is a recording's first table,
-whoever makes it: it seeds the form, and what you had set before it are that table's first steps in
-Edit ▸ Undo (§9b). Closing a recording drops its edits; the rest are saved with the project (§11a).
+a curation step, leave the edits where they are. A recording's first table keeps them too, unless a
+run made it from them. Settings you changed before it and did not run stay on the form, marked
+edited, over the table a batch run or a hand-made event gave the recording. They are that table's
+first steps in Edit ▸ Undo (§9b), and the next Detect takes them with it. Closing a recording drops its edits; the rest are saved with the project (§11a).
 
 Open **Preprocess ▸ Signal chain** for the compact card: the comparison with the table on screen,
 any warning, the protocol name, the scope line and the execution order, with **Open Signal
@@ -1680,7 +1683,9 @@ were stored.
 - **Re-measure depths** (on that line, or from inside that report) rewrites the amplitude columns
   against the configured estimator. It does **not** re-detect: every event span keeps its
   boundaries, and every accept/reject and hand-written flag survives — including ones you make
-  while it is running. A calibration change is different: its line (*Depths stale — calibration
+  while it is running. Edit names the step *Undo Re-measure depths*, also when the estimator did not
+  change. On a table from an older project, which stored no settings, the settings recorded with its
+  events are kept as its run. A calibration change is different: its line (*Depths stale — calibration
   changed*) offers **Re-run**, which re-detects, and the current curation does not survive that.
   **Re-measure depths** refuses such a table, on the status bar: *Nothing was re-measured. Re-run
   first — the calibration changed since this table was detected.* It used to measure under the new
@@ -1795,8 +1800,18 @@ screen (see below). It covers every edit that changes what the next number will 
   stage"*. Typing in a field becomes one step once you pause for 700 ms, or sooner when anything else
   is recorded inside the pause — a curation click, a calibration Apply — so the edit is always the
   older step and Ctrl+Z takes the newer one first. Settings changed before a recording and channel
-  have any table belong to the first table they get, since they produced it, wherever that table is
-  made: on screen, or by a batch run or a Detect that lands while you look at another recording.
+  have any table belong to the first table they get, wherever that table is made: on screen, or by
+  a batch run or a Detect that lands while you look at another recording.
+  - When they produced it (a Detect, or a batch launched from that same form with nothing changed
+    since, ML and open-pore reference included), its next run does not take them with it.
+  - When they did not, they stay on the form, and its next run does.
+
+  Switching the detector box is not a step, and neither is the minimum dwell and merge gap it moves
+  to the other detector's defaults. Those two settings follow a recording's first table the same
+  way, as long as you did not type them: where the app put them at the other detector's defaults,
+  they take the table's values. A value you typed stays as your edit. (A project does not record
+  which were typed: in an edit a reopened project brings back, a value at the other detector's
+  default follows the table.) An Undo or Redo the switch leaves with nothing to change is withdrawn.
 - **Calibration**, per channel: *Apply* and *Reset to default*, the **Treat this channel as**
   override with them (*"Undo Reset calibration"*). The sidecar follows the calibration: an undo puts
   `<your recording>.npcal.json` back exactly as it was before the step, byte for byte — removed
@@ -1860,9 +1875,10 @@ form's **Redo** is not offered, because the edit ends it.
 **The same Undo from every window.** ⌘Z and ⇧⌘Z run Edit ▸ Undo and Redo from the Signal
 Conditioning window, where the chain is edited, as they do from the Event inspector and the Event
 gallery; the gallery has a **Redo** button beside its **Undo**, and each says in its tooltip which
-step it would take. A text field or spin box you are typing in keeps ⌘Z for its own typing, in
-every window. Stepping a value with a spin box's arrows, or picking from a list, is not typing:
-⌘Z then undoes the change. Plot windows are the exception, on purpose: there ⌘Z undoes the plot's own history
+step it would take. A text field, spin box or editable list you have typed in keeps ⌘Z for its own
+typing, in every window. A field you only clicked or tabbed into, a value stepped with a spin box's
+arrows, and a pick from a list are not typing: ⌘Z then undoes the last change. A table cell you are
+editing keeps ⌘Z while its editor is open; press Esc first. Plot windows are the exception, on purpose: there ⌘Z undoes the plot's own history
 (§10), and Edit ▸ Undo never reaches a plot.
 
 **What it does not reach.** The view — zoom, which has its own Back / Forward, layer visibility,
@@ -2086,7 +2102,9 @@ that change with it (*STALE: dwell_s on this plot is not what a fresh run would 
 the same rules as that table's amber line in the Results panel (§9a); nothing is recomputed. The
 sample rate and the calibration are judged for every table the
 plot draws; the open-pore estimator only for the table on screen, because it is judged against the
-Baseline form, and that form belongs to the table on screen. Distributions used to check the
+Baseline form, and that form belongs to the table on screen. The mark follows a Baseline-form edit
+as you make it, once the knob stops, and keeps your zoom; a plot of columns the edit does not touch
+is not redrawn. Distributions used to check the
 calibration alone. **Generate Report figures…** asks the same question before it writes anything
 (§12).
 
@@ -2153,7 +2171,11 @@ Three behaviors help organize the comparison; none establishes scientific compar
   family: **Fit components** 1–4 with an **Auto (BIC)** option (exponential and gaussian-mixture
   only — the other three have a fixed parameterisation), a **Fit range** min/max in the axis unit
   shown — a *truncation*, not a crop: the likelihood is renormalised to the range, so BIC is only
-  comparable between fits over the same range — and **include filter-limited events**, off by
+  comparable between fits over the same range. A fit over a typed Fit range is not saved for
+  Generate Report figures, and the report never draws one. It uses the table's saved whole-column
+  fit if it has one it can use, or fits the whole column afresh, and the FIT RANGE line in Details
+  says which. Clear the Fit range to keep the fit for the report. Beside it is
+  **include filter-limited events**, off by
   default, which excludes events whose dwell is within ~2× the filter rise time (depth attenuated,
   dwell biased long) and reports the excluded count in **Details**.
 - **Scatter** — any X vs any Y (e.g. amplitude vs dwell), per-axis log, colour-by-cluster or
@@ -2206,7 +2228,9 @@ tool. Clustering runs on the **first ticked** source.
 - **Axis range** — type explicit X/Y limits in the displayed units (stored in data units and converted to log internally on a log axis)
   that persist across redraws; **Auto** releases them. The plot is also mouse zoom/pan-able.
 - **Appearance** — a custom title and axis labels, font family + size, data-series and fit colours,
-  marker size, line width, grid and background. These controls, legend edits and fit-decoration
+  marker size, line width, grid and background. An empty Title, X label or Y label box uses the
+  automatic label, in every plot window; type a single space to show no label, and a hidden title
+  leaves no gap above the plot. These controls, legend edits and fit-decoration
   toggles update the existing picture without recalculating bins, KDE, PCA or fits, collecting
   source data, or resetting manual zoom. Appearance-only Undo/Redo has the same guarantee.
   Pending analytical changes stay pending until **Plot / Apply** or **Apply fit**.
@@ -2266,7 +2290,8 @@ Reset restores that plot's existing defaults. Appearance used by a figure is sav
 Voltage dependence, Distribution summaries, Comparison figures, Subpopulations and the study figure
 editor (**Style selected figure…**, §1) have **Undo** and **Redo** beside **Reset appearance**, and
 ⌘Z / ⇧⌘Z do the same while the Appearance controls are on screen — in the Analysis Explorer, while
-the page's **Section** shows **Appearance**. A text box you are typing in keeps ⌘Z for its typing.
+the page's **Section** shows **Appearance**. A text box you are typing in keeps ⌘Z for its typing;
+with nothing typed in it, ⌘Z undoes the plot's last change.
 Every change is a step — an edit, a preset, a saved appearance, a colour, Reset — and edits less
 than 700 ms apart, such as the keystrokes of one size, make one; the buttons' tooltips name the step
 (*Undo: title size 12 → 14 pt*). Each plot keeps 200 steps, and once older ones have been dropped
@@ -2761,7 +2786,10 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   is named on the status line rather than exported in silence.
   A saved fit that no longer describes the table is not drawn: that histogram is refit afresh, and
   the status line says why (§9a). This includes a fit of another quantity (a Plots-window fit of
-  `depth_pA` on the dI/I0 histogram) and a fit made on another table of the recording.
+  `depth_pA` on the dI/I0 histogram), a fit made on another table of the recording, and a
+  Plots-window fit over a typed Fit range: that histogram gets the table's saved whole-column fit,
+  or is fitted afresh. A project saved by an earlier version keeps the ranged fit it saved;
+  refitting the column replaces it.
 - **Analysis Explorer ▸ Export current figure…** — the plot that is actually on
   screen, including companion axes such as density marginals and spectrogram colour bars. The
   Distributions page exposes the same choices from **Export ▾**. This is distinct from the standard
