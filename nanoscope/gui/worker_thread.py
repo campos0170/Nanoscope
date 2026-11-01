@@ -569,11 +569,19 @@ def exit_without_destroying_live_threads(code: int) -> None:
 
     ``os._exit`` skips atexit handlers, garbage collection and C++ destructors. Every one
     of those is either already done (settings are synced above) or is exactly what we are
-    trying to avoid. Measured: exit 0, 3/3, where the orderly path gave 134, 4/4.
+    trying to avoid. Measured: exit 0, 3/3, where the orderly path gave 134, 4/4. The one
+    atexit job this exit still owes is the frozen app's "clean exit" log line (without it
+    this quit reads as a crash), so it is written explicitly first.
     """
     import os
     import sys
 
+    try:
+        from ..clean_exit import note_clean_exit
+
+        note_clean_exit(int(code))
+    except Exception:      # nor may the log line: it is a diagnostic, the exit is the job
+        pass
     try:
         sys.stdout.flush()
         sys.stderr.flush()

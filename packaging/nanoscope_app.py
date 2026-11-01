@@ -1,6 +1,6 @@
 """Frozen-app entry script. PyInstaller builds THIS; it is not used by the source checkout.
 
-Three jobs beyond calling `nanoscope.gui.app.main`:
+Four jobs beyond calling `nanoscope.gui.app.main`:
 
 1. Send stdout/stderr to a log file at the *file-descriptor* level, so C/C++ chatter (TensorFlow's
    core, Qt's plugin loader, HDF5) lands there too — not just Python `print`. A double-clicked
@@ -11,11 +11,18 @@ Three jobs beyond calling `nanoscope.gui.app.main`:
    shows up under "Open With" and can be a double-click target — but macOS delivers those as
    Cocoa open-document AppleEvents, which Qt turns into QFileOpenEvent, NOT as argv. Without the
    relay below the app would claim to handle those files and then open empty.
+4. Leave a trail in that log that tells a crash from a quit and says which build crashed where:
+   the build ID and pid in the start banner, a "clean exit rc=N" line on every controlled way
+   out, faulthandler on the log, and hooks that date and name the thread of an exception that
+   escaped a Qt slot or a Python thread. See _install_crash_diagnostics.
 """
 from __future__ import annotations
 
+import atexit
+import faulthandler
 import os
 import sys
+import threading
 import traceback
 from datetime import datetime
 
@@ -50,6 +57,46 @@ _MAX_LOG_BYTES = 2 * 1024 * 1024
 # is what tells a LATER instance "someone is writing to nanoscope.log right now, do not rename it
 # out from under them". Closing this fd (or letting it be garbage-collected) would drop the lock.
 _LOG_LOCK_FD: int | None = None
+
+# The log as _redirect_stdio_to_log opened it (append mode), also kept for the whole process:
+# faulthandler writes a crash's traceback through this descriptor from its signal handler, when
+# no Python code can run any more, and the exit line and the exception hooks write here even if
+# something rebinds sys.stderr.
+_LOG_FILE = None
+_EXIT_LOGGED = False
+
+
+def _build_id() -> str:
+    """Which build is writing the log, for the start banner: "source" for an unfrozen run.
+
+    A frozen app reads the NanoScopeBuildID its own bundle's Info.plist carries (the value an
+    owner can read back with `defaults read`), else the _build_info.json PyInstaller placed under
+    nanoscope/ (Windows has no Info.plist; About reads the same record). Both are written from the
+    one build record by NanoScope.spec. An ID, never a path.
+    """
+    if not getattr(sys, "frozen", False):
+        return "source"
+    try:
+        import plistlib
+
+        contents = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
+        with open(os.path.join(contents, "Info.plist"), "rb") as fh:
+            found = plistlib.load(fh).get("NanoScopeBuildID")
+        if isinstance(found, str) and found:
+            return found
+    except Exception:
+        pass
+    try:
+        import json
+
+        record = os.path.join(sys._MEIPASS, "nanoscope", "_build_info.json")
+        with open(record, encoding="utf-8") as fh:
+            found = json.load(fh).get("build_id")
+        if isinstance(found, str) and found:
+            return found
+    except Exception:
+        pass
+    return "unknown"
 
 
 def _lock(fd: int, exclusive: bool, blocking: bool) -> bool:
@@ -102,7 +149,7 @@ def _redirect_stdio_to_log() -> str:
     Rotation is therefore skipped, never guessed at, whenever it could not be done safely — and
     the skip is written into the log rather than being silent.
     """
-    global _LOG_LOCK_FD
+    global _LOG_LOCK_FD, _LOG_FILE
     try:
         os.makedirs(_LOG_DIR, exist_ok=True)
 
@@ -141,7 +188,10 @@ def _redirect_stdio_to_log() -> str:
                     " and split that instance's log]\n")
 
         log = open(_LOG_PATH, "a", buffering=1, encoding="utf-8", errors="replace")
-        log.write(f"\n===== {APP_NAME} start {datetime.now().isoformat(timespec='seconds')} =====\n")
+        _LOG_FILE = log
+        # The pid pairs this banner with its own exit line when two instances share the log.
+        log.write(f"\n===== {APP_NAME} start {datetime.now().isoformat(timespec='seconds')}"
+                  f" pid={os.getpid()} build={_build_id()} =====\n")
         if note:
             log.write(note)
         log.flush()
@@ -275,6 +325,89 @@ def _report_fatal(exc: BaseException) -> None:
         pass
 
 
+def _exit_code(code) -> int:
+    """The exit status `raise SystemExit(code)` gives the process (None is 0, a message is 1)."""
+    if code is None:
+        return 0
+    return code if isinstance(code, int) else 1
+
+
+def _log_clean_exit(rc: int | None) -> None:
+    """Write the "clean exit" line, once: this process is ending under its own control.
+
+    A start banner whose pid has no such line after it marks a crash, a force quit or a power
+    loss. `rc` is the exit code; None means the caller cannot know it (atexit, reached by a
+    sys.exit inside the event loop, which PySide6 turns into an exit that never returns from
+    exec). Called from main() and atexit here, and through nanoscope.clean_exit by the os._exit
+    in gui.worker_thread, which skips atexit.
+    """
+    global _EXIT_LOGGED
+    if _EXIT_LOGGED or _LOG_FILE is None:
+        return
+    _EXIT_LOGGED = True
+    try:
+        _LOG_FILE.write(f"===== {APP_NAME} clean exit rc={'unknown' if rc is None else rc}"
+                        f" {datetime.now().isoformat(timespec='seconds')} pid={os.getpid()} =====\n")
+        _LOG_FILE.flush()
+    except Exception:
+        pass
+
+
+def _log_unhandled(exc_type, exc, tb, thread_name: str) -> None:
+    """Write a dated traceback that names its thread and pid to the log. Never raises."""
+    try:
+        out = _LOG_FILE or sys.stderr
+        out.write(f"----- unhandled {exc_type.__name__} in thread {thread_name!r}"
+                  f" {datetime.now().isoformat(timespec='seconds')} pid={os.getpid()} -----\n")
+        out.write("".join(traceback.format_exception(exc_type, exc, tb)))
+        out.flush()
+    except Exception:
+        pass
+
+
+def _install_crash_diagnostics() -> None:
+    """After the stdio redirect: make the log say how this process ended, and where it crashed.
+
+    * faulthandler on the log. A segfault or a qFatal abort in Qt or another C/C++ library kills
+      the process before Python can report anything, so the log used to just stop. Now it ends
+      in "Fatal Python error: Segmentation fault" (or "Aborted") and every thread's Python stack.
+      faulthandler re-raises the signal afterwards, so macOS still writes its own crash report.
+    * sys.excepthook and threading.excepthook. An exception that escapes a Qt slot does not end
+      the app: PySide6 hands it to sys.excepthook and carries on. The default hook prints a bare
+      traceback among Qt's chatter; these date it and name the thread and pid first. A hook
+      installed before these still runs after them. The interpreter's own default does not: it
+      would print the same traceback into the same log a second time.
+    * the clean-exit line on a way out that never returns to main(): atexit, for a sys.exit inside
+      the event loop. (main() arms nanoscope.clean_exit for gui.worker_thread's os._exit.)
+    Each step stands alone and none may raise: diagnostics must never be what stops the app.
+    """
+    try:
+        faulthandler.enable(file=_LOG_FILE or sys.stderr, all_threads=True)
+    except Exception:
+        pass  # no log and no usable stderr (a windowed launch whose redirect failed)
+
+    previous = sys.excepthook
+
+    def _excepthook(exc_type, exc, tb) -> None:
+        _log_unhandled(exc_type, exc, tb, threading.current_thread().name)
+        if previous is not sys.__excepthook__:
+            previous(exc_type, exc, tb)
+
+    sys.excepthook = _excepthook
+
+    previous_thread_hook = threading.excepthook
+
+    def _thread_excepthook(args) -> None:
+        if not issubclass(args.exc_type, SystemExit):  # the default is silent about it too
+            name = args.thread.name if args.thread is not None else "<unknown>"
+            _log_unhandled(args.exc_type, args.exc_value, args.exc_traceback, name)
+        if previous_thread_hook is not threading.__excepthook__:
+            previous_thread_hook(args)
+
+    threading.excepthook = _thread_excepthook
+    atexit.register(_log_clean_exit, None)
+
+
 def main() -> int:
     # Before ANY import that could pull in matplotlib, and before either branch below: the last
     # runtime hook to touch MPLCONFIGDIR is PyInstaller's, not ours. See _restore_mpl_cache_dir.
@@ -292,11 +425,19 @@ def main() -> int:
         return nanoscope_selftest.run(args)
 
     _redirect_stdio_to_log()
+    _install_crash_diagnostics()
     if mpl_note:
         print(mpl_note)
     print(f"{APP_NAME} frozen={getattr(sys, 'frozen', False)} python={sys.version.split()[0]}")
     print(f"executable={sys.executable}")
     print(f"QT_PLUGIN_PATH={os.environ.get('QT_PLUGIN_PATH', '<unset>')}")
+    try:
+        from nanoscope import clean_exit
+
+        # A quit over a worker that will not stop leaves through os._exit, which skips atexit.
+        clean_exit.arm(_log_clean_exit)
+    except Exception:  # noqa: BLE001 - a diagnostic never stops the app; that quit loses its line
+        pass
     try:
         from nanoscope.gui.app import create_app, main as app_main
 
@@ -305,11 +446,15 @@ def main() -> int:
         create_app(sys.argv)
         relay = _install_file_open_relay(sys.argv)  # noqa: F841 - must outlive main()
 
-        return int(app_main(sys.argv))
+        rc = int(app_main(sys.argv))
+        _log_clean_exit(rc)
+        return rc
     except BaseException as exc:  # noqa: BLE001 - this is the top of the stack
         if isinstance(exc, SystemExit):
+            _log_clean_exit(_exit_code(exc.code))
             raise
         _report_fatal(exc)
+        _log_clean_exit(1)
         return 1
 
 

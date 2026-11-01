@@ -40,14 +40,20 @@ from .worker_thread import (
 __all__ = [
     "DEFAULT_IDLE_MS",
     "DEFAULT_MAX_MS",
+    "DEFAULT_RETRY_MS",
     "RecoveryController",
 ]
 
 
-# Fifteen seconds makes an ordinary annotation burst one recovery transaction,
-# while the sixty-second ceiling bounds loss during uninterrupted curation.
-DEFAULT_IDLE_MS = 15_000
-DEFAULT_MAX_MS = 60_000
+# Five seconds still makes an annotation burst one recovery transaction, and the
+# twenty-second ceiling bounds loss during uninterrupted curation.  They were 15 s / 60 s
+# until the recoverability check (s1-s3) lost up to a minute of curation to a crash;
+# a capture costs 8-30 ms and a write 15-50 ms on 5k-50k-row tables.
+DEFAULT_IDLE_MS = 5_000
+DEFAULT_MAX_MS = 20_000
+# After a failed capture or write, try again on this beat without waiting for the next
+# edit (s12: a failure used to leave recovery off until the user touched something).
+DEFAULT_RETRY_MS = 30_000
 
 
 @dataclass(frozen=True)
@@ -138,19 +144,27 @@ class RecoveryController(QtCore.QObject):
         *,
         idle_ms: int = DEFAULT_IDLE_MS,
         max_ms: int = DEFAULT_MAX_MS,
+        retry_ms: int = DEFAULT_RETRY_MS,
     ) -> None:
         super().__init__(parent)
         if not callable(snapshot_factory):
             raise TypeError("snapshot_factory must be callable")
         if not callable(persist):
             raise TypeError("persist must be callable")
-        if int(idle_ms) <= 0 or int(max_ms) <= 0:
+        if int(idle_ms) <= 0 or int(max_ms) <= 0 or int(retry_ms) <= 0:
             raise ValueError("recovery timer intervals must be positive")
 
         self._snapshot_factory = snapshot_factory
         self._persist = persist
         self._idle_ms = int(idle_ms)
         self._max_ms = int(max_ms)
+        self._retry_ms = int(retry_ms)
+
+        # Separate from the edit timers on purpose: a backoff is not an edit, and
+        # ``_stop_timers`` (every capture) must not cancel the one retry left armed.
+        self._retry_timer = QtCore.QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self.flush)
 
         self._idle_timer = QtCore.QTimer(self)
         self._idle_timer.setSingleShot(True)
@@ -196,6 +210,13 @@ class RecoveryController(QtCore.QObject):
     @property
     def max_interval_ms(self) -> int:
         return self._max_ms
+
+    @property
+    def retry_interval_ms(self) -> int:
+        return self._retry_ms
+
+    def retry_scheduled(self) -> bool:
+        return self._retry_timer.isActive()
 
     def is_busy(self) -> bool:
         return self._thread is not None
@@ -303,6 +324,7 @@ class RecoveryController(QtCore.QObject):
         self._scheduled_revision = None
         self._pending = None
         self._stop_timers()
+        self._retry_timer.stop()
 
     # A compact name for callers that do not need to spell the reason for the reset.
     reset = reset_session
@@ -318,6 +340,7 @@ class RecoveryController(QtCore.QObject):
         self._scheduled_revision = None
         self._pending = None
         self._stop_timers()
+        self._retry_timer.stop()
         worker, thread = self._worker, self._thread
         was_busy = thread is not None
         self._worker, self._thread = None, None
@@ -346,11 +369,12 @@ class RecoveryController(QtCore.QObject):
             raw = self._snapshot_factory(requested)
         except Exception as exc:  # noqa: BLE001 - gather failures are reportable too
             if generation == self._generation and not self._retired:
-                # Retain it for an explicit flush or the next edit, but do not
-                # automatically spin on a deterministic gather failure.
+                # Retain it for an explicit flush, the next edit or the retry beat, but
+                # do not spin on a deterministic gather failure.
                 current = self._scheduled_revision
                 self._scheduled_revision = (
                     requested if current is None else max(requested, current))
+                self._retry_timer.start(self._retry_ms)
                 self.failed.emit(requested, f"{type(exc).__name__}: {exc}")
             return False
 
@@ -365,10 +389,12 @@ class RecoveryController(QtCore.QObject):
             actual, snapshot = self._resolve_snapshot(raw, requested)
         except Exception as exc:  # noqa: BLE001 - malformed factories fail as data, not Qt
             self._scheduled_revision = requested
+            self._retry_timer.start(self._retry_ms)
             self.failed.emit(requested, f"{type(exc).__name__}: {exc}")
             return False
         if actual < requested:
             self._scheduled_revision = requested
+            self._retry_timer.start(self._retry_ms)
             self.failed.emit(
                 requested,
                 f"Recovery snapshot revision {actual} is older than requested "
@@ -490,6 +516,10 @@ class RecoveryController(QtCore.QObject):
 
         if candidate.generation == self._generation and not self._retired:
             self._settled_revision = max(self._settled_revision, candidate.revision)
+            # An older write landing does not cover a newer capture that failed while
+            # it ran: that one keeps its retry beat.
+            if not self.has_pending():
+                self._retry_timer.stop()
             self.saved.emit(candidate.revision, result)
         else:
             self.staleSaved.emit(candidate.generation, candidate.revision, result)
@@ -517,6 +547,8 @@ class RecoveryController(QtCore.QObject):
             self._pending = failed_candidate
         self._retire_active(final=successor is None)
         if report:
+            # Retried on its own beat: the next edit may be a long way off.
+            self._retry_timer.start(self._retry_ms)
             self.failed.emit(failed_candidate.revision, message)
         if (successor is not None and not self._retired
                 and not self._launch(successor)):

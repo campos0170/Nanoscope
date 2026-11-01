@@ -2664,25 +2664,43 @@ completely intact rather than a truncated one. Three consequences worth knowing:
 ## 11b. Recovering unsaved work after a crash
 
 NanoScope keeps a private emergency checkpoint while your analysis is unsaved. It takes one after
-about **15 seconds without another edit**; if you keep curating continuously, a **60-second maximum**
-prevents each new click from postponing the checkpoint forever. The checkpoint contains the same
+about **5 seconds without another edit**; if you keep curating continuously, a **20-second maximum**
+prevents each new click from postponing the checkpoint forever. It also takes one at once when you
+export events, when a detection or batch run starts, and when you switch to another window or
+application. The status bar shows **Recovery copy saved HH:MM** after each one. If a checkpoint
+cannot be written, a banner says so and stays until a checkpoint of that work succeeds (NanoScope
+retries every 30 seconds); until then, save the project. If another NanoScope window or tool
+retired this window's recovery folder, the banner says crash recovery is off for as long as the
+window stays open. The checkpoint contains the same
 restorable analysis state as a project — calibrations, view state, detector tables, curation,
 labels, fits, segments and manual measurements. As with a project, recordings are path references;
 their raw signal is not duplicated.
 
 After NanoScope or the computer stops unexpectedly, the next launch presents **Recover unsaved
-NanoScope work**. Read the project name (or *unnamed analysis*) and revision, then choose:
+NanoScope work**. It names the work: the project (or *unnamed analysis*), the recordings, each event
+table with how many of its events are accepted, when it was last edited, and the NanoScope build that
+wrote it. A checkpoint that belongs to another NanoScope window that is still open is never offered.
+Choose:
 
 - **Recover** — open that checkpoint. The title begins with `•` and Gallery/Inspector say
   **Unsaved changes**. This is intentional: the private checkpoint has not become a durable project.
   Press **Ctrl/⌘+S** and choose a `.nanoscope` file to keep it. If the recovered work came from a
   named project, that path is suggested, but NanoScope does not silently overwrite it.
-- **Discard** — permanently remove both checkpoint generations for only the session named in the
-  question. If another crashed NanoScope window also left work, it is offered separately.
+- **Discard** — move both checkpoint generations of only the session named in the question to the
+  **Discarded** folder inside the recovery folder, where they are kept for 7 days. If another
+  crashed NanoScope window also left work, it is offered separately.
 - **Show in Finder** — reveal the private checkpoint folder, then return to the same Recover/Discard
   question. This does not consume or modify the checkpoint.
 - **Not now** (or close the question) — leave the checkpoint untouched and continue with an empty
-  window. It is offered again on a later launch.
+  window. It is offered again on a later launch; a checkpoint holding work is kept for 90 days.
+
+If a checkpoint cannot be read by this build (it was damaged, or a newer NanoScope wrote it), the
+launch says so (*N recovery copies could not be read by this build*), with **Show in Finder**. Those
+files are kept; open them with the newer build. Discard at the close question (or before Open/New)
+after a recovery also moves the checkpoints to Discarded for 7 days. If a recording of a recovered
+or reopened project is missing, or is found but cannot be read, the banner says its event tables
+were kept, with their row counts, and that they will be saved with the project; put the file back
+at the same path and reopen to see them.
 
 NanoScope retains two complete generations. If the newest file was interrupted or damaged, the app
 validates it and offers the preceding good generation instead. A successful project save removes
@@ -2692,6 +2710,21 @@ that save was finishing remains unsaved and recoverable. A cancelled or failed s
 Treat recovery as a safety net, not as file management or a backup. Its retention is bounded, it
 does not include undo/redo history, and the private files are not designed for sharing. Save a named
 `.nanoscope` project whenever you reach a point you need to reproduce, move, or archive.
+
+**If NanoScope crashed.** Every launch writes a start line to
+`~/Library/Logs/NanoScope/nanoscope.log` (Windows: `%LOCALAPPDATA%\NanoScope\Logs\nanoscope.log`)
+naming the build and the process number (pid), and a *clean exit* line with the same pid when
+NanoScope quits normally.
+- A start line with no matching *clean exit* line means that session crashed or was force-quit.
+- After a crash the log usually ends with *Fatal Python error* (on Windows, *Windows fatal
+  exception*) and the place in the program where it happened.
+- A *Fatal Python error* after the clean exit line means NanoScope crashed while shutting down,
+  after its window had closed.
+- A nonzero `rc` on the clean exit line means it stopped on an error it reported, shown above that
+  line.
+
+Send `nanoscope.log` and `nanoscope.log.1` with any crash report. Before relaunching after a crash,
+copy the recovery folder (`~/Library/Application Support/NanoScope/Recovery`) if the work matters.
 
 ---
 

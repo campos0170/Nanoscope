@@ -977,7 +977,7 @@ class MainWindow(QtWidgets.QMainWindow):
     projectSaveStateChanged = QtCore.Signal(str, bool)
 
     def __init__(self, parent=None, *, recovery_root=None,
-                 recovery_enabled: bool = True) -> None:
+                 recovery_enabled: bool | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("NanoScope")
         self.resize(1440, 880)
@@ -1084,7 +1084,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_revision: int = 0
         self._explicit_saved_revision: int = 0
         self._recovery_revision: int = 0
-        self._recovery_enabled = bool(recovery_enabled)
+        # OFF for a bare ``MainWindow()``: scripts, probes and tests construct windows
+        # this way, and 14 of 20 lineages in one owner's real Recovery folder were theirs,
+        # each one a fake "crashed session" the owner then had to Discard.  The app's
+        # launch path (gui.app.main, which the packaged app and ``python -m nanoscope``
+        # both go through) asks for it; an explicit ``recovery_root`` is an opt-in too.
+        self._recovery_enabled = (recovery_root is not None if recovery_enabled is None
+                                  else bool(recovery_enabled))
         self._recovery_root = recovery_root
         self._recovery_store = None
         self._recovery_controller = None
@@ -1092,6 +1098,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_suggested_project_path: str | None = None
         self._startup_recovery_checked = False
         self._restore_is_recovery = False
+        #: Recovery health (see :meth:`_on_recovery_saved` / :meth:`_on_recovery_failed`):
+        #: when the last copy landed, and whether the newest attempt failed (and at
+        #: which revision: an older write landing later does not clear it).
+        self._recovery_saved_at: float | None = None
+        self._recovery_failing = False
+        self._recovery_failed_revision = 0
+        self._recovery_label: QtWidgets.QLabel | None = None
+        self._recovery_bar: _InfoBar | None = None
+        self._recovery_flush_queued = False
         # The top-level window that initiated the current synchronous project-save flow.
         # Gallery/Inspector emit intent only; MainWindow still owns every chooser, warning,
         # conflict check and write. Remembering the initiator keeps native macOS sheets in
@@ -9161,6 +9176,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Wrote {len(accepted)} accepted event(s) of {total} to "
             f"{out['data'].name} (+ provenance {out['meta'].name}).{left_out}", 8000)
+        # The recovery copy must never be older than a CSV that just left the app (s4).
+        self._flush_recovery_now()
         self._disclose_identity_notes("Export events", list(out.values()))
 
     @staticmethod
@@ -11476,7 +11493,9 @@ class MainWindow(QtWidgets.QMainWindow):
             from ..core.recovery import RecoveryStore
             from .recovery_controller import RecoveryController
 
-            store = RecoveryStore(root=self._recovery_root)
+            # ``hold_liveness``: this session's live.lock tells a second instance that
+            # the lineage is a running window's, not a crash (sweep 11, s7).
+            store = RecoveryStore(root=self._recovery_root, hold_liveness=True)
             controller = RecoveryController(
                 self._capture_recovery_snapshot,
                 lambda snapshot, revision, _store=store:
@@ -11494,6 +11513,60 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._recovery_store = store
         self._recovery_controller = controller
+
+        # Recovery health, always on screen: when the last copy landed, or that it did
+        # not.  A failure also raises its own banner, which stays until a copy lands.
+        self._recovery_label = QtWidgets.QLabel("")
+        self._recovery_label.setObjectName("recoveryHealthLabel")
+        self.statusBar().addPermanentWidget(self._recovery_label)
+        self._recovery_bar = _InfoBar()
+        self._recovery_bar.setObjectName("recoveryFailureBar")
+        holder = self._info_bar.parentWidget()
+        lay = holder.layout() if holder is not None else None
+        if lay is not None:
+            lay.insertWidget(lay.indexOf(self._info_bar) + 1, self._recovery_bar)
+
+        # Natural flush points (s4: an exported CSV was newer than the recovery copy).
+        # A run is flushed as it starts, before its result can land; leaving the app
+        # or the window is coalesced through _request_recovery_flush.
+        self._analysis_controller.started.connect(self._flush_recovery_now)
+        self._batch_controller.started.connect(self._flush_recovery_now)
+        app = QtGui.QGuiApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_application_state_changed)
+
+    def _flush_recovery_now(self, *_args) -> bool:
+        """Capture the newest unsnapshotted revision now; the write runs on the worker."""
+        controller = self._recovery_controller
+        flush = getattr(controller, "flush", None)
+        if not callable(flush):
+            return False
+        try:
+            return bool(flush())
+        except Exception:  # noqa: BLE001 - a flush point never interrupts the user's action
+            return False
+
+    def _request_recovery_flush(self) -> None:
+        """Coalesce bursts (focus ping-pong, app switching) into one flush next turn."""
+        if self._recovery_controller is None or self._recovery_flush_queued:
+            return
+        self._recovery_flush_queued = True
+        QtCore.QTimer.singleShot(0, self, self._run_requested_recovery_flush)
+
+    def _run_requested_recovery_flush(self) -> None:
+        self._recovery_flush_queued = False
+        self._flush_recovery_now()
+
+    @QtCore.Slot(QtCore.Qt.ApplicationState)
+    def _on_application_state_changed(self, state) -> None:
+        if state != QtCore.Qt.ApplicationActive:
+            self._request_recovery_flush()
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802
+        """Flush recovery when this window stops being the active one."""
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.ActivationChange and not self.isActiveWindow():
+            self._request_recovery_flush()
 
     def _capture_recovery_snapshot(self, requested_revision: int):
         """Return an immutable snapshot for a recovery worker, on the GUI thread.
@@ -11533,19 +11606,99 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(int, object)
     def _on_recovery_saved(self, revision: int, candidate) -> None:
-        self._recovery_revision = max(self._recovery_revision, int(revision))
         # A real project save may have committed while this older worker was finishing.
         # Re-apply the retirement fence after the landing so that completion order cannot
         # resurrect a revision the user already saved explicitly.
         if int(revision) <= self._explicit_saved_revision:
+            self._recovery_revision = max(self._recovery_revision, int(revision))
             self._retire_recovery_through(self._explicit_saved_revision)
+            return
+        if candidate is None:
+            # The store refused a revision no save of ours covers: its lineage was
+            # retired from outside (sweep 11, s7: another instance's Discard).  That
+            # used to vanish here, and every later copy with it.  The store will refuse
+            # every later copy too, so the banner promises no retry.
+            self._on_recovery_failed(
+                int(revision),
+                "its recovery folder was retired by another NanoScope window or tool",
+                retried=False)
+            return
+        self._recovery_revision = max(self._recovery_revision, int(revision))
+        import time as _time
+
+        self._recovery_saved_at = _time.time()
+        if self._recovery_failing and int(revision) < self._recovery_failed_revision:
+            # An older write finishing after a newer capture failed: that newer work is
+            # still uncovered, so the warning stays (the controller's retry stays armed).
+            return
+        self._reset_recovery_health(saved=True)
+
+    def _reset_recovery_health(self, *, saved: bool = False) -> None:
+        """Clear the failure banner; the label says ``saved HH:MM`` or nothing."""
+        self._recovery_failing = False
+        self._recovery_failed_revision = 0
+        if not saved:
+            self._recovery_saved_at = None
+        if self._recovery_bar is not None:
+            self._recovery_bar.hide()
+        if saved:
+            self._show_recovery_health()
+        elif self._recovery_label is not None:
+            self._recovery_label.setText("")
+            self._recovery_label.setToolTip("")
+            self._recovery_label.setStyleSheet("")
 
     @QtCore.Slot(int, str)
-    def _on_recovery_failed(self, _revision: int, message: str) -> None:
-        if self._visible_project_dirty():
-            self.statusBar().showMessage(
-                f"Could not update the crash-recovery copy: {message}. "
-                "Save the project manually.", 12000)
+    def _on_recovery_failed(self, revision: int, message: str, *,
+                            retried: bool = True) -> None:
+        """A failed copy is a standing condition, not a 12-second message (s12).
+
+        The banner stays until a copy of this revision or a newer one lands (the
+        controller retries every 30 s without waiting for an edit); the status label
+        keeps saying so if it is dismissed.
+        """
+        if not self._visible_project_dirty():
+            return
+        first = not self._recovery_failing
+        self._recovery_failing = True
+        self._recovery_failed_revision = max(self._recovery_failed_revision, int(revision))
+        self._show_recovery_health(message)
+        # isHidden, not isVisible: only the user's ✕ hides it, whatever the window's state.
+        if self._recovery_bar is not None and (first or not self._recovery_bar.isHidden()):
+            since = self._recovery_time_text(self._recovery_saved_at)
+            covered = (f"The last copy is from {since}" if since
+                       else "No copy of this session's work exists yet")
+            then = ("NanoScope tries again every 30 seconds. Until it succeeds, use Save "
+                    "Project to keep this work." if retried else
+                    "Crash recovery is off for as long as this window stays open; use Save "
+                    "Project to keep this work.")
+            self._recovery_bar.show_message(
+                f"Crash recovery could not save a copy of your unsaved work ({message}). "
+                f"{covered}; {then}")
+        self.statusBar().showMessage(
+            f"Could not update the crash-recovery copy: {message}. "
+            "Save the project manually.", 12000)
+
+    @staticmethod
+    def _recovery_time_text(stamp: float | None) -> str:
+        if stamp is None:
+            return ""
+        from datetime import datetime
+
+        return datetime.fromtimestamp(float(stamp)).strftime("%H:%M")
+
+    def _show_recovery_health(self, error: str | None = None) -> None:
+        label = self._recovery_label
+        if label is None:
+            return
+        if self._recovery_failing:
+            label.setText("Recovery copy not saved")
+            label.setStyleSheet("color:#e0a040;")
+            label.setToolTip(f"The last attempt failed: {error}" if error else "")
+        elif self._recovery_saved_at is not None:
+            label.setText(f"Recovery copy saved {self._recovery_time_text(self._recovery_saved_at)}")
+            label.setStyleSheet("")
+            label.setToolTip("A crash-recovery copy of the unsaved work was written then.")
 
     @QtCore.Slot(int, int, object)
     def _on_stale_recovery_saved(self, _generation: int, _revision: int,
@@ -11573,31 +11726,82 @@ class MainWindow(QtWidgets.QMainWindow):
         value = getattr(candidate, name, default)
         return default if value is None else value
 
-    def _choose_recovery_action(self, candidate) -> str | None:
-        """Offer Recover / Discard / Show in Finder for one validated candidate."""
+    @staticmethod
+    def _recovery_when_text(when) -> str:
+        try:
+            from datetime import datetime
+            dt = datetime.fromtimestamp(float(when)).astimezone()
+            return (f"{dt:%b} {dt.day}, {dt:%Y} at "
+                    f"{dt.strftime('%I:%M:%S %p').lstrip('0')}")
+        except (ValueError, TypeError, OSError):
+            return str(when)
+
+    @staticmethod
+    def _recovery_writer_text(writer) -> str:
+        """``NanoScope 1.2 (build …)``, plus who ran it when it was not the app."""
+        if not isinstance(writer, Mapping):
+            return ""
+        text = f"NanoScope {writer.get('version') or '?'}"
+        build = writer.get("build_id")
+        if build:
+            text += f" (build {build})"
+        if writer.get("frozen") is False:
+            text += f", run from Python ({writer.get('executable') or 'unknown interpreter'})"
+        return text
+
+    def _recovery_candidate_detail(self, candidate) -> str:
+        """Name the work: recordings, tables with row counts, last edit and the build.
+
+        The prompt used to say only "unsaved work from an unnamed analysis (revision N)",
+        which no one could tell from a stray script's copy; the incident check found the
+        owner discarding fourteen of them about a second apart.
+        """
         source = self._candidate_value(candidate, "source_project_path", None)
         revision = self._candidate_value(candidate, "revision", "?")
         when = self._candidate_value(candidate, "timestamp", None)
         label = Path(source).name if source else "an unnamed analysis"
         detail = f"NanoScope found unsaved work from {label} (revision {revision})"
         if when:
-            try:
-                from datetime import datetime
-                dt = datetime.fromtimestamp(float(when)).astimezone()
-                shown_when = (f"{dt:%b} {dt.day}, {dt:%Y} at "
-                              f"{dt.strftime('%I:%M:%S %p').lstrip('0')}")
-            except (ValueError, TypeError, OSError):
-                shown_when = str(when)
-            detail += f", captured {shown_when}"
+            detail += f", last edited {self._recovery_when_text(when)}"
         detail += "."
+        summary = getattr(candidate, "summary", None)
+        if summary is not None:
+            recordings = list(getattr(summary, "recordings", ()) or ())
+            if recordings:
+                shown = ", ".join(recordings[:4])
+                more = f" and {len(recordings) - 4} more" if len(recordings) > 4 else ""
+                detail += f"\nRecordings: {shown}{more}."
+            tables = list(getattr(summary, "tables", ()) or ())
+            if tables:
+                lines = [f"{_DETECTOR_LABELS.get(module, module)} on {name}: "
+                         f"{accepted} of {rows} event(s) accepted"
+                         for module, name, rows, accepted in tables[:5]]
+                if len(tables) > 5:
+                    lines.append(f"and {len(tables) - 5} more table(s)")
+                detail += "\nTables: " + "; ".join(lines) + "."
+            elif not recordings:
+                detail += "\nIt holds no recordings or event tables."
+            n_measurements = int(getattr(summary, "measurements", 0) or 0)
+            if n_measurements:
+                detail += f"\nHand measurements: {n_measurements}."
+        writer = self._recovery_writer_text(getattr(candidate, "writer", None))
+        if writer:
+            detail += f"\nWritten by {writer}."
+        return detail
 
+    def _choose_recovery_action(self, candidate) -> str | None:
+        """Offer Recover / Discard / Show in Finder for one validated candidate."""
+        from ..core.recovery import DEFAULT_DISCARD_KEEP_SECONDS
+
+        detail = self._recovery_candidate_detail(candidate)
+        keep_days = int(round(DEFAULT_DISCARD_KEEP_SECONDS / 86400))
         box = QtWidgets.QMessageBox(self)
         box.setIcon(QtWidgets.QMessageBox.Warning)
         box.setWindowTitle("Recover unsaved NanoScope work")
         box.setText("NanoScope did not finish its previous session cleanly.")
         box.setInformativeText(
-            detail + "\n\nRecover opens that snapshot as unsaved work. Discard removes "
-            "both recovery generations permanently.")
+            detail + "\n\nRecover opens that snapshot as unsaved work. Discard moves it "
+            f"to the Discarded folder beside it, where it is kept for {keep_days} days.")
         recover = box.addButton("Recover", QtWidgets.QMessageBox.AcceptRole)
         discard = box.addButton("Discard", QtWidgets.QMessageBox.DestructiveRole)
         show = box.addButton("Show in Finder", QtWidgets.QMessageBox.ActionRole)
@@ -11613,6 +11817,35 @@ class MainWindow(QtWidgets.QMainWindow):
         if clicked is show:
             return _RECOVERY_SHOW
         return None
+
+    def _unreadable_recovery_text(self, unreadable) -> str:
+        count = len(unreadable)
+        writers = sorted({text for text in (
+            self._recovery_writer_text(getattr(item, "writer", None)) for item in unreadable)
+            if text})
+        text = (f"{count} recovery cop{'y' if count == 1 else 'ies'} could not be read by "
+                f"this build")
+        if writers:
+            text += f" (written by {'; '.join(writers)})"
+        text += (". They are kept, not deleted: a newer NanoScope may open them, and Show in "
+                 "Finder shows where they are. Reason: "
+                 + str(getattr(unreadable[0], "reason", "unknown")) + ".")
+        return text
+
+    def _report_unreadable_recoveries(self, unreadable) -> str | None:
+        """Say how many copies this build cannot read; Show in Finder or OK."""
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Information)
+        box.setWindowTitle("Recover unsaved NanoScope work")
+        box.setText(f"{len(unreadable)} recovery cop"
+                    f"{'y' if len(unreadable) == 1 else 'ies'} could not be read by this build.")
+        box.setInformativeText(self._unreadable_recovery_text(unreadable))
+        show = box.addButton("Show in Finder", QtWidgets.QMessageBox.ActionRole)
+        ok = box.addButton(QtWidgets.QMessageBox.Ok)
+        box.setDefaultButton(ok)
+        box.setEscapeButton(ok)
+        box.exec()
+        return _RECOVERY_SHOW if box.clickedButton() is show else None
 
     def _candidate_path(self, candidate) -> Path | None:
         for name in ("path", "envelope_path", "payload_path", "directory"):
@@ -11637,11 +11870,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if store is None:
             return
         try:
-            candidates = store.list_candidates()
+            scan = getattr(store, "scan", None)
+            if callable(scan):
+                found = scan()
+                candidates, unreadable = list(found.candidates), list(found.unreadable)
+            else:
+                candidates, unreadable = store.list_candidates(), []
         except Exception as exc:  # noqa: BLE001 - discovery cannot prevent normal use
             self.statusBar().showMessage(
                 f"Could not inspect crash-recovery copies: {exc}.", 12000)
             return
+        # Never hidden in silence (s11c/d): a truncated copy, or one from a newer build
+        # that this one cannot read, is still somebody's work.
+        if unreadable:
+            while self._report_unreadable_recoveries(unreadable) == _RECOVERY_SHOW:
+                self._show_recovery_in_finder(unreadable[0])
         while candidates:
             candidate = candidates[0]
             action = self._choose_recovery_action(candidate)
@@ -11711,7 +11954,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _discard_recovery(self, candidate=None) -> None:
-        """Permanently retire the surfaced lineage and this session's queued copies."""
+        """Retire the surfaced lineage and this session's queued copies, for good from
+        discovery's point of view, but kept under ``Discarded/`` for seven days: every
+        caller is a user's Discard (the startup prompt, the close guard, the guard before
+        Open/New), and one click there must not be beyond undoing."""
         controller = self._recovery_controller
         if controller is not None:
             reset = getattr(controller, "reset_session", None)
@@ -11719,20 +11965,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 reset()
         store = self._recovery_store
         if store is not None:
+            discard_through = getattr(store, "discard_through", None)
+            if not callable(discard_through):
+                discard_through = store.retire_through
             try:
                 if candidate is not None:
                     if getattr(candidate, "session_id", None) == store.session_id:
-                        store.retire_through(int(getattr(candidate, "revision", 0)))
+                        discard_through(int(getattr(candidate, "revision", 0)))
                     else:
                         # A surfaced prior-process lineage will never be reused; its
-                        # permanent discard tombstone makes the user's choice definitive.
+                        # discard tombstone makes the user's choice definitive.
                         store.discard(candidate)
                 # This process DOES continue after Open Project.  Fence its outgoing
                 # revisions, do not tombstone every future revision in the launch.
-                store.retire_through(int(self._session_revision))
+                discard_through(int(self._session_revision))
             except Exception as exc:  # noqa: BLE001 - report, but a close must remain possible
                 self.statusBar().showMessage(
                     f"Could not discard the crash-recovery copy: {exc}.", 12000)
+        # The copies went to Discarded/ and the work they guarded was let go: neither
+        # "saved HH:MM" nor a failure banner describes the session that follows.
+        self._reset_recovery_health()
         if candidate is None or candidate is self._recovered_candidate:
             self._recovered_candidate = None
 
@@ -11742,6 +11994,10 @@ class MainWindow(QtWidgets.QMainWindow):
             fence = getattr(controller, "retire_through", None)
             if callable(fence):
                 fence(int(revision))
+        if int(revision) >= self._session_revision and self._recovery_label is not None:
+            # The project file now holds everything: neither "saved HH:MM" (that copy
+            # is being retired) nor a failure banner describes anything any more.
+            self._reset_recovery_health()
         store = self._recovery_store
         if store is None:
             return
@@ -13298,16 +13554,38 @@ class MainWindow(QtWidgets.QMainWindow):
             # file that never moved, and threw away the one sentence that says what to do.
             gone = [p for p in self._restore_missing if p not in self._restore_refusals]
             refused = [p for p in self._restore_missing if p in self._restore_refusals]
+
+            # NOT "skipped, along with any of their results": either way they are carried
+            # (_capture_unrestorable) and the next save writes them back.  That sentence
+            # told a recovered session's user the work was gone, and the close guard's
+            # Discard then threw away a lineage that held it (s6 moved).
+            def held(paths) -> str:
+                missing = {str(p) for p in paths}
+                kept = [r for r in ((self._carried_over or {}).get("results") or ())
+                        if str(getattr(r, "doc_id", "")) in missing]
+                rows = accepted = 0
+                for record in kept:
+                    frame = getattr(record, "events", None)
+                    if frame is None:
+                        continue
+                    rows += int(len(frame))
+                    if "accepted" in frame.columns:
+                        accepted += int(frame["accepted"].fillna(False).astype(bool).sum())
+                if kept:
+                    return (f"Their {len(kept)} event table(s) ({rows} row(s), "
+                            f"{accepted} accepted) were kept and will be saved with the "
+                            f"project")
+                return "Everything recorded for them was kept and will be saved with the project"
+
             if gone:
                 names = ", ".join(Path(p).name for p in gone)
                 notes.append(
-                    f"{len(gone)} source file(s) could not be found and were "
-                    f"skipped, along with any of their results: {names}.")
+                    f"{len(gone)} source file(s) could not be found: {names}. {held(gone)}; "
+                    f"put the file(s) back at the same path and reopen to see them.")
             if refused:
                 notes.append(
-                    f"{len(refused)} source file(s) were found but could not be read, and "
-                    f"were skipped along with any of their results. Each one's reason, as "
-                    f"the reader gave it: " + "; ".join(
+                    f"{len(refused)} source file(s) were found but could not be read. "
+                    f"{held(refused)}. Each one's reason, as the reader gave it: " + "; ".join(
                         f"{Path(p).name} — {self._restore_refusals[p]}" for p in refused))
         if self._restore_lost_segments:
             notes.append(
@@ -15651,6 +15929,12 @@ class MainWindow(QtWidgets.QMainWindow):
         every unstopped thread and parks whatever survives, which is what keeps
         ``gui.app.main``'s final ``drain_detached()`` able to see it."""
         self._stop_owned_background_work()
+        # The recovery writer was stopped above; this session no longer claims its
+        # lineage as live (the kernel does the same on a crash).
+        store = self._recovery_store
+        release = getattr(store, "release_liveness", None)
+        if callable(release):
+            release()
         self._save_settings()
         return drain_worker_threads(_TEARDOWN_DRAIN_MS)
 

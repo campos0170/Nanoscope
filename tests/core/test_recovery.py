@@ -402,28 +402,43 @@ def test_loading_a_path_reused_for_a_new_generation_detects_the_change(tmp_path)
 
 
 def test_cleanup_bounds_old_sessions_but_never_the_live_one(tmp_path):
+    """The count bound pays with spent lineages only; a valid copy is never evicted by
+    count (sweep 11, s11a: a 'Not now' crash copy was gone after 20 later sessions)."""
     root = tmp_path / "recoveries"
-    stores = [RecoveryStore(root, session_id=sid, max_sessions=2,
-                            max_age_seconds=None)
+    stores = [RecoveryStore(root, session_id=sid, max_sessions=1,
+                            max_age_seconds=None, max_work_age_seconds=None)
               for sid in (SID1, SID2, SID3)]
     for n, store in enumerate(stores, 1):
         store.write(_state(str(n)), n)
         os.utime(store.session_directory, (float(n), float(n)))
-    # The third store's write cleanup already applies the bound. Running it again is
-    # idempotent and the live SID3 directory is protected.
     stores[2].cleanup(now=100)
     remaining = {p.name for p in root.iterdir() if p.is_dir()}
-    assert SID3 in remaining
-    assert len(remaining) <= 2
-    assert SID1 not in remaining
+    assert remaining == {SID1, SID2, SID3}
+
+    # Leftover retired generations are spent: they count, and the oldest goes.
+    for n, sid in ((1, SID1), (2, SID2)):
+        leftover = (root / sid / CURRENT_NAME).read_bytes()
+        stores[n - 1].retire_through(n)
+        (root / sid / CURRENT_NAME).write_bytes(leftover)   # an unlink that failed
+        os.utime(root / sid, (float(n), float(n)))
+    stores[2].cleanup(now=100)
+    remaining = {p.name for p in root.iterdir() if p.is_dir()}
+    assert remaining == {SID2, SID3}
 
 
 def test_cleanup_expires_old_lineages_by_age(tmp_path):
     root = tmp_path / "recoveries"
-    old = RecoveryStore(root, SID1, max_sessions=20, max_age_seconds=None)
+    old = RecoveryStore(root, SID1, max_sessions=20, max_age_seconds=None,
+                        max_work_age_seconds=None)
     old.write(_state(), 1)
     os.utime(old.session_directory, (10, 10))
-    live = RecoveryStore(root, SID2, max_sessions=20, max_age_seconds=50)
+    # Past the spent-lineage age but not the work age: a valid copy stays.
+    live = RecoveryStore(root, SID2, max_sessions=20, max_age_seconds=50,
+                         max_work_age_seconds=500)
+    assert live.cleanup(now=100) == 0
+    assert old.session_directory.exists()
+    live = RecoveryStore(root, SID2, max_sessions=20, max_age_seconds=50,
+                         max_work_age_seconds=50)
     assert live.cleanup(now=100) == 1
     assert not old.session_directory.exists()
 

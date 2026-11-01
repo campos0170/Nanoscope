@@ -238,7 +238,10 @@ def main(argv: list[str] | None = None) -> int:
     # constructing the whole widget tree, and so app.py never pulls a panel in at import time.
     from .main_window import MainWindow
 
-    window = MainWindow()
+    # Crash recovery is asked for HERE, the one launch path the packaged app and
+    # ``python -m nanoscope`` share. A bare MainWindow() (a script, a probe, a test) has it
+    # off, so it can never leave a fake "crashed session" in the user's Recovery folder.
+    window = MainWindow(recovery_enabled=True)
     window.show()
     rc = int(app.exec())
 

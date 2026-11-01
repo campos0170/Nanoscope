@@ -338,6 +338,34 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- **Crash recovery can no longer lose work by itself or through another window.** A user lost a
+  session to a crash with only an export left; the investigation found these gaps, now closed:
+  - **A second NanoScope window** could offer a running window's recovery as a crashed session,
+    and Discard deleted it. That window's later checkpoints were then dropped without a word. Each
+    window now holds a lock on its own recovery folder, released only when it exits or crashes,
+    and a locked folder is never offered, discarded or pruned.
+  - **Checkpoints are taken sooner:** after 5 s without an edit (was 15 s), at most every 20 s
+    (was 60 s), and at once when you export events, when a detection or batch run starts, and
+    when you switch away. An export could be newer than the last checkpoint.
+  - **Discard is no longer permanent:** the copies go to `Recovery/Discarded` for 7 days.
+  - **The prompt names the work:** recordings, event tables with accepted counts, the last edit
+    and the build.
+  - **Nothing is pruned or hidden silently.** A checkpoint holding work is kept 90 days and is
+    never pruned to make room. A damaged `retirement.json` no longer hides a valid one. Copies
+    this build cannot read are reported at launch.
+  - **A failed checkpoint stays visible:** a banner remains until one succeeds, the status bar
+    shows when the last one was saved, and NanoScope retries every 30 s.
+  - **A missing recording no longer reads as lost work:** the banner says its tables were kept
+    and will be saved with the project.
+  - **Scripts stay out of your recovery folder:** a `MainWindow()` built by a script or test no
+    longer writes there; only the app's own launch turns recovery on. Each checkpoint records the
+    build that wrote it.
+- **A crash can be traced afterwards.**
+  - The app log records the build id and process id at each start and a *clean exit* line at each
+    normal quit, so a crash can be told from a quit.
+  - A crash (segmentation fault or abort) leaves a Python stack trace in the log.
+  - An error the app survives, in a button, menu or background thread, is logged with its time
+    and thread.
 - **Re-measure keeps an old table's run.** On a table from a v1 or v2 project (no stored settings,
   its run known from the detector's own stamp), **Re-measure depths** stored only the open-pore
   estimator's settings as the table's run.

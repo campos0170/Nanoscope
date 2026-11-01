@@ -585,7 +585,7 @@ def test_quitting_with_an_unstoppable_worker_does_not_abort_the_process(tmp_path
         class _Window:
             """Stands in for MainWindow: one uncancellable job, then quit."""
 
-            def __init__(self):
+            def __init__(self, **_kwargs):      # main() passes recovery_enabled=True
                 self.ctrl = AnalysisController(session=None)
                 self.ctrl.run_callable(burn, label="sweep_threshold")
 

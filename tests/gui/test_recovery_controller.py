@@ -47,8 +47,8 @@ def controller_factory(qapp, qtbot):
 
 def test_defaults_and_argument_validation(controller_factory):
     controller = controller_factory(lambda revision: None, lambda snapshot, revision: None)
-    assert controller.idle_interval_ms == DEFAULT_IDLE_MS == 15_000
-    assert controller.max_interval_ms == DEFAULT_MAX_MS == 60_000
+    assert controller.idle_interval_ms == DEFAULT_IDLE_MS == 5_000
+    assert controller.max_interval_ms == DEFAULT_MAX_MS == 20_000
     assert controller._idle_timer.isSingleShot()
     assert controller._max_timer.isSingleShot()
 

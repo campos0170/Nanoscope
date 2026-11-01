@@ -22,11 +22,19 @@ over a good ``previous``.
 There is no Qt import here.  In particular, :func:`clone_project_state` is the
 GUI-thread snapshot seam: it detaches every mutable frame/container before a
 worker is allowed to serialize it.
+
+A live application session also holds ``live.lock`` in its directory (an advisory
+``flock``/``msvcrt`` lock, taken when it first writes and released by the kernel when
+the process dies).  Discovery, discard and cleanup leave a lineage whose lock is held
+alone: it is another running window's work, not a crash.  Discard never unlinks a
+generation; it moves the lineage to ``<root>/Discarded/<session UUID>`` for
+:data:`DEFAULT_DISCARD_KEEP_SECONDS`.
 """
 
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import math
@@ -37,10 +45,11 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 import zipfile
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 import numpy as np
 import pandas as pd
@@ -63,12 +72,19 @@ __all__ = [
     "CURRENT_NAME",
     "PREVIOUS_NAME",
     "RETIREMENT_NAME",
+    "LIVE_LOCK_NAME",
+    "DISCARDED_DIRNAME",
     "RecoveryError",
     "RecoveryVersionError",
     "RecoveryChangedError",
+    "RecoveryInUseError",
     "StaleRecoveryWrite",
     "RecoveryMetadata",
+    "RecoverySummary",
     "RecoveryCandidate",
+    "UnreadableRecovery",
+    "RecoveryScan",
+    "DiscardedRecovery",
     "RecoveredProject",
     "clone_project_state",
     "default_recovery_root",
@@ -83,12 +99,23 @@ PAYLOAD_NAME = "project.nanoscope"
 CURRENT_NAME = "current.nanoscope-recovery"
 PREVIOUS_NAME = "previous.nanoscope-recovery"
 RETIREMENT_NAME = "retirement.json"
+LIVE_LOCK_NAME = "live.lock"
+DISCARDED_DIRNAME = "Discarded"
+DISCARD_RECORD_NAME = "discarded.json"
 
 _RETIREMENT_FORMAT = "nanoscope-recovery-retirement"
 _RETIREMENT_VERSION = 1
+_DISCARD_FORMAT = "nanoscope-recovery-discard"
 
+# The count bound applies only to lineages that hold no recoverable work.  A directory
+# holding a valid or an unreadable un-retired copy leaves by age alone, after
+# DEFAULT_MAX_WORK_AGE_SECONDS; spent lineages (a fence, leftovers) after
+# DEFAULT_MAX_AGE_SECONDS.  Sweep 11 (s11a/b) lost a deferred crash copy to the old
+# rule, which counted fence-only directories and evicted valid copies by count.
 DEFAULT_MAX_SESSIONS = 20
 DEFAULT_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+DEFAULT_MAX_WORK_AGE_SECONDS = 90 * 24 * 60 * 60
+DEFAULT_DISCARD_KEEP_SECONDS = 7 * 24 * 60 * 60
 
 # Two RecoveryStore objects may address the same injected root/session in tests or
 # support tooling. They must still share the retirement/write critical section.
@@ -108,6 +135,10 @@ class RecoveryChangedError(RecoveryError):
     """A candidate changed after it was presented to the caller."""
 
 
+class RecoveryInUseError(RecoveryChangedError):
+    """The lineage belongs to a NanoScope process that is still running."""
+
+
 class StaleRecoveryWrite(RecoveryError):
     """An older asynchronous snapshot tried to replace a newer revision."""
 
@@ -121,6 +152,23 @@ class RecoveryMetadata:
     timestamp: float
     source_project_path: str | None
     covered_explicit_save_revision: int
+    #: Who wrote it: ``build_id``, ``version``, ``frozen``, ``executable``, ``pid``.
+    #: ``None`` for an envelope written before the block existed.
+    writer: Mapping[str, Any] | None = field(default=None, compare=False, hash=False)
+
+
+@dataclass(frozen=True)
+class RecoverySummary:
+    """What a snapshot holds, in the words the startup prompt uses.
+
+    Built from the state discovery already loads to validate a candidate, so naming the
+    work costs nothing extra.  ``tables`` rows are ``(module_id, recording name, rows,
+    accepted)``.
+    """
+
+    recordings: tuple[str, ...] = ()
+    tables: tuple[tuple[str, str, int, int], ...] = ()
+    measurements: int = 0
 
 
 @dataclass(frozen=True)
@@ -135,6 +183,8 @@ class RecoveryCandidate:
     envelope_path: Path
     generation: Literal["current", "previous"]
     payload_member: str = PAYLOAD_NAME
+    writer: Mapping[str, Any] | None = field(default=None, compare=False, hash=False)
+    summary: RecoverySummary | None = field(default=None, compare=False, hash=False)
 
     @property
     def path(self) -> Path:
@@ -150,7 +200,42 @@ class RecoveryCandidate:
             timestamp=self.timestamp,
             source_project_path=self.source_project_path,
             covered_explicit_save_revision=self.covered_explicit_save_revision,
+            writer=self.writer,
         )
+
+
+@dataclass(frozen=True)
+class UnreadableRecovery:
+    """Recovery material this build cannot offer: truncated, or from a newer build.
+
+    Discovery reports it instead of skipping it in silence (sweep 11, s11c/d).  The
+    revision, time and writer are known only when the envelope itself still parses.
+    """
+
+    session_id: str
+    directory: Path
+    reason: str
+    revision: int | None = None
+    timestamp: float | None = None
+    writer: Mapping[str, Any] | None = field(default=None, compare=False, hash=False)
+
+
+@dataclass(frozen=True)
+class RecoveryScan:
+    """One discovery pass: what can be offered, and what could not be read."""
+
+    candidates: list[RecoveryCandidate]
+    unreadable: list[UnreadableRecovery]
+
+
+@dataclass(frozen=True)
+class DiscardedRecovery:
+    """A lineage the user discarded, kept under ``Discarded/`` for seven days."""
+
+    session_id: str
+    directory: Path
+    discarded_at: float
+    candidate: RecoveryCandidate | None
 
 
 @dataclass(frozen=True)
@@ -312,6 +397,132 @@ def _session_lock(directory: Path) -> threading.RLock:
         return _SESSION_LOCKS.setdefault(key, threading.RLock())
 
 
+_WRITER_BASE: dict[str, Any] | None = None
+
+
+def _writer_identity() -> dict[str, Any]:
+    """Who is writing: the build, whether it is the packaged app, and the process.
+
+    The incident check found 14 of 20 lineages on one Mac written by scratch scripts and
+    no way to tell them from the app.  The startup prompt shows the build; support can
+    read the rest from ``envelope.json``.
+    """
+
+    global _WRITER_BASE
+    if _WRITER_BASE is None:
+        try:
+            from ..build_info import build_info
+
+            info = build_info()
+        except Exception:  # noqa: BLE001 - identity is a courtesy, never a write failure
+            info = {}
+        from .._version import __version__
+
+        _WRITER_BASE = {
+            "build_id": str(info.get("build_id") or "unknown"),
+            "version": str(info.get("version") or __version__),
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "executable": str(sys.executable or ""),
+        }
+    return {**_WRITER_BASE, "pid": os.getpid()}
+
+
+def _lock_exclusive(fd: int) -> bool | None:
+    """Try an exclusive, non-blocking advisory lock on ``fd``.
+
+    True: granted.  False: another open file holds it (a live owner).  None: this
+    filesystem cannot lock at all, which must read as "no evidence of a live owner" or a
+    network home folder would hide every crash copy for ever.  ``flock`` (not ``lockf``)
+    on purpose: it conflicts between two opens in one process too, so a second window
+    in the same process is told apart as well, and closing a probe's descriptor never
+    drops the owner's lock.
+    """
+
+    try:
+        if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError as exc:
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES,
+                         getattr(errno, "EDEADLOCK", errno.EAGAIN)):
+            return False
+        return None
+    except (ImportError, ValueError):
+        return None
+
+
+def _unlock(fd: int) -> None:
+    try:
+        if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except (OSError, ImportError, ValueError):
+        pass
+
+
+def _close_quietly(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _lineage_is_live(directory: Path) -> bool:
+    """True while another open file holds ``directory``'s liveness lock."""
+
+    path = directory / LIVE_LOCK_NAME
+    try:
+        if path.is_symlink():
+            return False
+        fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return False
+    try:
+        granted = _lock_exclusive(fd)
+        if granted:
+            _unlock(fd)
+        return granted is False
+    finally:
+        _close_quietly(fd)
+
+
+def _summarise_state(state: ProjectState | None) -> RecoverySummary | None:
+    """Name the work a snapshot holds: recordings, tables and their row counts."""
+
+    if state is None:
+        return None
+    try:
+        recordings = tuple(Path(str(doc.path)).name for doc in state.documents)
+        tables: list[tuple[str, str, int, int]] = []
+        for record in state.results:
+            frame = record.events
+            rows = int(len(frame))
+            if "accepted" in getattr(frame, "columns", ()):
+                accepted = int(frame["accepted"].fillna(False).astype(bool).sum())
+            else:
+                accepted = rows
+            tables.append((str(record.module_id), Path(str(record.doc_id)).name,
+                           rows, accepted))
+        measurements = state.measurements
+        n_measurements = 0 if measurements is None else int(len(measurements))
+    except Exception:  # noqa: BLE001 - a summary is a label, never a reason to hide work
+        return None
+    return RecoverySummary(recordings, tuple(tables), n_measurements)
+
+
 class RecoveryStore:
     """Persistent two-generation recovery storage.
 
@@ -326,21 +537,86 @@ class RecoveryStore:
         *,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         max_age_seconds: float | None = DEFAULT_MAX_AGE_SECONDS,
+        max_work_age_seconds: float | None = DEFAULT_MAX_WORK_AGE_SECONDS,
+        discard_keep_seconds: float = DEFAULT_DISCARD_KEEP_SECONDS,
+        hold_liveness: bool = False,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if not isinstance(max_sessions, int) or isinstance(max_sessions, bool) \
                 or max_sessions < 1:
             raise ValueError("max_sessions must be a positive integer")
-        if max_age_seconds is not None:
-            max_age_seconds = float(max_age_seconds)
-            if not math.isfinite(max_age_seconds) or max_age_seconds < 0:
-                raise ValueError("max_age_seconds must be finite and non-negative")
+        ages = []
+        for name, value in (("max_age_seconds", max_age_seconds),
+                            ("max_work_age_seconds", max_work_age_seconds),
+                            ("discard_keep_seconds", discard_keep_seconds)):
+            if value is not None:
+                value = float(value)
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError(f"{name} must be finite and non-negative")
+            ages.append(value)
+        max_age_seconds, max_work_age_seconds, discard_keep_seconds = ages
         self.root = Path(root).expanduser() if root is not None else default_recovery_root()
         self.session_id = _canonical_session_id(session_id)
         self.max_sessions = max_sessions
         self.max_age_seconds = max_age_seconds
+        self.max_work_age_seconds = max_work_age_seconds
+        self.discard_keep_seconds = discard_keep_seconds
         self._clock = clock
         self._mutex = _session_lock(self.session_directory)
+        # The application's own store claims ``live.lock`` on its first write; support
+        # tooling and tests that fabricate an old lineage leave it unclaimed.
+        self._hold_liveness = bool(hold_liveness)
+        self._live_fd: int | None = None
+        self._live_finalizer: weakref.finalize | None = None
+
+    # -- liveness -------------------------------------------------------------------------------
+    @property
+    def holds_liveness(self) -> bool:
+        return self._live_fd is not None
+
+    def _claim_liveness(self) -> None:
+        """Take this session's ``live.lock`` once, for as long as the store lives.
+
+        Never a reason to fail a write: a filesystem that cannot lock costs the
+        second-instance protection only.  The few retries cover a probe of another
+        process that holds the lock for a microsecond while it looks.
+        """
+
+        if not self._hold_liveness or self._live_fd is not None:
+            return
+        path = self.session_directory / LIVE_LOCK_NAME
+        try:
+            if path.is_symlink():
+                return
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError:
+            return
+        for _attempt in range(50):
+            granted = _lock_exclusive(fd)
+            if granted:
+                self._live_fd = fd
+                self._live_finalizer = weakref.finalize(self, _close_quietly, fd)
+                return
+            if granted is None:
+                break
+            time.sleep(0.002)
+        _close_quietly(fd)
+
+    def release_liveness(self) -> None:
+        """Give up ``live.lock`` (clean teardown; the kernel does this on a crash)."""
+
+        fd, self._live_fd = self._live_fd, None
+        finalizer, self._live_finalizer = self._live_finalizer, None
+        if finalizer is not None:
+            finalizer.detach()
+        if fd is not None:
+            _unlock(fd)
+            _close_quietly(fd)
+
+    def _held_elsewhere(self, directory: Path) -> bool:
+        """A lineage another running process (or another store here) is still writing."""
+
+        return directory.name != self.session_id and _lineage_is_live(directory)
 
     @property
     def session_directory(self) -> Path:
@@ -389,6 +665,8 @@ class RecoveryStore:
                 "covered_explicit_save_revision":
                     metadata.covered_explicit_save_revision,
             },
+            # Additive: a reader that predates it ignores the key (same version 1).
+            "writer": _writer_identity(),
             "payload": {
                 "member": PAYLOAD_NAME,
                 "size": len(payload),
@@ -434,7 +712,10 @@ class RecoveryStore:
             raise RecoveryError(f"{name}: recovery timestamp is invalid")
         if source is not None and not isinstance(source, str):
             raise RecoveryError(f"{name}: source project path is invalid")
-        return RecoveryMetadata(session_id, revision, timestamp, source, covered), payload
+        writer = envelope.get("writer")
+        writer = dict(writer) if isinstance(writer, dict) else None
+        return RecoveryMetadata(session_id, revision, timestamp, source, covered,
+                                writer), payload
 
     @staticmethod
     def _read_archive(path: Path) -> tuple[RecoveryMetadata, bytes]:
@@ -495,7 +776,9 @@ class RecoveryStore:
             try:
                 return load_project(path)
             except ProjectError as exc:
-                raise RecoveryError(f"embedded project is not readable ({exc})") from exc
+                # The temp name means nothing to a reader; discovery now shows this text.
+                reason = str(exc).replace(path.name, "the snapshot")
+                raise RecoveryError(f"embedded project is not readable ({reason})") from exc
         finally:
             _safe_unlink(path)
 
@@ -504,7 +787,8 @@ class RecoveryStore:
         return "previous" if path.name == PREVIOUS_NAME else "current"
 
     def _decode(self, path: Path, *, expected_session: str | None = None,
-                load_state: bool = True) -> tuple[RecoveryCandidate, ProjectState | None]:
+                load_state: bool = True,
+                summarise: bool = False) -> tuple[RecoveryCandidate, ProjectState | None]:
         metadata, payload = self._read_archive(path)
         if expected_session is not None and metadata.session_id != expected_session:
             raise RecoveryError(
@@ -518,6 +802,8 @@ class RecoveryStore:
             covered_explicit_save_revision=metadata.covered_explicit_save_revision,
             envelope_path=path,
             generation=self._generation_for_path(path),
+            writer=metadata.writer,
+            summary=_summarise_state(state) if summarise else None,
         )
         return candidate, state
 
@@ -554,41 +840,78 @@ class RecoveryStore:
         except OSError:
             pass
 
-    def _valid_at(self, path: Path, session_id: str) -> RecoveryCandidate | None:
+    def _valid_at(self, path: Path, session_id: str, *,
+                  summarise: bool = False) -> RecoveryCandidate | None:
         try:
             candidate, _state = self._decode(
-                path, expected_session=session_id, load_state=True)
+                path, expected_session=session_id, load_state=True, summarise=summarise)
             return candidate
         except (RecoveryError, OSError):
             return None
 
     @staticmethod
-    def _read_retirement(directory: Path) -> tuple[int, bool]:
-        """Return ``(through_revision, all_revisions)`` for one lineage.
+    def _peek_metadata(path: Path) -> RecoveryMetadata | None:
+        """The envelope's metadata alone (no payload check), or None if it is unreadable."""
 
-        A malformed tombstone errs on the side of retention (fence everything).  It
-        is internal state written only by this module; treating damage as "no fence"
-        could resurrect the exact recovery a user intentionally discarded.
-        """
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode) or not zipfile.is_zipfile(path):
+                return None
+            with zipfile.ZipFile(path, "r") as zf:
+                metadata, _descriptor = RecoveryStore._parse_envelope(
+                    zf.read(ENVELOPE_NAME), path.name)
+            return metadata
+        except (RecoveryError, OSError, KeyError, zipfile.BadZipFile):
+            return None
+
+    @staticmethod
+    def _retirement_state(directory: Path) -> tuple[int, bool, bool]:
+        """Return ``(through_revision, all_revisions, malformed)`` for one lineage."""
 
         path = directory / RETIREMENT_NAME
         if path.is_symlink():
-            return -1, True
+            return -1, True, True
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return -1, False
+            return -1, False, False
         except (OSError, UnicodeDecodeError, ValueError):
-            return -1, True
+            return -1, True, True
         if not isinstance(raw, dict) or raw.get("format") != _RETIREMENT_FORMAT \
                 or raw.get("version") != _RETIREMENT_VERSION:
-            return -1, True
+            return -1, True, True
         if raw.get("all_revisions") is True:
-            return -1, True
+            return -1, True, False
         through = raw.get("through_revision")
         if not isinstance(through, int) or isinstance(through, bool) or through < 0:
-            return -1, True
-        return through, False
+            return -1, True, True
+        return through, False, False
+
+    @staticmethod
+    def _read_retirement(directory: Path) -> tuple[int, bool]:
+        """Return ``(through_revision, all_revisions)`` for one lineage, for WRITING.
+
+        A malformed tombstone errs on the side of retention (fence everything) when
+        this session writes or advances its own fence: a delayed write must never
+        resurrect what a save or Discard retired.  Discovery reads it the other way
+        (see :meth:`_discovery_fence`).
+        """
+
+        through, all_revisions, _malformed = RecoveryStore._retirement_state(directory)
+        return through, all_revisions
+
+    @staticmethod
+    def _discovery_fence(directory: Path) -> tuple[int, bool]:
+        """The fence as discovery reads it: a damaged marker hides nothing.
+
+        A Discard moves the generations out (see :meth:`discard`), so a valid copy next
+        to an unreadable marker was never discarded; hiding it behind the damage lost
+        two of four synthetic lineages in the recoverability check.
+        """
+
+        through, all_revisions, malformed = RecoveryStore._retirement_state(directory)
+        if malformed:
+            return -1, False
+        return through, all_revisions
 
     @staticmethod
     def _write_retirement(directory: Path, through: int, all_revisions: bool) -> None:
@@ -610,7 +933,7 @@ class RecoveryStore:
 
     @staticmethod
     def _is_retired(candidate: RecoveryCandidate, directory: Path) -> bool:
-        through, all_revisions = RecoveryStore._read_retirement(directory)
+        through, all_revisions = RecoveryStore._discovery_fence(directory)
         return all_revisions or candidate.revision <= through
 
     def write(
@@ -646,6 +969,9 @@ class RecoveryStore:
 
         with self._mutex:
             self._ensure_session_directory()
+            # Before any generation exists, so no other process can ever see this
+            # lineage's copies without also seeing that it is alive.
+            self._claim_liveness()
             retired_through, retired_all = self._read_retirement(self.session_directory)
             if retired_all or revision <= retired_through:
                 # A delayed autosave which started before an explicit save/Discard
@@ -721,30 +1047,79 @@ class RecoveryStore:
 
         ``current`` is authoritative when valid.  If it is incomplete, corrupt, or
         has mismatched session metadata, ``previous`` is tried.  Invalid material is
-        never surfaced as a recoverable session.
+        never surfaced as a recoverable session; :meth:`scan` reports it instead.
         """
 
-        if not self.root.exists():
-            return []
-        found: list[RecoveryCandidate] = []
+        return self.scan().candidates
+
+    def _session_directories(self) -> list[Path]:
         try:
-            directories = list(self.root.iterdir())
+            entries = list(self.root.iterdir())
         except OSError:
             return []
-        for directory in directories:
+        out: list[Path] = []
+        for directory in entries:
             try:
                 if directory.is_symlink() or not directory.is_dir() \
                         or not _is_canonical_session_dir(directory):
                     continue
             except OSError:
                 continue
-            candidate = self._valid_at(directory / CURRENT_NAME, directory.name)
-            if candidate is None:
-                candidate = self._valid_at(directory / PREVIOUS_NAME, directory.name)
-            if candidate is not None and not self._is_retired(candidate, directory):
+            out.append(directory)
+        return out
+
+    def scan(self) -> RecoveryScan:
+        """Discover every recoverable lineage AND everything this build cannot read.
+
+        A lineage another live process holds (``live.lock``) is neither: it is that
+        process's running session (sweep 11, s7).  Each candidate carries a
+        :class:`RecoverySummary` of the state its validation loaded anyway.
+        """
+
+        if not self.root.exists():
+            return RecoveryScan([], [])
+        found: list[RecoveryCandidate] = []
+        unreadable: list[UnreadableRecovery] = []
+        for directory in self._session_directories():
+            if self._held_elsewhere(directory):
+                continue
+            through, all_revisions = self._discovery_fence(directory)
+            candidate: RecoveryCandidate | None = None
+            problem: tuple[str, RecoveryMetadata | None] | None = None
+            for name in (CURRENT_NAME, PREVIOUS_NAME):
+                path = directory / name
+                try:
+                    present = path.exists() or path.is_symlink()
+                except OSError:
+                    present = False
+                if not present:
+                    continue
+                try:
+                    candidate, _state = self._decode(
+                        path, expected_session=directory.name, load_state=True,
+                        summarise=True)
+                    break
+                except (RecoveryError, OSError) as exc:
+                    if problem is None:
+                        problem = (str(exc), self._peek_metadata(path))
+            if candidate is not None and not (all_revisions or candidate.revision <= through):
                 found.append(candidate)
+                continue
+            if problem is None or all_revisions:
+                continue
+            reason, meta = problem
+            if meta is not None and (meta.revision <= through
+                                     or (candidate is not None
+                                         and meta.revision <= candidate.revision)):
+                continue
+            unreadable.append(UnreadableRecovery(
+                session_id=directory.name, directory=directory, reason=reason,
+                revision=None if meta is None else meta.revision,
+                timestamp=None if meta is None else meta.timestamp,
+                writer=None if meta is None else meta.writer))
         found.sort(key=lambda c: (c.timestamp, c.revision, c.session_id), reverse=True)
-        return found
+        unreadable.sort(key=lambda u: (u.timestamp or 0.0, u.session_id), reverse=True)
+        return RecoveryScan(found, unreadable)
 
     def load(self, candidate: RecoveryCandidate) -> RecoveredProject:
         """Load the exact candidate previously returned by discovery/``write``."""
@@ -856,7 +1231,11 @@ class RecoveryStore:
         """Intentionally discard an entire lineage, including both generations.
 
         Deleting only the surfaced ``current`` would make ``previous`` appear on the
-        next launch, contradicting the user's Discard choice.
+        next launch, contradicting the user's Discard choice.  The generations are
+        MOVED to ``Discarded/<session UUID>`` and kept for
+        :attr:`discard_keep_seconds`, so one click on the startup prompt can no longer
+        lose a session for good.  A lineage another live process holds is refused with
+        :class:`RecoveryInUseError` (sweep 11, s7).
         """
 
         if isinstance(candidate_or_session, RecoveryCandidate):
@@ -867,30 +1246,228 @@ class RecoveryStore:
             sid = _canonical_session_id(candidate_or_session)
         with self._mutex:
             directory = self.root / sid
+            if self._held_elsewhere(directory):
+                raise RecoveryInUseError(
+                    "that recovery copy belongs to a NanoScope window that is still running")
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             if directory.is_symlink():
                 raise RecoveryError(f"recovery session location may not be a symlink: {directory}")
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            # Persistent all-revisions tombstone before deletion: a queued writer
+            # Persistent all-revisions tombstone before the move: a queued writer
             # which has not entered write() yet becomes a harmless no-op.
             self._write_retirement(directory, 0, True)
-            removed = 0
+            removed = self._move_to_discarded(directory, sid, (CURRENT_NAME, PREVIOUS_NAME))
             for entry in list(directory.iterdir()):
-                if entry.name == RETIREMENT_NAME:
+                if entry.name in (RETIREMENT_NAME, LIVE_LOCK_NAME, CURRENT_NAME, PREVIOUS_NAME):
                     continue
                 try:
                     if entry.is_dir() and not entry.is_symlink():
                         continue
-                    entry.unlink()
+                    entry.unlink()       # a partial temp sibling: nothing to keep
                     removed += 1
                 except (FileNotFoundError, OSError):
                     pass
             return removed
 
-    def cleanup(self, *, now: float | None = None) -> int:
-        """Bound old UUID lineages by age and count; never remove this live session.
+    def discard_through(self, revision: int, *,
+                        session_id: str | uuid.UUID | None = None) -> int:
+        """:meth:`retire_through` for a user's Discard: covered copies move to ``Discarded/``.
 
-        The return value counts session directories removed (not generation files).
+        An explicit save still unlinks (the project file holds the work); a Discard at
+        the close guard is a choice the user may regret within the week.
+        """
+
+        revision = _nonnegative_int(revision, "revision")
+        sid = self.session_id if session_id is None else _canonical_session_id(session_id)
+        directory = self.root / sid
+        with self._mutex:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if directory.is_symlink():
+                raise RecoveryError(f"recovery session location may not be a symlink: {directory}")
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._write_retirement(directory, revision, False)
+            covered = []
+            for name in (CURRENT_NAME, PREVIOUS_NAME):
+                candidate = self._valid_at(directory / name, sid)
+                if candidate is not None and candidate.revision <= revision:
+                    covered.append(name)
+            return self._move_to_discarded(directory, sid, covered)
+
+    def _discard_target(self, sid: str) -> Path:
+        base = self.root / DISCARDED_DIRNAME
+        target = base / sid
+        suffix = 2
+        while target.exists() or target.is_symlink():
+            target = base / f"{sid}-{suffix}"
+            suffix += 1
+        return target
+
+    def _move_to_discarded(self, directory: Path, sid: str, names) -> int:
+        """Move generation files into a fresh ``Discarded/<sid>[-n]`` folder."""
+
+        present = [name for name in names if (directory / name).is_file()
+                   and not (directory / name).is_symlink()]
+        if not present:
+            return 0
+        base = self.root / DISCARDED_DIRNAME
+        if base.is_symlink():
+            raise RecoveryError(f"the discarded-recovery folder may not be a symlink: {base}")
+        base.mkdir(mode=0o700, exist_ok=True)
+        target = self._discard_target(sid)
+        target.mkdir(mode=0o700)
+        moved: list[str] = []
+        for name in present:
+            try:
+                os.replace(directory / name, target / name)
+                moved.append(name)
+            except FileNotFoundError:
+                pass
+            # Any other OSError leaves the copy fenced in place: kept, never unlinked.
+        record = {"format": _DISCARD_FORMAT, "version": 1, "session_uuid": sid,
+                  "discarded_at": float(self._clock()), "files": moved}
+        with atomic_write.staged_write(target / DISCARD_RECORD_NAME) as fh:
+            fh.write(json.dumps(record, indent=2, sort_keys=True).encode("utf-8"))
+        _fsync_directory(directory)
+        _fsync_directory(target)
+        return len(moved)
+
+    @staticmethod
+    def _read_discard_record(directory: Path) -> tuple[str, float] | None:
+        try:
+            raw = json.loads((directory / DISCARD_RECORD_NAME).read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or raw.get("format") != _DISCARD_FORMAT:
+                return None
+            return _canonical_session_id(raw["session_uuid"]), float(raw["discarded_at"])
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
+            return None
+
+    def _discarded_records(self) -> list[tuple[Path, str, float]]:
+        base = self.root / DISCARDED_DIRNAME
+        try:
+            if base.is_symlink():
+                return []
+            entries = list(base.iterdir())
+        except OSError:
+            return []
+        out: list[tuple[Path, str, float]] = []
+        for directory in entries:
+            if directory.is_symlink() or not directory.is_dir():
+                continue
+            record = self._read_discard_record(directory)
+            if record is not None:
+                out.append((directory, *record))
+        return out
+
+    def list_discarded(self) -> list[DiscardedRecovery]:
+        """Lineages discarded in the last week, newest first, each with its newest copy."""
+
+        out: list[DiscardedRecovery] = []
+        for directory, sid, when in self._discarded_records():
+            candidate = None
+            for name in (CURRENT_NAME, PREVIOUS_NAME):
+                candidate = self._valid_at(directory / name, sid, summarise=True)
+                if candidate is not None:
+                    break
+            out.append(DiscardedRecovery(sid, directory, when, candidate))
+        out.sort(key=lambda item: (item.discarded_at, item.session_id), reverse=True)
+        return out
+
+    def restore_discarded(self, entry: DiscardedRecovery | str | Path) -> RecoveryCandidate | None:
+        """Put a discarded lineage back where discovery offers it, and lift its tombstone.
+
+        Refused with :class:`RecoveryChangedError` while the lineage folder still holds a
+        generation of its own (the session kept working after a guard Discard, or an
+        earlier discard of it was restored first): a restore never overwrites, mixes or
+        deletes copies.
+        """
+
+        directory = entry.directory if isinstance(entry, DiscardedRecovery) else Path(entry)
+        record = self._read_discard_record(directory)
+        if record is None:
+            raise RecoveryError(f"{directory.name} is not a discarded NanoScope recovery")
+        sid, _when = record
+        if sid == self.session_id:
+            raise RecoveryInUseError("this session's own copies cannot be restored into it")
+        lineage = self.root / sid
+        with _session_lock(lineage):
+            if _lineage_is_live(lineage):
+                raise RecoveryInUseError(
+                    "that recovery copy belongs to a NanoScope window that is still running")
+            if lineage.is_symlink():
+                raise RecoveryError(f"recovery session location may not be a symlink: {lineage}")
+            if any((lineage / name).exists() or (lineage / name).is_symlink()
+                   for name in (CURRENT_NAME, PREVIOUS_NAME)):
+                raise RecoveryChangedError(
+                    "that session already has newer recovery copies in its folder; "
+                    "recover or discard those first")
+            lineage.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for name in (CURRENT_NAME, PREVIOUS_NAME):
+                source = directory / name
+                if source.is_file() and not (lineage / name).exists():
+                    os.replace(source, lineage / name)
+            # The tombstone WAS the discard; lifting it is the restore.
+            _safe_unlink(lineage / RETIREMENT_NAME)
+            _fsync_directory(lineage)
+            self._remove_session_directory(directory)
+        for name in (CURRENT_NAME, PREVIOUS_NAME):
+            candidate = self._valid_at(lineage / name, sid, summarise=True)
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _lineage_holds_work(self, directory: Path) -> tuple[bool, bool]:
+        """``(holds_work, fence_only)`` for a lineage, from envelope headers alone.
+
+        Work is any generation (valid or unreadable) the discovery fence does not cover;
+        an unreadable copy may be a newer build's, and is reported, never evicted by
+        count.  Cheap on purpose: cleanup runs after every write.
+        """
+
+        through, all_revisions = self._discovery_fence(directory)
+        has_generation = False
+        for name in (CURRENT_NAME, PREVIOUS_NAME):
+            path = directory / name
+            try:
+                if not (path.exists() or path.is_symlink()):
+                    continue
+            except OSError:
+                continue
+            has_generation = True
+            if all_revisions:
+                continue
+            meta = self._peek_metadata(path)
+            if meta is None or meta.revision > through:
+                return True, False
+        if has_generation:
+            return False, False
+        try:
+            names = {entry.name for entry in directory.iterdir()}
+        except OSError:
+            return False, False
+        return False, RETIREMENT_NAME in names and names <= {RETIREMENT_NAME, LIVE_LOCK_NAME}
+
+    def _purge_discarded(self, moment: float) -> int:
+        if self.discard_keep_seconds is None:
+            return 0
+        removed = 0
+        for directory, _sid, when in self._discarded_records():
+            if moment - when > self.discard_keep_seconds:
+                self._remove_session_directory(directory)
+                if not directory.exists():
+                    removed += 1
+        return removed
+
+    def cleanup(self, *, now: float | None = None) -> int:
+        """Bound old UUID lineages; never remove a live session or a valid copy by count.
+
+        * A lineage another process holds (``live.lock``) and this session are skipped.
+        * A lineage holding work (a valid or an unreadable un-retired copy) leaves by age
+          only, after :attr:`max_work_age_seconds`.
+        * A fence-only lineage leaves after :attr:`max_age_seconds` and is not counted.
+        * The count bound :attr:`max_sessions` applies to the rest (retired leftovers).
+        * ``Discarded/`` entries leave after :attr:`discard_keep_seconds`.
+
+        The return value counts directories removed (not generation files).
         Inaccessible/tampered directories are skipped rather than making recovery
         discovery or a completed write fail.
         """
@@ -900,14 +1477,7 @@ class RecoveryStore:
         moment = float(self._clock() if now is None else now)
         if not math.isfinite(moment):
             raise ValueError("now must be finite")
-        try:
-            directories = [
-                p for p in self.root.iterdir()
-                if p.name != self.session_id and _is_canonical_session_dir(p)
-                and not p.is_symlink() and p.is_dir()
-            ]
-        except OSError:
-            return 0
+        directories = [p for p in self._session_directories() if p.name != self.session_id]
 
         def touched(path: Path) -> float:
             try:
@@ -915,22 +1485,23 @@ class RecoveryStore:
             except OSError:
                 return 0.0
 
-        removed = 0
-        survivors: list[Path] = []
+        removed = self._purge_discarded(moment)
+        countable: list[Path] = []
         for directory in directories:
-            if self.max_age_seconds is not None \
-                    and moment - touched(directory) > self.max_age_seconds:
+            if _lineage_is_live(directory):
+                continue
+            holds_work, fence_only = self._lineage_holds_work(directory)
+            limit = self.max_work_age_seconds if holds_work else self.max_age_seconds
+            if limit is not None and moment - touched(directory) > limit:
                 self._remove_session_directory(directory)
                 if not directory.exists():
                     removed += 1
                     continue
-            survivors.append(directory)
+            if not holds_work and not fence_only:
+                countable.append(directory)
 
-        # Include this live session in the count when it exists. It is protected,
-        # so all excess is paid by the oldest other lineages.
-        live_count = 1 if self.session_directory.exists() else 0
-        excess = max(0, len(survivors) + live_count - self.max_sessions)
-        for directory in sorted(survivors, key=touched)[:excess]:
+        excess = max(0, len(countable) - self.max_sessions)
+        for directory in sorted(countable, key=touched)[:excess]:
             self._remove_session_directory(directory)
             if not directory.exists():
                 removed += 1
