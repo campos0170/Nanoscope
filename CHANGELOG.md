@@ -7,10 +7,264 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **Words you typed, and ranges you pinned, go back to automatic when a figure's quantity changes
+  (plotting redesign, Phase 0, 2026-11-02).**
+  - **The rule.** The Title, X label, Y label and the fit label's wording you typed belong to what
+    the figure showed when you typed them, and so does the range pinned in **Axis properties** on
+    each axis, with the major tick spacing typed beside it (*range* below means both). When the
+    figure comes to show something else, the words and the range of each axis whose quantity moved
+    go back to automatic, as one step of that plot's own Undo, and its status line names only what
+    was reset (*Title and Y label reset: the plot now shows median depth.*, or *Title, Y label and Y
+    range reset: …* when a range went too; a major tick spacing is named apart from the range, *Y
+    range and Y major tick reset: …*, or *Y major tick reset: …* when only a spacing was typed). A Y
+    range pinned for the capture rate in Hz used to keep framing median depths in pA, and a range
+    pinned on a Box plot's value axis a new measurement. An axis whose quantity did not move keeps
+    its range, and so does another view's unless its axis shows the same quantity (the two pairs of
+    Distribution summaries share their measurement). A figure with nothing typed on it and no range
+    pinned on an axis that moved records no step and says nothing; one with only a range pinned
+    records the step and says *Y range reset: …*. If the status line still shows the sentence of an
+    earlier change, that sentence is removed, because the figure has moved on since (any other
+    message on the status bar stays). A title or label you hid (**Hide title**, or a single space in
+    its box) counts as typed and goes back to automatic too: the window's automatic title or label
+    comes back if it draws one (Voltage dependence and Subpopulations draw no automatic title, so
+    there a hidden title coming back shows nothing). The look stays: fonts, sizes, colours, text
+    styles, the legend, the ranges pinned on axes whose quantity did not move, and the fit label's
+    numbers, position, size and colour. A caption or other annotation text, Voltage dependence's
+    caption included, is not touched by this rule (Reset figure takes it back).
+  - **Undo.** It brings the words and the ranges back over the quantity that is on screen and does
+    not move the control. To return to the earlier quantity with its words, pick it first (nothing
+    is typed any more, so that records no step) and then **Undo**; **Undo** first and the pick after
+    is a new change, which clears the words again. Distributions is the exception: its
+    **Configuration** Undo takes the plot type and the words back together, so press **Undo** alone
+    there.
+  - **What counts, window by window.**
+    - **Voltage dependence:** the **Metric**, which is the Y axis (the X axis is voltage whatever the
+      metric, so its range stays), and the applied fit when **Apply fit** replaces one trend with
+      another or takes the fit away (only the fit label's wording goes back and no axis moves; the
+      first fit applied after *none* keeps wording typed ahead of it). Ticking or clearing **|V|**
+      turns the X axis between the signed voltage and its magnitude, so it takes the X range and
+      leaves the words (*X range reset: the plot now shows capture rate against |V|.*). **Log y** is
+      a real log axis whose range is typed in the units it shows: both ranges stay.
+    - **Distribution summaries and Comparison figures:** the measurement, summary or figure type (in
+      Comparison also X, Y and the pair features), at the moment **Generate** commits it; until then
+      the figure on screen is the old one and keeps its words. In Distribution summaries a new
+      measurement is the value axis changing (X in ECDF and Survival, Y in Box and Violin), so it
+      takes the value range of both pairs and the sentence says *value range* once; the ECDF's and
+      Survival's fraction axis and the Box and Violin sources axis keep their range, and a new
+      summary type takes none (each pair keeps its own, and the one you leave is waiting when you
+      come back). A Comparison figure is a picture without Axis properties: it has no range to take.
+    - **Event waveforms:** the heatmap's **X** (it takes the map's X range) and **Y** (the map's Y
+      range), the switch between the Event-count heatmap and Ensemble tabs (each view keeps its own
+      range, so it takes none), and **Normalize time** (it takes the ensemble's X range). **Log x**
+      and **Log y** take the range of their own axis of the map and leave the words, because the map
+      draws log10 values on a linear axis while one is ticked (*X range reset: the plot now shows
+      median depth against log10 of dwell.*); changing **Log scale** in the map's Axis properties,
+      though, keeps the range typed in that dialog (unticking it there to type a range in seconds is
+      how the map's X axis, which opens on a log axis, is pinned).
+    - **Noise:** the **Show** view takes the words and no range (each view keeps its own, so
+      Spectrogram and back brings the PSD's range back), and **Amplitude spectral density** on or
+      off takes the words and the PSD's Y range, and leaves its frequency range.
+    - **Subpopulations:** the **Embedding** takes the words and both axes of the scatter, not the
+      waveforms'.
+    - **Distributions:** the plot type and a column, which already took back the title, the axis
+      labels and the typed range of an axis that moved (the axis of the column that changed; both
+      axes on a plot-type change), and now take the fit label's wording too (wording typed for an
+      exponential, *Single exponential: {equation}, {n}*, used to stay over a linear fit); and the
+      applied fit (another model, another fixed number of components for a mixture, or Auto (BIC)
+      switched on or off for one), which takes back only the wording, the first fit applied after
+      *none* keeping wording typed ahead of it. The status line now names a range that went, words
+      and ranges together (*Title, X range and Y range reset: the plot is now set to show the
+      scatter of ycol against xcol.*), and a change that clears only a range says so instead of
+      leaving the line empty. The reset is part of the same **Configuration** Undo step as the change
+      that caused it. A column also moves on its own when you tick a source that lacks it (the
+      column boxes offer only the columns every ticked source has; the manual-measurement table has
+      no `depth_pA`), and the rule then runs as for a pick.
+    - **I-V** has no such control and is unchanged; the study figure editor has none that changes
+      what an axis shows.
+  - **What does not run the rule.** Choosing another recording or ticking another source that has
+    the plotted column, applying a preset, a refresh of the same quantity, a figure's first draw, a
+    log axis, |V|, bin counts, a colormap, a colour-by choice, the band, a subset of events,
+    Accepted only and the Welch settings keep the words, and so do Distributions' Time unit and a
+    change of its histogram normalization. None of them takes a range off either, except that |V|
+    (Voltage dependence's X range) and Log x and Log y (the Event-count heatmap's range on that
+    axis) change the numbers on the axis the range was typed in, so they take it and leave the
+    words. Opening a project shows the words and ranges it was saved with (the rule acts on the next
+    change), and recalling a template installs the title, labels and wording it was saved with
+    (none, if it was saved without), and the ranges it was saved with, in place of the ones typed
+    and pinned. A template recalled in Distribution summaries or Comparison figures brings its words
+    with its measurement, so the Generate that commits it keeps them; in Voltage dependence the
+    template's fit arrives selected, and the **Apply fit** that commits it keeps the wording that
+    came with it. Restoring a Subpopulations figure shows its saved words and no reset sentence.
+  - **A project saved by an older build** whose appearance holds a range with no view (a bare *X* or
+    *Y* range) takes it with the primary view's axis it belongs to (the PSD's in Noise, the
+    Event-count map's in Event waveforms, the scatter's in Subpopulations, the ECDF's and Survival's
+    in Distribution summaries), and no other view's.
+  - **Where the sentence is read.** On the page's status line inside the Analysis Explorer: the status
+    bar at the bottom of Voltage dependence, Distribution summaries, Event waveforms, Noise and
+    Distributions (ten seconds), the status line at the top of Comparison figures, and the standing
+    line under the report text in Subpopulations.
+  - **The Appearance boxes show the automatic text they would draw** in Voltage dependence and
+    Distribution summaries. The X label placeholder follows |V| (*Applied |voltage| (mV)*), the Y
+    label's names the metric and Log y (*Median depth (pA) (log)*), and Distribution summaries'
+    Title, X label and Y label name the figure on screen, so a reset box reads *Automatic: Median
+    depth (…)*.
+  - **The Title, X label and Y label boxes say what a typed title covers** in Noise, Event waveforms,
+    Comparison figures and Subpopulations. They read *Title (this view)*, *X label (this view)* and
+    *Y label (this view)* (*(both figures)* in Subpopulations), where they said *(all views)*, and so
+    does the right-click entry that adds a title on a figure: **Add title (this view)…** (**Add title
+    (both figures)…** in Subpopulations). Words typed there belong to what is on screen and go back to
+    automatic when the figure comes to show something else (another view, metric or embedding); the
+    boxes' tool tips say so, and that the status line names what went and Undo brings it back. The
+    old wording promised a title that stayed across the views.
+
+- **One short font list, with Arial as the default (plotting redesign, Phase 0, 2026-11-02).**
+  - **Every font control is the same list:** *Arial (default)*, *Helvetica*, *Times New Roman*,
+    *Courier New*, then *Other font…*. It replaces the 180-family lists in the Appearance section of
+    every plot page (Distributions' included), the **Text style…** font box and the composer's
+    panel-label font. *Other font…* opens a list of every installed font with a filter box and a
+    sample line (*Aa τ μ Δ Å 0123*) in the highlighted font; Cancel keeps the previous font. It
+    leaves out the faces of symbols (Symbol, Webdings, Wingdings, Wingdings 2 and 3, Zapf Dingbats,
+    Apple Symbols), which no figure's text is set in. A font outside the list, picked there or
+    stored by an older project (a symbol face included), is shown as one extra row under its own
+    name (*name — not on this computer* when this computer lacks it) and is kept as saved; the row
+    of an installed font stays so it can be picked again. In **Text style…** the first row reads
+    plain *Arial*, because there "no font" is the *Custom font* box being off (the font box's tool
+    tip says so). Choosing a font is one Undo step in every plot page, and the font box no longer
+    takes typed text (type the name into the filter box of *Other font…* instead).
+  - **A figure with no font chosen is drawn in Arial** instead of the application font, which on
+    macOS is a private system face no journal has: title, axis labels, tick numbers, legend entries,
+    the fit label, Voltage dependence's caption and the numbers that mark the levels of Noise's
+    All-points histogram, in Distributions, Voltage dependence, I-V, Noise spectrum, Event waveforms
+    (colour bar included), Distribution summaries and Subpopulations. The fit label and the legend
+    also follow a font chosen for the figure now; they used to stay in the application font. Comparison
+    figures and the study figure editor, which matplotlib draws, are Arial too (see the exports below).
+  - **A font this computer lacks falls back to a metric-compatible one** (Arial to Helvetica,
+    Liberation Sans, Arimo…; Times New Roman to Times, Liberation Serif, Tinos…; Courier New to
+    Courier, Liberation Mono, Cousine…; any other font to Arial's list) instead of to the system UI
+    font. With none of them installed, the labels and the tick numbers use the same face of that
+    kind (a sans-serif, a serif for Times New Roman, a fixed-width one for Courier New). The figure
+    keeps the name you chose; only what is drawn, and so what an SVG names first, is the substitute.
+    The font list says so: on Windows, which has no Helvetica, the row reads *Helvetica (drawn in
+    Arial on this computer)*; on a Linux computer with only the Liberation fonts, *Arial (default;
+    drawn in Liberation Sans on this computer)*, and likewise for Times New Roman and Courier New.
+    The row still stores the family, so a figure styled on a Mac opens unchanged; a computer that
+    has the four fonts shows the plain rows.
+  - **Greek letters** are ordinary Unicode characters (τ, µ, Δ) drawn in the figure's font; no symbol
+    font is on the list. A character the font lacks, such as the subscript zero of *I₀* or the
+    exponent in *10⁻³* in Times New Roman, is drawn in another installed font and no longer in the
+    system's own interface face, which a PDF export of the plot embedded. Labels now name only the
+    fonts this computer has (no generic *serif* or *sans-serif*, which Qt drew in the application
+    font).
+  - **Compose multi-panel figure:** panel labels default to *Arial (default)*, so they match the
+    panels of figures saved by this build that have no font chosen, which are Arial now. A figure
+    saved to the Figure Library by an earlier build is a frozen picture and keeps the font it was
+    drawn in (the application font unless one was chosen), so its panels do not match the Arial
+    labels (on a Mac, where the application font is a private face, the list has no row for it;
+    where it is an ordinary family such as Segoe UI, Other font… lists it, so it can be picked to
+    match): generate it again in its Analysis tool and save it again to get Arial panels. A
+    composition keeps the family it was saved with.
+  - **Nothing in a saved project changes:** an older project's font (`Menlo`, `Times New Roman`, or
+    none) opens exactly as saved, and one that names none is now drawn in Arial. An older build draws
+    a figure with no font chosen in its application font, and opens a project that names a font as
+    before.
+
+- **Distributions: the fit label's Numbers row chooses a fit's numbers, Title weight is gone, and
+  Reset appearance is now Reset figure, in the page toolbar (plotting redesign, Phase 0, owner
+  decision 9, 2026-11-02).**
+  - **The fit label's Numbers row replaces three Style boxes.** *Fit values on plot*, *R² on
+    figure* and *KS statistic on figure* are gone from Distributions' Style column. Tick BIC, KS
+    and R² in **Appearance ▸ Fit label ▸ Numbers**: a new label still shows Equation, R² and n, and
+    ticking BIC and KS draws the text *Fit values on plot* drew. The Style column's **Residual
+    strip** box still adds the strip's χ²/dof after the equation. The six Numbers boxes now sit
+    three to a line, so BIC and KS no longer fall off the right edge of Distributions' 344 px
+    controls column (which no longer scrolls sideways in Appearance); in a wide strip such as
+    Voltage dependence's or I-V's they keep that spacing instead of spreading a third of the strip
+    apart. The R² and KS boxes have tool tips that say what they do.
+  - **Unticking R² takes the R² refusal off the label with it.** *R² undefined (y does not vary)*
+    and *exact by construction* are printed, at the end of the label or where `{r2}` stands, while
+    R² is ticked or `{r2}` is in your words, as in every other window; unticked, with no `{r2}` in
+    your words, the label makes no claim about R² and Details still says. *R² on figure* used to
+    drop the number and keep the refusal. The scatter fit's R² is now always in Details' summary
+    line.
+  - **Title weight is gone;** the title's bold and italic are its **Text style…** (right-click the
+    title).
+  - **Older files open with the figure they had, with the two differences just named** (the
+    refusal tag, and Details' summary line). A project, Distributions template or plot
+    configuration file saved with those switches takes its label's numbers and the title's bold
+    and italic from them: a label with nothing of its own saved (never dragged, retyped or changed
+    in the Fit label group) shows Equation, R² and n plus BIC and KS if *Fit values on plot* was
+    ticked, any other label keeps the numbers it had, and *R² on figure* / *KS statistic on
+    figure* unticked leave R² / KS out, with a dash where your own wording names `{r2}` or `{ks}`,
+    as the older build drew it; Bold and Italic go to the title's Text style where it has not set
+    that one itself. The import note no longer lists those keys as settings not taken. This build
+    writes none of the old settings itself: a page saved after an edit holds none of them (a
+    project saved again with no edit to the page, and an older Distributions template stored on
+    this computer, are carried as they were and open the same way), and the project format is
+    still 12. An older build opens a project saved by this one and draws the same figure, because
+    the label's numbers and the title's weight are kept in fields it already reads.
+  - **Reset appearance is Reset figure, a button in the page toolbar,** just before **Export ▾**,
+    on every Analysis Explorer page, so it is there from every Section. It puts the title, axis
+    labels, fit-label wording, any caption or other annotation text you typed (Voltage dependence's
+    caption, the words on Distributions' detection-limit line) and the look back to their defaults
+    in one Undo step; ⌘Z brings it all back (on the other pages the Appearance section's Undo
+    button names the step from what it took back: *Undo: reset figure* when a title, a label and
+    a look went back together, *Undo: title ‘Capture vs voltage’ → automatic* when only the title
+    did; Distributions' Undo counts steps and names none). A source
+    you renamed on its legend row (Distributions, Distribution summaries) keeps its name. The study
+    figure editor, which has no such toolbar, keeps it in its Appearance section. The Undo and Redo
+    buttons stay in the Appearance section, side by side. In Distributions it now also returns the
+    label's numbers to Equation, R² and n and the title's bold and italic to plain, and its tool
+    tip says what it leaves as it is: the **Axis range** boxes, **Font size (body)**, the legend's
+    position, entries and (n = …) switch, source names, **Confidence band**, **Residual strip**,
+    **Provenance caption** and **Heatmap colormap**. On the other pages that have Axis properties, a range or tick spacing
+    typed there goes with the look; Event waveforms leaves its **Event-count heatmap colormap** and
+    Noise its **Spectrogram colormap** and **colour limits**, and their tool tips say so. It puts
+    the font back to *Arial (default)* along with the rest of the look.
+
+- **Exports name the figure's font with a fallback list, and report PDFs hold TrueType (plotting
+  redesign, Phase 0, export fonts, 2026-11-02).**
+  - **SVG exports name a fallback list for every font, and never the private system face.** Qt
+    wrote one font-family on each text element, even for a font that is not installed and with
+    nothing behind it, and a figure that was never given a font was written in the application's own
+    face, which on macOS is the private `.AppleSystemUIFont`. Every text element now names the font
+    the figure is drawn in, followed by its stand-ins (Arial, then Helvetica, Liberation Sans,
+    Arimo, TeX Gyre Heros, Nimbus Sans and sans-serif; Times New Roman and Courier New have lists of
+    their own, and any other family is followed by Arial's). A font this computer lacks is written
+    as the substitute the figure was drawn in, so an SVG exported here for a Calibri figure names
+    Arial first. Text that has no font of its own, such as the grey message a plot shows instead of
+    data, is written as Arial when the application's own font is a private system face (a name
+    starting with a dot, as on a Mac); a family someone picked is named first, the application's own
+    font included. The font-family Qt also put on the groups around the text, which named the
+    private face too, is dropped. Text stays text and no font is embedded. This covers **Export current figure…** (also at a physical size),
+    **Save figure bundle…**, Figure Library snapshots taken from now on and pyqtgraph's own
+    right-click Export. A figure saved to the Figure Library, or into a project, by an earlier
+    version keeps the SVG it was captured with, so its SVG export still has the single font family
+    per text element (and, for a figure whose font was never chosen, the application's own face).
+  - **Comparison figures and the study figure editor draw in the chosen font's list, and in Arial
+    when none is chosen.** The chosen family is drawn as that family, then those of its stand-ins
+    that are installed, then matplotlib's own sans-serif, serif or monospace face, then DejaVu Sans.
+    A family that is not installed falls back quietly; the bare name used to be logged as *not found*
+    on every text it drew, and the figure fell back to DejaVu Sans. A comparison figure with no font
+    chosen was drawn in DejaVu Sans, and a study figure in the editor in the font the study had drawn
+    it in. Their SVG and PDF still hold the text as outlines. On a Mac matplotlib reads only one
+    face of Helvetica, so bold or italic text set in Helvetica (a study figure's bold title, y tick
+    labels and bar text) is drawn in the regular weight there; pick Arial when you need bold.
+  - **A study figure with saved styling is drawn in Arial unless a font was chosen, also when its
+    figure group is regenerated.** This holds whatever else the styling holds, even nothing; a study
+    figure with no saved styling stays in the DejaVu Sans the study draws it in, so one regenerated
+    study can hold both. **Reset all figure styling** in the study figure editor leaves the figure in
+    Arial, no longer in the study's own font.
+  - **Matplotlib figures draw in a list that starts with Arial.** The report figures' font is the
+    list Arial, Helvetica, Liberation Sans, Arimo, TeX Gyre Heros and Nimbus Sans (those installed),
+    then matplotlib's sans-serif and DejaVu Sans; it was the word sans-serif, which names a single
+    face. A character the first face lacks, such as the subscript digits and the superscript minus
+    that Arial does not have, is taken from the next face that has it, and last from DejaVu Sans, so
+    τ, µ, Δ and the ₀ of ΔI/I₀ still draw on a computer with none of the others.
+
 - **Plot text belongs to you; a fit's numbers go in a fit label (plot UX round, 2026-11-01).**
   - **A fit no longer replaces the plot title.** In Distributions (scatter and histogram fits), I-V and
     Voltage dependence, the equation and numbers (R² with its degrees-of-freedom or *undefined* tag,
-    n; BIC and the KS statistic with *Fit values on plot*) are shown in a **fit label** on the plot,
+    n; BIC and the KS statistic when ticked in its Numbers row) are shown in a **fit label** on the plot,
     one line per source in the source's colour. A typed title keeps them. Legend fit rows read *Apo
     fit (linear)*; **In legend instead** (Distributions) puts the numbers there on a second line.
     Voltage dependence states what was pooled (merge state, baseline, gain, duration) in a caption
@@ -43,9 +297,8 @@ tags identify tested development baselines and do not promise a stable file or A
 - **Figure Library:** a saved figure is named after its tool and plot type (*I-V / conductance*,
   *Distributions · Histogram*) instead of its page id (*Iv*), and an export suggests a file name with
   *-* for the separators; the list shows recording file names, with the full path in the tooltip.
-- **Compose multi-panel figure:** panel spacing is in whole pixels, the label colour is a colour
-  swatch, and panel labels default to the application font (the font the panels' own text uses)
-  instead of Arial.
+- **Compose multi-panel figure:** panel spacing is in whole pixels and the label colour is a colour
+  swatch.
 - **Analysis Explorer:** a tool that cannot open yet says why in a banner inside the Explorer (from a
   double-click, Enter or Explain requirements alike) instead of on the main window's status bar, and
   Analysis home greys out tools that cannot open yet, with the reason first in their tooltip.
@@ -90,7 +343,7 @@ tags identify tested development baselines and do not promise a stable file or A
     - Your zoom and pan are kept.
     - A saved snapshot on screen is left as it is.
   - **⌘Z / ⇧⌘Z in a focused text field with nothing typed in it reach the window's Undo and
-    Redo,** as they already did in a spin box or a font box: a plot's Title box, a calibration
+    Redo,** as they already did in a spin box: a plot's Title box, a calibration
     field, a search box. A field you have typed in keeps them for its typing, and a table cell you
     are editing keeps them while its editor is open (press Esc first).
   - **A Plots-window fit over a typed Fit range is never the report's fit.** Such a fit records its
@@ -204,7 +457,8 @@ tags identify tested development baselines and do not promise a stable file or A
 - **Add title…**: right-click an empty part of a plot whose title is empty or hidden and type the
   title in place. Return keeps it as one Undo step; Esc, or Return with nothing typed, leaves the
   figure as it was. A hidden title also offers **Show title**. Where the views share one title
-  (Noise, Event waveforms, Subpopulations) the entry reads **Add title (all views)…**.
+  (Noise, Event waveforms, Subpopulations) the entry reads **Add title (this view)…** (**Add title
+  (both figures)…** in Subpopulations): the title goes back to automatic when the view changes.
 - **Distributions: every legend row has Text style… and Hide entry** from a right-click (one Undo
   step, saved with the plot and the project, not carried by templates or presets); a fit's row
   renames its source on a double-click. The *below detection limit* words can be retyped, styled or
@@ -404,8 +658,10 @@ tags identify tested development baselines and do not promise a stable file or A
   tooltip, and answers ⇧⌘Z.
 - **Every plot window has its own appearance Undo and Redo** — Event waveforms, Noise spectrum,
   I-V, Voltage dependence, Distribution summaries, Comparison figures, Subpopulations and the study
-  figure editor — beside **Reset appearance**, with ⌘Z / ⇧⌘Z while the Appearance controls are on
-  screen. An edit, a preset, a saved appearance, a colour and a reset are each a step, and edits
+  figure editor — in the Appearance section (beside **Reset figure** in the study figure editor; the
+  other pages carry that button in the page toolbar), with ⌘Z / ⇧⌘Z whatever the page's Section
+  shows (the study figure editor, which has no Sections, answers while its Appearance controls are on
+  screen). An edit, a preset, a saved appearance, a colour and a reset are each a step, and edits
   within 700 ms join one; 200 steps, with the tooltip naming the step (*Undo: title size 12 → 14
   pt*) and counting any dropped at the ceiling. It is kept apart from Edit ▸ Undo, and ends when a
   project opens, a saved state is restored or **Reset all figure styling** is pressed.
@@ -600,6 +856,39 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- **The first edit in Appearance no longer takes off what a project, template or import had put on
+  the figure.** After one of those installs, Distributions' Appearance controls kept showing what
+  they had last been told, so the next edit (a few letters typed in Title) took the fit label's
+  numbers and the title's bold off the figure, and Reset figure did nothing because the controls
+  believed they were already at their defaults. The controls now show the style that was installed.
+- **Report-figure PDFs hold TrueType text, not Type 3.** *Analysis ▸ Generate Report figures…* and
+  *Export density figure…* saved outside the NanoScope style, so matplotlib's default Type 3 glyph
+  drawings were written (an IEEE conference's paper page says they are not accepted; Nature asks for
+  TrueType, Type 42) although the style asks for 42. The PDF now embeds TrueType (Type 42) fonts.
+- **The report figures' text is printed in the face it was laid out in.** It was laid out in
+  Helvetica and printed in DejaVu Sans. The PDF and the PNG now both draw it in Arial, and a
+  character Arial does not have, such as the subscript zero of the fractional-blockade axis ΔI/I₀ or
+  the superscript minus of s⁻¹, in the next face of its list that has it (see the exports above).
+  The text of these figures therefore changes face. Greek and subscripts written as math text
+  (τ, µs, t_min) are still set in DejaVu Sans, which the PDF embeds as well.
+- **Distributions: Undo on a project you opened goes back to what the project was saved with.** The
+  Undo history began at the blank window, so the first change after opening (the plot type, say)
+  was undone to the built-in defaults: the typed title, the font, the ranges you had typed and the
+  fit label's numbers did not come back, and **Undo** with nothing changed wiped the page. The
+  history now starts when the project is opened, at the state it was saved in. An **Undo** or
+  **Redo** also counts as a change to the project: it marks it unsaved, and a project saved after
+  one holds what is on screen (it held the state from before the Undo, so a **Reset figure** and an
+  **Undo** in an opened project lost the saved look in the next save).
+- **A composition with shared axes keeps the figure's font in the title and the legend.** A panel
+  re-drawn with Share X range / Share Y range or One shared legend came back with its title and
+  legend rows in the application font (a private face on macOS, which the composed PDF embedded)
+  beside axis labels and ticks in Arial or the chosen font; with Times New Roman chosen the title
+  was affected too. A figure saved by an earlier version has no font for its legend rows in its
+  stored model, so those rows are still drawn in the application font; save the figure again.
+- **Comparison figures: ⌘Z answers from every Section.** Reset figure sits in the toolbar and the
+  reset when **Generate** commits another figure is made from whichever Section is showing, but the
+  Undo keys answered only while Appearance was on screen. They now answer from every Section, as on
+  the other plot pages (the study figure editor, which has no Sections, is unchanged).
 - **Distributions: a reopened project draws a histogram fit's label with every number it was saved
   with** (all parameters, n, BIC, the KS statistic and verdict), a typed fit-label template keeps its
   `{n}`, the legend's fit row stays "fit (…)" without numbers, and with **In legend instead** the
@@ -622,7 +911,8 @@ tags identify tested development baselines and do not promise a stable file or A
 - **I-V, Voltage dependence, Noise spectrum, Event waveforms and Distribution summaries: a range
   typed in Axis properties stays in view** after a redraw — Refresh, Generate, a new setting, an
   Explorer tab switch, a saved view restored into the page (it was dropped from view while Axis
-  properties still showed it). An appearance change still keeps a
+  properties still showed it) — until the axis comes to show another quantity, when it goes back to
+  automatic with the typed words (see the reset rule, above). An appearance change still keeps a
   zoom made by hand. With a range pinned, the I-V and Voltage dependence empty-page message (*No
   usable recordings…*) stays in view; the range returns when there are points again.
   In Noise spectrum, Event waveforms and Subpopulations the range belongs to the view whose axis
@@ -644,7 +934,7 @@ tags identify tested development baselines and do not promise a stable file or A
 - **Voltage dependence: dragging the caption is one Undo step** (*caption moved*) and its position is
   saved with the figure — projects, window templates and Undo keep it; presets leave it where it is.
 - **Distribution summaries: renaming a legend entry in the figure is one Undo step.** The name still
-  lives in Source names and colors, which Reset appearance and templates leave alone.
+  lives in Source names and colors, which Reset figure and templates leave alone.
 - **Annotate: a loose drag fits the event.** A drag that overshot an event by more than about 12
   pixels was refused as "not significant against the noise", even for a step dozens of times the
   noise, and with the step just past the search window it could add the event with a start or
@@ -731,10 +1021,11 @@ tags identify tested development baselines and do not promise a stable file or A
 - **Compose with shared axes no longer draws a blank title band** over a panel whose figure had no
   title, or a hidden one. A titled and an untitled panel still line up.
 - **⌘Z and ⇧⌘Z work after a spin box's arrows or a pick from a list.** A spin box changed with its
-  arrows or Page Up/Down, or an editable list such as the plot windows' Font, kept the key while it
-  had focus and did nothing with it, so the plot windows' appearance Undo/Redo, Edit ▸ Undo/Redo
-  and the Signal Conditioning window's ⌘Z were dead until focus moved. The control now keeps the
-  key only while it has typing of its own to undo (`gui/app.py`, `_UndoKeyGuard`).
+  arrows or Page Up/Down, or an editable list (the plot windows' Font was one, before the short
+  font list replaced it), kept the key while it had focus and did nothing with it, so the plot
+  windows' appearance Undo/Redo, Edit ▸ Undo/Redo and the Signal Conditioning window's ⌘Z were
+  dead until focus moved. The control now keeps the key only while it has typing of its own to
+  undo (`gui/app.py`, `_UndoKeyGuard`).
 - **The plot appearance size boxes step from Default straight to the smallest size a figure draws**
   (6 pt for title, axis, tick and legend text) and back, instead of through 1–5 pt, which changed
   nothing.

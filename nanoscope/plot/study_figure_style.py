@@ -23,6 +23,8 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.text import Text
 
+from .style import font_family_list
+
 
 _local = threading.local()
 
@@ -276,9 +278,12 @@ retain categorical identities on the multi-panel scientific figures.
             for legend in self._legends:
                 legend.get_frame().set_facecolor(background)
                 legend.get_frame().set_edgecolor(foreground)
-        if state.get('font_family'):
-            for text in self._texts:
-                text.set_fontfamily(state['font_family'])
+        # The chosen family's stack -- Arial's when none is chosen -- in every Text (and the
+        # title below): a bare name is a warning on every draw where that family is not
+        # installed, and the canvas item draws this figure outside any style.
+        family = font_family_list(state.get('font_family'))
+        for text in self._texts:
+            text.set_fontfamily(family)
         for ax, descriptor in zip(self._axes, self._panel_defaults):
             panel = dict(panels.get(descriptor['key'], {}))
             if 'event_identity' in descriptor:
@@ -309,8 +314,7 @@ retain categorical identities on the multi-panel scientific figures.
         if self.figure._suptitle is not None:
             if 'title_size' in state:
                 self.figure._suptitle.set_fontsize(state['title_size'])
-            if 'font_family' in state:
-                self.figure._suptitle.set_fontfamily(state['font_family'])
+            self.figure._suptitle.set_fontfamily(family)
             if state.get('background') in ('dark', 'light'):
                 self.figure._suptitle.set_color(foreground)
         for legend in self._legends:

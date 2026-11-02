@@ -2401,8 +2401,7 @@ own peak density so a rare population keeps its shape beside an abundant one.
 Defaults are the signature axes — `dwell_s` (log x) against `frac_depth` — and the
 `Contours` spinbox sets lines per source. It needs at least 5 usable points per
 source; anything dropped is disclosed in Details, along with each source's KDE
-bandwidth factor. Style, Save image and the fit-values box all apply as on any
-other plot type.
+bandwidth factor. Style and Save image apply as on any other plot type.
 
 **As a publication export** (with marginal distributions):
 
@@ -2426,7 +2425,7 @@ the legend entirely.
 
 In the Plots window, the Style group now also carries **X label** / **Y label**
 overrides (text only — tick scaling still applies), a **Show legend** toggle, and
-the **Fit values on plot** box; the **Axis range** fields read in the unit the axis
+the fit label's **Numbers** row; the **Axis range** fields read in the unit the axis
 displays, so a time axis follows the Time-unit combo and you type the number you
 read off the ticks.
 

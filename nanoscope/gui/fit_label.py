@@ -28,6 +28,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui
 
 from .figure_text import GATE, HIDDEN_TEXT, rich_text
+from .font_picker import html_font_family
 
 __all__ = ["FIT_FIELDS", "FIT_TOKENS", "PLACEMENTS", "FitLabelItem", "FitLabelState", "automatic_template",
            "FitReadout", "format_fit_label", "valid_offset"]
@@ -215,10 +216,11 @@ class FitLabelItem(pg.LabelItem):
 
     # -- drawing --------------------------------------------------------------------------
     def apply_state(self, state: FitLabelState, readouts: Sequence[FitReadout] = (),
-                    style=None) -> None:
+                    style=None, family: str | None = None) -> None:
         """Draw ``readouts`` as ``state`` says; hidden when there is nothing to show, when
         the label is off, or when its numbers are in the legend instead. ``style`` (a
-        ``TextStyle``, from Text style…) adds font, bold and italic."""
+        ``TextStyle``, from Text style…) adds font, bold and italic. The font is the
+        style's, else ``family`` (the figure's), else Arial -- never the application font."""
         self._state = state
         self._readouts = tuple(readouts)
         lines = [] if state.in_legend else format_fit_label(self._readouts, state)
@@ -226,12 +228,13 @@ class FitLabelItem(pg.LabelItem):
                            for text, colour in lines)
         for key in ("family", "bold", "italic", "size"):
             self.opts.pop(key, None)      # setText merges: a style taken off must go
-        options: dict[str, Any] = {"justify": "left"}
+        options: dict[str, Any] = {
+            "justify": "left",
+            "family": html_font_family(getattr(style, "family", None) or family)}
         if state.size_pt:
             options["size"] = f"{state.size_pt:g}pt"
         if style is not None:
-            for key, value in (("family", style.family), ("bold", style.bold),
-                               ("italic", style.italic)):
+            for key, value in (("bold", style.bold), ("italic", style.italic)):
                 if value is not None:
                     options[key] = value
         self.setText(body, **options)

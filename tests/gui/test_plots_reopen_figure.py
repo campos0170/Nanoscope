@@ -135,7 +135,8 @@ def test_a_reopened_fit_keeps_every_number_and_a_number_free_legend_row(
     plots.set_plot_type("Histogram")
     plots.set_histogram_column(col)
     plots.set_fit(kind)
-    plots._fit_values_check.click()          # Fit values on plot: BIC and KS on the figure
+    for name in ("bic", "ks"):               # the fit label's Numbers row: BIC and KS
+        plots._appearance_widget.fit_label_fields[name].click()
     _settle()
     before = _figure(plots)
     assert all(part in before["label"] for part in (*shown, "n = 120", "BIC = ", "KS = ")), before

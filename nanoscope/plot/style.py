@@ -20,6 +20,8 @@ from typing import Any
 
 import matplotlib as mpl
 
+from . import figure_fonts
+
 # Okabe & Ito (2008) colour-universal palette, reordered so the first few are
 # the ones you actually reach for first. Every pair is separable under
 # deuteranopia, protanopia and tritanopia.
@@ -132,8 +134,13 @@ def rc_params(**overrides: Any) -> dict[str, Any]:
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
         "svg.fonttype": "none",
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
+        # A list, not the word "sans-serif": the word is ONE face, and a character it lacks (a
+        # subscript zero is not in Arial) is a missing-glyph box; a list takes it from the next.
+        "font.family": font_family_list(),
+        # Arial first -- the face the journals name (docs: the plotting proposal, section 4) --
+        # then its stand-ins. DejaVu Sans ships with matplotlib and stays last, so Greek and the
+        # minus sign still draw on a machine with none of the others.
+        "font.sans-serif": [*figure_fonts.matplotlib_font_list(figure_fonts.DEFAULT_FAMILY), "DejaVu Sans"],
         "font.size": 8.0,
         "axes.titlesize": 9.0,
         "axes.labelsize": 8.0,
@@ -188,3 +195,48 @@ def nanoscope_style(**overrides: Any) -> Iterator[None]:
     """
     with mpl.rc_context(rc_params(**overrides)):
         yield
+
+
+#: The part of the style a SAVE has to run under. ``Figure.savefig`` picks the PDF/PS font type
+#: and resolves a Text's family when it DRAWS, not when the figure was built, so a figure built
+#: inside :func:`nanoscope_style` and saved outside it was laid out in one face and printed in
+#: another, and its PDF got matplotlib's default Type 3 glyph drawings instead of TrueType.
+_EXPORT_KEYS = ("pdf.fonttype", "ps.fonttype", "font.sans-serif")
+
+
+@contextmanager
+def export_style() -> Iterator[None]:
+    """Context manager for ``savefig``: TrueType (Type 42) in PDF/PS, and the style's sans-serif list.
+
+    Only the keys that decide the font are applied -- not the margins or sizes of
+    :func:`nanoscope_style` -- so a save lays the page out as it always has. Scoped, like it.
+    """
+    rc = rc_params()
+    with mpl.rc_context({key: rc[key] for key in _EXPORT_KEYS}):
+        yield
+
+
+def font_family_list(family: str | None = None) -> list[str]:
+    """``font.family`` for a figure drawn in ``family`` (``None`` / empty: Arial).
+
+    The family's stack from :mod:`~nanoscope.plot.figure_fonts`, cut to the names matplotlib can
+    find on this machine, then its generic (``sans-serif``, ``serif`` or ``monospace``), then
+    DejaVu Sans. It is a LIST because matplotlib draws a character the first face lacks -- a
+    subscript zero, a superscript minus: Arial has neither -- from the next face of a list, while
+    the bare word ``sans-serif`` names ONE face, the first of ``font.sans-serif`` that is
+    installed, and a character that face lacks is a missing-glyph box. DejaVu Sans is written out
+    last because it ships with matplotlib and has them (and Greek), and because the generic
+    cannot be counted on to reach it: under :func:`export_style` ``sans-serif`` is Arial again.
+    It is spelled out in the figure's own Texts because a Text is resolved when it is DRAWN -- for
+    the comparison and study figures that is later, outside any style, where a bare
+    ``sans-serif`` would mean matplotlib's own DejaVu Sans. Each name is cut to those installed
+    because matplotlib looks every named family up on its own and logs a warning, on every text
+    it draws, for each it cannot find. Names are compared without regard to case, as matplotlib
+    does, so a family stored as ``menlo`` is still found.
+    """
+    from matplotlib import font_manager
+
+    have = {entry.name.casefold() for entry in font_manager.fontManager.ttflist}
+    named = [name for name in figure_fonts.matplotlib_font_list(family) if name.casefold() in have]
+    last_resort = ["DejaVu Sans"] if "dejavu sans" in have else []
+    return [*named, figure_fonts.generic_family(family), *last_resort]

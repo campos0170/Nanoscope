@@ -50,6 +50,9 @@ import pyqtgraph as pg
 import shiboken6
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..plot import figure_fonts as ff
+from .font_picker import FontPicker, html_font_family
+
 __all__ = [
     "AXIS_SIDES", "HIDDEN_TEXT", "AxisPin", "AxisPropertiesPopover", "AxisState",
     "DoubleClickGate", "EditableLabelItem", "FigureTextController", "FigureTextHost",
@@ -183,7 +186,7 @@ def css_args(style: TextStyle) -> dict[str, str]:
     if style.size_pt:
         css["font-size"] = f"{style.size_pt:g}pt"
     if style.family:
-        css["font-family"] = style.family
+        css["font-family"] = html_font_family(style.family)
     if style.bold is not None:
         css["font-weight"] = "bold" if style.bold else "normal"
     if style.italic is not None:
@@ -199,7 +202,7 @@ def label_args(style: TextStyle) -> dict[str, Any]:
     if style.size_pt:
         args["size"] = f"{style.size_pt:g}pt"
     if style.family:
-        args["family"] = style.family
+        args["family"] = html_font_family(style.family)
     if style.bold is not None:
         args["bold"] = style.bold
     if style.italic is not None:
@@ -209,23 +212,27 @@ def label_args(style: TextStyle) -> dict[str, Any]:
     return args
 
 
-def apply_text_style(item, style: TextStyle, auto: str) -> None:
+def apply_text_style(item, style: TextStyle, auto: str, family: str | None = None) -> None:
     """Draw ``style`` on a window's own text item (a colour-bar or marginal label, an
     annotation): a LabelItem, a TextItem or an AxisItem's label. ``auto`` is the window's
-    automatic text, as rich text; the user's text is escaped."""
+    automatic text, as rich text; the user's text is escaped. The item's family is the
+    style's own, else ``family`` (the figure's), else Arial."""
     text = auto if style.text is None else ("" if style.text == HIDDEN_TEXT
                                            else rich_text(style.text))
+    css_family = html_font_family(style.family or family)
     if isinstance(item, pg.AxisItem):
         css = dict(item.labelStyle)
+        css["font-family"] = css_family
         css.update(css_args(style))
         item.labelText = text
         item.labelStyle = css
         item._updateLabel()
     elif isinstance(item, pg.LabelItem):
-        item.setText(text, **{**item.opts, **label_args(style)})
+        item.setText(text, **{**item.opts, "family": css_family, **label_args(style)})
         item.setVisible(bool(text.strip()))
     elif isinstance(item, pg.TextItem):
-        css = "; ".join(f"{k}: {v}" for k, v in css_args(style).items())
+        css = "; ".join(f"{k}: {v}" for k, v in {"font-family": css_family,
+                                                  **css_args(style)}.items())
         item.setHtml(f"<span style='{css}'>{text}</span>" if css else text)
         item.setVisible(bool(text.strip()))
 
@@ -510,10 +517,17 @@ class TextStylePopover(_Popover):
             self.text.hide()
         self.use_family = QtWidgets.QCheckBox("Custom font")
         self.use_family.setChecked(bool(style.family))
-        self.family = QtWidgets.QFontComboBox()
-        self.family.setEditable(True)
-        if style.family:
-            self.family.setCurrentText(style.family)
+        # "Arial" is a family here, not "unset": a text that follows the figure's font is this
+        # box unticked, so the first row stores Arial itself.
+        self.family = FontPicker(first_row=(ff.DEFAULT_FAMILY, ff.DEFAULT_FAMILY))
+        # Not the picker's own sentence ("The first row is the figure default"): here the first
+        # row is an explicit Arial, and the box counts only while Custom font is ticked.
+        self.family.setToolTip(
+            "Font for this text, used only while Custom font is ticked. The first row is Arial "
+            "itself, whatever the figure's font is; untick Custom font to follow the figure's "
+            f"font. {ff.OTHER_FONT_LABEL} lists every font installed on this computer except the "
+            "system's private fonts and symbol fonts such as Wingdings.")
+        self.family.set_value(style.family)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self.use_family)
         row.addWidget(self.family, 1)
@@ -559,7 +573,7 @@ class TextStylePopover(_Popover):
     def value(self) -> TextStyle:
         return TextStyle.from_mapping({
             "text": self.text.text() if self.text.isVisibleTo(self) else self._text_kept,
-            "family": self.family.currentText() if self.use_family.isChecked() else None,
+            "family": self.family.value() if self.use_family.isChecked() else None,
             "size_pt": self.size.value() or None,
             "bold": True if self.bold.isChecked() else None,
             "italic": True if self.italic.isChecked() else None,
@@ -876,18 +890,18 @@ class FigureTextController(QtCore.QObject):
         page's own: "Add title…" while the title draws nothing -- an empty automatic title
         (I-V, Voltage dependence) or a hidden one -- because such a title has no row left
         to click; "Show title" too when a hidden one has automatic text to come back to.
-        "Add title (all views)…" where the views share one title. Then the host's own
+        "Add title (this view)…" where the views share one title ("(both figures)" in
+        Subpopulations: ``AppearanceTextHost.title_scope``). Then the host's own
         (``background_entries``, optional), such as Distributions' Show detection-limit label."""
         entries: list[tuple[str, Callable[[], None]]] = []
         target = self.target("title")
         if (target is not None and "edit" in target.capabilities
                 and not shown_text(target.style, target.auto).strip()):
-            # A window whose views share one title (Noise, Event waveforms,
-            # Subpopulations) retitles every view, so the entry says so, as the
-            # Appearance box's "Title (all views)" does.
-            shared = bool(getattr(self.host, "shared_labels", ""))
-            entries.append(("Add title (all views)…" if shared else "Add title…",
-                            self.add_title))
+            # A window whose views share one title (Noise, Event waveforms, Subpopulations)
+            # says what the title covers -- the figure(s) on screen, until the view changes --
+            # as the Appearance box's "Title (this view)" does.
+            scope = getattr(self.host, "title_scope", "")
+            entries.append((f"Add title ({scope})…" if scope else "Add title…", self.add_title))
             if target.style.text == HIDDEN_TEXT and target.auto.strip():
                 style = target.style
                 entries.append(("Show title",
@@ -1138,6 +1152,13 @@ class AppearanceTextHost:
         self._annotations: dict[str, weakref.ref] = {}
 
     @property
+    def title_scope(self) -> str:
+        """What a title typed on this figure covers ("this view", "both figures"), as the
+        window's Title box says; "" where the window has one figure."""
+        widget = self._widget_ref()
+        return str(getattr(widget, "title_scope", "") or "")
+
+    @property
     def pin_view(self) -> str:
         """The view this figure's pins are kept under now; "" in a single-view window."""
         view = self._pin_view() if callable(self._pin_view) else self._pin_view
@@ -1337,5 +1358,5 @@ def appearance_text_host(plot, widget, *, axis_hooks=None, extra_targets=None,
 
 #: The reason a multi-view window's axis label is renamed in Appearance, not on a figure.
 SHARED_LABELS_REASON = ("This window's views share one X and one Y label (Appearance ▸ "
-                        "X label / Y label, all views), so it is renamed there; renaming it "
+                        "X label / Y label), so it is renamed there; renaming it "
                         "here would relabel views that show other quantities.")

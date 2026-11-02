@@ -16,9 +16,11 @@ it by construction.
 Three separate things have to hold, and each was broken on its own:
 
 * the box's footprint clears the bars (the placer: corner choice + headroom);
-* the box is DRAWN with the font it was MEASURED with -- a figure is built inside
+* the box is DRAWN with the font it was MEASURED with -- a figure was built inside
   ``nanoscope_style`` (Helvetica) and saved outside it (DejaVu Sans), so an unpinned
-  box drew 8 % more ink than its layout reserved and overshot the right spine;
+  box drew 8 % more ink than its layout reserved and overshot the right spine. (The rest
+  of the text no longer has that split: ``save_figure`` saves under ``export_style`` and
+  the style's font family is a list, Arial first. The box stays pinned to a file.)
 * the baseline pointer names a file that exists (X-SURF-2): Export figure… writes
   ``fig_<name>.pdf`` + ``.png`` + ``.csv``, and that CSV is the figure's own source
   data, not an advisory.

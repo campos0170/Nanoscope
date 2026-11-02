@@ -63,6 +63,23 @@ class PlotWorkflowBar(QtWidgets.QWidget):
         self.export_button.setMenu(self.export_menu)
         self.export_button.setEnabled(bool(exports))
         layout.addWidget(self.export_button)
+        #: The page's Reset figure button, once :meth:`adopt_reset_figure` has put it here.
+        self.reset_button: QtWidgets.QPushButton | None = None
+
+    def adopt_reset_figure(self, appearance, keeps: str = "") -> QtWidgets.QPushButton:
+        """Show ``appearance``'s Reset figure button here, left of Export ▾.
+
+        The same button its Appearance section had (``PlotAppearanceWidget.take_reset_button``),
+        so it resets the figure's words and look as one Undo step whichever Section is
+        showing. ``keeps`` names the page's own Appearance rows that the shared look does not
+        hold, and so Reset figure leaves (a colormap): the tool tip says so."""
+        button = appearance.take_reset_button()
+        if keeps:
+            button.setToolTip(f"{button.toolTip()} Here it also keeps {keeps}.")
+        layout = self.layout()
+        layout.insertWidget(layout.indexOf(self.export_button), button)
+        self.reset_button = button
+        return button
 
     def add_view_control(self, widget: QtWidgets.QWidget, stretch: int = 0) -> None:
         """Put a view-only control (``plot_interaction.view_button``, or a pointer readout

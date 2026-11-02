@@ -125,11 +125,14 @@ def test_fit_ornaments_use_cached_geometry_and_keep_fit_and_export(window, qtbot
     view = copy.deepcopy(w._plot.viewRange())
     _forbid(w, monkeypatch)
 
-    for name in ("_fit_values_check", "_r2_check", "_gof_check", "_ci_band_check",
-                 "_residual_check", "_prov_check"):
+    for name in ("_ci_band_check", "_residual_check", "_prov_check"):
         control = getattr(w, name)
         control.setChecked(False)
         control.setChecked(True)
+    for name in ("bic", "ks", "r2"):         # the fit label's Numbers row
+        box = w._appearance_widget.fit_label_fields[name]
+        box.click()
+        box.click()
     assert w._band_items and not w._resid_widget.isHidden()
     assert "POINTWISE" in w.details_text()
     assert "APPROXIMATE" in w.details_text() and "no p-value" in w.details_text()
@@ -201,7 +204,8 @@ def test_common_appearance_replaces_duplicate_basic_controls(window):
     window._show_control_section("Appearance")
     assert window._appearance_widget.isVisible()
     assert window._title_edit.isHidden() and window._line_width.isHidden()
-    assert window._fit_values_check.isVisible() and window._legend_entries.isVisible()
+    assert window._appearance_widget.fit_label_group.isVisible()
+    assert window._ci_band_check.isVisible() and window._legend_entries.isVisible()
 
 
 def test_population_export_uses_frozen_picture_after_dialog(window, monkeypatch, tmp_path):

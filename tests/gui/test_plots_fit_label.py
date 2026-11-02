@@ -112,15 +112,27 @@ def test_two_sources_get_two_coloured_label_lines_and_number_free_legend_rows(qa
     assert "apo:" in plain and "holo:" in plain, plain
 
 
-def test_unticking_r2_drops_the_number_but_never_the_refusal(qapp, qtbot):
+def test_the_numbers_row_decides_whether_r2_is_on_the_figure_and_a_ticked_r2_keeps_its_refusal(
+        qapp, qtbot):
+    """R² on figure is gone: the Numbers row says whether R² is on the figure. While R² is
+    ticked the label prints the refusal that says an R² cannot be judged, whatever the user's
+    words; unticked, and with no {r2} in the words, the label makes no R² claim (fit_label's
+    rule everywhere), and Details still says."""
     flat = _df()
     flat["ycol"] = 7.0                    # y does not vary: R² is undefined
     w = _scatter(qtbot, {"probe": flat})
     assert "R² undefined" in w._fit_label_item.plain_text()
-    w._r2_check.setChecked(False)
-    assert "R² undefined" in w._fit_label_item.plain_text()
+    w._appearance_widget.fit_label_fields["r2"].click()     # the Numbers row, unticked
+    assert "r2" not in w.config().style.fit_label_state().fields
+    assert "R²" not in w._fit_label_item.plain_text()
+    assert "y = " in w._fit_label_item.plain_text()
+    assert "R² is undefined" in w.details_text()
+    figure_text.figure_text_for(w._plot).host.apply_text(
+        "annotation.fit", figure_text.TextStyle(text="Fit: {equation} ({r2})"))
+    assert "R² undefined" in w._fit_label_item.plain_text(), "a {r2} in the words asks for it"
     w2 = _scatter(qtbot)
-    w2._r2_check.setChecked(False)
+    assert "R² = " in w2._fit_label_item.plain_text()
+    w2._appearance_widget.fit_label_fields["r2"].click()
     assert "R²" not in w2._fit_label_item.plain_text()
     assert "y = " in w2._fit_label_item.plain_text()
 

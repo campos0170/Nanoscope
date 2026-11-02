@@ -154,14 +154,14 @@ def test_the_verdict_is_said_once_on_the_automatic_title(rejected):
 
 
 def test_a_typed_title_with_the_legend_off_still_exports_the_verdict(rejected, tmp_path):
-    """The exact figure the skeptic saved: typed title, Show legend off, values box at
-    its default (off). The curve is drawn; the SVG must still carry the verdict."""
-    rejected._style = replace(rejected._style, fit_values_on_plot=False)
+    """The exact figure the skeptic saved: typed title, Show legend off, KS at its default
+    (not in the fit label's numbers). The curve is drawn; the SVG must still carry the
+    verdict."""
     rejected.set_title("Figure 3: apo-ferritin dwell times, -600 mV")
     rejected._legend_check.setChecked(False)
     rejected._redraw()
     assert _legend(rejected) == [], "premise: the legend is off"
-    assert "KS =" not in _fit_text(rejected), "premise: the values box is off"
+    assert "KS =" not in _fit_text(rejected), "premise: KS is not in the label's numbers"
     assert rejected._last_fit is not None, "premise: the curve is still drawn"
     svg = tmp_path / "typed_title_legend_off.svg"
     rejected.save_image(svg)
@@ -193,7 +193,6 @@ def test_an_overlay_names_the_rejected_source_in_the_title_by_the_figures_own_na
     w = _window(qtbot,
                 _source("doc0:0", "peak", _narrow_peak(), "#0072B2"),
                 _source("doc1:0", "expo", _exponential(), "#D55E00"))
-    w._style = replace(w._style, fit_values_on_plot=False)
     w._source_list.item(0).setText("Apo")
     w.set_fit("exponential")
     w._redraw()
@@ -213,7 +212,7 @@ def test_the_verdict_stacks_behind_the_titles_other_headlines_in_one_channel(rej
 
 
 def test_the_tooltip_says_the_title_carries_it_over_a_typed_title(rejected):
-    tip = rejected._gof_check.toolTip()
+    tip = rejected._appearance_widget.fit_label_fields["ks"].toolTip()
     assert "Details" in tip and "provenance" in tip
     assert "not on the plot" in tip
 

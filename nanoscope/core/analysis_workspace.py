@@ -1129,6 +1129,11 @@ def restore_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
     try:
         current = window.config()
         config = _decode_like(current, payload["config"], artifact)
+        # A key an older build saved that the live config has no field for is read by the
+        # window itself, from the saved tree (the decoder above reads only today's fields).
+        fold = getattr(window, "fold_saved_config", None)
+        if callable(fold):
+            config = fold(config, payload["config"])
         recipes = payload.get("selected_sources")
         unresolved: list[dict[str, Any]] = []
         if isinstance(recipes, (list, tuple)):
@@ -1257,6 +1262,10 @@ def restore_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
         })
     elif hasattr(window, "_nanoscope_unresolved_plot_results"):
         delattr(window, "_nanoscope_unresolved_plot_results")
+    # The saved state is where the window's Undo history starts (not the blank window).
+    adopt = getattr(window, "adopt_restored_state", None)
+    if callable(adopt):
+        adopt()
     return RestoreReport(restored=(PLOTS_ARTIFACT_ID,), warnings=tuple(warnings))
 
 

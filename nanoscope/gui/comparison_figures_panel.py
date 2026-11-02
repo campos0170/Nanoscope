@@ -3,6 +3,11 @@
 Generating prepares plot geometry, never detection/calibration/fitted results.
 Styling and restore draw that saved geometry; they do not rerun statistics or
 swarm layout. Canvas magnification is a viewer aid, not a numerical axis edit.
+
+The typed title and axis labels belong to the figure type and measurements the committed
+figure shows (``gui.quantity_reset``): the controls only edit a draft, so :meth:`analyze` puts
+them back to automatic when it commits another quantity, not on a first draw, a repeat, a
+restore, or the Generate that commits a recalled template's own quantity.
 """
 from __future__ import annotations
 
@@ -35,6 +40,11 @@ METRICS = (("dwell_s", "Dwell (s)"), ("depth_pA", "Median depth (recorded units)
            ("ecd_pA_s", "Event area (recorded units · s)"), ("snr", "SNR"),
            ("rise_s", "Rise time (s)"), ("fall_s", "Fall time (s)"))
 _METRIC_KEYS = {key for key, _ in METRICS}
+#: What the status line calls a measurement after a figure change (quantity_reset).
+_SHOWS_METRIC = {"dwell_s": "dwell time", "depth_pA": "median depth",
+                 "amplitude_pA": "selected amplitude", "frac_depth": "fractional depth",
+                 "ecd_pA_s": "event area", "snr": "SNR", "rise_s": "rise time",
+                 "fall_s": "fall time"}
 #: The pair matrix's starting features, and what its Default button puts back.
 PAIR_DEFAULT_FEATURES = ("dwell_s", "depth_pA", "ecd_pA_s", "snr")
 _KINDS = {key for key, _ in VIEWS}
@@ -131,6 +141,9 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         self._source_recipes = []
         self._appearance = PlotAppearance()
         self._source_appearance = {}
+        #: The quantity a recalled template's words came with: its first Generate commits
+        #: them, so those words are not stale (quantity_reset).
+        self._words_for = None
         self._figure_item = None
         self._fit_pending = False
 
@@ -231,7 +244,12 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         analysis_layout.addWidget(self._method_note)
         analysis_scroll = bounded_controls(analysis, maximum_height=240)
 
-        self._appearance_widget = PlotAppearanceWidget(self._appearance, multi_view_labels=True)
+        # ⌘Z on the page, not on these controls: Reset figure (in the page toolbar) and the rule's
+        # reset at Generate are made from any Section, and their step is undone from the keyboard
+        # whatever the Section shows (FIG-4); a page behind another Explorer tab is hidden, so it
+        # does not answer.
+        self._appearance_widget = PlotAppearanceWidget(self._appearance, multi_view_labels=True,
+                                                       shortcut_parent=self)
         self._appearance_widget.data_color.setEnabled(False)
         self._appearance_widget.data_color.setToolTip("Comparison figures retain each source's identity colour; a single colour override is not applied.")
         self._appearance_widget.fit_color.setEnabled(False)
@@ -279,6 +297,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
             sections={"Data": (data,), "Analysis": (analysis_scroll,), "Appearance": (appearance,), "Export": (export,)},
             actions=(("Generate", self._generate_from_user),),
             exports=(("Export current figure…", self.save_image), ("Export plotted values CSV…", self.save_csv)))
+        self._workflow.adopt_reset_figure(self._appearance_widget)
         self._source_list.itemChanged.connect(self._source_selection_changed)
         self._accepted_only.toggled.connect(self._draft_changed)
         for combo in (self._view_combo, self._x_combo, self._y_combo, self._metric, self._points):
@@ -383,6 +402,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         if self.template_settings()[0] != before:
             self._draft_changed()
         self._appearance_widget.apply_appearance(appearance)
+        self._words_for = self._quantity(self.config())
 
     def selected_sources(self):
         return [self._sources[key] for key in self._selected_keys if key in self._sources]
@@ -453,12 +473,14 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         self._update_status()
         self.workspaceChanged.emit()
 
-    def _update_status(self):
+    def _update_status(self, lead=""):
         if self._snapshot:
             counts = "; ".join(f"{source['label']}: {source['n']} selected rows" for source in self._snapshot.get("sources", []))
             text = ("Unapplied data/analysis changes · showing the previous figure. " if self._stale else "Generated snapshot · ") + counts
         else:
             text = "Choose stored event sources and a figure type, then Generate. Opening this page runs no analysis."
+        if lead:
+            text = f"{lead} {text}"
         self._status.setText(text if len(text) <= 220 else text[:217] + "…")
         self._status.setToolTip(text)
         self._status.setAccessibleDescription(text)
@@ -524,6 +546,11 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         snapshot["warnings"] = list(dict.fromkeys([*snapshot.get("warnings", []), *notes]))
         snapshot["details"] = "\n\n".join(filter(None, [METHODS[config["kind"]], str(snapshot.get("details", "")), *notes]))
         item = self._make_figure_item(snapshot, tables, self._appearance, self._source_appearance)
+        # The figure on screen shows the OLD quantity until this commit: the words typed on it
+        # go back to automatic when the new figure replaces it.
+        words_for, self._words_for = self._words_for, None
+        moved = (bool(self._applied_config) and words_for != self._quantity(config)
+                 and self._quantity(self._applied_config) != self._quantity(config))
         self._snapshot, self._tables = snapshot, {key: frame.copy(deep=True) for key, frame in tables.items()}
         self._source_recipes = recipes
         self._applied_config = deepcopy(config)
@@ -532,9 +559,28 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         self._update_method_note()
         self._install_figure_item(item, fit=True)
         self._warnings.set_warnings(self._snapshot["warnings"], full_text=self.details_text())
-        self._update_status()
+        self._update_status(
+            self._appearance_widget.reset_typed_words(self._shows(config)) if moved else "")
         self.workspaceChanged.emit()
         return True
+
+    @staticmethod
+    def _quantity(config):
+        """What a figure shows: its type, and the measurements on its axes."""
+        kind = config["kind"]
+        return kind, (tuple(config["features"]) if kind == "pairs" else
+                      (config["x"], config["y"]) if kind == "facets" else (config["metric"],))
+
+    @staticmethod
+    def _shows(config):
+        """What the status line says the plot now shows (quantity_reset)."""
+        kind = config["kind"]
+        if kind == "pairs":
+            return f"a pair matrix of {len(config['features'])} measurements"
+        if kind == "facets":
+            return (f"{_SHOWS_METRIC[config['y']]} against {_SHOWS_METRIC[config['x']]}, "
+                    "one panel per source")
+        return f"individual events of {_SHOWS_METRIC[config['metric']]}"
 
     @staticmethod
     def _make_figure_item(snapshot, tables, appearance, source_appearance=None):

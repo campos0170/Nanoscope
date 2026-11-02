@@ -949,7 +949,7 @@ def test_the_fit_the_user_reads_still_carries_its_confidence_interval(loaded,
 # owner note #14: the fitted parameters as a text box ON the figure
 # ================================================================================================
 
-def test_fit_values_box_lands_on_the_plot_when_asked(loaded):
+def test_fit_numbers_land_on_the_plot_when_asked(loaded):
     loaded.set_plot_type("Histogram")
     loaded.set_histogram_column("dwell_s")
     loaded.set_bins(20)
@@ -960,21 +960,22 @@ def test_fit_values_box_lands_on_the_plot_when_asked(loaded):
     assert label.isVisible() and "τ" in label.plain_text()
     assert "BIC" not in label.plain_text()
 
-    # "Fit values on plot" still asks for the rest of the numbers.
-    loaded._fit_values_check.setChecked(True)
+    # The fit label's Numbers row asks for the rest of the numbers.
+    bic = loaded._appearance_widget.fit_label_fields["bic"]
+    bic.click()
     assert "τ" in label.plain_text(), "the label carries the fitted parameters"
     assert "BIC" in label.plain_text()
     # Anchored to the ViewBox — it lands in a saved image, unlike Details.
     assert label.parentItem() is loaded.plot_item().vb
 
-    # No fit → no label, even with the option on.
+    # No fit → no label, even with the number ticked.
     loaded.set_fit("none")
     assert not label.isVisible()
 
-    # ...and turning the option back off takes the extra numbers away again.
+    # ...and unticking it takes the extra number away again.
     loaded.set_fit("exponential")
     assert label.isVisible()
-    loaded._fit_values_check.setChecked(False)
+    bic.click()
     assert "BIC" not in label.plain_text()
 
 # ================================================================================================

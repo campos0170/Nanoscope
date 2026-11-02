@@ -28,6 +28,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pandas as pd
 import pytest
+import shiboken6
 from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from nanoscope.core.session import Session
@@ -54,13 +55,32 @@ def _gate():
 
 # -- real gestures --------------------------------------------------------------------------------
 
+def window_handle(widget):
+    """The QWindow of ``widget``'s top-level window: where a real click, drag or key is sent.
+
+    PySide keeps ONE Python wrapper per C++ address, and a wrapper of an object that Qt deleted
+    underneath it (a QLayoutItem a layout dropped) is never told. When a window is later created
+    at that address, ``windowHandle()`` hands back the old wrapper, of another type, and
+    ``QTest.mouseMove(QWidgetItem, QPoint)`` raises a TypeError -- once in a while, under load.
+    The stale wrapper is dropped (``invalidate`` forgets the wrapper and deletes nothing) and the
+    window asked again, so the gesture gets the QWindow it was after."""
+    top = widget.window()
+    handle = top.windowHandle()
+    for _ in range(3):
+        if handle is None or isinstance(handle, QtGui.QWindow):
+            break
+        shiboken6.invalidate(handle)
+        handle = top.windowHandle()
+    return handle
+
+
 def _window_pos(plot, scene_pt):
     view = plot.scene().views()[0]
     return view.viewport().mapTo(view.window(), view.mapFromScene(scene_pt))
 
 
 def _click(plot, scene_pt, button=R, double=False):
-    handle = plot.scene().views()[0].window().windowHandle()
+    handle = window_handle(plot.scene().views()[0])
     pos = _window_pos(plot, scene_pt)
     QtTest.QTest.mouseMove(handle, pos)
     if double:
@@ -73,7 +93,7 @@ def _click(plot, scene_pt, button=R, double=False):
 def _drag(plot, start, end, steps=6):
     """Press, paced moves, release, through the QWindow: pyqtgraph's scene drops moves
     closer together than its rate limit, so each one waits ~30 ms."""
-    handle = plot.scene().views()[0].window().windowHandle()
+    handle = window_handle(plot.scene().views()[0])
     a, b = _window_pos(plot, start), _window_pos(plot, end)
     QtTest.QTest.mouseMove(handle, a)
     QtTest.QTest.qWait(30)
@@ -101,7 +121,7 @@ def _press_undo(page):
     page.window().activateWindow()
     QtWidgets.QApplication.processEvents()
     combo = undo_sequences()[0][0]
-    QtTest.QTest.keyClick(page.window().windowHandle(), combo.key(), combo.keyboardModifiers())
+    QtTest.QTest.keyClick(window_handle(page), combo.key(), combo.keyboardModifiers())
     QtWidgets.QApplication.processEvents()
 
 
@@ -888,7 +908,7 @@ def test_a_summaries_legend_rename_is_one_undo_step(summaries):
     _edit_double_click(page._plot, _legend_row(page), "Holo")
     assert widget.undo()
     assert page.source_appearance_state()["measurements"]["label"] == "Apo <1>"
-    # The name is saved once, in the Source names store; Reset appearance keeps it.
+    # The name is saved once, in the Source names store; Reset figure keeps it.
     assert "text" not in page.appearance_state()
     QtTest.QTest.mouseClick(widget.reset_button, L)
     assert page.source_appearance_state()["measurements"]["label"] == "Apo <1>"
@@ -919,8 +939,8 @@ def _editor_rename(page, text):
     QtWidgets.QApplication.processEvents()
 
 
-def test_reset_appearance_after_a_legend_rename_records_no_empty_step(summaries):
-    """The legend name lives in Source names and colors, which Reset appearance leaves
+def test_reset_figure_after_a_legend_rename_records_no_empty_step(summaries):
+    """The legend name lives in Source names and colors, which Reset figure leaves
     alone. Reset dropped the name's carrier all the same, as a step that changed nothing on
     screen, so the next ⌘Z seemed to do nothing."""
     page = summaries
@@ -962,8 +982,10 @@ def test_add_title_from_the_plot_menu_in_every_window(kind, qapp, qtbot, tmp_pat
     page, plot, _edit, _shown_text = _build(kind, qtbot, tmp_path)
     widget = page._appearance_widget
     controller = figure_text_for(plot)
-    # The views of Noise, Event waveforms and Subpopulations share one title.
-    add = "Add title (all views)…" if kind in ("noise", "events", "subpop") else "Add title…"
+    # The views of Noise, Event waveforms and Subpopulations share one title, and the entry says
+    # what a title typed there covers (the figure or figures on screen).
+    add = {"noise": "Add title (this view)…", "events": "Add title (this view)…",
+           "subpop": "Add title (both figures)…"}.get(kind, "Add title…")
     if plot.titleLabel.isVisible():
         controller.last_menu = None
         _click(plot, plot.titleLabel.sceneBoundingRect().center())
@@ -987,10 +1009,10 @@ def test_add_title_from_the_plot_menu_in_every_window(kind, qapp, qtbot, tmp_pat
     assert not plot.titleLabel.isVisible()
 
 
-def test_noise_add_title_on_a_view_says_it_titles_all_views(qapp, qtbot, tmp_path):
-    """Noise's views share ONE title ("Title (all views)" in Appearance). "Add title…" on
+def test_noise_add_title_on_a_view_says_what_it_titles(qapp, qtbot, tmp_path):
+    """Noise's views share ONE title ("Title (this view)" in Appearance). "Add title…" on
     one view retitled every other view too, and nothing on the view said so; the entry now
-    names it."""
+    names what it covers (the view on screen, until the view changes)."""
     page, _plot, _edit, _shown = _build("noise", qtbot, tmp_path)
     psd = page._plot
     page.set_view("fft")
@@ -1005,8 +1027,8 @@ def test_noise_add_title_on_a_view_says_it_titles_all_views(qapp, qtbot, tmp_pat
     controller.last_menu = None
     _click(fft, _background(fft))
     names = _names(controller.last_menu)
-    assert names[:2] == ["Add title (all views)…", "Show title"], names
-    _choose(controller.last_menu, "Add title (all views)…")
+    assert names[:2] == ["Add title (this view)…", "Show title"], names
+    _choose(controller.last_menu, "Add title (this view)…")
     editor = controller.editor
     assert editor.parentWidget().rect().contains(editor.geometry())
     _type_return(editor, "My FFT")

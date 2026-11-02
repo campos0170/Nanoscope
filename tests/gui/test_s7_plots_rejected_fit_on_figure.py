@@ -20,6 +20,7 @@ import pytest
 from nanoscope.core.session import Session
 from nanoscope.core.sources import PlotSource
 from nanoscope.gui import plots_panel as pp
+from nanoscope.gui.fit_label import FitLabelState
 from nanoscope.gui.plots_panel import PlotsWindow, StyleSettings
 
 
@@ -95,12 +96,12 @@ def rejected(qapp, qtbot):
 
 # ================================================================================================
 
-@pytest.mark.parametrize("show_gof", [True, False])
-@pytest.mark.parametrize("values_box", [False, True])
-def test_a_rejected_fit_says_so_in_the_title_and_the_legend_at_every_setting_of_the_two_switches(
-        rejected, show_gof, values_box):
-    rejected._style = replace(rejected._style, show_gof=show_gof,
-                              fit_values_on_plot=values_box)
+@pytest.mark.parametrize("ks_ticked", [True, False])
+def test_a_rejected_fit_says_so_in_the_title_and_the_legend_with_and_without_ks_in_the_numbers(
+        rejected, ks_ticked):
+    widget = rejected._appearance_widget
+    widget.apply_appearance(replace(widget.state(), fit_label=FitLabelState(
+        fields=("equation", "n", "bic", *(("ks",) if ks_ticked else ())))))
     rejected._redraw()
     assert "KS REJECTED" not in _title(rejected)
     assert "KS REJECTED" in rejected.details_text()
@@ -108,14 +109,13 @@ def test_a_rejected_fit_says_so_in_the_title_and_the_legend_at_every_setting_of_
     assert fit_rows and "KS REJECTED" not in fit_rows[0]
     # The fit label took the values box's place: its numbers, never the verdict.
     assert "τ =" in _fit_text(rejected) and "REJECTED" not in _fit_text(rejected)
-    assert ("KS =" in _fit_text(rejected)) is (values_box and show_gof)
+    assert ("KS =" in _fit_text(rejected)) is ks_ticked
 
 
 def test_the_shipped_defaults_are_the_case_that_used_to_ship_a_bare_tau(rejected):
-    """``StyleSettings()`` is the state the finding measured: verdict switch on, values
-    box off. That is the 2x2 cell the figure was silent in."""
-    assert StyleSettings().show_gof is True and StyleSettings().fit_values_on_plot is False
-    rejected._style = replace(rejected._style, show_gof=True, fit_values_on_plot=False)
+    """``StyleSettings()`` is the state the finding measured: the fit label at its default
+    numbers (no BIC, no KS). That is the cell the figure was silent in."""
+    assert StyleSettings().fit_label_state().fields == ("equation", "r2", "n")
     rejected._redraw()
     assert "τ =" in _fit_text(rejected) and "KS REJECTED" not in _fit_text(rejected)
     assert "KS REJECTED" not in _title(rejected)
@@ -125,7 +125,6 @@ def test_the_shipped_defaults_are_the_case_that_used_to_ship_a_bare_tau(rejected
 
 def test_the_verdict_survives_save_image(rejected, tmp_path):
     """The title and the legend are the surfaces the export keeps."""
-    rejected._style = replace(rejected._style, fit_values_on_plot=False)
     rejected._redraw()
     svg = tmp_path / "rejected.svg"
     rejected.save_image(svg)
@@ -149,7 +148,6 @@ def test_an_overlay_tags_each_rejected_fit_in_its_own_legend_entry(qapp, qtbot):
     w = _window(qtbot,
                 _source("doc0:0", "peak", _narrow_peak(), "#0072B2"),
                 _source("doc1:0", "expo", _exponential(), "#D55E00"))
-    w._style = replace(w._style, fit_values_on_plot=False)
     w.set_fit("exponential")
     w._redraw()
     rows = {t.split(" fit (")[0]: t for t in _fit_rows(w)}
@@ -161,7 +159,6 @@ def test_an_overlay_tags_each_rejected_fit_in_its_own_legend_entry(qapp, qtbot):
 
 def test_a_fit_the_test_accepts_is_not_tagged(qapp, qtbot):
     w = _window(qtbot, _source("doc0:0", "expo", _exponential(), "#0072B2"))
-    w._style = replace(w._style, show_gof=True, fit_values_on_plot=False)
     w.set_fit("exponential")
     w._redraw()
     assert w._last_fit.meta["gof"]["describes_data"] is True
@@ -170,7 +167,8 @@ def test_a_fit_the_test_accepts_is_not_tagged(qapp, qtbot):
 
 
 def test_the_tooltip_and_the_docstring_now_name_the_surfaces_the_verdict_reaches(rejected):
-    tip = rejected._gof_check.toolTip()
+    box = rejected._appearance_widget.fit_label_fields["ks"]
+    tip = box.toolTip()
     assert "Details" in tip and "provenance" in tip and "Save image" in tip
     assert "not on the plot" in tip
-    assert rejected._gof_check.text() == "KS statistic on figure"
+    assert box.text() == "KS"

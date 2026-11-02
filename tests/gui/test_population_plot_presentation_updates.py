@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from unittest.mock import Mock
 
 import nanoscope  # noqa: F401 -- initialize the Qt plugin path first
@@ -13,6 +14,9 @@ import pytest
 from PySide6 import QtTest
 
 from nanoscope.core.session import Session
+from nanoscope.gui.figure_text import figure_text_for
+from nanoscope.gui.fit_label import FitLabelState
+from nanoscope.gui.font_picker import html_font_family
 from nanoscope.gui.plots_panel import PlotsWindow
 
 from .test_plots_panel import _settle, _two_blob_events
@@ -38,6 +42,12 @@ def _watch_render_and_analysis(window, monkeypatch):
     return watchers
 
 
+def _title_style(window, **changes):
+    """The title's Text style, changed the way the Text style… popover's OK changes it."""
+    figure_text_for(window._plot).host.apply_text(
+        "title", replace(window._style.text_style("title"), **changes))
+
+
 def _exercise_text_and_canvas(window):
     window.set_title("Publication figure")
     window._x_label_edit.setText("Horizontal axis")
@@ -48,8 +58,7 @@ def _exercise_text_and_canvas(window):
     window._axis_label_size.setValue(14)
     window._tick_size.setValue(11)
     window._legend_font_size.setValue(9)
-    window._on_style_title_bold(True)
-    window._on_style_title_italic(True)
+    _title_style(window, bold=True, italic=True)
     window._grid_check.setChecked(False)
     window.set_background("light")
     window._history_commit()
@@ -108,7 +117,9 @@ def test_histogram_fit_and_residual_arrays_are_not_replaced(window, qtbot, monke
     window.set_plot_type("Histogram")
     window.set_histogram_column("dwell_s")
     window.set_fit("exponential")
-    window._fit_values_check.setChecked(True)
+    widget = window._appearance_widget      # BIC and KS in the fit label's Numbers row
+    widget.apply_appearance(replace(widget.state(), fit_label=FitLabelState(
+        fields=("equation", "r2", "n", "bic", "ks"))))
     window._residual_check.setChecked(True)
     _settle(window)
     fit = window.fit_result()
@@ -183,8 +194,7 @@ def test_custom_title_keeps_warning_in_details_and_defaults_restore(window, monk
     window._x_label_edit.clear()
     window._y_label_edit.clear()
     window.set_font_family("")
-    window._on_style_title_bold(False)
-    window._on_style_title_italic(False)
+    _title_style(window, bold=None, italic=None)
 
     for watcher in watchers:
         watcher.assert_not_called()
@@ -193,7 +203,10 @@ def test_custom_title_keeps_warning_in_details_and_defaults_restore(window, monk
     assert [window._plot.getAxis(side).labelText for side in ("bottom", "left")] == labels
     assert not window._plot.titleLabel.item.font().bold()
     assert not window._plot.titleLabel.item.font().italic()
-    assert window._plot.getAxis("bottom").labelStyle["font-family"] == window._qfont().family()
+    # Back to the default: the axis label is Arial's again, the fallback stack included
+    # (P0 G2), and no longer whatever the application font is.
+    assert window._plot.getAxis("bottom").labelStyle["font-family"] == html_font_family("")
+    assert window._qfont().family() == "Arial"
 
 
 def test_never_run_prompt_survives_presentation_edits(qtbot, monkeypatch):

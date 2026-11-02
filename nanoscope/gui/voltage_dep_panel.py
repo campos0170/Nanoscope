@@ -58,6 +58,30 @@ voltage series.
 
 None of it hides a point or refuses a fit. An incomparable pool is still drawn --
 it is simply no longer drawn silently.
+
+THE TYPED WORDS, THE METRIC AND THE TREND (``gui.quantity_reset``)
+-------------------------------------------------------------------
+The typed title, axis labels and fit-label wording belong to the metric the points on the
+plot show, and so does a range pinned on the Y axis in Axis properties (a Y range typed for
+Hz frames nothing over depths in pA). :meth:`VDepWindow._metric_changed`, the metric combo's
+own signal, puts the words and the Y pin back to automatic (one Undo step, and a line on the
+status bar) when it moves off that metric. The X axis is voltage whatever the metric, so its
+pin stays. A pick and an unblocked ``set_metric`` come through it; a project restore and a
+template block the signal and draw the saved state, so they reset nothing.
+
+|V| is the X axis changing between the signed voltage and its magnitude: a range pinned over
+one (-867 to -422 mV) frames nothing over the other (points at 199 to 1001 mV).
+:meth:`VDepWindow._abs_toggled`, the check box's own signal, puts the X pin back to automatic the
+same way (one Undo step, a line on the status bar, the same routes that reset nothing). The
+typed words stay, as ``gui.quantity_reset`` has it for |V|. Log y does neither: it is a real log
+axis, and a range pinned on one is in the units it shows.
+
+The fit label's wording also belongs to the trend that is APPLIED: :meth:`VDepWindow._apply_fit`
+puts the wording alone back to automatic when the trend goes from one fit to another, or to
+none (the title, axis labels and both pins stay: no axis moves). The first fit after none keeps
+wording typed ahead of it, and so does the Apply that commits a recalled template's own fit
+(``_fit_words_for``): the template arrives with its wording and its fit selected, and the fit
+waits for Apply. A restore sets the applied trend directly and reaches nothing of this.
 """
 
 from __future__ import annotations
@@ -83,6 +107,7 @@ from .export_paths import ask_export_path
 from .figure_text import (HIDDEN_TEXT, TextTarget, appearance_text_host, figure_text_for,
                           label_args, rich_text)
 from .fit_label import FitLabelItem, FitLabelState, FitReadout
+from .font_picker import html_font_family
 from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
                               reframe_axis_pins)
 from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
@@ -139,9 +164,10 @@ class _ProvenanceCaption(FitLabelItem):
         self.setToolTip("Caption: what measured these points. Drag to move, double-click "
                         "to retype it.")
 
-    def show_caption(self, body: str, style, colour: str, offset) -> None:
+    def show_caption(self, body: str, style, colour: str, offset, family: str | None = None) -> None:
         options = {key: value for key, value in label_args(style).items() if key != "justify"}
         options.setdefault("color", colour)
+        options.setdefault("family", html_font_family(family))     # the figure's, else Arial
         options["justify"] = "left"
         for key in ("family", "bold", "italic", "size"):
             self.opts.pop(key, None)      # setText merges: a style taken off must go
@@ -173,6 +199,21 @@ _METRIC_LABEL = {v: k for k, v in _METRIC_LABELS}
 # combo labels by construction: the axis, the combo, the table header and the
 # details pane are four renderings of one metric and must not name it four ways.
 _Y_LABEL: dict[str, str] = dict(_METRIC_LABEL)
+
+#: What the status line says the plot shows after a metric change (quantity_reset): the
+#: metric's name without its unit.
+_METRIC_PHRASE: dict[str, str] = {
+    "capture_rate_hz": "capture rate", "median_dwell_s": "median dwell",
+    "median_depth": "median depth", "median_frac_depth": "median dI/I₀",
+    "n_events": "event count"}
+
+
+#: What the status line says the plot shows after the applied trend changes (quantity_reset).
+_TREND_PHRASE: dict[str, str] = {
+    "none": "no fit", "linear": "the linear fit", "exponential": "the exponential fit"}
+
+#: What the status line calls the x axis after |V| is ticked (True) or cleared (False).
+_VOLTAGE_PHRASE: dict[bool, str] = {True: "|V|", False: "the signed voltage"}
 
 
 def _metric_unit(metric: str) -> str:
@@ -257,6 +298,15 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._fit_readouts: list[FitReadout] = []
         self._caption_segments: list[str] = []
         self._message_item: pg.TextItem | None = None
+        #: The metric of the points on the plot now (None: no points drawn). The typed words
+        #: belong to it, so a metric change is measured against THIS, not against the combo.
+        self._drawn_metric: str | None = None
+        #: Whether the x axis shows |V| (True) or the signed voltage (False) now (None: no
+        #: points drawn). A range pinned on it belongs to that, as the words do to the metric.
+        self._drawn_abs: bool | None = None
+        #: The fit a recalled template's fit-label wording was written for: the Apply that
+        #: commits that fit is not a change of trend for those words (quantity_reset).
+        self._fit_words_for: str | None = None
         self._appearance = PlotAppearance()
 
         self._build_ui()
@@ -434,6 +484,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             actions=(("Analyze / refresh", self._refresh_from_user),
                      ("Apply fit", self._apply_fit_from_user)),
             exports=exports)
+        self._workflow.adopt_reset_figure(self._appearance_widget)
         # View only (plot_interaction): Reset view, zoom history, the app right-click menu
         # in place of pyqtgraph's, and the pointer readout (log y shows the real value).
         self._readout = window_readout(self)
@@ -472,9 +523,9 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._workflow.add_section_widget("Export", self._templates)
 
         # Wire the change signals AFTER construction so populating them never redrew.
-        self._metric_combo.currentTextChanged.connect(self.refresh)
+        self._metric_combo.currentTextChanged.connect(self._metric_changed)
         self._fit_combo.currentTextChanged.connect(self._on_fit_selection_changed)
-        self._abs_v.toggled.connect(self._redraw)
+        self._abs_v.toggled.connect(self._abs_toggled)
         self._log_y.toggled.connect(self._redraw)
         self._accepted_only.toggled.connect(self.refresh)
         # ``activated`` and ``clicked`` are user-only signals; unlike the state
@@ -500,6 +551,7 @@ class VDepWindow(QtWidgets.QMainWindow):
                             else PlotAppearance.from_mapping(state))
         self._appearance_widget.set_state(self._appearance)
         self._appearance_widget.clear_history()
+        self._fit_words_for = None      # the saved wording is the project's, not a template's
         self._apply_appearance()
 
     def appearance_state(self) -> dict:
@@ -524,12 +576,13 @@ class VDepWindow(QtWidgets.QMainWindow):
         # Never In legend: the legend row does not carry the numbers or the R² refusal here.
         self._fit_label.apply_state(
             replace(self._appearance.fit_label_state(), in_legend=False), self._fit_readouts,
-            self._appearance.text_style("annotation.fit"))
+            self._appearance.text_style("annotation.fit"), self._appearance.font_family)
         style = self._appearance.text_style(_CAPTION_KEY)
         body = (self._wrap_title(self._caption_segments) if style.text is None
                 else "" if style.text == HIDDEN_TEXT else rich_text(style.text))
         self._caption.show_caption(body, style, _MSG_HEX,
-                                   self._appearance.annotation_offset(_CAPTION_KEY))
+                                   self._appearance.annotation_offset(_CAPTION_KEY),
+                                   self._appearance.font_family)
         controller = figure_text_for(self._plot)
         if controller is not None:
             controller.refresh()        # the legend may be new since the last draw
@@ -608,12 +661,51 @@ class VDepWindow(QtWidgets.QMainWindow):
             self._redraw()          # |V| and log y's own signal
         # The shared look answers through _appearance_from_user, zoom-preserving.
         self._appearance_widget.apply_appearance(appearance)
+        self._fit_words_for = fit       # its wording came with this fit (quantity_reset)
         if moved:
             self.workspaceChanged.emit()
 
     # -- current control state -------------------------------------------------------------------
     def _metric(self) -> str:
         return _METRIC_ID.get(self._metric_combo.currentText(), "capture_rate_hz")
+
+    def _metric_changed(self, *_args: object) -> None:
+        """The metric combo moved: re-gather and redraw, and when it was not the metric the
+        points on the plot showed, the typed words of that figure go back to automatic.
+
+        This is the combo's own signal, so a pick and an unblocked ``set_metric`` both come
+        here; a project restore and a template block it and draw the saved state, so they
+        reset nothing (``gui.quantity_reset``).
+        """
+        moved = self._drawn_metric is not None and self._drawn_metric != self._metric()
+        self.refresh()
+        if moved:       # the metric is the Y axis: a range pinned for it goes with the words
+            self._appearance_widget.reset_typed_words(
+                _METRIC_PHRASE[self._metric()], self.statusBar(), axes=(("", "left"),))
+
+    def _abs_toggled(self, on: bool) -> None:
+        """|V| was ticked or cleared: redraw, and when the x axis was not showing that, a range
+        pinned on it goes back to automatic, as one Undo step with a line on the status bar. A
+        range typed in signed mV frames nothing over magnitudes. The typed words stay: |V| is
+        not one of the changes that put them back (``gui.quantity_reset``).
+
+        This is the check box's own signal, so a pick and ``set_abs_voltage`` come through it;
+        a project restore and a template block it and draw the saved state.
+        """
+        moved = self._drawn_abs is not None and self._drawn_abs != bool(on)
+        self._redraw()
+        if moved:
+            self._appearance_widget.reset_typed_words(
+                f"{_METRIC_PHRASE[self._metric()]} against {_VOLTAGE_PHRASE[bool(on)]}",
+                self.statusBar(), only=(), axes=(("", "bottom"),))
+
+    def _sync_automatic_text(self) -> None:
+        """The Appearance boxes' placeholders: the axis labels this draw gives the figure."""
+        widget = self._appearance_widget
+        widget.set_automatic_text(
+            "x_label", _ABS_VOLTAGE_LABEL if self._abs_v.isChecked() else _VOLTAGE_LABEL)
+        widget.set_automatic_text("y_label", _Y_LABEL.get(self._metric(), "metric")
+                                  + (" (log)" if self._log_y.isChecked() else ""))
 
     def _fit_model(self) -> str:
         """The trend that is DRAWN — the applied one, never the combo's selection."""
@@ -638,10 +730,15 @@ class VDepWindow(QtWidgets.QMainWindow):
             self._apply_fit()
 
     def _apply_fit(self) -> None:
-        """Commit the selected trend and redraw with it."""
+        """Commit the selected trend and redraw with it. When it replaces another trend, or
+        takes the fit away, the fit label's wording goes back to automatic (quantity_reset)."""
+        was, words_for, self._fit_words_for = self._applied_fit, self._fit_words_for, None
         self._applied_fit = self._fit_combo.currentText()
         self._sync_fit_apply_btn()
         self._redraw()
+        if was not in (_FIT_NONE, self._applied_fit) and words_for != self._applied_fit:
+            self._appearance_widget.reset_typed_words(
+                _TREND_PHRASE[self._applied_fit], self.statusBar(), only=("fit_label",))
 
     def _apply_fit_from_user(self) -> None:
         """Commit an explicitly requested fit and mark the workspace changed."""
@@ -703,6 +800,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         saved_headline = self._headline.text()
         saved_warning = self.warning_text()
         try:
+            self._sync_automatic_text()
             self._fill_table()
             if not self._points:
                 self._message("No usable recordings.")
@@ -729,6 +827,7 @@ class VDepWindow(QtWidgets.QMainWindow):
                 x=x_values, y=y_values, pen=None, symbol="o", symbolSize=11,
                 symbolPen=pg.mkPen("#0d0f12"), symbolBrush=pg.mkBrush(point_color))
             self._plot.addItem(self._scatter_item)
+            self._drawn_metric, self._drawn_abs = self._metric(), use_abs
             self._set_voltage_axis(use_abs)
             self._plot.setLabel(
                 "left", _Y_LABEL.get(self._metric(), "metric") + (" (log)" if log_y else ""))
@@ -822,6 +921,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._plot.setTitle(None)
         self._plot.titleLabel.setText("")
         self._scatter_item = self._fit_item = self._message_item = None
+        self._drawn_metric = self._drawn_abs = None
         self._fit_readouts = []
         self._caption_segments = []
 
@@ -856,6 +956,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._fill_table()
 
     def _redraw(self) -> None:
+        self._sync_automatic_text()
         try:
             self._redraw_analysis()
         finally:
@@ -916,6 +1017,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             x=x, y=y, pen=None, symbol="o", symbolSize=11,
             symbolPen=pg.mkPen("#0d0f12"), symbolBrush=pg.mkBrush(point_color))
         self._plot.addItem(self._scatter_item)
+        self._drawn_metric, self._drawn_abs = metric, use_abs
 
         self._set_voltage_axis(use_abs)
         self._plot.setLabel("left", _Y_LABEL.get(metric, "metric") + (" (log)" if log_y else ""))

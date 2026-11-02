@@ -18,9 +18,11 @@ import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..plot import figure_fonts
 from .figure_bundle import (
     FigureSnapshot, MAX_SNAPSHOT_BYTES, capture_figure_snapshot, encode_figure_table,
 )
+from .font_picker import _UNSAFE, figure_qfont
 
 CARTESIAN_RESOURCE = "rendering/cartesian.json"
 PICTURE_RESOURCE = "rendering/figure.qpic"
@@ -185,6 +187,14 @@ def _restore_font(value):
     return font
 
 
+def _plain_family(family) -> bool:
+    """Whether a saved ``font-family`` list may be put back into label HTML (``style='...'``):
+    none, or a short string without the characters that would end the attribute or the
+    declaration. Double quotes round a name are fine (``html_font_family`` writes them)."""
+    return family is None or (isinstance(family, str) and 0 < len(family) <= 400
+                              and not _UNSAFE.search(family.replace('"', "")))
+
+
 def _visible(item):
     return item.isVisibleTo(item.parentItem())
 
@@ -274,7 +284,9 @@ def _capture_legend(plot):
                         "font": _font(label.item.font()),
                         "color": list(pg.mkColor(opts.get("color") or pg.getConfigOption("foreground")).getRgb()),
                         "size": opts.get("size", "9pt"), "bold": bool(opts.get("bold", False)),
-                        "italic": bool(opts.get("italic", False))})
+                        "italic": bool(opts.get("italic", False)),
+                        # The row's text family lives in its HTML, not in the QFont above.
+                        "family": opts["family"] if isinstance(opts.get("family"), str) else None})
     return {"entries": entries, "offset": list(legend.offset),
             "anchor": {"item": list(getattr(legend, "_GraphicsWidgetAnchor__itemAnchor")),
                        "parent": list(getattr(legend, "_GraphicsWidgetAnchor__parentAnchor")),
@@ -309,7 +321,8 @@ def _validate_legend(model):
                 or not 1 <= float(entry["size"][:-2]) <= 200
                 or not isinstance(entry.get("color"), list) or len(entry["color"]) != 4
                 or any(type(n) is not int or not 0 <= n <= 255 for n in entry["color"])
-                or any(type(entry.get(key)) is not bool for key in ("bold", "italic"))):
+                or any(type(entry.get(key)) is not bool for key in ("bold", "italic"))
+                or not _plain_family(entry.get("family"))):
             raise ValueError("Invalid saved legend entry.")
         _restore_font(entry.get("font"))
     for key, length in (("offset", 2), ("margins", 4)):
@@ -343,7 +356,8 @@ def _restore_legend(plot, state, series):
         label = legend.items[-1][1]
         label.item.setFont(_restore_font(entry["font"]))
         label.setText(entry["text"], color=QtGui.QColor(*entry["color"]), size=entry["size"],
-                      bold=entry["bold"], italic=entry["italic"])
+                      bold=entry["bold"], italic=entry["italic"],
+                      **({"family": entry["family"]} if entry.get("family") else {}))
     legend.setOpacity(state["opacity"])
     legend.setZValue(state["z"])
     legend.updateSize()
@@ -357,7 +371,7 @@ def _unreplayable_view_children(item) -> bool:
     """True when the ViewBox carries a child the model cannot replay (D10).
 
     A LabelItem or TextItem parented to the ViewBox itself -- the fit label, a provenance
-    caption, a fit-values box -- is in neither ``addedItems`` nor ``items``, so the series
+    caption -- is in neither ``addedItems`` nor ``items``, so the series
     test above cannot see it, and a re-render would silently drop the fit's numbers.
     Only the ViewBox's own internals and the standard legend (captured below) may be there.
     """
@@ -576,6 +590,9 @@ def _populate_clone(widget, model, canvas, ranges):
         axis.setVisible(state["visible"])
     title_options = {key: value for key, value in model["title"]["options"].items()
                      if key in {"color", "size", "bold", "italic"}}
+    family = model["title"]["options"].get("family")
+    if family and _plain_family(family):          # the title's font is its HTML's family
+        title_options["family"] = family
     # The window's own rule (``apply_plot_appearance``): a blank title has no row. pyqtgraph
     # shows one for any text but None, so "" (no title) and " " (a hidden one) became a
     # blank band the window never drew.
@@ -855,7 +872,7 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
         models = [_model(snapshot) for snapshot in snapshots]
         planned_w = max(model["canvas"][0] for model in models)
         planned_h = max(model["canvas"][1] for model in models)
-    font = QtGui.QFont(label_style["family"])
+    font = figure_qfont(label_style["family"])     # a family this computer lacks: its substitute
     font.setBold(label_style["bold"])
     font.setPixelSize(label_style["size_px"])
     metrics = QtGui.QFontMetricsF(font)
@@ -933,7 +950,8 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
                     painter.restore()
             panel_id = f"panel_{index + 1:03d}"
             ET.SubElement(svg, f"{{{_NS}}}text", {"x": str(x + 4), "y": str(label_y),
-                          "font-family": label_style["family"], "font-size": str(label_style["size_px"]),
+                          "font-family": figure_fonts.css_font_family(label_style["family"]),
+                          "font-size": str(label_style["size_px"]),
                           "font-weight": "bold" if label_style["bold"] else "normal",
                           "fill": label_style["color"], "id": panel_id + "_label"}).text = label
             _svg_panel(snapshot.svg_bytes, svg, panel_id, left, y, panel_w, panel_h)

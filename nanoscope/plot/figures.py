@@ -50,8 +50,8 @@ from ..analysis.events import FLAG_NON_FINITE, FLAG_ZERO_BASELINE
 from ..analysis.stats import _row_labels
 from ..core import clock
 from ..core.atomic_write import StagedSet
-from .style import (OKABE_ITO, PALETTE, SEQUENTIAL_CMAP, color, figure_size,
-                    nanoscope_style, rc_params)
+from .style import (OKABE_ITO, PALETTE, SEQUENTIAL_CMAP, color, export_style,
+                    figure_size, nanoscope_style, rc_params)
 
 __all__ = [
     "dwell_histogram",
@@ -516,10 +516,10 @@ def _box_font(size_pt: float = _BOX_FONT_PT) -> FontProperties:
 
     THE BOX WAS LAID OUT IN ONE FONT AND PRINTED IN ANOTHER (A2-NEW-1 / X-SURF-1, second
     cut). A figure is built inside :func:`~nanoscope.plot.style.nanoscope_style`, where
-    ``font.sans-serif`` is Helvetica; ``save_figure`` is a separate call the exporter
-    makes OUTSIDE that context, where the family resolves to matplotlib's own DejaVu
-    Sans -- and a Text keeps its family as the unresolved word "sans-serif", so
-    ``findfont`` runs again at draw time and answers differently. Measured at 300 dpi on
+    ``font.sans-serif`` was Helvetica; ``save_figure`` is a separate call the exporter
+    makes OUTSIDE that context, where the family resolved to matplotlib's own DejaVu
+    Sans -- and a Text then kept its family as the unresolved word "sans-serif", so
+    ``findfont`` ran again at draw time and answered differently. Measured at 300 dpi on
     one verdict line: laid out 0.718 of the axes wide, drawn 0.778 -- 8 % more ink than
     the layout reserved, ending at x = 1.034, i.e. past the right spine. The placer is
     only as good as its measurement, so the depth box printed over the fitted curve and
@@ -527,11 +527,16 @@ def _box_font(size_pt: float = _BOX_FONT_PT) -> FontProperties:
     Resolving the family to a path AT BUILD TIME pins the drawing to the font the
     measurement used: same line, laid out 0.718 and drawn 0.713, ending at 0.967.
 
-    Only the annotation box is pinned. The rest of the figure's text has the same split
-    (the axis labels are positioned in Helvetica and printed in DejaVu, and the exported
-    PDF gets the default Type-3 glyphs rather than the style's ``pdf.fonttype`` 42),
-    which is ``save_figure`` rendering outside the style the module docstring promises --
-    a wider change than this box, and not this finding's.
+    The rest of the figure's text had the same split (the axis labels were positioned in
+    Helvetica and printed in DejaVu, and the exported PDF got the default Type-3 glyphs
+    rather than the style's ``pdf.fonttype`` 42), which was ``save_figure`` rendering
+    outside the style the module docstring promises. That is closed now, and not by this
+    pin: ``rc_params()["font.family"]`` is the style's family LIST (Arial first), so a Text
+    built in the style keeps the list and is drawn in the face it was laid out in, and
+    ``save_figure`` saves under :func:`~nanoscope.plot.style.export_style`, which carries the
+    style's font keys and font type into the save. The box stays pinned to the file because
+    it is measured to the pixel and has no fallback face (its text is generated and has no
+    character Arial lacks).
     """
     return FontProperties(fname=findfont(FontProperties(size=size_pt)), size=size_pt)
 
@@ -1683,6 +1688,11 @@ def save_figure(fig: Figure, path: str | Path, *, data: Any = None,
     Writes the family of siblings enumerated by :func:`figure_output_paths`; a GUI
     caller must confirm THAT set, not the single path it was handed.
 
+    The PDF's text is TrueType (Type 42), not matplotlib's default Type 3 glyph drawings,
+    and both files draw it in the style's font list (Arial first; a character Arial lacks
+    comes from the next face that has it) -- see :func:`~nanoscope.plot.style.export_style`
+    and :func:`~nanoscope.plot.style.font_family_list`.
+
     Researchers always need to restyle a figure later, usually in another tool,
     usually the week of submission. Exporting the numbers behind every figure is
     the single kindest thing this app can do -- and it is what makes the figure
@@ -1749,7 +1759,11 @@ def save_figure(fig: Figure, path: str | Path, *, data: Any = None,
             assert f in declared
             mine.append(f)
             metadata = {"Subject" if ext == "pdf" else "Description": _details_json(fig)}
-            fig.savefig(owned.stage(f), dpi=_EXPORT_DPI, bbox_inches="tight", metadata=metadata)
+            # Under the style's font settings, not matplotlib's own: the PDF's text is TrueType
+            # (Type 42, which journals and Illustrator accept; the default is Type 3 drawings)
+            # in the face the figure was laid out in.
+            with export_style():
+                fig.savefig(owned.stage(f), dpi=_EXPORT_DPI, bbox_inches="tight", metadata=metadata)
             out[ext] = f
         if len(df):
             csv = stem.with_suffix(".csv")

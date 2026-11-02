@@ -4173,7 +4173,7 @@
     "opened_by": "Analysis → Distributions… / Distribution summaries… / Comparison figures…, or the corresponding Analysis home entry. Save to Figure Library… and Save figure bundle… are on the Explorer; Figure Library… is also in Analysis. Sources: nanoscope/gui/analysis_explorer.py, plots_panel.py, distribution_summary_panel.py, comparison_figures_panel.py, plot_appearance.py, source_appearance.py, plot_export_options.py, figure_library.py and figure_composer.py.",
     "gotchas": [
       "A generated plot is a captured result, not a live mirror. Refresh current or the page Refresh re-gathers the relevant live sources; saved snapshots remain frozen. Opening or exporting a stored snapshot does not run scientific analysis.",
-      "Ticking or unticking a source silently discards any clustering and PCA result you had computed AND clears any pinned Axis range; toggling 'Use accepted events only' discards the clustering and PCA result but leaves the Axis range pinned. Either way you must press Run clustering / Run PCA again.",
+      "Ticking or unticking a source silently discards any clustering and PCA result you had computed, but keeps a pinned Axis range and the words you typed (another source is not another quantity) unless the new row set no longer carries the plotted column; toggling 'Use accepted events only' discards the clustering and PCA result and leaves the Axis range pinned. Either way you must press Run clustering / Run PCA again.",
       "'Axis range' only moves the camera; 'Fit range' changes which data the fit actually sees. Using the wrong one is the easiest mistake in this window.",
       "Fit range numbers are typed in the unit the axis is showing: whatever the Time unit combo shows for a time column (ms by default), and the column's own unit otherwise — pA for depth_pA, dimensionless for frac_depth. Never raw seconds unless Time unit is \"s\".",
       "Time unit rescales displayed coordinates and axis text for time-valued quantities; source data and fitted scientific quantities remain stored in seconds. Custom axis labels must retain the correct displayed unit and log convention.",
@@ -4192,7 +4192,8 @@
       "Appearance edits (titles, fonts, colors, lines, legends) do not rerun fits, detection or clustering and do not reset the view range. Data/analysis controls remain distinct; Apply fit and Generate are explicit scientific actions.",
       "Warnings and scientific caveats belong in the persistent summary, expandable Details and provenance, not alongside the exported plotting artwork. Keep details with the figure bundle when sharing a clean figure.",
       "An unapplied draft and the visible generated result can differ. Save/export captures the visible committed result, not a promise to run the draft. Verify status and Details before final export.",
-      "Single/double-column dimensions are convenient 85/180 mm presets, not certification of a journal standard. Print-readability targets are user preferences and cannot certify unmeasured graphical elements."
+      "Single/double-column dimensions are convenient 85/180 mm presets, not certification of a journal standard. Print-readability targets are user preferences and cannot certify unmeasured graphical elements.",
+      "Changing what a figure shows puts the words you typed back to automatic, and the range pinned on each axis whose quantity moved. In Distributions that is the plot type or a column (the Title, X label, Y label and the fit label's wording, and the typed range of an axis whose column moved) and an applied fit that changes (the fit label's wording only); in Distribution summaries and Comparison figures the measurement or figure type, when Generate commits it (a new measurement takes the range pinned on the value axis in both Type pairs, a Type takes none, and Comparison figures have no Axis properties). It is one Undo step and the status line names what went, words and ranges. The look stays (fonts, sizes, colours, text styles, the legend, the fit label's numbers, the ranges of axes that did not move), Undo brings the words and ranges back over the quantity on screen, and opening a project or recalling a template does not run the rule."
     ],
     "controls": [
       {
@@ -4200,7 +4201,7 @@
         "kind": "list",
         "group": "Data sources",
         "what_it_does": "A checkable list of everything you can plot: \"Every open recording (segments included) that has a stored detection, plus the manual-measurement table.\" Tick one to plot it; tick two or more to overlay them.",
-        "notes": "Each row is inked in that source's own overlay colour, so the list doubles as the legend key. Hovering a row shows its row count, whether it is a derived segment, its module id and its detector's min_dwell_s (or \"no detector provenance (hand measurements)\" for the manual table). Merely HIGHLIGHTING a row does nothing — you must tick the checkbox. The hint above the list reads: \"Tick two or more to overlay them. Colour then means SOURCE, and the histogram normalizes so unequal-n recordings stay comparable.\" Changing the ticks throws away any clustering/PCA result and clears any pinned Axis range, because the row set changed underneath them. With an overlay the column pickers show only the columns ALL ticked sources share (the intersection). The FIRST ticked source is the \"primary\" one — clustering and PCA operate on it alone. Each row is also EDITABLE: double-click one and type to rename that series everywhere it is named — the legend, the fit lines, the Details pane and the plot title. The source's real label is kept underneath, so clearing the edit back to empty removes the override and the true name comes back rather than the legend going blank. The rename is a display override only; it changes nothing about the data or the fits."
+        "notes": "Each row is inked in that source's own overlay colour, so the list doubles as the legend key. Hovering a row shows its row count, whether it is a derived segment, its module id and its detector's min_dwell_s (or \"no detector provenance (hand measurements)\" for the manual table). Merely HIGHLIGHTING a row does nothing — you must tick the checkbox. The hint above the list reads: \"Tick two or more to overlay them. Colour then means SOURCE, and the histogram normalizes so unequal-n recordings stay comparable.\" Changing the ticks throws away any clustering/PCA result, because the row set changed underneath it; a pinned Axis range and the words you typed stay (another source is not another quantity) unless the new row set no longer carries the plotted column. With an overlay the column pickers show only the columns ALL ticked sources share (the intersection). The FIRST ticked source is the \"primary\" one — clustering and PCA operate on it alone. Each row is also EDITABLE: double-click one and type to rename that series everywhere it is named — the legend, the fit lines, the Details pane and the plot title. The source's real label is kept underneath, so clearing the edit back to empty removes the override and the true name comes back rather than the legend going blank. The rename is a display override only; it changes nothing about the data or the fits."
       },
       {
         "label": "Use accepted events only",
@@ -4388,7 +4389,7 @@
         "kind": "list",
         "group": "Axis range",
         "what_it_does": "Pins the left edge of the visible x axis, in DATA units. Blank means auto-fit.",
-        "notes": "Placeholder is \"auto\"; only numbers are accepted. Both X min AND X max must be filled for the pin to apply. Press Enter, or the Apply button, to take effect. This moves the camera only — it does not change what is fitted (use Fit range for that). On a log axis the value is still typed in data units; a non-positive bound is treated as auto. Pins are cleared automatically when you change plot type or change which sources are ticked.",
+        "notes": "Placeholder is \"auto\"; only numbers are accepted. Both X min AND X max must be filled for the pin to apply. Press Enter, or the Apply button, to take effect. This moves the camera only — it does not change what is fitted (use Fit range for that). On a log axis the value is still typed in data units; a non-positive bound is treated as auto. Pins are cleared automatically, with the words you typed, when you change the plot type or the column on an axis (a change of plot type moves both axes); ticking another source keeps them (another source is not another quantity) unless the new row set no longer carries the plotted column.",
         "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
       },
       {
@@ -4478,8 +4479,8 @@
         "label": "Font",
         "kind": "combo",
         "group": "Style",
-        "what_it_does": "\"Font family for the title and axes.\"",
-        "notes": "A system font picker; applies to the title, axis labels and tick labels."
+        "what_it_does": "\"Font for the figure's text. The first row is the figure default, Arial. Other font… lists every font installed on this computer except the system's private fonts and symbol fonts such as Wingdings.\"",
+        "notes": "The short list: Arial (default), Helvetica, Times New Roman, Courier New, then Other font… (every installed font, with a filter box; Cancel keeps the font). Applies to the title, axis labels, tick labels, legend, fit label and captions. A row for a font this computer lacks says what it is drawn in (on Windows: Helvetica (drawn in Arial on this computer)). Other font… leaves out private fonts and the faces of symbols (Symbol, Webdings, Wingdings, Wingdings 2 and 3, Zapf Dingbats, Apple Symbols). A font outside the list, from an older project or picked in Other font…, is shown as one extra row under its own name."
       },
       {
         "label": "Font size (body)",
@@ -4754,13 +4755,6 @@
         "what_it_does": "Contour lines per source (3–20, default 8), evenly spaced between 5% and 95% of that source's own peak density."
       },
       {
-        "label": "Fit values on plot",
-        "kind": "checkbox",
-        "group": "Style",
-        "what_it_does": "Show numerical fitted parameters in an optional on-figure text box.",
-        "notes": "Off by default. Numerical KS statistics can be included with their separate toggle; verdicts and warnings remain in Details and figure-bundle provenance, not exported artwork. This does not refit."
-      },
-      {
         "label": "X label / Y label",
         "kind": "line-edit",
         "group": "Style",
@@ -4845,6 +4839,13 @@
         "notes": "A configuration is not raw data or an independent proof of reproducibility. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
       },
       {
+        "label": "Reset figure",
+        "kind": "control",
+        "group": "Analysis Explorer and Distributions workflow",
+        "what_it_does": "Put the text you typed on the figure (title, axis labels, fit-label wording, caption) and its look back to their defaults, as one Undo step.",
+        "notes": "In the page toolbar just before Export ▾, from every Section, on each Analysis Explorer page; the study figure editor keeps it in its Appearance section. Data, fits and analysis settings are kept. On every page that has Axis properties except Distributions, a range or tick spacing typed there goes with the look. Event waveforms keeps its Event-count heatmap colormap and Noise its Spectrogram colormap and colour limits (not part of the shared look; their tool tips say so). Distributions keeps its range in the Axis range boxes and also keeps Font size (body), the legend's position, entries and (n = …) switch, source names, Confidence band, Residual strip, Provenance caption and Heatmap colormap; there it returns the fit label's numbers to Equation, R² and n and the title's bold and italic to plain. Source: nanoscope/gui/plot_appearance.py; plot_workflow.py; plots_panel.py."
+      },
+      {
         "label": "Publication · light / Presentation · dark",
         "kind": "control",
         "group": "Shared Appearance",
@@ -4852,18 +4853,11 @@
         "notes": "No source, fit, bin, scale or analytical setting changes. Source: nanoscope/gui/plot_appearance.py."
       },
       {
-        "label": "Reset appearance",
-        "kind": "control",
-        "group": "Shared Appearance",
-        "what_it_does": "Remove appearance overrides.",
-        "notes": "Keeps data and analytical settings. Source: nanoscope/gui/plot_appearance.py."
-      },
-      {
         "label": "Font",
         "kind": "control",
         "group": "Shared Appearance",
-        "what_it_does": "Choose the plot font family.",
-        "notes": "Availability depends on installed fonts; export preview shows the captured appearance. Source: nanoscope/gui/plot_appearance.py."
+        "what_it_does": "Choose the figure font: Arial (default), Helvetica, Times New Roman, Courier New, or Other font… for any installed font.",
+        "notes": "Arial (default) saves no font name. A font this computer lacks is drawn in a substitute, and its row says which (on Windows: Helvetica (drawn in Arial on this computer)); export preview shows the captured appearance. Other font… leaves out the faces of symbols such as Wingdings. The same list is in Text style…, where the first row is an explicit Arial that counts only while Custom font is ticked, and in the composer's panel labels. Source: nanoscope/gui/plot_appearance.py; font_picker.py."
       },
       {
         "label": "Title (pt) / Axis labels (pt) / Ticks (pt)",
@@ -4885,6 +4879,13 @@
         "group": "Shared Appearance",
         "what_it_does": "Choose single-source data and fitted-curve colors where supported.",
         "notes": "Does not change category/source membership or analytical values. Source: nanoscope/gui/plot_appearance.py."
+      },
+      {
+        "label": "Fit label · Numbers",
+        "kind": "control",
+        "group": "Shared Appearance",
+        "what_it_does": "Choose which numbers the fit label shows: Equation, R², n, CI, BIC and KS.",
+        "notes": "Distributions no longer has Fit values on plot, R² on figure or KS statistic on figure; its Residual strip box still adds the strip's χ²/dof after the equation. A new label shows Equation, R² and n; in the automatic text a number the fit does not have is left out, and where your own wording names it a dash is drawn. A ticked R² (or {r2} in your words) prints its refusal (undefined, or no residual degrees of freedom) instead of a bare number; unticked, with no {r2} in your words, the label makes no R² claim and Details still says. KS is the numerical statistic only: the verdict stays in Details and the figure bundle, not on the plot. Source: nanoscope/gui/plot_appearance.py; fit_label.py."
       },
       {
         "label": "Grid / Background",
@@ -5349,11 +5350,11 @@
         "notes": "Does not remove points or change their source identity; full details remain available. Source: nanoscope/gui/plots_panel.py."
       },
       {
-        "label": "Title size / Title weight",
+        "label": "Title size",
         "kind": "control",
         "group": "Distributions → Appearance → Style",
-        "what_it_does": "Set title font size and Bold/Italic style.",
-        "notes": "Appearance only; title wording is not a numerical model setting. Source: nanoscope/gui/plots_panel.py."
+        "what_it_does": "Set the title font size.",
+        "notes": "Appearance only; title wording is not a numerical model setting. The title's bold and italic are its Text style… (right-click the title). Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Axis label size / Tick label size",
@@ -5368,20 +5369,6 @@
         "group": "Distributions → Appearance → Style",
         "what_it_does": "Toggle the plot grid.",
         "notes": "Does not change bins, fitted values or axis ranges. Source: nanoscope/gui/plots_panel.py."
-      },
-      {
-        "label": "R² on figure",
-        "kind": "control",
-        "group": "Distributions → Appearance → Style",
-        "what_it_does": "Include the existing scatter-fit R² in figure text.",
-        "notes": "Turning it off does not hide undefined-fit or residual-degrees-of-freedom explanations from Details. Source: nanoscope/gui/plots_panel.py."
-      },
-      {
-        "label": "KS statistic on figure",
-        "kind": "control",
-        "group": "Distributions → Appearance → Style",
-        "what_it_does": "Include the numerical KS statistic when Fit values on plot is enabled.",
-        "notes": "Verdicts and warnings remain in Details and bundle provenance, not plot artwork; fit unchanged. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Confidence band",
@@ -5475,7 +5462,8 @@
       "A live signal with fluctuations below float32's smallest representable magnitude is reported as a representation limit (\"…not a quiet pore\"), never as \"Total RMS noise: 0\".",
       "Manual-reference Preview is noncommitting. To apply the reference press Detect: this can change residual-noise scale, automatic polarity, candidate boundaries and acceptance, not only reported amplitudes. Reviewed-table replacement is explicit and undoable.",
       "Known and interval references require calibrated pA and a supported classical detector. Incompatible high-pass, normalization or runtime baseline-subtraction settings are refused; the application does not silently turn them off.",
-      "An automatic result and a known-current/specified-interval result answer different conditional questions. If intervals/current came from synthetic ground truth, disclose that as oracle assistance; it is not evidence available on a real recording."
+      "An automatic result and a known-current/specified-interval result answer different conditional questions. If intervals/current came from synthetic ground truth, disclose that as oracle assistance; it is not evidence available on a real recording.",
+      "Changing what a figure shows puts the words you typed back to automatic, and the range (and major tick) pinned in Axis properties on each axis whose quantity moved: in Voltage dependence the Metric (the Y axis; an applied fit that changes takes the fit label's wording only, no range), in Event waveforms the heatmap X (the map's X range), Y (the map's Y range) and Normalize time (the ensemble's X range), in Noise Amplitude spectral density (the PSD's Y range), in Subpopulations the Embedding (both axes of the scatter). Switching the Event waveforms tab or Noise's Show view takes the words and no range (each view keeps its own). The Title, X label, Y label and fit label's wording go back, with those ranges, as one Undo step and the status line names what went (a typed major tick is named apart from the range: Y range and Y major tick reset); the look stays. Two controls that leave the words still take the range of the axis whose numbers they change: |V| in Voltage dependence (the X range, signed voltage against its magnitude) and Log x / Log y on the Event-count map (log10 values on a linear axis), except that Log scale changed in Axis properties keeps the range typed beside it. I-V has no such control."
     ],
     "controls": [
       {
@@ -5630,7 +5618,7 @@
         "kind": "checkbox",
         "group": "Noise spectrum ▸ Display",
         "what_it_does": "Plot the ASD √PSD in units/√Hz instead of the PSD in units²/Hz.",
-        "notes": "Off by default. Changes only the drawn quantity and the y-axis label (and the auto title's 'PSD'/'ASD' prefix); the numbers in Noise details stay in PSD units."
+        "notes": "Off by default. Changes the drawn quantity and the y-axis label (and the auto title's 'PSD'/'ASD' prefix); the numbers in Noise details stay in PSD units. Ticking or clearing it also puts the words you typed (Title, X label, Y label and the fit label's wording) back to automatic and takes a range (and major tick) pinned on the PSD's Y axis in Axis properties, because that axis then shows units/√Hz instead of units²/Hz, or the other way round when you clear it: one Undo step and a status line (for example 'Title and Y range reset: the plot now shows the amplitude spectral density.'; clearing the box says 'the power spectral density'); the frequency range stays."
       },
       {
         "label": "f low",
@@ -5763,7 +5751,7 @@
         "kind": "checkbox",
         "group": "Voltage dependence ▸ controls row",
         "what_it_does": "Plot against the voltage MAGNITUDE |V| instead of signed V.",
-        "notes": "Off by default. It changes what the fit is fitted to as well as what is drawn — the reported slope or V₀ is in terms of whichever axis is showing, and the details line says which ('· |V|' vs '· V')."
+        "notes": "Off by default. It changes what the fit is fitted to as well as what is drawn — the reported slope or V₀ is in terms of whichever axis is showing, and the details line says which ('· |V|' vs '· V'). Ticking or clearing it takes a range (and major tick) pinned on the X axis in Axis properties, because the axis then shows the voltage magnitude instead of the signed voltage: one Undo step and a status line ('X range reset: the plot now shows capture rate against |V|.'); the typed words and the Y range stay."
       },
       {
         "label": "Log y",
@@ -5854,14 +5842,14 @@
         "kind": "checkbox",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Bin the X metric in log space (drops non-positive values).",
-        "notes": "ON by default, because dwell reads on a log axis by convention. The axis label gains '(log10)' and the axis values ARE log10 values. If every event is dropped the plot says 'No events fall on these axes. Check the log toggles (non-positive values are dropped for a log axis).'"
+        "notes": "ON by default, because dwell reads on a log axis by convention. The axis label gains '(log10)' and the axis values ARE log10 values. If every event is dropped the plot says 'No events fall on these axes. Check the log toggles (non-positive values are dropped for a log axis).' Ticking or clearing it takes a range (and major tick) pinned on the map's X axis in Axis properties, because the numbers on the axis change: one Undo step and a status line; the typed words stay. Changing Log scale in Axis properties keeps the range typed in that dialog."
       },
       {
         "label": "Log y",
         "kind": "checkbox",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Bin the Y metric in log space (drops non-positive values).",
-        "notes": "Off by default. Watch this one with a signed depth metric — negative depths vanish silently apart from the empty-plot message."
+        "notes": "Off by default. Watch this one with a signed depth metric — negative depths vanish silently apart from the empty-plot message. Ticking or clearing it takes a range (and major tick) pinned on the map's Y axis in Axis properties, because the numbers on the axis change: one Undo step and a status line; the typed words stay."
       },
       {
         "label": "Bins",

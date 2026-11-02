@@ -42,12 +42,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pandas as pd
 import pytest
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtGui, QtWidgets
 from PySide6.QtCore import Qt
 
 from nanoscope.core.session import Session
 from nanoscope.core.sources import PlotSource
+from nanoscope.gui import font_picker
 from nanoscope.gui import plots_panel as pp
+from nanoscope.gui.figure_text import figure_text_for
 from nanoscope.gui.plots_panel import PlotsWindow, StyleSettings
 from nanoscope.gui.voltage_dep_panel import VDepWindow
 
@@ -221,7 +223,8 @@ def test_the_on_plot_box_carries_every_parameter_not_just_the_headline(win):
     win.set_histogram_column("depth_pA")
     win.set_fit("gaussian-mixture")
     win.set_fit_components(2)
-    win._fit_values_check.setChecked(True)
+    for name in ("bic", "ks"):          # the fit label's Numbers row
+        win._appearance_widget.fit_label_fields[name].click()
 
     # The values box is the fit label's extra fields since plotux G3 (2026-11-01).
     # The headline lists both means ("μ = 39.95, 40.06 pA"), then the rest.
@@ -230,10 +233,9 @@ def test_the_on_plot_box_carries_every_parameter_not_just_the_headline(win):
     assert re.search(r"μ = [-\d.]+, [-\d.]+", text), text
     assert "σ_1" in text and "σ_2" in text, "the widths were the missing half"
     assert "n = " in text and "BIC = " in text, text
-    # The Style checkbox's tooltip promises the numerical KS statistic; the box delivers
-    # it. (The verdict stays in Details, not on the figure, since 779d4ec, 2026-09-06.)
+    # The Numbers row's KS box delivers the numerical statistic. (The verdict stays in
+    # Details, not on the figure, since 779d4ec, 2026-09-06.)
     assert "KS = " in text, text
-    assert "numerical KS statistic" in win._fit_values_check.toolTip()
 
 
 def test_the_scatter_page_draws_a_fit_values_box_at_all(win):
@@ -242,7 +244,6 @@ def test_the_scatter_page_draws_a_fit_values_box_at_all(win):
     nothing."""
     win.set_plot_type("Scatter")
     win.set_scatter_columns("dwell_s", "depth_pA")
-    win._fit_values_check.setChecked(True)
     assert not win._fit_label_item.isVisible(), "no fit, no label"
 
     win.set_scatter_fit("linear")
@@ -664,10 +665,12 @@ def test_the_title_can_be_bold_or_italic_without_choosing_a_font_family(win):
     assert w._style.font_family == "", "premise: no family has been chosen"
     assert not w.plot_item().titleLabel.item.font().bold()
 
-    w._title_bold.setChecked(True)
-    w._title_italic.setChecked(True)
+    # The title's own Text style, set as its popover's OK sets it (Title weight is gone).
+    figure_text_for(w._plot).host.apply_text(
+        "title", replace(w._style.text_style("title"), bold=True, italic=True))
     font = w.plot_item().titleLabel.item.font()
     assert font.bold() and font.italic()
+    assert w._style.font_family == "", "and still no family has been chosen"
 
 
 def test_gridlines_are_a_control_and_are_re_read_on_every_draw(win):
@@ -923,30 +926,21 @@ def test_the_font_row_says_application_default_rather_than_naming_a_font(win, qt
     assert not QtGui.QFont(w._font_combo.currentText()).exactMatch(), (
         "the Font row must not name an installed family when none was chosen")
 
-    # ...and the replacement offers exactly the app's families, not a set of its own.
-    #
-    # A FRESH WINDOW, AFTER FORCING QT'S LAZY ALIAS POPULATION. Measured: asking for a
-    # family that does not exist grows ``QFontDatabase.families()`` by two alias names
-    # (Noto Sans Armenian, Noto Sans Zawgyi) on BOTH platforms, and until something
-    # triggers it the count differs by exactly those two — under cocoa the trigger fires
-    # inside window construction (list 181, later 183), under offscreen before it. The
-    # window snapshots the list at construction, so force the growth first and the
-    # comparison is exact rather than order-dependent.
-    QtGui.QFontInfo(QtGui.QFont("no such family — force Qt's alias population")).family()
-    fresh = PlotsWindow(Session())
-    qtbot.addWidget(fresh)
-    families = pp._font_families()
-    assert fresh._font_combo.count() == len(families) + 1
-    assert [fresh._font_combo.itemText(i)
-            for i in range(1, fresh._font_combo.count())] == families
-    assert [fresh._font_combo.itemData(i)
-            for i in range(1, fresh._font_combo.count())] == families, (
-        "a family row must carry its own name as its style value")
+    # ...and the Font row lists the short list and nothing else (P0 G2, owner decision 4):
+    # the four journal families, then Other font… -- not the 180-odd installed families it
+    # used to list, which stay behind Other font….
+    rows = [(w._font_combo.itemText(i), w._font_combo.itemData(i))
+            for i in range(w._font_combo.count())]
+    assert rows == [(pp._FONT_DEFAULT_LABEL, ""), ("Helvetica", "Helvetica"),
+                    ("Times New Roman", "Times New Roman"), ("Courier New", "Courier New"),
+                    ("", None), ("Other font…", "")], rows
+    # The "…(default)" row says what the default is: Arial, drawn and exported.
+    assert pp._FONT_DEFAULT_LABEL == "Arial (default)"
 
 
 def test_the_default_font_row_is_a_value_the_user_can_choose_back(win):
-    """"Application default" is a CHOICE, so it has to be reachable in both directions —
-    picked away from and picked back to, through the widget and through the setter."""
+    """"Arial (default)" (the blank) is a CHOICE, so it has to be reachable in both directions
+    -- picked away from and picked back to, through the widget and through the setter."""
     w = win
     w.set_plot_type("Histogram")
     w.set_histogram_column("dwell_s")
@@ -959,7 +953,8 @@ def test_the_default_font_row_is_a_value_the_user_can_choose_back(win):
 
     w._font_combo.setCurrentIndex(0)                    # ...and back to the default
     assert w._style.font_family == "", "row 0 commits the blank, not the word it shows"
-    assert w._qfont().family() == QtGui.QFont().family()
+    # ...which draws in Arial (P0 G2), not in the application font it used to name.
+    assert w._qfont().family() == "Arial"
 
     # The setter half. Before S6-01 `setCurrentFont(QFont(""))` left the combo showing
     # whatever it had been showing while the style went blank — the panel and the figure
@@ -1017,7 +1012,7 @@ def test_a_family_this_machine_lacks_is_shown_as_absent_not_rewritten(win):
     matching it to the nearest family would silently rewrite the user's style, so the exact
     string gets a row of its own, marked as absent, and the style keeps it verbatim."""
     w = win
-    if "calibri" in w._font_rows:
+    if font_picker.is_installed("Calibri"):
         pytest.skip("this machine has Calibri; the test needs a family it lacks")
 
     cfg = w.config()
@@ -1065,13 +1060,14 @@ def test_the_absent_family_row_is_retired_by_the_choice_that_replaces_it(win):
     for the rest of the session.
     """
     w = win
-    if "calibri" in w._font_rows:
+    if font_picker.is_installed("Calibri"):
         pytest.skip("this machine has Calibri; the test needs a family it lacks")
     base = w._font_combo.count()
 
     cfg = w.config()
     w.apply_config(replace(cfg, style=replace(cfg.style, font_family="Calibri")))
-    assert w._font_combo.count() == base + 1 and w._font_off_list, "premise: the row is up"
+    assert w._font_combo.count() == base + 1 and w._font_combo.has_extra_row(), (
+        "premise: the row is up")
 
     installed = w._font_combo.findData("Courier New")
     assert installed > 0, "premise: this machine has Courier New"
@@ -1080,11 +1076,11 @@ def test_the_absent_family_row_is_retired_by_the_choice_that_replaces_it(win):
 
     assert w._style.font_family == "Courier New"
     assert w._font_combo.count() == base, "the absent family's row went with the decision"
-    assert not w._font_off_list
+    assert not w._font_combo.has_extra_row()
     assert w._font_combo.findData("Calibri") == -1
-    # Removing row 1 renumbers everything above it. The row the user chose must still be
-    # the current one, and their one gesture must still be one undo step — an unblocked
-    # removal would re-enter the handler and take a second.
+    # The row the user chose must still be the current one, and their one gesture must
+    # still be one undo step — an unblocked removal would re-enter the handler and take a
+    # second.
     assert w._font_combo.currentData() == "Courier New"
     assert w._font_combo.currentText() == "Courier New"
     assert w._history.depth()[0] == steps + 1, "one gesture is still one undo step"
@@ -1093,58 +1089,34 @@ def test_the_absent_family_row_is_retired_by_the_choice_that_replaces_it(win):
     # does the sentence that explains it.
     assert w.undo_config()
     assert w._style.font_family == "Calibri"
-    assert w._font_off_list and "not on this computer" in w._font_combo.currentText()
+    assert w._font_combo.has_extra_row() and "not on this computer" in w._font_combo.currentText()
 
     # Re-selecting THAT row is a choice too, and it keeps it.
-    w._font_combo.setCurrentIndex(1)
-    assert (w._style.font_family, w._font_off_list) == ("Calibri", True)
+    w._font_combo.setCurrentIndex(w._font_combo.findData("Calibri"))
+    assert (w._style.font_family, w._font_combo.has_extra_row()) == ("Calibri", True)
     assert w._font_combo.count() == base + 1
 
     # ...and the default row retires it exactly as any other pick does.
     w._font_combo.setCurrentIndex(0)
-    assert (w._style.font_family, w._font_off_list) == ("", False)
+    assert (w._style.font_family, w._font_combo.has_extra_row()) == ("", False)
     assert w._font_combo.count() == base
 
 
 def test_the_font_tooltip_describes_the_default_without_naming_a_private_face(win):
-    """The tooltip may only print a family name the dropdown below it actually offers.
+    """The tooltip says what the first row is -- Arial -- and prints no family the dropdown
+    below it does not offer.
 
     It used to interpolate ``QFontInfo(QFont()).family()`` once, at construction, so on
-    macOS it read ".AppleSystemUIFont" — a leading-dot internal name, the same kind
-    ``_font_families`` strips OUT of the list as system-internal, and one no reader can act
-    on. It was also frozen at construction, so it described a font nothing was drawn in any
-    more as soon as the application font changed.
+    macOS it read ".AppleSystemUIFont" — a leading-dot internal name no reader can act on.
+    The default is Arial now, a name on the list, so there is nothing private to describe.
     """
     w = win
     tip = w._font_combo.toolTip()
-    assert pp._FONT_DEFAULT_LABEL in tip, "it still explains what the default row means"
-
+    assert "Arial" in tip and "Other font…" in tip
     resolved = QtGui.QFontInfo(QtGui.QFont()).family()
-    if w._font_rows.get(resolved.casefold()) is None:
-        # The stock macOS case, under cocoa AND offscreen: the application font resolves to
-        # a private family. Then it is described, not named.
-        assert resolved not in tip, (
-            f"the tooltip must not print {resolved!r} — the list below cannot offer it")
-        assert not any(word.startswith(".") and len(word) > 3 for word in tip.split()), (
-            "no leading-dot family name anywhere in the sentence")
-    else:
-        assert resolved in tip, "a family the list DOES offer is worth naming"
-
-    # THE FRESHNESS HALF. Change the application font under the running window and ask for
-    # the tooltip the way Qt does; the sentence has to be about the font in force now.
-    app = QtWidgets.QApplication.instance()
-    was = app.font()
-    try:
-        app.setFont(QtGui.QFont("Courier New", was.pointSize()))
-        assert "Courier New" in w._font_row_tooltip(), "composed against the live app font"
-        combo = w._font_combo
-        QtWidgets.QApplication.sendEvent(combo, QtGui.QHelpEvent(
-            QtCore.QEvent.ToolTip, QtCore.QPoint(5, 5),
-            combo.mapToGlobal(QtCore.QPoint(5, 5))))
-        assert "Courier New" in combo.toolTip(), (
-            "the ToolTip event rebuilds the text before Qt reads it")
-    finally:
-        app.setFont(was)
+    assert resolved not in tip or resolved == "Arial"
+    assert not any(word.startswith(".") and len(word) > 3 for word in tip.split()), (
+        "no leading-dot family name anywhere in the sentence")
 
 
 def test_pointing_the_font_row_at_a_family_cannot_commit_it_whatever_the_caller_did(win):

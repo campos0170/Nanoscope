@@ -134,19 +134,20 @@ def test_compose_label_colour_is_a_swatch(qtbot, monkeypatch):
     assert "color: #000000" in dialog._label_color.styleSheet()   # legible ink on yellow
 
 
-def test_compose_label_font_follows_the_application_font(entries, qtbot):  # noqa: F811
+def test_compose_label_font_defaults_to_arial(entries, qtbot):  # noqa: F811
+    """The panel-label font starts at Arial (default) -- the figure default (P0 G2) -- and no
+    longer at the application font, which on macOS is a private face no journal has."""
     dialog = FigureComposerDialog(entries)
     qtbot.addWidget(dialog)
-    assert dialog._label_font.currentText() == "Application default"
-    assert dialog.label_family() == QtWidgets.QApplication.font().family() != "Arial"
+    assert dialog._label_font.currentText() == "Arial (default)"
+    assert dialog.label_family() == "Arial"
     dialog.update_preview()
     assert dialog.snapshot is not None
-    assert dialog.snapshot.config()["label_style"]["family"] == QtWidgets.QApplication.font().family()
+    assert dialog.snapshot.config()["label_style"]["family"] == "Arial"
     # A family picked by name is used as named, and the preview is invalidated.
-    arial = dialog._label_font.findData("Arial")
-    if arial >= 0:
-        dialog._label_font.setCurrentIndex(arial)
-        assert dialog.snapshot is None and dialog.label_family() == "Arial"
+    helvetica = dialog._label_font.findData("Helvetica")
+    dialog._label_font.setCurrentIndex(helvetica)
+    assert dialog.snapshot is None and dialog.label_family() == "Helvetica"
 
 
 def test_compose_revision_keeps_its_saved_label_family(qtbot):
@@ -155,10 +156,13 @@ def test_compose_revision_keeps_its_saved_label_family(qtbot):
         dialog = FigureComposerDialog(figures, initial_layout=_layout(20, family))
         qtbot.addWidget(dialog)
         assert dialog.label_family() == family
-    same = FigureComposerDialog(figures, initial_layout=_layout(
-        20, QtWidgets.QApplication.font().family()))
+    # A composition saved before the default moved to Arial carries the application's own
+    # family; it is kept as saved, on a row of its own.
+    old = QtWidgets.QApplication.font().family()
+    same = FigureComposerDialog(figures, initial_layout=_layout(20, old))
     qtbot.addWidget(same)
-    assert same._label_font.currentText() == "Application default"
+    assert same.label_family() == old
+    assert same._label_font.currentData() == old
 
 
 # -- Explorer refusals and greyed Home rows -------------------------------------------------------

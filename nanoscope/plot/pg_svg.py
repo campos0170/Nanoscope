@@ -4,7 +4,10 @@ THIS FILE CARRIES A PATCH TO SOMEBODY ELSE'S CODE. It is written against
 **pyqtgraph 0.14.0 / PySide6 6.11.1 / Qt 6.11.1** and it exists only because
 ``pyqtgraph.exporters.SVGExporter`` cannot export *any* plot on this stack. When
 pyqtgraph fixes the bug the patch takes itself out of the way (see `install`);
-nothing here should outlive the upstream defect.
+nothing in the closepath patch should outlive the upstream defect.
+
+It also carries one thing that is NOT a workaround and stays: the font stack written into
+every ``<text>`` of an SVG (see "THE FONT STACK" below and `install_font_stack`).
 
 WHY (the bug, measured this session)
 ------------------------------------
@@ -108,14 +111,20 @@ TWO KNOWN LIMITATIONS OF PYQTGRAPH'S SVG EXPORT
 
 from __future__ import annotations
 
+import html
 import importlib
+import re
 import sys
 import xml.dom.minidom as _xml
 from pathlib import Path
 from typing import Any
+from xml.sax import saxutils
+
+from . import figure_fonts
 
 __all__ = [
     "BYTES_PER_VECTOR_POINT",
+    "FONT_PATCH_STATUS",
     "PATCH_STATUS",
     "SVG_POINT_WARN_THRESHOLD",
     "count_vector_points",
@@ -123,7 +132,9 @@ __all__ = [
     "estimate_svg_bytes_for_points",
     "export_svg",
     "install",
+    "install_font_stack",
     "refresh_for_export",
+    "set_font_stack",
     "svg_size_warning",
 ]
 
@@ -274,6 +285,132 @@ def install() -> str:
 #: Result of the import-time `install()` call -- readable by a panel that wants to say
 #: why SVG export is unavailable, and asserted on by the tests.
 PATCH_STATUS: str = install()
+
+
+# ==================================================================================================
+# The font stack
+# ==================================================================================================
+#
+# THE FONT STACK. Qt's SVG writer puts ONE ``font-family`` on each ``<text>`` -- the name the
+# QFont was given, even for a font that is not installed, and with no generic behind it (pyqtgraph
+# adds ``sans-serif`` only for a font whose style hint says so, which a family set by name never
+# does) -- and embeds nothing. A viewer without that one family silently picks its own. And text
+# that was never given a font (a plot's grey no-data message) is written with the APPLICATION's
+# face, which on macOS is the private ``.AppleSystemUIFont`` that no other machine has. (A figure
+# drawn by the windows is in Arial unless a family was picked: ``gui.font_picker``.)
+#
+# So every ``<text>`` is rewritten, as the SVG is produced, to the family's stack from
+# :mod:`nanoscope.plot.figure_fonts` (``Arial, Helvetica, 'Liberation Sans', Arimo, ...,
+# sans-serif``): the family Qt named first, then its metric-compatible stand-ins, then the
+# generic; a family nobody can name (empty, or a private ``.``-prefixed one) becomes Arial. A
+# family someone picked is named whatever the application's own font is (Segoe UI on Windows
+# can be picked in Other font…), so the SVG says what the screen, the PNG and the PDF show. The
+# text stays text -- nothing is outlined.
+#
+# THE GROUPS' ``font-family`` GOES. Qt also writes the painter's face on every enclosing ``<g>``
+# (410 of 418 groups in a 400-point scatter, text or no text). It governs nothing -- the text
+# under a group carries its own -- and for an untouched figure it is the private application
+# font again, so it is dropped rather than rewritten (which would add ~70 bytes to every group
+# of a file that already holds one per scatter point).
+#
+# WHERE IT HOOKS IN. At pyqtgraph's ``generateSvg``, which every ``SVGExporter`` export ends in:
+# ``export_svg`` below, the frozen snapshot the Figure Library / bundle / Export dialog take
+# (``gui/figure_bundle.py`` calls ``SVGExporter(...).export(toBytes=True)`` itself), and
+# pyqtgraph's own right-click Export all pass through it, so no caller has to remember to ask.
+
+#: Stamped on the replacement so a reload or a second explicit call cannot wrap the wrapper.
+_FONT_MARK = "_nanoscope_font_stack"
+
+_TEXT_TAG = re.compile(r"<text\b[^>]*>")
+_FONT_FAMILY_ATTR = re.compile(r'(\sfont-family=")([^"]*)(")')
+#: A ``font-family`` on any element but ``<text>``: group 1 is everything before it in the tag.
+_OTHER_FONT_FAMILY = re.compile(r'(<(?!text\b)[A-Za-z][^<>]*?)\sfont-family="[^"]*"')
+#: Characters a family name cannot carry into a CSS ``font-family`` without escaping.
+_UNWRITABLE = re.compile(r"""['"\\;,<>{}]""")
+
+
+def _first_family(value: str) -> str:
+    """The family a ``font-family`` attribute value starts with: ``"Times New Roman", serif``
+    (as pyqtgraph writes it) -> ``Times New Roman``."""
+    text = html.unescape(value).strip()
+    if text[:1] in ("'", '"'):
+        end = text.find(text[0], 1)
+        return text[1:end] if end > 0 else text[1:]
+    return text.split(",", 1)[0].strip()
+
+
+def _stack_for(family: str) -> str:
+    """The CSS ``font-family`` value for text Qt wrote in ``family``.
+
+    No family (empty), a private one (leading ``.``: on macOS the application's own face) or
+    one that cannot be written safely all mean "the figure default", Arial: the SVG never names
+    a font that only this computer has. Any other family is named first, the application's own
+    included -- a person can pick it, and then the SVG must agree with the screen.
+    """
+    unset = not family or family.startswith(".") or _UNWRITABLE.search(family) is not None
+    return figure_fonts.css_font_family(None if unset else family)
+
+
+def set_font_stack(svg: str) -> str:
+    """``svg`` with every ``<text>`` element's ``font-family`` replaced by the family's stack, and
+    the ``font-family`` Qt also writes on the enclosing groups dropped.
+
+    A ``<text>`` with no ``font-family`` gets the default (Arial) stack. Nothing else changes: not
+    the text, its position, size, weight or colour, and not the number of elements. Applying it to
+    its own output changes nothing.
+    """
+    stacks: dict[str, str] = {}
+
+    def restack(match: "re.Match[str]") -> str:
+        tag = match.group(0)
+        found = _FONT_FAMILY_ATTR.search(tag)
+        family = _first_family(found.group(2)) if found else ""
+        if family not in stacks:
+            stacks[family] = saxutils.escape(_stack_for(family), {'"': "&quot;"})
+        attribute = f' font-family="{stacks[family]}"'
+        if found:
+            return tag[:found.start()] + attribute + tag[found.end():]
+        cut = -2 if tag.endswith("/>") else -1
+        return tag[:cut] + attribute + tag[cut:]
+
+    return _OTHER_FONT_FAMILY.sub(r"\1", _TEXT_TAG.sub(restack, svg))
+
+
+def _make_font_stacked(upstream):
+    """Wrap *upstream* ``generateSvg`` so the SVG it returns carries the font stack."""
+
+    def generateSvg(item, options=None):  # noqa: N802 (pyqtgraph's spelling)
+        return set_font_stack(upstream(item, options))
+
+    setattr(generateSvg, _FONT_MARK, True)
+    generateSvg.__wrapped__ = upstream
+    generateSvg.__doc__ = (
+        "pyqtgraph's generateSvg, then nanoscope's font stack on every <text>. "
+        "See nanoscope/plot/pg_svg.py."
+    )
+    return generateSvg
+
+
+def install_font_stack() -> str:
+    """Put the font stack on every SVG pyqtgraph writes in this process. Idempotent.
+
+    Returns ``"patched"`` (installed just now), ``"already-patched"`` (a wrapper from this module
+    is in place -- a second import, a reload or a second call) or ``"unavailable"`` (this
+    pyqtgraph has no module-level ``generateSvg`` to wrap: nothing is done, and an SVG then keeps
+    Qt's one family per element).
+    """
+    module = sys.modules.get(_SVG_MODULE_NAME) or importlib.import_module(_SVG_MODULE_NAME)
+    current = getattr(module, "generateSvg", None)
+    if current is None:
+        return "unavailable"
+    if getattr(current, _FONT_MARK, False):
+        return "already-patched"
+    module.generateSvg = _make_font_stacked(current)
+    return "patched"
+
+
+#: Result of the import-time `install_font_stack()` call -- asserted on by the tests.
+FONT_PATCH_STATUS: str = install_font_stack()
 
 
 # ==================================================================================================

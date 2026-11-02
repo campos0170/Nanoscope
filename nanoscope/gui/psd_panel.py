@@ -49,6 +49,15 @@ A comparison recording is analysed over the same time window as the primary,
 clipped to its own duration (and the clipping is stated). Its own sample rate,
 units and Nyquist are its own -- they are printed per curve rather than assumed
 to match.
+
+THE TYPED WORDS AND THE VIEW (``gui.quantity_reset``). The four views share one title, one
+pair of axis labels and the 1/f fit label's wording, so they go back to automatic when the
+view in front changes, or when the spectrum becomes the ASD or the PSD again. The change goes
+through the control's own signal: a pick and ``set_view`` do it, a project restore and a
+template (which set ``_updating``) do not. A range pinned in Axis properties belongs to ONE
+view's axis (``<view>.<side>``), so a view change takes none off (PSD, Spectrogram, PSD keeps
+the PSD's range); the ASD does: it moves the PSD's y axis, and a Y range (or major tick) pinned
+there for the PSD goes with the words, while the frequency axis keeps its pin.
 """
 
 from __future__ import annotations
@@ -81,8 +90,9 @@ from .combos import choose_combo_item
 from .export_paths import ask_export_path
 from .figure_text import SHARED_LABELS_REASON, appearance_text_host, figure_text_for
 from .fit_label import FitLabelItem, FitReadout
+from .font_picker import figure_qfont, html_font_family
 from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
-                              reframe_axis_pins)
+                              apply_tick_family, reframe_axis_pins)
 from .plot_interaction import (image_value, install_plot_interaction, navigation_for,
                                reset_plot_history, view_button, window_readout)
 from .plot_templates import WindowTemplateControls
@@ -181,6 +191,10 @@ VIEWS: tuple[tuple[str, str], ...] = (
     (VIEW_SPECTROGRAM, "Spectrogram (PSD vs time)"),
     (VIEW_ALLPOINTS, "All-points histogram (levels)"),
 )
+
+#: What the status line says the plot shows after a view change (quantity_reset).
+_SHOWS_VIEW = {VIEW_PSD: "the Welch PSD", VIEW_FFT: "the FFT", VIEW_SPECTROGRAM: "the spectrogram",
+               VIEW_ALLPOINTS: "the all-points histogram"}
 
 # Spectrogram block lengths offered. Capped at 16384 rather than the Welch combo's 65536
 # because the row count is the IMAGE HEIGHT: 65536 would be a 32 769-row image, and no
@@ -602,6 +616,12 @@ class PSDWindow(QtWidgets.QMainWindow):
         # Automatic captions belong to the rendered result, not the current source.
         # Keep them so clearing a custom title can restyle even an orphan snapshot.
         self._view_titles: dict[str, str] = {}
+        # What the figures on screen show, for the reset rule (quantity_reset): the typed
+        # words belong to it, so a change is measured against THIS and not against the
+        # controls. ``_view_shown`` is the page in front; ``_asd_shown`` is whether the
+        # spectrum on the PSD page is the ASD (None: no spectrum drawn).
+        self._view_shown = VIEW_PSD
+        self._asd_shown: bool | None = None
         self._updating = False
 
         # Live results (kept for tests + redraws).
@@ -734,6 +754,8 @@ class PSDWindow(QtWidgets.QMainWindow):
             actions=(("Analyze / refresh", self._refresh_from_button),),
             exports=(("Export current figure…", lambda: self.save_image()),
                      ("Export data (CSV)…", lambda: self.export_data())))
+        self._workflow.adopt_reset_figure(
+            self._appearance_widget, keeps="the Spectrogram colormap and colour limits")
         self._refresh_btn.hide()
         self._install_plot_interaction()
 
@@ -759,7 +781,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             return f"{label} {value:.4g}"
 
         # In-figure editing (figure_text) on every view, through the ONE shared appearance:
-        # the Title is "(all views)", so retyping it on one view retitles them all. Log in
+        # the Title is "(this view)", typed for the view on screen. Log in
         # Axis properties is the window's own control for that view, never a second store.
         loglog = {"log": lambda side, on: self._loglog_check.setChecked(bool(on)),
                   "log_state": lambda side: self._loglog_check.isChecked(),
@@ -1543,8 +1565,20 @@ class PSDWindow(QtWidgets.QMainWindow):
 
     def _on_display_changed(self, *_a) -> None:
         if not self._updating:
+            moved = self._asd_shown not in (None, self._asd_check.isChecked())
             self._redraw_and_views()
+            if moved:       # PSD against ASD is the PSD view's y axis, and only that axis
+                self._reset_words("the amplitude spectral density" if self._asd_check.isChecked()
+                                  else "the power spectral density", ((VIEW_PSD, "left"),))
             self.workspaceChanged.emit()
+
+    def _reset_words(self, shows: str, axes: tuple = ()) -> None:
+        """A figure's quantity changed: the typed words, and the pin of each axis in ``axes``
+        (the ones whose quantity moved), go back to automatic, as one step of this window's
+        appearance Undo, and the status line (the one under the canvas, which the Explorer
+        shows) says what went, or loses the sentence of an earlier change."""
+        self._appearance_widget.reset_typed_words(shows, self.statusBar(), axes=axes,
+                                                  primary=VIEW_PSD)
 
     def _on_rms_changed(self, *_a) -> None:
         if not self._updating:
@@ -1819,7 +1853,9 @@ class PSDWindow(QtWidgets.QMainWindow):
             axis.setPen(pg.mkPen(self._fg_hex()))
             axis.setTextPen(pg.mkPen(self._fg_hex()))
             axis.labelStyle.update(self._label_style())
+            axis.labelStyle["font-family"] = html_font_family(self._appearance.font_family)
             axis._updateLabel()
+            apply_tick_family(axis, self._appearance.font_family)
         self._apply_appearance()  # shared overrides win after legacy per-view presentation
 
     def _on_appearance_changed(self, state: PlotAppearance) -> None:
@@ -1884,7 +1920,8 @@ class PSDWindow(QtWidgets.QMainWindow):
             # Never In legend: a single curve's row does not carry the α line.
             fit_label.apply_state(replace(self._appearance.fit_label_state(), in_legend=False),
                                   self._fit_readouts,
-                                  self._appearance.text_style("annotation.fit"))
+                                  self._appearance.text_style("annotation.fit"),
+                                  self._appearance.font_family)
         # Level positions and occupancies are scientific results; only their ink
         # changes here. InfiniteLine is not a PlotDataItem handled by the helper.
         for line in self._hist_marks:
@@ -1899,6 +1936,11 @@ class PSDWindow(QtWidgets.QMainWindow):
             line.setPen(pen)
             if line.label is not None:
                 line.label.setColor(pen.color())
+                # A plain TextItem, in the application font until given one: the figure's
+                # family (Arial when unset), at the size it has.
+                font = figure_qfont(self._appearance.font_family, line.label.textItem.font())
+                if font.family() != line.label.textItem.font().family():
+                    line.label.setFont(font)
 
     # -- public setters (owner + tests) ----------------------------------------------------------
     def set_segment(self, start_s: float, end_s: float) -> None:
@@ -2430,6 +2472,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._draw_flicker_line(asd, log_log)
 
         self._plot.setLogMode(x=log_log, y=log_log)
+        self._asd_shown = asd
         yq = "ASD" if asd else "PSD"
         # The y axis carries the PRIMARY curve's units. Undeclared units are named on
         # the axis too -- "PSD ()" or "PSD (²/Hz)" reads as a formatting slip and lets
@@ -3016,6 +3059,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._plot.setTitle(None)
         self._plot.titleLabel.setText("")
         self._view_titles.pop(VIEW_PSD, None)
+        self._asd_shown = None
         self._drop_legend()
         self._curve_item = self._fit_item = self._message_item = None
         self._fit_readouts = []
@@ -3093,8 +3137,11 @@ class PSDWindow(QtWidgets.QMainWindow):
     def _on_view_changed(self, *_a) -> None:
         if self._updating:
             return
+        moved = self._view_shown != self.current_view()
         self._refresh_view()
         self._apply_appearance()
+        if moved:
+            self._reset_words(_SHOWS_VIEW[self.current_view()])
         self.workspaceChanged.emit()
 
     def _on_view_option_changed(self, *_a) -> None:
@@ -3170,6 +3217,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         :meth:`_redraw`, and recomputing it here would double the cost of every keystroke.
         """
         view = self.current_view()
+        self._view_shown = view
         index = next((i for i, (key, _) in enumerate(VIEWS) if key == view), 0)
         self._view_stack.setCurrentIndex(index)
         self._view_options.setCurrentIndex(index)
@@ -3208,6 +3256,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._redraw()  # Stored PSD curves only; this path never calls Welch.
 
         view = self.current_view()
+        self._view_shown = view
         index = next((i for i, (key, _) in enumerate(VIEWS) if key == view), 0)
         self._view_stack.setCurrentIndex(index)
         self._view_options.setCurrentIndex(index)

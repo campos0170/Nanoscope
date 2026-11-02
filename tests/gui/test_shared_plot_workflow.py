@@ -21,6 +21,25 @@ from .test_psd import _fed_window as noise_window
 from .test_subpop_views import report  # real, module-scoped synthetic report fixture
 
 
+def _settled(qtbot, plots, quiet=5, limit=100):
+    """Wait until no plot's view range has moved for ``quiet`` waits in a row.
+
+    pyqtgraph pads an auto range by pixels, so a range follows the size of the plot area, and
+    an axis takes its final width when it first paints its numbers. Subpopulations' left axis
+    narrows from 52.6 to 39.9 px that way, and the range, worked out at the next paint, is
+    a turn behind it. The one 10 ms wait was enough before the plots drew in Arial by default;
+    now the range is still moving when the fixture returns.
+    """
+    last, still = None, 0
+    for _ in range(limit):
+        qtbot.wait(5)
+        now = [np.asarray(plot.viewRange()).tolist() for plot in plots]
+        still = still + 1 if now == last else 0
+        last = now
+        if still >= quiet:
+            return
+
+
 @pytest.fixture(params=["iv", "voltage", "events", "noise", "subpopulations"])
 def page(request, qtbot, tmp_path):
     kind = request.param
@@ -55,6 +74,7 @@ def page(request, qtbot, tmp_path):
     window.resize(1280, 820)
     window.show()
     qtbot.wait(10)
+    _settled(qtbot, plots)
     return kind, window, plots
 
 

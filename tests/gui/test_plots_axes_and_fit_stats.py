@@ -35,6 +35,7 @@ import pytest
 
 from nanoscope.core.session import Session
 from nanoscope.core.sources import PlotSource
+from nanoscope.gui.fit_label import FitLabelState
 from nanoscope.gui.plots_panel import KdeConfig, PlotConfig, PlotsWindow
 
 
@@ -266,11 +267,11 @@ def test_restoring_a_config_restores_its_explanation(win):
 # E1 — the fit statistics, and the switches that cannot hide a refusal
 # ================================================================================================
 
-def test_the_four_switches_default_to_todays_figure():
-    """Two statistics were already printed unconditionally and two pictures are new, so
-    the defaults are asymmetric on purpose: an untouched window renders as it did."""
+def test_the_switches_default_to_todays_figure():
+    """Two pictures are new and the fit label's numbers are its Numbers row, so the
+    defaults are asymmetric on purpose: an untouched window renders as it did."""
     s = PlotConfig().style
-    assert s.show_r2 is True and s.show_gof is True
+    assert s.fit_label_state().fields == ("equation", "r2", "n")
     assert s.show_ci_band is False and s.show_residuals is False
     assert s.show_provenance is False
 
@@ -278,11 +279,10 @@ def test_the_four_switches_default_to_todays_figure():
 def test_the_switches_round_trip_through_the_widgets(win):
     """They are style, so they are config, so undo/redo and templates carry them."""
     cfg = replace(win.config(), style=replace(
-        win.config().style, show_r2=False, show_gof=False,
-        show_ci_band=True, show_residuals=True, show_provenance=True))
+        win.config().style, show_ci_band=True, show_residuals=True, show_provenance=True))
     win._set_config(cfg, draw=False)
     assert win.config() == cfg
-    assert win._r2_check.isChecked() is False and win._ci_band_check.isChecked() is True
+    assert win._ci_band_check.isChecked() is True
 
 
 def _narrow_peak_events(n: int = 400, *, seed: int = 11) -> pd.DataFrame:
@@ -317,22 +317,26 @@ def _drawn_legend(win) -> list[str]:
     return [] if legend is None else [label.text for _s, label in legend.items]
 
 
-@pytest.mark.parametrize("show_gof", [True, False])
-@pytest.mark.parametrize("values_box", [False, True])
-def test_turning_the_KS_verdict_off_cannot_hide_a_REJECTION(qapp, qtbot, show_gof, values_box):
-    """Off means "stop decorating a figure whose fit is fine". A curve the test threw out
-    is the difference between a measurement and a decoration, and says so either way —
+def _numbers(win, *names: str) -> None:
+    """The fit label's Numbers row, set the way the Fit label group sets it."""
+    widget = win._appearance_widget
+    widget.apply_appearance(replace(widget.state(), fit_label=FitLabelState(fields=names)))
+
+
+@pytest.mark.parametrize("ks_ticked", [True, False])
+def test_leaving_KS_out_of_the_Numbers_row_cannot_hide_a_REJECTION(qapp, qtbot, ks_ticked):
+    """Unticked means "stop decorating a figure whose fit is fine". A curve the test threw
+    out is the difference between a measurement and a decoration, and says so either way —
     ON THE FIGURE, in the surfaces Save image… exports.
 
     THIS TEST USED TO ASSERT ON ``_full_fit_summary``, THE STRING BUILDER, and never on
     what was drawn — which is how it passed while the app's own shipped dwell template,
-    at its defaults (``show_gof`` True, ``fit_values_on_plot`` False), exported the
-    owner's -600 mV recording as title "τ = 20.41 ms (n = 275)" and legend "fit: τ =
-    20.41 ms (n = 275)" for a curve rejected at p = 1.6e-39, with no verdict anywhere
-    on the figure (S7-JRN2): the builder's output went only into the values box, which
-    a third switch keeps off by default. So this drives the real window over a narrow
-    peak, and reads the drawn TITLE, the drawn LEGEND entry and the values box, at all
-    four settings of the two switches."""
+    at its defaults, exported the owner's -600 mV recording as title "τ = 20.41 ms (n =
+    275)" and legend "fit: τ = 20.41 ms (n = 275)" for a curve rejected at p = 1.6e-39,
+    with no verdict anywhere on the figure (S7-JRN2): the builder's output went only into
+    the values box, which a switch kept off by default. So this drives the real window over
+    a narrow peak, and reads the drawn TITLE, the drawn LEGEND entry and the fit label, with
+    the KS statistic in the Numbers row and without it."""
     win = PlotsWindow(Session())
     qtbot.addWidget(win)
     win.set_data([PlotSource(key="doc0:0", label="apo −600 mV", df=_narrow_peak_events(),
@@ -344,7 +348,7 @@ def test_turning_the_KS_verdict_off_cannot_hide_a_REJECTION(qapp, qtbot, show_go
     win.set_plot_type("Histogram")
     win.set_histogram_column("dwell_s")
     win.set_time_unit("ms")
-    win._style = replace(win._style, show_gof=show_gof, fit_values_on_plot=values_box)
+    _numbers(win, "equation", "n", "bic", *(("ks",) if ks_ticked else ()))
     win.set_fit("exponential")
     win._redraw()
 
@@ -357,17 +361,14 @@ def test_turning_the_KS_verdict_off_cannot_hide_a_REJECTION(qapp, qtbot, show_go
     assert "KS REJECTED" not in _drawn_title(win)
     fit_rows = [t for t in _drawn_legend(win) if t.startswith("fit (")]
     assert fit_rows and "KS REJECTED" not in fit_rows[0]
-    # The values box's numbers are the label's extra fields now.
-    assert ("KS =" in label) is (values_box and show_gof), label
+    assert ("KS =" in label) is ks_ticked, label
     assert "DOES NOT DESCRIBE THESE DATA" in win.details_text()
 
 
 def test_a_fit_the_test_accepts_carries_no_verdict_in_the_title_or_the_legend(win):
     """The other direction: the tag is a REFUSAL, not a decoration, so a curve that passes
     puts nothing extra on the title or the legend, and the KS number reaches the figure
-    only through the values box when that box is asked for -- which is all ``show_gof``
-    governs."""
-    win._style = replace(win._style, show_gof=True, fit_values_on_plot=False)
+    only through the fit label's Numbers row."""
     win.set_fit("exponential")
     win._redraw()
     gof = win._last_fit.meta.get("gof")
@@ -376,47 +377,40 @@ def test_a_fit_the_test_accepts_carries_no_verdict_in_the_title_or_the_legend(wi
     assert not any("REJECTED" in t for t in _drawn_legend(win))
     assert "KS =" not in _drawn_fit_label(win)
 
-    win._style = replace(win._style, fit_values_on_plot=True)
-    win._redraw()
+    _numbers(win, "equation", "r2", "n", "bic", "ks")
     assert "KS =" in _drawn_fit_label(win)
     assert "consistent with these data" not in _drawn_fit_label(win)
-    win._style = replace(win._style, show_gof=False)
-    win._redraw()
+    _numbers(win, "equation", "r2", "n", "bic")
     assert "KS" not in _drawn_fit_label(win), "off means: stop decorating a fine fit"
 
 
-def test_the_string_builder_still_carries_the_rejection_whatever_show_gof_says(win):
-    """The old assertion, kept as the builder's own contract (the values box takes it)."""
+def test_the_string_builder_carries_the_ks_number_and_never_the_verdict(win):
+    """The builder's own contract: the numerical statistic is a number, and the verdict
+    (rejected or not) stays in Details."""
     fit = type("F", (), {"params": {"tau_1": 3e-4}, "n": 500, "bic": 1.0,
                          "unit_of": lambda self, k: "s"})()
-    win._style = replace(win._style, show_gof=False)
 
     passed = {"ks": 0.02, "describes_data": True}
     rejected = {"ks": 0.31, "describes_data": False}
-    assert "KS" not in win._full_fit_summary(fit, "dwell_s", passed)
-    assert "KS" not in win._full_fit_summary(fit, "dwell_s", rejected)
-
-    win._style = replace(win._style, show_gof=True)
     assert "KS = 0.020" in win._full_fit_summary(fit, "dwell_s", passed)
+    assert "KS = 0.310" in win._full_fit_summary(fit, "dwell_s", rejected)
+    assert "REJECT" not in win._full_fit_summary(fit, "dwell_s", rejected)
+    assert "KS" not in win._full_fit_summary(fit, "dwell_s", None)
 
 
-def test_the_R2_switch_keeps_every_sentence_that_says_the_R2_is_not_evidence(win):
+def test_the_Numbers_row_keeps_every_sentence_that_says_the_R2_is_not_evidence(win):
     """An R² through two points is exact by construction, and an R² over a flat response
     is undefined. Both are refusals, not statistics, so neither is optional."""
     win.set_plot_type("Scatter")
     win.set_scatter_columns("dwell_s", "depth_pA")
     win.set_scatter_fit("linear")
-    win._style = replace(win._style, show_r2=False)
     win._redraw()
-    with_off = win.details_text()
+    assert "R² =" in win.details_text() and "R² =" in _drawn_fit_label(win)
 
-    win._style = replace(win._style, show_r2=True)
-    win._redraw()
-    with_on = win.details_text()
-
-    assert "R²" in with_on
-    assert "R² =" not in with_off, "the plain number is what the switch turns off"
-    assert "y = " in with_off, "the equation still stands on the figure"
+    _numbers(win, "equation", "n")
+    assert "R²" not in _drawn_fit_label(win), "the plain number is what the row leaves out"
+    assert "y = " in _drawn_fit_label(win), "the equation still stands on the figure"
+    assert "R² =" in win.details_text(), "Details keeps the complete assessment"
 
 
 def test_the_residual_strip_appears_only_when_asked_and_carries_its_chi_square(win):

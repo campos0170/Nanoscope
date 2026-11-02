@@ -17,7 +17,7 @@ import pandas as pd
 
 from nanoscope.analysis.distribution_summary import summarize_distribution
 from nanoscope.core.source_style import compact_source_labels, validate_source_appearance
-from nanoscope.plot.style import OKABE_ITO, nanoscope_style
+from nanoscope.plot.style import OKABE_ITO, font_family_list, nanoscope_style
 
 SCHEMA_VERSION = 1
 MAX_SOURCES = 8
@@ -636,8 +636,11 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
                  # Keep short dwell-time ticks legible in narrow comparison
                  # panels while displaying the scale explicitly in axis units.
                  "axes.formatter.limits": (-3, 4)}
-    if state.get("font_family"):
-        overrides["font.family"] = state["font_family"]
+    # The chosen family's stack -- Arial's when none is chosen -- spelled out in every Text. The
+    # canvas item draws this figure later and outside this style, where a bare name (or the
+    # style's "sans-serif") would be matplotlib's own DejaVu Sans, or a warning for a family
+    # that is not installed.
+    overrides["font.family"] = font_family_list(state.get("font_family"))
     with nanoscope_style(**overrides):
         figure = Figure(figsize=(layout["width"], layout["height"]), dpi=100, layout="constrained")
         axes = figure.subplots(layout["rows"], layout["columns"], squeeze=False)

@@ -75,6 +75,18 @@ report, the session and both surfaces -- does the wiring, exactly as it does for
 every other cross-surface move in the app. What travels is an ``event_id ->
 subpopulation id`` map and the run's warnings; neither surface learns what a report
 is, and neither writes the assignment onto the events frame.
+
+THE TYPED WORDS AND THE EMBEDDING (``gui.quantity_reset``)
+==========================================================
+The two figures share one title and one pair of axis labels. A different embedding is a
+different quantity on the scatter's axes, so ``_appearance_after_view_change`` puts the typed
+words back to automatic (one Undo step) and leaves the sentence on the standing line under the
+report until the next report or the next change of embedding, and until a restore installs its
+saved appearance (a restore moves the embedding through the public setter, which resets the
+live page for a moment; the saved words then replace it and the sentence is dropped). The
+colouring is how the same points are drawn and keeps them. A new report and Undo do not reset,
+and a restore ends with the words it saved. The embedding is also what both axes of the scatter
+show, so a range or major tick pinned on either goes with the words; the waveforms' pins stay.
 """
 
 from __future__ import annotations
@@ -142,6 +154,8 @@ _SPLIT = (620, 800)
 #: the scatter's embedding units are no waveform time. A bare pin, saved before pins were
 #: kept per figure, is the scatter's: the report's first figure.
 PIN_EMBEDDING, PIN_WAVEFORMS = "embedding", "waveforms"
+#: What another embedding moves: both axes of the scatter, and none of the waveforms'.
+_EMBEDDING_AXES = ((PIN_EMBEDDING, "bottom"), (PIN_EMBEDDING, "left"))
 
 #: What a top-level window costs BEYOND the client area Qt sizes here, and how much
 #: screen to leave around it. ``QWidget.resize`` and ``QWidget.move`` address the
@@ -1047,6 +1061,12 @@ class SubpopReportWindow(QtWidgets.QWidget):
                                   (avail.height() - size.height()) // 2))
         self._report = None
         self._appearance = PlotAppearance()
+        #: The embedding on screen ("" before a report), for the reset rule (quantity_reset):
+        #: the typed words belong to it, so a change is measured against THIS.
+        self._embedding_shown = ""
+        #: The status sentence a quantity change leaves ("Title reset: the plot now shows
+        #: the UMAP embedding."), kept on the standing line until the next report.
+        self._words_note_text = ""
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1067,9 +1087,10 @@ class SubpopReportWindow(QtWidgets.QWidget):
         # the keyboard whatever the Section shows (FIG-4); a page behind another Explorer
         # tab is hidden, so it does not answer.
         self._appearance_widget = PlotAppearanceWidget(
-            self._appearance, include_colors=False, compact=True, multi_view_labels=True,
+            self._appearance, include_colors=False, compact=True, multi_view_labels="both figures",
             shortcut_parent=self)
         self._appearance_widget.changed.connect(self._appearance_from_user)
+        self._workflow.adopt_reset_figure(self._appearance_widget)
         appearance_layout.addWidget(self._appearance_widget)
         categorical_note = QtWidgets.QLabel(
             "Class colours stay linked to the report, event gallery and trace. Global recolouring "
@@ -1313,6 +1334,8 @@ class SubpopReportWindow(QtWidgets.QWidget):
             self._text.moveCursor(QtGui.QTextCursor.MoveOperation.Start)
         self._embed_view.set_report(report)
         self._wave_view.set_report(report)
+        self._embedding_shown = self._embed_view.embedding()    # the combos were rebuilt, signals blocked
+        self._words_note_text = ""
         self._caveats.setPlainText(self._caveat_text(report))
         self._caveat_box.setTitle(self._caveat_title(report))
         self._refresh_figure_details()
@@ -1335,8 +1358,17 @@ class SubpopReportWindow(QtWidgets.QWidget):
         self.workspaceChanged.emit()
 
     def _appearance_after_view_change(self, *_args) -> None:
+        shown, self._embedding_shown = self._embedding_shown, self._embed_view.embedding()
         self._refresh_figure_details()
         self._apply_appearance()
+        if shown and shown != self._embedding_shown:
+            # A different embedding is a different quantity on the scatter's axes: the
+            # typed words and the ranges pinned on them go back to automatic, and the
+            # standing line says what went.
+            self._words_note_text = self._appearance_widget.reset_typed_words(
+                f"the {self._embedding_shown} embedding", axes=_EMBEDDING_AXES,
+                primary=PIN_EMBEDDING)
+            self._render_live_note()
         self.workspaceChanged.emit()
 
     def _ensure_figure_minima(self, *_args) -> None:
@@ -1389,6 +1421,9 @@ class SubpopReportWindow(QtWidgets.QWidget):
         each one would erase the history it is recorded in."""
         self._install_appearance(state)
         self._appearance_widget.clear_history()
+        if self._words_note_text:       # the restore may have moved the embedding on the way
+            self._words_note_text = ""
+            self._render_live_note()
 
     def _install_appearance(self, state) -> None:
         parsed = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
@@ -1591,6 +1626,8 @@ class SubpopReportWindow(QtWidgets.QWidget):
             lines.append(self._assignment_reason)
         if self._curation_note_text:
             lines.append(self._curation_note_text)
+        if self._words_note_text:
+            lines.append(self._words_note_text)
         self._live_note_text = "\n".join(lines)
         self._fit_live_note()
 

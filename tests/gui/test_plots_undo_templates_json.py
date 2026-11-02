@@ -146,13 +146,11 @@ def _busy_config() -> PlotConfig:
             show_legend=False, font_family="Helvetica", font_size_pt=13,
             data_color="#ff0000", fit_color="#00ff00", point_size=9, line_width=3,
             background="light", export_w=1600, export_h=1200,
-            fit_values_on_plot=True,
             label_overrides=FrozenMap({"doc0:0": "pore A"}),
             legend_pos=(0.31, 0.42), legend_font_size_pt=8, legend_counts=False,
             legend_include=FrozenMap({"series:doc0:0": False, "cluster:1": False}),
             show_grid=False, title_font_size_pt=16, axis_label_font_size_pt=14,
-            tick_font_size_pt=9, title_bold=True, title_italic=True,
-            show_r2=False, show_gof=False, show_ci_band=True, show_provenance=True,
+            tick_font_size_pt=9, show_ci_band=True, show_provenance=True,
             show_residuals=True, heatmap_colormap="magma",
             # plotux G3: per-element styles and the fit label ride the config too.
             text_styles=FrozenMap({"axis.left.ticks": {"size_pt": 11.0, "bold": True}}),
@@ -675,12 +673,12 @@ def test_an_older_missing_key_reads_as_that_fields_default():
     """MIN_READ_VERSION is only honest if the reader is additive: it walks the DATACLASS's
     fields, not the payload's keys."""
     payload = plot_config_to_json(_busy_config())
-    del payload["style"]["title_italic"]
+    del payload["style"]["show_residuals"]
     del payload["fit"]["range_unit"]
     payload["style"]["a_key_from_the_future"] = 12
 
     got = plot_config_from_json(payload)
-    assert got.style.title_italic is StyleSettings().title_italic
+    assert got.style.show_residuals is StyleSettings().show_residuals
     assert got.fit.range_unit == FitConfig().range_unit
     assert got.style.title == "figure 3b", "everything else still read"
 

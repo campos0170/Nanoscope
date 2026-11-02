@@ -164,14 +164,18 @@ from .figure_text import (GATE, HIDDEN_TEXT, AxisState, TextStyle, TextTarget, c
                           valid_element_key)
 from .fit_label import (FIT_FIELDS, FitLabelItem, FitLabelState, FitReadout, automatic_template,
                         format_fit_label)
+from .font_picker import (DEFAULT_ROW_LABEL, FontPicker, figure_family, figure_qfont,
+                          html_font_family)
 from .key_sequences import redo_sequences, undo_sequences
-from .plot_appearance import PlotAppearance, PlotAppearanceWidget, preset_store
+from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_legend_family,
+                              preset_store)
 from .plot_interaction import (image_value, install_plot_interaction, keep_plot_history,
                                reset_plot_history, view_button, window_readout)
 from .plot_lasso import PlotLasso, RowIdentityIndex, toggled_rows, unique_rows
 from .plot_export import (
     apply_png_resolution, apply_svg_physical_size, choose_live_plot_export,
 )
+from .quantity_reset import announce, reset_sentence, words_cleared
 from .worker_thread import (
     DEFAULT_JOIN_MS,
     JOB_NONE,
@@ -312,6 +316,10 @@ KDE = "KDE (density)"
 #: because the guide's own rule is that a count heatmap is not a KDE density.
 HEATMAP = "Event-count heatmap"
 _PLOT_TYPES = (HISTOGRAM, SCATTER, KDE, HEATMAP, PCA)
+#: What the status line calls a plot (quantity_reset), with its two columns filled in.
+_SHOWS_PLOT = {HISTOGRAM: "the histogram of {x}", SCATTER: "the scatter of {y} against {x}",
+               KDE: "the density of {y} against {x}",
+               HEATMAP: "the event-count heatmap of {y} against {x}", PCA: "the PCA scores"}
 
 #: The heatmap's colour maps: Event waveforms' list, all perceptually uniform and
 #: sequential, so a count reads as a brightness and no hue boundary invents a level.
@@ -1197,10 +1205,10 @@ class StyleSettings:
     x_label: str = ""               # "" => the automatic axis label (unit scaling still applies)
     y_label: str = ""               # "" => the automatic axis label
     show_legend: bool = True        # the legend is an index, and an index is optional
-    font_family: str = ""           # "" => the application default family; the Font row's
-                                    # first entry names it (see _FONT_DEFAULT_LABEL). NOT a
-                                    # missing value -- it round-trips through JSON, undo
-                                    # and templates as itself.
+    font_family: str = ""           # "" => the figure default, Arial (figure_fonts); the Font
+                                    # row's first entry names it (see _FONT_DEFAULT_LABEL).
+                                    # NOT a missing value -- it round-trips through JSON,
+                                    # undo and templates as itself.
     font_size_pt: int = 10
     data_color: str = _DATA_HEX
     fit_color: str = _FIT_HEX
@@ -1209,10 +1217,6 @@ class StyleSettings:
     background: str = "dark"         # "dark" | "light"
     export_w: int = 0               # 0 => native width
     export_h: int = 0               # 0 => native height
-    #: Owner note #14: the fitted parameters as a text box ON the figure, so a saved
-    #: image carries its own numbers (Details is not exported). Off by default — a
-    #: box appearing on every histogram unasked is clutter, not presentation.
-    fit_values_on_plot: bool = False
     #: Owner note #15: "the legend is not editable". A source's legend text, per
     #: source KEY (never per label — the label is exactly what is being replaced).
     #: Absent means "use the source's own label", so an empty dict is today's look.
@@ -1270,15 +1274,6 @@ class StyleSettings:
     title_font_size_pt: int = 0
     axis_label_font_size_pt: int = 0
     tick_font_size_pt: int = 0
-    #: Title weight/slant. Cheap because the title is the one text item this window
-    #: already sets a real ``QFont`` on (the CSS span carries size and colour only).
-    title_bold: bool = False
-    title_italic: bool = False
-    #: Appearance-only statistics switches. Details always retains the complete
-    #: fit-quality assessment. The optional KS value is numerical artwork only;
-    #: rejection warnings are kept outside the plot and in saved provenance.
-    show_r2: bool = True
-    show_gof: bool = True
     #: The bootstrap's confidence BAND around the fitted curve. Off: it is a second
     #: object on the figure and, unlike the parameters' intervals, it does not exist for
     #: every fit (see :func:`nanoscope.analysis.stats.ci_band` for the four ways a fit can
@@ -1286,15 +1281,15 @@ class StyleSettings:
     #: defaulted on.
     show_ci_band: bool = False
     #: E2 -- WHAT MADE THESE EVENTS, written on the figure: the detector, the ML model
-    #: where there is one, and the preprocessing chain that ran before it. Off by default
-    #: for the reason ``fit_values_on_plot`` is: it is an annotation, and one appearing on
-    #: every plot unasked is clutter. It is drawn as a plot item so ``Save image…`` keeps
-    #: it -- which is the whole point, since the PNG is what leaves the app and the
-    #: provenance is what a reader of it cannot otherwise recover.
+    #: where there is one, and the preprocessing chain that ran before it. Off by default:
+    #: it is an annotation, and one appearing on every plot unasked is clutter. It is
+    #: drawn as a plot item so ``Save image…`` keeps it -- which is the whole point, since
+    #: the PNG is what leaves the app and the provenance is what a reader of it cannot
+    #: otherwise recover.
     show_provenance: bool = False
     #: The residual strip under the histogram, and the reduced χ² that goes with it. Off
-    #: for the same reason the fit-values box is: a second axis appearing on every fitted
-    #: histogram unasked is clutter, not presentation.
+    #: for the same reason: a second axis appearing on every fitted histogram unasked is
+    #: clutter, not presentation.
     show_residuals: bool = False
     #: The Event-count heatmap's colour map (one of :data:`_HEATMAP_COLORMAPS`).
     #: APPEARANCE, not analysis: it recolours counts already binned, so a change restyles
@@ -1314,9 +1309,10 @@ class StyleSettings:
     #: Empty is today's look: every element follows the figure-wide fields above.
     text_styles: FrozenMap = _NO_ENTRIES
     #: THE FIT LABEL (``fit_label.FitLabelState`` as a frozen map). A fit's numbers are
-    #: drawn there and never in the title. Empty means "never set": the label is shown
-    #: with the fields the three older switches ask for (:meth:`fit_label_state`), so a
-    #: configuration saved before the label existed opens with its numbers on the figure.
+    #: drawn there and never in the title, and its Numbers row (``fields``) chooses which
+    #: (the Residual strip box adds its χ²/dof after the equation: ``_shown_readout``).
+    #: Empty means "never set": the label is shown with its default fields
+    #: (:meth:`fit_label_state`).
     fit_label: FrozenMap = _NO_ENTRIES
 
     def __post_init__(self) -> None:
@@ -1372,18 +1368,14 @@ class StyleSettings:
         return _dc_replace(self, text_styles=styles, **changes)
 
     def fit_label_state(self) -> FitLabelState:
-        """The fit label as drawn: the saved one, else the one the older switches imply.
+        """The fit label as drawn: the saved one, else the default (equation, R², n).
 
-        Before the label, a fit's headline was in the title (equation, R², n) and the
-        "Fit values on plot" box added the rest (BIC, the KS statistic); with no saved
-        label those are its fields, and it is shown either way so no number that was on
-        a figure leaves it."""
+        The switches older builds kept beside it (Fit values on plot, R² on figure, KS
+        statistic on figure) are folded into its fields when a saved configuration is
+        read (:func:`_fold_legacy_style`); nothing here reads them."""
         if self.fit_label:
             return FitLabelState.from_mapping(_thawed(self.fit_label))
-        fields = ["equation", "r2", "n"]
-        if self.fit_values_on_plot:
-            fields += ["bic", "ks"]
-        return FitLabelState(fields=tuple(fields))
+        return FitLabelState()
 
     def with_fit_label(self, state: FitLabelState) -> "StyleSettings":
         return _dc_replace(self, fit_label=_deep_frozen(state.to_dict()))
@@ -1454,12 +1446,18 @@ class AnalysisIdentity:
     ``fit_column`` is carried separately from ``x_column`` because the Fit-range boxes
     live on the histogram page and bound the histogram's column whatever plot type is on
     screen -- see :meth:`PlotsWindow._fit_range`, their only reader.
+
+    ``fit_model`` is the APPLIED fit of the plot on screen ("" with none): the fit label's
+    wording describes it, so a move of the model clears the wording
+    (:meth:`PlotConfig.rebased`). A mixture's component count is part of it unless the
+    count is automatic, which the draw itself writes back.
     """
     plot_type: str = HISTOGRAM
     x_column: str = ""
     y_column: str = ""
     fit_column: str = ""
     time_unit: str = _DEFAULT_TIME_UNIT
+    fit_model: str = ""
 
     @property
     def axis_factors(self) -> tuple[float, float]:
@@ -1471,6 +1469,14 @@ class AnalysisIdentity:
     def fit_factor(self) -> float:
         """The factor the Fit-range boxes' text is written in."""
         return _display_factor(self.fit_column, self.time_unit)
+
+    def wording_stale_from(self, was: "AnalysisIdentity") -> bool:
+        """Whether the fit label's wording, typed for ``was``, no longer describes this
+        analysis: the plot type or a column moved, or the applied fit went from one model to
+        another or to none. A first fit (none -> a model) keeps wording typed ahead of it."""
+        return ((self.plot_type, self.x_column, self.y_column)
+                != (was.plot_type, was.x_column, was.y_column)
+                or bool(was.fit_model and self.fit_model != was.fit_model))
 
 
 def _unit_factor(time_unit: str) -> float:
@@ -1707,6 +1713,13 @@ class AxesConfig:
     manual_x: tuple[float, float] | None = None
     manual_y: tuple[float, float] | None = None
 
+    def ranges(self) -> tuple[str, ...]:
+        """The axes holding a typed limit or a pin, as the status line names them
+        (``quantity_reset``): ``("X range", "Y range")``, or the part of it that is set."""
+        return tuple(f"{name} range" for name, lo, hi, pin in (
+            ("X", self.x_min, self.x_max, self.manual_x),
+            ("Y", self.y_min, self.y_max, self.manual_y)) if lo or hi or pin)
+
 
 @dataclass(frozen=True)
 class PlotConfig:
@@ -1756,9 +1769,18 @@ class PlotConfig:
             x, y = self.heatmap.x, self.heatmap.y
         else:
             x, y = "", ""
+        fit = self.fit
+        if self.plot_type == HISTOGRAM and fit.applied != _FIT_NONE:
+            model = fit.applied
+            if fit.applied in _MULTI_COMPONENT_FITS:
+                model += ":auto" if fit.applied_k_auto else f":{fit.applied_k}"
+        elif self.plot_type == SCATTER and fit.applied_scatter != _SFIT_NONE:
+            model = fit.applied_scatter
+        else:
+            model = ""
         return AnalysisIdentity(plot_type=self.plot_type, x_column=x, y_column=y,
                                 fit_column=self.histogram.column,
-                                time_unit=self.axes.time_unit)
+                                time_unit=self.axes.time_unit, fit_model=model)
 
     @property
     def log_state(self) -> tuple[bool, bool]:
@@ -1842,6 +1864,11 @@ class PlotConfig:
            another pore. That is also why a plain Refresh no longer destroys the pinned
            range -- re-pulling the same columns is not an identity change at all, and the
            pin and the title now live or die together instead of by two ad-hoc rules.
+        5. **The analysis or the applied fit moved** -- so the fit label's WORDING goes
+           back to automatic with it (``style.fit_label``'s template): "Single
+           exponential: {equation}" is wrong over a linear fit or a gamma. Its numbers,
+           place, size and colour are the look and stay, as do the text styles. A first
+           fit (none -> a model) keeps wording typed ahead of it.
 
         A plot-type change counts as a move on BOTH axes even when a column name survives
         it (Histogram dwell_s -> Scatter dwell_s vs depth_pA): the y axis stopped being a
@@ -1877,9 +1904,19 @@ class PlotConfig:
             fit = _dc_replace(fit, range_lo="", range_hi="", range_unit=now.time_unit)
 
         # (4) THE ANALYSIS MOVED: the caption goes with it (owner note Q6).
-        if (now.plot_type, now.x_column, now.y_column) != (
-                was.plot_type, was.x_column, was.y_column):
+        analysis_moved = (now.plot_type, now.x_column, now.y_column) != (
+            was.plot_type, was.x_column, was.y_column)
+        if analysis_moved:
             style = _dc_replace(style, title="", x_label="", y_label="")
+
+        # (5) THE FIT LABEL'S WORDS describe one fit of one analysis: they go back to
+        # automatic when either moves (probe: "Single exponential: {equation}" over a
+        # linear fit). A first fit (none -> a model) keeps words typed ahead of it. The
+        # label's numbers, place, size and colour are the look, and stay.
+        if now.wording_stale_from(was):
+            label = style.fit_label_state()
+            if label.template:
+                style = style.with_fit_label(_dc_replace(label, template=""))
 
         return _dc_replace(self, axes=axes, fit=fit, style=style)
 
@@ -2168,7 +2205,7 @@ def _encode_dc(obj) -> dict:
     """One flat frozen dataclass -> a JSON-safe dict, driven by its own FIELDS.
 
     Field-driven rather than hand-listed, because a hand-listed encoder is how half a
-    config comes to be persisted: add ``title_italic`` to :class:`StyleSettings` and a
+    config comes to be persisted: add ``show_provenance`` to :class:`StyleSettings` and a
     listed encoder keeps writing files that silently lack it, while this one carries it
     the moment it exists. Only three shapes need translating -- a :class:`FrozenMap`
     becomes a plain dict, a tuple becomes a list (JSON has no tuple), and everything else
@@ -2238,6 +2275,58 @@ def _decode_dc(cls, payload: dict):
     return _dc_replace(blank, **kw) if kw else blank
 
 
+#: The Style keys older builds wrote that this one has no field for (the duplicate fit-number
+#: switches and Title weight). A saved configuration that carries one still opens and looks
+#: the same: :func:`_fold_legacy_style` moves it to its new home, and nothing writes the key
+#: again. The project format is not bumped for it -- an older build opening a newer file
+#: reads these keys as their defaults, and the folded look is in keys it already knows.
+_LEGACY_STYLE_KEYS = ("fit_values_on_plot", "show_r2", "show_gof", "title_bold", "title_italic")
+_LEGACY_STYLE_PATHS = frozenset(f"style.{name}" for name in _LEGACY_STYLE_KEYS)
+
+
+def _fold_legacy_style(style: StyleSettings, saved: Mapping) -> StyleSettings:
+    """``style`` with the switches an older build kept in ``saved`` (its Style mapping,
+    JSON or a project's tagged tree) moved to where they live now.
+
+    * THE FIT LABEL'S NUMBERS. The label showed its fields, less R² when R² on figure was
+      off and less the KS statistic when KS statistic on figure was off. Fit values on plot
+      added BIC and KS only to a label nobody had saved: a saved one (a drag, any Fit label
+      edit) showed its own fields whatever that box said, so it is not asked again here.
+      The user's own wording is taken the same way: a ``{r2}`` or ``{ks}`` in it printed a
+      dash while its switch was off, so it becomes that dash (no field is left to say it).
+    * TITLE WEIGHT is the title's own text style: bold and italic, each wherever the title's
+      style has not set that one itself.
+
+    Read the way the old decoder read them (``bool(value)``), so a file means what it did.
+    """
+    numbers = bool(saved.get("fit_values_on_plot", False))
+    no_r2 = not bool(saved.get("show_r2", True))
+    no_ks = not bool(saved.get("show_gof", True))
+    if numbers or no_r2 or no_ks:
+        kept = bool(saved.get("fit_label"))
+        label = style.fit_label_state() if kept else FitLabelState()
+        fields = set(label.fields)
+        template = label.template
+        if numbers and not kept:
+            fields |= {"bic", "ks"}
+        if no_r2:
+            fields.discard("r2")
+            template = template.replace("{r2}", "—")
+        if no_ks:
+            fields.discard("ks")
+            template = template.replace("{ks}", "—")
+        fields = tuple(name for name in FIT_FIELDS if name in fields)
+        if (fields, template) != (label.fields, label.template):
+            style = style.with_fit_label(_dc_replace(label, fields=fields, template=template))
+    for key, attr in (("title_bold", "bold"), ("title_italic", "italic")):
+        if bool(saved.get(key, False)):
+            title = TextStyle.from_mapping(_thawed(style.text_styles.get("title", {})))
+            if getattr(title, attr) is None:
+                style = _dc_replace(style, text_styles=style.text_styles.set(
+                    "title", _dc_replace(title, **{attr: True}).to_dict()))
+    return style
+
+
 def plot_config_to_json(cfg: PlotConfig) -> dict:
     """A :class:`PlotConfig` as the JSON-safe dict a sidecar file holds."""
     from .. import __version__ as _app_version   # local: the package imports this module
@@ -2297,7 +2386,12 @@ def plot_config_from_json(payload) -> PlotConfig:
         detail = f"missing key {exc}" if isinstance(exc, KeyError) else str(exc)
         raise PlotConfigError(
             f"This plot configuration is malformed ({detail}).") from exc
-    # THE ONE MIGRATION THIS FORMAT HAS (S6-03's rename) HAS ALREADY RUN BY HERE, and
+    # THE SECOND MIGRATION RUNS HERE, because it has to: the switches it folds have no field
+    # left for a ``__post_init__`` to canonicalise, and the decoding above has dropped them.
+    saved_style = payload.get("style")
+    if isinstance(saved_style, Mapping) and any(key in saved_style for key in _LEGACY_STYLE_KEYS):
+        cfg = _dc_replace(cfg, style=_fold_legacy_style(cfg.style, saved_style))
+    # THE ONE MIGRATION THIS FORMAT HAD UNTIL THEN (S6-03's rename) HAS ALREADY RUN BY HERE, and
     # deliberately not in this function. `_decode_dc` above builds each section by calling
     # its dataclass, so a v1 file's "density (area = 1)" is canonicalised by
     # `HistogramConfig.__post_init__` before this line is reached -- which is what lets a
@@ -2368,7 +2462,10 @@ def _config_round_trip_losses(payload: Mapping, asked: PlotConfig,
         # THE FORMAT HAS NOWHERE TO PUT IT. `_decode_dc` walks this build's FIELDS and
         # ignores a key it has none for -- additively and on purpose, so a newer build's
         # file still opens -- which is exactly why the drop has to be said out loud here.
-        if key not in pivot:
+        # An older build's switch that `_fold_legacy_style` has moved was taken, not lost; and
+        # so was the empty label or element-style map it moved into (that key is now many).
+        moved_into = value == {} and any(path.startswith(key + ".") for path in pivot)
+        if key not in pivot and key not in _LEGACY_STYLE_PATHS and not moved_into:
             losses.append(f"{key} “{_loss_value_text(value, None)}”")
     for key, want in pivot.items():
         # THE WINDOW WOULD NOT, OR COULD NOT, TAKE IT. A column these events have not
@@ -2675,7 +2772,7 @@ class _ConfigHistory:
 #: The symbol a fitted parameter is WRITTEN as, by the name ``stats`` stores it under.
 #: ``FitResult.params`` keys are ASCII (``tau_1``, ``mu_2``, ``sigma_1``, ``w_2``)
 #: because they travel through JSON into a saved project; the plot title has always
-#: rendered the headline one as Greek, and the on-plot values box has to use the SAME
+#: rendered the headline one as Greek, and the fit label has to use the SAME
 #: alphabet or one figure names a quantity two ways in two corners of itself.
 _PARAM_SYMBOLS: dict[str, str] = {
     "tau": "τ", "mu": "μ", "sigma": "σ", "lambda": "λ", "theta": "θ",
@@ -2709,8 +2806,8 @@ class _FitSummary(str):
 
     ``rejected`` and ``plain`` keep the diagnostic verdict separate from artwork.
     The string includes the rejection tag for Details; the title and legend use
-    ``plain``. ``full`` contains fitted parameters and optional numerical statistics
-    for the on-plot values box, without warning prose.
+    ``plain``. ``full`` contains fitted parameters and numerical statistics (the old
+    on-plot values box's text), without warning prose.
     """
 
     full: str = ""
@@ -2842,37 +2939,10 @@ def _narrow_combo(combo: QtWidgets.QComboBox, chars: int = _COMBO_CHARS) -> None
     combo.setMinimumContentsLength(chars)
 
 
-#: What the Font row's first entry is called, and the value it stands for.
-#:
-#: ``StyleSettings.font_family`` defaults to ``""`` = "whatever font this computer hands
-#: the application", and that is a value NO ``QFont`` can spell: ``QFont()`` reports
-#: ``.AppleSystemUIFont`` on macOS -- a PRIVATE family ``QFontComboBox`` filters out of
-#: its own list -- so ``setCurrentFont(QFont())`` fell through to the combo's first entry
-#: and the Style panel told the user their figure was in "Academy Engraved LET" while it
-#: was drawn in the system UI font (sweep-6 S6-01; measured under cocoa AND offscreen).
-#: The blank is not a missing value to be papered over -- it is a CHOICE the user can
-#: make and unmake -- so it gets a row of its own that says so in words.
-_FONT_DEFAULT_LABEL = "Application default"
-
-
-def _font_families() -> list[str]:
-    """Exactly the families ``QFontComboBox`` lists, in the same order.
-
-    MEASURED, not guessed: on this machine ``QFontDatabase.families()`` returns 201 names
-    and ``QFontComboBox`` shows 181 of them; the twenty it drops are the ones a leading
-    ``.`` or ``isPrivateFamily`` marks as system-internal, and this expression reproduces
-    its list element-for-element (set difference empty, order identical). Spelled out here
-    because the Font row can no longer BE a ``QFontComboBox`` (see
-    :data:`_FONT_DEFAULT_LABEL`), and the one thing a replacement must not do is quietly
-    offer a different set of fonts than this app always has.
-
-    (Re-measured under offscreen too, where the two lists agree at 183 rather than 181 --
-    constructing a ``QFontComboBox`` there populates two alias families into the database
-    as a side effect, so compare the two AFTER building one or the counts differ by those
-    two aliases alone. The expression still reproduces whatever the combo would show.)
-    """
-    return [f for f in QtGui.QFontDatabase.families()
-            if not f.startswith(".") and not QtGui.QFontDatabase.isPrivateFamily(f)]
+#: What the Font row's first entry is called: the figure default, Arial. It stores ``""`` --
+#: ``StyleSettings.font_family``'s "no family chosen" -- so a saved window keeps saying
+#: "default" and a figure draws in ``figure_fonts.DEFAULT_FAMILY`` until one is chosen.
+_FONT_DEFAULT_LABEL = DEFAULT_ROW_LABEL
 
 
 def _swatch_text_color(hex_color: str) -> str:
@@ -3322,6 +3392,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         #: way to know what the window used to be showing. Moved only by
         #: :meth:`_set_config` and :meth:`_rebase`.
         self._identity = AnalysisIdentity()
+        #: The sentence the last reset left on the status bar ("" for none): see ``_rebase``.
+        self._reset_said = ""
         #: The Time unit the Fit-range boxes' text is written in -- stored WITH the
         #: bounds so :meth:`_fit_range` converts them by what they were typed under
         #: rather than by whatever the combo says now. See :class:`FitConfig`.
@@ -3350,7 +3422,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         #: handle because `_clear_plot` is the only thing that removes them and a partial
         #: clear is how a band from the previous fit survives onto the next picture.
         self._band_items: list = []
-        #: E2's caption. Parented to the ViewBox like the fit-values box, so `clear()`
+        #: E2's caption. Parented to the ViewBox like the fit label, so `clear()`
         #: cannot reach it and `_clear_plot` detaches it by hand.
         self._prov_item = None
         self._limit_region: pg.LinearRegionItem | None = None   # below-detection-limit shading
@@ -3544,9 +3616,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # object every draw path, the export and eleven tests already hold. The cost of
         # not doing it is stated where the user meets it (the checkbox tooltip): the
         # strip is on screen, not in the PNG -- so the number it produces, the reduced
-        # χ², is routed into Details and into the on-plot values box, which the PNG does
-        # keep. The picture is the exploratory half; the statistic is the reportable half,
-        # and the reportable half exports.
+        # χ², is routed into Details and into the fit label (joined to its equation), which the
+        # PNG does keep. The picture is the exploratory half; the statistic is the reportable
+        # half, and the reportable half exports.
         #
         # `setXLink` rather than a copied range: pan and zoom on the histogram must move
         # the strip with it, or a bar and its residual stop lining up the moment anyone
@@ -3976,6 +4048,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
         export_button.setMenu(export_menu)
         self._export_menu = export_menu
         self._export_menu_btn = export_button
+        # Reset figure: the Appearance section's own button, in reach from every Section.
+        reset_button = self._appearance_widget.take_reset_button()
+        reset_button.setFlat(True)          # as flat as the toolbar's other text
+        # The shared tip says "its look"; these rows of this window are not in the shared look.
+        reset_button.setToolTip(
+            reset_button.toolTip() + " Here it also keeps the Axis range boxes, Font size (body), "
+            "the legend's position, entries and (n = …) switch, source names, Confidence band, "
+            "Residual strip, Provenance caption and Heatmap colormap.")
+        bar.addWidget(reset_button)
         bar.addWidget(export_button)
 
         self._workflow_toolbar = bar
@@ -4781,78 +4862,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._legend_entries.itemChanged.connect(self._on_legend_entry_toggled)
         form.addRow("Legend entries", self._legend_entries)
 
-        # THE FONT ROW IS A PLAIN COMBO, NOT A QFontComboBox, AND THAT IS THE WHOLE OF THE
-        # S6-01 FIX. ``QFontComboBox`` can only ever show a family that EXISTS, and this
-        # style's default -- "" = "whatever font this computer hands the application" -- is
-        # not one: ``setCurrentFont(QFont())`` asks it to show ``.AppleSystemUIFont``, which
-        # it filters out as private, so it silently fell back to its first entry and the
-        # panel told the user their figure was in "Academy Engraved LET".
-        #
-        # THREE WAYS OUT WERE MEASURED AND TWO FAILED:
-        #   * show the RESOLVED family instead -- ``QFontInfo(QFont()).family()`` is ALSO
-        #     '.AppleSystemUIFont' here, under cocoa and offscreen both, so the combo falls
-        #     back to exactly the same wrong entry. It fixes nothing.
-        #   * put a sentinel row INTO the QFontComboBox -- ``setCurrentFont()`` calls Qt's
-        #     private ``_q_updateModel()``, which rebuilds the list from the font database
-        #     and destroys the row (measured: 182 rows -> 181), after which the next
-        #     ``setCurrentIndex(0)`` emitted ``currentFontChanged("Academy Engraved LET")``
-        #     -- it COMMITTED the lie. Its editable line edit is worse still:
-        #     ``setEditText(...)`` emits ``currentFontChanged`` with the fake string on the
-        #     spot, no focus-out needed.
-        #   * seeding a real family into the default was rejected on sight: it changes how
-        #     every existing figure is drawn, it needs a per-platform guess, and every
-        #     config already on disk still carries "" and would still lie.
-        #
-        # So the list is built here -- element-for-element what QFontComboBox shows (see
-        # ``_font_families``) with one honest row on top -- and EVERY ROW CARRIES ITS STYLE
-        # VALUE IN ``Qt.UserRole``. That is the invariant this buys: readers take
-        # ``itemData``, never ``currentText()``, so what the user sees IS what the style
-        # holds, and "" is finally a value the widget can spell.
-        #
-        # Not editable, unlike QFontComboBox: a typed family name is a string that resolves
-        # to something else without saying so, which is the defect being fixed wearing a
-        # different hat. Type-to-search on the closed combo still reaches a family in a
-        # keystroke.
-        self._font_combo = QtWidgets.QComboBox()
-        # A FRESH QListView because the popup's own private delegate ignores
-        # ``Qt.SizeHintRole`` -- measured, row heights ran 13-29 px with it, a jittery list
-        # where QFontComboBox's was a uniform 22. With a plain view the hint is honoured and
-        # every row is the same 22 px the old widget drew.
-        self._font_combo.setView(QtWidgets.QListView())
-        self._font_row_h = QtGui.QFontMetrics(self._font_combo.font()).height() + 6
-        self._font_rows: dict[str, str] = {}    # casefolded family -> the family as listed
-        self._font_off_list = False             # is row 1 a "named by the config, absent
-                                                # here" row? see `_select_font_family`
-        self._add_font_row(_FONT_DEFAULT_LABEL, "", QtGui.QFont())
-        for family in _font_families():
-            self._add_font_row(family, family, QtGui.QFont(family))
-            self._font_rows[family.casefold()] = family
-        # THE TOOLTIP IS COMPOSED WHEN IT IS SHOWN, NOT BAKED IN HERE. This line used to
-        # interpolate ``QFontInfo(QFont()).family()`` once, at construction, and so put
-        # ".AppleSystemUIFont" in front of the reader: a leading-dot internal name that
-        # means nothing to a person, that ``_font_families`` above deliberately filters OUT
-        # of this very list as system-internal, and that a later ``QApplication.setFont``
-        # would leave stale. What a reader needs is not the platform's private spelling but
-        # whether the default is a family they could ALSO pin by name, so the sentence is
-        # built by ``_font_row_tooltip`` and rebuilt in the instant before Qt shows it (see
-        # :meth:`eventFilter`). It is set here too so that anything reading ``toolTip()``
-        # without a hover -- a test, an accessibility client -- gets the same words.
-        self._font_combo.setToolTip(self._font_row_tooltip())
-        self._font_combo.installEventFilter(self)
-        # Selected BEFORE the handler is connected, so populating the list cannot count as
-        # the user choosing anything -- and explicitly, rather than by trusting that row 0
-        # happens to be current, because that is only true while the default is "".
-        # (No ``blockSignals`` wrapper: :meth:`_select_font_family` now blocks the combo
-        # for the whole of its own body, which is the only way that rule can be a
-        # guarantee rather than a convention three call sites have to remember.)
+        # THE FONT ROW IS THE SHARED ``FontPicker``: Arial (default), Helvetica, Times New Roman,
+        # Courier New and Other font…, where this row used to list every installed family.
+        # Its first row stores the blank this style has always meant by "no family chosen"
+        # (and draws in Arial), a family the list lacks gets one extra row carrying its exact
+        # name, and showing a style on it (``_select_font_family``) never commits anything:
+        # only a pick reaches ``_on_style_font_family``, through ``changed``.
+        self._font_combo = FontPicker()
         self._select_font_family(self._style.font_family)
-        # ``currentIndexChanged``, not ``activated``: every other control in this group
-        # (``_bg_combo``'s ``currentTextChanged``, the spins' ``valueChanged``) fires for
-        # code as well as for a person and leans on the sync discipline -- ``_set_config``'s
-        # ``_updating``, and for this one control the block ``_select_font_family`` takes
-        # for itself -- to stay quiet. One control with a rule of its own is how a setter
-        # ends up leaving the widget and the style disagreeing.
-        self._font_combo.currentIndexChanged.connect(self._on_style_font_family)
+        self._font_combo.changed.connect(self._on_style_font_family)
         form.addRow("Font", self._font_combo)
 
         self._font_size = QtWidgets.QSpinBox()
@@ -4877,18 +4895,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "Title size in pt. 0 follows the body size.")
         form.addRow("Title size", self._title_size)
         self._title_size.valueChanged.connect(self._on_style_title_size)
-
-        trow = QtWidgets.QHBoxLayout()
-        self._title_bold = QtWidgets.QCheckBox("Bold")
-        self._title_bold.setChecked(self._style.title_bold)
-        self._title_bold.toggled.connect(self._on_style_title_bold)
-        self._title_italic = QtWidgets.QCheckBox("Italic")
-        self._title_italic.setChecked(self._style.title_italic)
-        self._title_italic.toggled.connect(self._on_style_title_italic)
-        trow.addWidget(self._title_bold)
-        trow.addWidget(self._title_italic)
-        trow.addStretch(1)
-        form.addRow("Title weight", trow)
 
         self._axis_label_size = self._pt_override_spin(
             self._style.axis_label_font_size_pt,
@@ -4936,40 +4942,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._heatmap_cmap.currentTextChanged.connect(self._on_style_heatmap_colormap)
         form.addRow("Heatmap colormap", self._heatmap_cmap)
 
-        self._fit_values_check = QtWidgets.QCheckBox("Fit values on plot")
-        self._fit_values_check.setToolTip(
-            "Add the remaining fitted numbers (BIC, the numerical KS statistic) to the fit "
-            "label, so a saved image carries its own numbers. The same text always "
-            "appears in Details below.")
-        self._fit_values_check.setChecked(self._style.fit_values_on_plot)
-        self._fit_values_check.toggled.connect(self._on_style_fit_values)
-        form.addRow("", self._fit_values_check)
-
-        # THE FIT STATISTICS, AS FOUR SWITCHES. The first two were computed and printed
-        # unconditionally -- correct numbers with no way to keep them off a figure that
-        # already carries its parameters -- and the second two are new. Each tooltip says
-        # what stays behind when it is off, because the one thing none of them may do is
-        # hide a refusal (see StyleSettings.show_r2).
-        self._r2_check = QtWidgets.QCheckBox("R² on figure")
-        self._r2_check.setToolTip(
-            "The scatter fit's R², in the fit label.\n"
-            "Off: the equation stands alone on the figure. Details still says when R² is "
-            "undefined or has no residual degrees of freedom — a fit that cannot be "
-            "judged must not be able to look unjudged.")
-        self._r2_check.setChecked(self._style.show_r2)
-        self._r2_check.toggled.connect(self._on_style_show_r2)
-        form.addRow("", self._r2_check)
-
-        self._gof_check = QtWidgets.QCheckBox("KS statistic on figure")
-        self._gof_check.setToolTip(
-            "Show the numerical KS statistic beside the fitted parameters when "
-            "Fit values on plot is enabled.\n"
-            "The verdict and warnings remain in Details and figure-bundle provenance, "
-            "not on the plot or in Save image artwork. This does not change the fit.")
-        self._gof_check.setChecked(self._style.show_gof)
-        self._gof_check.toggled.connect(self._on_style_show_gof)
-        form.addRow("", self._gof_check)
-
         self._ci_band_check = QtWidgets.QCheckBox("Confidence band")
         self._ci_band_check.setToolTip(
             "A 95% POINTWISE band from the bootstrap replicates of the whole parameter "
@@ -4989,7 +4961,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "squares.\nA run of same-sign bars is the finding — KS gives one number for "
             "the whole curve and cannot say WHERE it misses.\n"
             "Export current figure… offers an explicit option to include the visible "
-            "residual panel. The χ² can also appear in the on-plot values box.")
+            "residual panel. The χ² is also written after the equation in the fit label.")
         self._residual_check.setChecked(self._style.show_residuals)
         self._residual_check.toggled.connect(self._on_style_residuals)
         form.addRow("", self._residual_check)
@@ -5047,8 +5019,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._export_h.hide()
         # Keep legacy controls as the compatibility layer for saved configurations
         # and programmatic clients, but offer each basic field only once on screen.
-        # Population-specific fit ornaments, title weight, and legend entries stay
-        # below the common controls; they do not exist on every analytical view.
+        # Population-specific fit ornaments and legend entries stay below the common
+        # controls; they do not exist on every analytical view.
         for widget in (self._title_edit, self._x_label_edit, self._y_label_edit,
                        self._legend_check, self._legend_font_size, self._font_combo,
                        self._title_size, self._axis_label_size, self._tick_size,
@@ -5070,97 +5042,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
         spin.setValue(int(value))
         spin.setToolTip(tip)
         return spin
-
-    def _add_font_row(self, text: str, family: str, preview: QtGui.QFont) -> None:
-        """Append one row to the Font combo: what it SAYS, what it MEANS, how it LOOKS.
-
-        The three roles are deliberately three different things, and keeping them apart is
-        what makes the Font row honest. ``text`` is prose and may not be a family name at
-        all (row 0, and the "not on this computer" row); ``family`` is the exact string
-        that goes into ``StyleSettings.font_family`` and is the ONLY thing any reader of
-        this combo is allowed to take; ``preview`` draws the row in the font it is about,
-        which is what ``QFontComboBox`` gave for free and is worth keeping -- row 0 previews
-        in ``QFont()``, so the "application default" row is literally drawn in the
-        application default.
-        """
-        combo = self._font_combo
-        combo.addItem(text, family)
-        row = combo.count() - 1
-        preview.setPointSize(combo.font().pointSize())
-        combo.setItemData(row, preview, Qt.FontRole)
-        combo.setItemData(row, QtCore.QSize(0, self._font_row_h), Qt.SizeHintRole)
-
-    def _font_row_tooltip(self) -> str:
-        """The Font row's tooltip, composed against the application font AS IT IS NOW.
-
-        WHY THIS IS A METHOD AND NOT A STRING LITERAL. The first version of S6-01 wrote
-        the resolved family into the tooltip at construction time --
-        ``QFontInfo(QFont()).family()`` -- and on macOS that is ".AppleSystemUIFont": a
-        PRIVATE family name, the same kind ``_font_families`` strips out of the list
-        because it is an implementation detail of the platform rather than something a
-        person can choose, ask a colleague for, or type into a figure's style. Naming it
-        told the reader nothing and looked like a leak, and because it was interpolated
-        once it also went stale the moment anything called ``QApplication.setFont``.
-
-        WHAT A READER GETS INSTEAD. The default row's whole job is to say "this figure is
-        not pinned to a family", and the useful follow-up question is whether the font it
-        is currently getting is one they COULD pin. So the family is named only when this
-        very list offers it -- then the name is actionable, and the case is the one where
-        an application font was set to a real face. When the resolved family is not in the
-        list (every stock macOS run: the system UI font, private, unlistable) it is
-        described rather than named, because printing a name the user cannot find in the
-        dropdown below is worse than printing no name at all.
-
-        The resolved family is read through ``QFontInfo`` rather than ``QFont().family()``
-        because that is what the plot is actually DRAWN in -- measured: under cocoa the two
-        agree at ".AppleSystemUIFont", under offscreen ``QFont().family()`` claims "Sans
-        Serif" while ``QFontInfo`` resolves the same private face.
-        """
-        resolved = QtGui.QFontInfo(QtGui.QFont()).family()
-        listed = self._font_rows.get(str(resolved).casefold())
-        if listed is not None:
-            here = (f"On this computer that is {listed} today, which is also a row in this "
-                    "list — pick it by name if the figure must keep that face wherever it "
-                    "is opened.")
-        else:
-            here = ("On this computer that is the system's own interface font, which is "
-                    "not a row in this list and not a name another machine would resolve "
-                    "the same way.")
-        return ("Font family for the title, axis captions and tick numbers.\n\n"
-                f"“{_FONT_DEFAULT_LABEL}” is not a family of its own: it is whatever font "
-                "this computer hands the application, which is what an untouched plot has "
-                f"always been drawn in. {here} Name a family when the figure has to look "
-                "the same on someone else's machine.")
-
-    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
-        """One thing this window can only learn from the event stream itself.
-
-        THE FONT ROW'S TOOLTIP is rebuilt in the instant before Qt paints it. A tooltip
-        is the one piece of text in this window whose exact moment of display is known,
-        so it is the one that can afford to be recomputed instead of cached: the
-        application font can change under a running window (a theme, a platform setting,
-        an owner calling ``QApplication.setFont``), and a sentence about "whatever font
-        this computer hands the application" that was composed at construction would then
-        be describing a font nothing is drawn in any more. Qt reads ``toolTip()`` in its
-        own handler for this event, which runs after every filter, so writing the fresh
-        text here is enough -- the event is passed on untouched.
-
-        THE PRESS ON THE DISABLED UNDO BUTTON IS DELIBERATELY NOT HANDLED HERE, which is
-        worth saying in the place someone would reach for it. Qt does deliver that press
-        to this filter before dropping it for being disabled, so answering the mouse
-        user's refused undo from here is easy, and it was tried: it scrolled the ceiling
-        sentence into view, which took the Undo button out from under a pointer that had
-        not moved and put the template combo there, whose next click opened a dropdown of
-        whole configurations. That scroll is now gone on EVERY trigger, not only this one
-        -- see :meth:`undo_config` for the measurement and
-        ``test_no_gesture_at_the_undo_floor_scrolls_the_controls_column`` for the
-        property it leaves behind. Nothing about the undo floor is answered from the event
-        stream: the disclosure is the button's own tooltip and the standing amber line,
-        both of which are simply there.
-        """
-        if obj is self._font_combo and event.type() == QtCore.QEvent.ToolTip:
-            self._font_combo.setToolTip(self._font_row_tooltip())
-        return super().eventFilter(obj, event)
 
     def _make_swatch(self, hex_color: str, on_click, tip: str) -> QtWidgets.QPushButton:
         btn = QtWidgets.QPushButton()
@@ -5189,51 +5070,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._style = _dc_replace(self._style, title=self._label_override(text))
         self._presentation_changed()
 
-    def _on_style_font_family(self, index: int) -> None:
-        """The Font row moved. What the row CARRIES is committed, not what it says.
-
-        ``itemData``, never ``currentText()``: row 0 reads "Application default" and carries
-        ``""``, and an absent family's row reads "Calibri — not on this computer" and
-        carries "Calibri". Reading the words would write prose into a font name.
-
-        ``index < 0`` is "no row is current", which happens only if something clears the
-        combo, and it is NOT the same thing as the default row. Writing "" for it would be
-        this window choosing the application font on the user's behalf -- the half of S6-01
-        that was never broken and has to stay that way.
-
-        A PICK ALSO RETIRES THE "not on this computer" ROW -- see below.
-        """
-        if index < 0:
-            return
-        family = self._font_combo.itemData(index)
-        # THE ABSENT-FAMILY ROW IS TAKEN DOWN BY THE CHOICE THAT REPLACES IT. Row 1 exists
-        # for one purpose: to say "the config that arrived named Calibri and this machine
-        # has not got it" (:meth:`_select_font_family`). The moment the user picks any
-        # other row, that sentence is about a decision they have just reversed -- but it
-        # was cleared only on the NEXT `_select_font_family`, which is an undo, an import
-        # or a reset, NOT the pick itself. So a colleague's config plus one ordinary font
-        # change left a selectable "Calibri — not on this computer" row in the dropdown for
-        # the rest of the session, advertising a font this computer cannot draw as though
-        # it were still in play.
-        #
-        # Three details make the removal safe, all of them measured on both platforms:
-        #   * ``family`` is read FIRST, because removing row 1 shifts every index above it
-        #     down by one and the `index` this handler was handed goes stale.
-        #   * the combo's signals are blocked across the removal. QComboBox keeps the
-        #     current ITEM across a removal below it (measured on both platforms: index 2
-        #     -> 1, same item) and emits ``currentIndexChanged`` for that renumbering --
-        #     every pick above row 1, which is all of them but row 0. Unblocked, that
-        #     would re-enter this handler and take a SECOND undo step for one gesture, and
-        #     one gesture is one step is the rule the S6-01 tests pin.
-        #   * index 1 itself is left alone: that is the user deliberately re-selecting the
-        #     absent family, which is a legitimate choice the style still carries.
-        if self._font_off_list and index != 1:
-            was_blocked = self._font_combo.blockSignals(True)
-            self._font_combo.removeItem(1)
-            self._font_off_list = False
-            self._font_combo.blockSignals(was_blocked)
-        self._style = _dc_replace(
-            self._style, font_family="" if family is None else str(family))
+    def _on_style_font_family(self, family: str) -> None:
+        """The Font row was picked. ``family`` is what the row STORES: ``""`` for its first
+        entry ("Arial (default)", the blank this style has always meant by "no family
+        chosen"), else the family. Only a pick gets here -- :meth:`_select_font_family`
+        shows a style on the row without saying anything."""
+        self._style = _dc_replace(self._style, font_family=str(family))
         self._presentation_changed()
 
     def _on_style_font_size(self, value: int) -> None:
@@ -5253,14 +5095,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._style, background="light" if text == "Light" else "dark")
         self._presentation_changed()
 
-    def _on_style_show_r2(self, on: bool) -> None:
-        self._style = _dc_replace(self._style, show_r2=bool(on))
-        self._presentation_changed()
-
-    def _on_style_show_gof(self, on: bool) -> None:
-        self._style = _dc_replace(self._style, show_gof=bool(on))
-        self._presentation_changed()
-
     def _on_style_ci_band(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_ci_band=bool(on))
         self._presentation_changed()
@@ -5271,20 +5105,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_provenance(self, on: bool) -> None:
         self._style = _dc_replace(self._style, show_provenance=bool(on))
-        self._presentation_changed()
-
-    def _on_style_fit_values(self, on: bool) -> None:
-        self._style = _dc_replace(self._style, fit_values_on_plot=bool(on))
-        if self._style.fit_label:
-            # A saved label (a drag, any Fit label edit) no longer reads this switch
-            # through the legacy mapping, so the box edits the saved label's fields.
-            label = self._style.fit_label_state()
-            extra = ("bic", "ks")
-            fields = [f for f in label.fields if f not in extra]
-            if on:
-                fields += list(extra)
-            self._style = self._style.with_fit_label(_dc_replace(
-                label, fields=tuple(f for f in FIT_FIELDS if f in fields)))
         self._presentation_changed()
 
     def _on_style_x_label(self, text: str) -> None:
@@ -5309,14 +5129,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_tick_size(self, value: int) -> None:
         self._style = _dc_replace(self._style, tick_font_size_pt=int(value))
-        self._presentation_changed()
-
-    def _on_style_title_bold(self, on: bool) -> None:
-        self._style = _dc_replace(self._style, title_bold=bool(on))
-        self._presentation_changed()
-
-    def _on_style_title_italic(self, on: bool) -> None:
-        self._style = _dc_replace(self._style, title_italic=bool(on))
         self._presentation_changed()
 
     def _on_style_grid(self, on: bool) -> None:
@@ -5502,9 +5314,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         Every caller passes the size that belongs to the text it is about to set, and
         each of those sizes falls back to the body size when its own override is 0, so
         an untouched style still produces one number in four places."""
-        qf = QtGui.QFont()
-        if self._style.font_family:
-            qf.setFamily(self._style.font_family)
+        qf = figure_qfont(self._style.font_family)         # unset: Arial; missing: a substitute
         qf.setPointSize(int(self._style.font_size_pt if pt is None else pt))
         return qf
 
@@ -5558,9 +5368,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         captions are the second of the four independent text sizes owner note Q5 asks
         for, and they are the ones a poster usually wants larger than the ticks."""
         return {"color": self._fg_hex(), "font-size": f"{self._axis_label_pt()}pt",
-                # AxisItem merges styles; explicitly reset the family when the
-                # user returns to Application default, instead of retaining it.
-                "font-family": self._qfont().family()}
+                # AxisItem merges styles; explicitly reset the family when the user returns
+                # to the default (Arial), instead of retaining it. The fallback stack, in the
+                # double quotes a ``style='…'`` attribute allows, so a missing family still
+                # draws in a face of its own kind.
+                "font-family": html_font_family(self._style.font_family)}
 
     def _apply_grid(self) -> None:
         """Show or hide the gridlines, from the style, on every draw (owner note Q7).
@@ -5611,7 +5423,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             if ticks.size_pt:
                 qf.setPointSizeF(float(ticks.size_pt))
             if ticks.family:
-                qf.setFamily(ticks.family)
+                qf.setFamily(figure_family(ticks.family))
             if ticks.bold is not None:
                 qf.setBold(ticks.bold)
             if ticks.italic is not None:
@@ -5755,9 +5567,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         qf = self._qfont(int(round(size)))
         qf.setPointSizeF(float(size))
         if style.family:
-            qf.setFamily(style.family)
-        qf.setBold(bool(self._style.title_bold if style.bold is None else style.bold))
-        qf.setItalic(bool(self._style.title_italic if style.italic is None else style.italic))
+            qf.setFamily(figure_family(style.family))
+        qf.setBold(bool(style.bold))
+        qf.setItalic(bool(style.italic))
         self._plot.titleLabel.item.setFont(qf)
 
     # -- axis range ------------------------------------------------------------------------------
@@ -6360,6 +6172,21 @@ class PlotsWindow(QtWidgets.QMainWindow):
         ``set_plot_type`` and ``set_fit`` are."""
         self._set_config(cfg, draw=True)
 
+    def adopt_restored_state(self) -> None:
+        """A saved project has been restored into this window: its history starts here.
+
+        The rule :meth:`set_data` and :meth:`reset_state` follow ("a reconstruction never
+        becomes an offer to undo the project you just opened"). The restore writes the saved
+        configuration with ``_set_config(own=True)``, which moves neither the stack nor its
+        base, so without this the stack still began at the blank window: the first change
+        after opening was undone to the built-in defaults, and the typed title and look the
+        project was saved with did not come back.
+        """
+        self._history_timer.stop()
+        self._history.reset(self.config())
+        self._sync_config_buttons()
+        self._sync_template_selection()
+
     @staticmethod
     def _rebased(cfg: PlotConfig, was: AnalysisIdentity) -> PlotConfig:
         """``cfg``, corrected for having moved off analysis identity ``was``.
@@ -6394,6 +6221,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if not self._ui_ready or self._installing:
             return
         cfg = self.config()
+        acted = cfg.identity.wording_stale_from(self._identity)    # the words had a say
         rebased = self._rebased(cfg, self._identity)
         if self._updating:
             rebased = _dc_replace(rebased, style=_dc_replace(
@@ -6403,11 +6231,29 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._identity = cfg.identity   # nothing to clear, but the anchor still moved
             self._range_factors = self._identity.axis_factors
             self._sync_range_unit_labels()
+            self._announce_reset((), cfg.identity, acted)
             return
         # THE WINDOW'S OWN STATE, CORRECTED -- not an install from outside, so no new
         # origin and no re-decision of the import disclosures (S7-SK1: the Time-unit
         # combo reaches here, and the losses sentence must survive it).
         self._set_config(rebased, draw=False, own=True)
+        went = tuple(name for name in cfg.axes.ranges() if name not in rebased.axes.ranges())
+        self._announce_reset(words_cleared(cfg.style, rebased.style) + went, rebased.identity,
+                             acted)
+
+    def _announce_reset(self, cleared: tuple[str, ...], ident: AnalysisIdentity,
+                        acted: bool) -> None:
+        """Say which of the typed words and ranges went (quantity_reset). The picture follows
+        the control only at Plot, so it says what the plot is set to show. When the rule acted
+        and nothing was typed, the sentence an earlier change left on the bar goes instead."""
+        said = ""
+        if cleared:
+            shows = _SHOWS_PLOT[ident.plot_type].format(x=ident.x_column, y=ident.y_column)
+            if ident.fit_model:
+                shows += f", fitted with {ident.fit_model.partition(':')[0]}"
+            said = reset_sentence(cleared, shows, lead="the plot is now set to show")
+        if acted:
+            self._reset_said = announce(self.statusBar(), said, self._reset_said)
 
     def _apply_checked_keys(self, keys: Sequence[str]) -> None:
         """Tick exactly ``keys`` in the source list. Silent about keys that are not on
@@ -6474,11 +6320,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """Write a style onto the Style group's controls.
 
         Split out of :meth:`_set_config` because it is the half `reset_state` needs too,
-        and because the font combo is a genuine exception worth stating once: its handler
-        writes the style value the CURRENT ROW carries, and the default "" ("the
-        application's own font") is a row of its own rather than a family -- so the row is
-        moved by :meth:`_select_font_family`, which blocks the combo for its own body, and
-        the style installed by the caller stands.
+        and because the Font row is a genuine exception worth stating once: its handler
+        writes the value the CURRENT ROW stores, and the default "" ("no family chosen",
+        drawn in Arial) is a row of its own rather than a family -- so the row is moved by
+        :meth:`_select_font_family`, which says nothing, and the style installed by the
+        caller stands.
         """
         self._title_edit.setText(style.title)
         self._x_label_edit.setText(style.x_label)
@@ -6486,9 +6332,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._legend_check.setChecked(bool(style.show_legend))
         self._legend_font_size.setValue(int(style.legend_font_size_pt))
         self._legend_counts.setChecked(bool(style.legend_counts))
-        self._fit_values_check.setChecked(bool(style.fit_values_on_plot))
-        self._r2_check.setChecked(bool(style.show_r2))
-        self._gof_check.setChecked(bool(style.show_gof))
         self._ci_band_check.setChecked(bool(style.show_ci_band))
         self._residual_check.setChecked(bool(style.show_residuals))
         self._prov_check.setChecked(bool(style.show_provenance))
@@ -6496,8 +6339,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._title_size.setValue(int(style.title_font_size_pt))
         self._axis_label_size.setValue(int(style.axis_label_font_size_pt))
         self._tick_size.setValue(int(style.tick_font_size_pt))
-        self._title_bold.setChecked(bool(style.title_bold))
-        self._title_italic.setChecked(bool(style.title_italic))
         self._grid_check.setChecked(bool(style.show_grid))
         self._point_size.setValue(int(style.point_size))
         self._line_width.setValue(int(style.line_width))
@@ -6512,59 +6353,22 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # name the combo would ignore (`_heatmap_colormap` falls back to viridis too).
         if self._heatmap_cmap.findText(style.heatmap_colormap) >= 0:
             self._heatmap_cmap.setCurrentText(style.heatmap_colormap)
+        # The shared Appearance widget is part of this group. It is told the style too, so
+        # after an install (a project, a template, an import) its next edit builds on what
+        # is on the figure -- a label's numbers and a title's bold are its to keep.
+        if hasattr(self, "_appearance_widget"):
+            self._appearance_widget.set_state(self._appearance_of(style))
 
     def _select_font_family(self, family: str) -> None:
-        """Point the Font row at ``family`` (``""`` = the application default).
+        """Point the Font row at ``family`` (``""`` = the default). Never commits: the picker's
+        ``set_value`` says nothing, whatever the caller did to the row's signals, so a sync
+        (an undo, an import, a reset) cannot write a family the user did not choose.
 
-        THIS METHOD BLOCKS THE COMBO'S SIGNALS ITSELF, FOR ITS WHOLE BODY. It inserts and
-        removes rows, each of which moves ``currentIndex``, and an unblocked move goes
-        straight to :meth:`_on_style_font_family` -- which is exactly how a SYNC would end
-        up committing a family the user never chose. That is the one failure S6-01's fix
-        must not re-introduce, and it is the reason this is a guarantee rather than a
-        precondition: the first version asserted that the caller had blocked the signals,
-        which is not a guard at all under ``python -O`` (the assert is compiled out, and a
-        fourth call site that forgot would then commit silently) and which had three call
-        sites repeating the same two lines to satisfy it. Blocking here costs the same and
-        cannot be switched off. The previous blocked state is restored rather than cleared,
-        so a caller that blocks for reasons of its own still gets what it set up.
-
-        A FAMILY THE LIST DOES NOT HAVE GETS A ROW OF ITS OWN rather than being dropped. A
-        config exported on a colleague's machine (or on Windows) can name "Calibri";
-        selecting nothing would leave the previous row standing -- the same lie in a new
-        place -- and selecting the nearest match would silently rewrite the user's style.
-        So the exact string is shown, marked as absent, and left in the style untouched:
-        ``config()`` still exports "Calibri" and the panel still says what is missing.
-        Exactly one such row can exist, at index 1, and it is cleared on every call --
-        and, since the row is about a decision rather than about a font, also by the
-        user picking any other row (:meth:`_on_style_font_family` retires it there).
-
-        The lookup is CASE-INSENSITIVE because ``QFont`` matching is: a hand-edited sidecar
-        saying "courier new" really is drawn in Courier New, so the row naming it is the
-        honest one to show, and the style keeps its own spelling untouched.
-        """
-        combo = self._font_combo
-        was_blocked = combo.blockSignals(True)
-        try:
-            if self._font_off_list:
-                combo.removeItem(1)
-                self._font_off_list = False
-            if not family:
-                combo.setCurrentIndex(0)
-                return
-            listed = self._font_rows.get(str(family).casefold())
-            if listed is not None:
-                combo.setCurrentIndex(combo.findData(listed))
-                return
-            combo.insertItem(1, f"{family} — not on this computer", str(family))
-            combo.setItemData(1, QtGui.QFont(str(family)), Qt.FontRole)
-            combo.setItemData(1, QtCore.QSize(0, self._font_row_h), Qt.SizeHintRole)
-            self._font_off_list = True
-            combo.setCurrentIndex(1)
-        finally:
-            # ``finally``, not a line at the end: the body returns from three places, and
-            # a combo left silent because an early return skipped the restore would be a
-            # Font row that stops reporting the user's picks altogether.
-            combo.blockSignals(was_blocked)
+        A family the list does not have -- a config from a colleague's machine naming
+        ``Calibri`` -- gets one extra row carrying the exact string, marked as absent here, and
+        the style keeps it as written; ``courier new`` shows the Courier New row and the
+        style keeps its own spelling."""
+        self._font_combo.set_value(family)
 
     def _prune_legend_memory(self) -> None:
         """Drop legend decisions about sources and cluster rows that no longer exist.
@@ -7130,6 +6934,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._history.rebase(self.config())
         self._sync_config_buttons()
         self._sync_template_selection()
+        # An Undo or Redo is a durable edit like the step it takes back: a restored (frozen)
+        # page is saved from the checkpoint this announcement refreshes, and the project is
+        # now different from the file it was opened from.
+        self.workspaceChanged.emit()
         return True
 
     @staticmethod
@@ -8400,15 +8208,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def appearance_state(self) -> dict:
         """Appearance-only bridge; no sources, axes scales, bins or fit settings."""
-        out = {key: getattr(self._style, field) for key, field in self._APPEARANCE_FIELDS.items()
-               if getattr(self._style, field) not in (None, "")
-               and not (key.endswith("size") and getattr(self._style, field) == 0)}
+        return self._appearance_of(self._style)
+
+    @classmethod
+    def _appearance_of(cls, style: StyleSettings) -> dict:
+        out = {key: getattr(style, field) for key, field in cls._APPEARANCE_FIELDS.items()
+               if getattr(style, field) not in (None, "")
+               and not (key.endswith("size") and getattr(style, field) == 0)}
         # The figure's own element styles and the fit label ride the same bridge, so the
         # embedded Appearance section (its Fit label group) and shared presets see them.
-        if self._style.text_styles:
-            out["text"] = _thawed(self._style.text_styles)
-        if self._style.fit_label:
-            out["fit_label"] = _thawed(self._style.fit_label)
+        if style.text_styles:
+            out["text"] = _thawed(style.text_styles)
+        if style.fit_label:
+            out["fit_label"] = _thawed(style.fit_label)
         return out
 
     def set_appearance_state(self, mapping) -> None:
@@ -8469,6 +8281,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
         applied = getattr(self, "_figure_applied_config", None)
         return {} if applied is None else plot_config_to_json(
             _dc_replace(applied, style=self._style))
+
+    @staticmethod
+    def fold_saved_config(config: PlotConfig, saved) -> PlotConfig:
+        """A project's config (``config``, as the workspace decoded it) with the switches an
+        older build saved in ``saved`` -- the workspace's tagged tree for it -- moved to
+        where they live now (:func:`_fold_legacy_style`). The decoder reads only the fields
+        this build has, so the old keys must be taken from the tree itself."""
+        fields = saved.get("fields") if isinstance(saved, Mapping) else None
+        style = fields.get("style") if isinstance(fields, Mapping) else None
+        style = style.get("fields") if isinstance(style, Mapping) else None
+        if not isinstance(style, Mapping) or not any(key in style for key in _LEGACY_STYLE_KEYS):
+            return config
+        return _dc_replace(config, style=_fold_legacy_style(config.style, style))
 
     def _drawn_config(self) -> PlotConfig:
         """:meth:`config` as the picture just drawn has it: the KDE overlay as APPLIED.
@@ -8564,8 +8389,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     label = names[key] + " fit:" + label.split(" fit:", 1)[1]
             self._legend_offered[entry_id] = str(label)
             if self._style.show_legend and self._legend_included(entry_id):
-                self._ensure_legend().addItem(
-                    item, self._legend_markup(label, _legend_style_key(kind, key)))
+                legend = self._ensure_legend()
+                legend.addItem(item, self._legend_markup(label, _legend_style_key(kind, key)))
+                self._legend_row_added(legend)
         self._sync_legend_entry_list()
         self._appearance_widget.set_legend_available(bool(entries))
         self._refresh_committed_legend_disclosure(names)
@@ -8613,7 +8439,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                         offset=(8, -6) if bottom else (10, 8))
             item.setZValue(30)
             setattr(self, attribute, item)
-        item.setText(text, color=colour, size=f"{size}pt")
+        item.setText(text, color=colour, size=f"{size}pt",
+                     family=html_font_family(self._style.font_family))
 
     def _restyle_committed_decorations(self) -> None:
         names = self._committed_legend_names()
@@ -8914,9 +8741,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._applied_fit_k = int(self._fit_k.value())
         self._applied_fit_k_auto = bool(self._fit_k_auto.isEnabled()
                                         and self._fit_k_auto.isChecked())
+        self._rebase()      # a new applied model takes the fit label's wording with it
 
     def _commit_scatter_fit_selection(self) -> None:
         self._applied_scatter_fit = self._scatter_fit.currentText()
+        self._rebase()
 
     def _apply_fit(self) -> None:
         """Commit the selected histogram fit and draw it.
@@ -9338,7 +9167,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._font_size.setValue(int(pt))
 
     def set_font_family(self, family: str) -> None:
-        """Font family for the plot's text. ``""`` restores the application default.
+        """Font family for the plot's text. ``""`` restores the default, Arial.
 
         The empty string is not "no change": it is the value the Font row's first entry
         stands for, and before S6-01 this setter could not reach it --
@@ -9773,16 +9602,17 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """The committed fits' numbers in the fit label (``fit_label.FitLabelItem``).
 
         THE ONE PLACE A FIT'S NUMBERS ARE DRAWN ON THE FIGURE. They used to be the plot's
-        automatic title (and, with Fit values on plot, a second copy in a box), so a typed
+        automatic title (and, with the old Fit values on plot box, a second copy), so a typed
         title removed them from the figure and every export. The label is its own
         element: one line per fitted source, prefixed with the figure's name for it and
         in its colour, top-left unless dragged, and on whenever a fit is applied.
 
         Rebuilt from the cached readouts, never by refitting, so the restyle path can call
-        it on every appearance toggle. The three older switches keep their meaning: R² on
-        figure and KS statistic on figure drop the plain NUMBER (never a refusal, which
-        :func:`fit_label.format_fit_label` prints whenever R² is asked for), and Fit values
-        on plot adds BIC and KS to a label that was never configured.
+        it on every appearance toggle. The label's Numbers row (``FitLabelState.fields``)
+        chooses which numbers it shows: it drops a plain NUMBER, never a refusal, which
+        :func:`fit_label.format_fit_label` prints whenever R² is asked for. The one other
+        thing that writes into the label is the Residual strip box, whose χ²/dof is joined
+        to the equation (:meth:`_shown_readout`), so unticking Equation takes it away too.
         """
         item = getattr(self, "_fit_label_item", None)
         if item is None:
@@ -9805,16 +9635,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
                                  size_pt=state.size_pt or float(self._style.font_size_pt))
         style = _dc_replace(self._style.text_style(FIT_LABEL_KEY), text=None, size_pt=None,
                             color=None)
-        item.apply_state(draw_state, readouts, style)
+        item.apply_state(draw_state, readouts, style, self._style.font_family)
 
     def _shown_readout(self, key: str, readout: FitReadout, names: dict) -> FitReadout:
-        """``readout`` as this figure shows it: the switches applied, the legend name as
-        its source, and the fit colour where the source has none of its own."""
+        """``readout`` as this figure shows it: the residual strip's number joined to the
+        equation, the legend name as its source, and the fit colour where the source has
+        none of its own."""
         parts = dict(readout.parts)
-        if not self._style.show_r2:
-            parts.pop("r2", None)
-        if not self._style.show_gof:
-            parts.pop("ks", None)
         resid = parts.pop("resid", "")
         if resid and self._style.show_residuals and parts.get("equation"):
             # The strip's number, on the figure, because the strip itself is not exported.
@@ -9937,7 +9764,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def _draw_provenance_caption(self) -> None:
         """Write each drawn source's provenance under the plot, INSIDE the figure.
 
-        Bottom-left, because the other two corners are taken: the fit-values box owns the
+        Bottom-left, because the other two corners are taken: the fit label owns the
         top-left and the legend the top-right. Parented to the ViewBox exactly as those
         are, which is what puts it in the exported image and keeps it still under pan and
         zoom -- and, like them, means it must be detached by hand in :meth:`_clear_plot`,
@@ -9970,6 +9797,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         text = "<br>".join(_html.escape(l) for l in lines)
         item = pg.LabelItem(text, color=self._msg_hex(),
                             size=f"{max(6, self._style.font_size_pt - 2)}pt",
+                            family=html_font_family(self._style.font_family),
                             justify="left")
         item.setParentItem(self._plot.vb)
         item.anchor(itemPos=(0, 1), parentPos=(0, 1), offset=(8, -6))
@@ -10041,7 +9869,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         a right one, whatever either one's D happens to be.
 
         Returns ``(sentence, short)`` -- the full χ² paragraph for Details and the
-        one-token form for the on-plot values box, which is the half an exported PNG
+        one-token form for the fit label, which is the half an exported PNG
         keeps. Both ``""`` when nothing could be computed: a family whose density will not
         integrate over these bins loses its strip, exactly as it loses its KS verdict, and
         never raises into a draw.
@@ -10160,6 +9988,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
             pass
         legend.setVisible(True)
         return legend
+
+    def _legend_row_added(self, legend) -> None:
+        """A row was just added: draw the legend's rows in the figure family, then put the
+        legend where the user left it. The second step is needed because the family changes
+        the width the row was measured at, and a legend anchored by its far edge (a dragged
+        one is, past the middle of the plot) keeps that edge, not the left one."""
+        apply_legend_family(legend, self._style.font_family)
+        self._apply_legend_position(legend)
 
     # -- legend PLACEMENT: the user's, dragged, and kept (round-4 Q4) -----------------------------
     def _install_legend_drag(self, legend) -> None:
@@ -10405,6 +10241,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             return
         legend = self._ensure_legend()
         legend.addItem(item, self._legend_markup(label, _legend_style_key(kind, key)))
+        self._legend_row_added(legend)
         legend.setVisible(True)
 
     def _legend_markup(self, label: str, element: str = "") -> str:
@@ -10472,7 +10309,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             return
         style = self._style.text_style(LIMIT_LABEL_KEY)
         text = shown_text(style, _LIMIT_LABEL_AUTO)
-        css = {"color": _EXCLUDED_HEX, **css_args(style)}
+        css = {"color": _EXCLUDED_HEX, "font-family": html_font_family(self._style.font_family),
+               **css_args(style)}
         label.show_rich("<span style='{}'>{}</span>".format(
             "; ".join(f"{name}: {value}" for name, value in css.items()), rich_text(text))
             if text.strip() else "")
@@ -11989,7 +11827,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         The string summary includes the diagnostic tag for Details; ``.plain`` is
         the title/legend summary. ``.full`` supplies every fitted parameter with its
-        unit, n, BIC and optional numerical KS statistic for the on-plot values box.
+        unit, n, BIC and the numerical KS statistic (the old on-plot values box's text).
         Warnings and verdicts remain in Details and saved fit metadata.
 
         The curve is evaluated on a fine grid and scaled to the drawn y quantity by
@@ -12869,18 +12707,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
                      int(k), kind, col))
         if better:
             notes.append(better)
-        original_style = self._style
-        variants = {}
-        try:
-            for show_gof in (False, True):
-                self._style = _dc_replace(original_style, show_gof=show_gof)
-                for show_residuals in (False, True):
-                    variants[(show_gof, show_residuals)] = self._full_fit_summary(
-                        fit, col, gof, resid_short if show_residuals else "")
-        finally:
-            self._style = original_style
+        variants = {show_residuals: self._full_fit_summary(
+            fit, col, gof, resid_short if show_residuals else "") for show_residuals in (False, True)}
         self._presentation_full_variants.append((who, variants))
-        result = _FitSummary(summary, variants[(self._style.show_gof, self._style.show_residuals)],
+        result = _FitSummary(summary, variants[self._style.show_residuals],
                              rejected=ks_rejected, plain=plain_summary)
         result.parts = self._fit_parts(fit, col, gof, resid_short,
                                        headline=f"{names[1]} = {shown}{unit_txt}",
@@ -12920,7 +12750,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _full_fit_summary(self, fit, col: str, gof: dict | None,
                           resid_short: str = "") -> str:
-        """Every number this fit has, on one line, for the box drawn ON the figure.
+        """Every number this fit has, on one line: the text of the box that used to be drawn ON
+        the figure (the fit label takes the same numbers, token by token, from
+        :meth:`_fit_parts`).
 
         Owner note #13: "once the Fit has been applied, include the numerical values on
         the plot; make these plots presentation ready". The one-line title summary
@@ -12931,8 +12763,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         So: every entry of ``fit.params``, each scaled and named through the SAME
         :meth:`_display_unit` rule the title uses (a time parameter in the axis's unit,
-        a dimensionless shape bare), then n, BIC and the optional numerical KS
-        statistic. The verdict itself stays in Details, not in the values box.
+        a dimensionless shape bare), then n, BIC and the numerical KS statistic. The
+        verdict itself stays in Details, not on the figure.
         """
         parts = []
         for key, value in fit.params.items():
@@ -12942,9 +12774,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         parts.append(f"n = {fit.n}")
         if np.isfinite(float(fit.bic)):
             parts.append(f"BIC = {float(fit.bic):.6g}")
-        # The numerical statistic is optional artwork; its interpretation and
-        # rejection warning are always retained in Details and fit metadata.
-        if gof and self._style.show_gof:
+        # The numerical statistic only; its interpretation and rejection warning are
+        # retained in Details and fit metadata.
+        if gof:
             parts.append(f"KS = {float(gof['ks']):.3f}")
         # The strip's number, on the figure, because the strip itself is not exported.
         if resid_short:
@@ -14235,21 +14067,17 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # "decoration, not a measurement". Both lines this method fits (straight and
         # log-log) have exactly two free parameters.
         _dof_tag = stats.r2_dof_tag(fit.n, _SCATTER_FIT_PARAMS)
-        # THE SWITCH TURNS OFF A STATISTIC, NEVER A REFUSAL (StyleSettings.show_r2). Both
-        # branches above this one are refusals -- "y does not vary" and the dof tag are
-        # the sentences that say this R² is arithmetic rather than evidence -- and they
-        # print whatever the box is set to. Only the plain, meaningful number is optional,
-        # which is the one a clean paper figure has a reason to omit.
+        # THE FIT LABEL'S NUMBERS ROW LEAVES OUT A STATISTIC, NEVER A REFUSAL. The first two
+        # branches here are refusals -- "y does not vary" and the dof tag are the sentences
+        # that say this R² is arithmetic rather than evidence -- and Details prints them
+        # whatever the label shows. Only the plain, meaningful number is a field the label
+        # may leave out, which is the one a clean paper figure has a reason to omit.
         if not np.isfinite(fit.r2):
             r2_txt = "R² undefined (y does not vary)"
         elif _dof_tag:
             r2_txt = f"R² = {fit.r2:.3f} ({_dof_tag})"
-        elif self._style.show_r2:
-            r2_txt = f"R² = {fit.r2:.3f}"
         else:
-            r2_txt = ""
-        # Joined rather than interpolated, so switching R² off leaves one gap and not
-        # three spaces in the middle of an exported caption.
+            r2_txt = f"R² = {fit.r2:.3f}"
         if fit.log_log:
             coeff = fit.meta["coefficient"] * fy / fx ** fit.meta["exponent"]
             head = f"y = {coeff:.4g}·x^{fit.meta['exponent']:.4g}{unit_txt}"
@@ -14258,8 +14086,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         summary = "   ".join(p for p in (head, r2_txt, f"(n = {fit.n})") if p)
         # THE FIT LABEL'S COPY. The refusal ("undefined", or the dof tag on a number that
         # is arithmetic) is a refusal, not a field: the label prints it whenever R² is
-        # asked for and no template or switch can drop it. Only the plain, meaningful
-        # number is a part the R² switch may leave out.
+        # asked for and no template or Numbers choice can drop it. Only the plain,
+        # meaningful number is a field the Numbers row may leave out.
         parts = {"equation": head, "n": f"n = {fit.n}"}
         refusals: tuple[str, ...] = ()
         if not np.isfinite(fit.r2) or _dof_tag:

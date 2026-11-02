@@ -3,20 +3,10 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..plot import figure_fonts as ff
 from .figure_bundle import FigureSnapshot
 from .figure_composition import DEFAULT_LABEL_STYLE
-
-#: The panel-label font row standing for the font the panels' own text is drawn in.
-_APP_FONT_LABEL = "Application default"
-
-
-def _application_family() -> str:
-    """The family an untouched plot's text is drawn in, and named in its SVG.
-
-    ``QApplication.font().family()`` is what pyqtgraph writes into a panel's SVG for its
-    default-font text, so panel labels in this family match the panels in both outputs.
-    """
-    return QtWidgets.QApplication.font().family() or DEFAULT_LABEL_STYLE["family"]
+from .font_picker import FontPicker
 
 
 def _paint_swatch(button: QtWidgets.QPushButton, hex_color: str) -> None:
@@ -94,27 +84,16 @@ class FigureComposerDialog(QtWidgets.QDialog):
         self._spacing.setValue(spacing)
         appearance.addWidget(QtWidgets.QLabel("Panel spacing:"))
         appearance.addWidget(self._spacing)
-        # A plain combo, not QFontComboBox: the application font is a private family on
-        # macOS, which QFontComboBox cannot list and, asked to show it, replaces with its
-        # FIRST family (plots_panel's S6-01). So the application font gets a named row.
-        self._label_font = QtWidgets.QComboBox()
-        self._label_font.addItem(_APP_FONT_LABEL, "")
-        for family in QtGui.QFontDatabase.families():
-            if not family.startswith(".") and not QtGui.QFontDatabase.isPrivateFamily(family):
-                self._label_font.addItem(family, family)
-        family = style["family"]
-        if initial_layout is not None and family != _application_family():
-            if self._label_font.findData(family) < 0:
-                # Revising keeps a family this computer lacks rather than swapping it.
-                self._label_font.addItem(family, family)
-            self._label_font.setCurrentIndex(self._label_font.findData(family))
+        # The shared font picker. Its first row is the figure default, Arial; a revised
+        # composition shows the family it was saved with (an extra row when the list lacks
+        # it, kept as saved).
+        self._label_font = FontPicker()
+        if initial_layout is not None:
+            self._label_font.set_value(style["family"])
         self._label_font.setToolTip(
-            f"Panel-label font. “{_APP_FONT_LABEL}” is the font the panels' own text "
-            "is drawn in; name a family when the figure must look the same elsewhere.")
-        self._label_font.setMaxVisibleItems(12)
-        self._label_font.setMinimumContentsLength(12)
-        self._label_font.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            "Panel-label font. The first row is Arial, the figure default; "
+            "Other font… lists every font installed on this computer except the system's "
+            "private fonts and symbol fonts such as Wingdings.")
         self._label_font.setMaximumWidth(230)
         appearance.addWidget(QtWidgets.QLabel("Panel labels:"))
         appearance.addWidget(self._label_font)
@@ -215,7 +194,7 @@ class FigureComposerDialog(QtWidgets.QDialog):
         self._share_y.toggled.connect(self._invalidate)
         self._shared_legend.toggled.connect(self._invalidate)
         self._spacing.valueChanged.connect(self._invalidate)
-        self._label_font.currentIndexChanged.connect(self._invalidate)
+        self._label_font.changed.connect(self._invalidate)
         self._label_size.valueChanged.connect(self._invalidate)
         self._label_bold.toggled.connect(self._invalidate)
         self._name.textChanged.connect(self._name_changed)
@@ -224,8 +203,8 @@ class FigureComposerDialog(QtWidgets.QDialog):
         return self._name.text().strip()
 
     def label_family(self):
-        """The family panel labels are drawn in: the named row, or the application's."""
-        return self._label_font.currentData() or _application_family()
+        """The family panel labels are drawn in: the named row, or Arial."""
+        return ff.effective_family(self._label_font.value())
 
     def _choose_label_color(self):
         color = QtWidgets.QColorDialog.getColor(QtGui.QColor(self._label_color_value), self,

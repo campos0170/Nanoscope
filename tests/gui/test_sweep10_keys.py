@@ -118,7 +118,7 @@ def test_a_font_picked_from_the_list_lets_cmd_z_through(qtbot):
     assert set(picked) == {"font_family"}
     _key(undo_sequences()[0])
     assert window.appearance_state() == {}, "⌘Z on a picked font did not undo the pick"
-    assert combo.currentText() == "Default"
+    assert combo.currentText() == "Arial (default)"
 
 
 def test_a_spin_box_the_user_typed_in_keeps_cmd_z_for_its_typing(qtbot):
@@ -139,18 +139,29 @@ def test_a_spin_box_the_user_typed_in_keeps_cmd_z_for_its_typing(qtbot):
     assert w._history.depth() == depth, "⌘Z typed in a spin box moved the appearance history"
 
 
-def test_a_font_typed_into_the_editable_list_keeps_cmd_z_for_its_typing(qtbot):
-    """CONTROL, for the editable combo: typed text keeps ⌘Z."""
+def test_a_font_chosen_in_the_other_font_list_is_one_step_for_cmd_z(qtbot, monkeypatch):
+    """The font box is a list now, not an editable line (P0 G2): a family outside the short
+    list is chosen in the Other font… dialog, and that is ONE appearance step -- ⌘Z takes it
+    back whole, and the box shows the short list's first row again."""
+    from nanoscope.gui import font_picker
+
     window, w = _plot_window(qtbot, "iv")
     combo = w.font_family
     _focus(qtbot, combo)
-    combo.lineEdit().selectAll()
-    QTest.keyClicks(combo, "qqq")                     # no family starts so: no completion
-    assert combo.currentText() == "qqq" and combo.lineEdit().isUndoAvailable()
+
+    def pick_menlo(dialog):
+        assert dialog.select_family("Menlo")
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(font_picker.FontListDialog, "exec", pick_menlo)
+    combo.setCurrentIndex(combo.count() - 1)          # the Other font… row
+    qtbot.waitUntil(lambda: window.appearance_state().get("font_family") == "Menlo")
+    qtbot.wait(PAUSE_MS)
     depth = w._history.depth()
+    assert depth[0] == 1 and combo.currentText() == "Menlo"
     _key(undo_sequences()[0])
-    assert combo.currentText() == "Default", "⌘Z did not take back what was typed"
-    assert w._history.depth() == depth
+    assert window.appearance_state() == {}, "⌘Z on an Other font… pick did not undo it"
+    assert combo.currentText() == "Arial (default)"
 
 
 def test_a_stepped_detection_spin_box_lets_cmd_z_reach_edit_undo(make_window):

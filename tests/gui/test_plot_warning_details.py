@@ -18,7 +18,8 @@ from .test_s7_plots_rejected_fit_on_figure import rejected  # noqa: F401
 def test_warning_free_capture_export_and_bundle_retain_fit_and_details(
         rejected, qtbot, monkeypatch, tmp_path):
     window = rejected
-    window._fit_values_check.setChecked(True)
+    for name in ("bic", "ks"):          # the fit label's Numbers row
+        window._appearance_widget.fit_label_fields[name].click()
     window._residual_check.setChecked(True)
     window.set_title("Apo-ferritin dwell times")
     window.show()

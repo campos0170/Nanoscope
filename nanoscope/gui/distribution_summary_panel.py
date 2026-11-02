@@ -3,6 +3,15 @@
 This optional page never detects, fits, recalibrates, or changes event rows. Draft
 controls and live sources are separate from the committed figure: only Generate
 computes ECDF/quartiles/KDE. Restoring a project paints stored draw coordinates.
+
+The typed title and axis labels belong to the measurement and summary the committed figure
+shows (``gui.quantity_reset``): the controls only edit a draft, so :meth:`analyze` puts them
+back to automatic when it commits another pair, not on a first draw, a repeat, a restore, or
+the Generate that commits a recalled template's own pair. So does a range pinned on the value
+axis, when the MEASUREMENT is what changed: the value is x in ECDF and Survival and y in Box
+and Violin, so the pins of both pairs' value axes go together. A summary type moves no axis
+(each pair keeps its own pins, as it always has), and the axis of a pair that is not the value
+never does.
 """
 from __future__ import annotations
 
@@ -57,12 +66,22 @@ METHODS = {
               "source has equal peak width, independent of its event count. No KDE "
               "is inferred for fewer than 3 observations or constant data.",
 }
+#: What the status line says the plot shows after a measurement or summary change
+#: (quantity_reset): "the ECDF of median depth".
+_SHOWS_KIND = {"ecdf": "the ECDF", "survival": "the empirical survival", "box": "a box plot",
+               "violin": "a violin plot"}
+_SHOWS_METRIC = {"dwell_s": "dwell time", "depth_pA": "median depth",
+                 "frac_depth": "fractional depth", "amplitude_pA": "selected amplitude"}
 _PLOT_COLUMNS = ["source_key", "source_label", "primitive", "role", "point", "x", "y"]
 #: A range typed in Axis properties belongs to what the axes show (figures2-2): ECDF and
 #: Survival put the value on x and a fraction on y, Box and Violin the sources on x and the
 #: value on y. Each pair keeps its own pins (``PlotAppearance.for_view``); a bare pin, saved
 #: before pins were kept per pair, is the curves' (ECDF, the Type the page opens on).
 PIN_CURVES, PIN_CATEGORIES = "curves", "categories"
+#: The axis each pair draws the measurement on, for the pins a new measurement takes off
+#: (quantity_reset): x for the curves, y for box and violin. The status line calls it the value
+#: axis ("Value range"), since it is x in one pair and y in the other.
+_VALUE_AXES = ((PIN_CURVES, "bottom", "Value"), (PIN_CATEGORIES, "left", "Value"))
 
 
 def _pins_for(snapshot) -> str:
@@ -140,6 +159,9 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._appearance = PlotAppearance()
         self._pins_drawn = PIN_CURVES      # whose pins the plot holds (``_pins_for``)
         self._source_appearance = {}
+        #: The (measurement, summary) a recalled template's words came with: its first
+        #: Generate commits them, so those words are not stale (quantity_reset).
+        self._words_for = None
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
@@ -194,7 +216,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         # ⌘Z on the page, not on these controls: an edit made in the figure is undone from
         # the keyboard whatever the Section shows (FIG-4); a page behind another Explorer
         # tab is hidden, so it does not answer.
-        # Reset appearance keeps the legend-name carriers: the names live in Source names
+        # Reset figure keeps the legend-name carriers: the names live in Source names
         # and colors, which Reset leaves alone, so dropping them would be a step that
         # changes nothing on screen.
         self._appearance_widget = PlotAppearanceWidget(
@@ -241,6 +263,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             exports=(("Export current figure…", self.save_image),
                      ("Export plotted coordinates CSV…", self.save_csv)))
         self._workflow.export_button.setEnabled(False)
+        self._workflow.adopt_reset_figure(self._appearance_widget)
         # View only (plot_interaction). Reset view is this page's own framing, not a bare
         # auto-range: a box/violin keeps its full category slots. The menu's exports are
         # greyed out with the Export button, until a figure has been generated.
@@ -311,6 +334,8 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         if self.template_settings()[0] != before:
             self._draft_changed()
         self._appearance_widget.apply_appearance(appearance)
+        config = self.config()
+        self._words_for = (config["metric"], config["kind"])
 
     def selected_sources(self):
         return [self._sources[key] for key in self._selected_keys if key in self._sources]
@@ -482,12 +507,21 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
                                 "Empirical P(X > x)" if kind == "survival" else label),
                     "categorical": kind in ("box", "violin")}
         config["method"] = METHODS[kind]
+        # The figure on screen shows the OLD measurement and summary until this commit: the
+        # words typed on it go back to automatic when the new ones replace it.
+        previous, words_for, self._words_for = self._applied_config, self._words_for, None
+        moved = (bool(previous) and (previous["metric"], previous["kind"]) != (metric, kind)
+                 and words_for != (metric, kind))
         self._applied_config = deepcopy(config)
         self._source_recipes = recipes
         self._snapshot, self._tables = snapshot, tables
         self._stale = False
         self._render_snapshot()
         self._update_status()
+        if moved:
+            self._appearance_widget.reset_typed_words(
+                f"{_SHOWS_KIND[kind]} of {_SHOWS_METRIC[metric]}", self.statusBar(),
+                axes=_VALUE_AXES if previous["metric"] != metric else (), primary=PIN_CURVES)
         self.workspaceChanged.emit()
         return True
 
@@ -565,6 +599,11 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._plot.setTitle(title.removeprefix("⚠ Distribution notes · "))
         self._plot.setLabel("bottom", self._snapshot.get("x_label", ""))
         self._plot.setLabel("left", self._snapshot.get("y_label", ""))
+        # The Appearance boxes name the automatic text of the figure on screen.
+        for field, text in (("title", title.removeprefix("⚠ Distribution notes · ")),
+                            ("x_label", self._snapshot.get("x_label", "")),
+                            ("y_label", self._snapshot.get("y_label", ""))):
+            self._appearance_widget.set_automatic_text(field, text)
         ticks = ([(i, _display_source_label(s["label"], i)) for i, s in enumerate(self._snapshot.get("series", []))]
                  if self._snapshot.get("categorical") else None)
         bottom = self._plot.getAxis("bottom")
@@ -785,7 +824,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             name, was = after.text_style(carrier).text, before.text_style(carrier).text
             # A rename always goes from name to name (the current one is put on the carrier
             # silently first). A carrier a step brings back -- the Undo of a template or of
-            # Reset appearance -- is no rename: a name set since in Source names stays.
+            # Reset figure -- is no rename: a name set since in Source names stays.
             if name is None or was is None or name == was:
                 continue
             label = None if name == str(source["label"]) else name

@@ -17,8 +17,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .axes import set_major_tick
 from .figure_text import (AXIS_SIDES, AxisPin, TextStyle, _alive, _display_to_view, css_args,
-                          label_args, plain_text, rich_text, valid_element_key)
+                          label_args, plain_text, rich_text, valid_element_key, view_pin_key)
 from .fit_label import FIT_FIELDS, FitLabelState, valid_offset
+from .font_picker import FontPicker, figure_family, figure_qfont, html_font_family
 from .key_sequences import redo_sequences, undo_sequences
 
 #: How many appearance values one widget's history keeps, and how long a run of edits
@@ -147,6 +148,21 @@ class PlotAppearance:
         else:
             items[side] = pin
         return replace(self, axes=tuple(sorted(items.items())) or None)
+
+    def without_axis_pin(self, view: str, side: str, *, primary: str = "") -> "PlotAppearance":
+        """A copy with the range and major tick that :meth:`for_view` draws on ``side`` of
+        ``view`` taken off, so the axis frames its data again: the view's own key and, in
+        the ``primary`` view, the bare ``side`` an older project saved (the two keys
+        ``AppearanceTextHost.apply_axis`` moves a pin between). ``log`` stays: it is how
+        an axis is drawn, not what it frames."""
+        keys = [view_pin_key(view, side)]
+        if view == primary and keys[0] != side:
+            keys.append(side)
+        out = self
+        for key in keys:
+            out = out.with_axis_pin(key, replace(out.axis_pin(key), min=None, max=None,
+                                                 tick_major=None))
+        return out
 
     def for_view(self, view: str, *, primary: str = "") -> "PlotAppearance":
         """What ONE view of a multi-view window draws: the pins typed on it (``<view>.<side>``,
@@ -510,7 +526,7 @@ def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
         if after.style_only() == preset and before.style_only() != preset:
             return f"{name} preset"
     if not after.to_dict():
-        return "reset appearance"
+        return "reset figure"
     return f"{len(moved)} appearance changes"
 
 
@@ -659,6 +675,14 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
     outside -- a restore, a window blanked for an incoming project, a reset of everything
     -- calls :meth:`clear_history` after it.
 
+    ``multi_view_labels`` is for a window whose views share ONE title and one pair of axis labels
+    (Noise, Event waveforms, Comparison figures, Subpopulations): ``True``, or a few words for
+    what the typed words cover (Subpopulations passes ``"both figures"``). The Title, X label
+    and Y label captions say it (``Title (this view)``), as does the menu entry that adds a title
+    on the figure, and so do their tool tips: those words belong to what is on screen, and go
+    back to automatic when the figure comes to show something else (``gui.quantity_reset``).
+    :attr:`title_scope` holds the words, "" for a one-figure window.
+
     ``shortcuts`` binds the platform's Undo and Redo keys to that history, scoped to the
     widget's window. A host whose window already binds those keys passes False: the same
     key bound twice in one window is ambiguous, and Qt then fires NEITHER. The Plots window
@@ -673,22 +697,29 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
     still does not answer.
 
     ``reset_keeps`` (default: none) names the element keys whose text styles Reset
-    appearance leaves as they are: a page whose steps carry state stored elsewhere
+    figure leaves as they are: a page whose steps carry state stored elsewhere
     (Distribution summaries' legend names, kept in Source names and colors) passes them, so
     a Reset does not drop them as a step that changes nothing on screen.
+
+    The Reset figure button (``reset_button``) sits in this section until a page with a
+    toolbar takes it (:meth:`take_reset_button`); a window without one, the study figure
+    editor, keeps it here.
     """
 
     changed = QtCore.Signal(object)
 
     def __init__(self, state: PlotAppearance | None = None, parent=None, *,
                  include_colors=True, compact=False, include_markers=True,
-                 include_labels=True, include_legend=True, multi_view_labels=False,
-                 history=True, shortcuts=True,
+                 include_labels=True, include_legend=True,
+                 multi_view_labels: bool | str = False, history=True, shortcuts=True,
                  shortcut_parent: QtWidgets.QWidget | None = None,
                  reset_keeps: Callable[[str], bool] | None = None):
         super().__init__(parent)
         self._state = state or PlotAppearance()
         self._reset_keeps = reset_keeps
+        self._reset_taken = False       # see take_reset_button
+        #: The sentence the last quantity change put on the host's status bar ("" for none).
+        self._reset_said = ""
         self._loading = False
         #: How deep this widget is inside its own ``changed`` emission. A ``set_state``
         #: arriving then is the host answering the value it was just handed, not an
@@ -701,17 +732,25 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         layout.setVerticalSpacing(4)
         # TEXT FIRST (ux H2): the words on the figure are what people come here to change,
         # so Title, X label and Y label lead, above the preset and the font rows.
-        self._multi_view_labels = multi_view_labels
+        self._multi_view_labels = bool(multi_view_labels)
+        #: What the typed words cover in a window with several views: the Title box's caption
+        #: and the figure's "Add title" entry say it. "" in a window with one figure.
+        self.title_scope = ("" if not multi_view_labels else
+                            "this view" if multi_view_labels is True else str(multi_view_labels))
         text_rows = []
         for key, caption in (("title", "Title"), ("x_label", "X label"), ("y_label", "Y label")):
             edit = QtWidgets.QLineEdit()
             edit.setPlaceholderText(self._automatic_placeholder(""))
             edit.setToolTip("Text only: axis scaling and numerical values stay unchanged. "
                             "Typed text is shown as typed; _{…} and ^{…} make sub- and "
-                            "superscripts. Include the scientific unit in a custom axis label.")
+                            "superscripts. Include the scientific unit in a custom axis label."
+                            + (" Typed words go back to automatic when the figure comes to show "
+                               "something else (another view, metric or embedding); the status "
+                               "line says so and Undo brings them back." if self.title_scope
+                               else ""))
             edit.textEdited.connect(lambda text, field=key: self._edit(field, text))
             setattr(self, key, edit)
-            label = QtWidgets.QLabel(caption + (" (all views)" if multi_view_labels else ""))
+            label = QtWidgets.QLabel(caption + (f" ({self.title_scope})" if self.title_scope else ""))
             label.setBuddy(edit)
             label.setVisible(include_labels)
             edit.setVisible(include_labels)
@@ -724,12 +763,16 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self.preset.addItems(["Choose appearance preset…", *_BUILTIN_PRESETS])
         self.preset.setToolTip("Appearance only: never changes data, fitting, axis scales, or analysis settings.")
         self.preset.activated.connect(self._apply_preset)
-        self.reset_button = QtWidgets.QPushButton("Reset appearance")
-        self.reset_button.setToolTip("Remove appearance overrides; keep all data and analytical settings.")
+        self.reset_button = QtWidgets.QPushButton("Reset figure")
+        self.reset_button.setAccessibleName("Reset figure")
+        self.reset_button.setToolTip(
+            "Put the text you typed on the figure (title, axis labels, fit-label wording, "
+            "caption) and its look back to their defaults, as one Undo step. Data, fits and "
+            "analysis settings are kept.")
         self.reset_button.clicked.connect(self._reset)
         # Undo and Redo sit beside Reset, the only other buttons here that move the whole
         # appearance. Without a history the cell is the bare button, as it always was.
-        self.undo_button = self.redo_button = self._burst = None
+        self.undo_button = self.redo_button = self._burst = self._reset_row = None
         reset_cell = self.reset_button
         if self._history is not None:
             self.undo_button = QtWidgets.QPushButton("Undo")
@@ -750,6 +793,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             row_layout.setContentsMargins(0, 0, 0, 0)
             for button in (self.reset_button, self.undo_button, self.redo_button):
                 row_layout.addWidget(button)
+            self._reset_row = row_layout
             self._burst = QtCore.QTimer(self)
             self._burst.setSingleShot(True)
             self._burst.setInterval(APPEARANCE_COALESCE_MS)
@@ -779,14 +823,10 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         wide = reset_cell is not self.reset_button
         layout.addWidget(self.preset, top, 0, 1, 2 if wide else 3)
         layout.addWidget(reset_cell, top, 2 if wide else 3, 1, 2 if wide else 1)
-        self.font_family = QtWidgets.QComboBox()
-        self.font_family.setEditable(True)
-        self.font_family.addItems(["Default", *QtGui.QFontDatabase.families()])
-        self.font_family.setMaxVisibleItems(12)
-        self.font_family.setMinimumContentsLength(12)
-        self.font_family.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.font_family.currentTextChanged.connect(
-            lambda text: self._edit("font_family", None if text == "Default" else text))
+        # The short list (Arial first, the unset default) and Other font…; a picked row
+        # reports once, and showing a stored value (``_write``) never does.
+        self.font_family = FontPicker()
+        self.font_family.changed.connect(lambda family: self._edit("font_family", family))
         self._add_control(layout, top + 1, 0, "Font", self.font_family)
         self.background = QtWidgets.QComboBox()
         # "Automatic", the one word for "not overridden" (ux L3), as the label boxes say it.
@@ -912,6 +952,14 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
     # -- the fit label section --------------------------------------------------------------
     _FIT_FIELD_WORDS = {"equation": "Equation", "r2": "R²", "n": "n", "ci": "CI",
                         "bic": "BIC", "ks": "KS"}
+    _FIT_FIELD_TIPS = {
+        "r2": "The fit's R². Ticked, a fit whose R² is undefined or has no residual degrees of "
+              "freedom says so here instead of printing a bare number. Unticked, the "
+              "automatic text makes no claim about R² and Details still says; wording of your "
+              "own that names {r2} prints it either way.",
+        "ks": "The numerical Kolmogorov–Smirnov statistic of a histogram fit (Distributions). "
+              "The verdict and warnings stay in Details and in figure-bundle provenance, not "
+              "on the plot or in Save image artwork. This does not change the fit."}
 
     def _build_fit_label_group(self) -> QtWidgets.QGroupBox:
         """Show, the numbers, Text (template), Size, Colour, Position, In legend instead.
@@ -923,14 +971,20 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self.fit_label_show = QtWidgets.QCheckBox("Show the fit on the plot")
         self.fit_label_show.toggled.connect(lambda on: self._edit_fit_label(visible=on))
         form.addRow(self.fit_label_show)
-        row = QtWidgets.QHBoxLayout()
+        # THREE TO A LINE: six boxes on one line were 460 px wide, so in Distributions' 344 px
+        # column BIC and KS sat off its right edge -- and with Fit values on plot gone this row
+        # is the only way to tick them.
+        row = QtWidgets.QGridLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         self.fit_label_fields: dict[str, QtWidgets.QCheckBox] = {}
-        for name in FIT_FIELDS:
+        for index, name in enumerate(FIT_FIELDS):
             box = QtWidgets.QCheckBox(self._FIT_FIELD_WORDS[name])
+            box.setToolTip(self._FIT_FIELD_TIPS.get(name, ""))
             box.toggled.connect(lambda _on: self._edit_fit_label(fields=tuple(
                 f for f in FIT_FIELDS if self.fit_label_fields[f].isChecked())))
             self.fit_label_fields[name] = box
-            row.addWidget(box)
+            row.addWidget(box, index // 3, index % 3)
+        row.setColumnStretch(3, 1)       # in a wide strip the spare width goes here, not between boxes
         form.addRow("Numbers", row)
         self.fit_label_template = QtWidgets.QLineEdit()
         self.fit_label_template.setPlaceholderText("Automatic: the numbers ticked above")
@@ -1015,7 +1069,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self._state = state
         self._loading = True
         try:
-            self.font_family.setCurrentText(self._state.font_family or "Default")
+            self.font_family.set_value(self._state.font_family)
             for key in ("title_size", "axis_size", "tick_size", "line_width", "marker_size"):
                 getattr(self, key).setValue(getattr(self._state, key) or 0)
             for key in ("title", "x_label", "y_label"):
@@ -1119,6 +1173,37 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self._apply(state if isinstance(state, PlotAppearance)
                     else PlotAppearance.from_mapping(state))
 
+    def reset_typed_words(self, shows: str, status: Any = None,
+                          only: Sequence[str] | None = None,
+                          axes: Sequence[Sequence[str]] = (), primary: str = "") -> str:
+        """The figure's quantity changed: its typed title, axis labels and fit-label wording
+        go back to automatic, and so does the pin of each axis in ``axes``, as ONE step of this
+        history. Returns the status sentence, which names only what was cleared ("Title, Y
+        label and Y range reset: the plot now shows ``shows``.").
+
+        The look stays (``gui.quantity_reset`` has the rule). A gesture like a preset: announced
+        through ``changed`` after the host has answered, so the host redraws as for any edit,
+        and Undo brings the words and the pins back. Nothing typed and no pin on ``axes``
+        means no step, no ``changed`` and ``""``.
+
+        ``axes`` are the axes whose quantity moved, ``(view, side)`` or ``(view, side, name)``
+        (``quantity_reset.pinned_axes``), and ``primary`` the window's primary view, whose
+        pin a bare side key may be. ``status`` is the host's status bar when the sentence is
+        read there: it is shown for ten seconds, and a change that resets nothing takes the
+        earlier sentence off it (``quantity_reset.announce``). ``only`` limits the words, e.g.
+        ``("fit_label",)``; ``()`` is no word at all, a pin alone.
+        """
+        from .quantity_reset import announce, cleared_pins, cleared_words, reset_sentence
+
+        state, names = cleared_words(self._state, only)
+        state, pins = cleared_pins(state, axes, primary)
+        if names or pins:
+            self._apply(state)
+        said = reset_sentence(names + pins, shows)
+        if status is not None:
+            self._reset_said = announce(status, said, self._reset_said)
+        return said
+
     def delete_user_preset(self, name: str) -> bool:
         values = self.user_preset_states()
         if name not in values:
@@ -1206,6 +1291,18 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
                 if self._reset_keeps(key):
                     state = state.with_text_style(key, style)
         self._apply(state)
+
+    def take_reset_button(self) -> QtWidgets.QPushButton:
+        """Hand the Reset figure button to the page's toolbar: the SAME button, out of this
+        section, still clicking :meth:`_reset` and still named by ``reset_button``. Undo and
+        Redo stay, side by side where Reset was. Taking it again returns it where it is."""
+        button = self.reset_button
+        if not self._reset_taken:
+            self._reset_taken = True
+            button.setParent(None)      # its layout lets go of a child that leaves
+            if self._reset_row is not None:
+                self._reset_row.addStretch(1)
+        return button
 
     def _apply_preset(self, index):
         presets = tuple(_BUILTIN_PRESETS.values())
@@ -1408,6 +1505,7 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
     """
     defaults = getattr(plot, "_nanoscope_appearance_defaults", None)
     if defaults is None and not state.to_dict():
+        _draw_in_figure_family(plot, None)
         return
     if defaults is None:
         defaults = {
@@ -1447,8 +1545,7 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             axis.labelText = rich_text(override) if override else original["text"]
             original["applied_text"] = axis.labelText
             label_style = dict(original["label"])
-            if state.font_family:
-                label_style["font-family"] = state.font_family
+            label_style["font-family"] = html_font_family(state.font_family)     # unset: Arial
             if state.axis_size is not None:
                 label_style["font-size"] = f"{state.axis_size:g}pt"
             if foreground:
@@ -1456,21 +1553,18 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             # Element override, then the figure-wide fields above, then the window's own.
             label_style.update(css_args(elements.get(f"axis.{side}.label", TextStyle())))
             ticks = elements.get(f"axis.{side}.ticks", TextStyle())
-            font = original["font"]
-            if state.font_family or state.tick_size is not None or not ticks.is_default():
-                font = QtGui.QFont(font or QtWidgets.QApplication.font())
-                if state.font_family:
-                    font.setFamily(state.font_family)
-                if state.tick_size is not None:
-                    font.setPointSizeF(state.tick_size)
-                if ticks.family:
-                    font.setFamily(ticks.family)
-                if ticks.size_pt:
-                    font.setPointSizeF(ticks.size_pt)
-                if ticks.bold is not None:
-                    font.setBold(ticks.bold)
-                if ticks.italic is not None:
-                    font.setItalic(ticks.italic)
+            # Always a font of our own, in the figure family (Arial when unset, or when the
+            # family is not installed: its substitute), never the application font.
+            font = figure_qfont(ticks.family or state.font_family,
+                                original["font"] or QtWidgets.QApplication.font())
+            if state.tick_size is not None:
+                font.setPointSizeF(state.tick_size)
+            if ticks.size_pt:
+                font.setPointSizeF(ticks.size_pt)
+            if ticks.bold is not None:
+                font.setBold(ticks.bold)
+            if ticks.italic is not None:
+                font.setItalic(ticks.italic)
             axis.setStyle(tickFont=font)
             axis.setPen(foreground or original["pen"])
             axis.setTextPen(ticks.color or foreground or original["text_pen"])
@@ -1492,8 +1586,7 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             # title. Keep that original color available for palette reset.
             defaults["title_opts"]["color"] = title.opts.get("color")
         title.opts = dict(defaults["title_opts"])
-        if state.font_family:
-            title.opts["family"] = state.font_family
+        title.opts["family"] = html_font_family(state.font_family)               # unset: Arial
         if state.title_size is not None:
             title.opts["size"] = f"{state.title_size:g}pt"
         if foreground:
@@ -1533,7 +1626,8 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             # Axis text already follows the canvas theme; legend text must do
             # the same or a white publication preset leaves pale labels on white.
             legend.setLabelTextColor(foreground or original["color"] or pg.getConfigOption("foreground"))
-            _style_legend_entries(legend, elements)
+            apply_legend_family(legend, state.font_family)
+            _style_legend_entries(legend, elements, state.font_family)
     finally:
         view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
         pins = _apply_axis_pins(plot, state, auto)
@@ -1542,9 +1636,62 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
                 view.enableAutoRange(axis=axis, enable=enabled)
 
 
-def _style_legend_entries(legend, elements: Mapping[str, TextStyle]) -> None:
+def apply_legend_family(legend, family: str | None) -> None:
+    """Draw every legend row in the figure family (Arial when unset). The row's own text is
+    not touched: pyqtgraph's ``LegendItem`` has no family option, so it goes on the label."""
+    css = html_font_family(family)
+    changed = False
+    for _sample, label in list(legend.items):
+        if label.opts.get("family") != css:
+            label.opts["family"] = css
+            label.setText(label.text)
+            changed = True
+    if changed:
+        # The legend's own size is only recomputed when a row is added or removed, from the
+        # rows' geometry, which the layout only refreshes when it is activated. A row whose
+        # text just changed width would leave both stale, and a legend anchored by its far
+        # edge (Distributions keeps a dragged legend that way) would move by the difference
+        # at the next draw.
+        legend.layout.activate()
+        legend.updateSize()
+
+
+def apply_tick_family(axis: pg.AxisItem, family: str | None) -> None:
+    """Draw an axis' tick numbers in the figure family (Arial when unset), at the size they
+    have. For the axes ``apply_plot_appearance`` does not reach, a colour bar's."""
+    font = axis.style.get("tickFont")
+    if font is None or font.family() != figure_family(family):
+        axis.setStyle(tickFont=figure_qfont(family, font or QtWidgets.QApplication.font()))
+
+
+def _draw_in_figure_family(plot: pg.PlotItem, family: str | None) -> None:
+    """An untouched figure keeps its original look in everything but its text family: that
+    is the figure default, Arial, and not the application font a journal does not have.
+
+    Only what differs is written, so the redraw that follows every analysis costs a
+    comparison per element, and nothing is recorded as the figure's original: the first
+    real appearance step captures this, Arial, as what Reset goes back to."""
+    css = html_font_family(family)
+    title = plot.titleLabel
+    if title.opts.get("family") != css:
+        title.opts["family"] = css
+        title.setText(title.text)
+    for side in ("bottom", "left", "top", "right"):
+        axis = plot.getAxis(side)
+        if axis.labelStyle.get("font-family") != css:
+            axis.labelStyle["font-family"] = css
+            axis._updateLabel()
+        apply_tick_family(axis, family)
+    legend = getattr(plot, "legend", None)
+    if legend is not None:
+        apply_legend_family(legend, family)
+
+
+def _style_legend_entries(legend, elements: Mapping[str, TextStyle],
+                          family: str | None = None) -> None:
     """Each legend row's rename and style (``legend.entry.<name>``), escaped like any typed
-    text. The window's own name is remembered per row, so Reset name puts it back."""
+    text. The window's own name is remembered per row, so Reset name puts it back. A row's
+    own family wins; without one it is the figure's (``family``, Arial when unset)."""
     for _sample, label in list(legend.items):
         if getattr(label, "_nanoscope_applied_text", None) != label.text:
             label._nanoscope_auto_text = label.text      # the window (re)named it
@@ -1557,6 +1704,7 @@ def _style_legend_entries(legend, elements: Mapping[str, TextStyle]) -> None:
         # LabelItem.setText MERGES into its options, so a style taken off must be taken out.
         for key in ("family", "bold", "italic"):
             label.opts.pop(key, None)
+        label.opts["family"] = html_font_family(family)
         label.opts["justify"] = "left"
         label.opts["color"] = legend.opts.get("labelTextColor")
         label.opts["size"] = legend.opts.get("labelTextSize", "9pt")

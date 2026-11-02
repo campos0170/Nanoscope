@@ -289,6 +289,7 @@ class IVWindow(QtWidgets.QMainWindow):
                             "Appearance": (self._appearance_section,), "Export": (self._export_section,)},
             actions=(("Analyze / refresh", self._refresh_from_user),),
             exports=exports)
+        self._workflow.adopt_reset_figure(self._appearance_widget)
         # View only (plot_interaction): Reset view, zoom history, the app right-click menu
         # in place of pyqtgraph's, and the pointer readout on the status line.
         self._readout = window_readout(self)
@@ -345,7 +346,8 @@ class IVWindow(QtWidgets.QMainWindow):
             return                      # a draw during construction, before the label
         # Never In legend: the legend row does not carry the numbers or the dof tag here.
         fit_label.apply_state(replace(self._appearance.fit_label_state(), in_legend=False),
-                              self._fit_readouts, self._appearance.text_style("annotation.fit"))
+                              self._fit_readouts, self._appearance.text_style("annotation.fit"),
+                              self._appearance.font_family)
         controller = figure_text_for(self._plot)
         if controller is not None:
             controller.refresh()        # the legend may be new since the last draw

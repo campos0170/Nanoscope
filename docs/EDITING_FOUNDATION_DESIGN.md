@@ -239,7 +239,7 @@ The other eight plot windows all use one appearance widget, `PlotAppearanceWidge
 ### 4.2 Each plot window keeps its own
 
 - **`PlotAppearanceWidget` gains an opt-in history** of its `PlotAppearance` values:
-  - Undo and Redo buttons beside Reset appearance;
+  - Undo and Redo buttons beside Reset figure (a page toolbar holds that one on pages that have it);
   - ⌘Z and ⇧⌘Z, scoped to its own window and deduped;
   - 200 steps, with the same 700 ms merge for spin-box typing.
 - **Every change is a step:** an edit, a preset, a saved appearance and Reset (`_edit`, `_apply_preset`, `apply_user_preset` and `_reset`, `plot_appearance.py:290-366`). `set_state`, used for a restore or a recipe load, adopts the new value without a step.
@@ -619,18 +619,23 @@ Each item says what the build does where this design says something else, or not
 
 **Plot history (4)**
 
-- **⌘Z and ⇧⌘Z are live while the appearance widget is on screen**, which in the Analysis Explorer is
-  while the page's Section shows Appearance. Parenting the shortcuts higher brought back ambiguity
-  between pages. The Plots window turns the widget's history off and keeps its own stack.
+- **⌘Z and ⇧⌘Z answer whatever the page's Section shows** on seven of the Explorer's eight pages,
+  which hand their own root to the widget (`shortcut_parent`); on the widget itself they would go
+  quiet whenever the Appearance section is folded away. Only the page in front answers: parenting
+  the shortcuts any higher brought back ambiguity between pages. The study figure editor, which has
+  no Sections, keeps them on the widget, so they answer while its Appearance controls are on
+  screen. The Plots window, the eighth page (Distributions), turns the widget's history off and
+  keeps its own stack.
 - **A refused undo moves nothing.** A host that puts back the state the undo was leaving, as Comparison
   figures does when the figure will not render, leaves the stack where it was, and `undo()` returns
   False.
 - **A step is named by its field** when one field moved ("title size 12 → 14 pt"), by the preset when
-  several land on one, and "reset appearance" or a count otherwise.
+  several land on one, and "reset figure" or a count otherwise.
 - **The history ends** in every host's restore door, and also in `StudyFigureWindow.reset_style` and
   `SubpopReportWindow.set_report(None)`.
-- **The widget is 13 px wider** in its non-compact layout, for the Undo and Redo buttons beside Reset
-  appearance; the compact layout keeps its width.
+- **The widget is 10 px wider** in its non-compact layout, for the Undo and Redo buttons beside
+  Reset figure (on a page with a toolbar that button sits there, and Undo and Redo stay in the
+  Appearance section); the compact layout keeps its width.
 - **Deleting asks** for protocols, saved ML presets and Plots templates; 3.8 named two of them. The ML
   prompt also says which default preset the tab falls back to. Deleting a name that is not in the
   user's own store changes nothing, where it used to drop the combo to "— manual —".

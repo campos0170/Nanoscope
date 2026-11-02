@@ -145,7 +145,7 @@ def test_typing_in_a_text_box_then_return_is_one_undo_step(qapp, qtbot, box):
     assert _depth(w) == back
 
 
-def test_fit_values_on_plot_still_adds_the_numbers_after_the_label_is_saved(qapp, qtbot):
+def test_the_numbers_row_still_adds_bic_after_the_label_is_saved(qapp, qtbot):
     w = _window(qtbot)
     w.set_plot_type("Histogram")
     w.set_histogram_column("dwell_s")
@@ -154,9 +154,10 @@ def test_fit_values_on_plot_still_adds_the_numbers_after_the_label_is_saved(qapp
         "annotation.fit", TextStyle(bold=True)))      # any Fit label edit saves the label
     assert w.config().style.fit_label
     assert "BIC" not in w._fit_label_item.plain_text()
-    w._fit_values_check.setChecked(True)
+    bic = w._appearance_widget.fit_label_fields["bic"]
+    bic.click()
     assert "BIC" in w._fit_label_item.plain_text()
-    w._fit_values_check.setChecked(False)
+    bic.click()
     assert "BIC" not in w._fit_label_item.plain_text()
 
 
@@ -240,7 +241,7 @@ def test_in_legend_instead_is_not_offered_where_the_legend_cannot_carry_the_numb
 def test_a_shared_axis_label_is_not_renamed_from_one_view(qapp, qtbot):
     """Noise's views share one X and one Y label: renaming the spectrogram's y label on the
     figure relabelled the PSD's 'PSD (pA²/Hz)' too. The label's text is renamed in
-    Appearance (all views); on a figure it offers Text style only, and Axis properties
+    Appearance (this view); on a figure it offers Text style only, and Axis properties
     shows it read-only with the reason."""
     from nanoscope.gui.psd_panel import PSDWindow
 

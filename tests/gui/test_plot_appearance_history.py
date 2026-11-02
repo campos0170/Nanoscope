@@ -278,9 +278,9 @@ def test_the_buttons_follow_the_stack_and_name_the_step(qtbot, monkeypatch):
     w.preset.activated.emit(1)
     assert w.undo_button.toolTip() == "Undo: Publication · light preset"
     w.reset_button.click()
-    assert w.undo_button.toolTip() == "Undo: reset appearance"
+    assert w.undo_button.toolTip() == "Undo: reset figure"
     w.undo_button.click()
-    assert w.redo_button.toolTip() == "Redo: reset appearance"
+    assert w.redo_button.toolTip() == "Redo: reset figure"
 
     # One field is named, whatever moved it: a size typed back to Default lands on no
     # override at all, and is still that size's step, not a reset nobody pressed.
