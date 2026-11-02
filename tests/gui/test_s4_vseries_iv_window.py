@@ -65,8 +65,10 @@ def _session(tmp_path, rungs) -> Session:
 
 
 def _title(w: IVWindow) -> str:
-    label = w.plot_item().titleLabel
-    return "" if label is None else str(label.text)
+    """What the PNG keeps of the fit: its fit label. A fit no longer becomes the title
+    (owner, 2026-11-01), so the dof tag and G ride in the label, and the title is empty."""
+    assert w.plot_item().titleLabel.text == "", WHERE
+    return w.fit_label_text()
 
 
 # ================================================================================================
@@ -141,7 +143,7 @@ def test_both_fitting_windows_say_the_same_thing_about_the_same_n(qapp, qtbot, t
     qtbot.addWidget(vdw)
     vdw.set_metric("median_dwell_s")
     vdw.set_fit("linear")
-    vd_title = str(vdw.plot_item().titleLabel.text)
+    vd_title = vdw.fit_label_text()
     assert "exact by construction" in vd_title, f"{vd_title} {WHERE}"
     assert "exact by construction" in _title(ivw), f"{_title(ivw)} {WHERE}"
 

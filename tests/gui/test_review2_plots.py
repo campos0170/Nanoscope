@@ -260,6 +260,10 @@ def test_a_hidden_title_has_no_row_in_the_composed_panel(qtbot):
     qtbot.wait(PAUSE_MS)
     assert w.appearance_state().get("title") == " " and _no_title_row(w._plot_widget), \
         "precondition"
+    # The I-V fit is in a fit label since 2026-11-01 (plotux G4), and a panel carrying one is
+    # composed as a frozen picture; hidden, the panel is redrawn from its model as before.
+    w._appearance_widget.fit_label_show.setChecked(False)
+    qtbot.wait(PAUSE_MS)
     clone = _clone(qtbot, _model(w._plot_widget.getPlotItem()))
     assert _no_title_row(clone)
 

@@ -898,7 +898,7 @@ def test_a_multi_source_fit_does_not_run_a_two_tau_title_off_the_plot(window):
 
     # A single source keeps its tau in the title, exactly as before.
     window.set_sources(["pore-a"])
-    assert "τ" in window.plot_item().titleLabel.text
+    assert "τ" in window._fit_label_item.plain_text()     # plotux G3: a fit's numbers are in the fit label, never the title
 
     # ...and a user's own title always wins.
     window.set_sources(["pore-a", "pore-b"])

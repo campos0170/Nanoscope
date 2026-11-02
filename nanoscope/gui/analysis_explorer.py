@@ -115,6 +115,8 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
             figure_row.addWidget(button)
         figure_row.addStretch(1)
         root.addLayout(figure_row)
+        self._refusal_route: str | None = None
+        root.addWidget(self._build_refusal_banner())
 
         self._tabs = QtWidgets.QTabWidget()
         self._tabs.setDocumentMode(True)
@@ -123,6 +125,10 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         self._tabs.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self._home = AnalysisHome(availability_provider=availability_provider)
         self._home.launchRequested.connect(self.launchRequested)
+        self._home.availabilityRefreshed.connect(self._sync_refusal)
+        # A double-click, Enter or Explain requirements on a tool that cannot open yet is
+        # refused by Home's own gate, so the owner's refusal branch never sees it.
+        self._home.launchRefused.connect(self.show_refusal)
         self._tabs.addTab(self._home, ANALYSIS_LABELS[PAGE_HOME])
         self._tabs.currentChanged.connect(self._on_tab_activated)
         root.addWidget(self._tabs, 1)
@@ -170,6 +176,60 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         row.addWidget(self._refresh_btn)
         self._set_status("NO DATA", "empty")
         return header
+
+    def _build_refusal_banner(self) -> QtWidgets.QWidget:
+        """Why a chosen tool did not open, said here rather than behind this window."""
+        self._refusal = QtWidgets.QFrame()
+        self._refusal.setObjectName("analysisExplorerRefusal")
+        self._refusal.setStyleSheet(
+            "#analysisExplorerRefusal { background:#382a16; border:1px solid #6e5126; "
+            "border-radius:6px; }")
+        row = QtWidgets.QHBoxLayout(self._refusal)
+        row.setContentsMargins(10, 6, 6, 6)
+        self._refusal_label = QtWidgets.QLabel()
+        self._refusal_label.setObjectName("analysisExplorerRefusalText")
+        self._refusal_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self._refusal_label.setWordWrap(True)
+        self._refusal_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._refusal_label.setStyleSheet("color:#ffca78;")
+        row.addWidget(self._refusal_label, 1)
+        dismiss = QtWidgets.QToolButton()
+        dismiss.setText("Dismiss")
+        dismiss.setAccessibleName("Dismiss this message")
+        dismiss.clicked.connect(self.clear_refusal)
+        row.addWidget(dismiss, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        self._refusal.hide()
+        return self._refusal
+
+    def show_refusal(self, route: str, reason: str) -> None:
+        """Say why ``route`` cannot open: a banner here, and Home showing its requirements.
+
+        The owner used to post the reason to the main window's status bar, behind this
+        window, so choosing an unavailable tool looked like nothing happening. Nothing is
+        constructed or run; Home only selects the entry, whose detail pane explains it.
+        """
+        if route in self._home.route_ids():
+            self._home.set_current_route(route)
+        self.show_home()
+        self._refusal_route = route
+        label = ANALYSIS_LABELS.get(route, "This tool")
+        self._refusal_label.setText(f"{label} cannot open yet. {reason}".strip())
+        self._refusal.show()
+
+    def refusal_text(self) -> str:
+        """The banner's sentence while it is shown, else ``""``."""
+        return self._refusal_label.text() if not self._refusal.isHidden() else ""
+
+    @QtCore.Slot()
+    def clear_refusal(self) -> None:
+        self._refusal_route = None
+        self._refusal.hide()
+
+    @QtCore.Slot()
+    def _sync_refusal(self) -> None:
+        # The refused tool became available (a recording opened): the sentence is stale.
+        if self._refusal_route is not None and self._home.availability(self._refusal_route)[0]:
+            self.clear_refusal()
 
     # -- pages -----------------------------------------------------------------------------
     def show_home(self) -> None:
@@ -337,6 +397,7 @@ class AnalysisExplorer(QtWidgets.QMainWindow):
         page = self._pages.get(page_id or "")
         if page is not None:
             page.setProperty("nanoscopeAnalysisExplorerClosing", False)
+            self.clear_refusal()     # it explained Home's selection, not this page
         if not self._programmatic_tab_change:
             activate = self._activators.get(page_id or "")
             if activate is not None:

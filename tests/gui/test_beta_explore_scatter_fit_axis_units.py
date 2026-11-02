@@ -60,7 +60,8 @@ def _scatter(window: PlotsWindow, df: pd.DataFrame, x: str, y: str, kind: str) -
 
 
 def _texts(window: PlotsWindow) -> tuple[str, str]:
-    return window.plot_item().titleLabel.text, window.details_text()
+    # plotux G3: a fit's numbers are in the fit label, never the title.
+    return window._fit_label_item.plain_text(), window.details_text()
 
 
 # ================================================================================================

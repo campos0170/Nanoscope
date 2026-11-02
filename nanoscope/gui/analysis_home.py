@@ -1,7 +1,7 @@
 """Read-only analysis catalog. Selecting an entry never constructs its analytical page."""
 from collections.abc import Callable
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from .analysis_catalog import ANALYSIS_ENTRIES, ENTRY_BY_ROUTE, STATUS_HELP
 
@@ -21,6 +21,10 @@ class _ToolList(QtWidgets.QListWidget):
 
 class AnalysisHome(QtWidgets.QWidget):
     launchRequested = QtCore.Signal(str)
+    #: Every gate was re-read (a recording opened, a detection was stored, …).
+    availabilityRefreshed = QtCore.Signal()
+    #: A launch the gate refused (route, reason): the Explorer says so in its banner.
+    launchRefused = QtCore.Signal(str, str)
 
     def __init__(self, parent=None, *, availability_provider: Callable[[str], tuple[bool, str]] | None = None):
         super().__init__(parent)
@@ -123,15 +127,27 @@ class AnalysisHome(QtWidgets.QWidget):
 
     def refresh_availability(self):
         """Only call the supplied read-only predicates, never page factories or refreshers."""
+        dim = self._list.palette().brush(QtGui.QPalette.ColorGroup.Disabled,
+                                         QtGui.QPalette.ColorRole.Text)
         for route, item in self._items.items():
             available, reason = self._availability_for(route)
             self._gates[route] = (available, reason)
             entry = ENTRY_BY_ROUTE[route]
-            item.setToolTip(f"{entry.description}\n\nInputs: {entry.inputs}\n\n"
-                            f"{'Available' if available else 'Needs input'}: {reason}")
+            # Greyed, not disabled: a disabled row cannot be selected, and the detail pane
+            # beside the list is where its requirements are explained. The reason leads the
+            # tooltip, so hovering a grey row says what it is waiting for.
+            item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, None if available else dim)
+            item.setToolTip(f"{entry.description}\n\nInputs: {entry.inputs}\n\nAvailable: {reason}"
+                            if available else
+                            f"Needs input: {reason}\n\n{entry.description}\n\nInputs: {entry.inputs}")
             item.setData(QtCore.Qt.ItemDataRole.AccessibleTextRole,
                          f"{entry.label}. {'Available' if available else 'Needs input'}. {reason}")
         self._show_current()
+        self.availabilityRefreshed.emit()
+
+    def availability(self, route):
+        """The gate as last read for ``route``: ``(available, reason)``."""
+        return self._gates.get(route, (False, ""))
 
     def _show_current(self, *_args):
         route = self.current_route()
@@ -179,3 +195,4 @@ class AnalysisHome(QtWidgets.QWidget):
             self.launchRequested.emit(route)
         else:
             self._availability.setFocus()
+            self.launchRefused.emit(route, reason)

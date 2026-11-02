@@ -112,7 +112,8 @@ def test_scatter_flat_response_explains_undefined_r2(qapp, qtbot):
     w = _scatter_window(qtbot, _df(np.linspace(1.0, 10.0, 40), np.full(40, 5.0)))
     w.set_scatter_fit("linear")
     text = w.details_text()
-    title = w.plot_item().titleLabel.text
+    # plotux G3: the figure says it in the fit label (a fit never touches the title).
+    title = w._fit_label_item.plain_text()
     for surface in (text, title):
         assert "R² = nan" not in surface, surface
         assert "R² undefined (y does not vary)" in surface, surface
@@ -185,7 +186,7 @@ def test_vdep_identical_rates_explain_undefined_r2(qapp, qtbot):
     assert "n = 2 recording(s)" in good, good
     # The title carries the same honest verdict in its short form (its wrap
     # budget is real), not a bare nan; the Goodness line above holds the cause.
-    title = w._plot.titleLabel.text
+    title = w.fit_label_text()
     assert "R² = nan" not in title, title
     assert "R² undefined" in title, title
 

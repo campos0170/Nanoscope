@@ -108,8 +108,10 @@ def test_iv_window_draws_scatter_and_fit_line(ohmic_window):
     assert isinstance(w._fit_item, pg.PlotDataItem)
     items = list(w.plot_item().listDataItems())
     assert w._scatter_item in items and w._fit_item in items
-    # The conductance is announced on the plot title, the headline and the details.
-    assert "nS" in w.plot_item().titleLabel.text
+    # The conductance is announced on the plot's fit label (never the title, owner
+    # 2026-11-01), the headline and the details.
+    assert "nS" in w.fit_label_text()
+    assert w.plot_item().titleLabel.text == ""
     assert "nS" in w._headline.text()
     assert "Conductance" in w.details_text()
 

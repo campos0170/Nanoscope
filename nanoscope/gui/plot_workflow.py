@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 
 SECTIONS = ("Data", "Analysis", "Appearance", "Export")
@@ -26,10 +26,24 @@ class PlotWorkflowBar(QtWidgets.QWidget):
         self.sections = QtWidgets.QComboBox()
         self.sections.addItems(SECTIONS)
         self.sections.setAccessibleName("Plot control section")
-        self.sections.setToolTip("Data → Analysis → Appearance → Export. Changing section only "
-                                 "shows controls; it never analyzes or changes your data.")
+        first, last = (QtGui.QKeySequence(f"Ctrl+{n}").toString(
+            QtGui.QKeySequence.SequenceFormat.NativeText) for n in (1, len(SECTIONS)))
+        self.sections.setToolTip(f"Data → Analysis → Appearance → Export ({first}–{last}). "
+                                 "Changing section only shows controls; it never analyzes or "
+                                 "changes your data.")
         self.sections.currentTextChanged.connect(self._show_section)
         layout.addWidget(self.sections)
+        # Ctrl+1–4 (⌘1–4 on macOS) choose a section as the combo does. Window-wide, yet
+        # only the page in front answers: a shortcut on a hidden widget never matches, and
+        # the Explorer hides every other page's bar with its tab. Nothing else in the
+        # Explorer or a page window binds these keys (Signal Conditioning's Ctrl+1–3 live
+        # on its own widget, in another window); Ctrl+0 stays the main window's Reset.
+        self.section_shortcuts: list[QtGui.QShortcut] = []
+        for number, name in enumerate(SECTIONS, 1):
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(f"Ctrl+{number}"), self)
+            shortcut.setContext(QtCore.Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(lambda name=name: self.set_section(name))
+            self.section_shortcuts.append(shortcut)
         layout.addStretch(1)
         self.primary_actions: list[QtWidgets.QPushButton] = []
         for title, callback in actions:

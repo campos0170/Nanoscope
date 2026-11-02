@@ -13,13 +13,24 @@ focus:
 ``Shift+D``           add, then go to the next window
 ``G`` / ``Shift+G``   next / previous window
 ``X``                 discard the mask
-``E``                 draw mode: a plain left-drag draws a span instead of box-zooming
+``E``                 Annotate mode: a drag across an event (or a double-click on it) adds it
 ====================  ==============================================================
 
 Return and Enter add like ``D``, Shift+Return like Shift+``D``, Esc cancels a draw in progress
 and otherwise discards the mask. Those aliases act only when the trace got focus from a click
 or the pointer arriving (``MouseFocusReason``): the window parks focus on the trace when a dock
 closes, and a habitual Return or Esc after that must not add or discard.
+
+ANNOTATE MODE is draw mode whose gesture also ADDS: a plain left-drag draws a span, both edges
+are fitted on release, and when both fit (and the span holds one event, and Shift was not held
+at release) the event is added at once, one Edit ▸ Undo step; a double-click catches the event
+there and adds it the same way. Anything short of that leaves the span on screen with the
+sentence that says what it needs, so pure noise never becomes a row. The add runs AFTER the
+scene has finished with the release (a persistent zero-interval timer), never inside it. The
+mode is not remembered between launches.
+
+A right click on the target pane opens the TRACE MENU (Add event here, Add the selection,
+Discard, Delete this hand-made event, Annotate), each with its key shown beside it.
 
 This object owns the keys, the half-built mask's record (which edge came from a fit and which
 was placed by hand), and the label; everything about the mechanics of a drag or the pointer is
@@ -33,8 +44,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from PySide6 import QtCore, QtGui
+import numpy as np
+from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..analysis.edge_fit import REASON_FAR
 from ..analysis.manual_events import EdgeRecord, join_edge_fits
 
 __all__ = ["TraceKeyController"]
@@ -43,6 +56,9 @@ __all__ = ["TraceKeyController"]
 _CONFIRM_WINDOW_S = 10.0
 #: A one-sided press with no mask gives the unknown edge this many pixels of room to be fitted in.
 _PROVISIONAL_PX = 40
+#: A return to baseline inside a fitted span must last at least this many samples (or twice the
+#: open-pore autocorrelation time, if longer) before the span counts as holding two events.
+_GAP_MIN_SAMPLES = 4
 
 
 @dataclass
@@ -60,7 +76,12 @@ class _Edge:
 
 
 class TraceKeyController(QtCore.QObject):
-    """Wires the trace keys, draw mode and the pointer gestures to the add door."""
+    """Wires the trace keys, Annotate mode, the trace menu and the pointer gestures to the add
+    door."""
+
+    #: Annotate mode went on or off, whoever switched it (a door, or the view dropping draw
+    #: mode). The window's action, and every button showing it, follows this.
+    annotateChanged = QtCore.Signal(bool)
 
     def __init__(self, window) -> None:
         super().__init__(window)
@@ -68,6 +89,18 @@ class TraceKeyController(QtCore.QObject):
         self._tv = window._trace_view
         self._start = _Edge()
         self._end = _Edge()
+        #: Annotate mode: draw mode whose release (or double-click catch) ADDS. Dropped whenever
+        #: draw mode goes off, whoever turns it off (the view drops it with its target pane).
+        self._annotate = False
+        #: The add a gesture asked for, ``(target, bounds)``, until the timer below runs it.
+        self._pending_add: tuple | None = None
+        self._add_timer = QtCore.QTimer(self)
+        self._add_timer.setSingleShot(True)
+        self._add_timer.setInterval(0)
+        self._add_timer.timeout.connect(self._run_pending_add)
+        #: The trace menu: one per window, repopulated on each open, never ``exec``'d.
+        self._menu = QtWidgets.QMenu(self._tv)
+        self._menu.setObjectName("traceContextMenu")
         #: The latest fit's record: the shared parameters of a ``fit_json`` merged from two.
         self._fit_json: str | None = None
         self._target: tuple[str, int] | None = None
@@ -83,11 +116,12 @@ class TraceKeyController(QtCore.QObject):
         tv = self._tv
         tv.sigDrawReleased.connect(self._on_draw_released)
         tv.sigCatchRequested.connect(self._on_catch_requested)
+        tv.sigContextRequested.connect(self._on_context_requested)
         tv.sigDrawRefused.connect(self._say)
         tv.sigMeasureCleared.connect(self._reset)
         tv.sigMeasureFinished.connect(self._on_mask_settled)
         tv.sigMeasureActiveChanged.connect(self._on_measure_active_changed)
-        tv.sigDrawModeChanged.connect(lambda _on: self.refresh_label())
+        tv.sigDrawModeChanged.connect(self._on_draw_mode_changed)
         self._label_timer = QtCore.QTimer(self)
         self._label_timer.setSingleShot(True)
         self._label_timer.setInterval(120)
@@ -115,7 +149,7 @@ class TraceKeyController(QtCore.QObject):
         add("G", lambda: self.step_window(+1), repeat=True)
         add("Shift+G", lambda: self.step_window(-1), repeat=True)
         add("X", self.discard)
-        add("E", self.toggle_draw_mode)
+        add("E", self.toggle_annotate)
         # Return and the keypad's Enter are different keys to Qt; each needs its own sequence.
         for key in ("Return", "Enter"):
             add(key, self.add, alias=True)
@@ -261,15 +295,16 @@ class TraceKeyController(QtCore.QObject):
         return None if b is None else (int(b[0]), int(b[1]))
 
     # -- the keys ---------------------------------------------------------------------------------
-    def catch(self, *, at: tuple[str, int, float, float] | None = None) -> None:
-        """``C``: find the event under the pointer, fit both edges, show the mask."""
+    def catch(self, *, at: tuple[str, int, float, float] | None = None) -> bool:
+        """``C``: find the event under the pointer, fit both edges, show the mask. True when a
+        mask was caught (fitted or not); False when the catch was refused, and said why."""
         target = self._ensure_measure()
         if target is None:
-            return
+            return False
         ps = at if at is not None else self._tv.pointer_sample()
         if ps is None or (ps[0], ps[1]) != target:
             self._say("Point at the recording trace, then press C.")
-            return
+            return False
         _doc, _ch, sample, px = ps
         n = self._sample_count(target)
         view_lo, view_hi = self._visible_samples(target, n)
@@ -277,10 +312,10 @@ class TraceKeyController(QtCore.QObject):
             target[0], target[1], sample, px_samples=px, view_lo=view_lo, view_hi=view_hi)
         if catch is None:
             self._say(why)
-            return
+            return False
         if not catch.ok:
             self._say(catch.reason)
-            return
+            return False
         fit = catch.fit
         s_fit = fit is not None and fit.start.fitted
         e_fit = fit is not None and fit.end.fitted
@@ -302,6 +337,7 @@ class TraceKeyController(QtCore.QObject):
                       f"Shift+{'S' if which == 'start' else 'F'} to set it exactly, or D twice to add it "
                       "as placed.")
         self.refresh_label()
+        return True
 
     @staticmethod
     def _reason(fit, which: str) -> str:
@@ -394,7 +430,7 @@ class TraceKeyController(QtCore.QObject):
             return
         bounds = self._bounds()
         if bounds is None:
-            self._say("No mask: press C over an event, or drag in draw mode (E).")
+            self._say("No mask: press C over an event, or drag in Annotate mode (E).")
             return
         # The table's refusal first, as the Measure tab's preview gives it: no edge to set and no
         # second press is asked for a row the table on screen cannot take.
@@ -492,27 +528,158 @@ class TraceKeyController(QtCore.QObject):
             return
         self.discard()
 
-    def toggle_draw_mode(self) -> None:
-        """``E``: draw mode on or off. On needs Measure; it turns Measure on without a mask."""
-        self.set_draw_mode(not self._tv.draw_mode())
-
     def set_draw_mode(self, on: bool) -> None:
-        """Draw mode on or off (the key's and the menu item's one door)."""
+        """Plain draw mode on or off: a drag draws and fits a span, and nothing is added. On
+        needs Measure; it turns Measure on without a mask. Annotate mode is built on it."""
         on = bool(on)
         if on and not self._tv.draw_mode() and self._ensure_measure() is None:
             return
         self._tv.set_draw_mode(on)
         self.refresh_label()
 
+    # -- Annotate mode ----------------------------------------------------------------------------
+    def annotate(self) -> bool:
+        """Whether Annotate mode is on: draw mode on, and its gestures add."""
+        return bool(self._annotate and self._tv.draw_mode())
+
+    def set_annotate(self, on: bool) -> None:
+        """Annotate mode on (draw mode on, Measure on with no mask, and a drag or double-click
+        that fits an event adds it) or off (draw mode off too). The one door of ``E``, View ▸
+        Annotate, the two Annotate buttons and the trace menu's item."""
+        on = bool(on)
+        if on:
+            self.set_draw_mode(True)
+            self._annotate = self._tv.draw_mode()
+        else:
+            self._annotate = False
+            self.set_draw_mode(False)
+        self._tv.set_annotate_pointer(self._annotate)
+        self.refresh_label()
+        self.annotateChanged.emit(self.annotate())
+
+    def toggle_annotate(self) -> None:
+        """``E``."""
+        self.set_annotate(not self.annotate())
+
+    def _on_draw_mode_changed(self, on: bool) -> None:
+        if not on and self._annotate:
+            # The view dropped draw mode (Measure went off, or its pane went away): the mode
+            # goes with it, and says so.
+            self._annotate = False
+            self._tv.set_annotate_pointer(False)
+            self.annotateChanged.emit(False)
+        self.refresh_label()
+
+    def _schedule_add(self, target: tuple[str, int]) -> None:
+        """Add the mask a gesture left, AFTER the scene has finished handling that gesture: the
+        add re-feeds the tables and redraws the overlays, which must not run inside the
+        release. The timer is created once; its slot adds only the mask this gesture left."""
+        bounds = self._bounds()
+        if bounds is None:
+            return
+        self._pending_add = (target, bounds)
+        self._add_timer.start()
+
+    def _run_pending_add(self) -> None:
+        asked, self._pending_add = self._pending_add, None
+        if asked is None or (self._current(), self._bounds()) != asked:
+            return                       # the mask moved, or went, in between: nothing is added
+        self.add()
+
+    def _gesture_adds(self, target: tuple[str, int], *, check_one_event: bool) -> bool:
+        """In Annotate mode, schedule the add of a mask whose two edges are fitted, unless Shift
+        was held at the release or the span holds more than one event. True when scheduled;
+        otherwise the sentence for the mask that stays has been said, or is the caller's."""
+        if not self.annotate() or self._start.source != "fit:step" \
+                or self._end.source != "fit:step":
+            return False
+        if self._tv.release_modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            self._say("Kept for adjusting: drag an edge or its tab, then D or Return adds it.")
+            return False
+        bounds = self._bounds()
+        if bounds is None:
+            return False
+        if check_one_event and self._holds_more_than_one_event(target, *bounds):
+            self._say("This span holds more than one event: drag each one, or press D to add "
+                      "it as one.")
+            return False
+        self._schedule_add(target)
+        return True
+
+    def _holds_more_than_one_event(self, target: tuple[str, int], start: int, end: int) -> bool:
+        """Does the fitted span ``[start, end)`` go back to baseline inside, for at least
+        :data:`_GAP_MIN_SAMPLES` samples (or two open-pore autocorrelation times)? Then a drag
+        caught two events and fitted the first one's start and the last one's finish. On the
+        target table's own signal, polarity, baseline and noise; "no" when that basis is
+        missing, so the check never stops an add it cannot judge. A sub-level of one event stays
+        clear of baseline and is not a gap."""
+        return bool(self._baseline_gaps(target, start, end))
+
+    def _baseline_gaps(self, target: tuple[str, int], start: int, end: int) -> list[tuple[int, int]]:
+        """The ``[g0, g1)`` gaps of :meth:`_holds_more_than_one_event`, in samples."""
+        from ..analysis.edge_fit import _mask_runs
+
+        ctx = self._panel().fit_context(*target)
+        if isinstance(ctx, str) or ctx.baseline is None or end - start < 3:
+            return []
+        signal = np.asarray(ctx.signal[start:end], dtype=np.float64)
+        base = np.asarray(ctx.baseline, dtype=np.float64)
+        base = base[start:end] if base.ndim else float(base)
+        dev = float(ctx.polarity) * (signal - base)
+        noise = float(ctx.noise_rms)
+        level = float(np.percentile(dev, 75)) if dev.size else 0.0
+        if not (np.isfinite(level) and np.isfinite(noise) and noise > 0.0 and level > 3.0 * noise):
+            return []                    # too shallow to tell a gap from the noise
+        low = dev < min(0.5 * level, 3.0 * noise)
+        starts, ends = _mask_runs(low)
+        inner = (starts > 0) & (ends < low.size)    # a slow edge touching the span's end is not a gap
+        least = max(_GAP_MIN_SAMPLES, int(np.ceil(2.0 * float(ctx.tau))))
+        keep = inner & ((ends - starts) >= least)
+        return [(start + int(a), start + int(b)) for a, b in zip(starts[keep], ends[keep])]
+
     # -- the pointer gestures ---------------------------------------------------------------------
     def _on_draw_released(self, doc_id: str, channel: int, lo: int, hi: int, px: float) -> None:
         """A drag in draw mode ended as a real span: fit both edges to the steps it was drawn
         near and show the result. The settle is ours (we move the mask), so Measure recomputes
-        once, on the fitted bounds."""
+        once, on the fitted bounds. In Annotate mode a span with both edges fitted is then
+        added (`_gesture_adds`)."""
         target = (doc_id, int(channel))
         if self._current() != target:
             return
-        fit, why = self._panel().fit_span_edges(doc_id, channel, lo, hi, px_samples=px)
+        # Drawn: each edge is searched across the span's own cap, not 12 px of this zoom, so a
+        # drag that overshoots the event by tens of pixels still lands on its steps.
+        fit, why = self._panel().fit_span_edges(doc_id, channel, lo, hi, px_samples=px,
+                                                drawn=True)
+        if (fit is not None and fit.complete
+                and (fit.start.position < lo or fit.end.position > hi)
+                and self._holds_more_than_one_event(target, int(fit.start.position),
+                                                    int(fit.end.position))
+                and not self._holds_more_than_one_event(target, int(lo), int(hi))):
+            # The drawn window reaches 0.45 of the span OUTWARD too, so it can take in an
+            # unannotated neighbour beyond what was drawn. The span drawn holds one event:
+            # fit it as a pointed span is fitted, and keep that when both of its edges fit.
+            near, _why = self._panel().fit_span_edges(doc_id, channel, lo, hi, px_samples=px)
+            if near is not None and near.complete:
+                fit = near
+            # A pointed window is 12 px of the zoom, which at a coarse zoom still reaches a
+            # neighbour a few pixels off: refit once with no window crossing the gap before it.
+            gaps = self._baseline_gaps(target, int(fit.start.position), int(fit.end.position))
+            if gaps:
+                mid = lo + hi
+                bounds = (max((a for a, b in gaps if a + b < mid), default=0),
+                          min((b for a, b in gaps if a + b >= mid), default=2 ** 62))
+                # Drawn first: its edge windows reach the steps a loose drag missed, and the
+                # bounds keep them off the neighbour. Pointed when that is incomplete. A
+                # pointed far edge drawn ~12 px past the event can fit a step that is not
+                # there, so a refit is kept only when it holds one event (trace2-1).
+                for drawn in (True, False):
+                    held, _why = self._panel().fit_span_edges(
+                        doc_id, channel, lo, hi, px_samples=px, drawn=drawn, bounds=bounds)
+                    if (held is not None and held.complete
+                            and not self._holds_more_than_one_event(
+                                target, int(held.start.position), int(held.end.position))):
+                        fit = held
+                        break
         if fit is None:
             self._start = _Edge(int(lo), "drawn", int(lo))
             self._end = _Edge(int(hi), "drawn", int(hi))
@@ -534,22 +701,125 @@ class TraceKeyController(QtCore.QObject):
         else:
             self._tv.settle_measure_region()
         if s_fit and e_fit:
-            self._say(f"Fitted: {end - start:,} samples. D adds it.")
+            if not self.annotate():
+                self._say(f"Fitted: {end - start:,} samples. D adds it.")
+            else:
+                self._gesture_adds(target, check_one_event=True)   # adds, or says why it stays
         else:
             which = "start" if not s_fit else "finish"
-            self._say(f"The {which} edge is not fitted ({self._reason(fit, which)}). Point at it "
-                      f"and press {'S' if which == 'start' else 'F'}, or press D twice to add it "
-                      "as placed.")
+            reason = self._reason(fit, which)
+            # An edge drawn too far out has no step to point at: S or F there finds none either.
+            fix = ("Draw closer, press C over the event" if reason == REASON_FAR else
+                   f"Point at it and press {'S' if which == 'start' else 'F'}")
+            self._say(f"The {which} edge is not fitted ({reason}). {fix}, or press D twice to "
+                      "add it as placed.")
         self.refresh_label()
 
     def _on_catch_requested(self, doc_id: str, channel: int, sample: int, px: float) -> None:
-        """A double-click in draw mode catches the event there, as ``C`` does at that x."""
-        self.catch(at=(doc_id, int(channel), float(sample), float(px)))
+        """A double-click in draw mode catches the event there, as ``C`` does at that x. In
+        Annotate mode a catch with both edges fitted is added (one event: the catch found it)."""
+        caught = self.catch(at=(doc_id, int(channel), float(sample), float(px)))
+        if caught and self.annotate():
+            self._tv.release_modifiers = QtCore.Qt.KeyboardModifier.NoModifier
+            self._gesture_adds((doc_id, int(channel)), check_one_event=False)
+
+    # -- the trace menu ---------------------------------------------------------------------------
+    def _on_context_requested(self, doc_id: str, channel: int, sample: int, px: float,
+                              screen_pos) -> None:
+        """A right click on the target pane: the trace menu at that sample. ``popup``, never
+        ``exec``: nothing waits on it."""
+        menu = self.context_menu_for(doc_id, channel, sample, px)
+        menu.popup(QtCore.QPointF(screen_pos).toPoint())
+
+    def context_menu_for(self, doc_id: str, channel: int, sample: float,
+                         px: float = 10.0) -> QtWidgets.QMenu:
+        """The trace menu, populated for a right click at ``sample`` and not shown. The key for
+        each item is written beside it (after a tab, so no shortcut is registered: the keys are
+        the trace's own)."""
+        at = (doc_id, int(channel), float(sample), float(px))
+        menu = self._menu
+        menu.clear()
+        has_mask = self._bounds() is not None
+        here = menu.addAction("Add event here\tC")
+        here.setObjectName("traceMenuAddHere")
+        here.setToolTip("Find the event under the click, fit both edges and add it when both fit.")
+        here.triggered.connect(lambda _checked=False, a=at: self._add_here(a))
+        add_sel = menu.addAction("Add the selection as an event\tD")
+        add_sel.setObjectName("traceMenuAddSelection")
+        add_sel.setEnabled(has_mask)
+        add_sel.triggered.connect(lambda _checked=False: self.add())
+        drop = menu.addAction("Discard the selection\tX")
+        drop.setObjectName("traceMenuDiscard")
+        drop.setEnabled(has_mask)
+        drop.triggered.connect(lambda _checked=False: self.discard())
+        hand = self._hand_made_at(doc_id, int(channel), int(round(float(sample))))
+        delete = menu.addAction("Delete this hand-made event")
+        delete.setObjectName("traceMenuDeleteHandMade")
+        delete.setEnabled(hand is not None)
+        if hand is not None:
+            delete.setToolTip(f"Delete hand-made event {hand} from the table on screen "
+                              "(one Edit ▸ Undo step).")
+            delete.triggered.connect(
+                lambda _checked=False, i=hand: self._w._delete_hand_made_events([i]))
+        menu.addSeparator()
+        mode = menu.addAction("Annotate: drag adds an event\tE")
+        mode.setObjectName("traceMenuAnnotate")
+        mode.setCheckable(True)
+        mode.setChecked(self.annotate())
+        mode.triggered.connect(self._set_annotate_from_menu)
+        return menu
+
+    def _set_annotate_from_menu(self, on: bool) -> None:
+        """Through the window's shared action when there is one, so every button follows."""
+        action = getattr(self._w, "_act_annotate", None)
+        if action is not None:
+            action.setChecked(bool(on))
+        else:
+            self.set_annotate(bool(on))
+
+    def _add_here(self, at: tuple[str, int, float, float]) -> None:
+        """Catch the event at ``at`` and add it when both edges fit; otherwise the caught mask
+        stays and the catch's own sentence says which edge needs a hand."""
+        if (self.catch(at=at) and self._start.source == "fit:step"
+                and self._end.source == "fit:step" and self._bounds() is not None):
+            self.add()
+
+    def _hand_made_at(self, doc_id: str, channel: int, sample: int) -> int | None:
+        """The event id of the hand-made row of the table ON SCREEN that holds ``sample``, or
+        None. The delete door acts on that table, so the lookup does too."""
+        from ..analysis.scoring import hand_made_mask
+
+        res = self._panel().current_detection()
+        if res is None or (res.doc_id, int(res.channel)) != (doc_id, int(channel)):
+            return None
+        df = getattr(res.payload, "df", None)
+        if df is None or not len(df):
+            return None
+        s = df["start_idx"].to_numpy()
+        e = df["end_idx"].to_numpy()
+        hit = hand_made_mask(df) & (s <= sample) & (sample < e)
+        if not hit.any():
+            return None
+        return int(df["event_id"].to_numpy()[np.flatnonzero(hit)[0]])
 
     # -- the label on the trace ---------------------------------------------------------------------
     def refresh_label(self) -> None:
-        """Re-text the label and the Add button's destination, soon (a burst becomes one)."""
+        """Re-text the label and the Add button's destination, soon (a burst becomes one). The
+        mask's look follows the edges' record at once."""
+        self._push_edge_states()
         self._label_timer.start()
+
+    def _push_edge_states(self) -> None:
+        """Tell the trace how each edge was made (`TraceView.set_measure_edge_states`). A mask
+        with no record at all is what the person sees: drawn."""
+        s, e = self._start, self._end
+        if s.pos is None and e.pos is None:
+            self._tv.set_measure_edge_states("drawn", "drawn")
+            return
+        look = {"fit:step": "fit", "placed": "placed"}
+        self._tv.set_measure_edge_states(
+            None if s.pos is None else look.get(s.source, "drawn"),
+            None if e.pos is None else look.get(e.source, "drawn"))
 
     def _paint_label(self) -> None:
         panel = self._panel()
@@ -580,7 +850,9 @@ class TraceKeyController(QtCore.QObject):
                 e = df["end_idx"].to_numpy()
                 n_view = int((hand & (s < rng[1]) & (e > rng[0])).sum())
                 text += f" · {n_view} in view"
-        if self._tv.draw_mode():
+        if self.annotate():
+            text += " · ANNOTATE: drag adds"
+        elif self._tv.draw_mode():
             text += " · draw"
         for label, edge in (("start", self._start), ("finish", self._end)):
             if edge.source == "placed":

@@ -44,6 +44,16 @@ def _menu_texts(menu: QtWidgets.QMenu) -> list[str]:
     return out
 
 
+def _page_texts(menu: QtWidgets.QMenu) -> list[str]:
+    """The page's own entries: without figure_text's "Add title…" ("Add title (all
+    views)…" where the views share one title), which leads a plain right-click's menu
+    while the title draws nothing (an empty automatic title)."""
+    texts = _menu_texts(menu)
+    if texts[:1] and texts[0].startswith("Add title") and texts[1:2] == ["—"]:
+        return texts[2:]
+    return texts
+
+
 @pytest.fixture
 def bare(qapp, qtbot):
     widget = pg.PlotWidget()
@@ -415,7 +425,7 @@ def test_distributions_menu_and_readout_name_the_nearest_event(plots, qapp):
     w.set_scatter_columns("dwell_s", "depth_pA")
     w.set_scatter_log(False, False)
     qapp.processEvents()
-    texts = _menu_texts(app_menu_for(w._plot))
+    texts = _page_texts(app_menu_for(w._plot))
     assert texts[0] == "Reset view" and "Export current figure…" in texts
     assert "Export plot data…" in texts
     assert not any(g in t for t in texts for g in GENERIC)
@@ -665,7 +675,7 @@ def test_every_plot_window_has_reset_view_history_menu_and_readout(main_window, 
              waves._ensemble_plot, subpop.embedding_view()._plot.getPlotItem(),
              subpop.waveform_view()._plot.getPlotItem()]
     for plot in plots:
-        texts = _menu_texts(app_menu_for(plot))
+        texts = _page_texts(app_menu_for(plot))
         assert texts[:1] == ["Reset view"], texts
         assert not any(g in t for t in texts for g in GENERIC), texts
         assert plot.getContextMenus(None) is None

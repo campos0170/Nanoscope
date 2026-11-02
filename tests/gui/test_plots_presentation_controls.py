@@ -118,7 +118,8 @@ def test_picking_a_histogram_fit_does_not_draw_it_until_apply(shown, qapp):
     _user_picks(qapp, w._fit_combo, "exponential")
     assert w._fit_combo.currentText() == "exponential"
     assert w._fit_item is None, "the selection alone must not fit anything"
-    assert "τ" not in w.plot_item().titleLabel.text
+    # The numbers go to the fit label since plotux G3 (2026-11-01), never to the title.
+    assert not w._fit_label_item.isVisible()
     # ...and the button SAYS the plot is not showing what the combo says.
     assert w._fit_apply_btn.isEnabled()
     assert "exponential" in w._fit_apply_btn.toolTip()
@@ -127,7 +128,8 @@ def test_picking_a_histogram_fit_does_not_draw_it_until_apply(shown, qapp):
     w._fit_apply_btn.click()
     qapp.processEvents()
     assert w._fit_item is not None, "Apply must draw the chosen fit"
-    assert "τ" in w.plot_item().titleLabel.text
+    assert w._fit_label_item.isVisible() and "τ" in w._fit_label_item.plain_text()
+    assert "τ" not in w.plot_item().titleLabel.text
     assert not w._fit_apply_btn.isEnabled(), "nothing is pending once it is applied"
 
 
@@ -221,8 +223,11 @@ def test_the_on_plot_box_carries_every_parameter_not_just_the_headline(win):
     win.set_fit_components(2)
     win._fit_values_check.setChecked(True)
 
-    text = win._fit_values_item.text
-    assert "μ_1" in text and "μ_2" in text, text
+    # The values box is the fit label's extra fields since plotux G3 (2026-11-01).
+    # The headline lists both means ("μ = 39.95, 40.06 pA"), then the rest.
+    text = win._fit_label_item.plain_text()
+    import re
+    assert re.search(r"μ = [-\d.]+, [-\d.]+", text), text
     assert "σ_1" in text and "σ_2" in text, "the widths were the missing half"
     assert "n = " in text and "BIC = " in text, text
     # The Style checkbox's tooltip promises the numerical KS statistic; the box delivers
@@ -238,12 +243,13 @@ def test_the_scatter_page_draws_a_fit_values_box_at_all(win):
     win.set_plot_type("Scatter")
     win.set_scatter_columns("dwell_s", "depth_pA")
     win._fit_values_check.setChecked(True)
-    assert win._fit_values_item is None, "no fit, no box"
+    assert not win._fit_label_item.isVisible(), "no fit, no label"
 
     win.set_scatter_fit("linear")
-    assert win._fit_values_item is not None, "the Style checkbox must reach the scatter"
-    assert "R²" in win._fit_values_item.text
-    assert "y = " in win._fit_values_item.text
+    # The fit label carries the scatter fit's numbers (plotux G3, 2026-11-01).
+    assert win._fit_label_item.isVisible(), "the scatter's fit must reach the figure"
+    assert "R²" in win._fit_label_item.plain_text()
+    assert "y = " in win._fit_label_item.plain_text()
 
 
 def test_the_matplotlib_export_path_annotates_and_can_be_told_not_to():
@@ -547,7 +553,7 @@ def test_a_fitted_histogram_offers_both_rows_and_either_can_be_dropped(win):
     w._style = w._style.with_legend_include(fit_id, False)
     w._changed()
     texts = _legend_texts(w)
-    assert texts and not any("fit:" in t for t in texts), texts
+    assert texts and not any("fit (" in t for t in texts), texts
 
     # ...and the other way round: keep the fit's tau, drop the bars.
     w._style = replace(
@@ -556,7 +562,8 @@ def test_a_fitted_histogram_offers_both_rows_and_either_can_be_dropped(win):
             {next(i for i in ids if i.startswith("series:")): False}))
     w._changed()
     texts = _legend_texts(w)
-    assert len(texts) == 1 and "fit:" in texts[0], texts
+    # The fit's row is "fit (exponential)"; its τ is in the fit label (plotux G3).
+    assert len(texts) == 1 and "fit (" in texts[0], texts
 
 
 def test_the_legend_entry_checklist_lists_what_the_draw_offered(win):

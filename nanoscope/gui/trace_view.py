@@ -76,9 +76,24 @@ MAX_X_SPAN_FACTOR = 2.0
 #: rule, not a restriction on what can be annotated.
 MEASURE_MAX_VIEW_FRACTION = 0.20
 
-#: Circular grips on the two mask boundaries. Unlike a thicker cosmetic pen, an
-#: InfiniteLine marker expands the real device-pixel mouse hit box too.
+#: The hit size of the two mask boundaries. Unlike a thicker cosmetic pen, an InfiniteLine
+#: marker expands the real device-pixel mouse hit box too, over the line's whole height; the
+#: marker itself is invisible (the edge is drawn by `_MaskAdornment`), so the grip tab near
+#: the bottom of the pane sits inside the same hit strip.
 MEASURE_HANDLE_SIZE_PX = 16.0
+
+#: THE ANNOTATION INK: the Measure mask's brackets, tabs and rings. A magenta-violet no other
+#: trace mark uses: at least 13 dE (CIEDE2000) from every ink already on a trace pane under
+#: normal, deutan, protan and tritan vision, and at least 4:1 on both a dark and a white pane
+#: (the `test_colour_identity` helpers). Drawn over a dark casing, the rule the threshold and
+#: baseline rails follow, so it holds over a dense trace too.
+ANNOTATION_INK = "#D500F9"
+_MASK_CASING = "#0b0d10"
+#: The mask's fill alpha (0-255): faint, so the event under it stays readable. Lighter still
+#: while a span is being drawn, none at all while only one edge is set.
+_MASK_FILL_ALPHA = 14
+_MASK_FILL_DRAWING_ALPHA = 6
+_MASK_HOVER_ALPHA = 34
 
 #: One conventional 120-delta wheel notch translates the waveform by one tenth of the
 #: current pane height. Translation (rather than scaling) preserves amplitude span.
@@ -204,6 +219,8 @@ class TraceViewBox(pg.ViewBox):
       CATCH the event there (``on_catch``) instead.
     - ``hoverEvent`` reports the pointer ENTERING this box (``on_hover_enter``): pyqtgraph's
       ViewBox has no hover handling of its own.
+    - A right CLICK (not during a draw) asks the owner for the trace menu at that data-x
+      (``on_context``). A right DRAG still scales: pyqtgraph sends no click for a drag.
 
     Every hook is an injected callable, like ``on_double_click`` always was, so this class
     knows nothing of the view that owns it.
@@ -211,9 +228,11 @@ class TraceViewBox(pg.ViewBox):
 
     def __init__(self, *args, on_double_click=None, on_draw=None, draw_mode=None,
                  on_catch=None, on_hover_enter=None, scroll=None, extent=None,
-                 **kwargs) -> None:
+                 on_context=None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._on_double_click = on_double_click
+        #: ``on_context(view_box, x, screen_pos)``: a right click at data-x ``x``.
+        self._on_context = on_context
         #: ``on_draw(source, phase, ev, handle) -> handle``. ``phase`` is "start", "move",
         #: "finish" or "cancel"; ``handle`` is whatever the previous call returned (None at
         #: the start), so the owner can hold the gesture's token and the box need not.
@@ -368,16 +387,27 @@ class TraceViewBox(pg.ViewBox):
 
     def mouseClickEvent(self, ev):  # noqa: N802  (pyqtgraph MouseClickEvent)
         # A right-click while this box owns a draw cancels it. While the box owns a drag the
-        # scene routes clicks of OTHER buttons to it, and there is no context menu on a trace
-        # pane to lose.
+        # scene routes clicks of OTHER buttons to it, so the menu below never opens mid-draw.
         if ev.button() == QtCore.Qt.RightButton and self._drawing:
             ev.accept()
             if self._on_draw is not None and self._draw_handle is not None:
                 self._on_draw(self, "cancel", ev, self._draw_handle)
             return
+        # Any other right click INSIDE this box asks for the trace menu (the owner decides
+        # whether this pane has one). pyqtgraph's AxisItem hands its own clicks to the linked
+        # view, so a click on the x or y axis arrives here too, at a point off the trace: it
+        # falls through to pyqtgraph, whose menu stays disabled on these panes (see `rebuild`).
+        if (ev.button() == QtCore.Qt.RightButton and self._on_context is not None
+                and not ev.double() and self.sceneBoundingRect().contains(ev.scenePos())):
+            point = self.mapSceneToView(ev.scenePos())
+            ev.accept()
+            self._on_context(self, float(point.x()), ev.screenPos())
+            return
         # Left double-click -> request a mask at the clicked data-x. pyqtgraph flags
         # double-clicks via ev.double(); the owner decides whether a valid target exists.
-        if ev.double() and ev.button() == QtCore.Qt.LeftButton:
+        # Inside this box only, as the menu: a double-click on an axis is not on the trace.
+        if (ev.double() and ev.button() == QtCore.Qt.LeftButton
+                and self.sceneBoundingRect().contains(ev.scenePos())):
             if (self._on_catch is not None and self._draw_mode is not None
                     and self._draw_mode()):
                 point = self.mapSceneToView(ev.scenePos())
@@ -516,6 +546,231 @@ class _PaneLabel(QtWidgets.QGraphicsObject):
         painter.setPen(QtGui.QColor("#d7dde5"))
         painter.setFont(self._font)
         painter.drawText(self._rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), self._text)
+
+
+class _MaskAdornment(pg.GraphicsObject):
+    """How the Measure mask LOOKS: a ``[`` for the start, a ``]`` for the finish, a grip tab
+    near the bottom of each, and a ring on the sample a fitted edge snapped to.
+
+    THE MASK ITSELF IS STILL THE `_MeasureRegionItem`: its body and its two lines take every
+    drag, with transparent pens and an invisible marker that keeps their hit strips (see
+    :data:`MEASURE_HANDLE_SIZE_PX`). This item only paints, and it is TRANSPARENT TO THE MOUSE
+    as `_PaneLabel` is: no button, no hover, an empty ``shape``.
+
+    It lives in the pane's DATA group (``addItem(..., ignoreBounds=True)``, z 9), between the
+    mask's fill (8) and the crosshair (20) and its readout (21), so the crosshair stays on top;
+    a ViewBox child would draw above the whole data group. It paints in device pixels (the
+    painter's own transform maps the data corners), so the brackets and tabs keep their size at
+    any zoom. It repaints on the view's range and transform hooks pyqtgraph calls on every item
+    of a ViewBox, on the region's ``sigRegionChanged``, and when the view says the edges or the
+    drawing state changed; nothing runs per scene event.
+
+    Each edge has a STATE (:meth:`TraceView.set_measure_edge_states`): ``fit`` (solid, a filled
+    tab and a ring), ``drawn`` (solid, a filled tab: the edge is where a person put it),
+    ``placed`` (a fit was tried and failed: dashed, a hollow tab and a "not fitted" tag outside
+    the span) or ``None`` (not set: no bracket at all, so S alone shows a lone ``[``). While a
+    span is being drawn both edges are dashed and have no tabs: there is nothing to grab yet."""
+
+    _TICK = 9.0                      # the bracket's feet, in pixels
+    _TAB_W, _TAB_H, _TAB_LIFT = 16.0, 22.0, 10.0
+    _RING_R = 6.0
+
+    def __init__(self, view: "TraceView", region: pg.LinearRegionItem) -> None:
+        super().__init__()
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self.setAcceptHoverEvents(False)
+        self.setZValue(9)
+        self._view = view
+        self._region = region
+        region.sigRegionChanged.connect(self._region_moved)
+        font = QtGui.QFont()
+        font.setPointSizeF(max(8.0, font.pointSizeF() - 2.0))
+        font.setBold(True)
+        self._font = font
+
+    def detach(self) -> None:
+        """Stop following the region (it is being removed with this item)."""
+        try:
+            self._region.sigRegionChanged.disconnect(self._region_moved)
+        except (RuntimeError, TypeError):
+            pass
+
+    def _region_moved(self, *_args) -> None:
+        self.update()
+
+    def viewRangeChanged(self) -> None:  # noqa: N802  (pyqtgraph's hook name)
+        self.prepareGeometryChange()
+        self.update()
+
+    def viewTransformChanged(self) -> None:  # noqa: N802  (pyqtgraph's hook name)
+        self.prepareGeometryChange()
+        self.update()
+
+    def boundingRect(self) -> QtCore.QRectF:  # noqa: N802
+        rect = self.viewRect()
+        return QtCore.QRectF() if rect is None else QtCore.QRectF(rect).normalized()
+
+    def shape(self) -> QtGui.QPainterPath:
+        return QtGui.QPainterPath()
+
+    # -- geometry, in device pixels ----------------------------------------------------------
+    def layout(self, tr: QtGui.QTransform | None = None) -> dict | None:
+        """Where everything goes, in the device pixels ``tr`` maps to (the viewport's, when
+        ``tr`` is None). The one place the look is decided; :meth:`paint` only draws it, and
+        :meth:`TraceView.mask_look` hands it to the tests."""
+        if tr is None:
+            scene = self.scene()
+            views = scene.views() if scene is not None else []
+            if not views:
+                return None
+            tr = self.deviceTransform(views[0].viewportTransform())
+        rect = self.viewRect()
+        if rect is None or not _alive(self._region):
+            return None
+        rect = QtCore.QRectF(rect).normalized()
+        dev = tr.mapRect(rect)
+        top, bottom = dev.top() + 1.0, dev.bottom() - 1.0
+        y_mid = rect.center().y()
+        drawing = self._view.draw_in_progress()
+        states = ("drawn", "drawn") if drawing else self._view.measure_edge_states()
+        x0, x1 = (float(v) for v in self._region.getRegion())
+        rings = self._view._mask_ring_points() if not drawing else (None, None)
+        caption = self._caption_rect(tr)
+        edges = []
+        for side, x, inward, state, ring, line in (
+                ("start", x0, 1.0, states[0], rings[0], self._region.lines[0]),
+                ("end", x1, -1.0, states[1], rings[1], self._region.lines[1])):
+            if state is None:
+                continue
+            X = float(tr.map(QtCore.QPointF(x, y_mid)).x())
+            edge = {"side": side, "x": X, "inward": inward, "state": state,
+                    "dashed": drawing or state == "placed",
+                    "hover": bool(getattr(line, "mouseHovering", False)),
+                    "tab": None, "ring": None, "tag": None}
+            if not drawing:
+                tab = QtCore.QRectF(X - self._TAB_W / 2.0, bottom - self._TAB_H - self._TAB_LIFT,
+                                    self._TAB_W, self._TAB_H)
+                # Lifted to sit just above the pane caption rather than under it.
+                if caption is not None and tab.intersects(caption.adjusted(-4, -4, 4, 4)):
+                    tab.moveBottom(caption.top() - 6.0)
+                edge["tab"] = tab
+                if state == "fit" and ring is not None:
+                    edge["ring"] = tr.map(QtCore.QPointF(*ring))
+                if state == "placed":
+                    text = "not fitted"
+                    w = QtGui.QFontMetricsF(self._font).horizontalAdvance(text) + 10.0
+                    bx = X - 12.0 - w if inward > 0 else X + 12.0    # outside the span
+                    edge["tag"] = (text, QtCore.QRectF(bx, tab.top(), w, 16.0))
+            edges.append(edge)
+        return {"top": top, "bottom": bottom, "drawing": drawing, "edges": edges}
+
+    def _caption_rect(self, tr: QtGui.QTransform) -> QtCore.QRectF | None:
+        label = self._view._target_label
+        if label is None or not _alive(label) or not label.isVisible() or not label.text():
+            return None
+        if label.parentItem() is not self.getViewBox():
+            return None
+        return tr.mapRect(self.mapRectFromItem(label, label.boundingRect()))
+
+    # -- painting ----------------------------------------------------------------------------
+    def paint(self, p, *_args) -> None:
+        look = self.layout(p.transform())
+        if look is None or not look["edges"]:
+            return
+        ink, casing = QtGui.QColor(ANNOTATION_INK), QtGui.QColor(_MASK_CASING)
+        top, bottom = look["top"], look["bottom"]
+        p.save()
+        try:
+            p.resetTransform()
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            p.setFont(self._font)
+            for edge in look["edges"]:
+                X, inward = edge["x"], edge["inward"]
+                path = QtGui.QPainterPath()
+                path.moveTo(X + inward * self._TICK, top)
+                path.lineTo(X, top)
+                path.lineTo(X, bottom)
+                path.lineTo(X + inward * self._TICK, bottom)
+                width = 3.0 if edge["hover"] else 2.0
+                p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                p.setPen(QtGui.QPen(casing, width + 3.0, QtCore.Qt.PenStyle.SolidLine,
+                                    QtCore.Qt.PenCapStyle.FlatCap,
+                                    QtCore.Qt.PenJoinStyle.MiterJoin))
+                p.drawPath(path)
+                pen = QtGui.QPen(ink, width, QtCore.Qt.PenStyle.SolidLine,
+                                 QtCore.Qt.PenCapStyle.FlatCap, QtCore.Qt.PenJoinStyle.MiterJoin)
+                if edge["dashed"]:
+                    pen.setDashPattern([4.0, 3.0])
+                p.setPen(pen)
+                p.drawPath(path)
+                tab = edge["tab"]
+                if tab is not None:
+                    hollow = edge["state"] == "placed"
+                    p.setPen(QtGui.QPen(ink, 2.0) if hollow else QtGui.QPen(casing, 1.5))
+                    p.setBrush(casing if hollow else ink)
+                    p.drawRoundedRect(tab, 4.0, 4.0)
+                    p.setPen(QtGui.QPen(ink if hollow else QtGui.QColor("#ffffff"), 1.2))
+                    for dx in (-3.0, 0.0, 3.0):
+                        p.drawLine(QtCore.QPointF(X + dx, tab.top() + 6.0),
+                                   QtCore.QPointF(X + dx, tab.bottom() - 6.0))
+                ring = edge["ring"]
+                if ring is not None:
+                    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                    p.setPen(QtGui.QPen(casing, 4.0))
+                    p.drawEllipse(ring, self._RING_R, self._RING_R)
+                    p.setPen(QtGui.QPen(ink, 2.0))
+                    p.drawEllipse(ring, self._RING_R, self._RING_R)
+                tag = edge["tag"]
+                if tag is not None:
+                    text, box = tag
+                    p.setPen(QtGui.QPen(ink, 1.2))
+                    p.setBrush(QtGui.QColor(20, 24, 30, 220))
+                    p.drawRoundedRect(box, 3.0, 3.0)
+                    p.setPen(QtGui.QColor("#f2e6ff"))
+                    p.drawText(box, int(QtCore.Qt.AlignmentFlag.AlignCenter), text)
+        finally:
+            p.restore()
+
+
+_ANNOTATE_CURSOR: QtGui.QCursor | None = None
+
+
+def annotate_cursor() -> QtGui.QCursor:
+    """The pointer on the target pane while Annotate mode is on: a cross with a small bracket
+    beside it, so a forgotten mode shows under the hand. Drawn once, at 2x for a Retina screen,
+    hot spot on the centre of the cross. The plain cross keeps meaning "the trace keys are live,
+    Annotate is off"."""
+    global _ANNOTATE_CURSOR
+    if _ANNOTATE_CURSOR is not None:
+        return _ANNOTATE_CURSOR
+    scale, size = 2, 24
+    pixmap = QtGui.QPixmap(size * scale, size * scale)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pixmap)
+    try:
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        c = size / 2.0
+        for color, width in ((QtGui.QColor(_MASK_CASING), 3.0), (QtGui.QColor("#ffffff"), 1.2)):
+            p.setPen(QtGui.QPen(color, width, QtCore.Qt.PenStyle.SolidLine,
+                                QtCore.Qt.PenCapStyle.FlatCap))
+            p.drawLine(QtCore.QPointF(c, 2.0), QtCore.QPointF(c, c - 2.0))
+            p.drawLine(QtCore.QPointF(c, c + 2.0), QtCore.QPointF(c, size - 2.0))
+            p.drawLine(QtCore.QPointF(2.0, c), QtCore.QPointF(c - 2.0, c))
+            p.drawLine(QtCore.QPointF(c + 2.0, c), QtCore.QPointF(size - 2.0, c))
+        bracket = QtGui.QPainterPath()
+        bracket.moveTo(c + 9.0, c + 3.0)
+        bracket.lineTo(c + 5.0, c + 3.0)
+        bracket.lineTo(c + 5.0, c + 10.0)
+        bracket.lineTo(c + 9.0, c + 10.0)
+        for color, width in ((QtGui.QColor(_MASK_CASING), 3.5), (QtGui.QColor(ANNOTATION_INK), 1.6)):
+            p.setPen(QtGui.QPen(color, width, QtCore.Qt.PenStyle.SolidLine,
+                                QtCore.Qt.PenCapStyle.FlatCap, QtCore.Qt.PenJoinStyle.MiterJoin))
+            p.drawPath(bracket)
+    finally:
+        p.end()
+    _ANNOTATE_CURSOR = QtGui.QCursor(pixmap)          # hot spot -1, -1: the pixmap's centre
+    return _ANNOTATE_CURSOR
 
 
 class _DrawGesture:
@@ -976,6 +1231,9 @@ class TraceView(pg.GraphicsLayoutWidget):
     #: A double-click in draw mode on the target pane asks to catch the event there:
     #: ``(doc_id, channel, sample, px_samples)``. No mask is placed.
     sigCatchRequested = QtCore.Signal(str, int, int, float)
+    #: A right click on the key TARGET's pane (Measure on or off) asks for the trace menu:
+    #: ``(doc_id, channel, sample, px_samples, screen_pos)``. Other panes have no menu.
+    sigContextRequested = QtCore.Signal(str, int, int, float, QtCore.QPointF)
     #: The managed filter-preview curve's ON-SCREEN state changed: ``""`` when the standing
     #: request is drawn (or there is no request), otherwise WHY it is not drawn. The view
     #: rebuilds itself on gestures its owner never hears — View ▸ Stacked/Overlay and every
@@ -1078,6 +1336,16 @@ class TraceView(pg.GraphicsLayoutWidget):
         # Draw mode: a plain left-drag draws a Measure span instead of box-zooming.
         self._draw_mode: bool = False
         self._draw: _DrawGesture | None = None
+        #: The keyboard modifiers held when the last draw was RELEASED, for the receiver of
+        #: `sigDrawReleased` (Shift at release keeps an Annotate-mode span instead of adding it).
+        self.release_modifiers = QtCore.Qt.KeyboardModifier.NoModifier
+        #: How each mask edge was made, for its look (`set_measure_edge_states`), and the
+        #: painter that draws it, which lives and dies with the region.
+        self._mask_edges: tuple[str | None, str | None] = ("drawn", "drawn")
+        self._mask_adornment: _MaskAdornment | None = None
+        #: Annotate mode's pointer on the target pane (`set_annotate_pointer`), shown only while
+        #: draw mode is on as well.
+        self._annotate_pointer: bool = False
         # Focus follows the pointer onto the trace -- but only from holders with no keys of
         # their own. ``_key_owners`` are widgets (the docked Event inspector) that own bare keys.
         self._focus_follows: bool = True
@@ -1229,6 +1497,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._filter_preview_plot = None
         self._measure_region = None          # died with its plot in clear(); reattached below if active
         self._measure_plot = None
+        self._mask_adornment = None          # ...and its painter with it
         self._target_label = None            # a child of the old ViewBox: gone with it
         self._forget_confidence_pane()       # died in clear(); re-attached below on request
         self._placeholder = None
@@ -1262,7 +1531,8 @@ class TraceView(pg.GraphicsLayoutWidget):
                                     on_draw=self._on_draw_event, draw_mode=self.draw_mode,
                                     on_catch=self._request_catch,
                                     on_hover_enter=self._on_pane_hover_enter,
-                                    scroll=self._scroll_gesture, extent=self.full_x_extent),
+                                    scroll=self._scroll_gesture, extent=self.full_x_extent,
+                                    on_context=self._request_context),
                                 axisItems={"bottom": ReadableLinearAxis(orientation="bottom"),
                                            "left": ReadableLinearAxis(orientation="left")})
             self.ci.layout.setRowStretchFactor(
@@ -2708,6 +2978,73 @@ class TraceView(pg.GraphicsLayoutWidget):
         self.sigMeasureFinished.emit(bounds[0], bounds[1])
         return True
 
+    # -- the mask's look -------------------------------------------------------------------------
+    #: The edge states `set_measure_edge_states` takes.
+    EDGE_STATES = ("fit", "placed", "drawn", None)
+
+    def set_measure_edge_states(self, start: str | None, end: str | None) -> None:
+        """Say how each mask edge was made, for its look (:class:`_MaskAdornment`): ``fit``,
+        ``placed`` (a fit was tried and failed), ``drawn`` (by hand) or ``None`` (not set: the
+        bracket is not drawn, and with one edge unset the mask has no fill). The owner of the
+        edges' record says it whenever the record changes; a mask nobody described is drawn."""
+        states = (start, end)
+        if any(s not in self.EDGE_STATES for s in states):
+            raise ValueError(f"edge states are one of {self.EDGE_STATES}, not {states!r}")
+        if states != self._mask_edges:
+            self._mask_edges = states
+            self._refresh_mask_look()
+
+    def measure_edge_states(self) -> tuple[str | None, str | None]:
+        return self._mask_edges
+
+    def mask_look(self) -> dict | None:
+        """Where the mask's brackets, tabs, rings and tags are, in viewport pixels, or None with
+        no mask (see :meth:`_MaskAdornment.layout`)."""
+        adornment = self._mask_adornment
+        if adornment is None or not _alive(adornment):
+            return None
+        return adornment.layout()
+
+    @staticmethod
+    def _mask_fill(alpha: int) -> QtGui.QColor:
+        color = QtGui.QColor(ANNOTATION_INK)
+        color.setAlpha(int(alpha))
+        return color
+
+    def _refresh_mask_look(self) -> None:
+        """Re-fill the mask for its state and repaint its brackets: almost no fill while it is
+        drawn, none while only one edge is set (S alone), faint otherwise."""
+        region, adornment = self._measure_region, self._mask_adornment
+        if region is None or not _alive(region):
+            return
+        lone = None in self._mask_edges
+        fill = (0 if lone else _MASK_FILL_DRAWING_ALPHA if self.draw_in_progress()
+                else _MASK_FILL_ALPHA)
+        region.setBrush(pg.mkBrush(self._mask_fill(fill)))
+        region.setHoverBrush(pg.mkBrush(self._mask_fill(0 if lone else _MASK_HOVER_ALPHA)))
+        region.update()
+        if adornment is not None and _alive(adornment):
+            adornment.update()
+
+    def _mask_ring_points(self) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+        """The data ``(x, y)`` of the sample under each mask edge, on the TARGET layer's own
+        axis and drawn curve (the rule `measure_bounds` uses), never the pane's first layer.
+        The finish edge's index is half-open, so its ring sits on the first sample after."""
+        region, target = self._measure_region, self.measure_target()
+        pane = self.pane_for_layer(self._measure_layer_id) if self._measure_layer_id else None
+        if region is None or target is None or pane is None:
+            return None, None
+        vals = self.x_axis_for(*target).values
+        ys = pane.layer_y_data(self._measure_layer_id)
+        if ys is None or vals.size == 0 or np.asarray(ys).size != vals.size:
+            return None, None
+        out = []
+        for x in region.getRegion():
+            i = int(min(max(self._nearest_index(vals, float(x)), 0), vals.size - 1))
+            y = float(ys[i])
+            out.append((float(vals[i]), y) if np.isfinite(y) else None)
+        return out[0], out[1]
+
     # -- draw mode -------------------------------------------------------------------------------
     def draw_mode(self) -> bool:
         """Whether a plain left-drag draws a Measure span (True) or box-zooms (False). Option
@@ -2728,6 +3065,7 @@ class TraceView(pg.GraphicsLayoutWidget):
             return self._draw_mode
         if on != self._draw_mode:
             self._draw_mode = on
+            self._apply_target_cursor()
             self.sigDrawModeChanged.emit(on)
         return self._draw_mode
 
@@ -2754,6 +3092,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         """Draw mode needs its target: drop it, loudly, when the pane is gone."""
         if self._draw_mode and self._measure_pane() is None:
             self._draw_mode = False
+            self._apply_target_cursor()
             self.sigDrawModeChanged.emit(False)
 
     def _target_channel_name(self) -> str:
@@ -2837,6 +3176,7 @@ class TraceView(pg.GraphicsLayoutWidget):
             # Measure on, no mask: the draw makes one, at the press, with nothing seeded and
             # nothing announced -- the first frame below announces it.
             self._create_measure_region(seed=False, initial=(start_x, start_x), announce="none")
+        self._refresh_mask_look()                         # dashed, no tabs, while it is drawn
         self._advance_draw(g, ev, finish=False)
         return g
 
@@ -2855,12 +3195,14 @@ class TraceView(pg.GraphicsLayoutWidget):
         self.preview_measure_region(lo, hi)               # the release position, always
         g.alive = False
         self._draw = None
+        self._refresh_mask_look()
         bounds = self._measure_indices()
         px = self.target_px_samples()
         if bounds is None or px is None:
             self.settle_measure_region()
             return
         settled = self._settled_count
+        self.release_modifiers = ev.modifiers()
         self.sigDrawReleased.emit(g.doc_id, g.channel, int(bounds[0]), int(bounds[1]), float(px))
         if self._settled_count == settled:
             # Nobody moved the mask to a fitted position or settled it: do it here, once.
@@ -2874,6 +3216,7 @@ class TraceView(pg.GraphicsLayoutWidget):
             self._draw = None
         if restore:
             self._restore_before_draw(g)
+        self._refresh_mask_look()
         self.sigDrawCancelled.emit()
 
     def _abandon_draw(self) -> None:
@@ -2941,6 +3284,24 @@ class TraceView(pg.GraphicsLayoutWidget):
             return
         sample = int(min(max(self._nearest_index(vals, x), 0), vals.size - 1))
         self.sigCatchRequested.emit(target[0], target[1], sample, float(px))
+
+    def _request_context(self, view_box, x: float, screen_pos) -> None:
+        """A right click: on the key target's pane (Measure on or off) ask the owner for the
+        trace menu at that sample. Other panes keep no menu, as before."""
+        ref = self._target_ref()
+        x = float(x)
+        if ref is None or not np.isfinite(x):
+            return
+        doc_id, channel, pane = ref
+        if view_box is not pane.plot.vb:
+            return
+        vals = self.x_axis_for(doc_id, channel).values
+        px = self.target_px_samples()
+        if vals.size < 2 or px is None:
+            return
+        sample = int(min(max(self._nearest_index(vals, x), 0), vals.size - 1))
+        self.sigContextRequested.emit(doc_id, int(channel), sample, float(px),
+                                      QtCore.QPointF(screen_pos))
 
     # -- where the pointer is --------------------------------------------------------------------
     def set_annotation_target(self, doc_id: str | None, channel: int | None = None) -> None:
@@ -3140,22 +3501,35 @@ class TraceView(pg.GraphicsLayoutWidget):
             self._last_focus_reason = QtCore.Qt.FocusReason.MouseFocusReason
         super().mousePressEvent(ev)
 
+    def set_annotate_pointer(self, on: bool) -> None:
+        """Show Annotate mode's pointer (:func:`annotate_cursor`) on the target pane while draw
+        mode is on; the owner says when the mode is Annotate rather than plain draw mode."""
+        on = bool(on)
+        if on != self._annotate_pointer:
+            self._annotate_pointer = on
+            self._apply_target_cursor()
+
     def _apply_target_cursor(self) -> None:
         """A cross on the TARGET pane's ViewBox while the trace has keyboard focus (the keys are
-        live), an arrow while focus is elsewhere. On the ViewBox and not the viewport, so the
-        other panes and the axes keep their own cursor."""
+        live), an arrow while focus is elsewhere; Annotate mode's own pointer whenever that mode
+        is on, since a drag adds there with or without focus. On the ViewBox and not the
+        viewport, so the other panes and the axes keep their own cursor."""
         if self._closing:
             return
         ref = self._target_ref()
         target_vb = ref[2].plot.vb if ref is not None else None
         keys_live = self.hasFocus()
+        annotate = self._annotate_pointer and self._draw_mode
         for pane in self._panes:
             vb = pane.plot.vb
             if not _alive(vb):
                 continue
             if vb is target_vb:
-                vb.setCursor(QtCore.Qt.CursorShape.CrossCursor if keys_live
-                             else QtCore.Qt.CursorShape.ArrowCursor)
+                if annotate:
+                    vb.setCursor(annotate_cursor())
+                else:
+                    vb.setCursor(QtCore.Qt.CursorShape.CrossCursor if keys_live
+                                 else QtCore.Qt.CursorShape.ArrowCursor)
             else:
                 vb.unsetCursor()
 
@@ -3164,6 +3538,8 @@ class TraceView(pg.GraphicsLayoutWidget):
         hides it. Survives rebuilds. The crosshair readout owns the top edge."""
         self._target_label_text = str(text or "")
         self._place_target_label()
+        if self._mask_adornment is not None and _alive(self._mask_adornment):
+            self._mask_adornment.update()        # a tab may lift over (or drop past) the caption
 
     def target_label_text(self) -> str:
         return self._target_label_text
@@ -3269,25 +3645,35 @@ class TraceView(pg.GraphicsLayoutWidget):
             return False
         if initial is None and not seed and self._measure_empty:
             return False
+        # The two edges ARE the boundary cursors and still take every drag, but they are drawn
+        # by `_MaskAdornment` (brackets, tabs, rings): their own pens are transparent, at the
+        # widths that set their hit strips, and the marker that widens the strip to the grip
+        # size is painted in that transparent pen too.
+        clear = QtGui.QColor(0, 0, 0, 0)
         region = _MeasureRegionItem(
             orientation="vertical",
             movable=True,
-            brush=pg.mkBrush(33, 150, 243, 40),        # translucent blue — distinct from event spans
-            hoverBrush=pg.mkBrush(33, 150, 243, 70),
-            pen=pg.mkPen("#1565C0", width=1.5),        # the two edges ARE the boundary cursors
-            hoverPen=pg.mkPen("#1E88E5", width=3),
+            brush=pg.mkBrush(self._mask_fill(_MASK_FILL_ALPHA)),
+            hoverBrush=pg.mkBrush(self._mask_fill(_MASK_HOVER_ALPHA)),
+            pen=pg.mkPen(clear, width=1.5),
+            hoverPen=pg.mkPen(clear, width=3),
             on_draw=self._on_draw_event,               # a body drag draws, in draw mode or with Option
             draw_mode=self.draw_mode,
         )
         region.setToolTip(
-            "Drag the shaded mask to move it. Drag either circular edge handle to resize it.")
+            "Drag the shaded mask to move it. Drag either bracket (or its tab near the bottom) "
+            "to resize it.")
         for line in region.lines:
             line.addMarker("o", position=0.5, size=MEASURE_HANDLE_SIZE_PX)
-            line.setToolTip("Drag this handle to resize the annotation mask.")
+            line.setToolTip("Drag this edge to resize the annotation mask.")
+            line.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
         region.setZValue(8)                            # above the trace, distinct from the crosshair (20)
         pane.plot.addItem(region, ignoreBounds=True)   # ignoreBounds: never ratchet the y-autorange
         self._measure_region = region
         self._measure_plot = pane.plot
+        adornment = _MaskAdornment(self, region)
+        pane.plot.addItem(adornment, ignoreBounds=True)
+        self._mask_adornment = adornment
 
         if initial is not None:
             x0, x1 = initial
@@ -3300,6 +3686,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._measure_xrange = (float(x0), float(x1))
         region.sigRegionChanged.connect(self._on_measure_region_changed)
         region.sigRegionChangeFinished.connect(self._on_measure_region_finished)
+        self._refresh_mask_look()
         if announce in ("settled", "changed"):
             self._on_measure_region_changed()          # one deliberate initial emit of the bounds
         # ...and the range is already AT REST, so announce that too: a listener that debounces
@@ -3313,8 +3700,18 @@ class TraceView(pg.GraphicsLayoutWidget):
         """Detach the region from its pane (and the scene). Safe when none exists or after a rebuild
         already destroyed the underlying item."""
         region, plot = self._measure_region, self._measure_plot
+        adornment, self._mask_adornment = self._mask_adornment, None
         self._measure_region = None
         self._measure_plot = None
+        if adornment is not None:
+            adornment.detach()
+            try:
+                if plot is not None:
+                    plot.removeItem(adornment)
+                elif adornment.scene() is not None:
+                    adornment.scene().removeItem(adornment)
+            except RuntimeError:
+                pass   # torn down with its plot
         if region is None:
             return
         for signal, slot in ((region.sigRegionChanged, self._on_measure_region_changed),

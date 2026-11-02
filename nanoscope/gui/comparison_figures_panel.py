@@ -18,6 +18,7 @@ from ..core.analysis_workspace import _plot_source_recipe, fingerprint_frame
 from ..core.sources import amplitude_units_label, signal_domain_of, source_comparability
 from ..core.source_style import validate_source_appearance
 from .analysis_catalog import ANALYSIS_LABELS
+from .column_checklist import ColumnChecklist
 from .export_paths import ask_export_path
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget
 from .plot_export import DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export, write_live_plot_image, write_plot_csv
@@ -34,6 +35,8 @@ METRICS = (("dwell_s", "Dwell (s)"), ("depth_pA", "Median depth (recorded units)
            ("ecd_pA_s", "Event area (recorded units · s)"), ("snr", "SNR"),
            ("rise_s", "Rise time (s)"), ("fall_s", "Fall time (s)"))
 _METRIC_KEYS = {key for key, _ in METRICS}
+#: The pair matrix's starting features, and what its Default button puts back.
+PAIR_DEFAULT_FEATURES = ("dwell_s", "depth_pA", "ecd_pA_s", "snr")
 _KINDS = {key for key, _ in VIEWS}
 METHODS = {
     "facets": "One scatter panel per recording, with shared numerical axes. No pooling, regression, smoothing or uncertainty estimation.",
@@ -49,6 +52,14 @@ class _ComparisonCanvas(QtWidgets.QGraphicsView):
 
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
+        #: True while the canvas shows the whole figure and nobody has zoomed or panned
+        #: it. Then a resize fits it again, so a figure generated with the canvas tall
+        #: (Section ▸ Data) is still whole when Analysis's controls shrink the canvas;
+        #: before, it kept the old scale and opened scrolled into the figure, its title
+        #: cut off. The scene rect is the figure's (see ``_install_figure_item``), so a
+        #: restyled figure of another size is fitted as it now is.
+        self._fitted = False
+        self._pan_from = None
         self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
         self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.TextAntialiasing)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
@@ -57,11 +68,32 @@ class _ComparisonCanvas(QtWidgets.QGraphicsView):
         self.setAccessibleName("Comparison figure canvas")
         self.setBackgroundBrush(QtGui.QColor("#dce3e7"))
 
+    def fit(self, rect):
+        self._fitted = True
+        self.fitInView(rect, QtCore.Qt.KeepAspectRatio)
+
+    def release_fit(self):
+        """The view is the user's now (a zoom, a pan, a restored view): stop re-fitting."""
+        self._fitted = False
+
     def zoom(self, factor):
         scale = self.transform().m11() * factor
         if .01 <= scale <= 100:
+            self.release_fit()
             self.scale(factor, factor)
             self.viewChanged.emit()
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        if self._fitted and not self.sceneRect().isEmpty():
+            self.fitInView(self.sceneRect(), QtCore.Qt.KeepAspectRatio)
+
+    def _scroll_position(self):
+        return (self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+
+    def mousePressEvent(self, event):  # noqa: N802
+        self._pan_from = self._scroll_position()
+        super().mousePressEvent(event)
 
     def wheelEvent(self, event):  # noqa: N802
         if event.angleDelta().y():
@@ -72,6 +104,9 @@ class _ComparisonCanvas(QtWidgets.QGraphicsView):
 
     def mouseReleaseEvent(self, event):  # noqa: N802
         super().mouseReleaseEvent(event)
+        if self._pan_from is not None and self._pan_from != self._scroll_position():
+            self.release_fit()      # a hand-drag pan; a plain click keeps the fit
+        self._pan_from = None
         self.viewChanged.emit()
 
 
@@ -149,15 +184,16 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
 
         self._pair_controls = QtWidgets.QGroupBox("Pair matrix · select two to five features")
         pairs = QtWidgets.QHBoxLayout(self._pair_controls)
-        self._features = QtWidgets.QListWidget()
-        self._features.setMaximumHeight(115)
-        self._features.setAccessibleName("Pair matrix features")
-        for key, label in METRICS:
-            item = QtWidgets.QListWidgetItem(label)
-            item.setData(QtCore.Qt.UserRole, key)
-            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.Checked if key in {"dwell_s", "depth_pA", "ecd_pA_s", "snr"} else QtCore.Qt.Unchecked)
-            self._features.addItem(item)
+        # The shared checklist: a click anywhere on a row ticks it (only the 18 px box did),
+        # and the two-to-five rule is live ("4 of 8 selected · pick 2–5", the rows that
+        # would cross it greyed and saying why) instead of being met at Generate. The draft
+        # key `features` keeps METRICS order, as before.
+        self._features = ColumnChecklist(noun="features", minimum=2, maximum=5)
+        self._features.set_entries([(key, label, "") for key, label in METRICS],
+                                   PAIR_DEFAULT_FEATURES, PAIR_DEFAULT_FEATURES)
+        self._features.set_visible_rows(6)
+        self._features.layout().setContentsMargins(0, 0, 0, 0)
+        self._features.view.setAccessibleName("Pair matrix features")
         pairs.addWidget(self._features, 1)
         pair_options = QtWidgets.QVBoxLayout()
         pair_options.addWidget(QtWidgets.QLabel("Diagonal histogram bins"))
@@ -251,7 +287,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
             check.toggled.connect(self._draft_changed)
         self._bins.valueChanged.connect(self._draft_changed)
         self._columns.valueChanged.connect(self._draft_changed)
-        self._features.itemChanged.connect(self._draft_changed)
+        self._features.changed.connect(self._draft_changed)
         self._appearance_widget.changed.connect(self._appearance_from_user)
         self._source_appearance_editor.changed.connect(self._source_appearance_from_user)
         self._fit_button.clicked.connect(self.fit_canvas)
@@ -276,8 +312,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
         kind = self._view_combo.currentData()
         return {"source_keys": list(self._selected_keys), "accepted_only": self._accepted_only.isChecked(),
                 "kind": kind, "x": self._x_combo.currentData(), "y": self._y_combo.currentData(),
-                "metric": self._metric.currentData(), "features": [self._features.item(i).data(QtCore.Qt.UserRole)
-                    for i in range(self._features.count()) if self._features.item(i).checkState() == QtCore.Qt.Checked],
+                "metric": self._metric.currentData(), "features": self._features.checked(),
                 "bins": self._bins.value(), "columns": self._columns.value(),
                 "points": self._points.currentData(), "show_box": self._show_box.isChecked(),
                 "log_x": self._log_x.isChecked() if kind == "facets" else False,
@@ -323,9 +358,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
             self._event_log_y.setChecked(merged["log_y"])
             self._bins.setValue(merged["bins"])
             self._columns.setValue(merged["columns"])
-            for i in range(self._features.count()):
-                item = self._features.item(i)
-                item.setCheckState(QtCore.Qt.Checked if item.data(QtCore.Qt.UserRole) in merged["features"] else QtCore.Qt.Unchecked)
+            self._features.set_checked(merged["features"])
             self._populate_sources()
             self._update_method_note()
         finally:
@@ -530,7 +563,7 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
     def fit_canvas(self, _checked=False, *, emit=True):
         if self._figure_item is None:
             return
-        self._view.fitInView(self._figure_item.boundingRect(), QtCore.Qt.KeepAspectRatio)
+        self._view.fit(self._figure_item.boundingRect())
         if emit:
             self._view_changed()
 
@@ -542,7 +575,10 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
 
     def _view_state(self):
         center = self._view.mapToScene(self._view.viewport().rect().center())
-        return {"scale": float(self._view.transform().m11()), "center": [center.x(), center.y()]}
+        # "fitted": the view was still Fit canvas, so a reopened project fits the figure to
+        # the canvas it opens in rather than restoring a scale taken at another height.
+        return {"scale": float(self._view.transform().m11()), "center": [center.x(), center.y()],
+                "fitted": bool(self._view._fitted)}
 
     @staticmethod
     def _validate_view(view):
@@ -716,6 +752,11 @@ class ComparisonFiguresWindow(QtWidgets.QMainWindow):
                 self._scene.clear()
                 self._figure_item = None
             self._restore_view(payload["canvas_view"])
+            if payload["canvas_view"].get("fitted") is True and self._figure_item is not None:
+                self._fit_pending = not self.isVisible()
+                self._view.fit(self._figure_item.boundingRect())
+            else:
+                self._view.release_fit()    # the saved view is the user's; a resize keeps it
             self._warnings.set_warnings(snapshot.get("warnings", []), full_text=self.details_text())
             self._update_status()
         finally:

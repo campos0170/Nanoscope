@@ -92,6 +92,17 @@ The main window has four regions:
   **View ▸ Panels ▸ Results**, or **⇧⌘R**) to give the trace its full height — nothing in it is
   lost; drag its top edge for more rows. It floats or docks on any side, and its place and height
   are remembered.
+  **Columns…** opens a list of the table's columns in the order and wording of the header. Tick or
+  untick as many as you like in one go: a click anywhere on a row toggles it, and Space and the arrow
+  keys work too. The list stays open until you press Esc or click elsewhere. From 12 columns up, a
+  filter box finds a column by its header or its name. **Show all**, **Hide all** and **Default
+  columns** act on the whole list, or only on the filtered rows (*Show these* / *Hide these*) while
+  a filter is active. **Default order** puts the columns back in the scientific order without
+  changing which ones are shown. The table always keeps at least one column: Hide all leaves
+  **accepted** visible. Right-click a column header for **Hide “column”** and **Columns…**. Drag
+  headers to reorder. The view is remembered, and it is one view for every table the selector
+  shows: what you chose for a column one table lacks (amplitude columns before Curate ▸ Apply, ML or
+  hand-made columns) is kept for when it is back. **Default columns** resets those too.
 
 The **analysis launcher** starts with **Analysis home**, followed by shortcuts to
 **Distributions**, **Event waveforms**, **Noise spectrum**, **I-V / conductance**,
@@ -253,7 +264,10 @@ Library**, and **Guided first analysis**, including tools you have never used. S
 plot type or input, such as `ECDF`, `conductance` or `events`. Selecting a name only shows its
 purpose, required inputs and current availability. Choose **Open…**, double-click the list item,
 or press Enter on it to request that tool. An unavailable tool explains its requirements and
-does not open. Availability is checked again when you act.
+does not open. Availability is checked again when you act. Tools that cannot open yet are shown
+in grey; hover over one to see what it needs. If a tool you choose cannot open, the Explorer
+returns to Analysis home with that tool selected and a banner saying why. The banner goes away
+when you dismiss it, open a page, or the tool becomes available.
 
 **Browsing, searching and refreshing availability do not construct analytical pages or run
 calculations.** **Refresh availability** on the home page is different from **Refresh current**
@@ -1436,7 +1450,8 @@ project reopens on it. A detector run does not take the screen from **Manual**.
    event scale the Navigator changes from **Full recording** to a **9× local-context** lens.
 2. **Point at the event and press C.** NanoScope finds the event under the pointer and fits both
    edges to its steps; the mask appears on them. (Or double-click the trace to place a mask at the
-   click, or press **E** and drag a span: both are below.)
+   click. With Annotate on (**E**), one drag across the event, or a double-click on it, adds it at
+   once and you skip step 3: see *Annotate mode* below.)
 3. Read the **preview** on the Measure tab, then press **D**. Return, Enter, **Ctrl+M** (from any
    tab) and the **Add event** button do the same. **Shift+D** adds and moves to the next window.
 
@@ -1461,13 +1476,36 @@ channel, and **C** turns Measure on. After you close the selected recording, sel
 | **Shift+D** | Add, then go to the next window. At the last window it still adds and says there is no next one. |
 | **G** / **Shift+G** | Next / previous window at the current zoom (the Scan step). |
 | **X** | Discard the mask; Measure stays on. |
-| **E** | Draw mode on or off (also **View ▸ Drag draws an event span (draw mode)**, Ctrl+Shift+E). |
+| **E** | Annotate mode on or off (also the **✎ Annotate (E)** button under the trace and on the Measure tab, **View ▸ Annotate: drag adds an event**, Ctrl+Shift+E). |
 | Return / Enter, **Esc** | Add, and cancel a draw or discard the mask. These two act only when the trace got focus from a click or the pointer arriving, so a habitual Return or Esc after closing a dock does nothing until you click the trace. |
 
-**Draw mode.** With draw mode on, a plain left-drag on the trace draws a span instead of box-zooming,
-and releasing fits its edges. Holding **Option** while you start a drag does the opposite of the
-mode, so a one-off span needs no mode and a quick zoom needs no switch. The label on the trace says
-`draw` while it is on.
+**Annotate mode: one drag, one event.** With Annotate on, drag across an event and let go: both
+edges are fitted to the steps and, when both fit, the event is added at once (Edit ▸ Undo takes it
+back, one step per event). The drag can be loose: each edge is looked for across nearly half of the
+span you drew, at any zoom. Double-click an event to add it the same way. A drag that does not fit
+both edges adds nothing; the span stays so you can fix it with S or F, or press D twice to add it as
+placed. An edge drawn so far out that no step is near it says *no step near the drawn edge*: drag
+closer, or press C over the event. A drag across two events adds nothing and says so; drag each one, or press D to add the span
+as one. A tight drag on one event beside a neighbour nobody has annotated yet adds just that
+event: if the fit reaches the neighbour, the edges are fitted again without crossing the baseline
+before it. A drag that reaches close to the neighbour can still be refused as more than one event;
+drag closer to the event's edges. Hold Shift as you let go to keep the span for adjusting (drag a tab, then D or Return).
+Option-drag box-zooms while the mode is on; Esc or a right-click cancels a drag in progress. The
+pane caption says *ANNOTATE: drag adds* and the pointer becomes a cross with a small bracket while
+the mode is on. It is off in every new window. Outside the mode, Option-drag draws a span to look at
+before adding it with D.
+
+**The mask.** The start edge is a `[` and the finish a `]`, in magenta-violet over a dark outline,
+with a grip tab near the bottom of the pane (drag the tab or the edge to resize; the pointer shows
+↔). A ring marks the sample a fitted edge snapped to. A dashed edge with a *not fitted* tag is one
+the fit could not place. A single bracket means only S was pressed so far. While you drag a new span
+it is dashed, with no tabs.
+
+**Right-click on the trace** (Control-click or a two-finger click on a Mac) for: **Add event here**
+(C), **Add the selection as an event** (D), **Discard the selection** (X), **Delete this hand-made
+event** (over a hand-made event; one Undo step), and the **Annotate** switch (E). A right drag still
+scales. A right-click or a double-click on the trace's axes does nothing (a right-click there still
+cancels a drag in progress).
 
 **Fitted edges.** A fitted edge sits on the step, not where the pointer happened to be. If an edge
 cannot be fitted (a ramp, a noisy shoulder), the mask keeps the placement, the label says
@@ -1484,6 +1522,10 @@ when you turn it on (the middle fifth of the view): until you move it, **S** the
 mask over it. With no mask, **S** or **F** sets one edge and waits for the other; until both are set
 an add is refused, and the preview says which edge is missing. An event that the recording's end
 cuts off ends at the last sample and is rejected automatically as `clipped_by_boundary`.
+
+**The Measure tab** starts with the **✎ Annotate (E)** button and a one-line legend of the trace
+keys. **Clear mask** removes the mask and keeps Measure on, as X does. **Analysis ▸ Measure event**
+(Ctrl+Shift+M) turns Measure on and off.
 
 **The preview and the statistics.** The Measure tab (**Cursors (add events by hand)**) shows two
 different things:
@@ -2347,7 +2389,9 @@ Three behaviors help organize the comparison; none establishes scientific compar
 
 ### Clustering
 
-Pick a **feature set** (multi-select of numeric columns), choose **GMM** or **k-means**, set `k`
+Pick a **feature set** (the **Features** checklist: tick at least two; **Default** picks the
+preferred measurements the table has; the row identifiers `event_id`, `start_idx` and `end_idx` are
+offered last under *Identifiers* and never by Default), choose **GMM** or **k-means**, set `k`
 (fixed, or **Auto (BIC)** for GMM), and **Run clustering**. The scatter, the PCA **and the
 histogram** recolour by cluster — the histogram draws one curve per cluster over shared bins, so you
 can finally see the two populations' dwell distributions apart — and a summary shows the cluster
@@ -2365,18 +2409,54 @@ tool. Clustering runs on the **first ticked** source.
   read in the axis unit too. Axis-range entries follow their displayed unit labels.
 - **Axis range** — type explicit X/Y limits in the displayed units (stored in data units and converted to log internally on a log axis)
   that persist across redraws; **Auto** releases them. The plot is also mouse zoom/pan-able.
-- **Appearance** — a custom title and axis labels, font family + size, data-series and fit colours,
+- **Appearance** — the Text group comes first: Title, X label and Y label (empty = automatic, shown
+  as the placeholder; one space hides the label). Then font family + size, data-series and fit colours,
   the Event-count heatmap's colormap, marker size, line width, grid and background. An empty
   Title, X label or Y label box uses the automatic label, in every plot window; type a single
   space to show no label, and a hidden title leaves no gap above the plot. These controls, legend
   edits and fit-decoration toggles update the existing picture without recalculating bins, KDE,
   PCA or fits, collecting source data, or resetting manual zoom. Appearance-only Undo/Redo has the same guarantee.
   Pending analytical changes stay pending until **Plot / Apply** or **Apply fit**.
+- **Text in the figure** — double-click a title, axis label, legend entry, the fit label or the
+  *below detection limit* words to retype it in place (Return keeps it, Esc cancels; Return with
+  nothing changed changes nothing), and right-click it for **Text style…** (font, size, bold, italic,
+  colour, title alignment) or, on an axis, **Axis properties…**. Right-click the tick numbers for
+  their own **Text style…** (font, size, bold, italic and colour of the tick labels) and **Axis
+  properties…**; while an axis label is hidden, that menu offers **Show label**. When a plot's title
+  is empty (I-V and Voltage dependence have none by default) or hidden, right-click an empty part of
+  the plot and choose **Add title…** to type one in place; a hidden title with automatic text also
+  offers **Show title**. Where the views share one title (Noise, Event waveforms, Subpopulations) the
+  entry reads **Add title (all views)…**: the title you type replaces every view's automatic title.
+  Each change is one Undo step. Typed text is shown literally (`I < 5 pA & τ > 1 ms` stays as
+  typed); write `x_{0}` for a subscript and `x^{2}` for a superscript. In Distributions a legend
+  entry is named after its source: renaming a source's row, or double-clicking its fit's row (*Apo
+  fit (exponential)*), renames the source, and the legend, the fit's row, the fit label and the
+  Sources list all follow. **Text style…** and **Hide entry** act on the one row you clicked; a
+  one-source fit row (*fit (exponential)*) names no source, so a double-click opens Text style…, and
+  the KDE and cluster rows can be styled or hidden but not renamed. The *below detection limit* words
+  can be retyped, styled or hidden; the dashed line and the shading stay, and while the words are
+  hidden a right-click on the plot offers **Show detection-limit label**. In Distributions a range
+  typed in Axis properties is the same pin as the Axis range boxes (it fills them), and Log uses the
+  page's own Log box; pressing OK without changing anything changes nothing.
+- **Fit label** — when a fit is applied its result is shown in the fit label, top-left: one line
+  per source, in the source's colour, prefixed with its legend name (drawn as the legend draws it,
+  so `_{…}` and `^{…}` are sub- and superscripts there too). Drag it anywhere (the position
+  is saved with the plot). Double-click it to write your own words around the live tokens
+  `{equation}` `{r2}` `{n}` `{ci}` `{bic}` `{ks}` `{source}`; the numbers always come from the current
+  fit. The Appearance section's **Fit label** group chooses the numbers, size, colour and position,
+  or **In legend instead**. **R² on figure** and **KS statistic on figure** turn the plain numbers
+  off, and **Fit values on plot** adds BIC and the KS statistic; a refusal such as *R² undefined (y
+  does not vary)* or *exact by construction* is always printed when R² is asked for. Scatter
+  (linear, power law) and histogram fits are reported here, never in the title.
+- **Presets and templates** — an appearance preset keeps a look (fonts, sizes, colours, styles),
+  never the wording: applying one keeps your title and labels, and a dragged caption where it is. A
+  window template keeps titles, axis labels, text styles, the detection-limit wording and a
+  dragged caption's place, but not legend names or legend-row styles.
 - **Legend** — a **Show legend** toggle, a **Legend position** (upper right, the default, / upper
   left / lower right / lower left; the legend is drawn over the data, so move it off whichever
   quadrant your points occupy), a legend font size and a **(n = …)** toggle. The legend **labels are
-  editable**: double-click a row in the source list and type, and that series is renamed everywhere it
-  is named — legend, fit lines, Details and the plot title. The real name is kept underneath, so
+  editable**: double-click a row in the source list (or the legend row in the figure) and type, and
+  that series is renamed everywhere it is named — legend, fit lines, Details and the fit label. The real name is kept underneath, so
   clearing the edit back to empty restores it rather than legending a blank.
   Highlight that source and choose **Save name as project default** to reuse its edited name in
   newly generated figures. **Project source color…** saves its identity color for subsequent
@@ -2409,6 +2489,38 @@ tool. Clustering runs on the **first ticked** source.
   so no undo brings it back. A project saved earlier keeps its own copy (§11c).
 
 ### A consistent plotting workflow
+
+In-figure editing works the same in every plot window: double-click to edit, right-click for
+styles, one Undo step per change. In I-V and Voltage dependence the fit result is shown in the fit
+label, not the title; Voltage dependence adds a caption saying what was pooled, which you can drag
+(one Undo step; its position is saved with the plot, as the fit label's is), double-click to
+retype, or hide with a single space. Voltage axes read in mV. So do the fit numbers beside them: a
+Voltage dependence slope is per mV with the metric's unit (*slope = −0.07331 Hz/mV*) and V₀ is in
+mV; I-V's G is in nS, which is the slope in pA per mV, and a slope it prints without nS says *…/V*.
+**Export data (CSV)** keeps each fit's parameters in volts, like its voltage_V column, and names
+their units. In I-V, Voltage dependence, Noise, Event waveforms and Distribution summaries a range
+typed in Axis properties stays the view after a redraw (Refresh, Generate, a new setting, a tab
+switch); an appearance change keeps a zoom you made by hand. In Noise, Event waveforms and
+Subpopulations that range belongs to the view whose axis you typed it on: the other views keep
+framing their own data, and their Axis properties show Auto. A range saved by an earlier build with
+no view is the PSD's in Noise and the Event-count map's in Event waveforms (the view each opens on),
+and the scatter's in Subpopulations. In Distribution
+summaries a range belongs to what the axes show: ECDF and Survival share theirs, and Box and Violin
+theirs, so changing **Type** between the two pairs and pressing **Generate** starts on the page's
+own framing (Reset view returns there too), and changing back brings the range back; a range saved
+by an earlier build is ECDF and Survival's. Window templates keep each view's range, as they keep a
+one-view page's; presets keep no range. In I-V and Voltage dependence, with
+nothing to plot, the page's message stays in view whatever the range. Log in Axis
+properties is the window's own log control (Log y in Voltage dependence, Log-log or Log frequency
+in Noise, Log x / Log y on the Event-count map) — an analysis setting, not an appearance: in Voltage
+dependence a value at or below zero leaves the plot and the fit while Log y is on, so ⌘Z does not
+turn it off; untick it to go back. Where a window has none, the box is greyed with the reason. In Noise, Event waveforms and Subpopulations the views share one X and one Y label
+(Appearance, all views), so there an axis label is renamed in Appearance; on the figure it takes a
+text style, and Axis properties shows it read-only. In Distribution summaries, renaming a legend
+entry in the figure sets that source's display label in Source names and colors, as one Undo step
+(Reset appearance leaves the name alone). **Ctrl+1–4**
+(⌘1–4) choose the Section (Data, Analysis, Appearance, Export) of the page in front (not yet in
+Distributions).
 
 Analytical pages use the **Section** dropdown for **Data → Analysis → Appearance → Export**.
 The selector only changes which controls are visible; it does not change their values or run an
@@ -2453,8 +2565,10 @@ appearance, which a preset keeps.
 **Each plot keeps its own appearance Undo.** Event waveforms, Noise spectrum, I-V / conductance,
 Voltage dependence, Distribution summaries, Comparison figures, Subpopulations and the study figure
 editor (**Style selected figure…**, §1) have **Undo** and **Redo** beside **Reset appearance**, and
-⌘Z / ⇧⌘Z do the same while the Appearance controls are on screen — in the Analysis Explorer, while
-the page's **Section** shows **Appearance**. A text box you are typing in keeps ⌘Z for its typing;
+⌘Z / ⇧⌘Z do the same whenever the page is in front, whatever its **Section** shows, so an edit made
+in the figure can be undone from the keyboard; in the Analysis Explorer only the page in front
+answers. (In Comparison figures and the study figure editor the keys answer while the Appearance
+controls are on screen.) A text box you are typing in keeps ⌘Z for its typing;
 with nothing typed in it, ⌘Z undoes the plot's last change.
 Every change is a step — an edit, a preset, a saved appearance, a colour, Reset — and edits less
 than 700 ms apart, such as the keystrokes of one size, make one; the buttons' tooltips name the step
@@ -2509,7 +2623,10 @@ same plot. Counts, probability-per-bin and density retain their existing numeric
 
 ### Figure Library
 
-Use **Analysis Explorer ▸ Save to Figure Library…** to name and freeze the current figure.
+Use **Analysis Explorer ▸ Save to Figure Library…** to name and freeze the current figure. It
+proposes a name from the tool and the plot type the figure shows (for example *I-V / conductance*
+or *Distributions · Histogram*); edit it as you like. The list shows each figure's recording file
+names; hover for the full paths, which are also in the details beside the list.
 The library is separate from the Event Gallery: it stores figures, not curated event selections.
 **Save Project** writes the library into the `.nanoscope` project, including:
 
@@ -2550,7 +2667,11 @@ and use **Move up / Move down** to arrange them in reading order. Choose 1–4 c
 and **Cols** cells set each panel's span (1–4 cells); a column span must fit the grid. Panels are
 automatically packed without overlap and fitted without cropping. Use a wider span for a trace
 above smaller summary panels. **Panel spacing** and the label font, size, boldness and color are
-editable; sizes are native canvas pixels and scale with publication export. **Update
+editable; sizes are native canvas pixels and scale with publication export. Spacing is in whole
+pixels. The label font starts at **Application default**, the font the panels' own text uses;
+choose a named family when the figure must look the same on another computer. The label colour
+button shows the colour itself. Panels with a fit label, a caption or per-element text styles are
+composed as frozen pictures when axes are shared. **Update
 preview** builds a frozen composition; changing the selection, labels or layout invalidates that
 preview until you update it again. **Save to Figure Library** creates a new entry and does not
 modify any component figure. Save the project to retain it.
@@ -2693,7 +2814,11 @@ generation path. Checkmarked sources are included; simply highlighting a row doe
    - **Faceted comparisons:** choose X and Y measurements and the number of columns. One scatter
      panel is drawn per source with shared numerical axis limits. Optional logarithmic axes
      exclude nonpositive values explicitly; they do not transform the stored measurements.
-   - **Pair-plot matrix:** select two to five features. Off-diagonal panels show individual-event
+   - **Pair-plot matrix:** select two to five features in the checklist: click a row to tick it.
+     The line under it counts your choice (*4 of 8 selected · pick 2–5*); once five are ticked the
+     others are greyed until you untick one, and **Default features** returns to dwell, depth,
+     event area and SNR. A generated figure opens fitted to the canvas, and stays fitted when the
+     controls above change size, until you zoom or pan it. Off-diagonal panels show individual-event
      scatter plots; diagonal panels show separate-source count histograms with common bin edges.
      There is no KDE, regression, correlation estimate or automatic confidence interval. Missing
      values are handled separately for each panel, so one missing feature does not remove an
@@ -2733,6 +2858,9 @@ removal, detection, calibration, amplitude estimation, fitting defaults or exist
 The **Ensemble** tab of **Event waveforms** resamples each accepted event onto **Points**
 samples and overlays them, with the mean (solid) and median (dashed) on top.
 
+The colour-bar label (*Event count*) and the marginal *count* labels can be edited in the figure;
+they are saved with the appearance.
+
 - **Align** applies when **Normalize time** is off. **start** and **center** put each event's
   first sample or midpoint at t = 0. **extremum** puts each event's deepest sample at t = 0: the
   sample inside the event where polarity × (current − baseline) is largest, the sign the event
@@ -2766,6 +2894,9 @@ A reopened ensemble draws the saved band without recomputing it.
 ---
 
 ## 11. Noise spectra (PSD)
+
+With one curve, the fitted 1/f exponent α (and the bins and band it rests on) is shown in the fit
+label on the PSD view; with an overlay it stays in the legend row.
 
 **Analysis ▸ Noise spectrum…** opens the **Noise spectrum** page of the Analysis Explorer: the
 log-log current-noise spectrum every
@@ -3016,8 +3147,12 @@ The important distinction is between a **saved result** and a **redrawn view**:
 | **Refresh** or **Run…** | Explicitly computes a new result and marks the project unsaved. |
 
 Population Plots preserves a KDE's recipe but does not store its sampled density grid. After a
-reopen it shows **Press Plot to recompute** instead of silently running the KDE. The Event Density
-view does store and restore its frozen count grid and physical bin edges.
+reopen it shows **Press Plot to recompute** instead of silently running the KDE. An applied scatter
+fit (Linear, Power law) is not recomputed either: the reopened Scatter shows its points with **Plot
+●** and a note in Details, and pressing **Plot** draws the line and its fit label. A histogram fit
+is drawn from the saved fit with every number it had: all parameters, n, BIC, and the KS statistic
+and verdict saved with it. The Event Density view does store and restore its frozen count grid and
+physical bin edges.
 
 **Plot presets and templates travel with the project.** Your appearance presets, Distributions
 templates and window templates are kept on this computer. Save Project also writes a copy of all of
@@ -3235,15 +3370,19 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Ctrl+I** | **Open the Event inspector** |
 | **Ctrl+G** | **Open the Event gallery** |
 | **Ctrl+M** | **Add the current cursor region as a hand-made event in the table named beside the Add button (Schmitt, CUSUM, Manual...); works from any tab; refuses on Reconciled** |
-| **Ctrl+Shift+E** | **Draw mode: a plain left-drag on the trace draws an event span instead of box-zooming (Option inverts it for one drag)** |
+| **Ctrl+Shift+E** | **Annotate mode: a drag across an event that fits both edges adds it (one Undo step); a double-click on an event adds it; Option-drag box-zooms** |
+| **Ctrl+Shift+M** | **Analysis ▸ Measure event on or off** |
 | **Trace focused: C** | **Catch the event under the pointer and fit both edges** |
 | **Trace focused: S / F** | **Put the start / finish edge at the pointer, fitted (Shift+S / Shift+F: exactly)** |
 | **Trace focused: D** | **Add the mask as an event (Return and Enter too); Shift+D adds and moves to the next window** |
 | **Trace focused: G / Shift+G** | **Next / previous window at the current zoom** |
 | **Trace focused: X / Esc** | **Discard the mask (Esc first cancels a draw in progress)** |
-| **Trace focused: E** | **Draw mode on or off** |
+| **Trace focused: E** | **Annotate mode on or off** |
+| **Trace: right-click** | **Add event here, Add the selection as an event, Discard the selection, Delete this hand-made event, Annotate** |
+| **Plot: double-click text** | **Edit it in place (Return keeps it, Esc cancels); right-click for Text style… and Axis properties…** |
 | **Ctrl+Shift+F** | **Open the Signal Conditioning window (the classical detectors' signal chain)** |
 | **Signal Conditioning:** Ctrl+1 / Ctrl+2 / Ctrl+3 | Time / Spectrum / Response preview tab |
+| **Plot pages:** Ctrl/⌘+1 / 2 / 3 / 4 | Section: Data / Analysis / Appearance / Export (shows controls only; never runs an analysis; not yet in Distributions) |
 | **Signal Conditioning:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Edit ▸ Undo / Redo without leaving the window (a field you are typing in keeps them for its typing) |
 | Ctrl+0 / trace-focused Home / **Full** button | Reset zoom to the complete trace |
 | Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history; greyed out in the View menu when there is nowhere to go) |
@@ -3252,7 +3391,7 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | Ctrl+E | Centre the view on the current selection |
 | **Trace focused: Shift+← / Shift+→** | **Scan to the previous / next view at the current zoom, with 10% overlap; carry active Measure cursors with it** |
 | **Trace focused: Shift+↑ / Shift+↓** | **Zoom in / out one incremental step around the pointer (the centre when the pointer is off the trace)** |
-| Double-click trace | Place/activate a Measure mask at the click, capped at 20% of the visible view |
+| Double-click trace | Place/activate a Measure mask at the click, capped at 20% of the visible view; in Annotate mode (E), catch the event there and add it |
 | Wheel / two-finger swipe on trace | Vertical notch or swipe moves the signal up or down; horizontal notch, Shift+wheel or horizontal swipe slides the view along time (a swipe keeps the axis it started on) |
 | **Event inspector:** ←/→ | Previous / Next event |
 | **Event inspector:** A / R / Space | Accept / Reject / toggle (then the next event of the filter when **Advance after decision** is on) |
@@ -3268,7 +3407,7 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Event gallery:** PageDown / PageUp | Next / previous page |
 | **Event gallery:** Home / End | First / last page |
 | **Event gallery:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo on the main window's history, as the **Undo** and **Redo** buttons do |
-| **Plot windows:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo the plot's own history — its appearance while the Appearance controls are on screen; in Distributions, the whole plot recipe. Never Edit ▸ Undo (§10) |
+| **Plot windows:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo the plot's own history — its appearance, whatever the page's Section shows (Comparison figures and the study figure editor: while the Appearance controls are on screen); in Distributions, the whole plot recipe. Never Edit ▸ Undo (§10) |
 | **Plot windows:** right-click a plot | Reset view, Zoom back / Zoom forward and the page's exports. No key is bound to them; ⌘Z stays the plot's Undo (§10) |
 | **Event inspector & Event gallery:** 1–9 | Apply the matching label from the palette (**Analysis ▸ Event labels…**) — same digits, same meanings, in both windows |
 | **Event inspector & Event gallery:** custom one-character label hotkey | Apply that palette label (reserved and duplicate keys cannot be saved) |
@@ -3277,6 +3416,9 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 
 ## 14. Known limitations & caveats
 
+- **Text in the matplotlib windows** (Comparison figures, Study figures, report figures) cannot yet
+  be edited in the figure. In SVG exports the rotated y-axis label is written one glyph per text
+  element (pyqtgraph's behaviour).
 - **Current event-count heatmap display limitation:** the Event waveforms image can transpose
   bin coordinates relative to the correctly indexed counts/marginals. Do not read dwell-depth
   coordinates from it until a verified fix is installed. Use numerical tables, scatter or the

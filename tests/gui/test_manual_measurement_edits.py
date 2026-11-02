@@ -116,9 +116,10 @@ def test_clear_mask_after_double_click_keeps_saved_measurements_unchanged(window
     panel.measurementsChanged.connect(lambda: changed.append(True))
     assert panel.clear_mask() is True
 
-    assert not panel.is_active()
+    # Measure stays on with no mask, as X leaves it (Clear mask used to turn Measure off).
+    assert panel.is_active() and window._trace_view.measure_empty()
     assert window._trace_view.measure_bounds() is None
-    assert not panel._clear_mask_btn.isEnabled()
+    assert panel._clear_mask_btn.isEnabled()
     assert changed == []
     assert_frame_equal(panel.measurements_df, saved)
     assert "Saved measurements and events were not changed" in panel._status.text()

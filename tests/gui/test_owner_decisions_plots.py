@@ -217,9 +217,9 @@ def test_a_box_of_spaces_hides_the_plots_windows_title_and_axis_label(window, tm
     _open(window, tmp_path)
     plots = _plots(window)
     plots.set_histogram_column("frac_depth")
-    plots.set_fit("gaussian-mixture")           # the fit's summary is the automatic title
+    plots.set_fit("gaussian-mixture")           # plotux G3: a fit's numbers are in the fit label, never the title
     QtWidgets.QApplication.processEvents()
-    assert plots._plot.titleLabel.text and plots._plot.getAxis("bottom").labelText
+    assert plots._fit_label_item.plain_text() and plots._plot.getAxis("bottom").labelText
     widget = plots._appearance_widget
     QTest.keyClicks(widget.title, " ")
     QTest.keyClicks(widget.x_label, " ")
@@ -229,7 +229,10 @@ def test_a_box_of_spaces_hides_the_plots_windows_title_and_axis_label(window, tm
     widget.title.textEdited.emit("")
     widget.x_label.clear()
     widget.x_label.textEdited.emit("")
-    assert plots._plot.titleLabel.text.strip(), "an emptied box is the automatic title"
+    # An emptied box is the automatic title -- none for a histogram, now that the fit
+    # summary is not the title -- and the fit's numbers stayed on the figure throughout.
+    assert not plots._plot.titleLabel.isVisible() or not plots._plot.titleLabel.text.strip()
+    assert plots._fit_label_item.plain_text()
     assert plots._plot.getAxis("bottom").labelText.strip()
 
 

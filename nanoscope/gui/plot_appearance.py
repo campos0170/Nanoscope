@@ -5,14 +5,20 @@ original graphical properties. Text overrides never change units, arrays or fits
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, fields, replace
+import functools
 import math
 import json
-from typing import Any, Mapping, Sequence
+import re
+from typing import Any, Callable, Mapping, Sequence
 
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from .axes import set_major_tick
+from .figure_text import (AXIS_SIDES, AxisPin, TextStyle, _alive, _display_to_view, css_args,
+                          label_args, plain_text, rich_text, valid_element_key)
+from .fit_label import FIT_FIELDS, FitLabelState, valid_offset
 from .key_sequences import redo_sequences, undo_sequences
 
 #: How many appearance values one widget's history keeps, and how long a run of edits
@@ -59,16 +65,221 @@ class PlotAppearance:
     fit_color: str | None = None
     line_width: float | None = None
     marker_size: float | None = None
+    #: Per-element styles, element key -> TextStyle, as sorted pairs so the value stays
+    #: hashable. The TEXT of the title and the two axis labels stays in the three fields
+    #: above (one store per label); the map holds their style only.
+    text: tuple[tuple[str, TextStyle], ...] | None = None
+    #: The fit label (``fit_label.FitLabelState``); None = its defaults.
+    fit_label: FitLabelState | None = None
+    #: Per-axis pins, side -> AxisPin (range, major tick), as sorted pairs. In a window
+    #: whose views show different quantities the key is ``<view>.<side>`` (:meth:`for_view`).
+    axes: tuple[tuple[str, AxisPin], ...] | None = None
+    #: Where a drag put each annotation other than the fit label (V-dep's provenance
+    #: caption…): element key -> (x, y) px from the plot's top-left corner, as sorted
+    #: pairs. An annotation not here sits at its window's own place. The fit label's
+    #: place stays in ``fit_label`` (placement "custom" and its offset).
+    annotations: tuple[tuple[str, tuple[float, float]], ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe overrides only; an empty mapping means the original style."""
-        return {key: value for key, value in asdict(self).items() if value is not None}
+        out = {f.name: getattr(self, f.name) for f in fields(self)
+               if getattr(self, f.name) is not None
+               and f.name not in ("text", "fit_label", "axes", "annotations")}
+        if self.text:
+            out["text"] = {key: style.to_dict() for key, style in self.text}
+        if self.fit_label is not None:
+            out["fit_label"] = self.fit_label.to_dict()
+        if self.axes:
+            out["axes"] = {side: pin.to_dict() for side, pin in self.axes}
+        if self.annotations:
+            # A mapping per annotation, as the fit label's: room for more than the offset.
+            out["annotations"] = {key: {"offset": list(offset)} for key, offset in self.annotations}
+        return out
+
+    # -- per-element text -----------------------------------------------------------------
+    def text_style(self, key: str) -> TextStyle:
+        """The element's whole style, its text included, wherever each part is stored."""
+        style = dict(self.text or ()).get(key, TextStyle())
+        legacy = _LEGACY_TEXT.get(key)
+        if legacy is not None:
+            style = replace(style, text=getattr(self, legacy))
+        elif key == FIT_LABEL_KEY:
+            label = self.fit_label_state()
+            style = replace(style, text=label.template or None, size_pt=label.size_pt,
+                            color=label.color)
+        return style
+
+    def with_text_style(self, key: str, style: TextStyle) -> "PlotAppearance":
+        """A copy with ``key``'s style replaced. The title's and axis labels' text go to
+        their own fields, the fit label's text, size and colour to ``fit_label``."""
+        if not valid_element_key(key):
+            return self
+        style = TextStyle.from_mapping(style.to_dict())
+        changes: dict[str, Any] = {}
+        legacy = _LEGACY_TEXT.get(key)
+        if legacy is not None:
+            changes[legacy] = style.text
+            style = replace(style, text=None)
+        elif key == FIT_LABEL_KEY:
+            # Through from_mapping, so the state kept is the one a project reopens.
+            changes["fit_label"] = FitLabelState.from_mapping(
+                {**self.fit_label_state().to_dict(), "template": style.text or "",
+                 "size_pt": style.size_pt, "color": style.color})
+            style = replace(style, text=None, size_pt=None, color=None)
+        items = dict(self.text or ())
+        if style.is_default():
+            items.pop(key, None)
+        else:
+            items[key] = style
+        changes["text"] = tuple(sorted(items.items())) or None
+        return replace(self, **changes)
+
+    def axis_pin(self, side: str) -> AxisPin:
+        return dict(self.axes or ()).get(side, AxisPin())
+
+    def with_axis_pin(self, side: str, pin: AxisPin) -> "PlotAppearance":
+        if not valid_pin_key(side):
+            return self
+        pin = AxisPin.from_mapping(pin.to_dict())
+        items = dict(self.axes or ())
+        if pin.is_default():
+            items.pop(side, None)
+        else:
+            items[side] = pin
+        return replace(self, axes=tuple(sorted(items.items())) or None)
+
+    def for_view(self, view: str, *, primary: str = "") -> "PlotAppearance":
+        """What ONE view of a multi-view window draws: the pins typed on it (``<view>.<side>``,
+        ``figure_text.view_pin_key``) on its sides, and no other view's -- a range typed in
+        Hz on the PSD is no All-points range in pA. A bare ``<side>`` pin, saved before pins
+        were kept per view, is the ``primary`` view's (the one the window opens on) only.
+        ``view`` "" (a window with one view) is this appearance unchanged."""
+        if not view:
+            return self
+        own = {key: pin for key, pin in (self.axes or ()) if "." not in key and view == primary}
+        own.update((key[len(view) + 1:], pin) for key, pin in (self.axes or ())
+                   if key.startswith(view + "."))
+        return replace(self, axes=tuple(sorted(own.items())) or None)
+
+    def fit_label_state(self, legacy: Mapping[str, Any] | None = None) -> FitLabelState:
+        """The fit label as drawn: the saved one, else defaults (``legacy`` picks fields)."""
+        if self.fit_label is not None:
+            return self.fit_label
+        return FitLabelState.from_mapping(None, legacy=legacy)
+
+    # -- dragged annotations --------------------------------------------------------------
+    def annotation_offset(self, key: str) -> tuple[float, float] | None:
+        """Where annotation ``key`` was dragged to, px from the plot's top-left corner, or
+        None: at its window's own place. The fit label's is its custom ``fit_label`` offset."""
+        if key == FIT_LABEL_KEY:
+            label = self.fit_label_state()
+            return label.offset if label.placement == "custom" else None
+        return dict(self.annotations or ()).get(key)
+
+    def with_annotation_offset(self, key: str, offset) -> "PlotAppearance":
+        """A copy with annotation ``key`` dragged to ``offset``, or (None) back at its
+        window's own place. The fit label's goes to ``fit_label`` (placement "custom"),
+        where its Position control reads it. An offset no project could reopen is no change."""
+        place = valid_offset(offset) if offset is not None else None
+        if offset is not None and place is None:
+            return self
+        if key == FIT_LABEL_KEY:
+            label = self.fit_label_state()
+            if place is not None:
+                return replace(self, fit_label=replace(label, placement="custom", offset=place))
+            if label.placement != "custom":
+                return self
+            return replace(self, fit_label=replace(label, placement="top-left", offset=None))
+        if not (valid_element_key(key) and key.startswith("annotation.")):
+            return self
+        items = dict(self.annotations or ())
+        if place is None:
+            items.pop(key, None)
+        else:
+            items[key] = place
+        return replace(self, annotations=tuple(sorted(items.items())) or None)
+
+    def style_only(self) -> "PlotAppearance":
+        """What a PRESET carries: the look, never the wording (owner, Q-T2). Typed title
+        and axis labels, each element's text, the fit label's words, legend-entry styles
+        (tied to sources), axis pins (tied to data) and where annotations were dragged
+        all stay with the figure."""
+        items = {key: replace(style, text=None) for key, style in (self.text or ())
+                 if not key.startswith("legend.entry.")}
+        items = {key: style for key, style in items.items() if not style.is_default()}
+        label = None if self.fit_label is None else replace(self.fit_label, template="",
+                                                             offset=None,
+                                                             placement=("top-left" if self.fit_label.placement == "custom"
+                                                                        else self.fit_label.placement))
+        return replace(self, title=None, x_label=None, y_label=None,
+                       text=tuple(sorted(items.items())) or None, fit_label=label, axes=None,
+                       annotations=None)
+
+    def restyled(self, look: "PlotAppearance") -> "PlotAppearance":
+        """``look``'s style with THIS appearance's wording, pins and annotation places: a
+        preset applied."""
+        look = look.style_only()
+        items = dict(look.text or ())
+        for key, style in (self.text or ()):
+            if key.startswith("legend.entry."):
+                items[key] = style
+            elif style.text is not None:
+                items[key] = replace(items.get(key, TextStyle()), text=style.text)
+        label = look.fit_label
+        if label is None:
+            label = self.fit_label
+        elif self.fit_label is not None:
+            label = replace(label, template=self.fit_label.template,
+                            placement=self.fit_label.placement, offset=self.fit_label.offset)
+        return replace(look, title=self.title, x_label=self.x_label, y_label=self.y_label,
+                       text=tuple(sorted(items.items())) or None, fit_label=label,
+                       axes=self.axes, annotations=self.annotations)
+
+    def template_form(self) -> "PlotAppearance":
+        """What a window TEMPLATE carries (owner, Q-T6): wording and element styles, but no
+        legend-entry names or styles, which belong to the sources a template leaves out.
+        Dragged annotation places stay, as the fit label's dragged offset does."""
+        items = {key: style for key, style in (self.text or ())
+                 if not key.startswith("legend.entry.")}
+        return replace(self, text=tuple(sorted(items.items())) or None)
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any] | None) -> "PlotAppearance":
         """Ignore unknown/invalid saved fields without changing analysis defaults."""
         values = values if isinstance(values, Mapping) else {}
         valid: dict[str, Any] = {}
+        text = values.get("text")
+        if isinstance(text, Mapping):
+            items = {}
+            for key, style in list(text.items())[:400]:
+                if not valid_element_key(key) or not isinstance(style, Mapping):
+                    continue
+                style = TextStyle.from_mapping(style)
+                if key in _LEGACY_TEXT or key == FIT_LABEL_KEY:
+                    style = replace(style, text=None)
+                if not style.is_default():
+                    items[key] = style
+            if items:
+                valid["text"] = tuple(sorted(items.items()))
+        if isinstance(values.get("fit_label"), Mapping):
+            valid["fit_label"] = FitLabelState.from_mapping(values["fit_label"])
+        axes = values.get("axes")
+        if isinstance(axes, Mapping):
+            pins = {side: AxisPin.from_mapping(pin) for side, pin in axes.items()
+                    if valid_pin_key(side) and isinstance(pin, Mapping)}
+            pins = {side: pin for side, pin in pins.items() if not pin.is_default()}
+            if pins:
+                valid["axes"] = tuple(sorted(pins.items()))
+        annotations = values.get("annotations")
+        if isinstance(annotations, Mapping):
+            places = {}
+            for key, place in list(annotations.items())[:100]:
+                offset = valid_offset(place.get("offset")) if isinstance(place, Mapping) else None
+                if (offset is not None and valid_element_key(key)
+                        and key.startswith("annotation.") and key != FIT_LABEL_KEY):
+                    places[key] = offset
+            if places:
+                valid["annotations"] = tuple(sorted(places.items()))
         # One rule in every plot window (owner, design 13.4 Q1): an emptied box is the
         # automatic label, as one never touched, and a box holding only spaces hides the
         # label (kept as one space, :data:`HIDDEN_LABEL`).
@@ -112,22 +323,138 @@ _BUILTIN_PRESETS: dict[str, PlotAppearance] = {
         marker_size=11),
 }
 
+#: The element keys whose TEXT lives in a field of its own (the Appearance boxes edit it).
+_LEGACY_TEXT = {"title": "title", "axis.bottom.label": "x_label", "axis.left.label": "y_label"}
+#: The fit label's element key: its text, size and colour live in ``fit_label``.
+FIT_LABEL_KEY = "annotation.fit"
+
 #: How a step names each field, and the word for "no override" in that control's own
-#: vocabulary: the size spins and colour buttons say "Default", the three-way combos
-#: "Original", the label boxes' placeholder "Automatic". An emptied label box is that
-#: too; a box of spaces (:data:`HIDDEN_LABEL`) draws no label, so a step names it "hidden".
+#: vocabulary: the size spins and colour buttons say "Default", everything else
+#: "Automatic" -- the label boxes' placeholder, and the three-way combos since ux L3 (one
+#: word for "not overridden"). An emptied label box is that too; a box of spaces
+#: (:data:`HIDDEN_LABEL`) draws no label, so a step names it "hidden". Every field needs
+#: an entry: :func:`_describe_step` reads one for each field that moved.
 _STEP_WORDS: dict[str, tuple[str, str]] = {
     "title": ("title", "automatic"), "x_label": ("x label", "automatic"),
-    "y_label": ("y label", "automatic"), "legend_visible": ("legend", "original"),
+    "y_label": ("y label", "automatic"), "legend_visible": ("legend", "automatic"),
     "legend_size": ("legend text", "default"), "font_family": ("font", "default"),
     "title_size": ("title size", "default"), "axis_size": ("axis label size", "default"),
-    "tick_size": ("tick size", "default"), "grid": ("grid", "original"),
-    "background": ("background", "original"), "data_color": ("data color", "default"),
+    "tick_size": ("tick size", "default"), "grid": ("grid", "automatic"),
+    "background": ("background", "automatic"), "data_color": ("data color", "default"),
     "fit_color": ("fit color", "default"), "line_width": ("line width", "default"),
-    "marker_size": ("marker size", "default"),
+    "marker_size": ("marker size", "default"), "text": ("text style", "automatic"),
+    "fit_label": ("fit label", "automatic"), "axes": ("axis", "automatic"),
+    "annotations": ("annotation position", "automatic"),
 }
 _POINT_FIELDS = frozenset({"title_size", "axis_size", "tick_size", "legend_size"})
 _TEXT_FIELDS = ("title", "x_label", "y_label")
+#: The fields one element's style can move together (its text and its style).
+_ELEMENT_FIELDS = frozenset({"title", "x_label", "y_label", "text", "fit_label"})
+_SIDE_WORDS = {"bottom": "x axis", "left": "y axis", "top": "top axis", "right": "right axis"}
+#: A ``PlotAppearance.axes`` key: a side, or ``<view>.<side>`` (``PlotAppearance.for_view``).
+_PIN_KEY = re.compile(rf"(?:[a-z_]{{1,32}}\.)?(?:{'|'.join(AXIS_SIDES)})")
+
+
+def valid_pin_key(key) -> bool:
+    """Whether ``key`` can name a pin in ``PlotAppearance.axes``."""
+    return isinstance(key, str) and _PIN_KEY.fullmatch(key) is not None
+
+
+def _element_name(key: str) -> str:
+    names = {"title": "title", "axis.bottom.label": "x label", "axis.left.label": "y label",
+             "colorbar.label": "colour-bar label", FIT_LABEL_KEY: "fit label",
+             "annotation.provenance": "caption"}
+    if key in names:
+        return names[key]
+    parts = key.split(".")
+    if key.startswith("axis.") and key.endswith(".ticks"):
+        return f"{_SIDE_WORDS.get(parts[1], parts[1])} ticks"
+    if key.startswith("axis.") or key.startswith("marginal."):
+        return f"{parts[1]} label"
+    if key.startswith("legend.entry."):
+        name = key[len("legend.entry."):]
+        return f"legend ‘{name if len(name) <= 20 else name[:19] + '…'}’"
+    return key.split(".", 1)[-1].replace(".", " ")
+
+
+def _spell_style(attr: str, value) -> str:
+    if attr == "text":
+        if value is None:
+            return "text automatic"
+        if not value.strip():
+            return "hidden"
+        return f"‘{value if len(value) <= 24 else value[:23] + '…'}’"
+    word = {"family": "font", "size_pt": "size", "color": "colour", "align": "aligned",
+            "bold": "bold", "italic": "italic"}[attr]
+    if value is None:
+        return f"{word} automatic"
+    if isinstance(value, bool):
+        return f"{word} {'on' if value else 'off'}"
+    if attr == "size_pt":
+        return f"size {value:g} pt"
+    return f"{word} {value}"
+
+
+def _describe_elements(before: "PlotAppearance", after: "PlotAppearance") -> str | None:
+    """"title bold on", "y label colour #d55e00": one element's style step, or None."""
+    keys = {key for key, _ in (before.text or ())} | {key for key, _ in (after.text or ())}
+    keys |= set(_LEGACY_TEXT)
+    if before.fit_label_state() != after.fit_label_state():
+        keys.add(FIT_LABEL_KEY)
+    moved = [(key, attr.name) for key in sorted(keys) for attr in fields(TextStyle)
+             if getattr(before.text_style(key), attr.name) != getattr(after.text_style(key), attr.name)]
+    if not moved or len({key for key, _ in moved}) != 1:
+        return None
+    key = moved[0][0]
+    said = [_spell_style(attr, getattr(after.text_style(key), attr)) for _, attr in moved]
+    if len(said) > 2:
+        return f"{_element_name(key)} style ({len(said)} changes)"
+    return f"{_element_name(key)} {', '.join(said)}"
+
+
+def _describe_axes(before: "PlotAppearance", after: "PlotAppearance") -> str:
+    keys = sorted({key for key, _ in (before.axes or ())} | {key for key, _ in (after.axes or ())})
+    moved = [key for key in keys if before.axis_pin(key) != after.axis_pin(key)]
+    # A bare pin saved before pins were kept per view, moved onto its view's key: one axis.
+    bare = {key for key in moved if "." not in key and any(m.endswith("." + key) for m in moved)}
+    moved = [key for key in moved if key not in bare]
+    if len(moved) != 1:
+        return f"{len(moved)} axes"
+    key = moved[0]
+    side = key.rpartition(".")[2]
+    old, new = before.axis_pin(side if side in bare else key), after.axis_pin(key)
+    name = _SIDE_WORDS[side]
+    said = []
+    if old.range() != new.range():
+        said.append(f"range {new.min:g}–{new.max:g}" if new.range() else "range automatic")
+    if old.tick_major != new.tick_major:
+        said.append(f"major tick {new.tick_major:g}" if new.tick_major else "major tick automatic")
+    if old.log != new.log:
+        said.append("log automatic" if new.log is None else f"log {'on' if new.log else 'off'}")
+    return f"{name} {', '.join(said)}"
+
+
+def _describe_annotations(before: "PlotAppearance", after: "PlotAppearance") -> str:
+    """"caption moved", as a fit-label drag is "fit label moved"; "caption position
+    automatic" when it goes back to its window's own place."""
+    old, new = dict(before.annotations or ()), dict(after.annotations or ())
+    keys = sorted(key for key in set(old) | set(new) if old.get(key) != new.get(key))
+    if len(keys) != 1:
+        return f"{len(keys)} annotations moved"
+    return f"{_element_name(keys[0])} {'moved' if keys[0] in new else 'position automatic'}"
+
+
+def _describe_fit_label(before: "PlotAppearance", after: "PlotAppearance") -> str:
+    old, new = before.fit_label_state(), after.fit_label_state()
+    if old.visible != new.visible:
+        return f"fit label {'shown' if new.visible else 'hidden'}"
+    if old.in_legend != new.in_legend:
+        return f"fit label in legend {'on' if new.in_legend else 'off'}"
+    if (old.placement, old.offset) != (new.placement, new.offset):
+        return "fit label moved" if new.placement == "custom" else f"fit label {new.placement}"
+    if old.fields != new.fields:
+        return "fit label numbers " + (", ".join(new.fields) or "none")
+    return "fit label style"
 
 
 def _spell(key: str, value) -> str:
@@ -155,6 +482,19 @@ def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
     """
     moved = [f.name for f in fields(PlotAppearance)
              if getattr(before, f.name) != getattr(after, f.name)]
+    if moved == ["axes"]:
+        return _describe_axes(before, after)
+    if moved == ["annotations"]:
+        return _describe_annotations(before, after)
+    if moved and set(moved) <= _ELEMENT_FIELDS and ("text" in moved or "fit_label" in moved):
+        element = _describe_elements(before, after)
+        if element is not None:
+            return element
+        if moved == ["fit_label"]:
+            return _describe_fit_label(before, after)
+    if moved == ["text"]:
+        changed = set(before.text or ()) ^ set(after.text or ())
+        return f"{len({key for key, _ in changed})} text styles"
     if len(moved) == 1:
         key = moved[0]
         old, new = getattr(before, key), getattr(after, key)
@@ -166,7 +506,8 @@ def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
                 said_old += " pt"
         return f"{_STEP_WORDS[key][0]} {said_old} → {said_new}"
     for name, preset in _BUILTIN_PRESETS.items():
-        if after == preset:
+        # A preset keeps the figure's wording, so the step lands on the preset's LOOK.
+        if after.style_only() == preset and before.style_only() != preset:
             return f"{name} preset"
     if not after.to_dict():
         return "reset appearance"
@@ -301,6 +642,12 @@ def preset_store() -> _PresetStore:
     return _PRESET_STORE
 
 
+def _delete_all(objects, *_args) -> None:
+    for obj in objects:
+        if _alive(obj):
+            obj.deleteLater()
+
+
 class PlotAppearanceWidget(QtWidgets.QWidget):
     """Compact common controls. ``set_state`` is silent; user edits emit once.
 
@@ -317,6 +664,18 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
     key bound twice in one window is ambiguous, and Qt then fires NEITHER. The Plots window
     passes ``history=False`` -- its own configuration stack already holds appearance, and
     one window must not have two stacks.
+
+    ``shortcut_parent`` (default: this widget) is the widget those keys are created on. Qt
+    answers a window shortcut only while its parent is visible, so on this widget the keys
+    go quiet whenever its Appearance section is folded away -- while an edit made in the
+    figure itself (``figure_text``) is still one of its steps. A page passes its own root
+    to keep ⌘Z live in every section; a page behind another Explorer tab is hidden, so it
+    still does not answer.
+
+    ``reset_keeps`` (default: none) names the element keys whose text styles Reset
+    appearance leaves as they are: a page whose steps carry state stored elsewhere
+    (Distribution summaries' legend names, kept in Source names and colors) passes them, so
+    a Reset does not drop them as a step that changes nothing on screen.
     """
 
     changed = QtCore.Signal(object)
@@ -324,9 +683,12 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
     def __init__(self, state: PlotAppearance | None = None, parent=None, *,
                  include_colors=True, compact=False, include_markers=True,
                  include_labels=True, include_legend=True, multi_view_labels=False,
-                 history=True, shortcuts=True):
+                 history=True, shortcuts=True,
+                 shortcut_parent: QtWidgets.QWidget | None = None,
+                 reset_keeps: Callable[[str], bool] | None = None):
         super().__init__(parent)
         self._state = state or PlotAppearance()
+        self._reset_keeps = reset_keeps
         self._loading = False
         #: How deep this widget is inside its own ``changed`` emission. A ``set_state``
         #: arriving then is the host answering the value it was just handed, not an
@@ -337,6 +699,27 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(4)
+        # TEXT FIRST (ux H2): the words on the figure are what people come here to change,
+        # so Title, X label and Y label lead, above the preset and the font rows.
+        self._multi_view_labels = multi_view_labels
+        text_rows = []
+        for key, caption in (("title", "Title"), ("x_label", "X label"), ("y_label", "Y label")):
+            edit = QtWidgets.QLineEdit()
+            edit.setPlaceholderText(self._automatic_placeholder(""))
+            edit.setToolTip("Text only: axis scaling and numerical values stay unchanged. "
+                            "Typed text is shown as typed; _{…} and ^{…} make sub- and "
+                            "superscripts. Include the scientific unit in a custom axis label.")
+            edit.textEdited.connect(lambda text, field=key: self._edit(field, text))
+            setattr(self, key, edit)
+            label = QtWidgets.QLabel(caption + (" (all views)" if multi_view_labels else ""))
+            label.setBuddy(edit)
+            label.setVisible(include_labels)
+            edit.setVisible(include_labels)
+            text_rows.append((label, edit))
+        for row, (label, edit) in enumerate(text_rows):
+            layout.addWidget(label, row, 0)
+            layout.addWidget(edit, row, 1, 1, 3)
+        top = len(text_rows)
         self.preset = QtWidgets.QComboBox()
         self.preset.addItems(["Choose appearance preset…", *_BUILTIN_PRESETS])
         self.preset.setToolTip("Appearance only: never changes data, fitting, axis scales, or analysis settings.")
@@ -377,17 +760,25 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
                 # window, so a page behind another Explorer tab, or an Appearance section
                 # the workflow bar has folded away, does not answer. Each resolved key
                 # once (key_sequences says why). A focused text box keeps the key for its
-                # own typing, as everywhere else in the app.
+                # own typing, as everywhere else in the app. On ``shortcut_parent`` when
+                # the host gives one (the class docstring says why).
+                owner = shortcut_parent if shortcut_parent is not None else self
+                self._shortcuts: list[QtGui.QShortcut] = []
                 for keys, slot in ((undo_sequences(), self.undo), (redo_sequences(), self.redo)):
                     for key in keys:
-                        shortcut = QtGui.QShortcut(key, self)
+                        shortcut = QtGui.QShortcut(key, owner)
+                        self._shortcuts.append(shortcut)
                         shortcut.setContext(QtCore.Qt.ShortcutContext.WindowShortcut)
                         shortcut.activated.connect(slot)
+                if owner is not self:
+                    # Gone with this widget, not with the page: a widget built again on
+                    # the same page would otherwise find its keys bound twice (ambiguous).
+                    self.destroyed.connect(functools.partial(_delete_all, tuple(self._shortcuts)))
         # Three buttons need two columns of the four; the preset gives up the third, which
         # costs the grid nothing where the extra column would have cost it the row's width.
         wide = reset_cell is not self.reset_button
-        layout.addWidget(self.preset, 0, 0, 1, 2 if wide else 3)
-        layout.addWidget(reset_cell, 0, 2 if wide else 3, 1, 2 if wide else 1)
+        layout.addWidget(self.preset, top, 0, 1, 2 if wide else 3)
+        layout.addWidget(reset_cell, top, 2 if wide else 3, 1, 2 if wide else 1)
         self.font_family = QtWidgets.QComboBox()
         self.font_family.setEditable(True)
         self.font_family.addItems(["Default", *QtGui.QFontDatabase.families()])
@@ -396,13 +787,14 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self.font_family.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.font_family.currentTextChanged.connect(
             lambda text: self._edit("font_family", None if text == "Default" else text))
-        self._add_control(layout, 1, 0, "Font", self.font_family)
+        self._add_control(layout, top + 1, 0, "Font", self.font_family)
         self.background = QtWidgets.QComboBox()
-        for label, value in (("Original", None), ("Light", "light"), ("Dark", "dark")):
+        # "Automatic", the one word for "not overridden" (ux L3), as the label boxes say it.
+        for label, value in (("Automatic", None), ("Light", "light"), ("Dark", "dark")):
             self.background.addItem(label, value)
         self.background.currentIndexChanged.connect(
             lambda: self._edit("background", self.background.currentData()))
-        self._add_control(layout, 1, 2, "Background", self.background)
+        self._add_control(layout, top + 1, 2, "Background", self.background)
         for key, label, row, col in (
                 ("title_size", "Title (pt)", 2, 0),
                 ("axis_size", "Axis labels (pt)", 2, 2),
@@ -415,38 +807,41 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             spin.setSpecialValueText("Default")
             spin.valueChanged.connect(lambda value, field=key: self._edit(field, value or None))
             setattr(self, key, spin)
-            self._add_control(layout, row, col, label, spin)
+            self._add_control(layout, top + row, col, label, spin)
         self.grid = QtWidgets.QComboBox()
-        for label, value in (("Original", None), ("Show", True), ("Hide", False)):
+        for label, value in (("Automatic", None), ("Show", True), ("Hide", False)):
             self.grid.addItem(label, value)
         self.grid.currentIndexChanged.connect(lambda: self._edit("grid", self.grid.currentData()))
-        self._add_control(layout, 3, 2, "Grid", self.grid)
+        self._add_control(layout, top + 3, 2, "Grid", self.grid)
         for key, label, col in (("data_color", "Data color", 0), ("fit_color", "Fit color", 2)):
             button = QtWidgets.QPushButton("Default…")
             button.clicked.connect(lambda checked=False, field=key: self._choose_color(field))
             setattr(self, key, button)
-            self._add_control(layout, 5, col, label, button)
+            self._add_control(layout, top + 5, col, label, button)
         note = QtWidgets.QLabel("Appearance only. Axis scales, numerical values and scientific settings are preserved.")
         note.setWordWrap(True)
-        layout.addWidget(note, 6, 0, 1, 4)
+        layout.addWidget(note, top + 6, 0, 1, 4)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         if not include_colors:
             for row, column in ((5, 0), (5, 1), (5, 2), (5, 3)):
-                layout.itemAtPosition(row, column).widget().hide()
+                layout.itemAtPosition(top + row, column).widget().hide()
             # Category-colored views still share typography and canvas presets.
             # Their host ignores data/fit overrides so category identities stay intact.
         if not include_markers:
-            layout.itemAtPosition(4, 2).widget().hide()
+            layout.itemAtPosition(top + 4, 2).widget().hide()
             self.marker_size.hide()
         if compact:
-            pairs = [(layout.itemAtPosition(row, col).widget(),
-                      layout.itemAtPosition(row, col + 1).widget())
+            pairs = [(layout.itemAtPosition(top + row, col).widget(),
+                      layout.itemAtPosition(top + row, col + 1).widget())
                      for row, col in ((1, 0), (1, 2), (2, 0), (2, 2), (3, 0),
                                       (3, 2), (4, 0), (4, 2), (5, 0), (5, 2))]
             while layout.count():
                 layout.takeAt(0)
-            row = 0
+            for row, (label, edit) in enumerate(text_rows):
+                layout.addWidget(label, row, 0)
+                layout.addWidget(edit, row, 1)
+            row = top
             layout.addWidget(self.preset, row, 0, 1, 2)
             row += 1
             for label, control in pairs:
@@ -460,21 +855,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             layout.setColumnStretch(3, 0)
         columns = 2 if compact else 4
         row = layout.rowCount()
-        for key, caption in (("title", "Title"), ("x_label", "X label"), ("y_label", "Y label")):
-            edit = QtWidgets.QLineEdit()
-            edit.setPlaceholderText("Automatic / per-view label")
-            edit.setToolTip("Text only: axis scaling and numerical values stay unchanged. "
-                            "Include the scientific unit in a custom axis label.")
-            edit.textEdited.connect(lambda text, field=key: self._edit(field, text))
-            setattr(self, key, edit)
-            label = QtWidgets.QLabel(caption + (" (all views)" if multi_view_labels else ""))
-            layout.addWidget(label, row, 0)
-            layout.addWidget(edit, row, 1, 1, columns - 1)
-            label.setVisible(include_labels)
-            edit.setVisible(include_labels)
-            row += 1
         self.legend_visible = QtWidgets.QComboBox()
-        for label, value in (("Original", None), ("Show", True), ("Hide", False)):
+        for label, value in (("Automatic", None), ("Show", True), ("Hide", False)):
             self.legend_visible.addItem(label, value)
         self.legend_visible.currentIndexChanged.connect(
             lambda: self._edit("legend_visible", self.legend_visible.currentData()))
@@ -488,12 +870,17 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             caption.setVisible(include_legend)
             control.setVisible(include_legend)
             row += 1
+        self.fit_label_group = self._build_fit_label_group()
+        layout.addWidget(self.fit_label_group, row, 0, 1, columns)
+        row += 1
         self.user_presets = QtWidgets.QComboBox()
         self.user_presets.setToolTip("Reusable appearance only — no source, column, fit, bin or analysis settings.")
         self.user_presets.activated.connect(self._activate_user_preset)
         layout.addWidget(self.user_presets, row, 0, 1, columns)
         row += 1
         self.save_preset_button = QtWidgets.QPushButton("Save appearance preset…")
+        self.save_preset_button.setToolTip("Save the look: fonts, sizes, colours and styles. "
+                                           "Titles and labels you typed stay with their figure.")
         self.delete_preset_button = QtWidgets.QPushButton("Delete selected preset")
         self.save_preset_button.clicked.connect(self._ask_save_preset)
         self.delete_preset_button.clicked.connect(self._delete_selected_preset)
@@ -509,6 +896,97 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         label_widget.setBuddy(control)
         layout.addWidget(label_widget, row, column)
         layout.addWidget(control, row, column + 1)
+
+    def _automatic_placeholder(self, text: str) -> str:
+        if self._multi_view_labels and not text:
+            return "Automatic (each view's own)"
+        return f"Automatic: {text}" if text else "Automatic"
+
+    def set_automatic_text(self, field: str, text: str) -> None:
+        """Show the window's automatic ``title`` / ``x_label`` / ``y_label`` as the box's
+        placeholder ("Automatic: Dwell (ms)"), so it is easy to copy and change."""
+        box = getattr(self, field, None) if field in _TEXT_FIELDS else None
+        if box is not None:
+            box.setPlaceholderText(self._automatic_placeholder(plain_text(text)))
+
+    # -- the fit label section --------------------------------------------------------------
+    _FIT_FIELD_WORDS = {"equation": "Equation", "r2": "R²", "n": "n", "ci": "CI",
+                        "bic": "BIC", "ks": "KS"}
+
+    def _build_fit_label_group(self) -> QtWidgets.QGroupBox:
+        """Show, the numbers, Text (template), Size, Colour, Position, In legend instead.
+        Hidden until the host says it draws a fit label (:meth:`set_fit_label_available`)."""
+        group = QtWidgets.QGroupBox("Fit label")
+        group.setObjectName("plotAppearanceFitLabel")
+        form = QtWidgets.QFormLayout(group)
+        form.setContentsMargins(6, 4, 6, 4)
+        self.fit_label_show = QtWidgets.QCheckBox("Show the fit on the plot")
+        self.fit_label_show.toggled.connect(lambda on: self._edit_fit_label(visible=on))
+        form.addRow(self.fit_label_show)
+        row = QtWidgets.QHBoxLayout()
+        self.fit_label_fields: dict[str, QtWidgets.QCheckBox] = {}
+        for name in FIT_FIELDS:
+            box = QtWidgets.QCheckBox(self._FIT_FIELD_WORDS[name])
+            box.toggled.connect(lambda _on: self._edit_fit_label(fields=tuple(
+                f for f in FIT_FIELDS if self.fit_label_fields[f].isChecked())))
+            self.fit_label_fields[name] = box
+            row.addWidget(box)
+        form.addRow("Numbers", row)
+        self.fit_label_template = QtWidgets.QLineEdit()
+        self.fit_label_template.setPlaceholderText("Automatic: the numbers ticked above")
+        self.fit_label_template.setToolTip(
+            "Your words, with live numbers: {equation} {r2} {n} {ci} {bic} {ks} {source}. "
+            "A re-fit keeps your words and updates the numbers. An R² refusal (for example "
+            "zero degrees of freedom) is always shown when R² is asked for.")
+        self.fit_label_template.textEdited.connect(lambda text: self._edit_fit_label(template=text))
+        form.addRow("Text", self.fit_label_template)
+        self.fit_label_size = _SizeSpinBox(6, 72)
+        self.fit_label_size.setSpecialValueText("Default")
+        self.fit_label_size.valueChanged.connect(lambda v: self._edit_fit_label(size_pt=v or None))
+        form.addRow("Size (pt)", self.fit_label_size)
+        self.fit_label_color = QtWidgets.QComboBox()
+        self.fit_label_color.addItem("Automatic (the fit's colour)", None)
+        for colour in ("#000000", "#0072b2", "#d55e00", "#009e73", "#cc79a7", "#7f7f7f"):
+            self.fit_label_color.addItem(colour, colour)
+        self.fit_label_color.currentIndexChanged.connect(
+            lambda _i: self._edit_fit_label(color=self.fit_label_color.currentData()))
+        form.addRow("Colour", self.fit_label_color)
+        self.fit_label_position = QtWidgets.QComboBox()
+        for label, value in (("Automatic", "auto"), ("Top left", "top-left"),
+                             ("Top right", "top-right"), ("Bottom left", "bottom-left"),
+                             ("Bottom right", "bottom-right"), ("Where I dragged it", "custom")):
+            self.fit_label_position.addItem(label, value)
+        self.fit_label_position.setToolTip("Drag the label on the plot to put it anywhere.")
+        self.fit_label_position.activated.connect(self._fit_label_position_picked)
+        form.addRow("Position", self.fit_label_position)
+        self.fit_label_in_legend = QtWidgets.QCheckBox("In legend instead")
+        self.fit_label_in_legend.toggled.connect(lambda on: self._edit_fit_label(in_legend=on))
+        form.addRow(self.fit_label_in_legend)
+        group.hide()
+        return group
+
+    def set_fit_label_available(self, available: bool, *, in_legend: bool = True) -> None:
+        """Show the Fit label section: the host draws a fit label (``fit_label``).
+
+        ``in_legend=False`` for a window that does not put the label's lines in its legend
+        row: there "In legend instead" would take the numbers, and the R² refusal no
+        template may drop, off the figure."""
+        self.fit_label_group.setVisible(bool(available))
+        self.fit_label_in_legend.setVisible(bool(in_legend))
+
+    def _fit_label_position_picked(self, _index: int) -> None:
+        placement = self.fit_label_position.currentData()
+        label = self._state.fit_label_state()
+        if placement == "custom" and label.offset is None:
+            self._write(self._state)       # nothing dragged yet: nothing to go back to
+            return
+        self._edit_fit_label(placement=placement,
+                             offset=label.offset if placement == "custom" else None)
+
+    def _edit_fit_label(self, **changes) -> None:
+        if self._loading:
+            return
+        self._edit("fit_label", replace(self._state.fit_label_state(), **changes).to_dict())
 
     def state(self) -> PlotAppearance:
         return self._state
@@ -552,6 +1030,21 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
                 value = getattr(self._state, key)
                 button.setText(f"{value}…" if value else "Default…")
                 button.setStyleSheet(f"border-bottom: 3px solid {value};" if value else "")
+            label = self._state.fit_label_state()
+            self.fit_label_show.setChecked(label.visible)
+            for name, box in self.fit_label_fields.items():
+                box.setChecked(name in label.fields)
+            if self.fit_label_template.text() != label.template:
+                self.fit_label_template.setText(label.template)
+            self.fit_label_size.setValue(label.size_pt or 0)
+            index = self.fit_label_color.findData(label.color)
+            if index < 0 and label.color:
+                self.fit_label_color.addItem(label.color, label.color)
+                index = self.fit_label_color.count() - 1
+            self.fit_label_color.setCurrentIndex(max(0, index))
+            self.fit_label_position.setCurrentIndex(
+                max(0, self.fit_label_position.findData(label.placement)))
+            self.fit_label_in_legend.setChecked(label.in_legend)
         finally:
             self._loading = False
 
@@ -570,7 +1063,9 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             values = json.loads(raw) if isinstance(raw, str) else {}
             if not isinstance(values, dict):
                 return {}
-            return {name: PlotAppearance.from_mapping(state).to_dict()
+            # Style only, on the way out as on the way in: a preset saved before presets
+            # dropped wording (or carried in by a project) must not stamp its title either.
+            return {name: PlotAppearance.from_mapping(state).style_only().to_dict()
                     for name, state in values.items()
                     if isinstance(name, str) and name.strip() and isinstance(state, dict)}
         except (TypeError, ValueError):
@@ -597,7 +1092,9 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         values = self.user_preset_states()
         if name in values and not overwrite:
             return False
-        values[name] = self.state().to_dict()
+        # A preset is a LOOK (owner, Q-T2): a preset made on I-V used to stamp its title onto
+        # the noise spectrum. The wording stays with the figure it was typed on.
+        values[name] = self.state().style_only().to_dict()
         settings = QtCore.QSettings()
         settings.setValue(self._PRESETS_KEY, json.dumps(values, sort_keys=True, allow_nan=False))
         settings.sync()
@@ -609,7 +1106,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         values = self.user_preset_states()
         if name not in values:
             return False
-        self._apply(PlotAppearance.from_mapping(values[name]))
+        self._apply(self._state.restyled(PlotAppearance.from_mapping(values[name])))
         return True
 
     def apply_appearance(self, state: PlotAppearance | Mapping[str, Any]) -> None:
@@ -703,14 +1200,19 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             self._apply(PlotAppearance.from_mapping({**self._state.to_dict(), field: color.name()}))
 
     def _reset(self):
-        self._apply(PlotAppearance())
+        state = PlotAppearance()
+        if self._reset_keeps is not None:
+            for key, style in self._state.text or ():
+                if self._reset_keeps(key):
+                    state = state.with_text_style(key, style)
+        self._apply(state)
 
     def _apply_preset(self, index):
         presets = tuple(_BUILTIN_PRESETS.values())
         if not 1 <= index <= len(presets):
             return
         self.preset.setCurrentIndex(0)
-        self._apply(presets[index - 1], always=True)
+        self._apply(self._state.restyled(presets[index - 1]), always=True)
 
     # -- history ------------------------------------------------------------------------
     def undo(self) -> bool:
@@ -927,6 +1429,9 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
     ranges = [list(axis) for axis in view.viewRange()]
     auto = list(view.autoRangeEnabled())
     view.disableAutoRange()
+    elements = dict(state.text or ())
+    # Read by figure_composition: a style its model cannot replay makes a frozen panel.
+    plot._nanoscope_text_elements = elements
     try:
         foreground = {"light": "#20242b", "dark": "#e6e9ef"}.get(state.background)
         if plot_widget is not None:
@@ -937,7 +1442,9 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             if axis.labelText != original["applied_text"]:
                 original["text"] = axis.labelText
             override = state.x_label if side == "bottom" else state.y_label if side == "left" else None
-            axis.labelText = override or original["text"]
+            # The user's label is LITERAL text (owner, Q-T1): escaped, so "a<b> c" draws as
+            # typed instead of turning b into a bold tag. The window's own label is its HTML.
+            axis.labelText = rich_text(override) if override else original["text"]
             original["applied_text"] = axis.labelText
             label_style = dict(original["label"])
             if state.font_family:
@@ -946,20 +1453,36 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
                 label_style["font-size"] = f"{state.axis_size:g}pt"
             if foreground:
                 label_style["color"] = foreground
-            axis.labelStyle = label_style
-            axis._updateLabel()  # preserve text, units and automatic SI-prefix state
+            # Element override, then the figure-wide fields above, then the window's own.
+            label_style.update(css_args(elements.get(f"axis.{side}.label", TextStyle())))
+            ticks = elements.get(f"axis.{side}.ticks", TextStyle())
             font = original["font"]
-            if state.font_family or state.tick_size is not None:
+            if state.font_family or state.tick_size is not None or not ticks.is_default():
                 font = QtGui.QFont(font or QtWidgets.QApplication.font())
                 if state.font_family:
                     font.setFamily(state.font_family)
                 if state.tick_size is not None:
                     font.setPointSizeF(state.tick_size)
+                if ticks.family:
+                    font.setFamily(ticks.family)
+                if ticks.size_pt:
+                    font.setPointSizeF(ticks.size_pt)
+                if ticks.bold is not None:
+                    font.setBold(ticks.bold)
+                if ticks.italic is not None:
+                    font.setItalic(ticks.italic)
             axis.setStyle(tickFont=font)
             axis.setPen(foreground or original["pen"])
-            axis.setTextPen(foreground or original["text_pen"])
+            axis.setTextPen(ticks.color or foreground or original["text_pen"])
+            # After setTextPen, which writes its own colour into the label's CSS.
+            axis.labelStyle = label_style
+            axis._updateLabel()  # preserve text, units and automatic SI-prefix state
             axis.setGrid(original["grid"] if state.grid is None else
                          (0.15 * 255 if state.grid and side in ("bottom", "left") else False))
+            pin = state.axis_pin(side)
+            if pin.tick_major is not None or getattr(axis, "major_tick", None) is not None \
+                    or "tickSpacing" in vars(axis):
+                set_major_tick(axis, pin.tick_major)
         title = plot.titleLabel
         if title.text != defaults["applied_title_text"]:
             defaults["title_text"] = title.text
@@ -975,7 +1498,8 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             title.opts["size"] = f"{state.title_size:g}pt"
         if foreground:
             title.opts["color"] = foreground
-        title.setText(title_prefix + state.title if state.title else defaults["title_text"])
+        title.opts.update(label_args(elements.get("title", TextStyle())))
+        title.setText(title_prefix + rich_text(state.title) if state.title else defaults["title_text"])
         # setTitle(None) hides the row. An authored title must make it visible
         # again; Reset to an empty automatic title, or a hidden one, must hide it
         # without a gap.
@@ -1009,8 +1533,90 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             # Axis text already follows the canvas theme; legend text must do
             # the same or a white publication preset leaves pale labels on white.
             legend.setLabelTextColor(foreground or original["color"] or pg.getConfigOption("foreground"))
+            _style_legend_entries(legend, elements)
     finally:
         view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
+        pins = _apply_axis_pins(plot, state, auto)
         for axis, enabled in enumerate(auto):
-            if enabled:
+            if enabled and axis not in pins:
                 view.enableAutoRange(axis=axis, enable=enabled)
+
+
+def _style_legend_entries(legend, elements: Mapping[str, TextStyle]) -> None:
+    """Each legend row's rename and style (``legend.entry.<name>``), escaped like any typed
+    text. The window's own name is remembered per row, so Reset name puts it back."""
+    for _sample, label in list(legend.items):
+        if getattr(label, "_nanoscope_applied_text", None) != label.text:
+            label._nanoscope_auto_text = label.text      # the window (re)named it
+        auto = getattr(label, "_nanoscope_auto_text", label.text)
+        style = elements.get(f"legend.entry.{plain_text(auto)}"[:213], TextStyle())
+        if style.is_default() and label.text == auto and not getattr(label, "_nanoscope_styled", False):
+            label._nanoscope_applied_text = label.text
+            continue
+        text = auto if style.text is None else ("" if not style.text.strip() else rich_text(style.text))
+        # LabelItem.setText MERGES into its options, so a style taken off must be taken out.
+        for key in ("family", "bold", "italic"):
+            label.opts.pop(key, None)
+        label.opts["justify"] = "left"
+        label.opts["color"] = legend.opts.get("labelTextColor")
+        label.opts["size"] = legend.opts.get("labelTextSize", "9pt")
+        label.setText(text, **label_args(style))
+        label._nanoscope_styled = not style.is_default()
+        label._nanoscope_applied_text = label.text
+
+
+def _apply_axis_pins(plot: pg.PlotItem, state: PlotAppearance,
+                     auto: Sequence[object] = (True, True)) -> set[int]:
+    """Pin the bottom and left ranges the user typed in Axis properties (display units).
+
+    The pin is the page's framing from then on: ``plot_interaction``'s Reset view returns
+    to it (``_nanoscope_axis_pins``), where it would otherwise auto-range. Removing a pin
+    gives the axis back to auto-range. Returns the ViewBox axes now pinned.
+
+    A pin moves the view only when it is new or changed, when the axis was still
+    auto-ranging (a fresh draw), or after :func:`reframe_axis_pins` (a draw that framed
+    its data itself): an unrelated appearance step (a title size, a fit-label drag, Undo)
+    keeps the user's manual zoom, as every other appearance step does.
+    """
+    view = plot.getViewBox()
+    previous = getattr(plot, "_nanoscope_axis_pins", {}) or {}
+    reframe = bool(getattr(plot, "_nanoscope_axis_reframe", False))
+    plot._nanoscope_axis_reframe = False
+    pins: dict[int, tuple[float, float]] = {}
+    for side, index in (("bottom", 0), ("left", 1)):
+        rng = state.axis_pin(side).range()
+        if rng is None:
+            continue
+        axis = plot.getAxis(side)
+        try:
+            lo, hi = (_display_to_view(axis, value) for value in rng)
+        except (ValueError, ZeroDivisionError):
+            continue                         # a pin a log axis cannot show (<= 0)
+        if math.isfinite(lo) and math.isfinite(hi) and lo < hi:
+            pins[index] = (lo, hi)
+    for index, (lo, hi) in pins.items():
+        view.enableAutoRange(axis=index, enable=False)
+        if reframe or previous.get(index) != (lo, hi) or auto[index]:
+            (view.setXRange if index == 0 else view.setYRange)(lo, hi, padding=0)
+    for index in previous:
+        if index not in pins:
+            view.enableAutoRange(axis=index, enable=True)
+    plot._nanoscope_axis_pins = pins
+    return set(pins)
+
+
+def reframe_axis_pins(plot) -> None:
+    """A data redraw re-frames: the next apply moves the view to the pin.
+
+    For a window whose redraw puts new data on the plot and frames it itself (I-V's and
+    Voltage dependence's ``autoRange()``) before re-applying its appearance. That
+    ``autoRange()`` turns auto-range OFF, so to :func:`_apply_axis_pins` the pin looks
+    unchanged and the data's framing looks like a manual zoom to keep: Refresh dropped a
+    range typed in Axis properties while Axis properties still showed it. Call this
+    between the draw and the apply (``try: draw … finally: reframe_axis_pins(plot);
+    apply``). Appearance-only steps never call it, so they keep a manual zoom as before.
+    A plot with no pin keeps its draw's framing; the next apply uses the mark up.
+    """
+    if isinstance(plot, pg.PlotWidget):
+        plot = plot.getPlotItem()
+    plot._nanoscope_axis_reframe = True

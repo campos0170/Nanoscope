@@ -75,7 +75,7 @@ def test_two_points_get_the_full_sentence_in_details(qapp, qtbot, fit):
 def test_the_qualifier_also_reaches_the_title(qapp, qtbot, fit):
     """The title is what ``Save image`` keeps; the details pane is not exported."""
     w = _scatter_window(qtbot, 2, fit=fit)
-    assert "exact by construction" in str(w._plot.titleLabel.text or "")
+    assert "exact by construction" in w._fit_label_item.plain_text()   # plotux G3: a fit's numbers are in the fit label, never the title
 
 
 def test_a_real_sample_is_untouched(qapp, qtbot):
@@ -161,7 +161,7 @@ def test_a_trend_over_two_recordings_says_it_is_free(qapp, qtbot, tmp_path):
     assert "EXACT BY CONSTRUCTION" in text, text
     assert "a trend has 2 free parameters" in text, text
     assert "2 recordings were fitted" in text, text
-    assert "exact by construction" in str(w._plot.titleLabel.text or "")
+    assert "exact by construction" in w.fit_label_text()
 
 
 def test_a_trend_over_four_recordings_is_untouched(qapp, qtbot, tmp_path):

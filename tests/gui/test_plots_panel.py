@@ -142,7 +142,7 @@ def test_set_data_populates_numeric_pickers_and_hides_flags(loaded):
     assert "accepted" not in hist_cols and "filter_limited" not in hist_cols
     # The events source enables the accepted-only filter.
     assert loaded._accepted_check.isEnabled()
-    feats = [loaded._features.item(i).text() for i in range(loaded._features.count())]
+    feats = loaded._features.keys()      # the Features checklist (plotux G3)
     assert "accepted" not in feats
 
 
@@ -167,7 +167,8 @@ def test_histogram_draws_bars_and_exponential_fit_overlay(loaded):
     assert loaded._fit_item is not None
     assert loaded._fit_item in _data_items(loaded)
     assert loaded._hist_item in _data_items(loaded)
-    assert "τ" in loaded.plot_item().titleLabel.text
+    # plotux G3: the fit's numbers are in the fit label, never the title.
+    assert "τ" in loaded._fit_label_item.plain_text()
     assert "τ" in loaded.details_text()
 
 
@@ -178,7 +179,7 @@ def test_histogram_gaussian_mixture_fit_on_amplitude(loaded):
     loaded.set_fit_components(2)
 
     assert loaded._fit_item is not None
-    assert "μ" in loaded.plot_item().titleLabel.text
+    assert "μ" in loaded._fit_label_item.plain_text()
 
 
 def test_histogram_log_x_still_draws(loaded):
@@ -264,8 +265,9 @@ def test_scatter_linear_fit_overlays_line_and_reports_params(window):
     assert window._scatter_fit_item is not None
     assert window._scatter_fit_item in _data_items(window)
     assert window._scatter_item in _data_items(window)   # the points still draw
-    # slope 2, intercept 1, perfect fit -- shown in title AND details.
-    for text in (window.plot_item().titleLabel.text, window.details_text()):
+    # slope 2, intercept 1, perfect fit -- shown in the fit label AND details
+    # (plotux G3: never in the title).
+    for text in (window._fit_label_item.plain_text(), window.details_text()):
         assert "y = 2·x + 1" in text
         assert "R² = 1.000" in text
 
@@ -952,24 +954,28 @@ def test_fit_values_box_lands_on_the_plot_when_asked(loaded):
     loaded.set_histogram_column("dwell_s")
     loaded.set_bins(20)
     loaded.set_fit("exponential")
-    # Off by default — a box appearing unasked is clutter, not presentation.
-    assert loaded._fit_values_item is None
+    # plotux G3: the box became the fit label, shown whenever a fit is applied (the
+    # numbers used to be the title, so a hidden label would drop them from figures).
+    label = loaded._fit_label_item
+    assert label.isVisible() and "τ" in label.plain_text()
+    assert "BIC" not in label.plain_text()
 
+    # "Fit values on plot" still asks for the rest of the numbers.
     loaded._fit_values_check.setChecked(True)
-    assert loaded._fit_values_item is not None, "the checkbox must draw the box"
-    assert "τ" in loaded._fit_values_item.text, "the box carries the fitted parameters"
+    assert "τ" in label.plain_text(), "the label carries the fitted parameters"
+    assert "BIC" in label.plain_text()
     # Anchored to the ViewBox — it lands in a saved image, unlike Details.
-    assert loaded._fit_values_item.parentItem() is loaded.plot_item().vb
+    assert label.parentItem() is loaded.plot_item().vb
 
-    # No fit → no box, even with the option on.
+    # No fit → no label, even with the option on.
     loaded.set_fit("none")
-    assert loaded._fit_values_item is None
+    assert not label.isVisible()
 
-    # ...and turning the option back off removes it with the next draw.
+    # ...and turning the option back off takes the extra numbers away again.
     loaded.set_fit("exponential")
-    assert loaded._fit_values_item is not None
+    assert label.isVisible()
     loaded._fit_values_check.setChecked(False)
-    assert loaded._fit_values_item is None
+    assert "BIC" not in label.plain_text()
 
 # ================================================================================================
 # owner note #19: KDE is a plot type beside the others, not a separate window

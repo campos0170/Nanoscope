@@ -99,6 +99,12 @@ def _title(w) -> str:
     return re.sub(r"<[^>]+>", "", str(w._plot.titleLabel.text)).strip()
 
 
+def _fit_text(w) -> str:
+    """The fit label (plotux G3, 2026-11-01): a fit's numbers left the title for it."""
+    item = w._fit_label_item
+    return item.plain_text() if item is not None and item.isVisible() else ""
+
+
 def _legend(w) -> list[str]:
     legend = getattr(w._plot, "legend", None)
     return [] if legend is None else [label.text for _s, label in legend.items]
@@ -141,9 +147,10 @@ def test_a_typed_title_keeps_the_ks_verdict_ahead_of_the_users_own_text(rejected
 def test_the_verdict_is_said_once_on_the_automatic_title(rejected):
     """Prepended through ``warn`` AND appended to the summary would read 'KS REJECTED ·
     τ = … — KS REJECTED'; the title takes the plain summary."""
-    title = _title(rejected)
-    assert "KS REJECTED" not in title
-    assert "τ =" in title
+    # Now the fit label, which took the automatic title's numbers: said once, untagged.
+    text = _fit_text(rejected)
+    assert "KS REJECTED" not in text and "KS REJECTED" not in _title(rejected)
+    assert text.count("τ =") == 1, text
 
 
 def test_a_typed_title_with_the_legend_off_still_exports_the_verdict(rejected, tmp_path):
@@ -154,7 +161,7 @@ def test_a_typed_title_with_the_legend_off_still_exports_the_verdict(rejected, t
     rejected._legend_check.setChecked(False)
     rejected._redraw()
     assert _legend(rejected) == [], "premise: the legend is off"
-    assert rejected._fit_values_item is None, "premise: the values box is off"
+    assert "KS =" not in _fit_text(rejected), "premise: the values box is off"
     assert rejected._last_fit is not None, "premise: the curve is still drawn"
     svg = tmp_path / "typed_title_legend_off.svg"
     rejected.save_image(svg)
@@ -166,7 +173,7 @@ def test_a_typed_title_with_the_legend_off_still_exports_the_verdict(rejected, t
 def test_the_legend_entry_still_carries_the_tag_while_the_legend_is_shown(rejected):
     """The per-fit tag on the legend entry is kept -- on an overlay it is what says WHICH
     curve was thrown out; only the title's copy moved channels."""
-    fit_rows = [t for t in _legend(rejected) if t.startswith("fit:")]
+    fit_rows = [t for t in _legend(rejected) if t.startswith("fit (")]
     assert fit_rows and "KS REJECTED" not in fit_rows[0]
 
 

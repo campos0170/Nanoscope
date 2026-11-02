@@ -7,6 +7,56 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **Plot text belongs to you; a fit's numbers go in a fit label (plot UX round, 2026-11-01).**
+  - **A fit no longer replaces the plot title.** In Distributions (scatter and histogram fits), I-V and
+    Voltage dependence, the equation and numbers (R² with its degrees-of-freedom or *undefined* tag,
+    n; BIC and the KS statistic with *Fit values on plot*) are shown in a **fit label** on the plot,
+    one line per source in the source's colour. A typed title keeps them. Legend fit rows read *Apo
+    fit (linear)*; **In legend instead** (Distributions) puts the numbers there on a second line.
+    Voltage dependence states what was pooled (merge state, baseline, gain, duration) in a caption
+    you can drag, retype or hide. The PCA title no longer repeats the explained variance (the PC axis
+    labels state it; Details keeps the sentence).
+  - **Typed titles, axis labels and legend names are shown exactly as typed:** `I < 5 pA & τ > 1 ms`
+    no longer loses characters. Use `_{…}` and `^{…}` for sub- and superscripts. A title saved with
+    HTML tags such as `<sub>` now shows the tags literally; retype it with `_{…}`.
+  - **Appearance presets keep the look only** (fonts, sizes, colours, styles); they no longer carry
+    or overwrite titles and axis labels, and a preset carried by an older project is read the same
+    way. **Window templates** keep titles, axis labels and text styles, but not legend names.
+  - **The Appearance section starts with Title, X label and Y label**, whose placeholders show the
+    automatic text; *Original* is now *Automatic* everywhere.
+  - **Voltage axes read in millivolts:** *Applied voltage (mV)* with ticks in mV; ranges typed in
+    Axis properties are in mV.
+  - **Multi-panel composition with shared axes** uses a frozen picture for panels carrying a fit
+    label, a caption or text styles it cannot redraw, instead of redrawing them without it.
+  - **Distributions' Features list is a checklist** with Select all, Clear and Default (the preferred
+    measurements); event_id, start_idx and end_idx are listed last under *Identifiers* and left out
+    of Default.
+- **Results ▸ Columns… stays open while you tick several columns**, lists them in the table's order
+  with the header's own names, and adds a filter, Show all / Hide all / Default columns and Default
+  order; right-click a column header to hide it. The table can no longer be emptied: Hide all keeps
+  *accepted*, and a saved view that hid every column is ignored. Restoring the scientific column
+  order no longer also resets which columns are shown: **Default order** and **Default columns** are
+  separate.
+- **Comparison figures:** a click anywhere on a pair-matrix feature ticks it, and the two-to-five rule
+  is shown and enforced as you pick; a generated figure opens fitted to the canvas (also when a
+  project reopens) instead of scrolled into it.
+- **Figure Library:** a saved figure is named after its tool and plot type (*I-V / conductance*,
+  *Distributions · Histogram*) instead of its page id (*Iv*), and an export suggests a file name with
+  *-* for the separators; the list shows recording file names, with the full path in the tooltip.
+- **Compose multi-panel figure:** panel spacing is in whole pixels, the label colour is a colour
+  swatch, and panel labels default to the application font (the font the panels' own text uses)
+  instead of Arial.
+- **Analysis Explorer:** a tool that cannot open yet says why in a banner inside the Explorer (from a
+  double-click, Enter or Explain requirements alike) instead of on the main window's status bar, and
+  Analysis home greys out tools that cannot open yet, with the reason first in their tooltip.
+- **A new look for the Measure mask.** Its edges are brackets, `[` for the start and `]` for the
+  finish, in a magenta-violet no other trace mark uses, over a dark outline, with grip tabs near the
+  bottom of the pane instead of circles on the trace. A fitted edge has a ring on the sample it
+  snapped to. An edge that could not be fitted is dashed and tagged *not fitted*. A span being drawn
+  is dashed, and S alone shows a single bracket. The pointer over an edge is ↔, and the crosshair
+  stays on top.
+- **Clear mask keeps Measure on**, as X does.
+
 - **The owner's answers to the editing foundation's open questions (design 13.4).**
   - **Polarity is judged on its own.** It was compared with the run only inside the Baseline drift
     stage, so with that stage off a changed polarity left the table looking current, although the
@@ -91,7 +141,8 @@ tags identify tested development baselines and do not promise a stable file or A
   fresh run would measure now …*). Generate Report figures refuses a table whose sample rate is
   stale, as the event exports do, and names a table stale on its calibration or estimator on the
   status line.
-- **Ctrl+M files an event, and Ctrl+Shift+M and *Mark selection as missed event* are gone.** The Measure
+- **Ctrl+M files an event; Ctrl+Shift+M no longer adds (it now turns Analysis ▸ Measure event on and
+  off), and *Mark selection as missed event* is gone.** The Measure
   tab's *Add to list* became **Add event** and the old measurement list is a group, **Old
   measurements (N)**, shown only while it holds rows (Go to, Remove, Export CSV; no longer added to
   or edited). The *measure on* Raw/Processed choice is hidden whenever the Analysis panel supplies the
@@ -124,6 +175,41 @@ tags identify tested development baselines and do not promise a stable file or A
   just made counts at once, so Ctrl+← straight after a dive still steps back.
 
 ### Added
+
+- **Edit any text in a plot from the plot itself.** Double-click the title, an axis label, a legend
+  entry or the fit label to retype it (Return keeps it, Esc cancels; empty = automatic, a space hides
+  it). Right-click it for **Text style…** (font, size, bold, italic, colour, title alignment) and, on
+  an axis, **Axis properties…** (label, range with Auto, log where the window has one, tick label
+  size, major tick spacing where the window keeps one). Every change is one Undo step and is saved
+  with the project. In Distributions, I-V, Voltage dependence, Noise, Event waveforms (including the
+  colour-bar and marginal *count* labels), Distribution summaries (a legend rename sets that source's
+  display label) and Subpopulations. Where several views share one X and Y label (Noise, Event
+  waveforms, Subpopulations) the label is renamed in Appearance; on the figure it takes a text style.
+- **Fit label.** A fit's result is shown in its own label on the plot: on by default, draggable (the
+  position is saved), with your own words around live numbers (`{equation}` `{r2}` `{n}` `{ci}`
+  `{bic}` `{ks}` `{source}`). An R² refusal such as zero degrees of freedom is always shown when R²
+  is asked for. Noise shows a single curve's 1/f exponent α in it.
+- **Annotate mode on the trace** (E, Ctrl+Shift+E, the **✎ Annotate (E)** button under the trace and
+  on the Measure tab): a drag that fits both edges adds the event at once, one Edit ▸ Undo step, and
+  a double-click on an event adds it.
+- **A right-click menu on the trace** (not on its axes): Add event here, Add the selection as an event, Discard the
+  selection, Delete this hand-made event, and the Annotate switch, with the key for each.
+- **Analysis ▸ Measure event has a shortcut, Ctrl+Shift+M (⌘⇧M).**
+- **Plot pages: Ctrl+1–4 (⌘1–4) switch Section** to Data, Analysis, Appearance or Export (not yet in
+  Distributions).
+- **Right-click the tick numbers of a plot axis for their own menu:** **Text style…** sets the tick
+  labels' font, size, bold, italic and colour, and **Axis properties…** is there too. A right-click
+  on the axis label still gives the label's menu. While a label is hidden, the tick numbers' menu
+  offers **Show label**.
+- **Add title…**: right-click an empty part of a plot whose title is empty or hidden and type the
+  title in place. Return keeps it as one Undo step; Esc, or Return with nothing typed, leaves the
+  figure as it was. A hidden title also offers **Show title**. Where the views share one title
+  (Noise, Event waveforms, Subpopulations) the entry reads **Add title (all views)…**.
+- **Distributions: every legend row has Text style… and Hide entry** from a right-click (one Undo
+  step, saved with the plot and the project, not carried by templates or presets); a fit's row
+  renames its source on a double-click. The *below detection limit* words can be retyped, styled or
+  hidden from the figure; while they are hidden, a right-click on the plot offers **Show
+  detection-limit label**.
 
 - **Reset view, zoom history and a pointer readout in the plot windows.** Distributions, Noise
   spectrum, I-V / conductance, Voltage dependence, Event waveforms, Distribution summaries and
@@ -352,9 +438,14 @@ tags identify tested development baselines and do not promise a stable file or A
 - **Trace keys, draw mode and fitted edges.** With the trace focused: **C** catches the event under the
   pointer and fits both edges, **S** / **F** place an edge at the pointer fitted to its step
   (**Shift+S** / **Shift+F** exactly), **D** adds, **Shift+D** adds and goes to the next window, **G** /
-  **Shift+G** step windows, **X** discards the mask, **E** toggles draw mode (**View ▸ Drag draws an
-  event span**, Ctrl+Shift+E), where a left-drag draws a span instead of box-zooming and releasing fits
-  its edges; **Option** inverts the drag for one gesture. Return / Enter / Esc are aliases that act
+  **Shift+G** step windows, **X** discards the mask, **E** turns **Annotate mode** on or off (also the
+  **✎ Annotate (E)** button under the trace and on the Measure tab, and **View ▸ Annotate: drag adds an
+  event**, Ctrl+Shift+E). In it, a drag across an event fits both edges and, when both fit, adds the
+  event at once as one Edit ▸ Undo step; a double-click on an event catches and adds it. A drag that
+  does not fit both edges, or that holds more than one event, adds nothing and says why; the span
+  stays: **D** adds it (press it twice when an edge is not fitted, to add it as placed). Shift at
+  release keeps the span to adjust, and **Option**-drag box-zooms. Outside the mode, Option-drag draws
+  a span to look at before adding it with **D**. The mode is not remembered between launches. Return / Enter / Esc are aliases that act
   only after a click or the pointer arriving, never after a dock parked focus on the trace. New
   `analysis/edge_fit.py` fits the step with gates checked against correlated noise. Keyboard focus
   follows the pointer onto the trace, with Measure on or off, unless a table, text field, menu or the
@@ -508,6 +599,76 @@ tags identify tested development baselines and do not promise a stable file or A
   than allowing them to strip v11 analytical data.
 
 ### Fixed
+
+- **Distributions: a reopened project draws a histogram fit's label with every number it was saved
+  with** (all parameters, n, BIC, the KS statistic and verdict), a typed fit-label template keeps its
+  `{n}`, the legend's fit row stays "fit (…)" without numbers, and with **In legend instead** the
+  row keeps its numbers through a reopen and every redraw. A Fit colour or line width chosen after a
+  reopen restyles the restored curve too. An applied scatter fit, which opening a project does not
+  recompute, now shows **Plot ●** until Plot draws it.
+- **The fit label's source names** (the line prefix and the `{source}` token) draw `_{…}` and `^{…}`
+  as sub- and superscripts, as the legend does; a legend name such as `τ_{1}` showed its braces in
+  the fit label and in exported figures.
+- **Return in an in-figure text editor without changing the text changes nothing** (Return on a
+  hidden label's empty box used to bring the automatic label back). The editor opens inside the
+  view.
+- **Voltage dependence: the fit's numbers read in the axis's own unit.** A linear trend's slope is
+  given per mV with the metric's unit (*slope = −0.07331 Hz/mV*; it read *slope = −73.31*, a
+  per-volt number with no unit, beside an axis in mV), and the capture-rate model's V₀ is in mV
+  (*V₀ = −500 mV*), in the headline, the fit label, Fit details and exported figures. The data
+  export keeps the fit's parameters in volts, like its voltage_V column, and names their units in a
+  new fit_params_units_json column. I-V's data export names the units of fit_slope and
+  fit_intercept (new fit_slope_units, fit_intercept_units).
+- **I-V, Voltage dependence, Noise spectrum, Event waveforms and Distribution summaries: a range
+  typed in Axis properties stays in view** after a redraw — Refresh, Generate, a new setting, an
+  Explorer tab switch, a saved view restored into the page (it was dropped from view while Axis
+  properties still showed it). An appearance change still keeps a
+  zoom made by hand. With a range pinned, the I-V and Voltage dependence empty-page message (*No
+  usable recordings…*) stays in view; the range returns when there are points again.
+  In Noise spectrum, Event waveforms and Subpopulations the range belongs to the view whose axis
+  it was typed on: the other views keep framing their own data and their Axis properties show Auto
+  (a range typed on the PSD had become every view's, so the Spectrogram and, from the ensemble, the
+  Event-count map were drawn blank, and one typed on the Subpopulations scatter left the waveforms
+  beside it almost blank). A range saved before this, with no view, is the PSD's in Noise spectrum,
+  the Event-count map's in Event waveforms and the scatter's in Subpopulations. In Distribution
+  summaries a range belongs to what
+  the axes show: ECDF and Survival share theirs (value on x), Box and Violin theirs (sources on
+  x), so a Type change between the two pairs starts on the page's own framing at Generate and
+  Reset view, and changing back brings the range back (an x range typed on the ECDF had left
+  a Box or Violin out of view). A range saved before this is ECDF and Survival's. Window
+  templates keep each view's range, as they keep a one-view page's; presets keep no range.
+- **⌘Z / Ctrl+Z (and ⇧⌘Z) undo and redo a plot's appearance whatever the page's Section shows**, in
+  I-V, Voltage dependence, Noise spectrum, Event waveforms, Distribution summaries and
+  Subpopulations, so an edit made in the figure can be undone from the keyboard. In the Analysis
+  Explorer only the page in front answers.
+- **Voltage dependence: dragging the caption is one Undo step** (*caption moved*) and its position is
+  saved with the figure — projects, window templates and Undo keep it; presets leave it where it is.
+- **Distribution summaries: renaming a legend entry in the figure is one Undo step.** The name still
+  lives in Source names and colors, which Reset appearance and templates leave alone.
+- **Annotate: a loose drag fits the event.** A drag that overshot an event by more than about 12
+  pixels was refused as "not significant against the noise", even for a step dozens of times the
+  noise, and with the step just past the search window it could add the event with a start or
+  finish tens of samples off. Each edge of a drawn span is now looked for across nearly half the
+  span, at any zoom. An edge drawn so far out that no step is near it says *no step near the drawn
+  edge* and suggests drawing closer or C. C, S, F and Measure fit exactly as before. A double-click
+  on the trace's axes no longer catches an event. A tight drag on one event beside a neighbour
+  nobody had annotated yet, a few pixels away at about 12 samples per pixel or coarser, was refused
+  as *more than one event*: when the span drawn holds one event and its fit reaches a neighbour,
+  the edges are now fitted again without crossing the baseline before that neighbour, so the drag
+  adds the event drawn. That refit is kept only when it holds one event; a drag that reaches close
+  to the neighbour can still be refused, and then a drag closer to the event's edges adds it.
+- **Results ▸ Columns… remembers across tables.** Hiding or showing a column on one table, then
+  changing columns on a table without it (amplitude columns before Curate ▸ Apply, ML or hand-made
+  columns), forgot the first choice: the hidden column came back, and a default-hidden column you
+  had shown was hidden again. **Default columns** still resets every column, those included, and
+  keeps the order. **Default order** places them in the scientific order too.
+- **Distributions: typing in the Title box made its first keystroke an Undo step of its own** (the
+  appearance section spells a colour `#0072b2`, the window `#0072B2`); typing then Return is one step.
+- **Distributions: text with < or & in a title, axis label or legend name lost characters**, and the
+  *Features (clustering & PCA)* title showed a mnemonic underline instead of the &.
+- **Distribution summaries: a source name containing < or & lost characters in the legend.**
+- ***Applied voltage (V) (x0.001)*** on the I-V and Voltage dependence axes.
+- **The Measure tab's status line no longer outlives the mask it describes.**
 
 - **Crash recovery can no longer lose work by itself or through another window.** A user lost a
   session to a crash with only an export left; the investigation found these gaps, now closed:

@@ -1758,20 +1758,26 @@ class MainWindow(QtWidgets.QMainWindow):
             "in the Scan strip to change the time scale.")
         self._act_boxzoom.toggled.connect(self._trace_view.set_drag_mode)
 
-        # Draw mode: a plain left-drag draws a span (fitted to the step it was drawn near)
-        # instead of box-zooming; Option+drag does the other one. `E` toggles it from the trace;
-        # this is the menu's twin, so the state is visible and reachable without the keyboard.
-        # It lives beside "Drag draws zoom box" because it decides what the SAME drag does.
-        self._act_draw_mode = view_menu.addAction("Drag draws an e&vent span (draw mode)")
-        self._act_draw_mode.setCheckable(True)
-        self._act_draw_mode.setShortcut(QtGui.QKeySequence("Ctrl+Shift+E"))
-        self._act_draw_mode.setToolTip(
-            "On: a plain left-drag on the trace draws a span, and its edges are fitted to the "
-            "steps when you let go; D then adds it. Option+drag does the other thing (box zoom "
-            "when this is on, a drawn span when it is off). Press E on the trace to toggle it. "
-            "Needs Measure event.")
-        self._act_draw_mode.setEnabled(False)
-        self._act_draw_mode.toggled.connect(self._on_draw_mode_toggled)
+        # Annotate mode: a plain left-drag across an event draws a span, fits both edges to the
+        # steps and, when both fit, adds the event at once (one Edit ▸ Undo step); a
+        # double-click on an event adds it too. Option+drag box-zooms instead. ONE checkable
+        # action for every door: this item, `E` on the trace, the ✎ Annotate button on the
+        # Scan strip and on the Measure tab (`setDefaultAction`, so their text is the action's
+        # iconText) and the trace menu's item, so none of them can disagree. It lives beside
+        # "Drag draws zoom box" because it decides what the SAME drag does. Never remembered
+        # between launches: a forgotten mode is the one risk of an add on release.
+        self._act_annotate = view_menu.addAction("Annotate: drag adds an e&vent")
+        self._act_annotate.setIconText("✎ Annotate (E)")
+        self._act_annotate.setObjectName("annotateAction")
+        self._act_annotate.setCheckable(True)
+        self._act_annotate.setShortcut(QtGui.QKeySequence("Ctrl+Shift+E"))
+        self._act_annotate.setToolTip(
+            "Annotate (E, Ctrl+Shift+E): drag across an event on the trace and let go; both "
+            "edges are fitted and, when both fit, it is added as a hand-made event (Edit ▸ Undo "
+            "takes it back). Double-click an event to add it. Shift at release keeps the span "
+            "to adjust (D adds it); Option+drag box-zooms. Turns Measure event on.")
+        self._act_annotate.setEnabled(False)
+        self._act_annotate.toggled.connect(self._on_annotate_toggled)
 
         # What the detector compared the signal with, for the table on screen. Off by
         # default and no shortcut: an inspection aid, not a mode. The panel that owns the
@@ -1888,9 +1894,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._act_measure = analysis_menu.addAction("&Measure event")
         self._act_measure.setCheckable(True)
+        # Ctrl+Shift+M is free everywhere in the app; Ctrl+M (add) is the separate key below.
+        self._act_measure.setShortcut(QtGui.QKeySequence("Ctrl+Shift+M"))
         self._act_measure.setToolTip(
             "Hand-select an event with cursors and measure its dwell, amplitude and "
-            "full statistics (incl. kurtosis) live; add measurements to a saveable table.")
+            "full statistics (incl. kurtosis) live; add measurements to a saveable table. "
+            "(Ctrl+Shift+M)")
         self._act_measure.setEnabled(False)
         self._act_measure.toggled.connect(self._on_measure_toggled)
 
@@ -2522,12 +2531,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self._file_dock.focus_document(self._current_selection[0])
 
     def _wire(self) -> None:
-        # The trace keys (C S F D G X E, Return, Esc), draw mode and the label on the trace.
-        # The docked Event inspector owns bare keys of its own, so the pointer crossing the
-        # trace never takes focus from it: its dock registers with the trace when it is built
-        # (_inspector_dock_widget).
+        # The trace keys (C S F D G X E, Return, Esc), Annotate mode, the trace menu and the
+        # label on the trace. The docked Event inspector owns bare keys of its own, so the
+        # pointer crossing the trace never takes focus from it: its dock registers with the
+        # trace when it is built (_inspector_dock_widget).
         self._trace_keys = TraceKeyController(self)
-        self._trace_view.sigDrawModeChanged.connect(self._on_trace_draw_mode_changed)
+        self._trace_keys.annotateChanged.connect(self._follow_annotate)
+        # The ✎ Annotate button under the trace, on the Scan strip after its label: one click,
+        # and the mode's state is visible where the drag happens. The Measure tab gets the same
+        # action for its own button.
+        self._annotate_button = QtWidgets.QToolButton()
+        self._annotate_button.setObjectName("annotateToggle")
+        self._annotate_button.setDefaultAction(self._act_annotate)
+        self._annotate_button.setAutoRaise(True)
+        self._pan_scrollbar.layout().insertWidget(1, self._annotate_button)
+        self._analysis_panel.measure_panel.set_annotate_action(self._act_annotate)
         self._analysis_panel.measure_panel.addRequested.connect(self._add_event_from_cursors)
         self._analysis_panel.resultSwitched.connect(self._trace_keys.refresh_label)
         self._session.documentOpened.connect(self._remember_loaded_source)
@@ -4004,7 +4022,7 @@ class MainWindow(QtWidgets.QMainWindow):
         panel = self._analysis_panel.measure_panel
         self._act_measure.setEnabled(panel.can_measure())
         self._act_add_event.setEnabled(panel.has_open_target())
-        self._act_draw_mode.setEnabled(panel.has_open_target())
+        self._act_annotate.setEnabled(panel.has_open_target())
         if getattr(self, "_trace_keys", None) is not None:
             self._trace_keys.refresh_label()
         # The processed-trace export rides the same refreshes (a selection retarget is one
@@ -4078,19 +4096,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if note:
             self.statusBar().showMessage(note, 12000)
 
-    def _on_draw_mode_toggled(self, checked: bool) -> None:
-        """The menu item turns draw mode on or off through the trace keys' own door, and the
-        item follows the mode back when the view changes it itself (the target pane went)."""
-        self._trace_keys.set_draw_mode(bool(checked))
-        if self._act_draw_mode.isChecked() != self._trace_view.draw_mode():
-            was = self._act_draw_mode.blockSignals(True)
-            self._act_draw_mode.setChecked(self._trace_view.draw_mode())
-            self._act_draw_mode.blockSignals(was)
+    def _on_annotate_toggled(self, checked: bool) -> None:
+        """The action (the menu item, both buttons, the trace menu) turns Annotate mode on or
+        off through the trace keys' own door, and follows the mode back when it could not turn
+        on (no Measure target)."""
+        self._trace_keys.set_annotate(bool(checked))
+        self._follow_annotate()
 
-    def _on_trace_draw_mode_changed(self, on: bool) -> None:
-        was = self._act_draw_mode.blockSignals(True)
-        self._act_draw_mode.setChecked(bool(on))
-        self._act_draw_mode.blockSignals(was)
+    def _follow_annotate(self, *_args) -> None:
+        """The action (and every button showing it) follows the mode: ``E``, and the view
+        dropping draw mode itself (Measure off, the target pane gone), change it elsewhere."""
+        on = self._trace_keys.annotate()
+        if self._act_annotate.isChecked() != on:
+            was = self._act_annotate.blockSignals(True)
+            self._act_annotate.setChecked(on)
+            self._act_annotate.blockSignals(was)
 
     def _add_event_from_cursors(self) -> None:
         """Analysis ▸ Add event from cursors (Ctrl+M) — file the Measure region as an event.
@@ -5420,7 +5440,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _launch_analysis_route(self, route: str) -> None:
         available, reason = self._analysis_home_availability(route)
         if not available:
-            self.statusBar().showMessage(reason, 8000)
+            # Said in the Explorer, where the tool was chosen: this window's status bar is
+            # behind it, so the reason used to land where nobody was looking.
+            self._ensure_analysis_explorer().show_refusal(route, reason)
             return
         actions = {
             PAGE_HOME: self._open_analysis_home,
@@ -5629,6 +5651,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _figure_capture_options(self, page_id: str, *, ask_name: bool):
         """Name/residual inclusion only: no analysis controls or live view mutation."""
+        from .figure_library import default_figure_name
         _artifact_id, page = self._figure_page(page_id)
         residual_getter = getattr(page, "figure_residual_target", None)
         residual = residual_getter() if callable(residual_getter) else None
@@ -5637,7 +5660,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = QtWidgets.QDialog(self._analysis_explorer or self)
         dialog.setWindowTitle("Save figure snapshot" if ask_name else "Figure bundle")
         layout = QtWidgets.QVBoxLayout(dialog)
-        name = QtWidgets.QLineEdit(str(page_id).replace("_", " ").title())
+        name = QtWidgets.QLineEdit(default_figure_name(page_id, page))
         if ask_name:
             name.setMaxLength(200)
             layout.addWidget(QtWidgets.QLabel("Figure name:"))

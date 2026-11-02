@@ -137,8 +137,9 @@ def _window(qtbot, session, *, metric: str, fit: str = "none") -> VDepWindow:
 
 
 def _title(w: VDepWindow) -> str:
-    label = w.plot_item().titleLabel
-    return "" if label is None else str(label.text)
+    assert w.plot_item().titleLabel.text == ""
+    caption = w.caption_text().replace("\n", "<br>")
+    return "   ·   ".join(text for text in (w.fit_label_text(), caption) if text)
 
 
 def _table_column(w: VDepWindow, header: str) -> list[str]:

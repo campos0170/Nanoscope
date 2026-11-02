@@ -14,7 +14,60 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core.figure_library import duplicate_figure, rename_figure
 from ..core.project import WorkspaceArtifact
+from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
+
+
+def _shown_plot_type(page_id: str, page) -> str:
+    """The plot type the page's FIGURE shows, read without touching any control.
+
+    The applied configuration where a page has one, so a pending (unplotted) choice in
+    the controls never names a picture it is not. Blank when the page has a single plot
+    type or the reading is unavailable; a name is a suggestion, never worth an error.
+    """
+    if page is None:
+        return ""
+    try:
+        if page_id == "distributions":
+            return str(page.figure_applied_config().get("plot_type") or "")
+        if page_id in ("distribution_summaries", "comparison_figures"):
+            combo, key = page._view_combo, page.figure_applied_config().get("kind")
+        elif page_id == "noise":
+            combo, key = page._view_combo, page.current_view()
+        elif page_id == "event_waveforms":
+            return str(page._tabs.tabText(page._tabs.currentIndex()))
+        else:
+            return ""
+        index = combo.findData(key)
+        # "Welch PSD (averaged noise spectrum)" names the view; the gloss is for the combo.
+        return re.sub(r"\s*\(.*\)\s*$", "", combo.itemText(index)) if index >= 0 else ""
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return ""
+
+
+def default_figure_name(page_id: str, page=None) -> str:
+    """"I-V / conductance", "Distributions · Histogram": the catalogue's own words.
+
+    It used to be ``page_id.title()``, which named an I-V figure "Iv".
+    """
+    label = ANALYSIS_LABELS.get(page_id) or str(page_id).replace("_", " ").capitalize()
+    kind = _shown_plot_type(page_id, page)
+    return f"{label} · {kind}" if kind and kind.casefold() != label.casefold() else label
+
+
+#: An absolute path at the start of one ``source_label`` part (POSIX, home, drive or UNC).
+_ABSOLUTE = re.compile(r"^(?:[\\/]|~[\\/]|[A-Za-z]:[\\/])")
+
+
+def _file_names(source_label: str) -> str:
+    """``source_label`` with each recording's folders dropped: "run7.abf · channel 0".
+
+    A list row showing the whole absolute path wrapped it over six or seven lines, so
+    about three figures fitted the window. The full label stays in the tooltip and in
+    the detail pane. Parts that are not paths ("Saved analytical source …") are kept.
+    """
+    return "; ".join(re.split(r"[\\/]", part)[-1] if _ABSOLUTE.match(part) else part
+                     for part in str(source_label).split("; "))
 
 
 def _export_path(entry: WorkspaceArtifact | None) -> Path | None:
@@ -165,11 +218,11 @@ class FigureLibrary(QtWidgets.QMainWindow):
         self._list.clear()
         for entry in self._entries():
             status, reason = self._status(entry)
+            source = str(entry.payload.get("source_label", ""))
             item = QtWidgets.QListWidgetItem(
-                f"{entry.payload.get('name', 'Figure')}\n{status}\n"
-                f"{entry.payload.get('source_label', '')}")
+                f"{entry.payload.get('name', 'Figure')}\n{status}\n{_file_names(source)}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, entry.artifact_id)
-            item.setToolTip(reason)
+            item.setToolTip(f"{source}\n\n{reason}" if source else reason)
             preview = QtGui.QPixmap.fromImage(_scaled_image(_preview_png(entry), QtCore.QSize(340, 220)))
             if not preview.isNull():
                 item.setIcon(QtGui.QIcon(preview))
@@ -417,7 +470,9 @@ class FigureLibrary(QtWidgets.QMainWindow):
                 if options is None:
                     return None
                 suffix = options.extension
-            stem = re.sub(r"[^\w .-]", "_", str(entry.payload.get("name", "Figure")))[:100]
+            # A default name's " · " and " / " read as " - " in a file name, not " _ ".
+            name = re.sub(r"\s*[·/]\s*", " - ", str(entry.payload.get("name", "Figure")))
+            stem = re.sub(r"[^\w .-]", "_", name)[:100]
             target = ask_export_path(
                 self, title="Save figure bundle" if bundle else "Export saved figure",
                 suggestion=stem + suffix,

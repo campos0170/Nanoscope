@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -80,7 +81,10 @@ _I0_CROSS_REFERENCE = (
 from ..plot.style import OKABE_ITO
 from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
-from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .figure_text import appearance_text_host, figure_text_for
+from .fit_label import FitLabelItem, FitReadout
+from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
+                              reframe_axis_pins)
 from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
                                window_readout)
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
@@ -95,6 +99,9 @@ _DATA_HEX = OKABE_ITO[0]        # blue -- the (V, I) points
 _FIT_HEX = OKABE_ITO[1]         # vermillion -- the I-V line
 _MSG_HEX = "#8b9199"
 _POINT_ALPHA = 200
+#: The applied voltage is held in volts and SHOWN in millivolts: the tick scale, never the
+#: data, so the fit, the exports and the readout's own numbers stay in V underneath.
+_VOLTAGE_LABEL = "Applied voltage (mV)"
 
 
 def _fmt_q(value: float, units: str) -> str:
@@ -183,6 +190,7 @@ class IVWindow(QtWidgets.QMainWindow):
         self._fit: iv.IVFit | None = None
         self._scatter_item: pg.ScatterPlotItem | None = None
         self._fit_item: pg.PlotDataItem | None = None
+        self._fit_readouts: list[FitReadout] = []
         self._message_item: pg.TextItem | None = None
         self._appearance = PlotAppearance()
         self._gather_worker: _IVGatherWorker | None = None
@@ -220,7 +228,10 @@ class IVWindow(QtWidgets.QMainWindow):
         bar.addWidget(self._headline)
         root.addLayout(bar)
 
-        self._appearance_widget = PlotAppearanceWidget(self._appearance)
+        # ⌘Z on the page, not on these controls: an edit made in the figure is undone from
+        # the keyboard whatever the Section shows (FIG-4); a page behind another Explorer
+        # tab is hidden, so it does not answer.
+        self._appearance_widget = PlotAppearanceWidget(self._appearance, shortcut_parent=self)
         self._appearance_widget.changed.connect(self._appearance_from_user)
         self._appearance_section = bounded_controls(self._appearance_widget)
         root.addWidget(self._appearance_section)
@@ -281,9 +292,21 @@ class IVWindow(QtWidgets.QMainWindow):
         # View only (plot_interaction): Reset view, zoom history, the app right-click menu
         # in place of pyqtgraph's, and the pointer readout on the status line.
         self._readout = window_readout(self)
+        # In-figure editing (figure_text): every edit is one appearance Undo step. I-V has
+        # no log control, so Axis properties greys Log out and says why.
+        self._text_host = appearance_text_host(
+            self._plot, self._appearance_widget,
+            axis_hooks={"log_reason": "I-V has no log scale: the conductance is the slope "
+                                      "of a straight line in linear V and I."})
         self._plot_nav = install_plot_interaction(self._plot, readout=self._readout,
-                                                  exports=exports)
+                                                  exports=exports, text=self._text_host)
         self._workflow.add_view_control(view_button(lambda: self._plot_nav, (self._plot_nav,)))
+        # THE FIT IS NOT THE TITLE. Its numbers go in their own label, on by default, so
+        # a typed title never loses G and an automatic one is not an equation.
+        self._fit_label = FitLabelItem(self._plot.getViewBox())
+        self._text_host.register_fit_label(self._fit_label)
+        self._appearance_widget.set_fit_label_available(True, in_legend=False)
+        self._appearance_widget.set_automatic_text("x_label", _VOLTAGE_LABEL)
 
     def _appearance_from_user(self, state: PlotAppearance) -> None:
         self._appearance = state
@@ -307,9 +330,29 @@ class IVWindow(QtWidgets.QMainWindow):
         ensure_item_legend(self._plot, ((self._scatter_item, "Open-pore current"),
                                        (self._fit_item, "I-V fit")))
         self._appearance_widget.set_legend_available(self._scatter_item is not None)
+        shown = self._plot.viewRange() if self._message_item is not None else None
         apply_plot_appearance(
             self._plot, self._appearance, plot_widget=self._plot_widget,
             data_items=(self._scatter_item,), fit_items=(self._fit_item,))
+        if shown is not None and self._plot.viewRange() != shown:
+            # Nothing to frame, and a range pinned in Axis properties just moved the view
+            # off the message: put the message back in view. The pin is kept, and the next
+            # draw with data goes back to it; a zoom by hand stays, as on any page.
+            self._plot.setXRange(0, 1, padding=0)
+            self._plot.setYRange(0, 1, padding=0)
+        fit_label = getattr(self, "_fit_label", None)
+        if fit_label is None:
+            return                      # a draw during construction, before the label
+        # Never In legend: the legend row does not carry the numbers or the dof tag here.
+        fit_label.apply_state(replace(self._appearance.fit_label_state(), in_legend=False),
+                              self._fit_readouts, self._appearance.text_style("annotation.fit"))
+        controller = figure_text_for(self._plot)
+        if controller is not None:
+            controller.refresh()        # the legend may be new since the last draw
+
+    def fit_label_text(self) -> str:
+        """The fit label as drawn (plain text; empty when it is hidden or there is no fit)."""
+        return self._fit_label.plain_text() if self._fit_label.isVisible() else ""
 
     def figure_export_target(self):
         return self._plot
@@ -450,7 +493,7 @@ class IVWindow(QtWidgets.QMainWindow):
                 x=voltage, y=current, size=11, pen=pg.mkPen("#0d0f12"),
                 brush=pg.mkBrush(point_color))
             self._plot.addItem(self._scatter_item)
-            self._plot.setLabel("bottom", "Applied voltage (V)")
+            self._set_voltage_axis()
             self._plot.setLabel(
                 "left", f"Open-pore current I₀ ({units or 'units unknown'})")
             self._plot.getViewBox().setToolTip(_I0_CROSS_REFERENCE)
@@ -463,6 +506,7 @@ class IVWindow(QtWidgets.QMainWindow):
             self._fit = saved_fit
             self._details.setPlainText(saved_details)
             self._headline.setText(saved_headline)
+            reframe_axis_pins(self._plot)       # a draw, as _redraw's
             self._apply_appearance()
 
     def points(self) -> list[iv.IVPoint]:
@@ -532,6 +576,7 @@ class IVWindow(QtWidgets.QMainWindow):
         self._plot.setTitle(None)
         self._plot.titleLabel.setText("")
         self._scatter_item = self._fit_item = self._message_item = None
+        self._fit_readouts = []
 
     def _message(self, text: str) -> None:
         self._clear()
@@ -541,11 +586,25 @@ class IVWindow(QtWidgets.QMainWindow):
         self._plot.addItem(item)
         self._plot.setLabel("bottom", "")
         self._plot.setLabel("left", "")
+        self._plot.getAxis("bottom").setScale(1.0)
         self._plot.setXRange(0, 1, padding=0)
         self._plot.setYRange(0, 1, padding=0)
         item.setPos(0.5, 0.5)
         self._message_item = item
         self._details.setPlainText(text)
+
+    def _set_voltage_axis(self) -> None:
+        """Label the voltage axis in mV, with ticks that mean millivolts.
+
+        It read "Applied voltage (V) (x0.001)": a label naming V over ticks of 80-120, with
+        pyqtgraph's multiplier tacked on because the unit lived in the text. The data stay
+        in volts and the axis scale shows them x1000 (the readout and Axis properties go
+        through the same scale), with no automatic SI prefix to fight it.
+        """
+        bottom = self._plot.getAxis("bottom")
+        bottom.enableAutoSIPrefix(False)
+        bottom.setScale(1000.0)
+        self._plot.setLabel("bottom", _VOLTAGE_LABEL)
 
     @staticmethod
     def _exclusion_line(e: "iv.IVExclusion") -> str:
@@ -565,6 +624,10 @@ class IVWindow(QtWidgets.QMainWindow):
         try:
             self._redraw_analysis()
         finally:
+            # The draw framed its data (autoRange); a range pinned in Axis properties is the
+            # figure's framing, so the apply puts the view back on it (FIG-2). Appearance
+            # steps apply without this and keep a manual zoom.
+            reframe_axis_pins(self._plot)
             self._apply_appearance()
 
     def _redraw_analysis(self) -> None:
@@ -597,7 +660,7 @@ class IVWindow(QtWidgets.QMainWindow):
         self._scatter_item = pg.ScatterPlotItem(
             x=V, y=I, size=11, pen=pg.mkPen("#0d0f12"), brush=pg.mkBrush(point_color))
         self._plot.addItem(self._scatter_item)
-        self._plot.setLabel("bottom", "Applied voltage (V)")
+        self._set_voltage_axis()
         # An axis whose unit is blank reads "I₀ ()" and invites the reader to supply
         # the one they expect. Name the state instead -- the same words the read-outs use.
         self._plot.setLabel("left", f"Open-pore current I₀ ({units or 'units unknown'})")
@@ -648,12 +711,14 @@ class IVWindow(QtWidgets.QMainWindow):
         self._fit_item = pg.PlotDataItem(x=xs, y=fit.predict(xs), pen=pg.mkPen(_FIT_HEX, width=2))
         self._plot.addItem(self._fit_item)
 
-        # The degrees-of-freedom qualifier rides WITH the number, in the title the PNG
+        # The degrees-of-freedom qualifier rides WITH the number, in the fit label the PNG
         # keeps -- the same short tag the voltage-dependence window puts beside its own
         # two-parameter fit, from the same writer, so one session cannot give two
-        # verdicts to two windows about the identical n = 2 fit.
+        # verdicts to two windows about the identical n = 2 fit. It is also the label's
+        # refusal, which no template the user types can drop (fit_label).
         dof_tag = stats.r2_dof_tag(fit.n, _IV_FIT_PARAMS)
         r2_text = f"R² = {fit.r2:.4f}" + (f" ({dof_tag})" if dof_tag else "")
+        n_text = f"n = {fit.n} recording{'s' if fit.n != 1 else ''}"
         if fit.conductance_nS is not None:
             # "G" ALONE IS AMBIGUOUS ON THIS SCREEN. The Calibration panel prints an
             # "Open-pore conductance" for one recording at a time (G = I₀ / V, the
@@ -661,17 +726,17 @@ class IVWindow(QtWidgets.QMainWindow):
             # the whole series, which absorbs the leak; on the owner's three
             # recordings they differ by 1.71x. Say which one this is, here and in the
             # headline, and reconcile them in the details pane (_CHORD_CROSS_REFERENCE).
-            self._plot.setTitle(
-                f"G (I-V slope) = {fit.conductance_nS:.4g} nS   ·   {r2_text}",
-                color=_FIT_HEX)
-            self._headline.setText(f"G (I-V slope) = {fit.conductance_nS:.4g} nS")
+            equation = f"G (I-V slope) = {fit.conductance_nS:.4g} nS"
+            self._headline.setText(equation)
         else:
             # No nS is available because the current units are unknown -- so the
             # slope that IS shown must not read as a bare "/V" either.
             u = fit.current_units or "(units unknown)"
-            self._plot.setTitle(
-                f"slope = {fit.slope:.4g} {u}/V   ·   {r2_text}", color=_FIT_HEX)
-            self._headline.setText(f"slope = {fit.slope:.4g} {u}/V")
+            equation = f"slope = {fit.slope:.4g} {u}/V"
+            self._headline.setText(equation)
+        self._fit_readouts = [FitReadout(
+            parts={"equation": equation, "r2": r2_text, "n": n_text},
+            refusals=((dof_tag,) if dof_tag else ()), colour=_FIT_HEX)]
 
     @staticmethod
     def _fit_summary(fit: iv.IVFit) -> list[str]:
@@ -856,10 +921,15 @@ class IVWindow(QtWidgets.QMainWindow):
         warnings_json = json.dumps(warnings, ensure_ascii=False)
         details = self.details_text()
         fit = self._fit
+        # The fit's own numbers, in the frame of the voltage_V column (volts) and the
+        # current column, with their units beside them (the figure's axis reads mV).
+        current_units = axis_units or "(units unknown)"
         fit_fields = {
             "fit_model": "linear" if fit is not None else "none",
             "fit_slope": np.nan if fit is None else fit.slope,
+            "fit_slope_units": "" if fit is None else f"{current_units}/V",
             "fit_intercept": np.nan if fit is None else fit.intercept,
+            "fit_intercept_units": "" if fit is None else current_units,
             "fit_r2": np.nan if fit is None else fit.r2,
             "fit_n": np.nan if fit is None else fit.n,
             "fit_conductance_nS": (np.nan if fit is None or fit.conductance_nS is None

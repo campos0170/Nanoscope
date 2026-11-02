@@ -1134,6 +1134,26 @@ class MeasurePanel(QtWidgets.QWidget):
         title.setStyleSheet("font-weight:600; font-size:13px;")
         root.addWidget(title)
 
+        # -- Annotate mode: the one-gesture add ----------------------------
+        # The window's own Annotate action (`set_annotate_action`), so this button, the one on
+        # the Scan strip, View ▸ Annotate, E and the trace menu are one state. Hidden on a panel
+        # with no window to hand it one. The legend under it is the trace's gestures in a line.
+        self._annotate_button = QtWidgets.QToolButton()
+        self._annotate_button.setObjectName("measureAnnotateButton")
+        self._annotate_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._annotate_button.setVisible(False)
+        root.addWidget(self._annotate_button)
+        self._key_legend = QtWidgets.QLabel(
+            "On the trace: drag across an event, or double-click it, to add it (Annotate on) · "
+            "Shift at release keeps it · C catch · D add · X discard · ⌥-drag zooms · "
+            "right-click for more")
+        self._key_legend.setObjectName("measureKeyLegend")
+        self._key_legend.setWordWrap(True)
+        self._key_legend.setStyleSheet("color:#8b9199; font-size:11px;")
+        self._key_legend.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                       QtWidgets.QSizePolicy.Preferred)
+        root.addWidget(self._key_legend)
+
         # -- the cursor toggle + snap conveniences ------------------------
         self.action_widget = QtWidgets.QWidget()
         tools = QtWidgets.QGridLayout(self.action_widget)
@@ -1143,19 +1163,21 @@ class MeasurePanel(QtWidgets.QWidget):
         self._toggle.setToolTip(
             "Show a movable region on the current-channel trace; its two edges are "
             "the boundary cursors. Double-click the trace to place it, drag the shaded "
-            "body to move it, or drag either circular handle to resize it.")
+            "body to move it, or drag either bracket (or its tab) to resize it. "
+            "(Ctrl+Shift+M)")
         self._toggle.toggled.connect(self._on_toggle)
         self._snap_view_btn = QtWidgets.QPushButton("Snap to view")
         self._snap_view_btn.setToolTip(
-            "Place a mask over the middle 20% of the visible view, then drag its circular "
-            "edge handles to fit the event. Double-clicking the trace places it at the click.")
+            "Place a mask over the middle 20% of the visible view, then drag its edge tabs "
+            "to fit the event. Double-clicking the trace places it at the click.")
         self._snap_view_btn.clicked.connect(self._snap_to_view)
         self._snap_event_btn = QtWidgets.QPushButton("Snap to selected event")
         self._snap_event_btn.setToolTip("Set the cursors to the event last selected in the event table.")
         self._snap_event_btn.clicked.connect(self._snap_to_event)
         self._clear_mask_btn = QtWidgets.QPushButton("Clear mask")
         self._clear_mask_btn.setToolTip(
-            "Remove the live cursor mask. This never deletes a saved measurement or event.")
+            "Remove the live cursor mask and keep Measure on, as X does on the trace. This "
+            "never deletes a saved measurement or event.")
         self._clear_mask_btn.setEnabled(False)
         self._clear_mask_btn.clicked.connect(self.clear_mask)
         # The Add button ASKS the owner to file the cursor region as an EVENT (`addRequested`);
@@ -1433,6 +1455,7 @@ class MeasurePanel(QtWidgets.QWidget):
         self._status = QtWidgets.QLabel("")
         self._status.setStyleSheet("color:#8b9199;")
         self._status.setWordWrap(True)
+        self._status_about_mask = False      # see `_set_status`
         root.addWidget(self._status)
 
     # -- selection (pushed in by the owner) ------------------------------------------------------
@@ -1963,21 +1986,32 @@ class MeasurePanel(QtWidgets.QWidget):
         plain method behind the legacy measurement list."""
         self.addRequested.emit()
 
+    def set_annotate_action(self, action: QtGui.QAction | None) -> None:
+        """Show the window's Annotate action as this tab's ✎ Annotate button (its iconText is
+        the button's text). The action and its state stay the window's; None hides the button."""
+        if action is not None:
+            self._annotate_button.setDefaultAction(action)
+        self._annotate_button.setVisible(action is not None)
+
+    def annotate_button(self) -> QtWidgets.QToolButton:
+        return self._annotate_button
+
     def clear_mask(self) -> bool:
         """Remove the transient cursor mask without touching anything saved.
 
         A trace double-click intentionally creates the same live cursor selection as the
         Measure tool.  Clearing that selection must be a separate, reversible-in-spirit
-        operation from deleting a table row: it turns the tool off, drops only the
-        ``LinearRegionItem``, and leaves saved manual measurements, detector events,
-        labels, and project history unchanged.
+        operation from deleting a table row: it drops only the mask and leaves saved manual
+        measurements, detector events, labels, and project history unchanged. MEASURE STAYS
+        ON, as the trace's X leaves it: turning it off here also ended Annotate mode, without
+        a word, under a button that only says it clears the mask.
         """
-        if not self.is_active():
-            self._set_status("There is no live annotation mask to clear.")
+        if not self.is_active() or not self._trace_view.discard_measure_region():
+            self._set_status("There is no live annotation mask to clear.", about_mask=True)
             return False
-        self.set_active(False)
         self._set_status(
-            "Cleared the live annotation mask. Saved measurements and events were not changed.")
+            "Cleared the live annotation mask. Saved measurements and events were not changed.",
+            about_mask=True)
         return True
 
     def set_method(self, method: str) -> None:
@@ -2061,6 +2095,7 @@ class MeasurePanel(QtWidgets.QWidget):
         self._stop_pending_recompute()      # a queued frame would measure the mask that is gone
         self._refusal = None
         self._install_stats(None)
+        self._drop_mask_status()
 
     def _snap_to_view(self) -> None:
         self._place_mask_in_view()
@@ -2125,15 +2160,15 @@ class MeasurePanel(QtWidgets.QWidget):
         if clicked:
             self._set_status(
                 "Placed a Measure mask at the double-click (maximum 20% of the view). "
-                "Drag the shaded body to move it or a circular handle to resize it.")
+                "Drag the shaded body to move it or an edge tab to resize it.", about_mask=True)
         elif overlap0 != vlo or overlap1 != vhi:
             self._set_status(
                 "Placed a Measure mask in the visible part of this recording "
-                "(maximum 20% of the view).")
+                "(maximum 20% of the view).", about_mask=True)
         else:
             self._set_status(
                 "Placed a Measure mask over the middle 20% of the visible view. "
-                "Drag its handles to fit the event.")
+                "Drag its edge tabs to fit the event.", about_mask=True)
         return True
 
     def _snap_to_event(self) -> None:
@@ -2224,6 +2259,7 @@ class MeasurePanel(QtWidgets.QWidget):
         would reintroduce the very freeze the debounce was added to remove."""
         self._recompute_timer.stop()
         self._recompute()
+        self._drop_mask_status()
 
     def _on_calibration_changed(self, doc_id: str, channel: int) -> None:
         """The calibration of (doc_id, channel) changed.
@@ -3462,5 +3498,14 @@ class MeasurePanel(QtWidgets.QWidget):
             ok and self._selected_event is not None
             and self._selected_event[:2] == self._target)
 
-    def _set_status(self, text: str) -> None:
+    def _set_status(self, text: str, *, about_mask: bool = False) -> None:
+        """This tab's own status line. A sentence ``about_mask`` (placed, cleared) lasts only
+        until the mask next settles or goes: it read "Placed a Measure mask at the
+        double-click" eight gestures after the fact, beside a mask placed some other way."""
         self._status.setText(text)
+        self._status_about_mask = bool(about_mask and text)
+
+    def _drop_mask_status(self) -> None:
+        if self._status_about_mask:
+            self._status_about_mask = False
+            self._status.setText("")

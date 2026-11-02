@@ -6,6 +6,29 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .figure_bundle import FigureSnapshot
 from .figure_composition import DEFAULT_LABEL_STYLE
 
+#: The panel-label font row standing for the font the panels' own text is drawn in.
+_APP_FONT_LABEL = "Application default"
+
+
+def _application_family() -> str:
+    """The family an untouched plot's text is drawn in, and named in its SVG.
+
+    ``QApplication.font().family()`` is what pyqtgraph writes into a panel's SVG for its
+    default-font text, so panel labels in this family match the panels in both outputs.
+    """
+    return QtWidgets.QApplication.font().family() or DEFAULT_LABEL_STYLE["family"]
+
+
+def _paint_swatch(button: QtWidgets.QPushButton, hex_color: str) -> None:
+    """The chosen colour ON the button, with legible ink and its hex as the label: the
+    Distributions colour swatch, so the two read the same."""
+    color = QtGui.QColor(hex_color)
+    luma = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+    button.setText(hex_color)
+    button.setStyleSheet(
+        f"background-color: {hex_color}; color: {'#000000' if luma > 140 else '#ffffff'}; "
+        "border: 1px solid #555; padding: 2px;")
+
 
 class FigureComposerDialog(QtWidgets.QDialog):
     """Explicit preview/commit boundary: the saved result is the approved preview."""
@@ -61,15 +84,37 @@ class FigureComposerDialog(QtWidgets.QDialog):
         form.addRow(settings)
         style = (initial_layout or {}).get("label_style", DEFAULT_LABEL_STYLE)
         appearance = QtWidgets.QHBoxLayout()
+        spacing = (initial_layout or {}).get("spacing", 20)
         self._spacing = QtWidgets.QDoubleSpinBox()
         self._spacing.setRange(0, 200)
-        self._spacing.setDecimals(3)
+        # Whole pixels: "20 px", not "20.000 px". A composition saved with a fractional
+        # gap keeps its decimals when revised, so a revision never moves its panels.
+        self._spacing.setDecimals(0 if float(spacing).is_integer() else 3)
         self._spacing.setSuffix(" px")
-        self._spacing.setValue((initial_layout or {}).get("spacing", 20))
+        self._spacing.setValue(spacing)
         appearance.addWidget(QtWidgets.QLabel("Panel spacing:"))
         appearance.addWidget(self._spacing)
-        self._label_font = QtWidgets.QFontComboBox()
-        self._label_font.setCurrentFont(QtGui.QFont(style["family"]))
+        # A plain combo, not QFontComboBox: the application font is a private family on
+        # macOS, which QFontComboBox cannot list and, asked to show it, replaces with its
+        # FIRST family (plots_panel's S6-01). So the application font gets a named row.
+        self._label_font = QtWidgets.QComboBox()
+        self._label_font.addItem(_APP_FONT_LABEL, "")
+        for family in QtGui.QFontDatabase.families():
+            if not family.startswith(".") and not QtGui.QFontDatabase.isPrivateFamily(family):
+                self._label_font.addItem(family, family)
+        family = style["family"]
+        if initial_layout is not None and family != _application_family():
+            if self._label_font.findData(family) < 0:
+                # Revising keeps a family this computer lacks rather than swapping it.
+                self._label_font.addItem(family, family)
+            self._label_font.setCurrentIndex(self._label_font.findData(family))
+        self._label_font.setToolTip(
+            f"Panel-label font. “{_APP_FONT_LABEL}” is the font the panels' own text "
+            "is drawn in; name a family when the figure must look the same elsewhere.")
+        self._label_font.setMaxVisibleItems(12)
+        self._label_font.setMinimumContentsLength(12)
+        self._label_font.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._label_font.setMaximumWidth(230)
         appearance.addWidget(QtWidgets.QLabel("Panel labels:"))
         appearance.addWidget(self._label_font)
@@ -82,7 +127,11 @@ class FigureComposerDialog(QtWidgets.QDialog):
         self._label_bold = QtWidgets.QCheckBox("Bold")
         self._label_bold.setChecked(style["bold"])
         appearance.addWidget(self._label_bold)
-        self._label_color = QtWidgets.QPushButton(style["color"])
+        self._label_color_value = style["color"]
+        self._label_color = QtWidgets.QPushButton()
+        self._label_color.setToolTip("Panel-label colour")
+        self._label_color.setFixedHeight(24)
+        _paint_swatch(self._label_color, self._label_color_value)
         self._label_color.clicked.connect(self._choose_label_color)
         appearance.addWidget(self._label_color)
         appearance.addStretch()
@@ -166,7 +215,7 @@ class FigureComposerDialog(QtWidgets.QDialog):
         self._share_y.toggled.connect(self._invalidate)
         self._shared_legend.toggled.connect(self._invalidate)
         self._spacing.valueChanged.connect(self._invalidate)
-        self._label_font.currentFontChanged.connect(self._invalidate)
+        self._label_font.currentIndexChanged.connect(self._invalidate)
         self._label_size.valueChanged.connect(self._invalidate)
         self._label_bold.toggled.connect(self._invalidate)
         self._name.textChanged.connect(self._name_changed)
@@ -174,11 +223,16 @@ class FigureComposerDialog(QtWidgets.QDialog):
     def figure_name(self):
         return self._name.text().strip()
 
+    def label_family(self):
+        """The family panel labels are drawn in: the named row, or the application's."""
+        return self._label_font.currentData() or _application_family()
+
     def _choose_label_color(self):
-        color = QtWidgets.QColorDialog.getColor(QtGui.QColor(self._label_color.text()), self,
+        color = QtWidgets.QColorDialog.getColor(QtGui.QColor(self._label_color_value), self,
                                                 "Panel-label color")
         if color.isValid():
-            self._label_color.setText(color.name())
+            self._label_color_value = color.name()
+            _paint_swatch(self._label_color, self._label_color_value)
             self._invalidate()
 
     def _name_changed(self, *_args):
@@ -233,9 +287,9 @@ class FigureComposerDialog(QtWidgets.QDialog):
                 [self._snapshots[key] for key in selected], labels, self._columns.value(),
                 share_x=self._share_x.isChecked(), share_y=self._share_y.isChecked(),
                 panel_spans=spans, spacing=self._spacing.value(),
-                label_style={"family": self._label_font.currentFont().family(),
+                label_style={"family": self.label_family(),
                              "size_px": self._label_size.value(), "bold": self._label_bold.isChecked(),
-                             "color": self._label_color.text()}, shared_legend=self._shared_legend.isChecked())
+                             "color": self._label_color_value}, shared_legend=self._shared_legend.isChecked())
             self._pixmap.loadFromData(result.png_bytes, "PNG")
             if self._pixmap.isNull():
                 raise ValueError("The composition preview could not be decoded.")

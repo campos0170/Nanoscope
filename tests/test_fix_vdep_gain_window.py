@@ -45,6 +45,7 @@ import pytest
 from nanoscope.analysis.events import SCHEMA, EventSet, empty_df
 from nanoscope.core.analysis import AnalysisResult
 from nanoscope.core.calibration import ChannelCalibration
+from nanoscope.gui.figure_text import TextStyle
 from nanoscope.core.document import TraceDocument
 from nanoscope.core.session import Session
 from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, RecordingMeta
@@ -145,8 +146,12 @@ def _window(qtbot, session, *, metric: str, fit: str = "none") -> VDepWindow:
 
 
 def _title(w: VDepWindow) -> str:
-    label = w.plot_item().titleLabel
-    return "" if label is None else str(label.text)
+    """What the exported figure states about the fit and the pool: the fit label and the
+    provenance caption (owner, 2026-11-01, Q-F3: neither is the title any more, so a
+    typed title drops neither). Caption lines are joined with ``<br>`` as they wrap."""
+    assert w.plot_item().titleLabel.text == "", WHERE
+    caption = w.caption_text().replace("\n", "<br>")
+    return "   ·   ".join(text for text in (w.fit_label_text(), caption) if text)
 
 
 def _table_column(w: VDepWindow, header: str) -> list[str]:
@@ -372,7 +377,8 @@ def test_the_title_wraps_instead_of_dropping_its_last_segment(qapp, qtbot, tmp_p
         assert segment in _title(w), f"{segment!r} lost from {_title(w)!r} {WHERE}"
     assert "UNCALIBRATED" in w.details_text() and CAVEAT_700 in w.details_text(), WHERE
     w._set_title(LONG_FIGURE_TITLE, "#9aa5b1")
-    title = _title(w)
+    # The wrap is the provenance CAPTION's now (owner, 2026-11-01, Q-F3).
+    title = w.caption_text().replace("\n", "<br>")
     lines = title.split("<br>")
     assert len(lines) > 1, f"the title did not wrap: {title!r} {WHERE}"
     for line in lines:
@@ -383,14 +389,18 @@ def test_the_title_wraps_instead_of_dropping_its_last_segment(qapp, qtbot, tmp_p
     # ... and a title with nothing to qualify stays on one line.
     clean = _window(qtbot, _ladder(tmp_path, ONE_WINDOW), metric="median_dwell_s",
                     fit="linear")
-    assert "<br>" not in _title(clean), f"{_title(clean)!r} {WHERE}"
+    assert "\n" not in clean.caption_text(), f"{clean.caption_text()!r} {WHERE}"
 
 
 def test_a_wrapped_title_is_given_the_room_to_be_read(qapp, qtbot, tmp_path):
     """FOUND IN MY OWN FIX, TWICE OVER. ``PlotItem.setTitle`` hard-codes a 30 px
     title row, so wrapping the title to stop it clipping at the RIGHT edge made it
     clip at the TOP instead: the 3-line as-probed title lost its whole first line,
-    V₀ and R² with it."""
+    V₀ and R² with it.
+
+    Converted 2026-11-01: the provenance is a caption on the plot and V₀ and R² are in
+    the fit label (Q-F3), so the guarantee is that every caption line is drawn inside the
+    plot and the fit label is too, and that the empty title takes no row at all."""
     session = _ladder(tmp_path, THREE_WINDOWS, warnings={-700.0: (CAVEAT_700,)})
     w = _window(qtbot, session, metric="median_depth", fit="exponential")
     w._set_title(LONG_FIGURE_TITLE, "#9aa5b1")
@@ -398,19 +408,14 @@ def test_a_wrapped_title_is_given_the_room_to_be_read(qapp, qtbot, tmp_path):
     w.show()
     qtbot.waitExposed(w)
 
-    lines = _title(w).count("<br>") + 1
-    assert lines >= 3, f"{_title(w)!r} {WHERE}"
-    row_h = w.plot_item().layout.rowMaximumHeight(0)
-    text_h = w.plot_item().titleLabel.item.boundingRect().height()
-    assert row_h >= text_h, (
-        f"the title row is {row_h} px for {text_h} px of text ({lines} lines) {WHERE}")
-    assert row_h > 30.0, f"still the hard-coded 30 px {WHERE}"
-
-    # a one-line title must NOT hog the extra room
-    clean = _window(qtbot, _ladder(tmp_path, ONE_WINDOW), metric="median_dwell_s",
-                    fit="linear")
-    assert clean.plot_item().layout.rowMaximumHeight(0) == 30.0, (
-        f"a one-line title should keep pyqtgraph's own row height {WHERE}")
+    lines = w.caption_text().count("\n") + 1
+    assert lines >= 3, f"{w.caption_text()!r} {WHERE}"
+    view = w.plot_item().getViewBox().sceneBoundingRect()
+    for item in (w._caption, w._fit_label):
+        box = item.sceneBoundingRect()
+        assert view.contains(box), f"{item.objectName()} {box} outside the plot {view} {WHERE}"
+    assert w.plot_item().layout.rowMaximumHeight(0) == 0.0, (
+        f"the empty title still holds a row {WHERE}")
 
 
 def test_the_exported_png_really_keeps_the_extra_title_lines(qapp, qtbot, tmp_path):
@@ -437,13 +442,22 @@ def test_the_exported_png_really_keeps_the_extra_title_lines(qapp, qtbot, tmp_pa
     plain = _window(qtbot, _ladder(tmp_path, ONE_WINDOW),
                     metric="median_dwell_s", fit="linear")
     wrapped._set_title(LONG_FIGURE_TITLE, "#9aa5b1")
+    # Converted 2026-11-01: the wrapped text is the provenance caption, drawn on the plot
+    # (Q-F3), so its band is the whole image: the same figure exported with the caption
+    # hidden must hold clearly less ink.
     a, b = tmp_path / "wrapped.png", tmp_path / "plain.png"
     wrapped.save_image(str(a))
-    plain.save_image(str(b))
-    wrapped_ink, plain_ink = ink_in_top(a), ink_in_top(b)
-    assert wrapped_ink > plain_ink * 1.2, (
-        f"the exported title band holds {wrapped_ink} px against {plain_ink} for a "
-        f"one-line title — the extra lines did not reach the PNG {WHERE}")
+    widget = wrapped._appearance_widget
+    widget.apply_appearance(widget.state().with_text_style(
+        "annotation.provenance", TextStyle(text=" ")))
+    assert wrapped.caption_text() == "", WHERE
+    wrapped.save_image(str(b))
+    rows = QtGui.QImage(str(a)).height()
+    wrapped_ink, plain_ink = ink_in_top(a, rows), ink_in_top(b, rows)
+    assert wrapped_ink > plain_ink * 1.05, (
+        f"the exported figure holds {wrapped_ink} px against {plain_ink} without the "
+        f"caption — the extra lines did not reach the PNG {WHERE}")
+    assert plain is not None
 
 
 def test_the_empty_state_says_nothing(qapp, qtbot):

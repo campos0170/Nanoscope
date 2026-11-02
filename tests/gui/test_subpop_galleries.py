@@ -1037,8 +1037,10 @@ def test_the_report_window_offers_the_entry_points_without_importing_a_surface()
     tree = ast.parse(pathlib.Path(subpop_mod.__file__).read_text())
     siblings = {n.module for n in ast.walk(tree)
                 if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module}
+    # figure_text (2026-11-01): in-figure text editing, which every plot window installs
+    # through plot_interaction; a controller over the window's own items, not a surface.
     allowed = {"categorical", "analysis_catalog", "plot_appearance", "plot_workflow",
-               "plot_interaction"}
+               "plot_interaction", "figure_text"}
     assert siblings == allowed, (
         f"the report window reaches {sorted(siblings - allowed)} beyond the shared "
         f"infrastructure it is allowed to reuse {sorted(allowed)}; a real surface "

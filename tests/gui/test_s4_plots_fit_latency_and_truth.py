@@ -224,7 +224,7 @@ def _negative_frame(n: int = 600, seed: int = 5) -> pd.DataFrame:
 def test_a_mixture_over_an_all_negative_column_names_the_magnitude_in_the_title(qtbot):
     """The title is the only thing ``Save image`` keeps, so the frame goes in the title."""
     w = _hist(qtbot, _negative_frame(), "mean", PP._FIT_GMM, provenance={})
-    title = w._plot.titleLabel.text
+    title = w._fit_label_item.plain_text()     # plotux G3: a fit's numbers are in the fit label, never the title
     assert "μ(|mean|)" in title, title
     assert "Gaussian mixture on |mean|" in w.details_text()
 
@@ -307,7 +307,7 @@ def test_pca_on_all_constant_features_refuses_and_names_the_cause(qtbot):
     pane = w.details_text()
     assert "nan" not in pane.lower()
     assert "are constant" in pane and "no variance for PCA to explain" in pane
-    for surface in (pane, w._plot.titleLabel.text,
+    for surface in (pane, w._fit_label_item.plain_text(),
                     w._plot.getAxis("bottom").labelText, w._plot.getAxis("left").labelText):
         assert "nan" not in str(surface).lower(), surface
 
@@ -328,7 +328,8 @@ def test_pca_on_two_or_three_rows_caveats_its_exact_100_percent(qtbot, n, seed):
     df = pd.DataFrame({c: rng.normal(size=n) for c in FEATS})
     w = _pca_window(qtbot, df, FEATS)
     assert w.run_pca() is not None
-    title = w._plot.titleLabel.text
+    # plotux G3 (Q-F4): the explained variance left the PCA title for Details, tag and all.
+    title = w.details_text()
     assert "cumulative 100.0%" in title
     assert "exact by construction" in title, title
     assert "EXACT BY CONSTRUCTION" in w.details_text()

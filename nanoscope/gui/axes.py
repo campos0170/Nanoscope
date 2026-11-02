@@ -34,12 +34,18 @@ Imports nothing from the app: numpy, pyqtgraph, and this module's own arithmetic
 from __future__ import annotations
 
 import math
+import weakref
 
 import numpy as np
 import pyqtgraph as pg
 
-__all__ = ["ReadableLogAxis", "ReadableLinearAxis", "SUPERSCRIPT",
-           "exponent_decade", "decimal_decade"]
+__all__ = ["MAX_MAJOR_TICKS", "ReadableLogAxis", "ReadableLinearAxis", "SUPERSCRIPT",
+           "exponent_decade", "decimal_decade", "major_tick_levels", "set_major_tick"]
+
+#: The most major ticks a typed spacing may put on an axis. Past it (a 0.001 spacing on an
+#: axis zoomed out to 10⁶) the axis chooses its own spacing again, instead of building a
+#: million labels for the collision filter to throw away.
+MAX_MAJOR_TICKS = 200
 
 #: Unicode superscripts, so one decade label is one glyph run.
 SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
@@ -48,6 +54,58 @@ SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
 def exponent_decade(e: float) -> str:
     """``-3`` -> ``10⁻³``."""
     return "10" + f"{int(round(e))}".translate(SUPERSCRIPT)
+
+
+def major_tick_levels(axis: pg.AxisItem, low: float, high: float, major: float | None):
+    """The tick levels for a typed MAJOR spacing (Axis properties ▸ Major tick every), or
+    None to let the axis choose.
+
+    ``low``/``high`` arrive as ``tickValues`` hands them to ``tickSpacing``: in the units
+    the axis shows on a linear axis, in decades on a log one, where the spacing is taken as
+    whole decades. Minor ticks are a fifth of the major on a linear axis; a log axis keeps
+    pyqtgraph's own 2..9 minors (``logTickValues``).
+    """
+    if major is None or not (math.isfinite(major) and major > 0):
+        return None
+    span = abs(float(high) - float(low))
+    if axis.logMode:
+        major = max(1.0, float(round(major)))
+        return None if span / major > MAX_MAJOR_TICKS else [(major, 0.0)]
+    if span / major > MAX_MAJOR_TICKS:
+        return None
+    return [(major, 0.0), (major / 5.0, 0.0)]
+
+
+def set_major_tick(axis: pg.AxisItem, major: float | None) -> None:
+    """Give ``axis`` a typed major tick spacing (None = automatic again).
+
+    ``AxisItem.setTickSpacing`` is not used: it pins the levels whatever the zoom (a tiny
+    spacing on a zoomed-out axis would build millions of ticks), and the readable axes
+    choose their own. A :class:`ReadableLogAxis` reads :attr:`ReadableLogAxis.major_tick`
+    in its ``tickSpacing``; any other axis gets the same chooser on this instance only.
+    """
+    major = float(major) if major is not None else None
+    if isinstance(axis, ReadableLogAxis):
+        changed = axis.major_tick != major
+        axis.major_tick = major
+    else:
+        changed = getattr(axis, "major_tick", None) != major or (
+            major is None and "tickSpacing" in vars(axis))
+        axis.major_tick = major
+        if major is None:
+            vars(axis).pop("tickSpacing", None)
+        else:
+            ref, base = weakref.ref(axis), type(axis).tickSpacing
+
+            def tick_spacing(low, high, size, ref=ref, base=base):
+                owner = ref()
+                levels = major_tick_levels(owner, low, high, getattr(owner, "major_tick", None))
+                return levels if levels is not None else base(owner, low, high, size)
+
+            axis.tickSpacing = tick_spacing
+    if changed:
+        axis.picture = None
+        axis.update()
 
 
 def decimal_decade(e: float) -> str:
@@ -102,7 +160,13 @@ class ReadableLogAxis(pg.AxisItem):
         #: ``AxisItem.setScale`` cannot do this on a log axis (``tickValues`` multiplies
         #: the log10 RANGE by it, which is arithmetic on an exponent).
         self.display_factor: float = 1.0
+        #: A typed major tick spacing (:func:`set_major_tick`); None = this axis chooses.
+        self.major_tick: float | None = None
         self.enableAutoSIPrefix(False)
+
+    def tickSpacing(self, minVal, maxVal, size):  # noqa: N802 - pyqtgraph API
+        levels = major_tick_levels(self, minVal, maxVal, self.major_tick)
+        return levels if levels is not None else super().tickSpacing(minVal, maxVal, size)
 
     def updateAutoSIPrefix(self) -> None:
         """Disabling SI prefixes must also remove a previously computed scale.

@@ -116,7 +116,7 @@ def test_histogram_fit_and_residual_arrays_are_not_replaced(window, qtbot, monke
     item_pairs = [(item, item.xData, item.yData, item.xData.copy(), item.yData.copy())
                   for item in (*window._hist_items, *window._fit_items,
                                *window._resid.listDataItems())]
-    fit_values = window._fit_values_item
+    fit_values = window._fit_label_item
     fit_text = fit_values.text
     details = window.details_text()
     pending = dict(window._pending_notes)
@@ -130,8 +130,8 @@ def test_histogram_fit_and_residual_arrays_are_not_replaced(window, qtbot, monke
     for watcher in watchers:
         watcher.assert_not_called()
     assert window.fit_result() is fit
-    assert window._fit_values_item is fit_values
-    assert window._fit_values_item.text == fit_text
+    assert window._fit_label_item is fit_values
+    assert window._fit_label_item.text == fit_text
     assert window.details_text() == details
     assert window._pending_notes == pending
     np.testing.assert_array_equal(window._plot.viewRange(), view)

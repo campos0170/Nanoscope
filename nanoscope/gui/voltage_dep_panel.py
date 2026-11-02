@@ -63,6 +63,7 @@ it is simply no longer drawn silently.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -79,7 +80,11 @@ from ..plot.style import OKABE_ITO
 from .analysis_catalog import ANALYSIS_LABELS
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
-from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .figure_text import (HIDDEN_TEXT, TextTarget, appearance_text_host, figure_text_for,
+                          label_args, rich_text)
+from .fit_label import FitLabelItem, FitLabelState, FitReadout
+from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
+                              reframe_axis_pins)
 from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
                                window_readout)
 from .plot_workflow import (WarningSummary, bounded_controls, control_group,
@@ -117,6 +122,34 @@ _WARN_MAX_H = 150
 #: exported PNG silently dropped part of the very statement the title exists to
 #: keep. Wrapped, not shortened: nothing is worth dropping.
 _TITLE_WRAP = 72
+#: The voltage is held in volts and SHOWN in millivolts (the axis scale, never the data).
+_VOLTAGE_LABEL = "Applied voltage (mV)"
+_ABS_VOLTAGE_LABEL = "Applied |voltage| (mV)"
+_CAPTION_KEY = "annotation.provenance"
+
+
+class _ProvenanceCaption(FitLabelItem):
+    """What measured the pooled points (merge state, baseline, gain, duration), on the
+    figure but never in the title: the fit label's drag, double-click and menu, with its
+    own text. A typed title cannot drop it, and a hidden one does not hide it."""
+
+    def __init__(self, view_box) -> None:
+        super().__init__(view_box)
+        self.setObjectName("plotProvenanceCaption")
+        self.setToolTip("Caption: what measured these points. Drag to move, double-click "
+                        "to retype it.")
+
+    def show_caption(self, body: str, style, colour: str, offset) -> None:
+        options = {key: value for key, value in label_args(style).items() if key != "justify"}
+        options.setdefault("color", colour)
+        options["justify"] = "left"
+        for key in ("family", "bold", "italic", "size"):
+            self.opts.pop(key, None)      # setText merges: a style taken off must go
+        self._state = (FitLabelState(placement="custom", offset=offset) if offset is not None
+                       else FitLabelState(placement="bottom-left"))
+        self.setText(body, **options)
+        self.setVisible(bool(body.strip()))
+        self._place()
 
 # Metric combo label -> voltage_dep metric id (order defines the combo order).
 #
@@ -140,6 +173,14 @@ _METRIC_LABEL = {v: k for k, v in _METRIC_LABELS}
 # combo labels by construction: the axis, the combo, the table header and the
 # details pane are four renderings of one metric and must not name it four ways.
 _Y_LABEL: dict[str, str] = dict(_METRIC_LABEL)
+
+
+def _metric_unit(metric: str) -> str:
+    """The metric's unit as its axis label names it ("Hz" of "Capture rate (Hz)"); ""
+    for a ratio or a count, whose label names none."""
+    label = _Y_LABEL.get(metric, "")
+    return label[label.rfind("(") + 1:-1] if label.endswith(")") else ""
+
 
 # Fit combo labels (also the voltage_dep model ids, plus "none").
 _FIT_NONE = "none"
@@ -213,6 +254,8 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._applied_fit: str = _FIT_NONE
         self._scatter_item: pg.PlotDataItem | None = None
         self._fit_item: pg.PlotDataItem | None = None
+        self._fit_readouts: list[FitReadout] = []
+        self._caption_segments: list[str] = []
         self._message_item: pg.TextItem | None = None
         self._appearance = PlotAppearance()
 
@@ -296,7 +339,10 @@ class VDepWindow(QtWidgets.QMainWindow):
         bar.addStretch(1)
         root.addLayout(bar)
 
-        self._appearance_widget = PlotAppearanceWidget(self._appearance)
+        # ⌘Z on the page, not on these controls: an edit made in the figure is undone from
+        # the keyboard whatever the Section shows (FIG-4); a page behind another Explorer
+        # tab is hidden, so it does not answer.
+        self._appearance_widget = PlotAppearanceWidget(self._appearance, shortcut_parent=self)
         self._appearance_widget.changed.connect(self._appearance_from_user)
         self._appearance_section = bounded_controls(self._appearance_widget)
         root.addWidget(self._appearance_section)
@@ -391,9 +437,28 @@ class VDepWindow(QtWidgets.QMainWindow):
         # View only (plot_interaction): Reset view, zoom history, the app right-click menu
         # in place of pyqtgraph's, and the pointer readout (log y shows the real value).
         self._readout = window_readout(self)
+        # In-figure editing (figure_text): one appearance Undo step per edit. Log on the y
+        # axis IS this window's Log y control (one store); the x axis has no log scale.
+        self._text_host = appearance_text_host(
+            self._plot, self._appearance_widget,
+            axis_hooks={"log": self._log_from_figure,
+                        "log_state": lambda side: side == "left" and self._log_y.isChecked(),
+                        "log_reason": "Voltage dependence has a log scale on the y axis only."},
+            extra_targets=self._caption_targets)
         self._plot_nav = install_plot_interaction(self._plot, readout=self._readout,
-                                                  exports=exports)
+                                                  exports=exports, text=self._text_host)
         self._workflow.add_view_control(view_button(lambda: self._plot_nav, (self._plot_nav,)))
+        # THE FIT IS NOT THE TITLE (owner, 2026-11-01): the slope or V0 and R2 go in the fit
+        # label; what was pooled goes in the caption (Q-F3), so a typed title drops neither.
+        self._fit_label = FitLabelItem(self._plot.getViewBox())
+        self._text_host.register_fit_label(self._fit_label)
+        self._caption = _ProvenanceCaption(self._plot.getViewBox())
+        # Where it is dragged is part of the figure: one Undo step per drag, kept by
+        # templates and the project (annotation offsets), as the fit label's is.
+        self._text_host.register_annotation(self._caption, _CAPTION_KEY)
+        self._appearance_widget.set_fit_label_available(True, in_legend=False)
+        self._appearance_widget.set_automatic_text("x_label", _VOLTAGE_LABEL)
+        figure_text_for(self._plot).refresh()
         # Named recipes for another series: metric, fit proposal, axes and appearance --
         # never the recordings or their points. A recalled fit waits for Apply fit.
         self._templates = WindowTemplateControls(
@@ -444,9 +509,55 @@ class VDepWindow(QtWidgets.QMainWindow):
         ensure_item_legend(self._plot, ((self._scatter_item, "Per recording"),
                                        (self._fit_item, "Applied trend")))
         self._appearance_widget.set_legend_available(self._scatter_item is not None)
+        shown = self._plot.viewRange() if self._message_item is not None else None
         apply_plot_appearance(
             self._plot, self._appearance, plot_widget=self._plot_widget,
             data_items=(self._scatter_item,), fit_items=(self._fit_item,))
+        if shown is not None and self._plot.viewRange() != shown:
+            # Nothing to frame, and a range pinned in Axis properties just moved the view
+            # off the message: put the message back in view. The pin is kept, and the next
+            # draw with data goes back to it; a zoom by hand stays, as on any page.
+            self._plot.setXRange(0, 1, padding=0)
+            self._plot.setYRange(0, 1, padding=0)
+        if getattr(self, "_caption", None) is None:
+            return                      # a draw during construction, before the labels
+        # Never In legend: the legend row does not carry the numbers or the R² refusal here.
+        self._fit_label.apply_state(
+            replace(self._appearance.fit_label_state(), in_legend=False), self._fit_readouts,
+            self._appearance.text_style("annotation.fit"))
+        style = self._appearance.text_style(_CAPTION_KEY)
+        body = (self._wrap_title(self._caption_segments) if style.text is None
+                else "" if style.text == HIDDEN_TEXT else rich_text(style.text))
+        self._caption.show_caption(body, style, _MSG_HEX,
+                                   self._appearance.annotation_offset(_CAPTION_KEY))
+        controller = figure_text_for(self._plot)
+        if controller is not None:
+            controller.refresh()        # the legend may be new since the last draw
+
+    def _caption_targets(self) -> dict:
+        caption = getattr(self, "_caption", None)     # None while the window is built
+        if caption is None:
+            return {}
+        return {_CAPTION_KEY: TextTarget(
+            caption, "   ·   ".join(s for s in self._caption_segments if s), noun="caption")}
+
+    def _log_from_figure(self, side: str, on: bool) -> None:
+        """Axis properties' Log, routed to the window's own Log y control."""
+        if side != "left":
+            self.statusBar().showMessage(
+                "Voltage dependence has a log scale on the y axis only.", 5000)
+            return
+        if self._log_y.isChecked() != bool(on):
+            self._log_y.setChecked(bool(on))      # redraws, exactly as a click would
+            self._notify_workspace_changed()
+
+    def fit_label_text(self) -> str:
+        """The fit label as drawn (plain text; empty when it is hidden or there is no fit)."""
+        return self._fit_label.plain_text() if self._fit_label.isVisible() else ""
+
+    def caption_text(self) -> str:
+        """The provenance caption as drawn (plain text; line breaks as newlines)."""
+        return self._caption.plain_text() if self._caption.isVisible() else ""
 
     def figure_export_target(self):
         return self._plot
@@ -618,8 +729,7 @@ class VDepWindow(QtWidgets.QMainWindow):
                 x=x_values, y=y_values, pen=None, symbol="o", symbolSize=11,
                 symbolPen=pg.mkPen("#0d0f12"), symbolBrush=pg.mkBrush(point_color))
             self._plot.addItem(self._scatter_item)
-            self._plot.setLabel(
-                "bottom", "Applied |voltage| (V)" if use_abs else "Applied voltage (V)")
+            self._set_voltage_axis(use_abs)
             self._plot.setLabel(
                 "left", _Y_LABEL.get(self._metric(), "metric") + (" (log)" if log_y else ""))
             if saved_fit is not None:
@@ -627,6 +737,7 @@ class VDepWindow(QtWidgets.QMainWindow):
                 self._apply_fit_summary(saved_fit, use_abs)
             else:
                 self._set_title(self._provenance_segments(self._series), _MSG_HEX)
+                self._fit_readouts = []
             self._plot.setLogMode(x=False, y=log_y)
             self._plot.autoRange()
         finally:
@@ -637,6 +748,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             self._details.setPlainText(saved_details)
             self._headline.setText(saved_headline)
             self._set_warnings((saved_warning,) if saved_warning else ())
+            reframe_axis_pins(self._plot)       # a draw, as _redraw's
             self._apply_appearance()
 
     def points(self) -> list[voltage_dep.VDepPoint]:
@@ -710,6 +822,8 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._plot.setTitle(None)
         self._plot.titleLabel.setText("")
         self._scatter_item = self._fit_item = self._message_item = None
+        self._fit_readouts = []
+        self._caption_segments = []
 
     def _set_warnings(self, warnings) -> None:
         """Show (or hide) the banner. The ONE writer of that label.
@@ -733,6 +847,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._plot.addItem(item)
         self._plot.setLabel("bottom", "")
         self._plot.setLabel("left", "")
+        self._plot.getAxis("bottom").setScale(1.0)
         self._plot.setXRange(0, 1, padding=0)
         self._plot.setYRange(0, 1, padding=0)
         item.setPos(0.5, 0.5)
@@ -744,6 +859,10 @@ class VDepWindow(QtWidgets.QMainWindow):
         try:
             self._redraw_analysis()
         finally:
+            # The draw framed its data (autoRange); a range pinned in Axis properties is the
+            # figure's framing, so the apply puts the view back on it (FIG-2). Appearance
+            # steps apply without this and keep a manual zoom.
+            reframe_axis_pins(self._plot)
             self._apply_appearance()
 
     def _redraw_analysis(self) -> None:
@@ -798,8 +917,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             symbolPen=pg.mkPen("#0d0f12"), symbolBrush=pg.mkBrush(point_color))
         self._plot.addItem(self._scatter_item)
 
-        xlabel = "Applied |voltage| (V)" if use_abs else "Applied voltage (V)"
-        self._plot.setLabel("bottom", xlabel)
+        self._set_voltage_axis(use_abs)
         self._plot.setLabel("left", _Y_LABEL.get(metric, "metric") + (" (log)" if log_y else ""))
 
         # The headline count of the details pane. Rewritten at the end of this method
@@ -895,32 +1013,32 @@ class VDepWindow(QtWidgets.QMainWindow):
             return prefix + groups[0][0]
         return f"{mixed} ({len(groups)})"
 
-    def _set_title(self, segments, colour: str) -> None:
-        """Write the plot title from its segments. The ONE writer of that label.
+    def _set_voltage_axis(self, use_abs: bool) -> None:
+        """Label the voltage axis in mV, with ticks that mean millivolts.
 
-        Wraps (see :meth:`_wrap_title`) AND makes room for the wrap:
-        ``PlotItem.setTitle`` hard-codes a 30 px title row and a 30 px cap on the
-        label, so a two- or three-line title is drawn with its FIRST line clipped
-        away behind the plot's top edge — trading the horizontal clipping the wrap
-        exists to prevent for a vertical one. Measured on the owner's three
-        recordings as probed: a 3-line title lost its whole first line, ``V₀`` and
-        ``R²`` included.
+        It read "Applied voltage (V) (x0.001)": V in the label, ticks of 80-120 and
+        pyqtgraph's multiplier, because the unit lived in the text. The data stay in volts
+        (the fit runs in V; :meth:`_apply_fit_summary` prints its numbers per mV) and the
+        axis scale shows them x1000, which the readout and Axis properties read too; no
+        automatic SI prefix fights it.
         """
-        text = self._wrap_title(segments)
-        if not text:
-            self._plot.setTitle(None)
-            self._plot.titleLabel.setText("")
-            return
-        self._plot.setTitle(text, color=colour)
-        if "<br>" not in text:
-            return          # one line: leave pyqtgraph's own 30 px exactly as it was
-        label = self._plot.titleLabel
-        try:
-            height = max(30.0, float(label.item.boundingRect().height()) + 6.0)
-        except (AttributeError, TypeError):     # pragma: no cover - pyqtgraph internals
-            height = 30.0 + 19.0 * text.count("<br>")
-        label.setMaximumHeight(height)
-        self._plot.layout.setRowFixedHeight(0, height)
+        bottom = self._plot.getAxis("bottom")
+        bottom.enableAutoSIPrefix(False)
+        bottom.setScale(1000.0)
+        self._plot.setLabel("bottom", _ABS_VOLTAGE_LABEL if use_abs else _VOLTAGE_LABEL)
+
+    def _set_title(self, segments, colour: str) -> None:
+        """Write the provenance CAPTION from its segments. The ONE writer of that label.
+
+        This used to be the plot title, so a typed title dropped what was pooled and the
+        fit's numbers with it (owner, 2026-11-01, Q-F3). The caption wraps the same way
+        (:meth:`_wrap_title`); being a free label it sizes to its lines, so the 30 px
+        title row that once clipped a three-line title's first line no longer applies.
+        ``colour`` is kept for the callers; the caption has its own Text style.
+        """
+        self._caption_segments = [str(seg) for seg in segments if seg]
+        if getattr(self, "_caption", None) is not None:
+            self._apply_appearance()
 
     @staticmethod
     def _wrap_title(segments) -> str:
@@ -1158,18 +1276,40 @@ class VDepWindow(QtWidgets.QMainWindow):
         prov = self._figure_method_segments(self._series)
         warn = "⚠ " if self._series.warnings else ""
         colour = _WARN_HEX if self._series.warnings else _FIT_HEX
+        # IN THE AXIS'S OWN FRAME. The fit runs in volts (the data stay in V) while the axis
+        # reads mV (_set_voltage_axis), and "slope = -73.31" beside "Applied voltage (mV)"
+        # is -0.0733 Hz per mV: read off the axis it was 1000x out, and V₀ in V the same
+        # (review intent-3). The headline, the fit label and Details all give the mV-frame
+        # number with its unit; the CSV keeps the fit's own V-frame values, labelled.
+        unit = _metric_unit(self._metric())
+        in_unit = f" {unit}" if unit else ""
         if fit.get("model") == "exponential":
-            self._headline.setText(f"{warn}V₀ = {p['V0']:.4g} V")
+            v0 = p["V0"] * 1000.0
+            v0_text = f"V₀ = {v0:.4g} mV"
+            self._headline.setText(f"{warn}{v0_text}")
             lines = [
-                f"Exponential:  value = {p['A']:.4g} · exp({vsym} / {p['V0']:.4g})",
-                f"              A = {p['A']:.5g}   V₀ = {p['V0']:.5g} V",
+                f"Exponential:  value = {p['A']:.4g} · exp({vsym} / {v0:.4g})   ({vsym} in mV)",
+                f"              A = {p['A']:.5g}{in_unit}   V₀ = {v0:.5g} mV",
             ]
-            lead = [f"V₀ = {p['V0']:.4g} V", r2_short]
+            lead = [v0_text, r2_short]
         else:
-            self._headline.setText(f"{warn}slope = {p['slope']:.4g}")
-            lines = [f"Linear:  value = {p['slope']:.5g} · {vsym} + {p['intercept']:.5g}"]
-            lead = [f"slope = {p['slope']:.4g}", r2_short]
-        self._set_title(lead + prov, colour)
+            slope = p["slope"] / 1000.0
+            per_mV = f"{unit}/mV" if unit else "per mV"
+            slope_text = f"slope = {slope:.4g} {per_mV}"
+            self._headline.setText(f"{warn}{slope_text}")
+            lines = [f"Linear:  value = {slope:.5g} · {vsym} + {p['intercept']:.5g}   "
+                     f"({vsym} in mV)",
+                     f"         slope = {slope:.5g} {per_mV}   intercept = "
+                     f"{p['intercept']:.5g}{in_unit}"]
+            lead = [slope_text, r2_short]
+        # The numbers go in the fit label, the provenance in the caption. The dof tag or
+        # the undefined-R² reason is the label's refusal: no typed template can drop it.
+        refusal = dof_tag if r2_finite else "R² undefined: no variance across recordings"
+        self._fit_readouts = [FitReadout(
+            parts={"equation": lead[0], "r2": r2_short if r2_finite else "",
+                   "n": f"n = {n} recording{'s' if n != 1 else ''}"},
+            refusals=((refusal,) if refusal else ()), colour=colour)]
+        self._set_title(prov, colour)
         if r2_finite:
             dof_note = stats.r2_dof_caveat(n, _VDEP_FIT_PARAMS, model="trend",
                                            noun="recording")
@@ -1284,10 +1424,18 @@ class VDepWindow(QtWidgets.QMainWindow):
         use_abs = self._abs_v.isChecked()
         log_y = self._log_y.isChecked()
         fit = self._fit or {}
+        # The fit's own parameters, in the frame of the voltage_V column (volts), with
+        # their units beside them: the figure prints the same fit per mV.
+        unit = _metric_unit(metric)
+        param_units = {"slope": f"{unit}/V" if unit else "per V", "intercept": unit,
+                       "A": unit, "V0": "V"}
         fit_fields = {
             "fit_model": fit.get("model", "none"),
             "fit_params_json": json.dumps(
                 fit.get("params", {}), ensure_ascii=False, default=self._json_default),
+            "fit_params_units_json": json.dumps(
+                {name: param_units[name] for name in fit.get("params", {})
+                 if name in param_units}, ensure_ascii=False),
             "fit_r2": fit.get("r2", np.nan),
             "fit_n": fit.get("n", np.nan),
             "fit_drop_reason": fit.get("drop_reason", ""),

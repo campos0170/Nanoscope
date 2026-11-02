@@ -153,7 +153,11 @@ def _busy_config() -> PlotConfig:
             show_grid=False, title_font_size_pt=16, axis_label_font_size_pt=14,
             tick_font_size_pt=9, title_bold=True, title_italic=True,
             show_r2=False, show_gof=False, show_ci_band=True, show_provenance=True,
-            show_residuals=True, heatmap_colormap="magma"),
+            show_residuals=True, heatmap_colormap="magma",
+            # plotux G3: per-element styles and the fit label ride the config too.
+            text_styles=FrozenMap({"axis.left.ticks": {"size_pt": 11.0, "bold": True}}),
+            fit_label=FrozenMap({"fields": ("equation", "n"), "placement": "custom",
+                                 "offset": (40.0, 30.0), "template": "Fit: {equation}"})),
     )
 
 

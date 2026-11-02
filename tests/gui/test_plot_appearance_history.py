@@ -265,7 +265,7 @@ def test_the_buttons_follow_the_stack_and_name_the_step(qtbot, monkeypatch):
     w.background.setCurrentIndex(w.background.findData("dark"))
     assert not w.redo_button.isEnabled(), "committing this run will clear Redo"
     assert w.redo_button.toolTip() == "Redo is cleared by a new change."
-    assert w.undo_button.toolTip() == "Undo: background original → dark"
+    assert w.undo_button.toolTip() == "Undo: background automatic → dark"
     qtbot.wait(PAUSE_MS)
     assert w.redo_button.toolTip() == "Nothing to redo."
 
@@ -452,7 +452,11 @@ def _assert_painted(kind, window, state) -> None:
 def test_each_window_undoes_and_redoes_an_edit_a_preset_and_a_reset(host):
     kind, window = host
     widget = window._appearance_widget
-    assert widget.undo_button is not None and widget.findChildren(QtGui.QShortcut), (
+    # The keys live on the widget, or on the page that holds it (build 5, FIG-4: a window
+    # that edits text in the figure keeps ⌘Z live whatever its Section shows).
+    keys = {shortcut.key().toString() for shortcut in window.findChildren(QtGui.QShortcut)}
+    assert widget.undo_button is not None and {
+        seq.toString() for seq in undo_sequences()} <= keys, (
         "no window an eight-host widget lives in binds Undo or Redo itself")
     start = _applied(kind, window)
     figure = getattr(window, "_figure_item", None)

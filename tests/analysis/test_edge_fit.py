@@ -454,6 +454,117 @@ def test_an_edge_within_one_growth_of_the_window_is_found_and_further_out_is_lef
     assert not far.complete
 
 
+# ---- a span drawn by one drag (drawn=True) ---------------------------------------------------------
+def _loose_trace(seed: int, rise: float = 0.0) -> np.ndarray:
+    """A 400-sample, 300 pA blockade (37 sigma) at 20,000 on 8 pA white noise: the build-5 review's
+    loose Annotate drag."""
+    rng = np.random.default_rng(seed)
+    x = np.full(60_000, -1000.0) + rng.normal(0.0, 8.0, 60_000)
+    return x + erf_event(x.size, 20_000, 20_400, 300.0, rise)
+
+
+def _fit_loose(x: np.ndarray, start: int, end: int, **kw) -> ef.EdgeFit:
+    """3.67 samples per pixel: a 1,200-sample view across a 327-pixel pane."""
+    args = dict(polarity=1, noise_rms=8.0, tau=1.0, lo=0, hi=x.size, baseline=-1000.0, px_samples=3.67)
+    args.update(kw)
+    return ef.fit_edges(x, 50_000.0, start, end, **args)
+
+
+@pytest.mark.parametrize("seed", [0, 2])
+def test_a_loosely_drawn_span_is_fitted_on_its_steps(seed):
+    """12 px is 44 samples here, so a drag 64 samples (17 px) out searched open pore only: seed 0
+    refused the 37-sigma step as "not significant against the noise", seed 2 fitted a start on the
+    noise at 19,965, which Annotate then added. Drawn, each window reaches 0.45 of the span."""
+    x = _loose_trace(seed)
+    f = _fit_loose(x, 19_936, 20_464, drawn=True)
+    assert f.complete
+    assert abs(f.start.position - 20_000) <= 2 and abs(f.end.position - 20_400) <= 2
+    assert f.params["drawn"] is True
+    assert f.params["W"] == {"start": int(0.45 * 528), "end": int(0.45 * 528)}
+    pointed = _fit_loose(x, 19_936, 20_464)                  # S / F / C / Measure: unchanged
+    assert "drawn" not in pointed.params and pointed.params["W"]["start"] == int(12 * 3.67)
+
+
+def test_a_drawn_edge_whose_window_holds_no_step_says_it_was_drawn_too_far_out():
+    """The start drawn 1,000 samples early (the end tight): its window, 0.45 of the span, is open
+    pore only. The span itself holds the step, so the reason says where the trouble is."""
+    x = _loose_trace(0)
+    f = _fit_loose(x, 19_000, 20_420, drawn=True)
+    assert not f.start.fitted and f.start.reason == ef.REASON_FAR and f.start.position == 19_000
+    assert f.end.fitted and abs(f.end.position - 20_400) <= 2
+    # over open pore alone there is no step anywhere in the span: the noise is the honest reason
+    flat = _fit_loose(x, 40_000, 40_500, drawn=True)
+    assert not flat.start.fitted and not flat.end.fitted
+    assert ef.REASON_FAR not in (flat.start.reason, flat.end.reason)
+
+
+@pytest.mark.parametrize("seed, side, margin", [(2, "start", 368), (0, "start", 404),
+                                                (8, "start", 416), (0, "end", 400)])
+def test_a_drawn_edge_never_fits_the_noise_before_a_step_beyond_its_window(seed, side, margin):
+    """Rule 4 reads L samples past the window's INNER edge. Drawn far out on one side, the window
+    ends a few tens of samples short of the step, and a split on the noise there passed on the event
+    samples beyond it: 35 to 49 samples off, both edges "fitted". A drawn span guards that edge."""
+    x = _loose_trace(seed)
+    if side == "start":
+        f = _fit_loose(x, 20_000 - margin, 20_420, drawn=True)
+        edge, truth = f.start, 20_000
+    else:
+        f = _fit_loose(x, 19_980, 20_400 + margin, drawn=True)
+        edge, truth = f.end, 20_400
+    assert not edge.fitted or abs(edge.position - truth) <= 2, edge
+    assert edge.fitted or edge.reason == ef.REASON_FAR
+
+
+@pytest.mark.parametrize("where", ["end", "start"])
+@pytest.mark.parametrize("margin", [0, 2, 6])
+@pytest.mark.parametrize("px", [1.0, 3.67])
+def test_a_tight_drawn_span_on_a_short_event_with_a_shoulder_is_fitted(where, margin, px):
+    """110 samples, 300 pA deep, with a 33-sample, 100 pA shoulder at one end. The window (0.45 x
+    110 = 49 samples) is shorter than the L samples rule 4 reads past its inner edge, which are the
+    event's own deeper level: the inner guard took that for a step further in and refused the
+    split on the real step, even for a span drawn on the steps. A split whose own step passes
+    rules 4 and 5 on the window's samples is kept."""
+    rng = np.random.default_rng(0)
+    x = np.full(60_000, -1000.0) + rng.normal(0.0, 8.0, 60_000)
+    x[20_000:20_110] += 100.0
+    if where == "end":
+        x[20_000:20_077] += 200.0
+    else:
+        x[20_033:20_110] += 200.0
+    f = _fit_loose(x, 20_000 - margin, 20_110 + margin, drawn=True, px_samples=px)
+    assert f.complete, (f.start.reason, f.end.reason)
+    assert abs(f.start.position - 20_000) <= 2 and abs(f.end.position - 20_110) <= 2
+
+
+def test_a_joined_record_says_which_edge_a_drawn_fit_set():
+    """Edges set by two fits are joined per edge (window, rise, entry); ``drawn`` came whole from
+    the shared fit, so a start from a drawn span and a finish from F read drawn or not depending
+    on which fit was the latest. It is per edge in a joined record."""
+    from nanoscope.analysis.manual_events import join_edge_fits
+
+    x = _loose_trace(0)
+    drawn = _fit_loose(x, 19_936, 20_464, drawn=True).to_json()
+    pointed = _fit_loose(x, 19_990, 20_410).to_json()
+    for shared in (drawn, pointed):
+        joined = json.loads(join_edge_fits({"start": drawn, "end": pointed}, (20_000, 20_400),
+                                           shared=shared))
+        assert joined["drawn"] == {"start": True}
+        joined = json.loads(join_edge_fits({"start": pointed, "end": pointed}, (20_000, 20_400),
+                                           shared=shared))
+        assert "drawn" not in joined
+
+
+def test_a_drawn_soft_edge_with_the_rise_unknown_is_measured_on_the_step():
+    """With no table rise a first split finds the edge whose rise is measured. Drawn 120 samples out,
+    it looked within 12 px, on open pore, measured the 2-sample floor for a 40-sample ramp, and the
+    fit landed at the ramp's foot. It looks across the drawn span's own window."""
+    x = _loose_trace(0, rise=40.0)
+    f = _fit_loose(x, 19_880, 20_520, drawn=True, rise_s=None, filter_rise_s=2 / 50_000.0)
+    assert f.complete
+    assert abs(f.start.position - 20_000) <= 3 and abs(f.end.position - 20_400) <= 3
+    assert min(f.params["rise"]["start"]["samples"], f.params["rise"]["end"]["samples"]) > 20
+
+
 @pytest.mark.parametrize("fs", [50_000.0])
 @pytest.mark.parametrize("dur_ms", [300, 400, 500])
 def test_long_events_with_a_true_baseline(fs, dur_ms):

@@ -148,8 +148,10 @@ def test_a_single_source_pane_stays_unprefixed(qapp, qtbot):
 
 
 def test_the_legend_entry_keeps_its_historical_form(qapp, qtbot):
-    """The fix moves the attribution of NOTES; the legend text is unchanged."""
+    """The fix moves the attribution of NOTES; each fit's legend row still names its source.
+    Since the fit label (plotux G3, 2026-11-01) the row reads "<name> fit (<family>)": the
+    numbers moved to the label."""
     w = _two_source_window(qtbot)
     entries = [str(t.text) for _s, t in w._plot.legend.items]
-    assert any(e.startswith(f"{LABEL_A} fit:") for e in entries), entries
-    assert any(e.startswith(f"{LABEL_B} fit:") for e in entries), entries
+    assert any(e.startswith(f"{LABEL_A} fit (") for e in entries), entries
+    assert any(e.startswith(f"{LABEL_B} fit (") for e in entries), entries

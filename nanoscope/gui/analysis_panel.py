@@ -6740,18 +6740,24 @@ class AnalysisPanel(QtWidgets.QWidget):
 
     def fit_span_edges(self, doc_id: str, channel: int, start: int, end: int, *,
                        px_samples: float | None = None,
-                       edges: tuple[str, ...] = ("start", "end")) -> tuple[EdgeFit | None, str]:
+                       edges: tuple[str, ...] = ("start", "end"),
+                       drawn: bool = False,
+                       bounds: tuple[int, int] | None = None) -> tuple[EdgeFit | None, str]:
         """Fit the edges of a placed span to the step each sits on, on the target table's own
-        measurement basis. ``(fit, "")``, or ``(None, sentence)`` when nothing could be tried."""
+        measurement basis. ``(fit, "")``, or ``(None, sentence)`` when nothing could be tried.
+        ``drawn``: the span came from one drag (`fit_edges`'s ``drawn``). ``bounds``: outer
+        limits no window crosses, on top of the annotated neighbours (an unannotated one's gap)."""
         ctx = self.fit_context(doc_id, channel)
         if isinstance(ctx, str):
             return None, ctx
         lo, hi = self._neighbours(ctx, int(start), int(end))
+        if bounds is not None:
+            lo, hi = max(lo, int(bounds[0])), min(hi, int(bounds[1]))
         fit = fit_edges(
             ctx.signal, ctx.fs, int(start), int(end), polarity=ctx.polarity,
             noise_rms=ctx.noise_rms, tau=ctx.tau, lo=lo, hi=hi, baseline=ctx.baseline,
             edges=edges, px_samples=px_samples, rise_s=ctx.rise_s,
-            filter_rise_s=ctx.filter_rise_s)
+            filter_rise_s=ctx.filter_rise_s, drawn=drawn)
         return fit, ""
 
     def catch_event_at(self, doc_id: str, channel: int, sample: float, *, px_samples: float,

@@ -746,8 +746,9 @@ def test_panels_module_still_imports_no_sibling_gui_panel():
     # belong to their existing owners and must not be constructed from panels.py.
     # numeric_text (2026-09-13) is the same kind of shared, panel-free leaf as
     # inspector_widgets: pure ASCII number-parsing, no widget, no gui/ import of its
-    # own.
-    assert reached <= {'inspector_widgets', 'numeric_text'}, (
+    # own. column_checklist (2026-11-01, the Columns… popup) is another: a Qt-only
+    # checklist widget that imports no gui/ module.
+    assert reached <= {'inspector_widgets', 'numeric_text', 'column_checklist'}, (
         f"panels.py imported a sibling panel: {reached}")
     # ...and the checker above really would catch the import it is standing guard over.
     guarded = ast.parse("from .measure_panel import MeasurePanel")

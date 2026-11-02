@@ -88,6 +88,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..plot.style import PALETTE
 from .analysis_catalog import ANALYSIS_LABELS
+from .figure_text import SHARED_LABELS_REASON, appearance_text_host, figure_text_for
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_interaction import PlotReadout, install_plot_interaction, reset_plot_history
 from .plot_workflow import PlotWorkflowBar, WarningSummary, bounded_controls, control_group
@@ -137,6 +138,10 @@ _MIN_SIZE = (900, 480)  # the scrollable body retains each figure's independent 
 #: Initial splitter split: the text gets the width its widest table needs, the
 #: figures get the rest. The user can drag it anywhere, including all the way over.
 _SPLIT = (620, 800)
+#: The keys each figure's Axis properties pins are kept under (``PlotAppearance.for_view``):
+#: the scatter's embedding units are no waveform time. A bare pin, saved before pins were
+#: kept per figure, is the scatter's: the report's first figure.
+PIN_EMBEDDING, PIN_WAVEFORMS = "embedding", "waveforms"
 
 #: What a top-level window costs BEYOND the client area Qt sizes here, and how much
 #: screen to leave around it. ``QWidget.resize`` and ``QWidget.move`` address the
@@ -1058,8 +1063,12 @@ class SubpopReportWindow(QtWidgets.QWidget):
         appearance_host = QtWidgets.QWidget()
         appearance_layout = QtWidgets.QVBoxLayout(appearance_host)
         appearance_layout.setContentsMargins(0, 0, 0, 0)
+        # ⌘Z on the page, not on these controls: an edit made in the figure is undone from
+        # the keyboard whatever the Section shows (FIG-4); a page behind another Explorer
+        # tab is hidden, so it does not answer.
         self._appearance_widget = PlotAppearanceWidget(
-            self._appearance, include_colors=False, compact=True, multi_view_labels=True)
+            self._appearance, include_colors=False, compact=True, multi_view_labels=True,
+            shortcut_parent=self)
         self._appearance_widget.changed.connect(self._appearance_from_user)
         appearance_layout.addWidget(self._appearance_widget)
         categorical_note = QtWidgets.QLabel(
@@ -1227,8 +1236,16 @@ class SubpopReportWindow(QtWidgets.QWidget):
         self._readout = PlotReadout()
         self._workflow.add_view_control(self._readout, stretch=1)
         exports = (("Export report and tables…", self.exportRequested.emit, self.can_export),)
-        for view in (self._embed_view, self._wave_view):
-            install_plot_interaction(view._plot, readout=self._readout, exports=exports)
+        for view, pins in ((self._embed_view, PIN_EMBEDDING), (self._wave_view, PIN_WAVEFORMS)):
+            # In-figure editing (figure_text) through the shared appearance: axis labels,
+            # the title and the legend. Neither figure has a log scale. A range typed in
+            # Axis properties is that figure's own (figures2-1).
+            host = appearance_text_host(
+                view._plot, self._appearance_widget,
+                axis_hooks={"log_reason": "Subpopulation figures are drawn on linear axes."},
+                shared_labels=SHARED_LABELS_REASON, pin_view=pins, primary_view=PIN_EMBEDDING)
+            install_plot_interaction(view._plot, readout=self._readout, exports=exports,
+                                     text=host)
 
         self._workflow.set_sections({
             "Data": (self._data_section, self._gallery_btn, self._trace_btn),
@@ -1384,12 +1401,17 @@ class SubpopReportWindow(QtWidgets.QWidget):
         return self._appearance.to_dict()
 
     def _apply_appearance(self) -> None:
-        for view in (self._embed_view, self._wave_view):
+        for view, pins in ((self._embed_view, PIN_EMBEDDING), (self._wave_view, PIN_WAVEFORMS)):
             plot = view._plot.getPlotItem()
             items = [item for item in plot.items
                      if isinstance(item, (pg.PlotDataItem, pg.ScatterPlotItem))]
-            apply_plot_appearance(plot, self._appearance, plot_widget=view._plot,
-                                  data_items=items)
+            # Each figure draws only the pins typed on it (figures2-1): a range pinned on the
+            # scatter left the waveforms beside it almost blank.
+            apply_plot_appearance(plot, self._appearance.for_view(pins, primary=PIN_EMBEDDING),
+                                  plot_widget=view._plot, data_items=items)
+            controller = figure_text_for(plot)
+            if controller is not None:
+                controller.refresh()        # the legend may be new since the last draw
 
     def figure_export_items(self):
         """Ordered figures; both belong to this report and travel with its caveats."""

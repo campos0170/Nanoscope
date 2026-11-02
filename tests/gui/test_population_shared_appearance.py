@@ -188,11 +188,12 @@ def test_shared_user_presets_contain_only_appearance_and_load_silently(qtbot):
     assert not changes
     assert widget.save_user_preset("Cross-view test", overwrite=True)
     saved = PlotAppearanceWidget.user_preset_states()["Cross-view test"]
-    assert saved == {"title": "A title", "legend_visible": False, "legend_size": 12}
+    # Style only (owner, Q-T2): the typed title stays with the figure it was typed on.
+    assert saved == {"legend_visible": False, "legend_size": 12}
     other = PlotAppearanceWidget()
     qtbot.addWidget(other)
     assert other.apply_user_preset("Cross-view test")
-    assert other.state() == widget.state()
+    assert other.state() == PlotAppearance(legend_visible=False, legend_size=12)
     assert widget.delete_user_preset("Cross-view test")
 
 

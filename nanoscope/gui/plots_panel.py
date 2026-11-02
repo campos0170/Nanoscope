@@ -114,6 +114,7 @@ import html as _html
 import json
 import math
 import threading
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields as _dc_fields, replace as _dc_replace
 from pathlib import Path
@@ -156,7 +157,13 @@ from .analysis_catalog import ANALYSIS_LABELS
 from .axes import ReadableLogAxis
 from .categorical import category_brushes, category_colour, category_counts, legend_swatch
 from .combos import choose_combo_item
+from .column_checklist import ColumnChecklist
 from .export_paths import ask_export_path
+from .figure_text import (GATE, HIDDEN_TEXT, AxisState, TextStyle, TextTarget, css_args,
+                          figure_text_for, plain_text, rich_text, shown_text,
+                          valid_element_key)
+from .fit_label import (FIT_FIELDS, FitLabelItem, FitLabelState, FitReadout, automatic_template,
+                        format_fit_label)
 from .key_sequences import redo_sequences, undo_sequences
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, preset_store
 from .plot_interaction import (image_value, install_plot_interaction, keep_plot_history,
@@ -997,6 +1004,10 @@ _PREFER_FEATURES = (
     "max_dev_pA", "ecd_pA_s", "snr", "rise_s", "fall_s", "kurtosis", "skewness",
     "rms",
 )
+#: Row identifiers, not measurements: still offered as features (a saved configuration
+#: may use them), but listed LAST under an "Identifiers" caption and never in Default.
+#: ``t_start_s`` is not one of them -- a time of arrival is a legitimate drift feature.
+_IDENTIFIER_FEATURES = ("event_id", "start_idx", "end_idx")
 
 # Drawing colours (Okabe-Ito, reused for colour-blind-safe cluster colours).
 _DATA_HEX = OKABE_ITO[0]        # blue -- histogram bars / plain scatter
@@ -1089,6 +1100,74 @@ class FrozenMap(Mapping):
 #: The one empty map every default style shares. Safe to share precisely because it
 #: cannot be written to -- which is the whole point of the type.
 _NO_ENTRIES: FrozenMap = FrozenMap()
+
+
+def _deep_frozen(value):
+    """A JSON value as one a frozen style may hold: maps become :class:`FrozenMap`,
+    lists become tuples, all the way down (a FrozenMap hashes its items)."""
+    if isinstance(value, Mapping):
+        return FrozenMap({str(k): _deep_frozen(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_frozen(v) for v in value)
+    return value
+
+
+def _thawed(value):
+    """:func:`_deep_frozen` undone: plain dicts and lists, for JSON and ``from_mapping``."""
+    if isinstance(value, Mapping):
+        return {str(k): _thawed(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thawed(v) for v in value]
+    return value
+
+
+#: The fit label's element key (``figure_text``'s ``annotation.fit``).
+FIT_LABEL_KEY = "annotation.fit"
+#: The elements whose TEXT is a StyleSettings field of its own.
+_TEXT_FIELD_OF = {"title": "title", "axis.bottom.label": "x_label", "axis.left.label": "y_label"}
+#: The detection-floor line's words ("below detection limit"), an annotation of the figure.
+LIMIT_LABEL_KEY = "annotation.limit"
+_LIMIT_LABEL_AUTO = "below detection limit"
+
+
+def _text_kept_in_styles(key: str) -> bool:
+    """Whether ``text_styles[key]`` holds the element's TEXT too. An annotation's words
+    have no field of their own (the fit label's live in ``fit_label``); every other
+    element's text is a field (title, axis labels) or a source's name (``label_overrides``)."""
+    return key.startswith("annotation.") and key != FIT_LABEL_KEY
+
+
+#: The legend rows that are not a source's own, by the kind ``PlotsWindow._legend_id`` gives them.
+_LEGEND_ROW_KINDS = ("fit", "cluster", "kde")
+
+
+def _legend_style_key(kind: str, key: str) -> str:
+    """The element key of one legend row's Text style: ``legend.entry.<source key>`` for a
+    source's row (the key its Rename has always had), ``legend.entry.<kind>:<key>`` else."""
+    return f"legend.entry.{key}" if kind == "series" else f"legend.entry.{kind}:{key}"
+
+
+def _legend_entry_id(element_key: str, source_keys=()) -> str:
+    """:func:`_legend_style_key` undone, as the ``"<kind>:<key>"`` entry id. A source key
+    that itself reads ``fit:…`` is a source's row."""
+    rest = element_key[len("legend.entry."):]
+    kind, sep, key = rest.partition(":")
+    if sep and kind in _LEGEND_ROW_KINDS and rest not in source_keys:
+        return f"{kind}:{key}"
+    return f"series:{rest}"
+
+
+def _legend_styles(styles, legend: bool) -> FrozenMap:
+    """``styles`` (a ``text_styles`` map) with only the legend rows' entries, or without them."""
+    return FrozenMap({key: value for key, value in dict(styles or {}).items()
+                      if key.startswith("legend.entry.") == legend})
+
+
+def _style_text(value: str) -> str | None:
+    """A Title / X / Y box value as ``TextStyle.text``: "" automatic, spaces hidden."""
+    if not value:
+        return None
+    return value.strip() if value.strip() else HIDDEN_TEXT
 
 
 @dataclass(frozen=True)
@@ -1223,6 +1302,91 @@ class StyleSettings:
     #: here keeps. Kept in the style rather than on the heatmap page for that reason, and
     #: so it rides undo, templates and JSON with the rest of the look.
     heatmap_colormap: str = "viridis"
+    #: PER-ELEMENT TEXT STYLES, from the figure itself (double-click or right-click a
+    #: title, an axis, a legend entry or the fit label): element key -> the
+    #: ``figure_text.TextStyle`` fields as a frozen map. Never the TEXT of the title and
+    #: the two axis labels, which stays in ``title``/``x_label``/``y_label`` -- one store
+    #: per label, so the Appearance boxes and the figure cannot disagree -- nor a legend
+    #: row's, which is its source's name (``label_overrides``). An annotation's words (the
+    #: detection-limit label) have no other home and are kept here. A legend row's style
+    #: is ``legend.entry.<source key>`` for a source's row and
+    #: ``legend.entry.<kind>:<key>`` for the others (``fit:``, ``cluster:``, ``kde:``).
+    #: Empty is today's look: every element follows the figure-wide fields above.
+    text_styles: FrozenMap = _NO_ENTRIES
+    #: THE FIT LABEL (``fit_label.FitLabelState`` as a frozen map). A fit's numbers are
+    #: drawn there and never in the title. Empty means "never set": the label is shown
+    #: with the fields the three older switches ask for (:meth:`fit_label_state`), so a
+    #: configuration saved before the label existed opens with its numbers on the figure.
+    fit_label: FrozenMap = _NO_ENTRIES
+
+    def __post_init__(self) -> None:
+        # The two maps arrive from JSON, templates and replace() alike; one validation
+        # here keeps a malformed entry out of every door, and the deep freeze keeps the
+        # style hashable (FrozenMap hashes its items).
+        styles = {}
+        for key, value in dict(self.text_styles or {}).items():
+            style = TextStyle.from_mapping(value if isinstance(value, Mapping) else {})
+            if not _text_kept_in_styles(str(key)):
+                style = _dc_replace(style, text=None)
+            if valid_element_key(key) and not style.is_default():
+                styles[str(key)] = _deep_frozen(style.to_dict())
+        object.__setattr__(self, "text_styles", FrozenMap(styles))
+        label = dict(self.fit_label or {})
+        object.__setattr__(self, "fit_label", _deep_frozen(
+            FitLabelState.from_mapping(_thawed(label)).to_dict()) if label else _NO_ENTRIES)
+
+    # -- per-element text (figure_text) ----------------------------------------------------------
+    def text_style(self, key: str) -> TextStyle:
+        """Element ``key``'s whole style, its text included, wherever each part lives."""
+        style = TextStyle.from_mapping(_thawed(self.text_styles.get(key, {})))
+        field = _TEXT_FIELD_OF.get(key)
+        if field is not None:
+            return _dc_replace(style, text=_style_text(getattr(self, field)))
+        if key == FIT_LABEL_KEY:
+            label = self.fit_label_state()
+            return _dc_replace(style, text=label.template or None, size_pt=label.size_pt,
+                               color=label.color)
+        return style
+
+    def with_text_style(self, key: str, style: TextStyle) -> "StyleSettings":
+        """This style, with ``key``'s WHOLE style replaced (text included). The title's
+        and axis labels' text go to their own fields, the fit label's text, size and
+        colour to ``fit_label``, an annotation's text stays with its style; a legend
+        entry's text is the window's to route."""
+        if not valid_element_key(key):
+            return self
+        changes: dict = {}
+        field = _TEXT_FIELD_OF.get(key)
+        if field is not None:
+            changes[field] = ("" if style.text is None else
+                              " " if style.text == HIDDEN_TEXT else style.text)
+        elif key == FIT_LABEL_KEY:
+            changes["fit_label"] = _deep_frozen(_dc_replace(
+                self.fit_label_state(), template=style.text or "", size_pt=style.size_pt,
+                color=style.color).to_dict())
+            style = _dc_replace(style, size_pt=None, color=None)
+        if not _text_kept_in_styles(key):
+            style = _dc_replace(style, text=None)
+        styles = (self.text_styles.remove(key) if style.is_default()
+                  else self.text_styles.set(key, style.to_dict()))
+        return _dc_replace(self, text_styles=styles, **changes)
+
+    def fit_label_state(self) -> FitLabelState:
+        """The fit label as drawn: the saved one, else the one the older switches imply.
+
+        Before the label, a fit's headline was in the title (equation, R², n) and the
+        "Fit values on plot" box added the rest (BIC, the KS statistic); with no saved
+        label those are its fields, and it is shown either way so no number that was on
+        a figure leaves it."""
+        if self.fit_label:
+            return FitLabelState.from_mapping(_thawed(self.fit_label))
+        fields = ["equation", "r2", "n"]
+        if self.fit_values_on_plot:
+            fields += ["bic", "ks"]
+        return FitLabelState(fields=tuple(fields))
+
+    def with_fit_label(self, state: FitLabelState) -> "StyleSettings":
+        return _dc_replace(self, fit_label=_deep_frozen(state.to_dict()))
 
     # -- mapping-field helpers -------------------------------------------------------------------
     # The two ``FrozenMap`` fields cannot be written in place, and spelling
@@ -1746,22 +1910,29 @@ class PlotConfig:
         keys = {str(k) for k in source_keys}
         offered = {str(i) for i in offered_ids}
         judged_clusters = any(i.startswith("cluster:") for i in offered)
-        keep_label = {k: v for k, v in self.style.label_overrides.items() if k in keys}
-        keep_include = {}
-        for entry_id, included in self.style.legend_include.items():
+
+        def alive(entry_id: str) -> bool:
             kind, _, key = str(entry_id).partition(":")
             if kind in ("series", "fit"):
-                alive = key in keys
-            else:
-                alive = entry_id in offered or not judged_clusters
-            if alive:
-                keep_include[entry_id] = included
+                return key in keys
+            return entry_id in offered or not judged_clusters
+
+        keep_label = {k: v for k, v in self.style.label_overrides.items() if k in keys}
+        keep_include = {entry_id: included
+                        for entry_id, included in self.style.legend_include.items()
+                        if alive(entry_id)}
+        # A legend row's Text style is keyed like its inclusion (a source's row by the
+        # source key alone), so it is pruned by the same rule.
+        keep_styles = {key: style for key, style in self.style.text_styles.items()
+                       if not key.startswith("legend.entry.")
+                       or alive(_legend_entry_id(key, keys))}
         if (keep_label == dict(self.style.label_overrides)
-                and keep_include == dict(self.style.legend_include)):
+                and keep_include == dict(self.style.legend_include)
+                and keep_styles == dict(self.style.text_styles)):
             return self
         return _dc_replace(self, style=_dc_replace(
             self.style, label_overrides=FrozenMap(keep_label),
-            legend_include=FrozenMap(keep_include)))
+            legend_include=FrozenMap(keep_include), text_styles=FrozenMap(keep_styles)))
 
     # -- A3: the TEMPLATE projection -------------------------------------------------------------
     #: What a saved template deliberately forgets, as names, so the tooltip beside the
@@ -1771,7 +1942,8 @@ class PlotConfig:
     #: still sees exactly the dataclass fields it walks.
     TEMPLATE_DROPS = ("selection.source_keys", "fit.applied", "fit.applied_k",
                       "fit.applied_k_auto", "fit.applied_scatter",
-                      "style.label_overrides", "style.legend_include")
+                      "style.label_overrides", "style.legend_include",
+                      "style.text_styles[legend.entry.*]")
 
     def as_template(self) -> "PlotConfig":
         """This config as a REUSABLE TEMPLATE -- everything except what names THIS
@@ -1798,7 +1970,9 @@ class PlotConfig:
         * ``style.label_overrides`` and ``style.legend_include`` -- both keyed by
           something purely local: a source key, or a ``cluster:<i>`` ordinal that means
           nothing across two clustering runs (see :meth:`with_pruned_legend`). A legend
-          entry retyped for "apo -500 mV" is not a legend entry for anything else.
+          entry retyped for "apo -500 mV" is not a legend entry for anything else. The
+          legend rows' Text styles (``text_styles["legend.entry.…"]``) are keyed the same
+          way and go with them; every other element style, and its words, is carried.
 
         EVERYTHING ELSE IS CARRIED, and three of those look like data selection and are
         not:
@@ -1831,7 +2005,8 @@ class PlotConfig:
             fit=_dc_replace(self.fit, applied=_FIT_NONE, applied_k=1,
                             applied_k_auto=False, applied_scatter=_SFIT_NONE),
             style=_dc_replace(self.style, label_overrides=_NO_ENTRIES,
-                              legend_include=_NO_ENTRIES))
+                              legend_include=_NO_ENTRIES,
+                              text_styles=_legend_styles(self.style.text_styles, False)))
 
     def with_template(self, template: "PlotConfig") -> "PlotConfig":
         """``template`` recalled onto this config: the template's everything, over THIS
@@ -1867,7 +2042,10 @@ class PlotConfig:
                                   source_keys=self.selection.source_keys),
             style=_dc_replace(tpl.style,
                               label_overrides=self.style.label_overrides,
-                              legend_include=self.style.legend_include))
+                              legend_include=self.style.legend_include,
+                              text_styles=FrozenMap({
+                                  **_legend_styles(tpl.style.text_styles, False),
+                                  **_legend_styles(self.style.text_styles, True)})))
 
 
 
@@ -2000,7 +2178,8 @@ def _encode_dc(obj) -> dict:
     for f in _dc_fields(obj):
         value = getattr(obj, f.name)
         if isinstance(value, FrozenMap):
-            out[f.name] = {str(k): value[k] for k in value}
+            # Thawed all the way down: the style's text and fit-label maps nest.
+            out[f.name] = _thawed(value)
         elif isinstance(value, tuple):
             out[f.name] = list(value)
         else:
@@ -2022,7 +2201,7 @@ def _decoded(default, raw):
     them would destroy the very text the message is about.
     """
     if isinstance(default, FrozenMap):
-        return FrozenMap(raw or {})
+        return _deep_frozen(raw or {})
     if isinstance(default, tuple):
         return tuple(raw)
     if default is None:
@@ -2537,6 +2716,8 @@ class _FitSummary(str):
     full: str = ""
     rejected: bool = False
     plain: str = ""
+    #: The fit label's tokens (``fit_label.FIT_FIELDS`` -> text), set by the fitter.
+    parts: dict | None = None
 
     def __new__(cls, text: str, full: str = "", *, rejected: bool = False,
                 plain: str = ""):
@@ -2553,6 +2734,98 @@ class _LegendText(str):
         result = super().__new__(cls, text)
         result.name, result.count = str(name), count
         return result
+
+
+class _FitLegendText(str):
+    """A fit's legend row with its numbers (In legend instead): the head is elided like
+    any row, the numbers are a second line that never is."""
+    def __new__(cls, head, numbers):
+        result = super().__new__(cls, f"{head}: {numbers}")
+        result.head, result.numbers = str(head), str(numbers)
+        return result
+
+
+class _LimitLabel(pg.InfLineLabel):
+    """The detection-floor line's words ("below detection limit"): figure text the user
+    may retype, style or hide (``annotation.limit``). Like every annotation
+    ``figure_text`` edits, it says when it is double-clicked (``editRequested``) or
+    right-clicked (``menuRequested``, the screen position), from pyqtgraph's own dispatch.
+
+    pyqtgraph re-sets an InfLineLabel's PLAIN format text whenever it is shown or its line
+    moves (``valueChanged``); this one redraws the window's rich text instead, so the next
+    show cannot drop the user's words or style."""
+
+    editRequested = QtCore.Signal()
+    menuRequested = QtCore.Signal(object)
+    #: The window's rich text, "" when hidden; None until the window first draws it.
+    rich: str | None = None
+
+    def show_rich(self, html: str) -> None:
+        self.rich = html
+        pg.TextItem.setVisible(self, bool(plain_text(html).strip()))
+        self.valueChanged()
+
+    def valueChanged(self):  # noqa: N802 - pyqtgraph API, our own subclass
+        if self.rich is None:
+            super().valueChanged()
+        elif self.isVisible():
+            self.setHtml(self.rich)
+            self.updatePosition()
+
+    def hoverEvent(self, ev):  # noqa: N802 - pyqtgraph API
+        if not ev.isExit():
+            ev.acceptClicks(QtCore.Qt.MouseButton.LeftButton)
+            ev.acceptClicks(QtCore.Qt.MouseButton.RightButton)
+
+    def mouseClickEvent(self, ev):  # noqa: N802 - pyqtgraph API
+        if ev.button() == QtCore.Qt.MouseButton.LeftButton and GATE(ev, ("limit", id(self))):
+            ev.accept()
+            self.editRequested.emit()
+        elif ev.button() == QtCore.Qt.MouseButton.RightButton:
+            ev.accept()
+            self.menuRequested.emit(ev.screenPos())
+        else:
+            ev.ignore()
+
+
+class _PlotsTextHost:
+    """The Plots window's ``figure_text.FigureTextHost``: in-figure text and axis edits.
+
+    A WEAK reference to the window, as every per-instance wrap of the controller holds:
+    the controller lives on the plot, and the plot must not keep a closed window alive.
+    Every write is the window's (:meth:`PlotsWindow._apply_figure_text`,
+    :meth:`PlotsWindow._apply_figure_axis`), so it lands in StyleSettings / AxesConfig and
+    is ONE step of this window's own Undo, exactly as the same edit made in the panel.
+    """
+
+    def __init__(self, window: "PlotsWindow") -> None:
+        self._window = weakref.ref(window)
+
+    def _live(self):
+        window = self._window()
+        if window is None:
+            raise RuntimeError("the Plots window is gone")
+        return window
+
+    def text_targets(self) -> dict:
+        window = self._window()
+        return {} if window is None else window._figure_text_targets()
+
+    def apply_text(self, key: str, style: TextStyle) -> None:
+        self._live()._apply_figure_text(key, style)
+
+    def axis_state(self, side: str) -> AxisState:
+        return self._live()._figure_axis_state(side)
+
+    def apply_axis(self, side: str, values: AxisState) -> None:
+        self._live()._apply_figure_axis(side, values)
+
+    def menu_entries(self, key: str) -> list:
+        return []
+
+    def background_entries(self) -> list:
+        window = self._window()
+        return [] if window is None else window._figure_background_entries()
 
 
 def _narrow_combo(combo: QtWidgets.QComboBox, chars: int = _COMBO_CHARS) -> None:
@@ -2922,6 +3195,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._kde_cache: dict[tuple, object] = {}
         #: Set by a snapshot render that declined to estimate the KDE overlay.
         self._kde_pending_after_snapshot = False
+        #: ...and by one that declined to fit an applied scatter regression.
+        self._scatter_fit_pending_after_snapshot = False
         #: Whether the histogram's KDE overlay is ON THE PICTURE -- the box is only the
         #: proposal. `_applied_fit`'s split, for its reason: a live redraw (a bin count, a
         #: log toggle) must not estimate a curve the user ticked but has not committed.
@@ -3384,12 +3659,217 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         self._plot_nav = install_plot_interaction(
             self._plot, readout=self._readout, reset=self._reset_plot_view, exports=exports,
-            points=self._readout_points, extra=heatmap_count)
+            points=self._readout_points, extra=heatmap_count, text=_PlotsTextHost(self))
+        # The fit label: one item for the window's lifetime (a ViewBox child, which
+        # plot.clear() does not remove), empty -- and so hidden -- until a fit is drawn.
+        self._fit_label_item = FitLabelItem(self._plot.getViewBox())
+        self._fit_label_item.apply_state(self._style.fit_label_state(), [])
+        self._fit_label_item.moved.connect(self._on_fit_label_moved)
+        self._appearance_widget.set_fit_label_available(True)
+        figure_text_for(self._plot).refresh()
         install_plot_interaction(self._resid, readout=self._readout, exports=exports,
                                  navigation=self._plot_nav)
         button = view_button(lambda: self._plot_nav, (self._plot_nav,))
         self._view_button = button
         self._workflow_toolbar.insertWidget(self._workflow_spacer_action, button)
+
+    # -- in-figure text and axes (figure_text) ---------------------------------------------------
+    def _figure_text_targets(self) -> dict:
+        """What a double-click or right-click on the figure may edit, keyed as
+        ``figure_text`` names elements. The title and axis labels show their automatic
+        text when nothing is typed; the fit label opens on its TEMPLATE, so retyped words
+        keep live numbers.
+
+        The title is a target whatever it shows -- empty (no automatic title) or hidden --
+        so the plot's menu can offer to add one (it opens this target's editor)."""
+        style = self._style
+        plot = self._plot
+        out = {"title": TextTarget(plot.titleLabel, plain_text(self._title_presentation[0] or ""),
+                                   style.text_style("title"), "title",
+                                   frozenset({"edit", "style", "hide", "align"}))}
+        for side in ("bottom", "left"):
+            axis = plot.getAxis(side)
+            out[f"axis.{side}.label"] = TextTarget(
+                axis, plain_text(self._axis_auto_labels.get(side, "")),
+                style.text_style(f"axis.{side}.label"), "label")
+            out[f"axis.{side}.ticks"] = TextTarget(
+                axis, "", style.text_style(f"axis.{side}.ticks"), "tick labels",
+                frozenset({"style"}))
+        legend = getattr(plot, "legend", None)
+        rows = {}
+        if legend is not None:
+            for sample, label in list(legend.items):
+                rows[id(getattr(sample, "item", None))] = label
+        for _entry_id, (item, _label, kind, key) in getattr(self, "_presentation_legend", {}).items():
+            src = self._sources.get(key)
+            row = rows.get(id(item))
+            if row is None:
+                continue
+            element = _legend_style_key(kind, key)
+            row_style = style.text_style(element)
+            if kind in ("series", "fit") and src is not None:
+                # A source's name, never a typed caption: Rename writes the ONE name
+                # resolver (``label_overrides``), so the legend, the fit's own row ("Apo
+                # fit (…)"), the fit label's line prefix, the Sources list and Details all
+                # follow. A one-source fit row ("fit (…)") names no source, so it has
+                # nothing to rename: a double-click there opens Text style….
+                named = kind == "series" or getattr(item, "_presentation_fit_named", True)
+                override = style.label_overrides.get(key)
+                out[element] = TextTarget(
+                    row, src.label, _dc_replace(row_style, text=override or None),
+                    "legend entry",
+                    frozenset({"edit", "style", "hide"} if named else {"style", "hide"}))
+            elif kind in _LEGEND_ROW_KINDS:
+                # A cluster's or the KDE overlay's row: the window's words, styled or hidden.
+                out[element] = TextTarget(row, plain_text(row.text),
+                                          _dc_replace(row_style, text=None), "legend entry",
+                                          frozenset({"style", "hide"}))
+        line = getattr(self, "_limit_line", None)
+        label = getattr(line, "label", None) if line is not None else None
+        if isinstance(label, _LimitLabel):
+            out[LIMIT_LABEL_KEY] = TextTarget(
+                label, _LIMIT_LABEL_AUTO, style.text_style(LIMIT_LABEL_KEY),
+                "detection-limit label", frozenset({"edit", "style", "hide"}))
+        item = getattr(self, "_fit_label_item", None)
+        if item is not None:
+            out[FIT_LABEL_KEY] = TextTarget(
+                item, automatic_template(style.fit_label_state()),
+                style.text_style(FIT_LABEL_KEY), "fit label", frozenset({"edit", "style", "hide"}))
+        return out
+
+    def _figure_background_entries(self) -> list:
+        """A right-click on the plot itself: "Show detection-limit label" while the words
+        are hidden, because a hidden label leaves nothing to right-click (the dashed line
+        and the shading stay drawn)."""
+        if LIMIT_LABEL_KEY not in self._figure_text_targets():
+            return []
+        style = self._style.text_style(LIMIT_LABEL_KEY)
+        if style.text != HIDDEN_TEXT:
+            return []
+        return [("Show detection-limit label",
+                 lambda: self._apply_figure_text(LIMIT_LABEL_KEY, _dc_replace(style, text=None)))]
+
+    def _apply_figure_text(self, key: str, style: TextStyle) -> None:
+        """One in-figure text edit: written into the style, the picture restyled (never
+        recomputed), and ONE step of this window's Undo.
+
+        A legend row's text is never stored as typed: Hide entry writes ``legend_include``
+        for that row, and a rename (from a source's row or its fit's) writes the source's
+        one name, ``label_overrides``. Its font, size, weight and colour are the row's own
+        (``text_styles["legend.entry.…"]``)."""
+        if key.startswith("legend.entry."):
+            entry_id = _legend_entry_id(key, self._sources)
+            kind, _, src_key = entry_id.partition(":")
+            if style.text == HIDDEN_TEXT:
+                self._style = self._style.with_legend_include(entry_id, False)
+            elif kind in ("series", "fit") and src_key in self._sources:
+                if style.text is None:
+                    self._style = self._style.without_label_override(src_key)
+                else:
+                    self._style = self._style.with_label_override(src_key, style.text)
+            self._style = self._style.with_text_style(key, _dc_replace(style, text=None))
+        else:
+            self._style = self._style.with_text_style(key, style)
+        self._updating = True
+        try:
+            self._apply_style_widgets(self._style)
+            self._sync_source_row_labels()
+        finally:
+            self._updating = False
+        if key.startswith("legend.entry."):
+            self._restyle_committed_legend()
+            self._sync_legend_entry_list()
+        self._presentation_changed()
+        self._history_touch()
+
+    def _on_fit_label_moved(self, offset) -> None:
+        """A drag of the fit label: its place is saved (``fit_label.offset``), as one
+        step. The view never moved -- the label took the drag."""
+        if self._updating:
+            return
+        state = self._style.fit_label_state()
+        self._style = self._style.with_fit_label(_dc_replace(
+            state, placement="custom", offset=(float(offset[0]), float(offset[1]))))
+        self._presentation_changed()
+        self._history_touch()
+
+    def _log_pair(self):
+        """The current page's (Log x, Log y) boxes, or None where the view has none."""
+        for pair in ((self._hist_logx, self._hist_logy), (self._scatter_logx, self._scatter_logy),
+                     (self._kde_logx, self._kde_logy), (self._heatmap_logx, self._heatmap_logy)):
+            if pair[0].isVisibleTo(self):
+                return pair
+        return None
+
+    def _figure_axis_state(self, side: str) -> AxisState:
+        """Axis properties for ``side``: range in the unit the axis DISPLAYS (the Axis
+        range boxes' unit), the pin if there is one, and this page's Log box."""
+        index = 0 if side == "bottom" else 1
+        log = self._current_log_state()[index]
+        factor = self._axis_unit_factors()[index]
+        lo, hi = self._plot.getViewBox().viewRange()[index]
+
+        def shown(v: float) -> float:
+            try:
+                return (10.0 ** v if log else v) * factor
+            except OverflowError:
+                return math.inf
+
+        manual = self._manual_x if index == 0 else self._manual_y
+        pair = self._log_pair()
+        return AxisState(
+            label=self._style.text_style(f"axis.{side}.label").text,
+            label_auto=plain_text(self._axis_auto_labels.get(side, "")),
+            range=None if manual is None else (manual[0] * factor, manual[1] * factor),
+            shown_range=(shown(lo), shown(hi)),
+            log=bool(pair[index].isChecked()) if pair is not None else log,
+            log_available=pair is not None,
+            log_reason="This view has no log scale for this axis.",
+            tick_pt=self._style.text_style(f"axis.{side}.ticks").size_pt,
+            tick_major_available=False)       # Distributions keeps no major tick spacing
+
+    def _apply_figure_axis(self, side: str, values: AxisState) -> None:
+        """Axis properties, committed: the label and tick size go to the style, the range
+        to the Axis range boxes and their pin (exactly what Apply / Auto do), as one step.
+        Log goes through the page's own Log box, so it is gated, redrawn and undone
+        exactly as a tick in the panel is."""
+        before = self._figure_axis_state(side)
+        # The popover shows a range to 6 significant figures: OK on the same text is no
+        # change, so it neither rounds the pin nor records a step.
+        if (values.range is not None and before.range is not None
+                and all(f"{a:.6g}" == f"{b:.6g}" for a, b in zip(values.range, before.range))):
+            values = _dc_replace(values, range=before.range)
+        x = side == "bottom"
+        lo_key, hi_key = ("xmin", "xmax") if x else ("ymin", "ymax")
+        self._style = self._style.with_text_style(f"axis.{side}.label", _dc_replace(
+            self._style.text_style(f"axis.{side}.label"), text=values.label))
+        self._style = self._style.with_text_style(f"axis.{side}.ticks", _dc_replace(
+            self._style.text_style(f"axis.{side}.ticks"), size_pt=values.tick_pt))
+        self._updating = True
+        try:
+            self._apply_style_widgets(self._style)
+            if values.range is not None and values.range != before.range:
+                self._range_edits[lo_key].setText(f"{values.range[0]:.12g}")
+                self._range_edits[hi_key].setText(f"{values.range[1]:.12g}")
+        finally:
+            self._updating = False
+        # The range's Apply and the Log box each commit on their own; held, so a range
+        # and Log typed in one OK are one step and one Undo puts both back.
+        suspended = self._history_suspended
+        self._history_suspended = True
+        try:
+            if values.range != before.range:
+                if values.range is None:
+                    self._reset_axis_range(axis="x" if x else "y")
+                else:
+                    self._apply_axis_range()
+            self._presentation_changed()
+            pair = self._log_pair()
+            if pair is not None and values.log != before.log:
+                pair[0 if x else 1].setChecked(bool(values.log))
+        finally:
+            self._history_suspended = suspended
+        self._history_touch()
 
     def _reset_plot_view(self) -> None:
         """Reset view: the framing the last draw ended with, the user's axis pin included.
@@ -4062,12 +4542,20 @@ class PlotsWindow(QtWidgets.QMainWindow):
         return page
 
     def _build_features_group(self) -> QtWidgets.QGroupBox:
-        box = QtWidgets.QGroupBox("Features (clustering & PCA)")
+        # "&&": a QGroupBox title takes "&" as a mnemonic, which drew "clustering  PCA"
+        # with an underlined P.
+        box = QtWidgets.QGroupBox("Features (clustering && PCA)")
         lay = QtWidgets.QVBoxLayout(box)
-        self._features = QtWidgets.QListWidget()
-        self._features.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
-        self._features.setMaximumHeight(150)
-        self._features.itemSelectionChanged.connect(self._on_features_changed)
+        # A CHECKLIST, not a multi-selection list: a click on one row used to be the only
+        # way to change a selection that a stray click could also wipe. One click, Space,
+        # Select all, Clear or Default is one gesture -- one `changed`, one Undo step
+        # (`_wire_history` cannot see a custom signal, so the slot touches the history).
+        self._features = ColumnChecklist(noun="features", minimum=2)
+        self._features.set_visible_rows(7)
+        self._features.layout().setContentsMargins(0, 0, 0, 0)
+        self._features.view.setAccessibleName("Clustering and PCA features")
+        self._features.set_separator_before(_IDENTIFIER_FEATURES[0], "Identifiers")
+        self._features.changed.connect(self._on_features_checked)
         lay.addWidget(self._features)
         note = QtWidgets.QLabel("Pick ≥2 columns; they are z-scored before fitting.")
         note.setStyleSheet(f"color:{_MSG_HEX};")
@@ -4433,7 +4921,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         self._fit_swatch = self._make_swatch(
             self._style.fit_color, self._pick_fit_color,
-            "Colour of the fitted overlay curve and its title.")
+            "Colour of the fitted overlay curve and its fit-label line.")
         form.addRow("Fit colour", self._fit_swatch)
 
         # The heatmap's colour map, beside the other colours because it is one: it
@@ -4450,9 +4938,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         self._fit_values_check = QtWidgets.QCheckBox("Fit values on plot")
         self._fit_values_check.setToolTip(
-            "Write the fitted parameters (τ, μ, numerical KS statistic…) as a text box on the "
-            "figure itself, so a saved image carries its own numbers. The same text "
-            "always appears in Details below.")
+            "Add the remaining fitted numbers (BIC, the numerical KS statistic) to the fit "
+            "label, so a saved image carries its own numbers. The same text always "
+            "appears in Details below.")
         self._fit_values_check.setChecked(self._style.fit_values_on_plot)
         self._fit_values_check.toggled.connect(self._on_style_fit_values)
         form.addRow("", self._fit_values_check)
@@ -4464,7 +4952,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # hide a refusal (see StyleSettings.show_r2).
         self._r2_check = QtWidgets.QCheckBox("R² on figure")
         self._r2_check.setToolTip(
-            "The scatter fit's R², in the title, the legend entry and the values box.\n"
+            "The scatter fit's R², in the fit label.\n"
             "Off: the equation stands alone on the figure. Details still says when R² is "
             "undefined or has no residual degrees of freedom — a fit that cannot be "
             "judged must not be able to look unjudged.")
@@ -4787,6 +5275,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _on_style_fit_values(self, on: bool) -> None:
         self._style = _dc_replace(self._style, fit_values_on_plot=bool(on))
+        if self._style.fit_label:
+            # A saved label (a drag, any Fit label edit) no longer reads this switch
+            # through the legacy mapping, so the box edits the saved label's fields.
+            label = self._style.fit_label_state()
+            extra = ("bic", "ks")
+            fields = [f for f in label.fields if f not in extra]
+            if on:
+                fields += list(extra)
+            self._style = self._style.with_fit_label(_dc_replace(
+                label, fields=tuple(f for f in FIT_FIELDS if f in fields)))
         self._presentation_changed()
 
     def _on_style_x_label(self, text: str) -> None:
@@ -5094,6 +5592,33 @@ class PlotsWindow(QtWidgets.QMainWindow):
         qf = self._qfont(self._tick_pt())
         for name in ("bottom", "left"):
             self._plot.getAxis(name).setStyle(tickFont=qf)
+        self._apply_element_styles()
+
+    def _apply_element_styles(self) -> None:
+        """The per-axis styles set from the figure (Text style… on a label or the ticks),
+        over the figure-wide fonts. Run after every ``setLabel``: the label CSS that call
+        installs is the figure-wide one, and an element override sits on top of it."""
+        for side in ("bottom", "left"):
+            axis = self._plot.getAxis(side)
+            label = self._style.text_style(f"axis.{side}.label")
+            if not _dc_replace(label, text=None).is_default():
+                axis.labelStyle = {**axis.labelStyle, **css_args(label)}
+                axis._updateLabel()
+            ticks = self._style.text_style(f"axis.{side}.ticks")
+            if _dc_replace(ticks, text=None).is_default():
+                continue
+            qf = self._qfont(int(round(ticks.size_pt or self._tick_pt())))
+            if ticks.size_pt:
+                qf.setPointSizeF(float(ticks.size_pt))
+            if ticks.family:
+                qf.setFamily(ticks.family)
+            if ticks.bold is not None:
+                qf.setBold(ticks.bold)
+            if ticks.italic is not None:
+                qf.setItalic(ticks.italic)
+            axis.setStyle(tickFont=qf)
+            if ticks.color:
+                axis.setTextPen(pg.mkPen(ticks.color))
 
     def _axis_label_for(self, side: str, col: str, log: bool) -> str:
         """Label for ``side`` ('bottom'/'left'), rescaling the axis for time columns.
@@ -5156,7 +5681,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """Retain the rendered unit/clock caption, including when it is overridden."""
         self._axis_auto_labels[side] = auto
         override = self._style.x_label if side == "bottom" else self._style.y_label
-        return override.strip() if override else auto      # blank: hidden (13.4 Q1)
+        # Typed text is drawn literally (see _apply_title); blank: hidden (13.4 Q1).
+        return rich_text(override.strip()) if override else auto
 
     def _axis_clock_tag(self, col: str) -> str:
         """The clock clause a time axis needs, or ``""`` for a duration.
@@ -5186,18 +5712,27 @@ class PlotsWindow(QtWidgets.QMainWindow):
         override is no title (design 13.4 Q1)."""
         return self._style.title.strip() if self._style.title else auto
 
-    def _apply_title(self, auto: str | None, accent: str | None = None,
-                     warn: str | None = None) -> None:
-        """Set the title from the override-or-auto text, in the style font size + a sensible colour.
+    def _apply_title(self, auto: str | None, warn: str | None = None) -> None:
+        """Set the title from the override-or-auto text, in the style font size and colour.
 
-        An automatic accent (the fit vermillion / PCA foreground) is honoured only when the user has
-        not typed their own title; an explicit override renders in the neutral foreground colour.
+        A FIT NEVER REACHES THIS. A fit's equation and numbers used to be the automatic
+        title, drawn in the fit colour -- so typing a title took the result off the figure
+        and clearing it put the equation back as the title. They are in the fit label now
+        (:meth:`_draw_fit_label`), and the automatic title is what the plot shows without
+        a fit (none, for a scatter or a histogram).
+
+        The user's own text is drawn LITERALLY (``figure_text.rich_text``): "I < 5 pA &
+        τ > 1 ms" used to lose everything between the two angle brackets, and ``_{…}`` /
+        ``^{…}`` are the one markup, for sub- and superscripts. The element style set from
+        the figure (Text style…) wins over the figure-wide title fields.
 
         ``warn`` is retained with the committed presentation for Details, but is
         not artwork. Comparability, calibration and fit verdicts belong in the
         warning summary, Details and saved provenance, never in the plot title.
         """
-        self._title_presentation = (auto, accent, warn)
+        # The middle slot was the fit accent; kept so the tuple's shape (and every reader
+        # of its warn slot) is unchanged.
+        self._title_presentation = (auto, None, warn)
         text = self._plot_title(auto)
         if not text:
             # setTitle(None) only HIDES pyqtgraph's title label -- the previous
@@ -5210,13 +5745,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._plot.setTitle(None)
             self._plot.titleLabel.setText("")
             return
-        color = accent if (accent and not self._style.title) else self._fg_hex()
-        self._plot.setTitle(text, color=color, size=f"{self._title_pt()}pt")
+        style = self._style.text_style("title")
+        shown = rich_text(text) if self._style.title else text
+        size = style.size_pt or self._title_pt()
+        self._plot.setTitle(shown, color=style.color or self._fg_hex(), size=f"{size:g}pt",
+                            justify=style.align or "center")
         # Set both positive and negative choices: an in-place restyle must also
         # remove a formerly selected family, bold weight, or italic slant.
-        qf = self._qfont(self._title_pt())
-        qf.setBold(bool(self._style.title_bold))
-        qf.setItalic(bool(self._style.title_italic))
+        qf = self._qfont(int(round(size)))
+        qf.setPointSizeF(float(size))
+        if style.family:
+            qf.setFamily(style.family)
+        qf.setBold(bool(self._style.title_bold if style.bold is None else style.bold))
+        qf.setItalic(bool(self._style.title_italic if style.italic is None else style.italic))
         self._plot.titleLabel.item.setFont(qf)
 
     # -- axis range ------------------------------------------------------------------------------
@@ -5927,10 +6468,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _apply_feature_selection(self, cols: Sequence[str]) -> None:
         """Select exactly ``cols`` in the feature list (those it currently offers)."""
-        want = {str(c) for c in cols}
-        for i in range(self._features.count()):
-            item = self._features.item(i)
-            item.setSelected(item.text() in want)
+        self._features.set_checked({str(c) for c in cols})
 
     def _apply_style_widgets(self, style: StyleSettings) -> None:
         """Write a style onto the Style group's controls.
@@ -6263,8 +6801,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # rule is short enough to simply state where it is used.
         split = QtWidgets.QLabel(
             "A template carries the plot type, columns, fit recipe, axis limits and the "
-            "whole style. It never carries which sources are ticked, your retyped legend "
-            "entries, or an applied fit — the fit arrives selected, and you press Apply.")
+            "whole style. It never carries which sources are ticked, your retyped or "
+            "restyled legend entries, or an applied fit — the fit arrives selected, and you "
+            "press Apply.")
         split.setWordWrap(True)
         split.setStyleSheet(f"color:{_MSG_HEX};")
         lay.addWidget(split)
@@ -6322,6 +6861,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 if isinstance(w.parent(), (QtWidgets.QAbstractSpinBox,
                                            QtWidgets.QComboBox)):
                     continue
+                if w.objectName() == "columnChecklistFilter":
+                    continue    # filtering a checklist is not an edit
                 w.textChanged.connect(self._history_touch_text)
                 # Focus-out AND Return both land here, which is what makes "until
                 # focus-out" a real rule rather than a hope: clicking any other control
@@ -6434,7 +6975,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 names = [n for sec, n in cls._TEXT_FIELDS if sec == section]
                 out = _dc_replace(out, **{section: _dc_replace(
                     getattr(out, section), **{n: "" for n in names})})
-            return out
+            # The fit label's template box is typed text too; compared as the label it
+            # draws, so the first keystroke (which saves the implied label) is text only.
+            label = _dc_replace(out.style.fit_label_state(), template="")
+            return _dc_replace(out, style=out.style.with_fit_label(label))
         return _blank(was) == _blank(now)
 
     def _history_settle(self) -> None:
@@ -7798,9 +8342,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
                             + ". Review method, interval scope and stale-value warnings before pooling."),
                             QtCore.Qt.ToolTipRole)
 
-            self._features.clear()
-            for c in cols:
-                self._features.addItem(QtWidgets.QListWidgetItem(c))
+            measured = [c for c in cols if c not in _IDENTIFIER_FEATURES]
+            identifiers = [c for c in _IDENTIFIER_FEATURES if c in cols]
+            self._features.set_separator_before(
+                identifiers[0] if identifiers else _IDENTIFIER_FEATURES[0], "Identifiers")
+            self._features.set_entries(
+                [(c, c, "") for c in measured + identifiers], (),
+                [c for c in _PREFER_FEATURES if c in cols])
 
             if not cols:
                 return
@@ -7830,10 +8378,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
             keep = feat_prev & set(cols)
             if not keep:
-                keep = {c for c in _PREFER_FEATURES if c in cols} or set(cols[:4])
-            for i in range(self._features.count()):
-                item = self._features.item(i)
-                item.setSelected(item.text() in keep)
+                keep = ({c for c in _PREFER_FEATURES if c in cols}
+                        or set([c for c in cols if c not in _IDENTIFIER_FEATURES][:4]))
+            self._features.set_checked(keep)
         finally:
             self._updating = False
         # The pickers may have moved on their own -- a refreshed source that no longer
@@ -7853,9 +8400,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def appearance_state(self) -> dict:
         """Appearance-only bridge; no sources, axes scales, bins or fit settings."""
-        return {key: getattr(self._style, field) for key, field in self._APPEARANCE_FIELDS.items()
-                if getattr(self._style, field) not in (None, "")
-                and not (key.endswith("size") and getattr(self._style, field) == 0)}
+        out = {key: getattr(self._style, field) for key, field in self._APPEARANCE_FIELDS.items()
+               if getattr(self._style, field) not in (None, "")
+               and not (key.endswith("size") and getattr(self._style, field) == 0)}
+        # The figure's own element styles and the fit label ride the same bridge, so the
+        # embedded Appearance section (its Fit label group) and shared presets see them.
+        if self._style.text_styles:
+            out["text"] = _thawed(self._style.text_styles)
+        if self._style.fit_label:
+            out["fit_label"] = _thawed(self._style.fit_label)
+        return out
 
     def set_appearance_state(self, mapping) -> None:
         """Restore only appearance, silently and without committing pending analysis."""
@@ -7869,7 +8423,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 value = int(round(value))
                 if field in ("line_width", "point_size"):
                     value = max(1, value)
+            current = getattr(self._style, field)
+            if (field in ("data_color", "fit_color") and isinstance(value, str)
+                    and isinstance(current, str) and value.lower() == current.lower()):
+                # The widget names colours in lower case ('#0072b2'); the same colour
+                # spelt '#0072B2' is no change, or a Title keystroke stops being typed
+                # text only and the first one becomes an Undo step of its own (D13).
+                value = current
             values[field] = value
+        values["text_styles"] = FrozenMap(
+            {key: (style if _text_kept_in_styles(key) else _dc_replace(style, text=None)).to_dict()
+             for key, style in (state.text or ())})
+        values["fit_label"] = (FrozenMap(state.fit_label.to_dict()) if state.fit_label is not None
+                               else _NO_ENTRIES)
         prior = self._updating
         self._updating = True
         try:
@@ -7989,14 +8555,17 @@ class PlotsWindow(QtWidgets.QMainWindow):
             elif kind == "series":
                 label = names.get(key, label)
             elif kind == "fit":
-                variants = getattr(item, "_presentation_fit_summaries", None)
-                if variants is not None:
-                    label = f"{names.get(key, '')} fit: {variants[self._style.show_r2]}".strip()
+                if getattr(item, "_presentation_fit_family", None) is not None:
+                    # A one-source fit row is "fit (…)", unnamed; an overlay's is named.
+                    named = getattr(item, "_presentation_fit_named", True)
+                    label = self._fit_legend_label(item, names.get(key, "") if named else "",
+                                                   key)
                 elif " fit:" in label and key in names:
                     label = names[key] + " fit:" + label.split(" fit:", 1)[1]
-            self._legend_offered[entry_id] = label
+            self._legend_offered[entry_id] = str(label)
             if self._style.show_legend and self._legend_included(entry_id):
-                self._ensure_legend().addItem(item, self._elide_legend(label))
+                self._ensure_legend().addItem(
+                    item, self._legend_markup(label, _legend_style_key(kind, key)))
         self._sync_legend_entry_list()
         self._appearance_widget.set_legend_available(bool(entries))
         self._refresh_committed_legend_disclosure(names)
@@ -8048,21 +8617,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _restyle_committed_decorations(self) -> None:
         names = self._committed_legend_names()
-        aliases = {label: names[key] for key, label, _segment in
-                   getattr(self, "_presentation_sources", ())}
-        lines = getattr(self, "_presentation_fit_lines", [])
-        variants = getattr(self, "_presentation_full_variants", [])
-        if variants:
-            key = (self._style.show_gof, self._style.show_residuals)
-            lines = [(f"{aliases.get(who, who)}: " if who else "") + text[key]
-                     for who, text in variants]
-        scatter = getattr(self, "_presentation_scatter_variants", [])
-        if scatter:
-            lines = [(f"{aliases.get(who, who)}: " if who else "") + text[self._style.show_r2]
-                     for who, text in scatter]
-            _auto, accent, warning = self._title_presentation
-            self._apply_title("   |   ".join(lines), accent=accent, warn=warning)
-        self._set_presentation_annotation("_fit_values_item", lines, self._style.fit_values_on_plot)
+        # The fit's numbers: reformatted from the cached readouts, never refitted, and
+        # never written into the title.
+        self._draw_fit_label()
+        self._draw_limit_label()
         provenance = getattr(self, "_presentation_provenance", [])
         keyed = getattr(self, "_presentation_provenance_by_source", [])
         if keyed:
@@ -8133,11 +8691,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._apply_background()
         self._apply_fonts()
         if self._plot_armed and self._message_item is None:
-            self._apply_title(*self._title_presentation)
+            self._apply_title(self._title_presentation[0], self._title_presentation[2])
             for side, auto in self._axis_auto_labels.items():
                 override = self._style.x_label if side == "bottom" else self._style.y_label
-                self._plot.setLabel(side, override.strip() if override else auto,
+                self._plot.setLabel(side, rich_text(override.strip()) if override else auto,
                                     **self._label_style())
+            self._apply_element_styles()
         elif self._message_item is not None:
             self._message_item.setColor(self._msg_hex())
 
@@ -8154,10 +8713,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             pt = int(self._style.legend_font_size_pt) or max(6, self._style.font_size_pt - 3)
             legend.setLabelTextSize(f"{max(1, pt)}pt")
         for item, size, colour in (
-                (getattr(self, "_fit_values_item", None), self._style.font_size_pt,
-                 self._style.fit_color),
                 (getattr(self, "_prov_item", None), max(6, self._style.font_size_pt - 2),
-                 self._msg_hex())):
+                 self._msg_hex()),):
             if item is not None:
                 item.setText(item.text, size=f"{size}pt", color=colour)
         if hasattr(self, "_resid"):
@@ -8472,6 +9029,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._use_filter_limited.setEnabled(
             bool(has_flag and self._fit_combo.currentText() != _FIT_NONE))
 
+    def _on_features_checked(self, _keys: list) -> None:
+        self._on_features_changed()
+        self._history_touch()
+
     def _on_features_changed(self) -> None:
         if self._updating:
             return
@@ -8750,18 +9311,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._apply_scatter_fit()
 
     def set_feature_selection(self, cols: Sequence[str]) -> None:
-        want = set(cols)
-        self._updating = True
-        try:
-            for i in range(self._features.count()):
-                item = self._features.item(i)
-                item.setSelected(item.text() in want)
-        finally:
-            self._updating = False
+        self._features.set_checked({str(c) for c in cols})
         self._on_features_changed()
 
     def feature_selection(self) -> list[str]:
-        return [i.text() for i in self._features.selectedItems()]
+        return self._features.checked()
 
     def set_cluster_method(self, method: str) -> None:
         """Clustering algorithm. RAISES on a name this window does not offer."""
@@ -8982,7 +9536,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
         * histogram overlays evaluate the already-restored ``FitResult``;
         * a scatter regression is left pending because no fitted regression result
-          is stored yet; and
+          is stored yet, and the gate's ● says so; and
         * KDE is left pending because its sampled density grid is not a saved result.
 
         PCA and cluster colouring are direct projections of the restored arrays and
@@ -8997,6 +9551,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._workspace_snapshot_fits = (saved_fits, saved_columns)
         self._workspace_snapshot_rendering = True
         self._kde_pending_after_snapshot = False
+        self._scatter_fit_pending_after_snapshot = False
         # Opening a project is never a KDE run, whatever page it opens on: the restored
         # picture has no curve, so the applied state -- and with it the Figure Library's
         # `figure_applied_config` -- says none until Plot is pressed.
@@ -9015,6 +9570,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 # exactly what the gate's ● is for.
                 self._stale = True
                 self._stale_reason = "the KDE overlay"   # Details says it was not recomputed
+            elif self._plot_armed and self._scatter_fit_pending_after_snapshot:
+                # ...and an applied scatter fit, for the same reason: the saved figure
+                # had its line and its fit label, and this picture has neither.
+                self._stale = True
+                self._stale_reason = "the scatter fit"
             self._sync_fit_apply_buttons()
             self._sync_run_state()
         finally:
@@ -9082,6 +9642,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         item = pg.PlotDataItem(x=grid, y=expected, pen=pen)
         self._plot.addItem(item)
         self._fit_items.append(item)
+        # The live draw's roles, so a Fit colour or Line width change after a reopen
+        # restyles this curve as it would a fresh one.
+        item._presentation_role = "category" if who else "fit"
+        item._presentation_width_extra = 1
         if self._fit_item is None:
             self._fit_item = item
         if self._last_fit is None:
@@ -9091,8 +9655,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._fit_columns[src.key] = col
 
         # Match the ordinary headline parameter, but read every value from the saved
-        # fit.  The full on-plot box remains the common formatter and therefore keeps
-        # units, CIs and BIC consistent with a freshly rendered fit.
+        # fit.  The fit label and the legend row are built by the SAME helpers as a
+        # fresh fit's (``_fit_parts``, ``_fit_legend_label``), so a reopened project
+        # draws the figure that was saved: every parameter, n, BIC and KS in the label,
+        # and a number-free "fit (…)" row. The KS numbers are the ones ``stats`` stamped
+        # on the fit (``meta['gof']``), saved with it -- read, never recomputed.
         head = {
             _FIT_EXP: "tau", _FIT_GMM: "mu", _FIT_GAMMA: "k",
             _FIT_INVGAUSS: "mu", _FIT_EXP_GAMMA: "k",
@@ -9109,12 +9676,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
             label = f"μ(|{col}|)"
         unit_text = f" {unit}" if unit else ""
         summary = f"{label} = {shown}{unit_text}   (n = {int(fit.n)})"
-        full = self._full_fit_summary(fit, col, None)
+        stamped = (getattr(fit, "meta", None) or {}).get("gof")
+        gof = stamped if isinstance(stamped, dict) and "ks" in stamped else None
+        full = self._full_fit_summary(fit, col, gof)
         legend_who = self._legend_name(src) if (who and src is not None) else who
-        self._legend_add(item,
-                         f"{legend_who} fit: {summary}".strip() if legend_who
-                         else f"fit: {summary}",
+        item._presentation_fit_family = kind
+        item._presentation_fit_named = bool(legend_who)
+        self._legend_add(item, self._fit_legend_label(item, legend_who, key),
                          kind="fit", key=key)
+        plain_summary = summary
+        rejected = bool(gof) and not gof.get("describes_data", True)
+        if rejected:
+            summary = f"{summary} — {_KS_REJECTED_TAG}"
 
         notes = [
             str(getattr(fit, "model", "saved fit")),
@@ -9124,8 +9697,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         ci_line = self._ci_note(fit, col)
         if ci_line:
             notes.append(ci_line)
+        if gof and gof.get("note"):
+            notes.append(f"{gof['note']} (as saved with the fit)")
         notes.extend(str(note) for note in getattr(fit, "meta", {}).get("warnings", ()))
-        return _FitSummary(summary, full, plain=summary), notes
+        result = _FitSummary(summary, full, rejected=rejected, plain=plain_summary)
+        result.parts = self._fit_parts(fit, col, gof, headline=f"{label} = {shown}{unit_text}",
+                                       headline_keys=keys)
+        return result, notes
 
     def _clear_plot(self) -> None:
         self._lasso_generation += 1
@@ -9140,6 +9718,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._presentation_scatter_variants = []
         self._presentation_provenance = []
         self._presentation_provenance_by_source = []
+        #: ``(source key, FitReadout)`` per fitted source of the committed draw: what the
+        #: fit label (and, with In legend instead, the legend's fit rows) is drawn from,
+        #: so an appearance change reformats the numbers without refitting.
+        self._presentation_readouts = []
         self._presentation_bands = []
         self._presentation_residual = None
         self._presentation_residual_note = ""
@@ -9167,15 +9749,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # with the plot items, so the Style group's checklist can only ever list rows
         # the picture on screen actually produced.
         self._legend_offered = {}
+        # The fit label is a ViewBox child that lives as long as the window (plot.clear()
+        # cannot reach it); a draw without a fit leaves it empty, which hides it.
+        if getattr(self, "_fit_label_item", None) is not None:
+            self._fit_label_item.apply_state(self._style.fit_label_state(), [])
         # Parented to the ViewBox, not added through addItem — plot.clear() cannot
         # reach it, so it is detached explicitly (same reason _drop_legend exists).
-        if getattr(self, "_fit_values_item", None) is not None:
-            self._fit_values_item.setParentItem(None)
-            sc = self._fit_values_item.scene()
-            if sc is not None:
-                sc.removeItem(self._fit_values_item)
-        self._fit_values_item = None
-        # Same ViewBox-child rule as the fit-values box above.
         if getattr(self, "_prov_item", None) is not None:
             self._prov_item.setParentItem(None)
             _sc = self._prov_item.scene()
@@ -9190,25 +9769,85 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._fit_columns = {}
 
     # -- legend ----------------------------------------------------------------------------------
-    def _draw_fit_values(self, lines: list[str]) -> None:
-        """The fitted parameters as a text box ON the figure (owner note #14).
+    def _draw_fit_label(self) -> None:
+        """The committed fits' numbers in the fit label (``fit_label.FitLabelItem``).
 
-        A ``pg.LabelItem`` anchored to the ViewBox's top-LEFT corner (the legend owns
-        the top-right), so it stays put under pan/zoom/log and lands in the saved
-        image — which Details, where these numbers otherwise live, does not. One line
-        per fitted source, in the fit colour, at the style's font size."""
-        self._presentation_fit_lines = list(lines)
-        if not self._style.fit_values_on_plot or not lines:
+        THE ONE PLACE A FIT'S NUMBERS ARE DRAWN ON THE FIGURE. They used to be the plot's
+        automatic title (and, with Fit values on plot, a second copy in a box), so a typed
+        title removed them from the figure and every export. The label is its own
+        element: one line per fitted source, prefixed with the figure's name for it and
+        in its colour, top-left unless dragged, and on whenever a fit is applied.
+
+        Rebuilt from the cached readouts, never by refitting, so the restyle path can call
+        it on every appearance toggle. The three older switches keep their meaning: R² on
+        figure and KS statistic on figure drop the plain NUMBER (never a refusal, which
+        :func:`fit_label.format_fit_label` prints whenever R² is asked for), and Fit values
+        on plot adds BIC and KS to a label that was never configured.
+        """
+        item = getattr(self, "_fit_label_item", None)
+        if item is None:
             return
-        text = "<br>".join(_html.escape(str(l)) for l in lines if str(l).strip())
-        if not text:
-            return
-        item = pg.LabelItem(text, color=self._style.fit_color,
-                            size=f"{self._style.font_size_pt}pt", justify="left")
-        item.setParentItem(self._plot.vb)
-        item.anchor(itemPos=(0, 0), parentPos=(0, 0), offset=(10, 8))
-        item.setZValue(30)
-        self._fit_values_item = item
+        state = self._style.fit_label_state()
+        readouts_in = getattr(self, "_presentation_readouts", [])
+        names = self._committed_legend_names()
+        if not names and len(readouts_in) > 1:
+            # Mid-draw the committed sources are not recorded yet; the live resolver
+            # names the same ticked sources then. Only a draw reaches here: an
+            # appearance change always has its committed names, and must not collect
+            # sources (the restyle path never does).
+            names = self._legend_names()
+        drawn_rows = self._fit_rows_in_legend() if state.in_legend else set()
+        readouts = [self._shown_readout(key, readout, names)
+                    for key, readout in readouts_in
+                    # In legend instead: a fit whose row is drawn carries its numbers there.
+                    if key not in drawn_rows]
+        draw_state = _dc_replace(state, in_legend=False,
+                                 size_pt=state.size_pt or float(self._style.font_size_pt))
+        style = _dc_replace(self._style.text_style(FIT_LABEL_KEY), text=None, size_pt=None,
+                            color=None)
+        item.apply_state(draw_state, readouts, style)
+
+    def _shown_readout(self, key: str, readout: FitReadout, names: dict) -> FitReadout:
+        """``readout`` as this figure shows it: the switches applied, the legend name as
+        its source, and the fit colour where the source has none of its own."""
+        parts = dict(readout.parts)
+        if not self._style.show_r2:
+            parts.pop("r2", None)
+        if not self._style.show_gof:
+            parts.pop("ks", None)
+        resid = parts.pop("resid", "")
+        if resid and self._style.show_residuals and parts.get("equation"):
+            # The strip's number, on the figure, because the strip itself is not exported.
+            parts["equation"] = f"{parts['equation']}   {resid}"
+        return FitReadout(parts, readout.refusals, names.get(key) or None,
+                          readout.colour or self._style.fit_color)
+
+    def _fit_rows_in_legend(self) -> set:
+        """Source keys whose fit row is in the drawn legend (In legend instead puts their
+        numbers there; a fit with no drawn row keeps them in the label)."""
+        if not self._style.show_legend:
+            return set()
+        return {key for entry_id, (_item, _label, kind, key)
+                in getattr(self, "_presentation_legend", {}).items()
+                if kind == "fit" and self._legend_included(entry_id)}
+
+    def _fit_legend_label(self, item, name: str, key: str) -> str:
+        """A fit's legend row: "Apo fit (linear)", with no numbers -- they are in the fit
+        label, and a middle-elided "Apo fit: y = 1.96….971" helped nobody. With In legend
+        instead the numbers come back, as a second line that is never elided."""
+        family = getattr(item, "_presentation_fit_family", "")
+        head = f"{name} fit".strip() if name else "fit"
+        head = f"{head} ({family})" if family else head
+        state = self._style.fit_label_state()
+        if not state.in_legend:
+            return head
+        for rkey, readout in getattr(self, "_presentation_readouts", []):
+            if rkey == key:
+                lines = format_fit_label([self._shown_readout(rkey, readout, {})],
+                                         _dc_replace(state, in_legend=False))
+                if lines:
+                    return _FitLegendText(head, plain_text(lines[0][0]))
+        return head
 
     # -- E2: what made these events, ON the figure -----------------------------------------------
     #: How a detector id is written for a human. `provenance['detector']` is a module
@@ -9495,6 +10134,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # EXISTING item untouched from here on, so this is the one chance to hook
             # the drag -- and the hook is how a dragged position gets remembered.
             self._install_legend_drag(legend)
+            # The in-figure text controller was installed before any legend existed;
+            # its rows become editable (double-click, right-click) once it is told.
+            controller = figure_text_for(self._plot)
+            if controller is not None:
+                controller.refresh()
         self._apply_legend_position(legend)
         legend.setLabelTextColor(fg)
         legend.setBrush(pg.mkBrush(backing))
@@ -9760,8 +10404,26 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if not self._style.show_legend or not self._legend_included(entry_id):
             return
         legend = self._ensure_legend()
-        legend.addItem(item, self._elide_legend(label))
+        legend.addItem(item, self._legend_markup(label, _legend_style_key(kind, key)))
         legend.setVisible(True)
+
+    def _legend_markup(self, label: str, element: str = "") -> str:
+        """A legend row as Qt rich text: elided, then drawn LITERALLY (a source renamed
+        "a<b>" lost its middle), with ``_{…}``/``^{…}`` as sub/superscripts. A fit row
+        carrying its numbers (In legend instead) puts them on a second line, unelided.
+
+        ``element`` is the row's Text style key (``legend.entry.…``): its font, size,
+        weight and colour wrap the row, over the legend's own ink and size. An unstyled
+        row stays plain text."""
+        if isinstance(label, _FitLegendText):
+            text = f"{rich_text(self._elide_legend(label.head))}<br>{rich_text(label.numbers)}"
+        else:
+            text = rich_text(self._elide_legend(str(label)))
+        css = css_args(self._style.text_style(element)) if element else {}
+        if not css:
+            return text
+        return "<span style='{}'>{}</span>".format(
+            "; ".join(f"{name}: {value}" for name, value in css.items()), text)
 
     def _shade_below_limit(self, t_min: float, lo: float, log_x: bool) -> None:
         """Shade the region the detector could never report, as figures.py does.
@@ -9786,10 +10448,34 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._plot.addItem(self._limit_region)
         self._limit_line = pg.InfiniteLine(
             pos=to_view(t_min), angle=90,
-            pen=pg.mkPen(_EXCLUDED_HEX, width=1, style=Qt.DashLine),
-            label="below detection limit",
-            labelOpts={"position": 0.06, "color": _EXCLUDED_HEX, "movable": False})
+            pen=pg.mkPen(_EXCLUDED_HEX, width=1, style=Qt.DashLine))
+        # The words are figure text (``annotation.limit``): retyped, styled or hidden from
+        # the figure, so the label is this window's own InfLineLabel, made here rather
+        # than by ``InfiniteLine(label=…)``. The line and the shading stay whatever the
+        # words say: they are the detector's floor, not a caption.
+        self._limit_line.label = _LimitLabel(self._limit_line, text=_LIMIT_LABEL_AUTO,
+                                             position=0.06, color=_EXCLUDED_HEX,
+                                             movable=False)
         self._plot.addItem(self._limit_line)
+        self._draw_limit_label()
+        controller = figure_text_for(self._plot)
+        if controller is not None:
+            controller.refresh()        # a new label each draw: hook its double-click
+
+    def _draw_limit_label(self) -> None:
+        """The detection-floor line's words as the figure has them: automatic, typed (drawn
+        literally, ``_{…}``/``^{…}`` as sub/superscripts) or hidden, in their Text style
+        over the excluded-region grey."""
+        line = getattr(self, "_limit_line", None)
+        label = getattr(line, "label", None) if line is not None else None
+        if not isinstance(label, _LimitLabel):
+            return
+        style = self._style.text_style(LIMIT_LABEL_KEY)
+        text = shown_text(style, _LIMIT_LABEL_AUTO)
+        css = {"color": _EXCLUDED_HEX, **css_args(style)}
+        label.show_rich("<span style='{}'>{}</span>".format(
+            "; ".join(f"{name}: {value}" for name, value in css.items()), rich_text(text))
+            if text.strip() else "")
 
     def _message(self, text: str) -> None:
         """Blank the plot and show a friendly centred note (empty/invalid state).
@@ -10113,6 +10799,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # never survive from the previous one; it declines to draw over a message.
         self._presentation_sources = tuple((src.key, src.label, bool(src.is_segment))
                                            for src, _df in drawn)
+        if self._style.fit_label_state().in_legend and getattr(
+                self, "_presentation_readouts", None):
+            # In legend instead: a fit's row was added before its readout was recorded,
+            # so it was built without its numbers; rebuild the rows now that they exist.
+            self._restyle_committed_legend()
         self._draw_provenance_caption()
 
     # -- histogram -------------------------------------------------------------------------------
@@ -10649,7 +11340,6 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     "shortest reportable events differ. Each fit below uses its OWN t_min; "
                     "the shading marks the shallowest of them.")
 
-        title = ""
         #: The title's KS headline -- "" until a fit below is thrown out. See
         #: `_ks_headline` for why the verdict rides the title's WARN channel and not
         #: its automatic text.
@@ -10692,6 +11382,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     try:
                         t, fit_notes = self._overlay_fit(
                             kind, col, all_v, edges, log_x, src, self._style.fit_color, "")
+                        self._presentation_readouts.append(
+                            (src.key if src is not None else "", self._readout_of(t, None)))
                         titles.append(t)
                         headlines.append(getattr(t, "plain", t))
                         if getattr(t, "rejected", False):
@@ -10711,6 +11403,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
                             kind, col, v, edges, log_x, src,
                             colour if multi else self._style.fit_color,
                             label if multi else "")
+                        self._presentation_readouts.append(
+                            (src.key if src is not None else "",
+                             self._readout_of(t, colour if multi else None)))
                         t_full = getattr(t, "full", t)
                         titles.append(f"{label}: {t}" if multi else t)
                         headlines.append(getattr(t, "plain", t))
@@ -10730,20 +11425,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
                         blame = self._fit_range_blame(col, v)
                         if blame:
                             notes.append(f"{label}: {blame}" if multi else blame)
-            # ONE fit summary fits in a title; several do not — two taus joined into one
-            # line runs off the plot and gets clipped. With an overlay the legend already
-            # names every fit, so the title stays empty (or the user's own) and Details
-            # carries the full list.
+            # Details carries the full list; the TITLE carries none of it -- a fit's
+            # numbers are the fit label's, one line per source, so a typed title no
+            # longer takes them off the figure and two taus never run off its top.
             details.extend(titles)
-            title = headlines[0] if len(headlines) == 1 else ""
             ks_warn = self._ks_headline(rejected)
-            # ...and, when asked for, the FULL parameter set ON the figure (owner notes
-            # #13/#14): a saved image whose parameters live only in Details is not a
-            # figure that can defend itself in a talk, and the thin one-line summary
-            # this used to write carried the leading parameter and nothing else -- no
-            # sigma, no mixture weight, no BIC, and not the KS verdict the Style
-            # checkbox's own tooltip promises.
-            self._draw_fit_values(full)
+            # The FULL parameter set ON the figure (owner notes #13/#14): a saved image
+            # whose parameters live only in Details is not a figure that can defend
+            # itself in a talk.
+            self._draw_fit_label()
 
         # The pooled verdict FIRST in the note list: whether these rows may be put on
         # one axis at all outranks anything said about the curve drawn through them.
@@ -10800,7 +11490,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                             self._remember_axis_label("left", self._y_axis_label(col, log_y)),
                             **self._label_style())
         # Record the warning separately; _set_details places it outside artwork.
-        self._apply_title(title or None, accent=self._style.fit_color,
+        self._apply_title(None,
                           warn=self._warn_headline(self._stale_headline([col]),
                                                    verdict.headline, ks_warn,
                                                    "CHECK SELECTED AMPLITUDES" if cluster_warnings else ""))
@@ -12058,8 +12748,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if ks_rejected:
             summary = f"{summary} — {_KS_REJECTED_TAG}"
         legend_who = self._legend_name(src) if (who and src is not None) else who
-        self._legend_add(item, f"{legend_who} fit: {plain_summary}".strip() if legend_who
-                         else f"fit: {plain_summary}",
+        item._presentation_fit_family = kind
+        item._presentation_fit_named = bool(legend_who)
+        self._legend_add(item, self._fit_legend_label(
+                             item, legend_who, src.key if src is not None else ""),
                          kind="fit", key=src.key if src is not None else "")
         notes.append(fit.model)
         notes.append(f"BIC = {fit.bic:.6g}   AIC = {fit.aic:.6g}   components = {k}")
@@ -12188,9 +12880,43 @@ class PlotsWindow(QtWidgets.QMainWindow):
         finally:
             self._style = original_style
         self._presentation_full_variants.append((who, variants))
-        return (_FitSummary(summary, variants[(self._style.show_gof, self._style.show_residuals)],
-                            rejected=ks_rejected, plain=plain_summary),
-                notes)
+        result = _FitSummary(summary, variants[(self._style.show_gof, self._style.show_residuals)],
+                             rejected=ks_rejected, plain=plain_summary)
+        result.parts = self._fit_parts(fit, col, gof, resid_short,
+                                       headline=f"{names[1]} = {shown}{unit_txt}",
+                                       headline_keys=keys)
+        return result, notes
+
+    def _fit_parts(self, fit, col: str, gof: dict | None, resid_short: str = "", *,
+                   headline: str = "", headline_keys=()) -> dict:
+        """The fit label's tokens for a histogram fit: the headline the title used to
+        carry (its symbol names the frame -- ``μ(|mean|)`` on a reflected column), then
+        every other parameter in the axis's unit (the :meth:`_display_unit` rule of
+        :meth:`_full_fit_summary`), n, BIC, the numerical KS statistic and the residual
+        strip's number. The KS VERDICT is not here: it stays in Details, not in artwork."""
+        params = [headline] if headline else []
+        for key, value in fit.params.items():
+            if headline and key in headline_keys:
+                continue
+            scale, uname = self._display_unit(col, fit.unit_of(key))
+            params.append(f"{_param_symbol(key)} = {float(value) * scale:.4g}"
+                          + (f" {uname}" if uname else ""))
+        parts = {"equation": ", ".join(params), "n": f"n = {fit.n}"}
+        if np.isfinite(float(fit.bic)):
+            parts["bic"] = f"BIC = {float(fit.bic):.6g}"
+        if gof:
+            parts["ks"] = f"KS = {float(gof['ks']):.3f}"
+        if resid_short:
+            parts["resid"] = resid_short
+        return parts
+
+    @staticmethod
+    def _readout_of(summary, colour: str | None) -> FitReadout:
+        """A histogram fit's :class:`FitReadout`. A summary without parts (the
+        exponential + gamma placeholder while it is on the worker) says so in the label,
+        where the numbers will appear."""
+        parts = getattr(summary, "parts", None) or {"equation": str(summary)}
+        return FitReadout(parts, (), None, colour)
 
     def _full_fit_summary(self, fit, col: str, gof: dict | None,
                           resid_short: str = "") -> str:
@@ -13376,23 +14102,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 self._legend_clusters(cluster_labels)
 
         # Optional least-squares best-fit line, PER SOURCE (never one line through
-        # two pooled clouds). The summary always lands in Details; it also becomes
-        # the title unless the user pinned their own.
-        titles = []
+        # two pooled clouds). The summary always lands in Details, and its numbers in
+        # the fit label -- never in the title, which stays the user's (or none).
         for src, x, y, _index, _identities in series:
-            t = self._overlay_scatter_fit(x, y, xcol, ycol, details,
-                                          src if multi else None)
-            if t:
-                titles.append(f"{src.label}: {t}" if multi else t)
-        title = "   |   ".join(titles)
-        # ...and the same numbers ON the figure when the Style box asks for them.
-        # The checkbox lived beside the FIT colour and worked only on the histogram,
-        # so the page that owns the scatter-fit combo -- the one where a slope, an
-        # intercept and an R² are exactly what a reader needs off the exported PNG --
-        # was the one page where ticking it did nothing (owner note #13). The scatter
-        # summary is already the full statement (equation, units, R² with its
-        # degrees-of-freedom tag, n), so there is no second, richer form to build.
-        self._draw_fit_values(titles)
+            self._overlay_scatter_fit(x, y, xcol, ycol, details, src if multi else None,
+                                      key=src.key)
+        # The equation, units, R² with its degrees-of-freedom tag and n, ON the figure,
+        # so the exported PNG carries them (owner note #13).
+        self._draw_fit_label()
 
         verdict = self._comparability(xcol, ycol)
         cluster_warnings = self._cluster_amplitude_warnings() if by_cluster else ()
@@ -13405,7 +14122,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                             **self._label_style())
         self._plot.setLabel("left", self._axis_label_for("left", ycol, log_y),
                             **self._label_style())
-        self._apply_title(title or None, accent=self._style.fit_color,
+        self._apply_title(None,
                           warn=self._warn_headline(self._stale_headline([xcol, ycol]),
                                                    verdict.headline,
                                                    "CHECK SELECTED AMPLITUDES" if cluster_warnings else ""))
@@ -13416,9 +14133,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _overlay_scatter_fit(
         self, x: np.ndarray, y: np.ndarray, xcol: str, ycol: str, details: list[str],
-        src: PlotSource | None = None,
+        src: PlotSource | None = None, key: str = "",
     ) -> str | None:
-        """Fit and draw the scatter best-fit line; return its title summary (or None).
+        """Fit and draw the scatter best-fit line; return its summary (or None).
+
+        The numbers go to the fit label as a :class:`fit_label.FitReadout` keyed by
+        ``key`` (the source's), never to the title.
 
         The line is sampled in DATA units across the plotted x-range and handed to
         the SAME viewbox as the points, so pyqtgraph's ``setLogMode`` renders it
@@ -13433,6 +14153,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         describe a population that does not exist."""
         if self._workspace_snapshot_rendering:
             if self._applied_scatter_fit != _SFIT_NONE:
+                self._scatter_fit_pending_after_snapshot = True
                 details.append(
                     "Scatter-fit configuration restored; press Plot to recompute the "
                     "regression. No fit was run while opening the project.")
@@ -13535,19 +14256,26 @@ class PlotsWindow(QtWidgets.QMainWindow):
         else:
             head = f"y = {fit.slope * fy / fx:.4g}·x + {fit.intercept * fy:.4g}{unit_txt}"
         summary = "   ".join(p for p in (head, r2_txt, f"(n = {fit.n})") if p)
-        variants = {}
-        for show_r2 in (False, True):
-            printed_r2 = (r2_txt if not np.isfinite(fit.r2) or _dof_tag else
-                          f"R² = {fit.r2:.3f}" if show_r2 else "")
-            variants[show_r2] = "   ".join(p for p in (head, printed_r2, f"(n = {fit.n})") if p)
-        item._presentation_fit_summaries = variants
-        self._presentation_scatter_variants.append((src.label if src is not None else "", variants))
+        # THE FIT LABEL'S COPY. The refusal ("undefined", or the dof tag on a number that
+        # is arithmetic) is a refusal, not a field: the label prints it whenever R² is
+        # asked for and no template or switch can drop it. Only the plain, meaningful
+        # number is a part the R² switch may leave out.
+        parts = {"equation": head, "n": f"n = {fit.n}"}
+        refusals: tuple[str, ...] = ()
+        if not np.isfinite(fit.r2) or _dof_tag:
+            refusals = (r2_txt,)
+        else:
+            parts["r2"] = f"R² = {fit.r2:.3f}"
+        self._presentation_readouts.append(
+            (key, FitReadout(parts, refusals, None, src.colour if src is not None else None)))
+        item._presentation_fit_family = "power law" if fit.log_log else "linear"
         if src is not None:
             # By the FIGURE's name for the source (`_legend_name`, the one resolver),
             # as the series entry above it is: with two rows typed to "Apo" the
             # series read "Apo — -700 mV" / "Apo — -600 mV" and these two fit entries
-            # read "Apo fit: …" twice in the same legend (A1-N2).
-            self._legend_add(item, f"{self._legend_name(src)} fit: {summary}",
+            # read "Apo fit: …" twice in the same legend (A1-N2). No numbers: they are
+            # in the fit label, one line per source in its colour.
+            self._legend_add(item, self._fit_legend_label(item, self._legend_name(src), key),
                              kind="fit", key=src.key)
         details.append(f"{who}{summary}")
         if not np.isfinite(fit.r2):
@@ -14001,7 +14729,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         details.extend(amplitude_warnings)
         details.extend(self._column_notes(list(res.columns), one))
         details.extend(self._detection_notes(one))
-        self._apply_title(self._explained_variance_text(res),
+        # No explained-variance sentence in the title: the PC1/PC2 axis labels already
+        # state it, and a title is the user's (the sentence is in Details, above).
+        self._apply_title(None,
                           warn=self._warn_headline(
                               self._stale_headline(list(res.columns), one),
                               "CHECK SELECTED AMPLITUDES" if amplitude_warnings else ""))

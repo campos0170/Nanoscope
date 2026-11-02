@@ -305,6 +305,13 @@ def _drawn_title(win) -> str:
     return re.sub(r"<[^>]+>", "", str(win._plot.titleLabel.text)).strip()
 
 
+def _drawn_fit_label(win) -> str:
+    """The fit label (plotux G3, 2026-11-01): the drawn surface a fit's numbers moved to,
+    from the automatic title and the values box."""
+    item = win._fit_label_item
+    return item.plain_text() if item is not None and item.isVisible() else ""
+
+
 def _drawn_legend(win) -> list[str]:
     legend = getattr(win._plot, "legend", None)
     return [] if legend is None else [label.text for _s, label in legend.items]
@@ -345,16 +352,13 @@ def test_turning_the_KS_verdict_off_cannot_hide_a_REJECTION(qapp, qtbot, show_go
     assert gof and gof.get("describes_data") is False, (
         f"premise: the exponential is REJECTED on a narrow peak -- {gof}")
 
-    title = _drawn_title(win)
-    assert "τ =" in title and "KS REJECTED" not in title, title
-    fit_rows = [t for t in _drawn_legend(win) if t.startswith("fit:")]
+    label = _drawn_fit_label(win)
+    assert "τ =" in label and "KS REJECTED" not in label, label
+    assert "KS REJECTED" not in _drawn_title(win)
+    fit_rows = [t for t in _drawn_legend(win) if t.startswith("fit (")]
     assert fit_rows and "KS REJECTED" not in fit_rows[0]
-    if values_box:
-        assert win._fit_values_item is not None
-        assert "REJECTED" not in win._fit_values_item.text
-        assert ("KS =" in win._fit_values_item.text) is show_gof
-    else:
-        assert win._fit_values_item is None, "the box is off, and the verdict did not need it"
+    # The values box's numbers are the label's extra fields now.
+    assert ("KS =" in label) is (values_box and show_gof), label
     assert "DOES NOT DESCRIBE THESE DATA" in win.details_text()
 
 
@@ -370,15 +374,15 @@ def test_a_fit_the_test_accepts_carries_no_verdict_in_the_title_or_the_legend(wi
     assert gof and gof.get("describes_data") is True, f"premise: a fit that passes -- {gof}"
     assert "REJECTED" not in _drawn_title(win)
     assert not any("REJECTED" in t for t in _drawn_legend(win))
-    assert win._fit_values_item is None
+    assert "KS =" not in _drawn_fit_label(win)
 
     win._style = replace(win._style, fit_values_on_plot=True)
     win._redraw()
-    assert "KS =" in win._fit_values_item.text
-    assert "consistent with these data" not in win._fit_values_item.text
+    assert "KS =" in _drawn_fit_label(win)
+    assert "consistent with these data" not in _drawn_fit_label(win)
     win._style = replace(win._style, show_gof=False)
     win._redraw()
-    assert "KS" not in win._fit_values_item.text, "off means: stop decorating a fine fit"
+    assert "KS" not in _drawn_fit_label(win), "off means: stop decorating a fine fit"
 
 
 def test_the_string_builder_still_carries_the_rejection_whatever_show_gof_says(win):

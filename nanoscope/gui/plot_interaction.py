@@ -272,6 +272,11 @@ class PlotNavigation(QtCore.QObject):
             self._vb.setRange(xRange=self._hist[0][0], yRange=self._hist[0][1], padding=0)
         else:
             self._reset()
+            # A range pinned in Axis properties IS the page's framing now
+            # (``plot_appearance._apply_axis_pins``): Reset view returns to it.
+            for index, (lo, hi) in (getattr(self.plot, "_nanoscope_axis_pins", None) or {}).items():
+                self._vb.enableAutoRange(axis=index, enable=False)
+                (self._vb.setXRange if index == 0 else self._vb.setYRange)(lo, hi, padding=0)
             # A reset that only ENABLES auto-range (Distribution summaries' ECDF framing)
             # has moved nothing yet: pyqtgraph fits at the next paint. Fit now, so the
             # framing recorded below is the reset one, not the zoom it reset from -- which
@@ -570,8 +575,16 @@ def keep_plot_history(plot):
 
 
 # -- the menu ------------------------------------------------------------------------------------
-def _populate_menu(menu: QtWidgets.QMenu, navigation: PlotNavigation | None, exports) -> None:
+def _populate_menu(menu: QtWidgets.QMenu, navigation: PlotNavigation | None, exports,
+                   context: Sequence = ()) -> None:
+    """Fill the app menu. ``context`` holds the right-clicked text element's own entries
+    (``figure_text``: Edit title…, Text style…, Automatic title, Hide title), or on the
+    plot's background its "Add title…", shown first."""
     menu.clear()
+    for title, callback in context:
+        menu.addAction(title, lambda fn=callback: fn())
+    if context:
+        menu.addSeparator()
     if navigation is not None:
         reset = menu.addAction("Reset view", navigation.reset_view)
         reset.setToolTip("Zoom and pan back to the page's own framing (auto-range or your "
@@ -591,7 +604,8 @@ def _populate_menu(menu: QtWidgets.QMenu, navigation: PlotNavigation | None, exp
     menu.setToolTipsVisible(True)
 
 
-def _app_menu(plot: pg.PlotItem, navigation, exports) -> QtWidgets.QMenu:
+def _app_menu(plot: pg.PlotItem, navigation, exports,
+              context_key: str | None = None) -> QtWidgets.QMenu:
     menu = getattr(plot, "_nanoscope_app_menu", None)
     if menu is None:
         views = plot.scene().views() if plot.scene() is not None else []
@@ -599,7 +613,15 @@ def _app_menu(plot: pg.PlotItem, navigation, exports) -> QtWidgets.QMenu:
         menu.setObjectName("plotAppContextMenu")
         menu.setAccessibleName("Plot actions")
         plot._nanoscope_app_menu = menu
-    _populate_menu(menu, navigation, exports)
+    context = []
+    text = getattr(plot, "_nanoscope_figure_text", None)
+    if context_key is not None and text is not None:
+        context = text.menu_entries(context_key)
+    elif text is not None:
+        # The plot's own background: what the figure lacks and has nothing to click
+        # ("Add title…" while the title draws nothing).
+        context = text.background_entries()
+    _populate_menu(menu, navigation, exports, context)
     return menu
 
 
@@ -608,13 +630,16 @@ def install_plot_interaction(plot, *, readout: PlotReadout | None = None,
                              exports: Sequence | Callable[[], Sequence] = (),
                              navigation: PlotNavigation | None = None,
                              x_name=None, y_name=None, x_log=None, y_log=None,
-                             extra=None, points=None) -> PlotNavigation:
+                             extra=None, points=None, text=None) -> PlotNavigation:
     """Give ``plot`` the app's Reset view / zoom history / menu / readout. Returns its navigation.
 
     ``navigation`` shares another plot's history instead of making one: the density
     marginals and Distributions' residual strip are linked to a main plot and mean the same
     view. ``exports`` is the page's own ``(title, callback[, enabled])`` list — the same verbs
     as its Export menu. The readout options are documented on :func:`readout_text`.
+    ``text`` is a ``figure_text.FigureTextHost``: with it, the plot's title, axes, legend
+    and annotations become editable in the figure (:func:`figure_text.attach_figure_text`),
+    and a right-click on one of them puts its entries on top of this menu.
     """
     if isinstance(plot, pg.PlotWidget):
         plot = plot.getPlotItem()
@@ -635,13 +660,21 @@ def install_plot_interaction(plot, *, readout: PlotReadout | None = None,
     plot.setMenuEnabled(False, enableViewBoxMenu=True)
 
     def raise_menu(ev, plot=plot, navigation=navigation, exports=exports):
-        menu = _app_menu(plot, navigation, exports)
+        # The text element a right-click landed on, recorded by figure_text's wrap just
+        # before it raised this menu; read once, so a plain right-click after it has none.
+        key = getattr(plot, "_nanoscope_menu_context", None)
+        plot._nanoscope_menu_context = None
+        menu = _app_menu(plot, navigation, exports, key)
+        text = getattr(plot, "_nanoscope_figure_text", None)
+        if text is not None:
+            text.last_menu = menu
         pos = ev.screenPos()
         menu.popup(QtCore.QPoint(int(pos.x()), int(pos.y())))
 
     vb.raiseContextMenu = raise_menu
     vb.getContextMenus = lambda _event: []
-    plot._nanoscope_menu_factory = lambda: _app_menu(plot, navigation, exports)
+    plot._nanoscope_menu_factory = lambda context_key=None: _app_menu(
+        plot, navigation, exports, context_key)
     if readout is not None and plot.scene() is not None:
         scene = plot.scene()
         hover = getattr(scene, "_nanoscope_hover", None)
@@ -650,15 +683,20 @@ def install_plot_interaction(plot, *, readout: PlotReadout | None = None,
             scene._nanoscope_hover = hover
         hover.add(plot, readout, {"x_name": x_name, "y_name": y_name, "x_log": x_log,
                                   "y_log": y_log, "extra": extra, "points": points})
+    if text is not None:
+        from .figure_text import attach_figure_text   # local: the editing half is optional
+
+        attach_figure_text(plot, text)
     return navigation
 
 
-def app_menu_for(plot) -> QtWidgets.QMenu | None:
-    """The app menu a right-click on ``plot`` would show now, freshly populated (tests)."""
+def app_menu_for(plot, context_key: str | None = None) -> QtWidgets.QMenu | None:
+    """The app menu a right-click on ``plot`` would show now, freshly populated (tests);
+    with ``context_key``, as a right-click on that text element would show it."""
     if isinstance(plot, pg.PlotWidget):
         plot = plot.getPlotItem()
     factory = getattr(plot, "_nanoscope_menu_factory", None)
-    return factory() if factory is not None else None
+    return factory(context_key) if factory is not None else None
 
 
 # -- the toolbar button --------------------------------------------------------------------------

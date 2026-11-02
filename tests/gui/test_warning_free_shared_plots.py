@@ -217,12 +217,16 @@ def test_voltage_no_fit_and_fit_keep_complete_details_and_export_metadata(
     window._series = series
     window._applied_fit = model
     window._redraw()
+    # The fit's numbers are in the fit label and the method in the caption (owner,
+    # 2026-11-01), so the figure's text is all three; none of it carries warning prose.
     title = window._plot.titleLabel.text
+    assert title == ""
+    shown = " ".join((window.fit_label_text(), window.caption_text()))
     for forbidden in ("⚠", "MIXED", "NOT COMPARABLE", "UNCALIBRATED", "uncalibrated",
                       "UNEQUAL", "detection caveat", "NOT in this series"):
-        assert forbidden not in title
+        assert forbidden not in shown
     if model == "linear":
-        assert "slope" in title and "R²" in title
+        assert "slope" in window.fit_label_text() and "R²" in window.fit_label_text()
     expected = (list(series.warnings) + list(series.duration_warnings)
                 + [f"{recording}: {warning}" for recording, warning in series.detection_warnings]
                 + [f"{item.recording}: {item.reason}" for item in series.excluded])

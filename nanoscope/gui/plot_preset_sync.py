@@ -90,7 +90,9 @@ def _readable(family: str, kind: str | None, carried: Any, unread: list[str]
         if unreadable_preset(family, kind, payload):
             unread.append(f"{label} “{name}”")
         elif family == APPEARANCE_PRESETS:
-            readable[name] = PlotAppearance.from_mapping(payload).to_dict()
+            # Style only, as user_preset_states() reads this computer's copy: an older
+            # build's preset that still carries wording must compare equal to it.
+            readable[name] = PlotAppearance.from_mapping(payload).style_only().to_dict()
         else:
             readable[name] = payload
     return readable

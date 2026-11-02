@@ -99,6 +99,7 @@ from PySide6.QtWidgets import (
 
 import pyqtgraph as pg
 
+from .column_checklist import ColumnChecklist, ColumnChooserPopup
 from .inspector_widgets import Disclosure, InspectorScrollArea, PinnedActions, host_layout
 from .numeric_text import parse_strict_number
 
@@ -8308,11 +8309,20 @@ class EventTable(QWidget):
             self._notice_actions[key] = action
         self.notice_chip.clicked.connect(self._open_notice_menu)
         toolbar.addWidget(self.notice_chip, 1)
-        self.columns_button = QPushButton('Columns…')
-        self.columns_button.setToolTip('Choose visible columns. Drag column headers to reorder; the view is remembered.')
-        self.columns_menu = QMenu(self.columns_button)
-        self.columns_menu.aboutToShow.connect(self._build_columns_menu)
-        self.columns_button.setMenu(self.columns_menu)
+        # ONE OPENING, MANY COLUMNS. This was a QMenu of checkable actions, and Qt hides a
+        # menu before it fires the entry clicked, so every opening changed one column (five
+        # hidden = five openings, ten clicks); it also listed schema order and raw names, not
+        # the header's. The button now opens a ColumnChooserPopup that stays up while rows
+        # are ticked; it is built on the first click (see :meth:`open_columns_popup`).
+        # The ▾ keeps it reading as "opens a list" now the button carries no QMenu.
+        self.columns_button = QPushButton('Columns… ▾')
+        self.columns_button.setAccessibleName('Columns…')
+        self.columns_button.setToolTip(
+            'Choose visible columns: tick several in one go, filter, show or hide them all, '
+            'or go back to the defaults. Drag column headers to reorder; right-click a header '
+            'to hide that column. The view is remembered.')
+        self.columns_button.clicked.connect(self.open_columns_popup)
+        self.columns_popup: ColumnChooserPopup | None = None
         toolbar.addWidget(self.columns_button)
         root.addLayout(toolbar)
 
@@ -8370,6 +8380,11 @@ class EventTable(QWidget):
         self.view.setModel(self._proxy)
         self.view.horizontalHeader().setSectionsMovable(True)
         self.view.horizontalHeader().sectionMoved.connect(self._save_column_preferences)
+        # Right-click a header: Hide "that column" / Columns…. A Qt signal on the header,
+        # not an event filter.
+        self.view.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.horizontalHeader().customContextMenuRequested.connect(
+            self._on_header_context_menu)
 
         root.addWidget(self.view)
 
@@ -8464,6 +8479,13 @@ class EventTable(QWidget):
         finally:
             self._applying_columns = False
         self._sync_refusal_note()
+        self._refill_open_columns_popup()
+
+    def _refill_open_columns_popup(self) -> None:
+        # A detection (or a stale-badge or clock change) landing while Columns… is open must
+        # refill it, or its next click works from rows the table no longer has.
+        if self.columns_popup is not None and self.columns_popup.isVisible():
+            self._fill_columns_popup()
 
     def _apply_column_preferences(self) -> None:
         """Change header order/visibility only; the source schema is untouched."""
@@ -8487,6 +8509,13 @@ class EventTable(QWidget):
         # An old preference cannot express visibility for fields that did not exist.
         known = set(preferred)
         hidden = set(hidden) | {c for c in self._DEFAULT_HIDDEN if c not in known}
+        # THE TABLE IS NEVER EMPTY. A saved view that hides every column (written before
+        # the guard, or by hand) would come back as bare row numbers every session; it is
+        # ignored for visibility and the default set is shown instead.
+        if columns and hidden.issuperset(columns):
+            hidden = set(self._DEFAULT_HIDDEN)
+            if hidden.issuperset(columns):
+                hidden.discard(order[0])
         header = self.view.horizontalHeader()
         self._applying_columns = True
         try:
@@ -8506,30 +8535,192 @@ class EventTable(QWidget):
             return
         order = [columns[header.logicalIndex(i)] for i in range(header.count())]
         hidden = [name for i, name in enumerate(columns) if self.view.isColumnHidden(i)]
-        self._column_preferences = {'order': order, 'hidden': hidden}
+        self._column_preferences = self._with_absent_columns(order, hidden, columns)
         QSettings().setValue(self._COLUMN_SETTINGS_KEY, json.dumps(self._column_preferences))
+
+    def _with_absent_columns(self, order: list, hidden: list, columns: list) -> dict:
+        """``{order, hidden}`` for this table's columns, plus what the saved view says about
+        columns this table LACKS. One preference serves every table the selector shows, and
+        a column missing here (amplitude columns before Curate ▸ Apply, ML or hand-made
+        columns) is still a choice the user made on another table: without it a change made
+        here forgot that choice, and the unknown-field rule in
+        :meth:`_apply_column_preferences` showed a column they had hidden and hid a
+        default-hidden one they had shown. Each absent name goes back after the name it
+        followed in the saved order."""
+        old_order = self._column_preferences.get('order')
+        old_hidden = self._column_preferences.get('hidden')
+        old_order = old_order if isinstance(old_order, list) else []
+        old_hidden = old_hidden if isinstance(old_hidden, list) else []
+        present = set(columns)
+        order = list(order)
+        for i, name in enumerate(old_order):
+            if name in present or name in order:
+                continue
+            at = 0
+            for before in reversed(old_order[:i]):
+                if before in order:
+                    at = order.index(before) + 1
+                    break
+            order.insert(at, name)
+        hidden = list(hidden) + [name for name in dict.fromkeys(old_hidden)
+                                 if name not in present and name not in hidden]
+        return {'order': order, 'hidden': hidden}
 
     def set_column_visible(self, name: str, visible: bool) -> None:
         columns = list(self._model.df.columns)
         if name in columns:
-            self.view.setColumnHidden(columns.index(name), not visible)
+            logical = columns.index(name)
+            # The last visible column stays: a table of bare row numbers is not a view.
+            if (not visible and not self.view.isColumnHidden(logical)
+                    and self._visible_column_count() <= 1):
+                return
+            self.view.setColumnHidden(logical, not visible)
             self._save_column_preferences()
 
+    def _visible_column_count(self) -> int:
+        return sum(not self.view.isColumnHidden(i) for i in range(self._model.columnCount()))
+
     def reset_column_view(self) -> None:
+        """Default order AND default columns, and the saved view forgotten."""
         self._column_preferences = {}
         QSettings().remove(self._COLUMN_SETTINGS_KEY)
         self._apply_column_preferences()
 
-    def _build_columns_menu(self) -> None:
-        self.columns_menu.clear()
-        reset = self.columns_menu.addAction('Restore scientific column order')
-        reset.triggered.connect(self.reset_column_view)
-        self.columns_menu.addSeparator()
-        for i, name in enumerate(self._model.df.columns):
-            action = self.columns_menu.addAction(str(name))
-            action.setCheckable(True)
-            action.setChecked(not self.view.isColumnHidden(i))
-            action.toggled.connect(lambda checked, column=name: self.set_column_visible(column, checked))
+    def reset_column_order(self) -> None:
+        """Columns… ▸ Default order: ``_SCIENTIFIC_ORDER`` first, the rest in schema order —
+        what a fresh install shows — leaving WHICH columns are shown alone.
+
+        The one old entry ("Restore scientific column order") also reset visibility, which
+        its label never said. The saved order names every current column, so the
+        unknown-field rule in :meth:`_apply_column_preferences` cannot re-hide a column the
+        user chose to show. It names the columns this table lacks too, as the saved view
+        had them shown or hidden, the scientific ones in their scientific place."""
+        columns = list(self._model.df.columns)
+        if not columns:
+            return
+        hidden = [name for i, name in enumerate(columns) if self.view.isColumnHidden(i)]
+        kept = self._with_absent_columns([], hidden, columns)
+        absent = [name for name in kept['order'] if name not in columns]
+        order = [name for name in self._SCIENTIFIC_ORDER if name in columns or name in absent]
+        order.extend(name for name in columns if name not in order)
+        order.extend(name for name in absent if name not in order)
+        self._column_preferences = {'order': order, 'hidden': kept['hidden']}
+        self._apply_column_preferences()
+        self._save_column_preferences()
+        if self.columns_popup is not None and self.columns_popup.isVisible():
+            self._fill_columns_popup()      # the rows follow the header's new order
+
+    # -- Columns… (the popup) ----------------------------------------------
+    def column_entries(self) -> list[tuple[str, str, str]]:
+        """``(name, header label, header tooltip)`` for every column, in the table's VISUAL
+        order — the rows Columns… lists, worded exactly as the header is (the median-depth
+        label, the ⚠ stale badge, the ``(t₀=0)`` clock suffix)."""
+        columns = list(self._model.df.columns)
+        header = self.view.horizontalHeader()
+        if header.count() != len(columns):
+            return []
+        entries = []
+        for visual in range(header.count()):
+            logical = header.logicalIndex(visual)
+            label = self._model.headerData(logical, Qt.Horizontal, Qt.DisplayRole)
+            tip = self._model.headerData(logical, Qt.Horizontal, Qt.ToolTipRole)
+            name = str(columns[logical])
+            entries.append((name, str(label or name), str(tip or "")))
+        return entries
+
+    def open_columns_popup(self) -> ColumnChooserPopup:
+        """Show the Columns… popup under its button, filled from the live table."""
+        if self.columns_popup is None:
+            # Hide all keeps `accepted`: the column the A/R keys write and every export
+            # reads, and the one a table that may not be empty is most use with.
+            checklist = ColumnChecklist(noun='columns', minimum=1, keep=('accepted',))
+            popup = ColumnChooserPopup(checklist, self)
+            popup.setAccessibleName('Visible columns')
+            order = popup.add_footer_button(
+                'Default order',
+                'Put the columns back in the scientific order. Which columns are shown is '
+                'left as it is (Default columns does that).')
+            order.clicked.connect(self.reset_column_order)
+            popup.aboutToShow.connect(self._fill_columns_popup)
+            checklist.changed.connect(self._apply_chosen_columns)
+            # After the checklist's own Default (connected first), which set the listed rows.
+            checklist.default_btn.clicked.connect(self._default_columns_not_on_screen)
+            self.columns_popup = popup
+        self.columns_popup.show_below(self.columns_button)
+        return self.columns_popup
+
+    def _fill_columns_popup(self) -> None:
+        entries = self.column_entries()
+        columns = list(self._model.df.columns)
+        shown = [str(name) for i, name in enumerate(columns) if not self.view.isColumnHidden(i)]
+        defaults = [name for name, _label, _tip in entries if name not in self._DEFAULT_HIDDEN]
+        self.columns_popup.checklist.set_entries(entries, shown, defaults)
+
+    def _apply_chosen_columns(self, names: list) -> None:
+        """One Columns… gesture: every column's visibility, then ONE save."""
+        want = set(names)
+        columns = list(self._model.df.columns)
+        if not want.intersection(map(str, columns)):
+            return      # never empty (the checklist's own minimum says the same)
+        # Only the columns the popup lists: one the table gained since it filled is left
+        # as the table has it, never hidden because the popup never offered it.
+        listed = set(self.columns_popup.checklist.keys()) if self.columns_popup else None
+        self._applying_columns = True
+        try:
+            for i, name in enumerate(columns):
+                if listed is not None and str(name) not in listed:
+                    continue
+                hide = str(name) not in want
+                if self.view.isColumnHidden(i) != hide:
+                    self.view.setColumnHidden(i, hide)
+        finally:
+            self._applying_columns = False
+        self._save_column_preferences()
+
+    def _default_columns_not_on_screen(self) -> None:
+        """Default columns puts EVERY column back to its default choice, and the saved view
+        also speaks for columns this table lacks (:meth:`_with_absent_columns`): those go
+        back too, shown unless hidden by default, keeping their place in the order. The
+        rows the popup lists were set (and saved) by the checklist's own Default just
+        before; a filtered "Default for these" touches only the rows it shows."""
+        if self.columns_popup is None or self.columns_popup.checklist.filter.text():
+            return
+        order = self._column_preferences.get('order')
+        hidden = self._column_preferences.get('hidden')
+        if not isinstance(order, list) or not isinstance(hidden, list):
+            return
+        present = set(self._model.df.columns)
+        default = [name for name in hidden if name in present]
+        default.extend(name for name in order
+                       if name not in present and name in self._DEFAULT_HIDDEN)
+        if default != hidden:
+            self._column_preferences = {'order': order, 'hidden': default}
+            QSettings().setValue(self._COLUMN_SETTINGS_KEY,
+                                 json.dumps(self._column_preferences))
+
+    def _on_header_context_menu(self, pos) -> None:
+        """Right-click a header: Hide “that column”, or open Columns…."""
+        header = self.view.horizontalHeader()
+        logical = header.logicalIndexAt(pos)
+        columns = list(self._model.df.columns)
+        menu = QMenu(self.view)
+        menu.setToolTipsVisible(True)    # the greyed Hide entry says why
+        act_hide = None
+        if 0 <= logical < len(columns):
+            label = self._model.headerData(logical, Qt.Horizontal, Qt.DisplayRole)
+            label = str(label or columns[logical]).replace('&', '&&')
+            act_hide = menu.addAction(f'Hide “{label}”')
+            if self._visible_column_count() <= 1:
+                act_hide.setEnabled(False)
+                act_hide.setToolTip('At least one column stays visible')
+        act_columns = menu.addAction('Columns…')
+        chosen = self._exec_menu(menu, header.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if act_hide is not None and chosen is act_hide:
+            self.set_column_visible(columns[logical], False)
+        elif chosen is act_columns:
+            self.open_columns_popup()
 
     #: How many rows :meth:`_autosize_columns` measures — spread over the WHOLE frame,
     #: so a wide value in the tail still widens its column (Qt's own pass read only the
@@ -8579,6 +8770,7 @@ class EventTable(QWidget):
         event frame. See :mod:`nanoscope.core.clock`.
         """
         self._model.set_clock_offset(offset_s)
+        self._refill_open_columns_popup()      # the (t₀=…) labels it lists
 
     #: Text columns that identify the run rather than the row. Captioned when constant.
     _IDENTITY_COLUMNS = ("recording", "pore_id")
@@ -8596,7 +8788,7 @@ class EventTable(QWidget):
 
         This method used to move them to the far right itself, with
         ``QHeaderView.moveSection``. It no longer moves anything, so it cannot fight the
-        layout the Columns… menu remembers: :meth:`_apply_column_preferences` runs right
+        layout the Columns… popup remembers: :meth:`_apply_column_preferences` runs right
         after it and owns the order — the user's saved one, or by default
         ``_SCIENTIFIC_ORDER``, which paints the scientific block first and both identity
         columns after it, constant or not. Either way the order is VISUAL only; the
@@ -8642,6 +8834,7 @@ class EventTable(QWidget):
         self._model.set_stale_columns(names, tooltip)
         if self._model.stale_columns != before:
             self._autosize_columns()
+            self._refill_open_columns_popup()
 
     @property
     def stale_columns(self) -> tuple[str, ...]:

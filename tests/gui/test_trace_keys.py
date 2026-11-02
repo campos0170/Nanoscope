@@ -188,23 +188,23 @@ def test_return_adds_only_after_the_user_pointed_at_the_trace(rig):
 def test_esc_discards_but_never_leaves_draw_mode(rig):
     win, doc_id = rig
     tv = win._trace_view
-    win._trace_keys.set_draw_mode(True)
-    assert tv.draw_mode() and win._act_draw_mode.isChecked()
+    win._trace_keys.set_annotate(True)                          # E is Annotate mode now
+    assert tv.draw_mode() and win._act_annotate.isChecked()
     _point(win, doc_id, 20_200)
     win._trace_keys.catch()
     win._trace_keys.escape()
-    assert tv.measure_empty() and tv.draw_mode()
+    assert tv.measure_empty() and tv.draw_mode() and win._trace_keys.annotate()
 
 
-def test_e_toggles_draw_mode_and_the_menu_item_follows(rig):
+def test_e_toggles_annotate_mode_and_the_menu_item_follows(rig):
     win, _ = rig
-    win._trace_keys.toggle_draw_mode()
-    assert win._trace_view.draw_mode() and win._act_draw_mode.isChecked()
-    win._act_draw_mode.setChecked(False)
-    assert not win._trace_view.draw_mode()
-    win._act_draw_mode.setChecked(True)
-    assert win._trace_view.draw_mode()
-    assert win._analysis_panel.measure_panel.is_active()       # draw mode turned Measure on
+    win._trace_keys.toggle_annotate()
+    assert win._trace_view.draw_mode() and win._act_annotate.isChecked()
+    win._act_annotate.setChecked(False)
+    assert not win._trace_view.draw_mode() and not win._trace_keys.annotate()
+    win._act_annotate.setChecked(True)
+    assert win._trace_view.draw_mode() and win._trace_keys.annotate()
+    assert win._analysis_panel.measure_panel.is_active()       # the mode turned Measure on
 
 
 def test_a_drawn_span_is_fitted_on_release(rig):

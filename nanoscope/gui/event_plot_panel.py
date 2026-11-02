@@ -52,7 +52,10 @@ from ..core.sources import amplitude_comparability, amplitude_units_label
 from ..plot.style import OKABE_ITO
 from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
-from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .figure_text import (SHARED_LABELS_REASON, TextTarget, appearance_text_host,
+                          apply_text_style, figure_text_for, plain_text)
+from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
+                              reframe_axis_pins)
 from .plot_interaction import (axis_name, image_value, install_plot_interaction,
                                reset_plot_history, view_button, window_readout)
 from .plot_templates import WindowTemplateControls
@@ -68,6 +71,9 @@ __all__ = ["EventPlotWindow"]
 DENSITY = "Density"  # stable workspace key; the visible label is deliberately more precise
 DENSITY_LABEL = "Event-count heatmap"
 ENSEMBLE = "Ensemble"
+#: The keys each view's Axis properties pins are kept under (``PlotAppearance.for_view``). A
+#: bare pin, saved before pins were kept per view, is the map's: the view the window opens on.
+PIN_MAP, PIN_ENSEMBLE = "map", "ensemble"
 
 # Metric ids (X/Y choices for the density map). ``ecd`` is computed on demand.
 _M_DWELL = "dwell_s"
@@ -193,9 +199,12 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
+        # ⌘Z on the page, not on these controls: an edit made in the figure is undone from
+        # the keyboard whatever the Section shows (FIG-4); a page behind another Explorer
+        # tab is hidden, so it does not answer.
         self._appearance_widget = PlotAppearanceWidget(
             self._appearance, include_colors=True, include_markers=False,
-            multi_view_labels=True)
+            multi_view_labels=True, shortcut_parent=self)
         self._appearance_widget.changed.connect(self._on_appearance_changed)
         self._appearance_section = bounded_controls(self._appearance_widget)
         layout.addWidget(self._appearance_section)
@@ -274,9 +283,26 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             value = image_value(self._density_image, vx, vy)
             return "" if value is None else f"Event count {value:.0f}"
 
+        # In-figure editing (figure_text) on the map and the ensemble, one controller per
+        # PlotItem: the marginals and the colour bar are NOT given controllers of their own;
+        # their labels are extra targets of the map's (plan G4, the six-install risk). Log is
+        # the map's own Log x / Log y (one store), which re-bins as a click on them does.
+        def log_box(side: str) -> QtWidgets.QCheckBox:
+            return self._logx if side == "bottom" else self._logy
+
+        self._density_text_host = appearance_text_host(
+            self._density_main, self._appearance_widget,
+            axis_hooks={"log": lambda side, on: log_box(side).setChecked(bool(on)),
+                        "log_state": lambda side: log_box(side).isChecked()},
+            extra_targets=self._density_label_targets, shared_labels=SHARED_LABELS_REASON,
+            pin_view=PIN_MAP, primary_view=PIN_MAP)
         self._density_nav = install_plot_interaction(
             self._density_main, readout=self._readout, exports=exports, x_name=x_name,
-            y_name=y_name, x_log=x_log, y_log=y_log, extra=density_count)
+            y_name=y_name, x_log=x_log, y_log=y_log, extra=density_count,
+            text=self._density_text_host)
+        controller = figure_text_for(self._density_main)
+        for key, target in self._density_label_targets().items():
+            controller._wrap(target.item, lambda _ev, key=key: key)
         install_plot_interaction(self._density_top, readout=self._readout, exports=exports,
                                  navigation=self._density_nav, x_name=x_name, x_log=x_log,
                                  y_name="count")
@@ -284,11 +310,35 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                                  navigation=self._density_nav, y_name=y_name, y_log=y_log,
                                  x_name="count")
         self._ensemble_nav = install_plot_interaction(
-            self._ensemble_plot, readout=self._readout, exports=exports)
+            self._ensemble_plot, readout=self._readout, exports=exports,
+            text=appearance_text_host(
+                self._ensemble_plot, self._appearance_widget,
+                axis_hooks={"log_reason": "The ensemble draws current against time on "
+                                          "linear axes."},
+                shared_labels=SHARED_LABELS_REASON, pin_view=PIN_ENSEMBLE, primary_view=PIN_MAP))
         navigations = (self._density_nav, self._ensemble_nav)
         self._workflow.add_view_control(view_button(
             lambda: self._density_nav if self.current_view() == DENSITY else self._ensemble_nav,
             navigations))
+
+    def _density_label_targets(self) -> dict:
+        """The map's own labels outside its PlotItem: the colour bar's and the marginals'."""
+        return {key: TextTarget(axis, auto, noun="label")
+                for key, (axis, auto) in self._density_labels().items()}
+
+    def _density_labels(self) -> dict:
+        # pyqtgraph draws a vertical colour bar's label on its LEFT axis; ``.axis`` is the
+        # tick axis on the right, whose label is hidden, so editing it changed nothing seen.
+        bar = self._colorbar
+        label_axis = bar.getAxis("bottom" if bar.horizontal else "left")
+        return {"colorbar.label": (label_axis, "Event count"),
+                "marginal.left.label": (self._density_top.getAxis("left"), "count"),
+                "marginal.bottom.label": (self._density_right.getAxis("bottom"), "count")}
+
+    def label_text(self, key: str) -> str:
+        """A colour-bar or marginal label as drawn (plain text)."""
+        axis, _auto = self._density_labels()[key]
+        return plain_text(axis.labelText) if axis.labelText else ""
 
     def _show_appearance(self, visible: bool) -> None:
         self._workflow.set_section("Appearance" if visible else "Data")
@@ -314,12 +364,33 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     def appearance_state(self) -> dict:
         return self._appearance.to_dict()
 
+    def _frame(self, plot: pg.PlotItem) -> None:
+        """A draw frames its data, then a range typed in Axis properties is the view again
+        (FIG-2): the mark tells the next apply that this was a draw, so an appearance step
+        alone still keeps a zoom made by hand."""
+        plot.autoRange()
+        reframe_axis_pins(plot)
+        self._apply_appearance()
+
     def _apply_appearance(self) -> None:
-        apply_plot_appearance(self._density_main, self._appearance, plot_widget=self._density_glw)
-        marginal = replace(self._appearance, title=None, x_label=None, y_label=None)
+        # Each view draws only the pins typed on it (figures2-1): a time range pinned on the
+        # ensemble blanked the map, whose x is log10 dwell.
+        apply_plot_appearance(self._density_main,
+                              self._appearance.for_view(PIN_MAP, primary=PIN_MAP),
+                              plot_widget=self._density_glw)
+        # The map's element styles and axis pins are the map's: a marginal shares only the
+        # figure-wide look, and its count label is styled below as its own element.
+        marginal = replace(self._appearance, title=None, x_label=None, y_label=None,
+                           text=None, axes=None, fit_label=None)
         for plot, item in ((self._density_top, self._top_marginal_item),
                            (self._density_right, self._right_marginal_item)):
             apply_plot_appearance(plot, marginal, data_items=(item,))
+        for key, (axis, auto) in self._density_labels().items():
+            original = getattr(axis, "_nanoscope_label_style", None)
+            if original is None:
+                original = axis._nanoscope_label_style = dict(axis.labelStyle)
+            axis.labelStyle = dict(original)  # a style taken off must go, not linger
+            apply_text_style(axis, self._appearance.text_style(key), auto)
         # Mean and median are summaries, not fits: preserve their individual
         # colors and solid/dashed identities while sharing typography/line width.
         ensure_item_legend(self._ensemble_plot, ((self._events_item, "Events"),
@@ -334,8 +405,12 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             if self.current_view() == ENSEMBLE else
             "The event-count heatmap has no fitted curve. Its colours use the colormap control.")
         apply_plot_appearance(
-            self._ensemble_plot, self._appearance, plot_widget=self._ensemble_widget,
+            self._ensemble_plot, self._appearance.for_view(PIN_ENSEMBLE, primary=PIN_MAP),
+            plot_widget=self._ensemble_widget,
             data_items=(self._events_item,), fit_items=(self._mean_item, self._median_item))
+        controller = figure_text_for(self._ensemble_plot)
+        if controller is not None:
+            controller.refresh()        # the legend may be new since the last draw
         if len(self._band_items) == 3:
             # The band follows the summary curve it surrounds (its colour may just have
             # changed); restyling a brush is presentation only.
@@ -884,7 +959,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                 f"{self._metric_label(y_id)} vs {self._metric_label(x_id)}   ·   "
                 f"n = {int(counts.sum())} of {len(acc.df)} accepted events")
         self._apply_density_labels()
-        self._density_main.autoRange()
+        self._frame(self._density_main)
 
     def _density_message(self, text: str) -> None:
         self._density_main.setTitle(None)
@@ -967,7 +1042,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._ensemble_auto_title = self._ensemble_title(matrix.shape[0], skipped)
         self._apply_ensemble_title()
         self._refresh_ensemble_notes()
-        self._ensemble_plot.autoRange()
+        self._frame(self._ensemble_plot)
 
     # -- ensemble band ---------------------------------------------------------------------------
     def _band_kind(self) -> str:
@@ -1439,7 +1514,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             f"{self._metric_label(y_id)} vs {self._metric_label(x_id)}   ·   "
             f"n = {count_text}")
         self._apply_density_labels()
-        self._density_main.autoRange()
+        self._frame(self._density_main)
 
     def _render_ensemble_snapshot(self) -> None:
         self._ensemble_plot.clear()
@@ -1502,7 +1577,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._ensemble_auto_title = self._ensemble_title(*self._ensemble_kept_and_skipped())
         self._apply_ensemble_title()
         self._refresh_ensemble_notes()
-        self._ensemble_plot.autoRange()
+        self._frame(self._ensemble_plot)
 
     def ensemble_traces(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
         return self._ensemble

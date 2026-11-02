@@ -640,7 +640,9 @@ def join_edge_fits(own: Mapping[str, str], bounds: tuple[int, int], *,
     design 5.5): each edge's entry, window (``W``), rise and placed position from its own record,
     an edge no record set marked "not requested" at its bound, and the shared parameters from
     ``shared`` when it is one of the records (the trace keys pass the latest fit's), else from the
-    first. One record that set both edges comes back as it is; ``None`` when there is none."""
+    first. One record that set both edges comes back as it is; ``None`` when there is none. A
+    drawn span's mark (``drawn``) is per edge here, as the window is: ``{"start": true}`` names
+    the edge a drawn fit set, and no key means neither was."""
     if not own:
         return None
     if len(own) == 2 and own["start"] == own["end"]:
@@ -651,6 +653,10 @@ def join_edge_fits(own: Mapping[str, str], bounds: tuple[int, int], *,
         part = {name: fit[key][name] for name, fit in fits.items() if name in (fit.get(key) or {})}
         if part or key in out:
             out[key] = part
+    drawn = {name: True for name, fit in fits.items() if fit.get("drawn")}
+    out.pop("drawn", None)
+    if drawn:
+        out["drawn"] = drawn
     out["edges"] = {
         name: fits[name]["edges"][name] if name in fits else {
             "pos": int(pos), "fitted": False, "z": 0.0, "step": 0.0,

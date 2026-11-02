@@ -353,6 +353,38 @@ def _restore_legend(plot, state, series):
     return legend
 
 
+def _unreplayable_view_children(item) -> bool:
+    """True when the ViewBox carries a child the model cannot replay (D10).
+
+    A LabelItem or TextItem parented to the ViewBox itself -- the fit label, a provenance
+    caption, a fit-values box -- is in neither ``addedItems`` nor ``items``, so the series
+    test above cannot see it, and a re-render would silently drop the fit's numbers.
+    Only the ViewBox's own internals and the standard legend (captured below) may be there.
+    """
+    vb = item.vb
+    own = {vb.childGroup, getattr(vb, "background", None), getattr(vb, "rbScaleBox", None),
+           getattr(vb, "borderRect", None), getattr(vb, "locateGroup", None),
+           getattr(item, "legend", None)}
+    return any(child not in own and child.isVisible() for child in vb.childItems())
+
+
+#: The element styles (``PlotAppearance.text`` keys) a re-render reproduces: the title
+#: options, the axis label CSS and the tick font are captured as they are drawn.
+_REPLAYABLE_TEXT = re.compile(r"^(title|axis\.(bottom|left|top|right)\.(label|ticks))$")
+
+
+def _unreplayable_text_styles(item) -> bool:
+    """True when a per-element style is one the model cannot replay: a legend entry's font
+    family lives only in its rich text, and any other element is not in the model."""
+    for key, style in dict(getattr(item, "_nanoscope_text_elements", None) or {}).items():
+        if _REPLAYABLE_TEXT.match(key):
+            continue
+        if key.startswith("legend.entry.") and getattr(style, "family", None) is None:
+            continue
+        return True
+    return False
+
+
 def capture_cartesian_model(item) -> bytes | None:
     """Return a restricted re-renderable model, or None without modifying the item.
 
@@ -372,6 +404,8 @@ def capture_cartesian_model(item) -> bytes | None:
             return None
         if set(item.vb.addedItems) != set(item.items):
             return None
+        if _unreplayable_view_children(item) or _unreplayable_text_styles(item):
+            return None
         if (item.titleLabel.opts.get("justify", "center") != "center"
                 or any(not graphic.transform().isIdentity() or graphic.rotation() != 0
                        or graphic.scale() != 1 for graphic in (item.titleLabel, item.titleLabel.item))):
@@ -383,7 +417,9 @@ def capture_cartesian_model(item) -> bytes | None:
             formatter = _capture_axis_formatter(axis)
             if (getattr(axis, "_tickLevels", None) is not None
                     or getattr(axis, "_tickSpacing", None) is not None
-                    or any(name in vars(axis) for name in ("tickStrings", "tickValues", "logTickStrings"))
+                    or getattr(axis, "major_tick", None) is not None
+                    or any(name in vars(axis) for name in ("tickStrings", "tickValues", "logTickStrings",
+                                                           "tickSpacing"))
                     or not axis.transform().isIdentity() or axis.rotation() != 0
                     or QtWidgets.QGraphicsItem.scale(axis) != 1
                     or not axis.label.transform().isIdentity()

@@ -45,6 +45,15 @@ them:
    once with the window grown outward; the test is skipped when the window already reaches
    a neighbour.
 
+A SPAN DRAWN BY A DRAG (``drawn=True``) is loose by however far the hand overshot, which at a
+close zoom is many times the 12-pixel window: an edge drawn 16 px out searched only open pore
+and was refused as "not significant", or, with the step just past the window's inner edge,
+fitted on the noise (rule 4 reads ``L`` samples beyond the window). So for a drawn span each
+window reaches the 0.45-span cap whatever the zoom; the INNER window edge is guarded as the
+outer one is, refusing a split that hugs it or whose inner side steps further in past it (the
+cap stops the window growing inward); and an edge that finds no step in a span that does hold
+one says so (:data:`REASON_FAR`) instead of blaming the noise. Every other caller is unchanged.
+
 An edge that fails keeps its placed position and says why (``EdgeResult.reason``). A fit on
 both edges is all or nothing at the ROW level (:attr:`EdgeFit.complete`): the caller decides
 what to do with one good edge and one that failed; this module never mixes the two silently.
@@ -67,7 +76,9 @@ KNOWN LIMITS, each pinned by a test
   edge, which is left unfitted (design 5.1).
 * An edge placed further out than the window ``W`` is usually left alone, but a split can hug the
   INNER window border when the real step lies just beyond it, because rule 4's statistics read up
-  to ``L`` samples past the window. The measured rates are in the test file.
+  to ``L`` samples past the window. The measured rates are in the test file. A drawn span's
+  inner edge is guarded: over 1,100 drags drawn 300 to 520 samples out on one side at 3.67
+  samples per pixel, 1 far edge was fitted wrong (61 unguarded).
 * ``b_out`` is a median of samples beyond the window; a real edge within 64 samples beyond it makes
   that median the event level, and the outer test then passes on the event's own interior.
 * An event longer than the baseline estimator's rough window is partly absorbed into the CONTRACT's
@@ -113,6 +124,7 @@ __all__ = [
     "REASON_NOT_REQUESTED",
     "REASON_NO_BASELINE",
     "REASON_CROSS",
+    "REASON_FAR",
 ]
 
 METHOD = "step"
@@ -177,6 +189,8 @@ REASON_NONFINITE = "non-finite samples in the window"
 REASON_NOT_REQUESTED = "not requested"
 REASON_NO_BASELINE = "no open-pore samples to take a baseline from"
 REASON_CROSS = "the fitted edges cross"
+#: A drawn span only: this edge's window holds no step, but the span does, further in.
+REASON_FAR = "no step near the drawn edge"
 
 
 # ================================================================================================
@@ -377,9 +391,11 @@ def _directed_split(P: np.ndarray, a: int, b: int, edge: str, min_len: int) -> i
     return a + min_len + k
 
 
-def _window_half_width(span: int, px: float, rise: float, min_len: int) -> int:
-    """W = max(12 px of the current zoom in samples, 3 rises), capped at 0.45 span; the cap wins."""
-    w = max(_WINDOW_PX * px, _WINDOW_RISES * rise)
+def _window_half_width(span: int, px: float, rise: float, min_len: int,
+                       window_min: float = 0.0) -> int:
+    """W = max(12 px of the current zoom in samples, 3 rises, ``window_min``), capped at 0.45
+    span; the cap wins. A drawn span passes the cap itself as ``window_min``."""
+    w = max(_WINDOW_PX * px, _WINDOW_RISES * rise, window_min)
     w = min(w, _SPAN_CAP * span)
     return max(int(w), min_len)
 
@@ -433,7 +449,8 @@ def _edge_rise_estimate(d: np.ndarray, m: int, edge: str, inner_level: float, ou
 class _EdgeGeom:
     """Everything one edge's search needs, in BLOCK-LOCAL indices (``off`` is the absolute
     index of ``d[0]``). ``outer_lim``/``inner_lim`` are the neighbour bound on the outside and
-    the other (placed) edge on the inside."""
+    the other (placed) edge on the inside. ``inner_guard``: rule 6 guards the inner window
+    edge too (a drawn span)."""
 
     edge: str
     c: int
@@ -442,6 +459,7 @@ class _EdgeGeom:
     W: int
     Wo0: int
     rise: float
+    inner_guard: bool = False
 
 
 def _fit_edge(d: np.ndarray, g: _EdgeGeom, *, sigma: float, tau: float, interior_med: float,
@@ -547,6 +565,29 @@ def _fit_edge(d: np.ndarray, g: _EdgeGeom, *, sigma: float, tau: float, interior
                 grown = 1
                 continue
             return c, False, REASON_BORDER, 0.0, 0.0
+        # ... and, for a drawn span, the INNER edge is guarded too. The window is at the span cap
+        # and may not grow inward, and rule 4 reads up to L samples past it, so a step just
+        # beyond the window passes for a split on the noise before it: a split hugging that
+        # edge, or whose inner side steps further in past it, is refused -- unless the split's
+        # own step, read on the window's inner samples alone against the outer side, passes
+        # rules 4 and 5. On a short event (W = 0.45 x span < L) the samples past the edge are
+        # still inside the event, and a deeper sub-level there is not noise before a step.
+        if g.inner_guard and (b < other if start else a > other):
+            if start:
+                (x1, y1), (x2, y2) = (m, b), (b, min(other, m + L, nmax))
+                xo, yo = max(olim, m - L, 0), m
+            else:
+                (x1, y1), (x2, y2) = (a, m), (max(other, m - L, 0), a)
+                xo, yo = m, min(olim, m + L, nmax)
+            n1, n2, n_out = y1 - x1, y2 - x2, yo - xo
+            deeper = (_mean(P, x2, y2) - _mean(P, x1, y1)
+                      if n1 >= min_len and n2 >= min_len else 0.0)
+            own = _mean(P, x1, y1) - _mean(P, xo, yo) if n1 >= 1 and n_out >= 1 else 0.0
+            own_ok = (n1 >= min_len and n_out >= 1 and own >= size_gate and own / (
+                sigma * math.sqrt(1.0 / n1 + 1.0 / n_out)) / sq_tau >= z_min)
+            if n1 < bt or (not own_ok and deeper >= size_cut and deeper / (
+                    sigma * math.sqrt(1.0 / n1 + 1.0 / n2)) / sq_tau >= z_min):
+                return c, False, REASON_BORDER, 0.0, 0.0
         # rules 4 and 5: local z, then size
         if start:
             xo, yo, xi, yi = max(olim, m - L, 0), m, m, min(other, m + L, nmax)
@@ -562,6 +603,28 @@ def _fit_edge(d: np.ndarray, g: _EdgeGeom, *, sigma: float, tau: float, interior
         if step < size_gate:
             return c, False, REASON_SIZE, z, step
         return m, True, "", z, step
+
+
+def _span_holds_step(dev: _Dev, s0: int, e0: int, edge: str, *, sigma: float, tau: float,
+                     rise: float, size_gate: float, min_len: int) -> bool:
+    """Does the drawn span [s0, e0) hold a step of ``edge``'s sign that would pass rules 4 and
+    5? Its strongest directed split, judged on the span's own samples as `_fit_edge` judges a
+    split (local z over ``L`` each side, then size). Read only for a drawn edge that failed."""
+    d = dev.block(s0, e0)
+    if d.size < 2 * min_len or not np.isfinite(d).all():
+        return False
+    P = _prefix(d)
+    m = _directed_split(P, 0, d.size, edge, min_len)
+    if m is None:
+        return False
+    L = int(max(_LOCAL_MIN, _LOCAL_RISES * rise))
+    if edge == "start":
+        xo, yo, xi, yi = max(m - L, 0), m, m, min(m + L, d.size)
+    else:
+        xi, yi, xo, yo = max(m - L, 0), m, m, min(m + L, d.size)
+    step = _mean(P, xi, yi) - _mean(P, xo, yo)
+    z = abs(step) / (sigma * math.sqrt(1.0 / (yi - xi) + 1.0 / (yo - xo))) / math.sqrt(max(tau, 1.0))
+    return z >= _Z_MIN and step >= size_gate
 
 
 # ================================================================================================
@@ -586,6 +649,7 @@ def fit_edges(
     rise_s: float | None = None,
     min_len: int = 3,
     filter_rise_s: float | None = None,
+    drawn: bool = False,
 ) -> EdgeFit:
     """Move a placed ``start`` and ``end`` onto the steps they sit on.
 
@@ -616,6 +680,10 @@ def fit_edges(
         min_len: the shortest segment either side of a split (3, ``cusum``'s default).
         filter_rise_s: the filter's 10-90% rise time in seconds, the floor under the rise
             (and under the first-pass estimate). Not in the design's signature; optional.
+        drawn: the span was drawn by a drag, both edges in one gesture, rather than each edge
+            pointed at: every window reaches the 0.45-span cap whatever ``px_samples`` says, the
+            window's inner edge is guarded (rule 6), and an edge whose window holds no step
+            while the span does reads :data:`REASON_FAR`. ``params["drawn"]`` says so.
 
     Never raises on bad DATA (non-finite samples in a window, a span too short to fit, zero
     noise, a window the neighbours squeeze to nothing): the affected edges come back unfitted
@@ -627,7 +695,8 @@ def fit_edges(
     return _fit_edges_impl(signal, fs, start, end, polarity=polarity, noise_rms=noise_rms,
                            tau=tau, lo=lo, hi=hi, baseline=baseline, edges=edges, method=method,
                            px_samples=px_samples, rise_s=rise_s, min_len=min_len,
-                           filter_rise_s=filter_rise_s, foot=None, extra=None)
+                           filter_rise_s=filter_rise_s, foot=None, extra=None,
+                           drawn=bool(drawn))
 
 
 def _num(v: Any, default: float | None = None) -> float | None:
@@ -654,7 +723,8 @@ def _unfitted(start: int, end: int, params: dict, why: str, only: Sequence[str] 
 
 
 def _fit_edges_impl(signal, fs, start, end, *, polarity, noise_rms, tau, lo, hi, baseline, edges,
-                    method, px_samples, rise_s, min_len, filter_rise_s, foot, extra) -> EdgeFit:
+                    method, px_samples, rise_s, min_len, filter_rise_s, foot, extra,
+                    drawn=False) -> EdgeFit:
     """``fit_edges`` plus two internal inputs: ``foot`` (how far past the placed start and end
     the outer window must reach, in samples, from ``catch_event``) and ``extra`` (a dict
     merged into ``params``)."""
@@ -666,6 +736,8 @@ def _fit_edges_impl(signal, fs, start, end, *, polarity, noise_rms, tau, lo, hi,
     s0, e0 = _int(start), _int(end)
     params: dict[str, Any] = {"method": METHOD, "version": VERSION, "gates": dict(GATES),
                               "placed": [s0, e0], "edges_requested": list(want)}
+    if drawn:
+        params["drawn"] = True
     if extra:
         params.update(extra)
     fs_ = _num(fs)
@@ -720,6 +792,8 @@ def _fit_edges_impl(signal, fs, start, end, *, polarity, noise_rms, tau, lo, hi,
     table_rise = _num(rise_s)
     table_rise = table_rise * fs_ if table_rise is not None and table_rise > 0 else None
     cap = _SPAN_CAP * span
+    # a drawn span's windows reach the cap whatever the zoom (the module docstring)
+    reach_cap = cap if drawn else 0.0
     params["rise_floor_samples"] = floor
     results: dict[str, EdgeResult] = {}
     rises: dict[str, Any] = {}
@@ -735,9 +809,9 @@ def _fit_edges_impl(signal, fs, start, end, *, polarity, noise_rms, tau, lo, hi,
             r_e, src = max(floor, min(table_rise, cap)), "table"
         else:
             r_e, src = _first_pass_rise(dev, edge, s0, e0, lo_, hi_, span, px, floor, reach,
-                                        sigma, tau_, min_len)
+                                        sigma, tau_, min_len, reach_cap)
         rises[edge] = {"samples": r_e, "s": r_e / fs_, "source": src}
-        W = _window_half_width(span, px, r_e, min_len)
+        W = _window_half_width(span, px, r_e, min_len, reach_cap)
         # the outer half-window reaches the foot plus three rises when C supplied one
         Wo0 = W if foot is None else max(W, reach + int(round(_WINDOW_RISES * r_e)))
         widths[edge] = W
@@ -763,9 +837,15 @@ def _fit_edges_impl(signal, fs, start, end, *, polarity, noise_rms, tau, lo, hi,
             edge=edge, c=c - b0,
             inner_lim=(e0 - b0) if edge == "start" else (s0 - b0),
             outer_lim=(lo_ - b0) if edge == "start" else (hi_ - b0),
-            W=W, Wo0=Wo0, rise=r_e)
+            W=W, Wo0=Wo0, rise=r_e, inner_guard=drawn)
         m, ok, reason, z, step = _fit_edge(d, geom, sigma=sigma, tau=tau_, interior_med=interior_med,
                                            min_len=min_len)
+        if (drawn and not ok and reason in (REASON_Z, REASON_NO_STEP, REASON_BORDER)
+                and _span_holds_step(dev, s0, e0, edge, sigma=sigma, tau=tau_, rise=r_e,
+                                     size_gate=max(_SIZE_SIGMA * sigma, _SIZE_FRAC * interior_med),
+                                     min_len=min_len)):
+            # the window found nothing, and the span holds the step: it was drawn too far out
+            reason = REASON_FAR
         results[edge] = EdgeResult(int(m + b0) if ok else c, bool(ok), float(z), float(step), reason)
     s_res, e_res = results["start"], results["end"]
     if s_res.fitted and e_res.fitted and s_res.position >= e_res.position:
@@ -826,13 +906,14 @@ def _estimate_ref(dev: _Dev, s0: int, e0: int, lo: int, hi: int, px: float, min_
 
 
 def _first_pass_rise(dev: _Dev, edge: str, s0: int, e0: int, lo: int, hi: int, span: int, px: float,
-                     floor: float, reach: int, sigma: float, tau: float, min_len: int) -> tuple[float, str]:
+                     floor: float, reach: int, sigma: float, tau: float, min_len: int,
+                     window_min: float = 0.0) -> tuple[float, str]:
     """The edge's 10-90% rise, estimated around a first split found with the floor rise; the
     floor when nothing can be measured. Returns (samples, source)."""
     n = dev.n
     c = s0 if edge == "start" else e0
     other = e0 if edge == "start" else s0
-    W0 = _window_half_width(span, px, floor, min_len)
+    W0 = _window_half_width(span, px, floor, min_len, window_min)
     Wo = max(W0, reach)
     L = int(max(_LOCAL_MIN, _LOCAL_RISES * floor))
     cap = int(max(64, _SPAN_CAP * span))

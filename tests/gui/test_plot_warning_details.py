@@ -34,7 +34,7 @@ def test_warning_free_capture_export_and_bundle_retain_fit_and_details(
     ranges = np.asarray(window._plot.viewRange()).copy()
     details = window.details_text()
     assert "KS REJECTED" in details
-    assert "REJECTED" not in window._fit_values_item.text
+    assert "REJECTED" not in window._fit_label_item.text
 
     def forbid(*args, **kwargs):
         pytest.fail("Capturing a warning-free figure must not rerun scientific work")

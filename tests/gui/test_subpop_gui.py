@@ -508,8 +508,9 @@ def _relative_sibling_imports(module) -> list[str]:
 #: ``gui.plot_interaction`` argued for itself the same way: the Reset view / zoom history /
 #: right-click menu / pointer readout that every plot window installs. It imports no gui
 #: module and wires nothing; the alternative was a private copy per window.
-_ALLOWED_SIBLING_IMPORTS = ["analysis_catalog", "plot_appearance", "plot_interaction",
-                            "plot_workflow", "categorical"]
+# figure_text (2026-11-01): the shared in-figure text editing, not a panel.
+_ALLOWED_SIBLING_IMPORTS = ["analysis_catalog", "figure_text", "plot_appearance",
+                            "plot_interaction", "plot_workflow", "categorical"]
 
 
 def test_the_report_window_imports_only_the_shared_leaf():

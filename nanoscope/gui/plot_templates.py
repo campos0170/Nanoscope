@@ -97,7 +97,9 @@ def encode_window_template(kind: str, settings: Mapping[str, Any],
     return {"format": TEMPLATE_FORMAT, "version": TEMPLATE_VERSION, "window": kind,
             "app_version": app_version,
             "settings": json.loads(json.dumps(dict(settings), allow_nan=False)),
-            "appearance": PlotAppearance.from_mapping(appearance).to_dict()}
+            # Wording and element styles stay (owner, Q-T6); legend-entry names go, as the
+            # sources they name do.
+            "appearance": PlotAppearance.from_mapping(appearance).template_form().to_dict()}
 
 
 def decode_window_template(kind: str, payload: Any) -> tuple[dict, dict]:
@@ -131,7 +133,7 @@ def decode_window_template(kind: str, payload: Any) -> tuple[dict, dict]:
     except (TypeError, ValueError, OverflowError, RecursionError):
         raise TemplateError("Its settings hold a value that is not a plain number or "
                             "text (for example NaN or Infinity).") from None
-    return dict(settings), PlotAppearance.from_mapping(appearance).to_dict()
+    return dict(settings), PlotAppearance.from_mapping(appearance).template_form().to_dict()
 
 
 # -- the shared controls --------------------------------------------------------------------------

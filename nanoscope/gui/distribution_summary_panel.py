@@ -7,9 +7,12 @@ computes ECDF/quartiles/KDE. Restoring a project paints stored draw coordinates.
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 import datetime
+import html
 import json
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +27,10 @@ from ..core.source_style import compact_source_labels, validate_source_appearanc
 from .analysis_catalog import ANALYSIS_LABELS
 from .axes import ReadableLinearAxis
 from .export_paths import ask_export_path
-from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .figure_text import (AppearanceTextHost, TextStyle, TextTarget, figure_text_for,
+                          plain_text, valid_element_key)
+from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
+                              reframe_axis_pins)
 from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
                           write_live_plot_image, write_plot_csv)
 from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
@@ -52,6 +58,56 @@ METHODS = {
               "is inferred for fewer than 3 observations or constant data.",
 }
 _PLOT_COLUMNS = ["source_key", "source_label", "primitive", "role", "point", "x", "y"]
+#: A range typed in Axis properties belongs to what the axes show (figures2-2): ECDF and
+#: Survival put the value on x and a fraction on y, Box and Violin the sources on x and the
+#: value on y. Each pair keeps its own pins (``PlotAppearance.for_view``); a bare pin, saved
+#: before pins were kept per pair, is the curves' (ECDF, the Type the page opens on).
+PIN_CURVES, PIN_CATEGORIES = "curves", "categories"
+
+
+def _pins_for(snapshot) -> str:
+    """The pins the drawn figure (``snapshot``) frames with."""
+    return PIN_CATEGORIES if (snapshot or {}).get("categorical") else PIN_CURVES
+
+
+class _SummaryTextHost(AppearanceTextHost):
+    """In-figure editing for Distribution summaries. A legend name IS the Source names
+    editor's display label (one store): a rename typed in the figure is written there, as
+    "Apply to figure" would, and no second legend-entry style is kept beside it. The
+    rename is one appearance Undo step (``_rename_source_from_figure`` says how)."""
+
+    def __init__(self, panel, plot, widget) -> None:
+        panel_ref = weakref.ref(panel)
+        super().__init__(plot, widget, axis_hooks={
+            "log_reason": "Distribution summaries are drawn on linear axes."},
+            pin_view=lambda: _pins_for(getattr(panel_ref(), "_snapshot", None)),
+            primary_view=PIN_CURVES)
+        self._panel_ref = panel_ref
+
+    def text_targets(self) -> dict:
+        out = {key: target for key, target in super().text_targets().items()
+               if not key.startswith("legend.entry.")}
+        panel, plot = self._panel_ref(), self.plot
+        legend = getattr(plot, "legend", None) if plot is not None else None
+        if panel is None or legend is None:
+            return out
+        for _sample, label in list(legend.items):
+            source = panel._legend_sources.get(plain_text(label.text))
+            if source is None:
+                continue
+            key, name = source
+            typed = panel._source_appearance.get(key, {}).get("label") or None
+            out[f"legend.entry.{key}"] = TextTarget(
+                label, name, TextStyle(text=typed), "legend entry", frozenset({"edit"}))
+        return out
+
+    def apply_text(self, key: str, style: TextStyle) -> None:
+        panel = self._panel_ref()
+        if key.startswith("legend.entry."):
+            if panel is not None:
+                panel._rename_source_from_figure(key[len("legend.entry."):], style.text)
+            return
+        super().apply_text(key, style)
 
 
 def _display_source_label(label, number):
@@ -82,6 +138,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._tables = {}
         self._data_items = []
         self._appearance = PlotAppearance()
+        self._pins_drawn = PIN_CURVES      # whose pins the plot holds (``_pins_for``)
         self._source_appearance = {}
 
         central = QtWidgets.QWidget()
@@ -134,7 +191,15 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         analysis_layout.addWidget(self._violin_points, 0, 3)
         analysis_layout.addWidget(self._method_note, 1, 0, 1, 4)
 
-        self._appearance_widget = PlotAppearanceWidget(self._appearance)
+        # ⌘Z on the page, not on these controls: an edit made in the figure is undone from
+        # the keyboard whatever the Section shows (FIG-4); a page behind another Explorer
+        # tab is hidden, so it does not answer.
+        # Reset appearance keeps the legend-name carriers: the names live in Source names
+        # and colors, which Reset leaves alone, so dropping them would be a step that
+        # changes nothing on screen.
+        self._appearance_widget = PlotAppearanceWidget(
+            self._appearance, shortcut_parent=self,
+            reset_keeps=lambda key: key.startswith("legend.entry."))
         # There is no fitted curve on this page. Keep the common preset vocabulary,
         # but explicitly disable its inapplicable fit palette control.
         if hasattr(self._appearance_widget, "fit_color"):
@@ -180,10 +245,12 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         # auto-range: a box/violin keeps its full category slots. The menu's exports are
         # greyed out with the Export button, until a figure has been generated.
         self._readout = window_readout(self)
+        self._legend_sources: dict[str, tuple[str, str]] = {}
         self._plot_nav = install_plot_interaction(
             self._plot, readout=self._readout, reset=self._frame_view,
             exports=(("Export current figure…", lambda: self.save_image(), self.has_data),
-                     ("Export plotted coordinates CSV…", lambda: self.save_csv(), self.has_data)))
+                     ("Export plotted coordinates CSV…", lambda: self.save_csv(), self.has_data)),
+            text=_SummaryTextHost(self, self._plot, self._appearance_widget))
         self._workflow.add_view_control(view_button(lambda: self._plot_nav, (self._plot_nav,)))
         self._source_list.itemChanged.connect(self._source_selection_changed)
         self._metric_combo.currentIndexChanged.connect(self._draft_changed)
@@ -512,8 +579,16 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._appearance_widget.set_legend_available(bool(entries))
         self._sync_source_appearance_editor()
         self._warnings.set_warnings(self._snapshot.get("warnings", []), full_text=self.details_text())
-        self._apply_appearance()
+        if self._pins_drawn != _pins_for(self._snapshot):
+            # A Type whose axes show other quantities (ECDF/Survival <-> Box/Violin): the
+            # other pair's pins leave the plot BEFORE it is framed, or taking them off after
+            # would hand those axes back to auto-range and lose the category slots.
+            self._apply_appearance()
+        # Framed first, then styled: a range pinned in Axis properties is the figure's
+        # framing, so a Generate (new data) ends on the pin rather than on the data.
         self._frame_view()
+        reframe_axis_pins(self._plot)
+        self._apply_appearance()
 
     def _frame_view(self):
         """The page's own framing of the drawn figure: what a draw ends with and what
@@ -545,13 +620,19 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         return "\n\n".join(self._snapshot.get("warnings", []))
 
     def _appearance_from_user(self, state):
+        renamed = self._renamed_sources(self._appearance, state)
         self._appearance = state
-        self._apply_appearance()
+        if renamed is not None:
+            self.set_source_appearance_state(renamed)     # draws with the names
+        else:
+            self._apply_appearance()
         self.workspaceChanged.emit()
 
     def _apply_appearance(self):
-        apply_plot_appearance(self._plot, self._appearance, plot_widget=self._plot_widget,
-                              data_items=self._data_items)
+        pins = _pins_for(self._snapshot)
+        apply_plot_appearance(self._plot, self._appearance.for_view(pins, primary=PIN_CURVES),
+                              plot_widget=self._plot_widget, data_items=self._data_items)
+        self._pins_drawn = pins
         self._apply_source_appearance()
 
     def _sync_source_appearance_editor(self):
@@ -566,6 +647,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
 
     def _source_appearance_from_user(self, state):
         self.set_source_appearance_state(state)
+        self._sync_name_carriers()
         self.workspaceChanged.emit()
 
     def source_appearance_state(self):
@@ -610,9 +692,16 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
                         brush.setColor(tint)
                         setter(brush)
                 if key not in seen:
-                    entries.append((item, f"{names[key]} · n={counts[key]}"))
+                    # A name is literal text (owner, Q-T1): the legend row is rich text,
+                    # so "Apo <1>" would otherwise lose its "<1>" as a tag.
+                    entries.append((item, html.escape(f"{names[key]} · n={counts[key]}",
+                                                      quote=False)))
+                    self._legend_sources[f"{names[key]} · n={counts[key]}"] = (key, names[key])
                     seen.add(key)
             ensure_item_legend(self._plot, entries)
+            controller = figure_text_for(self._plot)
+            if controller is not None:
+                controller.refresh()        # the legend may be new since the last draw
             if self._plot.legend is not None:
                 self._plot.legend.setVisible(bool(entries) and self._appearance.legend_visible is not False)
             if self._snapshot.get("categorical"):
@@ -624,8 +713,108 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
                 if enabled:
                     self._plot.enableAutoRange(axis=axis, enable=enabled)
 
+    def _rename_source_from_figure(self, source_key: str, text: str | None) -> None:
+        """A legend rename typed in the figure: the Source names editor's display label
+        for that source (empty or Reset name restores the captured one), as ONE appearance
+        Undo step, as a rename is in every other plot window.
+
+        The name stays in the Source names store (one store). The step only CARRIES it, as
+        the text of the appearance's ``legend.entry.<captured name>`` (:meth:`_name_carrier`):
+        the name the legend shows now is put there silently (the step's "before"), the
+        typed one is the step, and :meth:`_appearance_from_user` writes whatever the carrier
+        becomes -- the rename, its Undo, its Redo -- back to the store. The carrier draws
+        nothing and is not saved (:meth:`appearance_state`).
+        """
+        new = text.strip() if text and text.strip() else None
+        carrier = self._name_carrier(source_key)
+        if carrier is None:          # not a source of the figure on show: the store only
+            self._source_appearance_from_user(self._with_label(source_key, new))
+            return
+        captured = self._captured_label(source_key)
+        widget = self._appearance_widget
+        shown = self._source_appearance.get(source_key, {}).get("label") or captured
+        if widget.state().text_style(carrier).text != shown:
+            self._appearance = widget.state().with_text_style(carrier, TextStyle(text=shown))
+            widget.set_state(self._appearance)
+        widget.apply_appearance(widget.state().with_text_style(
+            carrier, TextStyle(text=new or captured)))
+
+    def _with_label(self, source_key: str, label: str | None, names=None) -> dict:
+        """The Source names store (or ``names``) with ``source_key``'s display label set
+        (None: the captured one)."""
+        state = deepcopy(self._source_appearance if names is None else names)
+        entry = dict(state.get(source_key, {}))
+        if label:
+            entry["label"] = label
+        else:
+            entry.pop("label", None)
+        if entry:
+            state[source_key] = entry
+        else:
+            state.pop(source_key, None)
+        return state
+
+    def _captured_label(self, source_key: str) -> str:
+        return next((str(series["label"]) for series in self._snapshot.get("series", [])
+                     if series["key"] == source_key), "")
+
+    def _name_carrier(self, source_key: str) -> str | None:
+        """The appearance key that carries a figure rename of ``source_key`` through Undo:
+        ``legend.entry.<its captured name>``, numbered as the legend numbers two sources
+        that share one, so the step reads "legend ‘Apo’ ‘Apo-ferritin’". None for a key
+        that is not a source of the figure on show."""
+        series = self._snapshot.get("series", [])
+        labels = [" ".join(str(source["label"]).split())[:150] for source in series]
+        for number, (source, label) in enumerate(zip(series, labels)):
+            if source["key"] == source_key:
+                name = label if label and labels.count(label) == 1 else f"{number + 1} · {label}"
+                key = f"legend.entry.{name}"
+                return key if valid_element_key(key) else None
+        return None
+
+    def _renamed_sources(self, before: PlotAppearance, after: PlotAppearance) -> dict | None:
+        """The Source names store once an appearance step from ``before`` to ``after`` has
+        moved a name carrier, or None when it moved none. A carrier the step took away (a
+        template) or brought back (its Undo) leaves the name alone: only a carrier moved
+        from one name to another is written."""
+        names = self._source_appearance
+        for source in self._snapshot.get("series", []):
+            carrier = self._name_carrier(source["key"])
+            if carrier is None:
+                continue
+            name, was = after.text_style(carrier).text, before.text_style(carrier).text
+            # A rename always goes from name to name (the current one is put on the carrier
+            # silently first). A carrier a step brings back -- the Undo of a template or of
+            # Reset appearance -- is no rename: a name set since in Source names stays.
+            if name is None or was is None or name == was:
+                continue
+            label = None if name == str(source["label"]) else name
+            if label != names.get(source["key"], {}).get("label"):
+                names = self._with_label(source["key"], label, names)
+        return None if names is self._source_appearance else names
+
+    def _sync_name_carriers(self) -> None:
+        """After a name set in Source names and colors (not a step): the carriers the
+        appearance holds follow it, silently, so an Undo or Redo next to it lands on the
+        names as they were then rather than on one this editor replaced."""
+        state = widget_state = self._appearance_widget.state()
+        for source in self._snapshot.get("series", []):
+            carrier = self._name_carrier(source["key"])
+            if carrier is None or state.text_style(carrier).text is None:
+                continue
+            shown = (self._source_appearance.get(source["key"], {}).get("label")
+                     or str(source["label"]))
+            state = state.with_text_style(carrier, TextStyle(text=shown))
+        if state != widget_state:
+            self._appearance = state
+            self._appearance_widget.set_state(state)
+
     def appearance_state(self):
-        return self._appearance.to_dict()
+        # Without the legend-name carriers: the names are saved once, in the Source names
+        # store (``source_appearance``), which is what draws them.
+        kept = tuple((key, style) for key, style in (self._appearance.text or ())
+                     if not key.startswith("legend.entry."))
+        return replace(self._appearance, text=kept or None).to_dict()
 
     def set_appearance_state(self, state):
         self._appearance = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)

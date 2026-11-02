@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import json
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,7 +79,10 @@ from .analysis_catalog import ANALYSIS_LABELS
 from .axes import ReadableLogAxis
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
-from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
+from .figure_text import SHARED_LABELS_REASON, appearance_text_host, figure_text_for
+from .fit_label import FitLabelItem, FitReadout
+from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
+                              reframe_axis_pins)
 from .plot_interaction import (image_value, install_plot_interaction, navigation_for,
                                reset_plot_history, view_button, window_readout)
 from .plot_templates import WindowTemplateControls
@@ -618,6 +621,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._plot_y: np.ndarray | None = None
         self._curve_item: pg.PlotDataItem | None = None
         self._fit_item: pg.PlotDataItem | None = None
+        self._fit_readouts: list[FitReadout] = []
         self._message_item: pg.TextItem | None = None
         # The overlay. curves[0] is the PRIMARY recording, and the single-curve
         # accessors above mirror it so a one-pore session reads exactly as before.
@@ -754,13 +758,46 @@ class PSDWindow(QtWidgets.QMainWindow):
                      if self._spec_bar is not None else "") or "log₁₀ PSD"
             return f"{label} {value:.4g}"
 
+        # In-figure editing (figure_text) on every view, through the ONE shared appearance:
+        # the Title is "(all views)", so retyping it on one view retitles them all. Log in
+        # Axis properties is the window's own control for that view, never a second store.
+        loglog = {"log": lambda side, on: self._loglog_check.setChecked(bool(on)),
+                  "log_state": lambda side: self._loglog_check.isChecked(),
+                  "log_reason": "Log-log axes switch both axes together."}
+        spec_log = {"log": self._spec_log_from_figure,
+                    "log_state": lambda side: side == "left" and self._spec_logf_check.isChecked(),
+                    "log_reason": "The spectrogram has a log scale on the frequency axis only."}
+        hist_log = {"log_reason": "The all-points histogram always counts on a log axis and "
+                                  "keeps current linear."}
         navigations = []
-        for plot, extra in ((self._plot, None), (self._fft_plot, None),
-                            (self._spec_plot, spectrogram_value), (self._hist_plot, None)):
+        for plot, extra, hooks in ((self._plot, None, loglog), (self._fft_plot, None, loglog),
+                                   (self._spec_plot, spectrogram_value, spec_log),
+                                   (self._hist_plot, None, hist_log)):
+            # A range typed in Axis properties is the view's own (figures2-1): 10-1000 Hz on
+            # the PSD made All-points (pA) and the Spectrogram (s) draw 10-1000 too, blank.
+            host = appearance_text_host(plot, self._appearance_widget, axis_hooks=hooks,
+                                        shared_labels=SHARED_LABELS_REASON,
+                                        pin_view=self._pin_view(plot), primary_view=VIEW_PSD)
             navigations.append(install_plot_interaction(
-                plot, readout=self._readout, exports=exports, extra=extra))
+                plot, readout=self._readout, exports=exports, extra=extra, text=host))
+            if plot is self._plot:
+                self._psd_text_host = host
+        # A single curve's 1/f exponent had no place on the figure at all: the legend row
+        # that names it is drawn only for an overlay. It goes in the fit label (fittitle §2).
+        self._fit_label = FitLabelItem(self._plot.getViewBox())
+        self._psd_text_host.register_fit_label(self._fit_label)
+        self._appearance_widget.set_fit_label_available(True, in_legend=False)
         self._workflow.add_view_control(view_button(
             lambda: navigation_for(self.active_plot_item()), navigations))
+
+    def _spec_log_from_figure(self, side: str, on: bool) -> None:
+        if side == "left":
+            self._spec_logf_check.setChecked(bool(on))
+
+    def fit_label_text(self) -> str:
+        """The PSD view's fit label as drawn (plain text; empty when hidden)."""
+        label = getattr(self, "_fit_label", None)
+        return label.plain_text() if label is not None and label.isVisible() else ""
 
     def _spectrogram_cell_value(self, vx: float, vy: float) -> float | None:
         """The ORIGINAL spectrogram cell's log₁₀ PSD under view position (vx, vy).
@@ -1208,9 +1245,12 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._export_w.hide()
         self._export_h.hide()
         # The existing palette is retained; shared controls add opt-in typography.
+        # ⌘Z on the page, not on these controls: an edit made in the figure is undone from
+        # the keyboard whatever the Section shows (FIG-4); a page behind another Explorer
+        # tab is hidden, so it does not answer.
         self._appearance_widget = PlotAppearanceWidget(
             self._appearance, include_colors=True, compact=True, include_markers=False,
-            multi_view_labels=True)
+            multi_view_labels=True, shortcut_parent=self)
         self._appearance_widget.changed.connect(self._on_appearance_changed)
         for legacy in (self._title_edit, self._data_swatch, self._fit_swatch, self._bg_combo):
             form.setRowVisible(legacy, False)
@@ -1799,6 +1839,19 @@ class PSDWindow(QtWidgets.QMainWindow):
     def appearance_state(self) -> dict:
         return self._appearance.to_dict()
 
+    def _pin_view(self, plot: pg.PlotItem) -> str:
+        """The view whose Axis properties pins ``plot`` draws (``PlotAppearance.for_view``)."""
+        return {id(self._plot): VIEW_PSD, id(self._fft_plot): VIEW_FFT,
+                id(self._spec_plot): VIEW_SPECTROGRAM, id(self._hist_plot): VIEW_ALLPOINTS}[id(plot)]
+
+    def _frame(self, plot: pg.PlotItem) -> None:
+        """A draw frames its data, then a range typed in Axis properties is the view again
+        (FIG-2): the mark tells the next apply that this was a draw, so an appearance step
+        alone still keeps a zoom made by hand."""
+        plot.autoRange()
+        reframe_axis_pins(plot)
+        self._apply_appearance()
+
     def _apply_appearance(self) -> None:
         view = self.current_view()
         self._appearance_widget.set_legend_available(
@@ -1820,8 +1873,18 @@ class PSDWindow(QtWidgets.QMainWindow):
                 (self._fft_widget, self._fft_plot, [self._fft_item], []),
                 (self._spec_widget, self._spec_plot, [], []),
                 (self._hist_widget, self._hist_plot, [self._hist_item], [])):
-            apply_plot_appearance(plot, self._appearance, plot_widget=widget,
-                                  data_items=data, fit_items=fits)
+            apply_plot_appearance(
+                plot, self._appearance.for_view(self._pin_view(plot), primary=VIEW_PSD),
+                plot_widget=widget, data_items=data, fit_items=fits)
+            controller = figure_text_for(plot)
+            if controller is not None:
+                controller.refresh()        # a legend may be new since the last draw
+        fit_label = getattr(self, "_fit_label", None)
+        if fit_label is not None:
+            # Never In legend: a single curve's row does not carry the α line.
+            fit_label.apply_state(replace(self._appearance.fit_label_state(), in_legend=False),
+                                  self._fit_readouts,
+                                  self._appearance.text_style("annotation.fit"))
         # Level positions and occupancies are scientific results; only their ink
         # changes here. InfiniteLine is not a PlotDataItem handled by the helper.
         for line in self._hist_marks:
@@ -2381,7 +2444,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._apply_title(self._auto_title())
         self._apply_background()
         self._restyle_existing_views()
-        self._plot.autoRange()
+        self._frame(self._plot)
 
         self._fill_details()
         self._update_rms_readout()
@@ -2489,6 +2552,13 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._fit_item = pg.PlotDataItem(
             x=grid, y=line, pen=pg.mkPen(self._style.fit_color, width=2, style=Qt.DashLine))
         self._plot.addItem(self._fit_item)
+        if len(self._curves) == 1:
+            n = int(fl.get("n", 0))
+            mark = " · MARGINAL" if fl.get("status") == "marginal" else ""
+            self._fit_readouts = [FitReadout(
+                parts={"equation": f"1/f fit: α = {alpha:.3f}{mark}",
+                       "n": f"{n} bins, {lo:.3g}–{hi:.3g} Hz"},
+                source=self._curves[0].label, colour=self._style.fit_color)]
         if len(self._curves) > 1:
             # Every surface that prints α prints what it rests on — a legend entry is
             # the one that ends up cropped into a slide on its own.
@@ -2948,6 +3018,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._view_titles.pop(VIEW_PSD, None)
         self._drop_legend()
         self._curve_item = self._fit_item = self._message_item = None
+        self._fit_readouts = []
         self._plot_x = self._plot_y = None
         for curve in self._curves:
             curve.item = None
@@ -3270,7 +3341,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                                 color=self._fg_hex())
         self._fft_plot.showGrid(x=True, y=True, alpha=0.15)
         self._restyle_existing_views()
-        self._fft_plot.autoRange()
+        self._frame(self._fft_plot)
         self._captions[VIEW_FFT].setPlainText(self._fft_caption(spec, span))
 
     @staticmethod
@@ -3426,7 +3497,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._spec_plot.setTitle(self._style.title or self._view_titles[VIEW_SPECTROGRAM],
                                  color=self._fg_hex())
         self._restyle_existing_views()
-        self._spec_plot.autoRange()
+        self._frame(self._spec_plot)
         self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(sg, span, levels))
 
     def _place_spectrogram_image(self, sg: psd_mod.Spectrogram, span: _Span, *,
@@ -3686,7 +3757,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                                  color=self._fg_hex())
         self._hist_plot.showGrid(x=True, y=True, alpha=0.15)
         self._restyle_existing_views()
-        self._hist_plot.autoRange()
+        self._frame(self._hist_plot)
         self._captions[VIEW_ALLPOINTS].setPlainText(self._hist_caption(hist, span))
 
     def _hist_caption(self, hist: ap_mod.AllPointsHistogram, span: _Span) -> str:

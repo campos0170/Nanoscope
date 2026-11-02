@@ -129,13 +129,15 @@ def test_the_seed_flag_does_not_leak_into_the_next_toggle(rig):
     assert rig.view.measure_empty() is False and rig.view.measure_bounds() is not None
 
 
-def test_clear_mask_still_turns_the_tool_off(rig):
-    """The button keeps its meaning; discarding with Measure left on is the view's own call."""
+def test_clear_mask_discards_the_mask_and_keeps_the_tool_on(rig):
+    """Clear mask does what X does: the mask goes and Measure stays on, with no mask (it used to
+    turn Measure off, which also ended Annotate mode without a word)."""
     zoom_middle(rig, 0.5)
     _mask(rig)
+    target = rig.view.measure_target()
     assert rig.panel.clear_mask() is True
-    assert rig.panel.is_active() is False and rig.view.measure_empty() is False
-    assert rig.view.measure_target() is None
+    assert rig.panel.is_active() is True and rig.view.measure_empty() is True
+    assert rig.view.measure_target() == target
 
 
 # ================================================================================================

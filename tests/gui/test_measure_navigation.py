@@ -974,7 +974,15 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           # they embed plot_appearance. It reaches only plot_appearance; the
                           # project copy, which must read PlotsWindow's templates, lives in
                           # plot_preset_sync, which only MainWindow imports.
-                          "plot_templates"}
+                          "plot_templates",
+                          # 2026-11-01 (plotux G2/G3): figure_text is the in-figure text
+                          # editing every plot window installs through plot_interaction
+                          # (no event filter: item wraps, an inline editor and popovers,
+                          # embedded controls exempted below); fit_label is the fit-label
+                          # item and its formatting (no widget). column_checklist (G1) is
+                          # the shared many-at-once checklist the Plots window's Features
+                          # and the Results Columns… popup embed; it imports only Qt.
+                          "figure_text", "fit_label", "column_checklist"}
 
 
 def test_the_non_panel_allowlist_holds_no_panel():
@@ -1029,7 +1037,16 @@ def test_the_non_panel_allowlist_holds_no_panel():
         # 2026-10-30: each plot window's own appearance Undo/Redo (design §4.2) binds
         # the platform's keys through the shared dedupe rule rather than a private copy
         # of it. key_sequences reaches nothing further and defines no widget.
-        "plot_appearance": {"key_sequences"},
+        "plot_appearance": {"key_sequences",
+                            # 2026-11-01 (plotux G2): per-element text styles, the fit
+                            # label section and the major-tick hook.
+                            "axes", "figure_text", "fit_label"},
+        # 2026-11-01 (plotux G2): install_plot_interaction(..., text=host) attaches the
+        # in-figure text controller; the controller knows the fit label and the
+        # appearance model it edits, and the fit label its text helpers.
+        "plot_interaction": {"figure_text"},
+        "figure_text": {"fit_label", "plot_appearance"},
+        "fit_label": {"figure_text"},
         # Plot Studio step 6: a template's appearance is recalled through the appearance
         # widget's own one-step apply, so the control knows PlotAppearance and nothing else.
         "plot_templates": {"plot_appearance"},
@@ -1071,7 +1088,7 @@ def test_the_non_panel_allowlist_holds_no_panel():
         #                        each plot window puts on its status line.
         if name in ("trace_view", "plot_appearance", "plot_workflow", "plot_lasso",
                     "plot_export_options", "plot_interaction",
-                    "plot_templates"):
+                    "plot_templates", "figure_text", "column_checklist"):
             # plot_export_options's ExportOptionsDialog is the shared "Export current
             # figure" dialog (CHANGELOG), embedded from every export path -- not a
             # wired panel, same category as the three above. plot_templates's
@@ -1170,20 +1187,25 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
     assert _gui_modules_reached(plots_mod) == {
         "export_paths", "combos", "axes", "categorical", "worker_thread",
         "analysis_catalog", "plot_export", "plot_appearance", "figure_bundle", "plot_lasso",
-        "key_sequences", "plot_interaction"}
+        "key_sequences", "plot_interaction",
+        # 2026-11-01 (plotux G3): the fit label, the in-figure text host and the
+        # Features checklist -- all on the allowlist, proven by the guard above.
+        "figure_text", "fit_label", "column_checklist"}
     # ``plot_export`` is the shared, non-panel seam for staged PNG/SVG/PDF and
     # exact-CSV export; reaching it preserves the no-sibling-panel boundary.
+    # ``figure_text`` and ``fit_label`` (2026-11-01): in-figure text editing, and the 1/f
+    # fit label of a single curve. Both on the allowlist and proven by the guard above.
     assert _gui_modules_reached(psd_mod) == {
         "export_paths", "combos", "axes", "plot_export",
         "analysis_catalog", "plot_appearance", "plot_workflow", "plot_interaction",
-        "plot_templates"}
+        "plot_templates", "figure_text", "fit_label"}
     # The report window is the third standalone window and is held to the same rule.
     # It has its own allow-list guard in ``test_subpop_gui``; this one is stronger,
     # because ``_gui_modules_reached`` catches every spelling of the import and that
     # one only catches the relative form.
     assert _gui_modules_reached(subpop_mod) == {
         "categorical", "analysis_catalog", "plot_appearance", "plot_workflow",
-        "plot_interaction"}
+        "plot_interaction", "figure_text"}
     for mod in (plots_mod, psd_mod, subpop_mod):
         assert _gui_modules_reached(mod) <= _NON_PANEL_GUI_MODULES
         # specifically: no PANEL, by any spelling

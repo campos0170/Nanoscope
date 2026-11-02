@@ -896,7 +896,8 @@ def test_analysis_menu_keeps_every_shortcut_and_flag(win):
     # which is not when the key is used (C30).
     assert win._act_add_event.shortcut() == QtCore.QKeyCombination(
         QtCore.Qt.ControlModifier, QtCore.Qt.Key_M)
-    # Ctrl+Shift+M retired: two adjacent keys with different targets invite misfiled events.
+    # Ctrl+Shift+M no longer adds: two adjacent keys with different targets invited misfiled
+    # events. Since 2026-11-01 it toggles Analysis ▸ Measure event, which files nothing.
     # Reserved for Signal conditioning… (change D), and always enabled: disabled, the key
     # would fall through to the event table's modifier-blind curation keys (F = flag).
     assert win._act_signal_conditioning.shortcut() == QtCore.QKeyCombination(

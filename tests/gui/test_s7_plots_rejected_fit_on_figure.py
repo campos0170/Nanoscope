@@ -66,6 +66,18 @@ def _title(w) -> str:
     return re.sub(r"<[^>]+>", "", str(w._plot.titleLabel.text)).strip()
 
 
+def _fit_text(w) -> str:
+    """The fit label (plotux G3, 2026-11-01): where a fit's numbers are on the figure now
+    that they no longer take the title or a separate values box."""
+    item = w._fit_label_item
+    return item.plain_text() if item is not None and item.isVisible() else ""
+
+
+def _fit_rows(w) -> list[str]:
+    """Legend fit rows: "<name> fit (<family>)" since the fit label carries the numbers."""
+    return [t for t in _legend(w) if t.startswith("fit (") or " fit (" in t]
+
+
 def _legend(w) -> list[str]:
     legend = getattr(w._plot, "legend", None)
     return [] if legend is None else [label.text for _s, label in legend.items]
@@ -92,13 +104,11 @@ def test_a_rejected_fit_says_so_in_the_title_and_the_legend_at_every_setting_of_
     rejected._redraw()
     assert "KS REJECTED" not in _title(rejected)
     assert "KS REJECTED" in rejected.details_text()
-    fit_rows = [t for t in _legend(rejected) if t.startswith("fit:")]
+    fit_rows = _fit_rows(rejected)
     assert fit_rows and "KS REJECTED" not in fit_rows[0]
-    if values_box:
-        assert "REJECTED" not in rejected._fit_values_item.text
-        assert ("KS =" in rejected._fit_values_item.text) is show_gof
-    else:
-        assert rejected._fit_values_item is None
+    # The fit label took the values box's place: its numbers, never the verdict.
+    assert "τ =" in _fit_text(rejected) and "REJECTED" not in _fit_text(rejected)
+    assert ("KS =" in _fit_text(rejected)) is (values_box and show_gof)
 
 
 def test_the_shipped_defaults_are_the_case_that_used_to_ship_a_bare_tau(rejected):
@@ -107,9 +117,10 @@ def test_the_shipped_defaults_are_the_case_that_used_to_ship_a_bare_tau(rejected
     assert StyleSettings().show_gof is True and StyleSettings().fit_values_on_plot is False
     rejected._style = replace(rejected._style, show_gof=True, fit_values_on_plot=False)
     rejected._redraw()
-    assert "τ =" in _title(rejected) and "KS REJECTED" not in _title(rejected)
+    assert "τ =" in _fit_text(rejected) and "KS REJECTED" not in _fit_text(rejected)
+    assert "KS REJECTED" not in _title(rejected)
     assert "DOES NOT DESCRIBE THESE DATA" in rejected.details_text()
-    assert rejected._fit_values_item is None, "the verdict did not need the box"
+    assert "KS =" not in _fit_text(rejected), "the verdict did not need the extra numbers"
 
 
 def test_the_verdict_survives_save_image(rejected, tmp_path):
@@ -126,9 +137,10 @@ def test_the_verdict_survives_save_image(rejected, tmp_path):
 def test_the_tag_survives_the_legends_middle_elision(rejected):
     """A legend entry over 34 characters is middle-elided to its two ends; the tag is
     sized to be one whole end, so "…S REJECTED" cannot happen."""
-    fit_rows = [t for t in _legend(rejected) if t.startswith("fit:")]
+    fit_rows = _fit_rows(rejected)
     assert "REJECTED" not in fit_rows[0]
-    assert "τ" in fit_rows[0]
+    # The row names the fit; its τ is in the fit label, which is never elided.
+    assert "τ" in _fit_text(rejected) and "REJECTED" not in _fit_text(rejected)
 
 
 def test_an_overlay_tags_each_rejected_fit_in_its_own_legend_entry(qapp, qtbot):
@@ -140,7 +152,7 @@ def test_an_overlay_tags_each_rejected_fit_in_its_own_legend_entry(qapp, qtbot):
     w._style = replace(w._style, fit_values_on_plot=False)
     w.set_fit("exponential")
     w._redraw()
-    rows = {t.split(" fit:")[0]: t for t in _legend(w) if " fit:" in t}
+    rows = {t.split(" fit (")[0]: t for t in _fit_rows(w)}
     assert set(rows) == {"peak", "expo"}, _legend(w)
     assert "REJECTED" not in rows["peak"]
     assert f"{pp._KS_REJECTED_TAG}: peak" in w.details_text()
