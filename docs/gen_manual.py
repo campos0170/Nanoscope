@@ -40,6 +40,8 @@ E = html.escape
 GOTCHA_LIMIT = 60
 
 AREA_TITLE = {
+    "project-figures": "Project Figures, styles &amp; millisecond presentation",
+    "curve-fitting-dialog": "Curve fitting: draft, completed result &amp; export",
     "incubation-studies": "Incubation studies and shared curation",
     "menus": "Menu bar",
     "file-and-calibration": "File Manager &amp; Calibration",
@@ -47,7 +49,7 @@ AREA_TITLE = {
     "stats-merge-measure": "Fits, Merge &amp; Measure",
     "event-table-and-inspector": "Event table &amp; Event inspector",
     "event-gallery": "Event gallery",
-    "plots": "Distributions, Figure Library &amp; publication export",
+    "plots": "Distributions, saved Figures &amp; publication export",
     "noise-iv-vdep-eventplots": "Noise, I-V, voltage dependence &amp; event waveforms",
 }
 
@@ -152,7 +154,8 @@ def controls_table(controls: list[dict]) -> str:
         if notes:
             extra.append(f'<span class="note">{E(notes)}</span>')
         if corr:
-            extra.append(f'<span class="corr"><b>Exactly:</b> {E(corr[:400])}</span>')
+            excerpt = corr if len(corr) <= 400 else corr[:397].rsplit(' ', 1)[0].rstrip(' ,;:') + '…'
+            extra.append(f'<span class="corr"><b>Exactly:</b> {E(excerpt)}</span>')
         rows.append(
             f'<tr><td class="c-label"><code>{label}</code>'
             + (f'<span class="grp">{grp}</span>' if grp else "")

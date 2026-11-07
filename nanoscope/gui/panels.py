@@ -83,6 +83,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QSpinBox,
     QStackedWidget,
@@ -102,8 +103,10 @@ import pyqtgraph as pg
 from .column_checklist import ColumnChecklist, ColumnChooserPopup
 from .inspector_widgets import Disclosure, InspectorScrollArea, PinnedActions, host_layout
 from .numeric_text import parse_strict_number
+from .time_controls import SecondsSpinBox
 
 from ..core import clock
+from ..core.quantity_display import quantity_for, column_entry, to_display
 from ..analysis import events as events_mod
 from ..analysis import baseline as baseline_mod
 from ..analysis import filters, ml_detect
@@ -545,10 +548,11 @@ class DetectionPanel(QWidget):
     _CONTROL_LEVEL_SETTINGS_KEY = "inspector/detection_control_level"
     mlModelChanged = Signal(str)
     notchLinesRefused = Signal(str)
-    #: "Open Signal Conditioning…" on the card (and, while hosted, the baseline
+    #: "Open Preprocess workspace…" on the card (and, while hosted, the baseline
     #: workspace's Advanced signal-chain settings): the stage key to show, or "" for the
     #: current one.
     openSignalConditioningRequested = Signal(str)
+    openPreprocessRequested = Signal(str)
     #: The stage page now raised in the editor (a STAGE_KEYS key), whatever raised it.
     stageShown = Signal(str)
     #: A sentence about a protocol recall for the status line (e.g. what the form clamped).
@@ -1099,14 +1103,14 @@ class DetectionPanel(QWidget):
         median_page = QWidget()
         median_form = QFormLayout(median_page)
         self.median_enabled = _ElidingCheckBox("enable (sliding median, despikes edges intact)")
-        self.median_window_s = QDoubleSpinBox()
+        self.median_window_s = SecondsSpinBox()
         self.median_window_s.setDecimals(5)
         self.median_window_s.setRange(0.00001, 1.0)
         self.median_window_s.setSingleStep(0.00005)
         self.median_window_s.setValue(0.0001)
-        self.median_window_s.setSuffix(" s")
+        self.median_window_s.setSuffix(" ms")
         self.median_window_s.setToolTip(
-            "Median window in seconds. Rejects spikes up to about half the window wide, so "
+            "Median window in milliseconds. Rejects spikes up to about half the window wide, so "
             "keep it a few samples — MUCH shorter than the shortest real event, or the "
             "median eats the events along with the spikes. Clamped up to an odd sample count."
         )
@@ -1123,12 +1127,12 @@ class DetectionPanel(QWidget):
         self.detrend_enabled = _ElidingCheckBox("remove baseline wander (flatten slow drift)")
         self.detrend_method = QComboBox()
         self.detrend_method.addItems([label for label, _ in self._DETREND_METHODS])
-        self.detrend_window_s = QDoubleSpinBox()
+        self.detrend_window_s = SecondsSpinBox()
         self.detrend_window_s.setDecimals(3)
         self.detrend_window_s.setRange(0.001, 60.0)
         self.detrend_window_s.setSingleStep(0.1)
         self.detrend_window_s.setValue(0.5)
-        self.detrend_window_s.setSuffix(" s")
+        self.detrend_window_s.setSuffix(" ms")
         self.detrend_window_s.setToolTip(
             "Smoothing window for the open-pore estimate. Must be MUCH longer than the "
             "longest event, or the baseline dives into events and subtracts them "
@@ -1251,23 +1255,23 @@ class DetectionPanel(QWidget):
         masked_page = QWidget()
         masked_form = QFormLayout(masked_page)
         masked_form.setContentsMargins(0, 0, 0, 0)
-        self.detrend_rough_s = QDoubleSpinBox()
+        self.detrend_rough_s = SecondsSpinBox()
         self.detrend_rough_s.setDecimals(3)
         self.detrend_rough_s.setRange(0.001, 60.0)
         self.detrend_rough_s.setSingleStep(0.1)
         self.detrend_rough_s.setValue(0.5)
-        self.detrend_rough_s.setSuffix(" s")
+        self.detrend_rough_s.setSuffix(" ms")
         self.detrend_rough_s.setKeyboardTracking(False)
         self.detrend_rough_s.setToolTip(
             "ROUGH window: the first, event-exposing pass. Must be MUCH longer than "
             "the longest event so the events stand out against it — this is the pass "
             "whose job is to be wrong inside events.")
-        self.detrend_base_s = QDoubleSpinBox()
+        self.detrend_base_s = SecondsSpinBox()
         self.detrend_base_s.setDecimals(4)
         self.detrend_base_s.setRange(0.0001, 60.0)
         self.detrend_base_s.setSingleStep(0.01)
         self.detrend_base_s.setValue(0.1)
-        self.detrend_base_s.setSuffix(" s")
+        self.detrend_base_s.setSuffix(" ms")
         self.detrend_base_s.setKeyboardTracking(False)
         self.detrend_base_s.setToolTip(
             "TRACKING window: the second pass, run on the masked trace. It may be far "
@@ -1380,14 +1384,14 @@ class DetectionPanel(QWidget):
         rmean_page = QWidget()
         rmean_form = QFormLayout(rmean_page)
         self.rmean_enabled = _ElidingCheckBox("enable (centred moving average, zero-phase)")
-        self.rmean_window_s = QDoubleSpinBox()
+        self.rmean_window_s = SecondsSpinBox()
         self.rmean_window_s.setDecimals(5)
         self.rmean_window_s.setRange(0.00001, 1.0)
         self.rmean_window_s.setSingleStep(0.0001)
         self.rmean_window_s.setValue(0.0005)
-        self.rmean_window_s.setSuffix(" s")
+        self.rmean_window_s.setSuffix(" ms")
         self.rmean_window_s.setToolTip(
-            "Averaging window in seconds. Suppresses noise by about sqrt(window·fs), but a "
+            "Averaging window in milliseconds. Suppresses noise by about sqrt(window·fs), but a "
             "box average rounds peaks and smears steps — keep it SHORTER than the shortest "
             "event you care about. Centred, so it does not shift features in time."
         )
@@ -1409,14 +1413,14 @@ class DetectionPanel(QWidget):
         # detrend page rather than in the item label.
         self.savgol_enabled = _ElidingCheckBox(
             "enable (peak-preserving polynomial smooth — KEEPS the fit)")
-        self.savgol_window_s = QDoubleSpinBox()
+        self.savgol_window_s = SecondsSpinBox()
         self.savgol_window_s.setDecimals(4)
         self.savgol_window_s.setRange(0.0001, 1.0)
         self.savgol_window_s.setSingleStep(0.0005)
         self.savgol_window_s.setValue(0.0010)
-        self.savgol_window_s.setSuffix(" s")
+        self.savgol_window_s.setSuffix(" ms")
         self.savgol_window_s.setToolTip(
-            "Smoothing window in seconds. Keep it SHORTER than the shortest event you "
+            "Smoothing window in milliseconds. Keep it SHORTER than the shortest event you "
             "care about, or the smoother rounds the event off along with the noise. It is "
             "clamped up to an odd sample count with more points than the polynomial order."
         )
@@ -1600,7 +1604,7 @@ class DetectionPanel(QWidget):
 
         # -- the compact Signal chain card, used while the editor is HOSTED in the Signal
         # Conditioning window. Every row owns a fixed height, so no state moves anything.
-        self.open_conditioning_button = QPushButton("Open Signal Conditioning…")
+        self.open_conditioning_button = QPushButton("Open Preprocess workspace…")
         self.open_conditioning_button.setObjectName("openSignalConditioningButton")
         self.open_conditioning_button.setToolTip(
             "Edit the classical detectors' signal chain in execution order, with its "
@@ -1823,18 +1827,18 @@ class DetectionPanel(QWidget):
         self.k_out.setRange(0.1, 49.5)
         self.k_out.setSingleStep(0.5)
         self.k_out.setValue(2.0)
-        self.min_dwell_s = QDoubleSpinBox()
+        self.min_dwell_s = SecondsSpinBox()
         self.min_dwell_s.setDecimals(7)
         self.min_dwell_s.setRange(0.0, 1.0)
         self.min_dwell_s.setSingleStep(1e-5)
         self.min_dwell_s.setValue(2e-5)
-        self.min_dwell_s.setSuffix(" s")
-        self.max_dwell_s = QDoubleSpinBox()
+        self.min_dwell_s.setSuffix(" ms")
+        self.max_dwell_s = SecondsSpinBox()
         self.max_dwell_s.setDecimals(6)
         self.max_dwell_s.setRange(0.0, 100.0)
         self.max_dwell_s.setSingleStep(1e-3)
         self.max_dwell_s.setValue(0.0)
-        self.max_dwell_s.setSuffix(" s  (0 = off)")
+        self.max_dwell_s.setSuffix(" ms  (0 = off)")
         self.max_dwell_s.setToolTip(
             "Events longer than this are KEPT but marked rejected (a clog is real signal "
             "you must see, not something to disappear).\n"
@@ -1880,6 +1884,31 @@ class DetectionPanel(QWidget):
             "merged: 40 clean 0.4 ms events 8 ms apart are not one 312 ms translocation, "
             "so they are left as they are and the provenance records how many were skipped."
         )
+        self.noise_policy = _narrow_combo()
+        for label, value in (("Automatic (recommended)", "auto"),
+                             ("Local", "local"), ("Global", "global")):
+            self.noise_policy.addItem(label, value)
+        self.noise_policy.setToolTip(
+            "Automatic keeps global thresholds for stationary noise and uses local "
+            "thresholds when noise changes strongly. Local requests adaptive thresholds; "
+            "short or unmeasurable traces fall back to Global with an advisory. "
+            "Local thresholds never fall below the global noise floor. Global uses one "
+            "estimate and restores the threshold policy of older runs; baseline algorithm "
+            "changes still require a new analysis. Review null controls and event recovery.")
+        self.noise_window_s = SecondsSpinBox()
+        self.noise_window_s.setDecimals(7)
+        self.noise_window_s.setRange(1e-6, 1e6)
+        self.noise_window_s.setSingleStep(.05)
+        self.noise_window_s.setValue(.25)
+        self.noise_window_s.setSuffix(" ms")
+        self.noise_window_s.setToolTip(
+            "Time scale for local noise estimation. Short windows follow rapid noise "
+            "changes but contain less evidence; long windows spread high thresholds "
+            "around transitions and can hide nearby weak events.")
+        self.noise_policy.currentIndexChanged.connect(
+            lambda: self.noise_window_s.setEnabled(self.noise_policy.currentData() != "global"))
+        schmitt_form.addRow("Noise thresholds", self.noise_policy)
+        schmitt_form.addRow("Noise window", self.noise_window_s)
         schmitt_form.addRow("k_in (enter)", self.k_in)
         schmitt_form.addRow("k_out (exit)", self.k_out)
         self.detector_stack.addWidget(schmitt_page)
@@ -2245,11 +2274,13 @@ class DetectionPanel(QWidget):
         # Every widget that changes a detection parameter re-emits paramsChanged
         # (the AnalysisPanel recomputes the live preview from it).
         self.polarity_override.currentTextChanged.connect(self._emit_params)
+        self.noise_policy.currentIndexChanged.connect(self._emit_params)
         for w in (
             self.filter_cutoff_hz,
             self.filter_order,
             self.k_in,
             self.k_out,
+            self.noise_window_s,
             self.min_dwell_s,
             self.max_dwell_s,
             self.merge_gap_ms,
@@ -2474,7 +2505,7 @@ class DetectionPanel(QWidget):
 
     def _refresh_detection_advanced_summary(self, *_args) -> None:
         self.detection_advanced_summary.setText(
-            f'Max dwell: {self.max_dwell_s.value():g} s (0 = off) · '
+            f'Max dwell: {self.max_dwell_s.value() * 1000:g} ms (0 = off) · '
             f'Merge gap: {self.merge_gap_ms.value():g} ms (0 = off) · '
             f'Polarity: {self.polarity_override.currentText()}')
 
@@ -2495,7 +2526,7 @@ class DetectionPanel(QWidget):
         self.control_level_selector.setToolTip(
             "Changes visibility only. No filters, thresholds, presets, results or review history are changed.")
         row.addWidget(self.control_level_selector, 1)
-        self.baseline_reference_button = QPushButton("Baseline reference…")
+        self.baseline_reference_button = QPushButton("Event reference…")
         self.baseline_reference_button.setToolTip(
             "Inspect and confirm the open-pore reference used to measure event amplitudes.")
         self.baseline_reference_button.clicked.connect(self.show_open_pore_baseline)
@@ -2579,7 +2610,7 @@ class DetectionPanel(QWidget):
         active = [label for label, check in self._filter_specs if check.isChecked()]
         retained = []
         if self.max_dwell_s.value() > 0:
-            retained.append(f"max dwell {self.max_dwell_s.value():g} s")
+            retained.append(f"max dwell {self.max_dwell_s.value() * 1000:g} ms")
         if self.merge_gap_ms.value() > 0:
             retained.append(f"merge {self.merge_gap_ms.value():g} ms")
         if self.normalize_enabled.isChecked():
@@ -3057,12 +3088,12 @@ class DetectionPanel(QWidget):
     @staticmethod
     def _ml_seconds_spin(value: float, tip: str) -> QDoubleSpinBox:
         """A seconds-valued window spin with enough decimals for notebook 3's 0.01 s."""
-        spin = QDoubleSpinBox()
+        spin = SecondsSpinBox()
         spin.setDecimals(4)
         spin.setRange(0.0001, 3600.0)
         spin.setSingleStep(0.01)
         spin.setValue(value)
-        spin.setSuffix(" s")
+        spin.setSuffix(" ms")
         spin.setKeyboardTracking(False)
         spin.setToolTip(tip)
         return spin
@@ -3675,6 +3706,91 @@ class DetectionPanel(QWidget):
         for actions in self.findChildren(PinnedActions):
             actions._sync_height()
 
+    def set_preprocess_workspace_hosted(self, hosted: bool = True) -> None:
+        """Use the Inspector as navigation for the one expanded workspace.
+
+        The original pages stay alive for standalone consumers and form ownership.
+        This changes only presentation; it never writes a processing parameter.
+        """
+        if not hasattr(self, "_preprocess_overview"):
+            self._preprocess_workspace_hosted = False
+            self._preprocess_section = "filters"
+            self._preprocess_reference_summary = "Event reference: automatic"
+            self._preprocess_display_summary = "Main trace: raw current"
+            self._preprocess_legacy_widgets = tuple(
+                self._preprocess_page.layout().itemAt(i).widget()
+                for i in range(self._preprocess_page.layout().count())
+                if self._preprocess_page.layout().itemAt(i).widget() is not None)
+            self._preprocess_overview = QWidget()
+            self._preprocess_overview.setObjectName("preprocessOverview")
+            layout = QVBoxLayout(self._preprocess_overview)
+            layout.setContentsMargins(0, 0, 0, 0)
+            self.preprocess_route_buttons = {}
+            for key, title, tip in (
+                ("filters", "Filters && drift", "Classical detection, processed measurements and processed export."),
+                ("reference", "Event reference", "Shared open-pore reference for future event measurements, including ML."),
+                ("comparison", "Background comparison", "Inspect and export one background operation; independent of detector input."),
+            ):
+                button = QRadioButton(title)
+                button.setObjectName("preprocessRoute_" + key)
+                button.setToolTip(tip)
+                button.toggled.connect(lambda on, section=key: self.select_preprocess_section(section) if on else None)
+                self.preprocess_route_buttons[key] = button
+                layout.addWidget(button)
+            self.preprocess_route_buttons["filters"].setChecked(True)
+            self.preprocess_open_button = QPushButton("Open Preprocess workspace…")
+            self.preprocess_open_button.setObjectName("openPreprocessWorkspaceButton")
+            self.preprocess_open_button.clicked.connect(
+                lambda: self.openPreprocessRequested.emit(self.current_preprocess_section()))
+            layout.addWidget(self.preprocess_open_button)
+            self.preprocess_effect_summary = QLabel()
+            self.preprocess_effect_summary.setWordWrap(True)
+            self.preprocess_effect_summary.setStyleSheet("color:#8b9199;")
+            layout.addWidget(self.preprocess_effect_summary)
+            self.preprocess_result_summary = QLabel()
+            self.preprocess_result_summary.setWordWrap(True)
+            layout.addWidget(self.preprocess_result_summary)
+            note = QLabel("ML model preprocessing stays in ML. Event reference is shared with event measurement.")
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#8b9199;")
+            layout.addWidget(note)
+            layout.addStretch(1)
+            self._preprocess_page.layout().addWidget(self._preprocess_overview, 1)
+        self._preprocess_workspace_hosted = bool(hosted)
+        for widget in self._preprocess_legacy_widgets:
+            widget.setVisible(not hosted)
+        self._preprocess_overview.setVisible(hosted)
+        self._refresh_preprocess_summary()
+
+    def current_preprocess_section(self) -> str:
+        return getattr(self, "_preprocess_section", "filters")
+
+    def select_preprocess_section(self, section: str) -> None:
+        if section not in {"filters", "reference", "comparison"}:
+            raise ValueError("Unknown Preprocess section: " + str(section))
+        self._preprocess_section = section
+        for key, button in getattr(self, "preprocess_route_buttons", {}).items():
+            previous = button.blockSignals(True)
+            button.setChecked(key == section)
+            button.blockSignals(previous)
+
+    def sync_preprocess_summary(self, reference: str, display: str) -> None:
+        self._preprocess_reference_summary = str(reference)
+        self._preprocess_display_summary = str(display)
+        self._refresh_preprocess_summary()
+
+    def _refresh_preprocess_summary(self) -> None:
+        if not hasattr(self, "preprocess_effect_summary"):
+            return
+        processed = " · processed overlay ON" if self.filter_preview.isChecked() else ""
+        self.preprocess_effect_summary.setText(
+            self._preprocess_display_summary + processed + "\n\n"
+            + "Next classical run: " + self.active_filters_label.text() + "\n\n"
+            + self._preprocess_reference_summary)
+        self.preprocess_result_summary.setText(self._chain_status_text)
+        self.preprocess_result_summary.setStyleSheet(
+            "color:#FFB74D;" if self._chain_status_warn else "color:#8b9199;")
+
     def is_signal_chain_hosted(self) -> bool:
         return self._chain_editor_hosted
 
@@ -3686,17 +3802,21 @@ class DetectionPanel(QWidget):
         """
         if self._editor_parts is not None:
             return self._editor_parts
+        from .widget_transfer import prepare_widget_move
         protocol_bar = QWidget()
         protocol_bar.setObjectName("signalChainProtocolBar")
         bar = QVBoxLayout(protocol_bar)
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(4)
         row = QHBoxLayout()
+        prepare_widget_move(self._protocol_label)
         row.addWidget(self._protocol_label)
+        prepare_widget_move(self.protocol_combo)
         row.addWidget(self.protocol_combo, 1)
         verbs = QHBoxLayout()
         for button in (self.protocol_save_btn, self.protocol_rename_btn,
                        self.protocol_delete_btn):
+            prepare_widget_move(button)
             verbs.addWidget(button)
         verbs.addStretch(1)
         bar.addLayout(row)
@@ -3707,7 +3827,10 @@ class DetectionPanel(QWidget):
         stack = _CurrentPageStackedWidget()
         stack.setObjectName("signalChainStageStack")
         for page in [old_stack.widget(i) for i in range(old_stack.count())]:
-            old_stack.removeWidget(page)
+            # Taking/deleting the old layout item through PySide invalidates any
+            # wrapper held by a geometry observer before the native address can
+            # be reused for an event. The page and its callbacks remain alive.
+            prepare_widget_move(page)
             stack.addWidget(page)
         stack.setCurrentIndex(max(current, 0))
         old_stack.setVisible(False)
@@ -3720,6 +3843,7 @@ class DetectionPanel(QWidget):
         nl.setSpacing(4)
         for label in (self.highpass_measurement_label, self.normalize_units_label,
                       self.detrend_refusal_label):
+            prepare_widget_move(label)
             nl.addWidget(label)
 
         response_view = QWidget()
@@ -3727,9 +3851,10 @@ class DetectionPanel(QWidget):
         rl = QVBoxLayout(response_view)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(4)
-        rl.addWidget(self.response_chain_check)
-        rl.addWidget(self.response_plot, 1)
-        rl.addWidget(self.response_note)
+        for widget, stretch in ((self.response_chain_check, 0),
+                                (self.response_plot, 1), (self.response_note, 0)):
+            prepare_widget_move(widget)
+            rl.addWidget(widget, stretch)
         self.response_plot.setMaximumHeight(16_777_215)
         self._set_response_title(self.response_plot.getPlotItem().titleLabel.text)
         self._editor_parts = SignalChainEditorParts(
@@ -3918,10 +4043,15 @@ class DetectionPanel(QWidget):
         if self.chain_status_note.styleSheet() != style:
             self.chain_status_note.setStyleSheet(style)
 
+        self._refresh_preprocess_summary()
+
     def show_open_pore_baseline(self) -> None:
-        """Raise Preprocess and reveal the open-pore baseline controls."""
+        """Navigate to the shared event reference without copying its settings."""
         self.show_preprocess_tab()
         self.preprocess_section_selector.setCurrentIndex(1)
+        if getattr(self, "_preprocess_workspace_hosted", False):
+            self.select_preprocess_section("reference")
+            self.openPreprocessRequested.emit("reference")
 
     def show_detection_tab(self) -> None:
         """Raise the Detection (Schmitt threshold / polarity / run) tab."""
@@ -4222,6 +4352,7 @@ class DetectionPanel(QWidget):
         learns *which* stage is misconfigured instead of watching the curve vanish."""
         self.preview_error_label.setText(
             f"processed-trace preview unavailable: {message}" if message else "")
+        self.preview_error_label.setToolTip(self.preview_error_label.text())
         self.preview_error_label.setVisible(bool(message))
 
     def set_runnable(self, runnable: bool, reason: str = "") -> None:
@@ -5164,6 +5295,8 @@ class DetectionPanel(QWidget):
             "polarity": self.polarity_choice(),
             "k_in": float(self.k_in.value()),
             "k_out": float(self.k_out.value()),
+            "noise_policy": self.noise_policy.currentData(),
+            "noise_window_s": float(self.noise_window_s.value()),
             "cusum_k": float(self.cusum_k.value()),
             "cusum_h": float(self.cusum_h.value()),
             "min_dwell_s": float(self.min_dwell_s.value()),
@@ -5278,6 +5411,16 @@ class DetectionPanel(QWidget):
         # -- thresholds (k_in first; see the docstring) --------------------
         _apply("k_in", self.k_in.setValue, float)
         _apply("k_out", self.k_out.setValue, float)
+        if "noise_policy" in params:
+            value = str(params["noise_policy"])
+            index = self.noise_policy.findData(value)
+            if index < 0:
+                # Keep an unknown saved policy visible and invalid; the engine must
+                # refuse it, rather than silently changing a restored analysis.
+                self.noise_policy.addItem("Unavailable: " + value, value)
+                index = self.noise_policy.count() - 1
+            self.noise_policy.setCurrentIndex(index)
+        _apply("noise_window_s", self.noise_window_s.setValue, float)
         _apply("cusum_k", self.cusum_k.setValue, float)
         _apply("cusum_h", self.cusum_h.setValue, float)
         _apply("min_dwell_s", self.min_dwell_s.setValue, float)
@@ -5706,12 +5849,14 @@ class DetectionPanel(QWidget):
                 + (description or "raw calibrated signal")
                 + ". Quantitative measurement: same order with high-pass omitted.")
             self.filter_preview.setText(
-                "show candidate-localization trace on the plot")
+                "Candidate-localization overlay" if getattr(self, "_preprocess_workspace_hosted", False)
+                else "show candidate-localization trace on the plot")
         else:
             self.active_filters_label.setText(
                 "Active execution order: "
                 + (description or "raw calibrated signal (no stages enabled)"))
-            self.filter_preview.setText("show processed trace on the plot")
+            self.filter_preview.setText("Processed overlay" if getattr(self, "_preprocess_workspace_hosted", False)
+                                        else "show processed trace on the plot")
         self._refresh_highpass_measurement_note()
         self._refresh_normalize_units_note()
         self._refresh_chain_card()
@@ -5827,8 +5972,8 @@ class DetectionPanel(QWidget):
         design = self._KIND_LABELS.get(kind, kind)
         design = design if kind in filters.KINDS_WITHOUT_ORDER else f"{order}-pole {design}"
         text = (
-            f"rise time: {rise_us:.0f} µs ({design}, zero-phase)  →  dwells below "
-            f"~{floor_us:.0f} µs are filter-limited (depth attenuated, dwell biased long)."
+            f"rise time: {rise_us / 1000:.3g} ms ({design}, zero-phase)  →  dwells below "
+            f"~{floor_us / 1000:.3g} ms are filter-limited (depth attenuated, dwell biased long)."
         )
         # The kernel warns above fs/2.5 that the transition band is truncated and the
         # nominal order is meaningless — a stderr RuntimeWarning nothing in the GUI ever
@@ -6200,7 +6345,7 @@ class DetectionPanel(QWidget):
                 harmonics=int(kwargs["harmonics"]), freqs=explicit)
             settle_samples = int(np.ceil(settle_s * fs))
             cost = (
-                f" Required settling pad: {settle_s:.3g} s "
+                f" Required settling pad: {settle_s * 1000:.3g} ms "
                 f"({settle_samples:,} samples per side)."
             )
             if settle_samples > filters.MAX_NOTCH_PAD_SAMPLES:
@@ -6228,7 +6373,7 @@ class DetectionPanel(QWidget):
         )
         if stage == "running_mean" and n_samp == 1:
             return (
-                f"A {window_s * 1e6:g} µs window is 1 sample at this rate: this stage is "
+                f"A {window_s * 1000:g} ms window is 1 sample at this rate: this stage is "
                 "the IDENTITY — it is enabled but changes nothing. Widen the window.")
         corner = filters.response_crossing_hz(f, mag)
         text = f"{n_samp} samples wide."
@@ -6291,7 +6436,7 @@ class StatsPanel(QWidget):
         ("n events", "n_events"),
         ("n accepted", "n_accepted"),
         ("rate (Hz, accepted)", "rate_accepted_hz"),
-        ("median dwell (µs, accepted)", "median_dwell_us"),
+        ("median dwell (ms, accepted)", "median_dwell_us"),
         ("median depth ({units}, accepted)", "median_depth_pA"),
         ("median dI/I0 (accepted)", "median_frac_depth"),
         ("open pore (median stamped, {units}, accepted)", "median_baseline_pA"),
@@ -6462,7 +6607,7 @@ class StatsPanel(QWidget):
         self.fit_button = QPushButton("Fit")
         self.fit_button.setToolTip(
             "Fit the dwell and depth distributions of the ACCEPTED events of the current "
-            "detection (exponential / log-normal mixtures), and store each fit with its "
+            "detection (exponential / Gaussian mixtures), and store each fit with its "
             "provenance.")
         # The Fit gate. This button used to have NO gate at all: with no detection it accepted
         # the click and then wrote "Run detection first…" into the results box — a failure
@@ -6572,6 +6717,8 @@ class StatsPanel(QWidget):
         """Fill the summary table from a plain stats dict (AnalysisPanel builds it)."""
         for i, (_, key) in enumerate(self._SUMMARY_ROWS):
             val = stats.get(key)
+            if key == "median_dwell_us" and isinstance(val, (int, float, np.integer, np.floating)):
+                val = to_display(val, quantity_for(key))
             item = self.summary_table.item(i, 0)
             text = self._fmt(val)
             note = self.frac_depth_note(val) if key == "median_frac_depth" else ""
@@ -6851,12 +6998,19 @@ class StatsPanel(QWidget):
         of running detection; only the action is gated.
         """
         on = bool(present)
-        self.fit_button.setEnabled(on)
+        self._fit_detection_present = on
+        self.fit_button.setEnabled(on or getattr(self, "_fit_busy", False))
         text = "" if on else (reason or self._NO_DETECTION_REASON)
         self._fit_gate_label.setText(text)
         self._fit_gate_label.setVisible(bool(text))
         self.fit_button.setToolTip(
             self.fit_button.toolTip().split("\n\n")[0] + ("" if on else "\n\n" + text))
+
+    def set_fit_busy(self, busy: bool) -> None:
+        """Keep cancellation reachable even when the user selects another recording."""
+        self._fit_busy = bool(busy)
+        self.fit_button.setText("Cancel fit" if busy else "Fit")
+        self.fit_button.setEnabled(bool(busy) or getattr(self, "_fit_detection_present", False))
 
     def fit_gate_reason(self) -> str:
         """The reason the Fit button is disabled ("" when it is live) — what the user reads."""
@@ -7545,6 +7699,7 @@ class _EventTableModel(QAbstractTableModel):
             {c: pd.Series(dtype=d) for c, (d, _, _) in SCHEMA.items()}
         )
         self._columns = list(self._df.columns)
+        self._quantities = {key: quantity_for(key, schema=SCHEMA) for key in self._columns}
         #: Columns whose values were measured by an estimator that is no longer the
         #: configured one. Empty is the normal case. Held on the MODEL, not painted
         #: by a delegate over 5000 rows: the badge is a role the model answers, so
@@ -7561,6 +7716,7 @@ class _EventTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._df = df
         self._columns = list(df.columns)
+        self._quantities = {key: quantity_for(key, schema=SCHEMA) for key in self._columns}
         self.endResetModel()
 
     def set_clock_offset(self, offset_s: float | None) -> None:
@@ -7620,7 +7776,7 @@ class _EventTableModel(QAbstractTableModel):
             # thing lost to a colour-blind reader, a screenshot, or a printed figure,
             # and this badge is the only thing distinguishing a number that is right
             # from one that is 15x wrong.
-            label = "median depth (depth_pA)" if name == "depth_pA" else name
+            label = column_entry(name, self._quantities[name])[1]
             text = f"{label} ⚠" if stale else label
             # ...and the same rule for the CLOCK. `t_start_s` is seconds from the start
             # of the recording; the trace x-axis beside it is seconds on the instrument
@@ -7631,11 +7787,11 @@ class _EventTableModel(QAbstractTableModel):
                 text = f"{text} (t₀=0)"
             return text
         if role == Qt.ToolTipRole:
-            tips = []
+            tips = [column_entry(name, self._quantities[name])[2]]
             if stale:
                 tips.append(self._stale_tip or _STALE_COLUMN_TIP)
             if name in _CLOCK_COLUMNS:
-                tips.append(clock.field_note(clock.RECORDING, self._clock_offset_s))
+                tips.append(clock.field_note(clock.RECORDING, self._clock_offset_s, display_unit="ms"))
             elif name in _COLUMN_TIPS:
                 tips.append(_COLUMN_TIPS[name])
             return "\n\n".join(t for t in tips if t) or None
@@ -7682,6 +7838,8 @@ class _EventTableModel(QAbstractTableModel):
             return None  # no text next to the checkbox
 
         if role in (Qt.DisplayRole, Qt.EditRole):
+            if role == Qt.DisplayRole and isinstance(value, (int, np.integer, float, np.floating)) and not isinstance(value, (bool, np.bool_)):
+                value = to_display(value, self._quantities[colname])
             if isinstance(value, (float, np.floating)):
                 if colname in ("dwell_s", "rise_s", "fall_s", "ecd_pA_s"):
                     return f"{value:.6g}"
@@ -7939,6 +8097,7 @@ class _EventTableModel(QAbstractTableModel):
         storm would be wasteful."""
         self.beginResetModel()
         self._columns = list(self._df.columns)
+        self._quantities = {key: quantity_for(key, schema=SCHEMA) for key in self._columns}
         self.endResetModel()
 
 
@@ -8258,7 +8417,7 @@ class EventTable(QWidget):
     _NOTICE_ACTIONS: tuple[tuple[str, str], ...] = (
         ("revert", "Revert form to this detection's chain"),
         ("run", "Run detection with the form's chain…"),
-        ("open", "Open Signal Conditioning…"),
+        ("open", "Open Preprocess workspace…"),
     )
     #: The revert entry once a detection threshold differs: Revert then puts thresholds
     #: back as well as stages, and "chain" would undersell what it writes.

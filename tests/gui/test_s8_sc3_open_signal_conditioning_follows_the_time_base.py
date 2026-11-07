@@ -5,7 +5,7 @@ milliseconds, on the owner's -600 mV ABF re-declared at 25 kHz and on a neutral-
 declared at 100 kHz). With Signal Conditioning (⇧⌘F) open, Inspector ▸ File Info ▸ Sample rate /
 time unit… moved the status bar, File Info, the Detection form and the main trace to the declared
 clock — and not the window. It went on previewing at the OLD rate: the Time tab spanned 0–2000 s
-against the trace's 0–2 s under "Exact for these stages · window 2000.00 s", the Spectrum tab
+against the trace's 0–2 s under "Exact for these stages · window 2000000.00 ms", the Spectrum tab
 stopped at the old Nyquist (25 Hz), and when the user then turned on the 10 kHz low-pass the form
 now accepted, the preview refused it as "at or above Nyquist (25 Hz) for fs=50 Hz" — the very
 units error the user had just corrected. Nothing on the window said it was stale. Handing the
@@ -268,7 +268,7 @@ def test_declaring_the_time_unit_moves_the_open_window_to_the_declared_clock(ben
     window = bench.window
     did, ws = bench.open(_csv_in_milliseconds(bench.tmp))
     assert ws._source.fs == pytest.approx(50.0)
-    assert bench.status() == "No stage is on, so processed = raw · window 2000.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 2000000.00 ms"
     assert _x_span(ws.raw_curve) == pytest.approx((T0_AS_READ, T0_AS_READ + (N_CSV - 1) / 50.0))
 
     said = bench.declare(did, unit="ms")
@@ -286,7 +286,7 @@ def test_declaring_the_time_unit_moves_the_open_window_to_the_declared_clock(ben
         "the Time tab spans the recording's 2 s, not 2000 s")
     trace_x = window._trace_view.visible_x_range_for(did, 0)
     assert _x_span(ws.raw_curve) == pytest.approx(trace_x, abs=0.05), "the main trace's clock"
-    assert bench.status() == "No stage is on, so processed = raw · window 2.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 2000.00 ms"
     assert ws.preview_state() == "exact"
     assert "processed — exact" in ws.legend_texts()
 
@@ -302,7 +302,7 @@ def test_the_cutoff_the_form_accepts_after_a_declaration_is_not_refused_by_the_o
     assert "Nyquist" not in ws.time_status.text() and "Preview unavailable" not in (
         ws.time_status.text())
     assert ws.preview_state() == "exact" and ws.last_result().error == ""
-    assert bench.status().startswith("Exact for these stages · window 2.00 s, padded ±")
+    assert bench.status().startswith("Exact for these stages · window 2000.00 ms, padded ±")
     low_pass = [r.text for r in ws.stage_rows() if "Low-pass" in r.text][0]
     assert low_pass.endswith("Bessel 8 · 10 kHz (applied inside detection)")
     assert ws._source.fs == ws._fs == pytest.approx(50_000.0)
@@ -312,7 +312,7 @@ def test_the_spectrum_tab_follows_a_declaration_frequency_axis_note_and_lines(be
     did, ws = bench.open(_csv_in_milliseconds(bench.tmp), tab="spectrum")
     sp = ws.last_result().spectrum
     assert sp.f_hz[-1] == pytest.approx(25.0, rel=0.05), "as read: Nyquist is 25 Hz"
-    assert "on a 2000.00 s window" in ws.spectrum_note.text()
+    assert "on a 2000000.00 ms window" in ws.spectrum_note.text()
     assert "in 20 – 25 Hz." in ws.lines_note.text()
 
     bench.declare(did, unit="ms")
@@ -320,7 +320,7 @@ def test_the_spectrum_tab_follows_a_declaration_frequency_axis_note_and_lines(be
     sp = ws.last_result().spectrum
     assert sp.f_hz[-1] == pytest.approx(25_000.0, rel=0.05), "the declared clock's Nyquist"
     assert sp.window_s == pytest.approx(N_CSV / FS)
-    assert "on a 2.00 s window" in ws.spectrum_note.text() and "2000" not in (
+    assert "on a 2000.00 ms window" in ws.spectrum_note.text() and "2000000" not in (
         ws.spectrum_note.text())
     x0, x1 = ws.spectrum_plot.getPlotItem().getViewBox().viewRange()[0]
     assert 10 ** x1 == pytest.approx(sp.f_hz[-1], rel=0.01), "the plotted axis ends at it"
@@ -344,7 +344,7 @@ def test_giving_the_time_base_back_to_the_file_moves_the_open_window_back(bench)
     bench.declare(did, unit="ms")                      # declared BEFORE the window opens
     ws = bench.open_window()
     assert ws._source.fs == ws._fs == pytest.approx(50_000.0)
-    assert bench.status() == "No stage is on, so processed = raw · window 2.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 2000.00 ms"
 
     said = bench.declare(did)                          # Use the file's own time base
     assert said.startswith("The file's own time base is in use again."), said
@@ -352,13 +352,13 @@ def test_giving_the_time_base_back_to_the_file_moves_the_open_window_back(bench)
     assert window._session.document(did).meta.sample_rate_hz == pytest.approx(50.0)
     assert bench.det.sample_rate() == pytest.approx(50.0)
     assert ws._source.fs == pytest.approx(50.0) and ws._fs == pytest.approx(50.0)
-    assert bench.status() == "No stage is on, so processed = raw · window 2000.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 2000000.00 ms"
     assert _x_span(ws.raw_curve) == pytest.approx((T0_AS_READ, T0_AS_READ + (N_CSV - 1) / 50.0))
     assert ws.preview_state() == "exact"
     ws.set_preview_tab("spectrum")
     _settle(ws)
     assert ws.last_result().spectrum.f_hz[-1] == pytest.approx(25.0, rel=0.05)
-    assert "on a 2000.00 s window" in ws.spectrum_note.text()
+    assert "on a 2000000.00 ms window" in ws.spectrum_note.text()
 
 
 def test_a_rate_declared_on_a_recording_that_had_none_reaches_the_open_window(bench):
@@ -371,7 +371,7 @@ def test_a_rate_declared_on_a_recording_that_had_none_reaches_the_open_window(be
     bench.declare(did, rate=50_000)
     _settle(ws)
     assert ws._source.fs == pytest.approx(50_000.0) and ws._fs == pytest.approx(50_000.0)
-    assert bench.status() == "No stage is on, so processed = raw · window 4.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 4000.00 ms"
     assert ws.preview_state() == "exact"
 
     bench.declare(did)
@@ -389,12 +389,12 @@ def test_a_declared_rate_leaves_the_source_and_the_chain_on_one_rate_through_a_d
     panel = bench.panel
     did, ws = bench.open(_recording_with_a_header_rate(bench.tmp))
     assert ws._source.fs == ws._fs == FS
-    assert bench.status() == "No stage is on, so processed = raw · window 4.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 4000.00 ms"
 
     bench.declare(did, rate=25_000)
     _settle(ws)
     assert ws._source.fs == ws._fs == pytest.approx(25_000.0), "one rate, at once"
-    assert bench.status() == "No stage is on, so processed = raw · window 8.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 8000.00 ms"
 
     bench.det.set_params({"filter_cutoff_hz": 5_000.0, "min_dwell_s": 5e-4})
     panel.trigger_detection()
@@ -403,7 +403,7 @@ def test_a_declared_rate_leaves_the_source_and_the_chain_on_one_rate_through_a_d
     _settle(ws)
     assert panel.current_detection() is not None, "the detection ran"
     assert ws._source.fs == ws._fs == pytest.approx(25_000.0), "and did not split the rates"
-    assert bench.status().startswith("Exact for these stages · window 8.00 s, padded ±")
+    assert bench.status().startswith("Exact for these stages · window 8000.00 ms, padded ±")
     assert ws.preview_state() == "exact"
 
 
@@ -418,7 +418,7 @@ def test_a_cutoff_the_new_nyquist_clamps_is_previewed_clamped_not_refused(bench)
     did, ws = bench.open(_recording_with_a_header_rate(bench.tmp))
     bench.det.set_params({"filter_cutoff_hz": 10_000.0})
     _settle(ws)
-    assert bench.status().startswith("Exact for these stages · window 4.00 s")
+    assert bench.status().startswith("Exact for these stages · window 4000.00 ms")
 
     bench.declare(did, rate=4_000)
     _settle(ws)
@@ -427,7 +427,7 @@ def test_a_cutoff_the_new_nyquist_clamps_is_previewed_clamped_not_refused(bench)
     assert ws._source.fs == ws._fs == pytest.approx(4_000.0)
     low_pass = [r.text for r in ws.stage_rows() if "Low-pass" in r.text][0]
     assert "10 kHz" not in low_pass and "1.9999 kHz" in low_pass, low_pass
-    assert bench.status().startswith("Exact for these stages · window 50.00 s, padded ±")
+    assert bench.status().startswith("Exact for these stages · window 50000.00 ms, padded ±")
     assert "Preview unavailable" not in ws.time_status.text()
     assert ws.preview_state() == "exact" and ws.last_result().error == ""
 
@@ -459,7 +459,7 @@ def test_a_baseline_window_longer_than_the_declared_recording_is_refused_in_its_
                           "detrend_window_s": 60.0})
     _settle(ws)
     assert ws.preview_state() == "exact"
-    assert bench.status() == "Exact for these stages · window 2000.00 s, padded ±120.00 s"
+    assert bench.status() == "Exact for these stages · window 2000000.00 ms, padded ±120000.00 ms"
 
     bench.declare(did, unit="ms")
     _settle(ws)
@@ -529,7 +529,7 @@ def test_a_closed_window_computes_nothing_and_reopens_on_the_declared_rate(bench
     assert calls and all(fs == pytest.approx(50_000.0) for fs in calls), (
         "and it comes up on the declared rate")
     assert ws._source.fs == ws._fs == pytest.approx(50_000.0)
-    assert bench.status() == "No stage is on, so processed = raw · window 2.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 2000.00 ms"
     t0 = window._session.document(did).meta.t0_s
     assert _x_span(ws.raw_curve) == pytest.approx((t0, t0 + (N_CSV - 1) / FS))
 
@@ -546,7 +546,7 @@ def test_a_preview_scheduled_at_the_old_rate_is_posted_at_the_new_one(bench, mon
     bench.declare(did, rate=25_000)
     _settle(ws)
     assert calls and all(fs == pytest.approx(25_000.0) for fs in calls), calls
-    assert bench.status().startswith("Exact for these stages · window 8.00 s")
+    assert bench.status().startswith("Exact for these stages · window 8000.00 ms")
 
 
 def test_an_answer_computed_at_the_old_rate_never_lands_after_the_declaration(bench, monkeypatch):
@@ -590,7 +590,7 @@ def test_an_answer_computed_at_the_old_rate_never_lands_after_the_declaration(be
     _settle(ws)
     assert set(drawn) == {25_000.0} and ws.last_result().computed_at_hz == 25_000.0
     assert ws._source.fs == ws._fs == pytest.approx(25_000.0)
-    assert bench.status().startswith("Exact for these stages · window 8.00 s, padded ±")
+    assert bench.status().startswith("Exact for these stages · window 8000.00 ms, padded ±")
 
 
 def _observe(bench, ws) -> dict:
@@ -667,7 +667,7 @@ def test_a_pass_computed_at_the_old_rate_is_not_the_exact_trace_at_the_new_one(b
     _settle(ws)
     assert bench.status().startswith("Window estimate — Baseline drift uses whole-recording")
     _compute_exact_and_wait(ws)
-    assert bench.status().startswith("Whole recording (exact) · showing 1.00 s")
+    assert bench.status().startswith("Whole recording (exact) · showing 1000.02 ms")
     old_pass = np.array(ws._memo.get(ws._current_memo_key())[0], dtype=np.float64)
 
     bench.declare(did, rate=25_000)
@@ -783,13 +783,13 @@ def test_a_segment_in_the_window_follows_the_declaration_made_on_its_parent(benc
     _pump(20)
     ws = bench.open_window()
     assert ws._source.doc_id == seg and ws._source.fs == pytest.approx(50.0)
-    assert bench.status() == "No stage is on, so processed = raw · window 1000.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 1000000.00 ms"
 
     bench.declare(parent, unit="ms")
     _settle(ws)
     assert bench.session.document(seg).meta.sample_rate_hz == pytest.approx(50_000.0)
     assert ws._source.fs == ws._fs == pytest.approx(50_000.0)
-    assert bench.status() == "No stage is on, so processed = raw · window 1.00 s"
+    assert bench.status() == "No stage is on, so processed = raw · window 1000.00 ms"
 
 
 def test_the_window_hears_a_declaration_once_however_often_it_was_opened(bench, monkeypatch):

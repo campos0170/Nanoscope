@@ -1,0 +1,131 @@
+{
+  "edition": "2026-11-03",
+  "status": "approved-assets-installed",
+  "source_base": "5bc0a4c",
+  "final_validated_revision": "403311a6cb44a7d250f4487331acb4a77c84ed0a",
+  "final_capture_manifest": "manual-phase4-captures.json",
+  "note": "Approved source captures are installed at the recorded paths and hashes. Runtime checks belong to the cited capture report; older linked images retain historical provenance. Generated manual build is separate.",
+  "assets": [
+    {
+      "id": "figures-multiple",
+      "section": "Analysis and plotting: navigation guide / Work with several figures",
+      "required_evidence": "Multiple apo-ferritin live figures of the same type; Current/Stale/Dormant and Snapshot lineage visible.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/07-reopened-apo-phase4.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_figures.png",
+      "sha256": "e922208f99f476396fdbd3c465076ae26d28b64ee86d04cd660dbb79350663ee",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "status": "approved",
+      "capture_size": [
+        1440,
+        900
+      ],
+      "caption": "Independent apo-ferritin figures after project reopening. The Figures list retains live entries and saved categories; a retained result remains editable without a new calculation."
+    },
+    {
+      "id": "new-recipe",
+      "section": "Work with several figures",
+      "required_evidence": "From recipe chooser with input requirements and wording checkbox off; no result computed by opening it.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/11-new-recipe.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_recipe.png",
+      "sha256": "f6d9669da4326106c7d5259a3de7a966ece8f09e94193700ae147ce53fb88494",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "status": "approved",
+      "capture_size": [
+        820,
+        600
+      ],
+      "caption": "The From recipe chooser lists its input requirements. Including typed wording is off by default; opening the chooser does not run an analysis."
+    },
+    {
+      "id": "format-series",
+      "section": "Styles, source identity and element selection",
+      "required_evidence": "A real source/category series selected; figure-owned color/size/visibility and Project Sources control visible.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/08-apo-per-series-format.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_series.png",
+      "sha256": "3ce7ade5f0b4453770f016a1f9b3fdabca665d3bf79dd826cdac3c644223fc2f",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "status": "approved",
+      "capture_size": [
+        1440,
+        900
+      ],
+      "caption": "A source series in an apo-ferritin figure is selected in Format. Appearance changes and Undo preserve the exact source tables; Project Sources opens the separate shared name/color registry."
+    },
+    {
+      "id": "project-styles",
+      "section": "Styles, source identity and element selection",
+      "required_evidence": "Style scopes, pinned revision, project/computer sections and overrides; no transient popover in exported artwork.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/12-project-style-scopes.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_styles.png",
+      "sha256": "9b14183ed7b19a9ebc6e0f602ed2f804e5453796f97f3c01af9e1ace20754e37",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "status": "approved",
+      "capture_size": [
+        750,
+        275
+      ],
+      "caption": "The Style menu offers figure scopes and Built in, Project and On this computer stores. This illustration arranges two actual offscreen menu captures together; it is not one simultaneous application view."
+    },
+    {
+      "id": "style-editor",
+      "section": "Styles, source identity and element selection",
+      "required_evidence": "Frame/palette/role sizes/canvas and column widths plus explicitly synthetic preview.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/09-apo-style-editor.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_style_editor.png",
+      "sha256": "9ce16ce7ee22548c019ba3ac54846443c214f123c1015bda0a093157ef587516",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "status": "approved",
+      "capture_size": [
+        920,
+        850
+      ],
+      "caption": "The shared style editor changes look only and previews synthetic points. The preview is not an apo-ferritin analysis or a publisher-compliance check; extra fields remain available by scrolling."
+    },
+    {
+      "id": "milliseconds",
+      "section": "Translate the measurement names between tools",
+      "required_evidence": "Real apo dwell/fit axis and a time input/table in ms, with raw seconds recorded in capture metadata.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/02-apo-dwell-comparison-ms.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_milliseconds.png",
+      "sha256": "3fc81bf2e6e8ac28b4e7f204e829c8a33583f841e69eb67efa9b354111bae228",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "status": "approved",
+      "capture_size": [
+        1440,
+        900
+      ],
+      "caption": "A descriptive apo-ferritin dwell comparison displays milliseconds. Raw dwell_s tables remain in seconds; this display test does not validate detector performance or current calibration."
+    },
+    {
+      "id": "composition",
+      "section": "Compose panels",
+      "required_evidence": "Frozen panels and shared panel-letter style; literal letters and manual position preserved.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/10-apo-composer-style.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_composition.png",
+      "sha256": "c590ff27bc50ffa7a8f528821fce70c21786d79c8554f3a4f8f69f2d5c1ae52e",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "status": "approved",
+      "capture_size": [
+        1280,
+        850
+      ],
+      "caption": "Two populated frozen apo-ferritin panels in the composer. Shared panel-letter style preserves literal labels and component snapshots; Update preview prepares a new composition without changing its source figures."
+    },
+    {
+      "id": "batch-export",
+      "section": "Export a selection without generating new analyses",
+      "required_evidence": "Selected live/Snapshot records, explicit per-figure sizing and final result report without analysis.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/03-batch-export-options.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_batch_options.png",
+      "sha256": "6dcb1ce86d05fa0191d502662dfc23ccb2efb36c509c83dc846e2f30e19a9d3c",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "status": "approved",
+      "capture_size": [
+        650,
+        600
+      ],
+      "caption": "Selected-figure export options specify formats and physical sizing. The captured run exports existing results serially without detection, fitting or Update plot."
+    }
+  ],
+  "build_provenance": "manual-build-manifest.json"
+}

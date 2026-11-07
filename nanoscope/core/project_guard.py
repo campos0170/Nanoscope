@@ -40,6 +40,7 @@ __all__ = [
     "project_disk_stamp",
     "project_save_lock",
     "project_save_lock_path",
+    "retain_verified_project_backup",
 ]
 
 
@@ -334,3 +335,73 @@ def locked_project_read(path: str | Path,
     with project_save_lock(path):
         result = read()
         return result, project_disk_stamp(path)
+
+
+def retain_verified_project_backup(path: str | Path, *, max_version: int = 12) -> Path | None:
+    """Retain the exact pre-conversion file without replacing an existing backup.
+
+    Call inside guarded_project_write's callback so stamp comparison, backup and
+    replacement share its existing lock. This helper never saves the new project.
+    A new Save As target returns None; newer-format targets need no conversion copy.
+    """
+    from . import atomic_write
+    from .project import ProjectError, load_project, read_project_container_version
+
+    target, _followed = atomic_write.resolve_write_target(path)
+    original = project_disk_stamp(target)
+    if original is None:
+        return None
+    version = read_project_container_version(target)
+    if version > max_version:
+        return None
+    # Validate the old archive before calling any copy a usable backup.
+    load_project(target)
+    candidate = Path(str(target) + ".v12.bak")
+    pending = atomic_write.temp_sibling(target, tag="conversion-backup")
+    try:
+        digest = hashlib.sha256()
+        with atomic_write.staged_write(pending, notes=[]) as staged:
+            with open(target, "rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    staged.write(chunk)
+                    digest.update(chunk)
+        if digest.hexdigest() != original.sha256 or project_disk_stamp(target) != original:
+            current = project_disk_stamp(target)
+            if current is not None:
+                raise ProjectSaveConflict(current)
+            raise ProjectError("Project disappeared while preparing its conversion backup.")
+        if project_disk_stamp(pending).sha256 != original.sha256:
+            raise ProjectError("Conversion backup did not match the original project's SHA-256.")
+        load_project(pending)
+        index = 1
+        while True:
+            if candidate.exists() or candidate.is_symlink():
+                # A symlink is somebody else's name and is never claimed as our backup.
+                if candidate.is_file() and not candidate.is_symlink():
+                    existing = project_disk_stamp(candidate)
+                    if existing is not None and existing.sha256 == original.sha256:
+                        load_project(candidate)
+                        return candidate
+                index += 1
+                candidate = Path(str(target) + f".v12.{index}.bak")
+                continue
+            try:
+                # Atomic no-clobber publication: another creator cannot be overwritten
+                # between the existence check and publication. The staged inode is new,
+                # so this never hard-links the live original into its own backup.
+                os.link(pending, candidate)
+            except FileExistsError:
+                continue
+            try:
+                if project_disk_stamp(candidate).sha256 != original.sha256:
+                    raise ProjectError("Published conversion backup failed SHA-256 verification.")
+                load_project(candidate)
+            except BaseException:
+                # Keep a published backup for diagnosis; never touch the original.
+                raise
+            return candidate
+    finally:
+        try:
+            pending.unlink()
+        except FileNotFoundError:
+            pass

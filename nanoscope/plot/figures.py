@@ -49,6 +49,8 @@ from ..analysis import events as events_mod
 from ..analysis.events import FLAG_NON_FINITE, FLAG_ZERO_BASELINE
 from ..analysis.stats import _row_labels
 from ..core import clock
+from ..core.quantity_display import quantity_for, QuantityPresentation, to_display
+from .quantity_axes import time_axis, set_quantity_axis, figure_quantity_metadata
 from ..core.atomic_write import StagedSet
 from .style import (OKABE_ITO, PALETTE, SEQUENTIAL_CMAP, color, export_style,
                     figure_size, nanoscope_style, rc_params)
@@ -109,7 +111,7 @@ def _attach_details(fig: Figure, kind: str, prov: dict, *, fit: Any = None,
             text.append(str(gof["note"]))
     details["plots"].append(copy.deepcopy({
         "kind": kind, "provenance": prov, "fit": fit_data,
-        "details": list(dict.fromkeys(text)), **extra,
+        "details": list(dict.fromkeys(text)), "quantity_display": figure_quantity_metadata(fig), **extra,
     }))
     setattr(fig, _DETAILS_ATTR, details)
 
@@ -309,7 +311,7 @@ def _gof(fit: Any) -> dict | None:
 
 
 def _fit_rejected(fit: Any) -> bool:
-    """True when the app's own KS test threw this curve out (``describes_data is False``)."""
+    """True when the descriptive CDF check found a mismatch (not a calibrated test)."""
     gof = _gof(fit)
     return gof is not None and gof.get("describes_data") is False
 
@@ -324,11 +326,11 @@ def _gof_verdict(fit: Any) -> str | None:
     # Two visual lines each: the box on a single-column figure holds ~42 characters a
     # line (see _BOX_LINE_CHARS), and the verdict must not squeeze the histogram.
     if _fit_rejected(fit):
-        against = f" > {float(crit):.3f} (1%)" if crit is not None else ""
-        return (f"KS D = {ks:.3f}{against}: fit REJECTED\n"
-                "— parameters are not measurements")
-    against = f" ≤ {float(crit):.3f} (1%)" if crit is not None else ""
-    return f"KS D = {ks:.3f}{against}:\nconsistent with these data"
+        against = f" > {float(crit):.3f} reference" if crit is not None else ""
+        return (f"CDF D = {ks:.3f}{against}: mismatch\n"
+                "descriptive check; not a calibrated test")
+    against = f" ≤ {float(crit):.3f} reference" if crit is not None else ""
+    return f"CDF D = {ks:.3f}{against}:\nno mismatch flagged (descriptive)"
 
 
 def _param_items(fit: Any, needle: str) -> list[tuple[str, float, tuple[float, float] | None]]:
@@ -399,11 +401,11 @@ def _fit_caveats(fit: Any) -> list[str]:
     t_min = meta.get("t_min")
     if t_min is not None:
         src = str(meta.get("t_min_source", "") or "")
-        label = rf"$t_{{min}}$ = {float(t_min) * 1e6:.1f} $\mu$s"
+        label = rf"$t_{{min}}$ = {float(t_min) * 1e3:.3g} ms"
         out.append(label if src in ("", "min_dwell_s") else f"{label} ({src})")
     t_max = meta.get("t_max")
     if t_max is not None:
-        out.append(rf"right-truncated at {float(t_max) * 1e6:.1f} $\mu$s (modelled)")
+        out.append(rf"right-truncated at {float(t_max) * 1e3:.3g} ms (modelled)")
     if meta.get("floor_biased"):
         floor = meta.get("depth_floor")
         out.append(f"floor-biased: $\\mu_1$ cut off at {float(floor):.3f}")
@@ -418,9 +420,9 @@ def _fit_support(fit: Any) -> list[str]:
     meta = dict(getattr(fit, "meta", {}) or {})
     out = []
     if meta.get("t_min") is not None:
-        out.append(rf"$t_{{min}}$ = {float(meta['t_min']) * 1e6:.1f} $\mu$s")
+        out.append(rf"$t_{{min}}$ = {float(meta['t_min']) * 1e3:.3g} ms")
     if meta.get("t_max") is not None:
-        out.append(rf"$t_{{max}}$ = {float(meta['t_max']) * 1e6:.1f} $\mu$s")
+        out.append(rf"$t_{{max}}$ = {float(meta['t_max']) * 1e3:.3g} ms")
     return out
 
 
@@ -886,7 +888,8 @@ def dwell_histogram(
 ) -> tuple[Figure, Axes]:
     """Dwell-time histogram with an optional fitted exponential overlay.
 
-    Units: dwell in seconds, plotted in microseconds on a log axis. The y axis
+    Units: dwell in seconds; retained artist coordinates are microseconds, displayed
+    as milliseconds on a log axis. The y axis
     is counts per bin.
 
     Gotchas handled here:
@@ -984,8 +987,8 @@ def dwell_histogram(
 
             rejected = _fit_rejected(fitted)
             texts = [
-                _param_text(r"$\tau$", val, ci, rejected=rejected, scale=1e6,
-                            unit=r" $\mu$s")
+                _param_text(r"$\tau$", val, ci, rejected=rejected, scale=1e3, fmt=".3g",
+                            unit=" ms")
                 for _name, val, ci in _param_items(fitted, "tau")
             ]
             texts.append(f"n = {n_fit}")
@@ -1011,7 +1014,7 @@ def dwell_histogram(
                 rotation=90,
             )
         ax.set_xlim(left * 1e6, hi * 1.3e6)
-        ax.set_xlabel(r"dwell time ($\mu$s)")
+        time_axis(ax, "bottom", "dwell_s", stored_unit="µs", label="Dwell time (ms)")
         ax.set_ylabel("events per bin")
         # Last: the box is placed around what is drawn, at the limits the reader sees.
         _annotate(ax, box)
@@ -1220,6 +1223,7 @@ def scatter_dwell_depth(
             a.tick_params(labelsize=6)
             for s in ("top", "right"):
                 a.spines[s].set_visible(False)
+        time_axis(ax_top, "bottom", "dwell_s", stored_unit="µs")
         ax_top.tick_params(labelbottom=False)
         ax_right.tick_params(labelleft=False)
         ax_top.set_yticks([])
@@ -1238,7 +1242,7 @@ def scatter_dwell_depth(
             # population (median dI/I0 2.5, cloud at 2-4.5 over 12-26 ms) the box sat on
             # the hexbin cloud -- so the placer measures rather than assumes.
             texts = [f"n = {dwell.size}",
-                     rf"median dwell = {float(np.median(dwell)) * 1e6:.1f} $\mu$s",
+                     f"median dwell = {float(np.median(dwell)) * 1000:.3g} ms",
                      median_line]
             n_limited = int(np.count_nonzero(limited))
             if n_limited:
@@ -1247,7 +1251,7 @@ def scatter_dwell_depth(
         else:
             box = []
 
-        ax.set_xlabel(r"dwell time ($\mu$s)")
+        time_axis(ax, "bottom", "dwell_s", stored_unit="µs", label="Dwell time (ms)")
         ax.set_ylabel(y_label)
         # Last: the box is placed around what is drawn, at the limits the reader sees.
         _annotate(ax, box)
@@ -1317,6 +1321,9 @@ def event_rate_plot(
         if "conc" in x.lower() and np.all(np.asarray(d[x], dtype=float) > 0):
             ax.set_xscale("log")
         ax.set_xlabel({"voltage_mV": "applied voltage (mV)"}.get(x, x))
+        quantity = quantity_for(x)
+        if quantity.quantity in ("duration", "clock"):
+            set_quantity_axis(ax, "bottom", quantity, label=f"{quantity.label} ({quantity.display_unit})")
         ax.set_ylabel("event rate (Hz)")
         ax.margins(x=0.08)
 
@@ -1380,7 +1387,7 @@ def _axis_clock(x_start: float, meta: Any) -> tuple[str, float | None]:
     """
     if meta is None:
         return (
-            f"s (axis origin {clock.format_t0(x_start)} s, added to every event time; "
+            f"ms (axis origin {clock.format_t0(x_start, display_unit='ms')} ms, added to every event time; "
             f"which clock that origin is on was not supplied to this figure)",
             None,
         )
@@ -1389,7 +1396,7 @@ def _axis_clock(x_start: float, meta: Any) -> tuple[str, float | None]:
     # nudge included, which is right for a LABEL (it describes what is drawn). The rebase
     # origin is the half only ``meta`` carries, and it is what stops the false branch.
     offset = clock.ClockOffset(x_start, clock.rebased_origin_from_meta(meta))
-    return (clock.axis_label("s", clock.INSTRUMENT, offset),
+    return (clock.axis_label("s", clock.INSTRUMENT, offset, display_unit="ms"),
             clock.instrument_origin_s(meta))
 
 
@@ -1588,6 +1595,8 @@ def trace_preview(
             # Samples are on neither clock; annotating them would be a second falsehood.
             x_label, instrument_origin_s = "sample", None
         ax.set_xlabel(x_label)
+        if x_is_time:
+            time_axis(ax, "bottom", "time_s", clock_basis="view")
         ax.set_ylabel(f"current ({units})")
         title = getattr(getattr(channel, "info", None), "name", "") or ""
         if title:
@@ -2002,13 +2011,27 @@ def joint_density(
 
     Returns:
         ``(fig, ax)`` with the joint axes; marginals are attached around it.
+        Attached source columns retain their canonical raw units. Additive
+        display columns and ``data.attrs['display_columns']`` name the displayed
+        values, while ``quantity_display`` records the artist-coordinate basis.
     """
     from scipy.stats import gaussian_kde
 
     prepared: list[tuple[str, np.ndarray, np.ndarray, str]] = []
+    source_rows = []
+    x_quantity = quantity_for(xcol, schema=events_mod.SCHEMA)
+    y_quantity = quantity_for(ycol, schema=events_mod.SCHEMA)
+    display_columns = {}
+    used = {"group", xcol, ycol}
+    for field in ("display_x", "display_y", "display_x_unit", "display_y_unit"):
+        name, suffix = field, 2
+        while name in used:
+            name = f"{field}_{suffix}"; suffix += 1
+        display_columns[field] = name; used.add(name)
     for i, (label, src) in enumerate(groups.items()):
         df, _prov = _unpack(src)
-        x = _column(df, xcol) * float(x_scale)
+        source_x = _column(df, xcol)
+        x = source_x * float(x_scale)
         y = _column(df, ycol)
         ok = np.isfinite(x) & np.isfinite(y)
         if log_x:
@@ -2016,6 +2039,11 @@ def joint_density(
         x, y = x[ok], y[ok]
         if x.size >= 5:      # a KDE of four points is a decoration, not an estimate
             prepared.append((label, x, y, OKABE_ITO[i % len(OKABE_ITO)]))
+            source_rows.append(pd.DataFrame({"group": label, xcol: source_x[ok], ycol: y,
+                display_columns["display_x"]: to_display(source_x[ok], x_quantity),
+                display_columns["display_y"]: to_display(y, y_quantity),
+                display_columns["display_x_unit"]: x_quantity.display_unit,
+                display_columns["display_y_unit"]: y_quantity.display_unit}))
     if not prepared:
         raise ValueError("no group has enough finite points to estimate a density")
 
@@ -2072,6 +2100,20 @@ def joint_density(
         base = float(plt.rcParams.get("font.size", 8.0))
         ax.set_xlabel(xlabel, fontsize=base * font_scale)
         ax.set_ylabel(ylabel, fontsize=base * font_scale)
+        # Existing native coordinates can already be ms (the default) or an explicit
+        # caller scale. This witness describes that geometry, not the raw CSV column.
+        if x_quantity.quantity in ("duration", "clock") and np.isfinite(x_scale) and x_scale > 0:
+            native_factor = x_quantity.factor / float(x_scale)
+            native_unit = {1000.: "s", 1.: "ms", .001: "µs", 60000.: "min", 3600000.: "h"}.get(native_factor, "scaled " + x_quantity.stored_unit)
+            coordinate = QuantityPresentation(xcol, x_quantity.label, x_quantity.quantity,
+                native_unit, x_quantity.display_unit, x_quantity.factor / float(x_scale),
+                clock_basis=x_quantity.clock_basis,
+                extra={"source_unit": x_quantity.stored_unit, "coordinate_scale": float(x_scale)})
+            set_quantity_axis(ax, "bottom", coordinate)
+            set_quantity_axis(ax_top, "bottom", coordinate)
+        if y_quantity.quantity in ("duration", "clock"):
+            set_quantity_axis(ax, "left", y_quantity)
+            set_quantity_axis(ax_right, "left", y_quantity)
         ax.tick_params(labelsize=base * font_scale * 0.9)
         for axis in (ax_top, ax_right):
             axis.set_axis_off()
@@ -2088,10 +2130,12 @@ def joint_density(
                 kw.update(loc=legend_loc)
             ax.legend(**kw)
 
-        data = pd.concat(
-            [pd.DataFrame({"group": l, xcol: x, ycol: y}) for l, x, y, _c in prepared],
-            ignore_index=True)
+        data = pd.concat(source_rows, ignore_index=True)
+        data.attrs["quantity_display"] = figure_quantity_metadata(fig)
+        data.attrs["display_columns"] = display_columns
         _attach(fig, data)
+        _attach_details(fig, "joint_density", {}, display_columns=display_columns,
+                        x_coordinate_scale=float(x_scale), density_measure="log10" if log_x else "linear")
     return fig, ax
 
 

@@ -112,7 +112,17 @@ def test_a_views_own_pins_travel_like_a_single_views_and_reach_only_that_view():
 
 def test_every_field_has_step_words_and_new_fields_are_named_readably():
     """Plan G2 test 9: _describe_step reads _STEP_WORDS for every field that moves."""
-    assert {f.name for f in fields(PlotAppearance)} <= set(plot_appearance._STEP_WORDS)
+    dedicated = {"style_binding", "quantity_display", "series_styles", "source_appearance"}
+    assert {f.name for f in fields(PlotAppearance)} <= set(plot_appearance._STEP_WORDS) | dedicated
+    # Structured fields have dedicated human-readable history descriptions.
+    for key, expected in (("quantity_display", "display units"),
+                          ("series_styles", "series formatting"),
+                          ("source_appearance", "source names and colors")):
+        assert _describe_step(PlotAppearance(), PlotAppearance(**{key: {}})) == expected
+    from nanoscope.core.figure_style import FigureStyle, style_binding
+    styled_binding = PlotAppearance(style_binding=style_binding(FigureStyle("test", 1, "Test look")))
+    assert _describe_step(PlotAppearance(), styled_binding) == "figure style Test look · revision 1"
+    assert _describe_step(styled_binding, PlotAppearance()) == "figure style reset"
     empty = PlotAppearance()
     assert _describe_step(empty, empty.with_text_style("title", TextStyle(bold=True))) == "title bold on"
     assert _describe_step(empty, empty.with_text_style(

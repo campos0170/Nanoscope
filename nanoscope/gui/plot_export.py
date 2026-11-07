@@ -88,8 +88,9 @@ def choose_live_plot_export(parent, item, suggestion: str,
         residual_size = (figure_native_size(
             item, residual_item=residual_item, include_residual=True)
             if residual_item is not None else None)
+        from .figure_export_style import export_style_for
         options = choose_export_options(
-            parent, rect.size(), initial_format=extension,
+            parent, rect.size(), initial_format=extension, figure_style=export_style_for(parent),
             initial_width=initial_width, initial_height=initial_height,
             preview_image=preview, residual_preview_image=residual_preview,
             residual_native_size=residual_size,

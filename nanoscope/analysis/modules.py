@@ -42,7 +42,12 @@ from .baseline import (
     SAVGOL_POLY,
     AmplifiedWanderWarning,
     ConstantBaselineWarning,
+    DetrendAttenuationWarning,
     baseline_config_from_params,
+    baseline_endpoint_policy,
+    baseline_sample_count_policy,
+    baseline_mask_noise_policy,
+    require_current_detrend_policy,
     baseline_progress_scope,
     characterisation_baseline,
     collect_baseline_warnings,
@@ -315,7 +320,12 @@ def detrend_method_kwargs(params: Mapping[str, Any]) -> dict[str, Any]:
             # keyword is always present and the intent is explicit in one place.
             out[kernel_key] = None
             continue
-        out[kernel_key] = int(value) if isinstance(default, int) else float(value)
+        # Do not silently truncate invalid solver iteration counts before the
+        # numeric boundary can reject them (e.g. a restored 1.5 or NaN).
+        if kernel_key == "asls_niter":
+            out[kernel_key] = value if isinstance(value, (bool, np.bool_)) else float(value)
+        else:
+            out[kernel_key] = int(value) if isinstance(default, int) else float(value)
     return out
 
 
@@ -728,7 +738,8 @@ def characterization_params(params: Mapping[str, Any]) -> dict[str, Any]:
 # The preprocessing keys are DETREND_PARAM_KEYS + FILTER_PARAM_KEYS; together the three
 # tuples are the whole Schmitt form.
 DETECT_PARAM_KEYS = (
-    "polarity", "k_in", "k_out", "min_dwell_s", "max_dwell_s", "merge_gap_s",
+    "polarity", "k_in", "k_out", "noise_policy", "noise_window_s",
+    "min_dwell_s", "max_dwell_s", "merge_gap_s",
     "filter_cutoff_hz", "filter_order", "filter_kind",
 )
 
@@ -755,7 +766,7 @@ DETECT_CUSUM_PARAM_KEYS = (
 #: has no parameter for and would raise a TypeError on -- and vice versa. It is keyed by
 #: MODULE ID so a third detector cannot be added without declaring its own private keys.
 DETECTOR_PRIVATE_KEYS: dict[str, frozenset[str]] = {
-    "detect.schmitt": frozenset({"k_in", "k_out"}),
+    "detect.schmitt": frozenset({"k_in", "k_out", "noise_policy", "noise_window_s"}),
     "detect.cusum": frozenset({"cusum_k", "cusum_h"}),
 }
 
@@ -784,8 +795,16 @@ def detection_params_from_provenance(prov: Mapping[str, Any]) -> dict[str, Any]:
         # Validate the full saved instruction before projecting away derived flags.
         # Otherwise a missing recipe could become an apparently valid Automatic run.
         from .baseline import BaselineConfig
-        BaselineConfig.reproducible_from(prov)
+        # Restoring controls is not exact sample replay. Validate the complete
+        # reference recipe without rejecting a valid old processing revision;
+        # the explicitly new detection stamps the current algorithm afterwards.
+        BaselineConfig.from_provenance(prov)
     base = preprocess_params_from_provenance(prov)
+    # Saved pre-local-noise Schmitt detections used global thresholds. Restoring
+    # their controls must not silently adopt a new analysis policy.
+    if "k_in" in prov or "k_out" in prov:
+        base.setdefault("noise_policy", "global")
+        base.setdefault("noise_window_s", 0.25)
     out: dict[str, Any] = {}
     for key in (*DETECT_PARAM_KEYS, *DETREND_PARAM_KEYS, *FILTER_PARAM_KEYS,
                 # A FOURTH trap, and the one this list existed without: the
@@ -832,6 +851,7 @@ def detection_signal(
     an old project, hand-built EventSet or ML run with no classical chain is otherwise
     left alone rather than guessed at. Returns contiguous float32.
     """
+    require_current_detrend_policy(prov)
     arr = np.ascontiguousarray(signal, dtype=np.float32)
     cutoff = prov.get("filter_cutoff_hz")
     if fs is None:
@@ -893,6 +913,7 @@ def detection_signal_key(prov: Mapping[str, Any]) -> tuple[Any, ...]:
     an Event Inspector drag would otherwise pay that on every release); this is the key
     that says when the cached copy is still the right one.
     """
+    require_current_detrend_policy(prov)
     effective = dict(prov)
     if (
         prov.get("highpass_localization_only")
@@ -903,7 +924,8 @@ def detection_signal_key(prov: Mapping[str, Any]) -> tuple[Any, ...]:
             effective.pop(key, None)
     keys = (
         "filter_cutoff_hz", "filter_kind", "filter_order",
-        "polarity", "polarity_requested",
+        "polarity", "polarity_requested", "detrend_endpoint_policy",
+        "detrend_sample_count_policy", "detrend_mask_noise_policy",
         *DETREND_PARAM_KEYS, *FILTER_PARAM_KEYS,
     )
     method = str(prov.get("detrend_method", "block_median"))
@@ -1163,6 +1185,10 @@ def _build_warnings(prov: dict[str, Any], df: pd.DataFrame) -> tuple[str, ...]:
     polarity, filter-limited fraction, what the conditioning chain cost, and whether
     the chain left the trace in picoamps at all)."""
     warns: list[str] = []
+    warns.extend(str(w) for w in (prov.get("noise_warnings") or ()))
+    if prov.get("noise_policy_effective") == "local":
+        warns.append("Detection thresholds vary with local noise. Event-table SNR remains "
+                     "relative to the whole-recording measurement noise; it is not the local trigger score.")
     # The estimator's own advisories first: a baseline that fell back, or whose
     # health checks fired, is upstream of every other number in the table.
     warns.extend(str(w) for w in (prov.get("baseline_warnings") or ()))
@@ -1401,8 +1427,20 @@ def stamp_preprocess_provenance(
     # Only the enabled stages stamp their parameters; a disabled stage records just
     # its False flag so provenance is never ambiguous about what ran.
     prov["detrend_enabled"] = bool(params.get("detrend_enabled", False))
+    prov.pop("detrend_endpoint_policy", None)
+    prov.pop("detrend_sample_count_policy", None)
+    prov.pop("detrend_mask_noise_policy", None)
     if prov["detrend_enabled"]:
         prov["detrend_method"] = str(params.get("detrend_method", "block_median"))
+        mask_policy = baseline_mask_noise_policy(prov["detrend_method"])
+        if mask_policy is not None:
+            prov["detrend_mask_noise_policy"] = mask_policy
+        count_policy = baseline_sample_count_policy(prov["detrend_method"])
+        if count_policy is not None:
+            prov["detrend_sample_count_policy"] = count_policy
+        endpoint_policy = baseline_endpoint_policy(prov["detrend_method"])
+        if endpoint_policy is not None:
+            prov["detrend_endpoint_policy"] = endpoint_policy
         prov["detrend_window_s"] = float(
             params.get("detrend_window_s", DEFAULT_DETREND_WINDOW_S)
         )
@@ -1431,6 +1469,9 @@ def stamp_preprocess_provenance(
         # for "the detrend did nothing".
         prov["detrend_amplified"] = any(
             isinstance(w, AmplifiedWanderWarning) for w in detrend_warns
+        )
+        prov["detrend_attenuation_risk"] = any(
+            isinstance(w, DetrendAttenuationWarning) for w in detrend_warns
         )
 
     prov["notch_enabled"] = bool(params.get("notch_enabled", False))
@@ -1721,7 +1762,11 @@ def _recharacterize_highpass_candidates(
     # Detection thresholds stay in the candidate domain. Top-level noise describes
     # the row SNR denominator, so spell the threshold source explicitly rather than
     # leaving a reader to (incorrectly) multiply by the replacement value.
-    prov["threshold_noise_source"] = "detection_noise_rms_pA"
+    prov["threshold_noise_source"] = (
+        "noise_profile_scales_pA on detection signal"
+        if prov.get("noise_policy_effective") == "local"
+        else "detection_noise_rms_pA"
+    )
     if prov.get("detector") == "cusum_sequential":
         prov["cusum_sigma_source"] = (
             "detection_noise_rms_pA: MAD residual on high-pass candidate trace"
@@ -1900,6 +1945,10 @@ def _run_highpass_dual_path(
                 isinstance(w, AmplifiedWanderWarning)
                 for w in candidate_detrend_warns
             )
+            prov["detection_detrend_attenuation_risk"] = any(
+                isinstance(w, DetrendAttenuationWarning)
+                for w in candidate_detrend_warns
+            )
         # Primary detrend provenance describes the trace the quantitative rows use.
         stamp_preprocess_provenance(
             prov,
@@ -2006,6 +2055,9 @@ class DetectSchmitt:
                 prov, ctx.params, float(ch.sample_rate_hz), detrend_warns
             )
         ctx.report_progress(1.0, f"{len(df)} event(s)")
+
+        params_record["noise_policy"] = prov.get("noise_policy", "global")
+        params_record["noise_window_s"] = prov.get("noise_window_s", 0.25)
 
         # THE DETECTOR'S OWN BOUNDS, recorded before any hand edit can move them.
         # Stamped HERE and only here (detection is the one moment they are the
@@ -2263,12 +2315,15 @@ def resolve_t_min(
 
     Resolution order, best evidence first:
 
-    1. ``provenance['min_dwell_s']`` -- the gate the detector actually applied.
+    1. ``min_dwell_samples / fs`` when a detector records its sample gate.
+       Legacy CUSUM records use its documented rounded-sample gate. Schmitt's
+       continuous-duration comparison is never rounded here.
+    2. ``provenance['min_dwell_s']`` -- the gate the detector actually applied.
        ``source='min_dwell_s'``, no note.
-    2. ``1/fs`` -- a dwell cannot be shorter than one sample. ``source='1/fs'``,
+    3. ``1/fs`` -- a dwell cannot be shorter than one sample. ``source='1/fs'``,
        with a note: this is a floor, not *the* floor, and under-corrects if the
        detector really did gate at 50 us.
-    3. ``observed_min`` (the caller's shortest observed dwell), if given.
+    4. ``observed_min`` (the caller's shortest observed dwell), if given.
        ``source='observed_min'``, with :data:`NO_TMIN_WARNING` as the note.
 
     Raises:
@@ -2277,9 +2332,21 @@ def resolve_t_min(
             published.
     """
     md = prov.get("min_dwell_s")
+    fs = prov.get("fs")
+    samples = prov.get("min_dwell_samples")
+    if (samples is None and prov.get("detector") in ("cusum_sequential", "detect.cusum")
+            and md and fs and np.isfinite(float(md)) and np.isfinite(float(fs))
+            and float(md) > 0 and float(fs) > 0):
+        samples = max(1, round(float(md) * float(fs)))
+    if (samples is not None and fs and np.isfinite(float(samples))
+            and np.isfinite(float(fs)) and float(fs) > 0
+            and float(samples) >= 1 and float(samples).is_integer()):
+        t_min = float(samples) / float(fs)
+        note = (f"Detection floor uses the recorded {int(samples)}-sample gate / fs "
+                f"({t_min:.12g} s), rather than the nominal duration setting.")
+        return t_min, "min_dwell_samples/fs", note
     if md and float(md) > 0:
         return float(md), "min_dwell_s", None
-    fs = prov.get("fs")
     if fs:
         t_min = 1.0 / float(fs)
         return t_min, "1/fs", (
@@ -2360,6 +2427,9 @@ def depth_floor_from_provenance(
         prov.get("highpass_localization_only")
         or prov.get("characterization_hp_omitted")
     ):
+        return None
+    # A locally varying trigger has no single truncation floor for a depth fit.
+    if prov.get("noise_policy_effective") == "local":
         return None
     thr = prov.get("threshold_out_pA")
     if thr is None or not np.isfinite(float(thr)) or float(thr) <= 0:

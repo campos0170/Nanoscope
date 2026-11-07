@@ -94,6 +94,7 @@ from ..analysis.labels import LabelVocabulary, format_labels
 from ..analysis.reconcile import CONSENSUS_MODULE_ID, clear_curation_conflicts
 from ..analysis.events import MANUAL_MODULE_ID, KIND_MANUAL, source_kind, source_of
 from ..core.session import Session
+from ..core import clock
 from .curation_keys import CurationKeyGuard
 from .overlays import STEP_LEVEL_HEX
 from .trace_view import ChannelPane
@@ -971,10 +972,8 @@ def _fmt_dwell(dwell_us) -> str:
         return "—"
     if not np.isfinite(us):
         return "—"
-    for scale, unit in ((1e6, "s"), (1e3, "ms")):
-        if abs(us) >= scale:
-            return f"{us / scale:.3g} {unit}"
-    return f"{us:.3g} µs"
+    return f"{us / 1000.:.3g} ms"
+
 
 
 class _BodyLayout(QtWidgets.QVBoxLayout):
@@ -4094,7 +4093,13 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             # quantitative lines/editing are hidden by _render_event's explicit refusal.
             data = np.asarray(self._session.calibrated(self._doc_id, self._channel).data)
             self._set_axis_label("Raw channel — measurement unavailable", "Raw channel", None)
-        xvals = self._session.x_axis(self._doc_id).values
+        xaxis = self._session.x_axis(self._doc_id)
+        xvals = xaxis.values
+        axis = self._plot.getAxis("bottom")
+        axis.enableAutoSIPrefix(False)
+        axis.setScale(1000. if xaxis.is_time else 1.)
+        offset = clock.clock_offset_s(self._session.document(self._doc_id).meta)
+        self._plot.setLabel("bottom", clock.axis_label(xaxis.unit, clock.INSTRUMENT, offset, display_unit="ms"))
         n = int(min(data.size, xvals.size))
         lo = int(np.clip(lo, 0, n))
         hi = int(np.clip(hi, 0, n))
@@ -4237,7 +4242,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         dwell_us = float(r["dwell_s"]) * 1e6 if np.isfinite(r["dwell_s"]) else float("nan")
         parts = [
             f"Event {int(r['event_id'])}",
-            f"dwell {_fmt_num(dwell_us, ' µs', 4)}",
+            f"dwell {_fmt_num(dwell_us / 1000., ' ms', 4)}",
             f"median depth {_fmt_num(r['depth_pA'], units, 4)}",
             f"dI/I0 {_fmt_num(r['frac_depth'], '', 3)}",
         ]
@@ -4289,8 +4294,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         head = [
             f"Event {ev_id}    [{where}]",
             f"accepted:        {'yes' if bool(r['accepted']) else 'no'}",
-            f"dwell:           {_fmt_num(float(r['dwell_s']) * 1e6, ' µs', 5)}"
-            f"   ({_fmt_num(r['dwell_s'], ' s', 4)}){stale('dwell_s')}",
+            f"dwell:           {_fmt_num(float(r['dwell_s']) * 1000., ' ms', 5)}"
+            f"{stale('dwell_s')}",
             f"median depth:    {_fmt_num(r['depth_pA'], units, 5)}{stale('depth_pA')}",
             f"dI/I0:           {_fmt_num(r['frac_depth'], '', 4)}"
             f"{frac_depth_flag(r['frac_depth'])}{stale('frac_depth')}",
@@ -4301,8 +4306,8 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
         lines = [
             *head,
             f"SNR:             {_fmt_num(r['snr'], '', 3)}{stale('snr')}",
-            f"rise / fall:     {_fmt_num(float(r['rise_s']) * 1e6, ' µs', 4)}"
-            f" / {_fmt_num(float(r['fall_s']) * 1e6, ' µs', 4)}{stale('rise_s', 'fall_s')}",
+            f"rise / fall:     {_fmt_num(float(r['rise_s']) * 1000., ' ms', 4)}"
+            f" / {_fmt_num(float(r['fall_s']) * 1000., ' ms', 4)}{stale('rise_s', 'fall_s')}",
             f"levels:          {int(r['n_levels'])}",
             f"filter-limited:  {'yes' if bool(r['filter_limited']) else 'no'}",
             *( [f"labels:          {_labels}"] if _labels else [] ),
@@ -4599,7 +4604,7 @@ class EventInspectorWindow(QtWidgets.QMainWindow):
             out.append(
                 f"  L{int(lv.level_idx)}: "
                 f"{_fmt_num(lv.depth_pA, units, 4)}"
-                f"   {_fmt_num(float(lv.dwell_s) * 1e6, ' µs', 4)}"
+                f"   {_fmt_num(float(lv.dwell_s) * 1000., ' ms', 4)}"
                 f"   dI/I0 {_fmt_num(lv.frac_depth, '', 3)}"
                 f"{frac_depth_flag(lv.frac_depth)}{step}"
             )

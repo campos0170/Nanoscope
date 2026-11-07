@@ -82,9 +82,9 @@ def test_dialog_presets_and_aspect_lock(qtbot):
     qtbot.addWidget(dialog)
     assert dialog.options().native
     dialog.preset_combo.setCurrentIndex(1)
-    assert dialog.width_spin.value() == 85.0
-    assert dialog.height_spin.value() == 42.5
-    assert dialog.options().physical_width_mm == 85.0
+    assert dialog.width_spin.value() == 89.0
+    assert dialog.height_spin.value() == 44.5
+    assert dialog.options().physical_width_mm == 89.0
     dialog.width_spin.setValue(120)
     assert dialog.height_spin.value() == 60
     assert dialog.preset_combo.currentIndex() == 0
@@ -96,8 +96,8 @@ def test_dialog_presets_and_aspect_lock(qtbot):
     dialog.aspect_check.setChecked(True)
     assert dialog.height_spin.value() == 70
     dialog.preset_combo.setCurrentIndex(2)
-    assert dialog.width_spin.value() == 180
-    assert dialog.height_spin.value() == 90
+    assert dialog.width_spin.value() == 183
+    assert dialog.height_spin.value() == 91.5
 
 
 def test_units_are_a_presentation_change_without_rounding_drift(qtbot):
@@ -171,7 +171,7 @@ def test_accept_returns_validated_options_without_writes(qtbot, monkeypatch, tmp
     before = list(tmp_path.iterdir())
     options = choose_export_options(None, (800, 400), initial_format="pdf")
     assert options.extension == ".pdf"
-    assert options.physical_width_mm == 85
+    assert options.physical_width_mm == 89
     assert list(tmp_path.iterdir()) == before
 
 
@@ -317,7 +317,8 @@ def test_residual_preflight_uses_combined_frozen_art(qtbot):
     dialog.residual_check.setChecked(True)
     assert dialog._selected_metrics(dialog.options()).text_size == 8
     assert dialog.options().include_residual
-    assert dialog.options().physical_height_mm == pytest.approx(63.75)
+    assert dialog.options().physical_height_mm == pytest.approx(
+        dialog.preset_combo.currentData() * 600 / 800)
 
 
 def test_missing_typography_does_not_claim_print_readability(qtbot):

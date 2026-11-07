@@ -57,32 +57,37 @@ def choose_combo_item(combo: QtWidgets.QComboBox, want: str, what: str) -> str:
         ValueError: ``want`` matches no item, or matches more than one by prefix.
     """
     items = [combo.itemText(i) for i in range(combo.count())]
+    # Only explicitly keyed combos expose aliases. Ordinary UserRole values can be
+    # arbitrary objects, and are not an invitation to select by their repr.
+    key_for = getattr(combo, "selection_key", None)
+    keys = [str(key_for(i)) for i in range(combo.count())] if callable(key_for) else items
+    aliases = [set((label, key)) for label, key in zip(items, keys)]
     text = str(want).strip()
-    chosen = None
-    if text in items:
-        chosen = text
-    else:
-        low = text.lower()
-        exact_ci = [i for i in items if i.lower() == low]
-        prefix = [i for i in items if i.lower().startswith(low)] if low else []
-        if len(exact_ci) == 1:
-            chosen = exact_ci[0]
-        elif len(prefix) == 1:
-            chosen = prefix[0]
-        elif len(prefix) > 1:
-            raise ValueError(
-                f"{what} {want!r} is ambiguous: it matches {prefix}. Name one exactly.")
-    if chosen is None:
+    low = text.lower()
+    matches = [i for i, key in enumerate(keys) if key == text]
+    if not matches:
+        matches = [i for i, names in enumerate(aliases) if text in names]
+    if not matches:
+        matches = [i for i, names in enumerate(aliases) if any(name.lower() == low for name in names)]
+    if not matches and low:
+        matches = [i for i, names in enumerate(aliases) if any(name.lower().startswith(low) for name in names)]
+    if len(matches) > 1:
+        choices = [f"{items[i]} [{keys[i]}]" if keys[i] != items[i] else items[i] for i in matches]
+        raise ValueError(
+            f"{what} {want!r} is ambiguous: it matches {choices}. Name one exactly.")
+    if not matches:
         raise ValueError(
             f"unknown {what} {want!r}; this window offers {items}. "
             f"(Setting it silently would leave the previous selection in place and the "
             f"panel would report THAT model's numbers.)")
-    combo.setCurrentText(chosen)
-    if combo.currentText() != chosen:      # pragma: no cover - defends the defence
+    index = matches[0]
+    combo.setCurrentIndex(index)
+    if combo.currentIndex() != index or combo.currentText() != keys[index]:  # pragma: no cover
         raise RuntimeError(
-            f"{what} {chosen!r} did not take: the combo still reads "
+            f"{what} {items[index]!r} did not take: the combo still reads "
             f"{combo.currentText()!r}")
-    return chosen
+    return items[index]
+
 
 
 #: Alias for callers that read better as an imperative.

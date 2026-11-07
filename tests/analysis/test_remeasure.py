@@ -480,6 +480,25 @@ def test_a_table_with_no_stamp_is_named_as_the_block_median_it_was():
          "baseline_dilate_ms": 1.0, "baseline_window_s": 0.5,
          "baseline_despike_size": 0})
     assert "masked median" in named and "2000 ms" in named
+    assert "re-run detection" in named
+    assert "invalid stored user reference" not in named
+
+
+def test_describing_old_algorithm_does_not_relax_exact_reconstruction():
+    from nanoscope.analysis import baseline as B
+    stored = B.DEFAULT_BASELINE.to_provenance(FS)
+    stored["baseline_mask_noise_policy"] = "historical-mask-v0"
+    named = R.describe_stored_baseline(stored)
+    assert "masked median" in named and "re-run detection" in named
+    assert "invalid stored user reference" not in named
+    with pytest.raises(B.BaselinePolicyChangedError):
+        B.BaselineConfig.reproducible_from(stored)
+
+
+def test_historical_description_does_not_hide_an_incomplete_user_reference():
+    named = R.describe_stored_baseline({"baseline_reference_applied": True})
+    assert "invalid stored user reference" in named
+    assert "predates" not in named
 
 
 # ===========================================================================

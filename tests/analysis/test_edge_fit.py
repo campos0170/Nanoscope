@@ -1491,11 +1491,6 @@ def test_tau_cost_is_bounded_whatever_the_recording_holds():
         ef._piece_tau = orig
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "cusum.open_pore_autocorr_time builds its gap list as [0, b0 + pad, a1 - pad, b1 + pad, ...] and pairs "
-    "(even, odd), i.e. it measures [0, b0 + pad), [a1 - pad, b1 + pad), ... -- the stretches that CONTAIN the events -- "
-    "and never the gaps between them. estimate_open_pore_tau measures the gaps itself. Fix: start the list "
-    "[0, a0 - pad, b0 + pad, a1 - pad, ...] and end it [..., a_last - pad, b_last + pad, n]."))
 def test_cusum_open_pore_autocorr_time_measures_the_gaps_between_events():
     from nanoscope.analysis.cusum import open_pore_autocorr_time
 
@@ -1506,6 +1501,24 @@ def test_cusum_open_pore_autocorr_time_measures_the_gaps_between_events():
     for s, e in zip(starts, ends):
         r[s:e] += 40.0
     assert open_pore_autocorr_time(r, starts, ends, n_scale=64, pad=64) == pytest.approx(1.0, abs=0.1)
+
+
+def test_cusum_open_pore_gaps_exclude_the_union_of_padded_events(monkeypatch):
+    import nanoscope.analysis.cusum as cusum
+
+    signal = np.arange(3000, dtype=float)
+    measured = []
+    monkeypatch.setattr(cusum, 'integrated_autocorr_time',
+                        lambda segment, **kwargs: measured.append(segment.copy()) or 1.)
+    # Unsorted events, including nested/overlapping intervals and boundary clipping.
+    starts = np.array([2000, 600, -20, 400, 2900])
+    ends = np.array([2300, 700, 100, 800, 3100])
+    assert cusum.open_pore_autocorr_time(signal, starts, ends, n_scale=16, pad=20) == 1.
+    high_passed = signal-np.convolve(signal, np.ones(17)/17, mode='same')
+    expected = [high_passed[120:380], high_passed[820:1980], high_passed[2320:2880]]
+    assert len(measured) == len(expected)
+    for observed, reference in zip(measured, expected):
+        np.testing.assert_array_equal(observed, reference)
 
 
 # ================================================================================================

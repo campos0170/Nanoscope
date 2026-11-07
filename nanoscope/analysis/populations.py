@@ -200,6 +200,11 @@ class LinearFit:
         the power law ``coefficient * x**exponent`` (which needs ``x > 0``).
         """
         x = np.asarray(x, dtype=np.float64)
+        if "x_reference" in self.meta:
+            xf = np.log10(x) if self.log_log else x
+            yf = (self.meta["y_center"] + self.slope *
+                  ((xf - self.meta["x_reference"]) - self.meta["x_center_offset"]))
+            return np.power(10.0, yf) if self.log_log else yf
         if self.log_log:
             coef = 10.0 ** self.intercept
             return coef * np.power(x, self.slope)
@@ -697,8 +702,8 @@ def linear_fit(
 
     Non-finite ``(x, y)`` pairs are dropped first; a log-log fit additionally
     drops any pair with a non-positive x or y (``log10`` needs both > 0). The fit
-    itself is a degree-1 least squares via the normal equations -- numpy only, no
-    scipy. ``R²`` is ``1 - SSres/SStot`` in the fitted space, ``nan`` when the
+    itself uses centred and scaled degree-1 least squares. ``R²`` is
+    ``1 - SSres/SStot`` in the fitted space, ``nan`` when the
     response has no variance (a horizontal cloud, ``SStot == 0``).
 
     Args:
@@ -745,15 +750,39 @@ def linear_fit(
             "degenerate x: all x values are equal, so the slope is undefined"
         )
 
-    # Degree-1 least squares via the normal equations (no scipy needed).
-    slope, intercept = np.polyfit(xf, yf, 1)
-    slope, intercept = float(slope), float(intercept)
-
-    ss_tot = float(np.sum((yf - yf.mean()) ** 2))
-    ss_res = float(np.sum((yf - (slope * xf + intercept)) ** 2))
+    # Subtract a reference before taking the mean: a large absolute time offset
+    # must not destroy a small but perfectly identifiable slope.
+    reference = float(xf[0])
+    delta = xf - reference
+    center_offset = float(delta.mean())
+    xc = delta - center_offset
+    scale = float(np.max(np.abs(xc)))
+    xs = xc / scale
+    y_center = float(yf.mean())
+    yc = yf - y_center
+    slope = float(np.dot(xs, yc) / np.dot(xs, xs) / scale)
+    intercept = float(y_center - slope * reference - slope * center_offset)
+    ss_tot = float(np.dot(yc, yc))
+    residual = yc - slope * xc
+    ss_res = float(np.dot(residual, residual))
     r2 = np.nan if ss_tot == 0.0 else 1.0 - ss_res / ss_tot
 
-    meta: dict[str, Any] = {"log_log": bool(log_log)}
+    meta: dict[str, Any] = {"log_log": bool(log_log),
+        "objective": "log10-response least squares" if log_log else "response least squares",
+        "x_reference": reference, "x_center_offset": center_offset, "y_center": y_center,
+        "dof": n - 2, "sse": ss_res}
+    if n > 2:
+        from scipy.stats import t as student_t
+        variance = ss_res / (n - 2)
+        sxx = float(np.dot(xs, xs)) * scale ** 2
+        slope_se = float(np.sqrt(variance / sxx))
+        x_center = reference + center_offset
+        intercept_se = float(np.sqrt(variance * (1.0 / n + x_center ** 2 / sxx)))
+        q = float(student_t.ppf(.975, n - 2))
+        meta["standard_errors"] = {"slope": slope_se, "intercept": intercept_se}
+        meta["ci95"] = {"slope": (slope - q*slope_se, slope + q*slope_se),
+                        "intercept": (intercept - q*intercept_se, intercept + q*intercept_se)}
+        meta["uncertainty_method"] = "Student-t OLS intervals; independent homoscedastic errors in fitted space"
     if log_log:
         meta["exponent"] = slope
         meta["coefficient"] = 10.0 ** intercept

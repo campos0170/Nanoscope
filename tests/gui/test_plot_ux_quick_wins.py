@@ -281,17 +281,27 @@ def test_ctrl_digits_pick_the_section_of_the_page_in_front_only(qtbot):
     assert "–" in second_bar.sections.toolTip()
 
 
-def test_ctrl_2_on_a_real_page_shows_analysis_without_computing(iv_window, qtbot, monkeypatch):
+def test_cmd_1_and_2_on_a_real_page_are_the_inspector_tabs_and_compute_nothing(
+        iv_window, qtbot, monkeypatch):
+    """Phase 1: in the Explorer the page's Section keys became the inspector's two tabs (the
+    page's own bar is hidden and its Ctrl+1 to 4 are handed over). ⌘2 is Format, ⌘1 is Data &
+    analysis, and neither computes anything."""
+    from . import p1_hosting as H
     page = iv_window._iv_window
     explorer = iv_window._analysis_explorer
     for name in ("refresh", "_refresh_from_user", "_redraw"):
         if hasattr(page, name):
-            monkeypatch.setattr(page, name, lambda *_a, **_k: pytest.fail("Ctrl+2 computed"))
+            monkeypatch.setattr(page, name, lambda *_a, **_k: pytest.fail("a tab key computed"))
     explorer.show()
     explorer.activateWindow()
     qtbot.waitActive(explorer)
-    _ctrl(qtbot, page._workflow.sections, QtCore.Qt.Key.Key_2)
-    assert page._workflow.sections.currentText() == "Analysis"
+    explorer.raise_page("iv")
+    explorer.inspector().set_tab(0)
+    H.key(explorer, QtCore.Qt.Key.Key_2, H.CTRL)
+    assert explorer.inspector().current_tab() == 1
+    H.key(explorer, QtCore.Qt.Key.Key_1, H.CTRL)
+    assert explorer.inspector().current_tab() == 0
+    assert page._workflow.sections.currentText() == "Data", "the hidden Section combo is left alone"
 
 
 # -- integration fixes (plotux build 4, 2026-11-01) ------------------------------------------
@@ -330,6 +340,6 @@ def test_export_suggests_a_tidy_file_name_for_a_default_figure_name(iv_window, m
     asked = []
     monkeypatch.setattr(module, "ask_export_path",
                         lambda *_a, **kw: asked.append(kw.get("suggestion")))
-    win._figure_library._list.setCurrentRow(0)
+    assert win._analysis_explorer.current_page_id() == win._figure_library.current_id()
     assert win._figure_library.export_current(bundle=True) is None
     assert asked == ["I-V - conductance.zip"]

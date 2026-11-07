@@ -502,7 +502,10 @@ def test_one_poisoned_sample_of_the_owners_recording_costs_only_its_neighbours()
     # Detection GEOMETRY given a fixed baseline is unchanged (tests/analysis/
     # test_detect.py holds that pin); which events are found is not, and that is the
     # intended effect of the change.
-    assert len(df) == 317, "the documented detection on this file"
+    # This test measures the influence of one poisoned raw sample, independently
+    # of which versioned baseline/noise policy supplied the candidate table.
+    # Keep a full 200-row witness; the exact candidate count is not a truth label.
+    assert len(df) >= 200, "the corpus must supply the complete blast-radius witness"
 
     spans = [(int(r.start_idx), int(r.end_idx)) for _, r in df.head(200).iterrows()]
     few = int(round(fs * RECHAR_PAD_MS / 1000.0))
@@ -553,17 +556,42 @@ def test_the_owners_recording_acquires_no_non_finite_flag_anywhere():
     doc_id = session.add_document(open_document(ABF))
     sig = np.asarray(session.calibrated(doc_id, 2).data, dtype=np.float64)
     fs = float(session.document(doc_id).meta.sample_rate_hz)
+    original_signal = sig.copy()
 
     df, prov = detect_events(sig, fs, min_dwell_s=2e-5, max_dwell_s=2e-3)
+    assert len(df) > 0, "the clean-file control must actually detect events"
     assert not has_flag(df["flag"], FLAG_NON_FINITE).any()
 
-    merged, _ = merge_by_gap(EventSet(df, prov), sig, fs, max_gap_s=5e-3)
-    # 344 under the pre-change 10 ms block median; 245 before `merge_by_gap` grew its
-    # occupancy floor. The floor refuses exactly ONE group on this recording, at occupancy
-    # 0.213 -- a run of four whose merged span would have been 79% open pore, reported as a
-    # single event whose dwell is the whole span and whose median depth the open pore
-    # out-votes. The four survive as four, which is why the count moved 245 -> 248.
-    assert len(merged.df) == 248
+    original_rows = df.copy(deep=True)
+    outcome = merge_by_gap(EventSet(df, prov), sig, fs, max_gap_s=5e-3)
+    merged = outcome.eventset
+    # The old total248 encoded a particular automatic baseline. Check the merge
+    # accounting and the physical occupancy brake independently of detector count.
+    assert 0 < len(merged.df) < len(df)
+    assert outcome.n_merged == len(df) - len(merged.df)
+    starts = df['start_idx'].to_numpy(dtype=np.int64)
+    ends = df['end_idx'].to_numpy(dtype=np.int64)
+    assert np.all(starts[1:] >= ends[:-1]), "detected source spans must be disjoint"
+    cuts = np.flatnonzero(starts[1:] - ends[:-1] > round(.005 * fs)) + 1
+    groups = np.split(np.arange(len(df)), cuts)
+    from nanoscope.analysis.merge import MIN_MERGE_OCCUPANCY
+    refused = []
+    retained = set(zip(merged.df['start_idx'], merged.df['end_idx']))
+    for group in groups:
+        if len(group) < 2:
+            continue
+        # The input spans are disjoint, so this is their exact interval coverage,
+        # measured directly without using the production occupancy helper.
+        occupancy = float(np.sum(ends[group] - starts[group]) /
+                          (ends[group[-1]] - starts[group[0]]))
+        if occupancy < MIN_MERGE_OCCUPANCY:
+            refused.append(occupancy)
+            assert all((starts[i], ends[i]) in retained for i in group)
+    assert refused, "the real-file fixture must still exercise the occupancy brake"
+    assert outcome.n_refused == len(refused)
+    assert outcome.refused_occupancy == pytest.approx(refused)
     assert not has_flag(merged.df["flag"], FLAG_NON_FINITE).any()
     assert np.isfinite(merged.df["snr"].to_numpy()).all()
     assert np.isfinite(merged.df["depth_pA"].to_numpy()).all()
+    pd.testing.assert_frame_equal(df, original_rows)
+    np.testing.assert_array_equal(sig, original_signal)

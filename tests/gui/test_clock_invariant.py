@@ -104,7 +104,7 @@ def test_the_trace_x_axis_says_it_is_on_the_instrument_clock(win, tmp_path):
     _open(win, tmp_path, t0_s=T0_APO)
     label = win._trace_view.x_axis_label()
     assert "instrument clock" in label, label
-    assert "61.3034" in label, label
+    assert "61303.4 ms" in label, label
 
 
 def test_the_trace_axis_ticks_are_in_the_unit_the_label_claims(win, tmp_path):
@@ -127,7 +127,7 @@ def test_the_crosshair_states_the_instant_on_both_clocks(win, tmp_path):
     win._session.set_cursor(T0_APO + 0.2)
     texts = [item[2].textItem.toPlainText() for item in win._trace_view.crosshair._items]
     assert texts and "instrument" in texts[0], texts
-    assert "0.2000 s in" in texts[0], texts
+    assert "200.0 ms in" in texts[0] and "61503.4 ms instrument" in texts[0], texts
 
 
 def test_the_crosshair_does_not_double_print_when_the_clocks_agree(win, tmp_path):
@@ -156,16 +156,22 @@ def test_the_event_tables_time_column_says_which_clock_it_is_on(win, tmp_path):
     assert "t₀=0" in _header(win, "t_start_s", Qt.DisplayRole)
     tip = _header(win, "t_start_s", Qt.ToolTipRole)
     assert "from the start of this recording" in tip
-    assert "61.3034" in tip and "add" in tip
+    assert "61303.4 ms" in tip and "add" in tip
 
 
-def test_a_duration_column_is_left_alone(win, tmp_path):
+def test_a_duration_column_changes_display_units_without_a_clock_badge(win, tmp_path):
     """``dwell_s`` is a LENGTH of time. It is on no clock, and annotating it would be
     noise pretending to be rigour."""
     from PySide6.QtCore import Qt
 
     _open(win, tmp_path, t0_s=T0_APO)
-    assert _header(win, "dwell_s", Qt.DisplayRole) == "dwell_s"
+    assert _header(win, "dwell_s", Qt.DisplayRole) == "Dwell time (ms)"
+    assert "t₀" not in _header(win, "dwell_s", Qt.ToolTipRole)
+    model = win._analysis_panel._table._model
+    column = list(model.df.columns).index("dwell_s")
+    raw_seconds = float(model.df.iloc[0]["dwell_s"])
+    assert float(model.data(model.index(0, column), Qt.DisplayRole)) == pytest.approx(raw_seconds * 1000, rel=1e-4)
+    assert float(model.df.iloc[0]["dwell_s"]) == raw_seconds
 
 
 def test_the_offset_follows_the_recording_that_is_shown(win, tmp_path):
@@ -176,7 +182,7 @@ def test_the_offset_follows_the_recording_that_is_shown(win, tmp_path):
     _open(win, tmp_path, t0_s=T0_APO, name="a.dat")
     assert "t₀=0" in _header(win, "t_start_s", Qt.DisplayRole)
     _open(win, tmp_path, t0_s=0.0, name="b.dat")
-    assert _header(win, "t_start_s", Qt.DisplayRole) == "t_start_s"
+    assert _header(win, "t_start_s", Qt.DisplayRole) == "Start time (ms)"
 
 
 # ================================================================================================
@@ -303,7 +309,7 @@ def test_the_psd_segment_spins_say_which_clock_they_are_in(win, tmp_path):
             tip = spin.toolTip()
             assert "FROM THE START OF THIS RECORDING" in tip, tip
             # ...and the arithmetic, in numbers, not as an abstraction.
-            assert "61.3034" in tip, tip
+            assert "61303.4 ms" in tip, tip
             assert "trace x-axis" in tip, tip
     finally:
         psd.deleteLater()
@@ -321,7 +327,9 @@ def test_the_psd_segment_readout_states_the_window_on_both_clocks(win, tmp_path)
         psd.set_segment(0.20, 0.40)
         text = psd._seg_label.text()
         assert "into the recording" in text, text
-        assert "61.5034" in text and "61.7034" in text, text
+        assert "61503.4–61703.4 ms" in text, text
+        assert psd._start_spin.value() == pytest.approx(.20)
+        assert psd._end_spin.value() == pytest.approx(.40)
     finally:
         psd.deleteLater()
 

@@ -117,7 +117,8 @@ def _curate_out(window, qtbot, n: int) -> int:
     model = window._analysis_panel._table.view.model()
     header = [model.headerData(c, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
               for c in range(model.columnCount())]
-    col = header.index("accepted")
+    col = header.index("Accepted")
+    assert model.flags(model.index(0, col)) & Qt.ItemFlag.ItemIsUserCheckable
     done = 0
     row = 0
     while done < n and row < model.rowCount():

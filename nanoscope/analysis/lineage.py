@@ -182,11 +182,13 @@ def _run_params(result: Any) -> dict[str, Any]:
     params = dict(getattr(result, "params", None) or {})
     # The estimator's keys alone name no run (a v1/v2 table re-measured before the stamp was
     # kept): read the stamp under them, as the panel does.
-    if any(not str(k).startswith("baseline_") for k in params):
-        return params
     payload = getattr(result, "payload", None)
-    if isinstance(payload, EventSet) and payload.provenance:
-        return {**preprocess_params_from_provenance(payload.provenance), **params}
+    prov = payload.provenance if isinstance(payload, EventSet) else {}
+    if not any(not str(k).startswith("baseline_") for k in params) and prov:
+        params = {**preprocess_params_from_provenance(prov), **params}
+    if params and getattr(result, "module_id", None) == "detect.schmitt":
+        params.setdefault("noise_policy", prov.get("noise_policy", "global"))
+        params.setdefault("noise_window_s", prov.get("noise_window_s", 0.25))
     return params
 
 

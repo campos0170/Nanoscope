@@ -76,13 +76,19 @@ def test_warnings_warn_still_fires_and_the_subclass_matches_the_base():
 
 
 def test_no_sink_installed_is_the_old_behaviour():
-    """Outside any collect block the kernel just warns — no state leaks between calls."""
-    with pytest.warns(ConstantBaselineWarning):
-        remove_baseline_wander(_drifting(), FS, window_s=1.0, polarity=-1)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", BaselineWarning)
-        # A healthy window raises nothing and appends nowhere.
+    """Leaving a collect block detaches its sink; later advisories cannot leak into it."""
+    with collect_baseline_warnings() as closed_sink:
+        with pytest.warns(ConstantBaselineWarning):
+            remove_baseline_wander(_drifting(), FS, window_s=1.0, polarity=-1)
+    assert len(closed_sink) == 1
+    with warnings.catch_warnings(record=True) as observed:
+        warnings.simplefilter("always", BaselineWarning)
+        # A nondegenerate window does not emit the constant/no-op warning. Runtime
+        # health may now report separate advisories, which must remain collectable
+        # through Python warnings without reaching an already-closed local sink.
         remove_baseline_wander(_drifting(), FS, window_s=0.1, polarity=-1)
+    assert not any(issubclass(item.category, ConstantBaselineWarning) for item in observed)
+    assert len(closed_sink) == 1, "a completed collect scope received a later warning"
 
 
 def test_nested_collect_blocks_both_see_the_warning():

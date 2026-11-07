@@ -241,11 +241,12 @@ def test_a_usable_pair_says_nothing(win):
 def test_the_note_names_the_unit_the_box_is_read_in(win):
     """"min ≥ max" over a pair of boxes labelled in µs is only actionable if you know
     which pair and which unit."""
-    win.set_time_unit("µs")
+    with pytest.raises(ValueError, match="unknown time unit"):
+        win.set_time_unit("µs")
     win._range_edits["xmin"].setText("2000")
     win._range_edits["xmax"].setText("100")
     win._apply_axis_range()
-    assert "(µs)" in win._axis_range_input_notes()[0]
+    assert "(ms)" in win._axis_range_input_notes()[0]
 
 
 def test_restoring_a_config_restores_its_explanation(win):

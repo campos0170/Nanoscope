@@ -39,10 +39,11 @@ The figures remain on screen while the workflow switches controls. Analysis show
 the full report beside them; Appearance and Export free that space for their own
 controls. The caveat summary is never a separate tab or a hidden workflow section.
 
-UMAP IS SURFACED ONLY IF THE RUN COMPUTED IT, and never turned on from here.
+UMAP IS SURFACED ONLY AFTER IT HAS BEEN COMPUTED. Generate UMAP announces an
+explicit request to the owner, which computes from the stored PCA off-thread.
 ``random_state`` forces it single-threaded but the result is still not
 bit-reproducible across umap-learn / numba / platform versions, so it is an
-explicit opt-in at the analysis layer (``SubpopConfig(with_umap=True)``) and the
+explicit opt-in (recorded as ``with_umap=True``) and the
 view says the coordinates are not stable whenever they are on screen.
 
 Deliberately NOT a panel:
@@ -81,9 +82,11 @@ THE TYPED WORDS AND THE EMBEDDING (``gui.quantity_reset``)
 The two figures share one title and one pair of axis labels. A different embedding is a
 different quantity on the scatter's axes, so ``_appearance_after_view_change`` puts the typed
 words back to automatic (one Undo step) and leaves the sentence on the standing line under the
-report until the next report or the next change of embedding, and until a restore installs its
-saved appearance (a restore moves the embedding through the public setter, which resets the
-live page for a moment; the saved words then replace it and the sentence is dropped). The
+report until the next report or the next change of embedding, until what it names is typed or
+pinned again (the Undo of the reset, a title typed since: ``PlotAppearanceWidget.resetLapsed``;
+Reset figure and a change of look leave it), and until a restore installs its saved appearance
+(a restore moves the embedding through the public setter, which resets the live page for a
+moment; the saved words then replace it and the sentence is dropped). The
 colouring is how the same points are drawn and keeps them. A new report and Undo do not reset,
 and a restore ends with the words it saved. The embedding is also what both axes of the scatter
 show, so a range or major tick pinned on either goes with the words; the waveforms' pins stay.
@@ -100,10 +103,19 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..plot.style import PALETTE
 from .analysis_catalog import ANALYSIS_LABELS
-from .figure_text import SHARED_LABELS_REASON, appearance_text_host, figure_text_for
+from .figure_text import SHARED_LABELS_REASON, appearance_text_host, figure_text_for, _alive
+from ..core.figure_series import SeriesDescriptor, stable_series_id
+from ..core.figure_style import points_to_logical_pixels, logical_pixels_to_points
+from .figure_series import (tag_pg_series, prepare_pg_series_items, apply_pg_item_style,
+                            pg_series_descriptors)
+from .series_points import apply_point_style, reset_point_sizes, scatter_mask_scene_bounds
+import weakref
 from .plot_appearance import PlotAppearance, PlotAppearanceWidget, apply_plot_appearance
 from .plot_interaction import PlotReadout, install_plot_interaction, reset_plot_history
-from .plot_workflow import PlotWorkflowBar, WarningSummary, bounded_controls, control_group
+from .plot_workflow import (DEFAULT_REVEAL, ExportEntry, FormatSpec, InspectorGroup, PageAdapter,
+                            PendingState, PlotWorkflowBar, WarningSummary, bounded_controls,
+                            form_rows)
+from .widget_transfer import prepare_widget_move
 from .categorical import (
     add_category_scatter,
     category_colour,
@@ -147,6 +159,11 @@ _DEFAULT_SIZE = (1600, 980)
 #: 760 the data rectangle was 197 px wide beside a 164 px legend, i.e. the legend
 #: took 45 % of the figure. Measured at this floor: data 276x110, aspect 2.51.
 _MIN_SIZE = (900, 480)  # the scrollable body retains each figure's independent floor
+#: The floor while the page is hosted in the Analysis Explorer (Phase 1): the page area
+#: beside the 320 px inspector at the Explorer's 840 px minimum is about 500 px wide. The
+#: scrollable body keeps each figure's own floor, so a narrower page scrolls, it does not
+#: squeeze a figure.
+_HOSTED_MIN_SIZE = (520, 360)
 #: Initial splitter split: the text gets the width its widest table needs, the
 #: figures get the rest. The user can drag it anywhere, including all the way over.
 _SPLIT = (620, 800)
@@ -284,15 +301,13 @@ _EMBED_HONESTY = (
 )
 
 _UMAP_OFF = (
-    "UMAP is OFF for this run and that is not a slow-path excuse: `random_state` forces it "
-    "single-threaded but the result is still not bit-reproducible across umap-learn / numba / "
-    "platform versions, so a run and a re-run can disagree about a column that looks like data. "
-    "Turn it on deliberately at the analysis layer — SubpopConfig(with_umap=True)."
+    "UMAP has not been generated. Use Generate UMAP in View to compute it from this "
+    "report’s stored PCA scores. Coordinates can change across software and platform "
+    "versions; save the project to retain the coordinates you use."
 )
 _UMAP_ON = (
-    "THESE UMAP COORDINATES ARE NOT STABLE. They are not bit-reproducible across "
-    "umap-learn / numba / platform versions: a re-run of this same report can place the same "
-    "events elsewhere. Read the t-SNE view before quoting this one."
+    "UMAP coordinates can change across software and platform versions. Save the project "
+    "to retain this result. Compare with t-SNE; neither embedding validates biological classes."
 )
 
 #: The one caveat that is about the PICTURE rather than the pipeline, and the
@@ -315,9 +330,10 @@ _NO_REPORT = f"No report yet — run Analysis ▸ Generate {ANALYSIS_LABELS['sub
 #: not know what an assignment is; it repeats the state and the reason it is given.
 ASSIGNMENT_NONE = "none"            # the report fitted no mixture: nothing to colour with
 ASSIGNMENT_INSTALLED = "installed"  # on the trace and in the gallery right now
+ASSIGNMENT_READY = "ready"          # validated original source; a button can attach the map
 ASSIGNMENT_AWAY = "away"            # held; another detection is on screen
 ASSIGNMENT_RETIRED = "retired"      # gone, for the reason given (detection changed, …)
-ASSIGNMENT_STATES = (ASSIGNMENT_NONE, ASSIGNMENT_INSTALLED, ASSIGNMENT_AWAY,
+ASSIGNMENT_STATES = (ASSIGNMENT_NONE, ASSIGNMENT_INSTALLED, ASSIGNMENT_READY, ASSIGNMENT_AWAY,
                      ASSIGNMENT_RETIRED)
 
 #: The standing line under the document never MOVES anything: it is one label that is
@@ -798,10 +814,15 @@ class EmbeddingScatterView(QtWidgets.QWidget):
         item = add_category_scatter(
             self._plot.getPlotItem(), x, y, ids, size=_POINT_SIZE)
         item.setZValue(1)
+        item._nanoscope_category_ids = ids.copy()
+        item._nanoscope_category_mode = mode
+        item._nanoscope_category_legend = {}
         counts = category_counts(ids)
         for cid, n in counts:
             swatch = legend_swatch(cid, size=_POINT_SIZE)
             self._legend.addItem(swatch, f"{_class_name(mode, cid)}  (n = {n})")
+            sample, label = self._legend.items[-1]
+            item._nanoscope_category_legend[cid] = (weakref.ref(swatch), weakref.ref(sample), weakref.ref(label))
             self._legend_entries.append(
                 (f"{_class_name(mode, cid)}  (n = {n})", category_colour(cid).name()))
         self._legend_n = len(counts)
@@ -958,6 +979,9 @@ class WaveformOverlayView(QtWidgets.QWidget):
             # Export must identify the curve actually drawn, not zip it against
             # _series (which also records all-NaN, deliberately undrawn classes).
             curve._nanoscope_waveform_series = (str(col), int(counts.get(col, 0)))
+            tag_pg_series(curve, view='subpopulations', identity=f'{_MODE_GMM}:{cid}',
+                          identity_kind='category', label=f'subpop {cid}', color=colour.name(),
+                          capabilities=('color', 'line_width_pt', 'visible'))
             pi.addItem(curve)
             n = int(counts.get(col, 0))
             self._legend.addItem(curve, f"subpop {cid}  (n = {n})")
@@ -1024,11 +1048,16 @@ class SubpopReportWindow(QtWidgets.QWidget):
 
     exportRequested = QtCore.Signal()
     analyzeRequested = QtCore.Signal()
+    umapRequested = QtCore.Signal()
     workspaceChanged = QtCore.Signal()
+    formatViewsChanged = QtCore.Signal()
     #: "Show me these events." Both are ANNOUNCEMENTS, like Export: this window does not
     #: know what a gallery or a trace pane is, and ``main_window`` is the sole wirer.
     galleryRequested = QtCore.Signal()
     traceRequested = QtCore.Signal()
+    #: The Explorer's Update plot count may have moved (the curation sentence appeared or
+    #: went). Carries nothing; the toolbar reads ``pending()``.
+    pendingChanged = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1060,25 +1089,34 @@ class SubpopReportWindow(QtWidgets.QWidget):
                   avail.y() + max(_SCREEN_MARGIN + _FRAME_ALLOWANCE[1],
                                   (avail.height() - size.height()) // 2))
         self._report = None
+        self._umap_busy = False
         self._appearance = PlotAppearance()
         #: The embedding on screen ("" before a report), for the reset rule (quantity_reset):
         #: the typed words belong to it, so a change is measured against THIS.
         self._embedding_shown = ""
         #: The status sentence a quantity change leaves ("Title reset: the plot now shows
-        #: the UMAP embedding."), kept on the standing line until the next report.
+        #: the UMAP embedding."), kept on the standing line until the next report, a new
+        #: embedding, a restore, or the day what it names is typed or pinned again.
         self._words_note_text = ""
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
         self._workflow = PlotWorkflowBar(
-            actions=(("Analyze…", self.analyzeRequested.emit),),
+            actions=(("Recompute subpopulations", self.analyzeRequested.emit),),
             exports=(("Export report and tables…", self.exportRequested.emit),
                      ("Copy report", self._copy)))
         root.addWidget(self._workflow)
-        self._data_section = control_group(
-            "Data", "These figures show the stored subpopulation report. Analyze… opens the "
-            "existing analysis settings; section and appearance changes never recompute the report.")
+        self._data_section = QtWidgets.QGroupBox("Data")
+        source_layout = QtWidgets.QVBoxLayout(self._data_section)
+        # One context block preserves provenance without taking a second block's
+        # height from the scientific plots when Full details is open.
+        self._source_label = QtWidgets.QLabel()
+        self._source_label.setTextFormat(QtCore.Qt.PlainText)
+        self._source_label.setWordWrap(True)
+        self._source_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        source_layout.addWidget(self._source_label)
+        self._refresh_source_description()
         root.addWidget(self._data_section)
         appearance_host = QtWidgets.QWidget()
         appearance_layout = QtWidgets.QVBoxLayout(appearance_host)
@@ -1090,11 +1128,12 @@ class SubpopReportWindow(QtWidgets.QWidget):
             self._appearance, include_colors=False, compact=True, multi_view_labels="both figures",
             shortcut_parent=self)
         self._appearance_widget.changed.connect(self._appearance_from_user)
-        self._workflow.adopt_reset_figure(self._appearance_widget)
+        self._appearance_widget.resetLapsed.connect(self._words_note_lapsed)
+        self._workflow.adopt_reset_figure(self._appearance_widget, takes_ranges=True)
         appearance_layout.addWidget(self._appearance_widget)
-        categorical_note = QtWidgets.QLabel(
-            "Class colours stay linked to the report, event gallery and trace. Global recolouring "
-            "is unavailable here; typography, background, line width, markers and legends remain editable.")
+        categorical_note = self._categorical_note = QtWidgets.QLabel(
+            "Class colours start from the report's category identities. Series edits affect this figure's "
+            "embedding, waveforms and legends only; class assignments, the report, gallery and trace stay unchanged.")
         categorical_note.setWordWrap(True)
         appearance_layout.addWidget(categorical_note)
         self._appearance_section = bounded_controls(appearance_host)
@@ -1202,7 +1241,7 @@ class SubpopReportWindow(QtWidgets.QWidget):
             "full recording becomes a map of where each subpopulation occurs. Zoom in and "
             "each span is named.")
         self._trace_btn.clicked.connect(self.traceRequested)
-        close_btn = QtWidgets.QPushButton("Close")
+        close_btn = self._close_btn = QtWidgets.QPushButton("Close")
         close_btn.clicked.connect(self.close)
         buttons.addWidget(self._copy_btn)
         buttons.addWidget(self._export_btn)
@@ -1256,7 +1295,8 @@ class SubpopReportWindow(QtWidgets.QWidget):
         # which it means; the menu is on the figure it acts on.
         self._readout = PlotReadout()
         self._workflow.add_view_control(self._readout, stretch=1)
-        exports = (("Export report and tables…", self.exportRequested.emit, self.can_export),)
+        exports = self._exports = (
+            ("Export report and tables…", self.exportRequested.emit, self.can_export),)
         for view, pins in ((self._embed_view, PIN_EMBEDDING), (self._wave_view, PIN_WAVEFORMS)):
             # In-figure editing (figure_text) through the shared appearance: axis labels,
             # the title and the legend. Neither figure has a log scale. A range typed in
@@ -1284,6 +1324,72 @@ class SubpopReportWindow(QtWidgets.QWidget):
 
         self._sync_buttons()
 
+    def inspector_adapter(self) -> PageAdapter:
+        """How the Analysis Explorer hosts this page (Phase 1, "Pages B").
+
+        Built once and cached; nothing but ``AnalysisExplorer.add_page`` (through
+        ``InspectorHost.adopt``) and the hosting test helpers call it. The two selectors of
+        the scatter leave their 303 px row for a form; the report, both figures, both
+        splitters and the caveats stay where they are (the report is content, not a
+        control). It computes nothing: ``update`` is the Analyze… signal (which opens the
+        existing settings), the count is 1 only while the curation sentence says the
+        accepted set moved under the report, and both figures have a controller."""
+        if getattr(self, "_inspector_adapter", None) is None:
+            view = self._embed_view
+            selectors = form_rows([("Embedding", view._embed_combo),
+                                   ("Colour by", view._colour_combo)])
+            self._inspector_adapter = PageAdapter.from_widget(
+                self, "subpopulations", self._appearance_widget,
+                groups=[InspectorGroup("about", "Sources", [self._data_section]),
+                        InspectorGroup("view", "View", [selectors, self._generate_umap_btn]),
+                        InspectorGroup("report", "Report", [self._gallery_btn, self._trace_btn],
+                                       expanded=False)],
+                format=FormatSpec(
+                    self._appearance_widget, controllers=self._text_controllers,
+                    extras={"series": [self._categorical_note]},
+                    series_provider=self.series_descriptors,
+                    views_changed=self.formatViewsChanged),
+                update=self.analyzeRequested.emit,
+                update_tooltip="Recompute subpopulations from the report's original detection "
+                               "and its current accepted events, using the app's model-search "
+                               "defaults. A new empty figure uses the current detection. "
+                               "Large runs ask for confirmation; changing the view does not recompute.",
+                pending=self._pending,
+                pending_changed=self.pendingChanged,
+                exports=lambda: [
+                    ExportEntry("Export report and tables…", self.exportRequested.emit,
+                                self.can_export, "figure"),
+                    ExportEntry("Copy report", self._copy, self.can_export, "page")],
+                reveal_map={**DEFAULT_REVEAL, "Data": "about", "Analysis": "view",
+                            "Export": "report"},
+                chrome=[self._workflow],
+                on_adopt=self._on_adopt)
+        return self._inspector_adapter
+
+    def _text_controllers(self) -> list:
+        """Both figures are on screen at once: one controller each."""
+        found = (figure_text_for(v._plot.getPlotItem()) for v in (self._embed_view, self._wave_view))
+        return [c for c in found if c is not None]
+
+    def _pending(self) -> PendingState:
+        note = self._curation_note_text
+        return PendingState(1 if note else 0, (note,) if note else (), busy=self._umap_busy)
+
+    def _on_adopt(self) -> None:
+        """Hosting steps: the buttons the toolbar and the inspector replace stay constructed
+        and hidden, the pointer readout leaves the hidden bar for a bottom row of its own,
+        and the explicit minimum size drops to what the page area beside the inspector has.
+        The report was Section-hidden under Data and is content here, so it shows."""
+        for hidden in (self._copy_btn, self._export_btn, self._close_btn,
+                       self._appearance_section, self._embed_view._selector_controls):
+            hidden.hide()
+        self._text.show()
+        prepare_widget_move(self._readout)
+        self.layout().addWidget(self._readout)
+        self._readout.show()
+        self.setMinimumSize(*_HOSTED_MIN_SIZE)
+        self._ensure_figure_minima()
+
     def _build_figures(self) -> QtWidgets.QWidget:
         """The figure column: scatter, waveforms and caveats, all three in one splitter.
 
@@ -1292,6 +1398,10 @@ class SubpopReportWindow(QtWidgets.QWidget):
         into the splitter that wrapper had one child and no purpose.
         """
         self._embed_view = EmbeddingScatterView()
+        self._generate_umap_btn = QtWidgets.QPushButton("Generate UMAP")
+        self._generate_umap_btn.setObjectName("generateSubpopulationUmap")
+        self._generate_umap_btn.clicked.connect(self.umapRequested.emit)
+        self._embed_view._selector_controls.layout().addWidget(self._generate_umap_btn)
         self._wave_view = WaveformOverlayView()
         figures = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         figures.setChildrenCollapsible(False)
@@ -1317,9 +1427,32 @@ class SubpopReportWindow(QtWidgets.QWidget):
         return figures
 
     # -- state ---------------------------------------------------------------
+    def _refresh_source_description(self) -> None:
+        recipe = getattr(self, "_nanoscope_workspace_source", None) or {}
+        source = str(recipe.get("source_key") or "")
+        if source:
+            channel = recipe.get("channel_name") or f"channel {recipe.get('channel', '?')}"
+            module = str(recipe.get("module_id") or "stored detection")
+            detector = {"detect.schmitt": "Schmitt", "detect.cusum": "CUSUM",
+                        "detect.keras": "ML", "detect.study": "Study candidates"}.get(module, module)
+            name = source.rsplit("/", 1)[-1]
+            text = (f"Source: {name} · Channel: {channel} · Detector: {detector}\n"
+                    "Pinned to this detection. Update plot recomputes from its current accepted "
+                    "events using the app’s model-search defaults. View changes only affect presentation.")
+        elif self._report is None:
+            text = ("New report: Update plot uses the detection selected in the main window "
+                    "and the app’s model-search defaults. View changes only affect presentation.")
+        else:
+            name = str(self._report.meta.get("recording") or "Stored report")
+            text = (f"Source: {name}\nNo bound detection is available. The stored report can "
+                    "be viewed and exported; Generate UMAP uses its stored PCA scores.")
+        self._source_label.setText(text)
+        self._source_label.setToolTip(text + (f"\nFull source: {source}" if source else ""))
+
     def set_report(self, report, subtitle: str = "") -> None:
         """Install a report (or ``None`` to clear). Idempotent; re-entrant-safe."""
         self._report = report
+        self._refresh_source_description()
         if report is None:
             self._header.setText(self._empty_header())
             self._text.setPlainText("")
@@ -1348,6 +1481,24 @@ class SubpopReportWindow(QtWidgets.QWidget):
         self._curation_note_text = ""
         self._render_live_note()
         self._sync_buttons()
+        self.pendingChanged.emit()
+
+    def set_umap_busy(self, busy: bool) -> None:
+        """The owner controls the worker; the view only reflects its state."""
+        self._umap_busy = bool(busy)
+        self._sync_buttons()
+        self.pendingChanged.emit()
+
+    def install_umap_report(self, report) -> None:
+        """Replace embedding data while retaining assignment and curation state."""
+        assignment = self.assignment_state()
+        curation = self.curation_note()
+        colour = self._embed_view.colour_mode()
+        self.set_report(report, subtitle=str(report.meta.get("recording") or "(unnamed)"))
+        self.set_assignment_state(*assignment)
+        self.set_curation_note(curation)
+        self._embed_view.set_colour_mode(colour)
+        self._embed_view.set_embedding("UMAP")
 
     def report(self):
         """The installed :class:`SubpopReport`, or ``None``."""
@@ -1356,6 +1507,13 @@ class SubpopReportWindow(QtWidgets.QWidget):
     def _appearance_from_user(self, state: PlotAppearance) -> None:
         self._install_appearance(state)
         self.workspaceChanged.emit()
+
+    def _words_note_lapsed(self) -> None:
+        """What the sentence on the standing line said was automatic is typed or pinned again
+        (the Undo of the reset, a title typed since): it no longer describes the figures."""
+        if self._words_note_text:
+            self._words_note_text = ""
+            self._render_live_note()
 
     def _appearance_after_view_change(self, *_args) -> None:
         shown, self._embedding_shown = self._embedding_shown, self._embed_view.embedding()
@@ -1397,6 +1555,8 @@ class SubpopReportWindow(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(0, self._scroll_figure_details_into_view)
 
     def _scroll_figure_details_into_view(self) -> None:
+        if getattr(self, "_figure_suspended", False):
+            return
         if self._caveat_summary.toggle.isChecked():
             self._body_scroll.ensureWidgetVisible(self._caveat_box, 0, 8)
 
@@ -1435,18 +1595,127 @@ class SubpopReportWindow(QtWidgets.QWidget):
     def appearance_state(self) -> dict:
         return self._appearance.to_dict()
 
+    def series_descriptors(self):
+        found = {}
+        for plot in self.figure_export_items():
+            targets = getattr(plot, '_nanoscope_series_targets', {})
+            for descriptor in pg_series_descriptors((plot,)):
+                effective = {}
+                for reference in targets.get(descriptor.series_id, (None, ()))[1]:
+                    item = reference()
+                    if item is None or not _alive(item):
+                        continue
+                    if hasattr(item, '_nanoscope_category_ids'):
+                        # Scalar ScatterPlotItem.opts describes the whole cloud,
+                        # not this category's per-point brush/footprint.
+                        cid = int(descriptor.identity_key.rsplit(':', 1)[1])
+                        indexes = np.flatnonzero(item._nanoscope_category_ids == cid)
+                        if not len(indexes):
+                            continue
+                        point = item.points()[int(indexes[0])]
+                        effective['color'] = point.brush().color().name()
+                        size = point.size()
+                        if size <= 0:
+                            # Hidden footprints are zero, but visibility is not
+                            # copied. Keep the category's intended native size.
+                            own = (self._appearance.series_styles or {}).get(descriptor.series_id, {})
+                            size = (points_to_logical_pixels(own['marker_size_pt']) if 'marker_size_pt' in own
+                                    else self._appearance.marker_size or _POINT_SIZE)
+                        effective['marker_size_pt'] = logical_pixels_to_points(float(size))
+                        break
+                    if isinstance(item, pg.PlotDataItem):
+                        pen = pg.mkPen(item.opts['pen'])
+                        effective['color'] = pen.color().name()
+                        if pen.widthF() > 0:
+                            effective['line_width_pt'] = logical_pixels_to_points(pen.widthF())
+                descriptor = replace(descriptor, extra={**dict(descriptor.extra), 'effective_style': effective})
+                previous = found.get(descriptor.series_id)
+                if previous is not None:
+                    descriptor = replace(previous, capabilities=tuple(dict.fromkeys(
+                        (*previous.capabilities, *descriptor.capabilities))), extra={**dict(previous.extra),
+                        'effective_style': {**dict(previous.extra.get('effective_style', {})), **effective}})
+                found[descriptor.series_id] = descriptor
+        return tuple(found.values())
+
+    @staticmethod
+    def _category_scene_bounds(reference, category_keys, key):
+        item = reference()
+        cid = next((cid for cid, identity in category_keys.items() if identity == key), None)
+        if item is None or not _alive(item) or cid is None:
+            return None
+        return scatter_mask_scene_bounds(item, item._nanoscope_category_ids == cid)
+
+    def _apply_embedding_series(self, plot, item):
+        ids = item._nanoscope_category_ids
+        mode = item._nanoscope_category_mode
+        size = self._appearance.marker_size or _POINT_SIZE
+        # Restore only ink/footprint. Position arrays and class membership remain
+        # the captured report's values, including negative noise-category IDs.
+        reset_point_sizes(item, size)
+        for point, cid in zip(item.points(), ids):
+            point.setBrush(pg.mkBrush(category_colour(int(cid))))
+            point.setPen(pg.mkPen(None))
+            point.setSize(size)
+        targets = getattr(plot, '_nanoscope_series_targets', {})
+        category_keys = {}
+        for cid, _count in category_counts(ids):
+            descriptor = SeriesDescriptor(stable_series_id('subpopulations', 'data', f'{mode}:{cid}'),
+                _class_name(mode, cid), identity_kind='category', identity_key=f'{mode}:{cid}',
+                color=category_colour(cid).name(), capabilities=('color', 'marker_size_pt', 'visible'))
+            category_keys[cid] = descriptor.series_id
+            style = (self._appearance.series_styles or {}).get(descriptor.series_id, {})
+            marker = style.get('marker_size_pt')
+            apply_point_style(item, ids == cid, color=style.get('color'),
+                size=None if marker is None else points_to_logical_pixels(marker),
+                visible=style.get('visible', True))
+            refs = [weakref.ref(item)]
+            legend = item._nanoscope_category_legend.get(cid)
+            if legend is not None:
+                swatch, sample, label = (ref() for ref in legend)
+                if swatch is not None:
+                    prepare_pg_series_items((swatch,))
+                    swatch.setBrush(pg.mkBrush(category_colour(cid)))
+                    swatch.setSize(size)
+                    swatch.setVisible(True)
+                    apply_pg_item_style(swatch, style)
+                    refs.append(weakref.ref(swatch))
+                for element in (sample, label):
+                    if element is not None:
+                        element.setVisible(style.get('visible', True))
+                        element.update()
+            targets[descriptor.series_id] = (descriptor, refs)
+        plot._nanoscope_series_targets = targets
+        reference = weakref.ref(item)
+        plot._nanoscope_series_bounds = lambda key: SubpopReportWindow._category_scene_bounds(
+            reference, category_keys, key)
+        if not getattr(item, '_nanoscope_series_selection_wired', False):
+            sink = weakref.ref(plot._nanoscope_series_selection)
+            def selected(_item, points, *_args):
+                emitter = sink()
+                if emitter is not None and points:
+                    index = points[0].index()
+                    emitter.selected.emit(category_keys[int(ids[index])])
+            item.sigClicked.connect(selected)
+            item._nanoscope_series_selection_wired = True
+
     def _apply_appearance(self) -> None:
         for view, pins in ((self._embed_view, PIN_EMBEDDING), (self._wave_view, PIN_WAVEFORMS)):
             plot = view._plot.getPlotItem()
             items = [item for item in plot.items
                      if isinstance(item, (pg.PlotDataItem, pg.ScatterPlotItem))]
+            categorical = [item for item in items if hasattr(item, '_nanoscope_category_ids')]
+            plot._nanoscope_series_bounds = None
+            items = [item for item in items if item not in categorical]
             # Each figure draws only the pins typed on it (figures2-1): a range pinned on the
             # scatter left the waveforms beside it almost blank.
             apply_plot_appearance(plot, self._appearance.for_view(pins, primary=PIN_EMBEDDING),
                                   plot_widget=view._plot, data_items=items)
+            for item in categorical:
+                self._apply_embedding_series(plot, item)
             controller = figure_text_for(plot)
             if controller is not None:
                 controller.refresh()        # the legend may be new since the last draw
+        self.formatViewsChanged.emit()
 
     def figure_export_items(self):
         """Ordered figures; both belong to this report and travel with its caveats."""
@@ -1582,8 +1851,8 @@ class SubpopReportWindow(QtWidgets.QWidget):
         :data:`ASSIGNMENT_STATES` — and, for every state but ``installed``, WHY in one
         sentence. The owner (``main_window``) is the only caller; it resolves the state
         from the session and this window repeats it: the two entry buttons are live
-        exactly when the map is on the trace and in the gallery, and the standing line
-        under the document carries the reason whenever it is not (S7-POP3)."""
+        when the map is installed or its original detection is validated and ready
+        to attach. The standing line distinguishes ready from installed (S7-POP3)."""
         if state not in ASSIGNMENT_STATES:
             raise ValueError(f"unknown assignment state {state!r}; one of {ASSIGNMENT_STATES}")
         self._assignment_state = state
@@ -1603,6 +1872,7 @@ class SubpopReportWindow(QtWidgets.QWidget):
         touched: they are the run's, and this line says so."""
         self._curation_note_text = str(text)
         self._render_live_note()
+        self.pendingChanged.emit()
 
     def curation_note(self) -> str:
         """The standing curation sentence, "" when the accepted set is the run's."""
@@ -1713,6 +1983,16 @@ class SubpopReportWindow(QtWidgets.QWidget):
 
     def _sync_buttons(self) -> None:
         live = self._report is not None
+        cached = live and "UMAP" in self._embed_view.embeddings()
+        has_pca = (live and self._report.clustering is not None
+                   and self._report.clustering.scopes.get("ALL") is not None)
+        self._generate_umap_btn.setEnabled(has_pca and not cached and not self._umap_busy)
+        self._generate_umap_btn.setToolTip(
+            "Generating UMAP in the background. Cancel discards the pending result." if self._umap_busy else
+            "UMAP is already stored. Choose UMAP in Embedding to display it." if cached else
+            "Generate Subpopulations first to provide a report with stored PCA scores." if not has_pca else
+            "Compute UMAP from this report's stored PCA scores, preserving its t-SNE, "
+            "classes and other analysis results. Coordinates can vary across software versions.")
         self._workflow.export_button.setEnabled(live)
         self._export_btn.setEnabled(live)
         self._copy_btn.setEnabled(live)
@@ -1727,7 +2007,7 @@ class SubpopReportWindow(QtWidgets.QWidget):
         # otherwise (S7-POP3). A report with no mixture never reaches ``installed``, so
         # the old "NO MIXTURE" case is still dead, for the same reason as before.
         has_classes = (live and self._report.quantification is not None
-                       and self._assignment_state == ASSIGNMENT_INSTALLED)
+                       and self._assignment_state in (ASSIGNMENT_INSTALLED, ASSIGNMENT_READY))
         self._gallery_btn.setEnabled(has_classes)
         self._trace_btn.setEnabled(has_classes)
 

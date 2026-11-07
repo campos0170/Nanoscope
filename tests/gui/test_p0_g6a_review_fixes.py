@@ -55,8 +55,8 @@ from .test_p0_figure_font_picker import (  # noqa: F401 -- ``arial`` is a fixtur
 from .test_p0_integration import (
     _export_through_the_menu, _pdf_is_clean, _pick_font, _show_appearance, _svg_families)
 from .test_p0_reset_on_quantity_change import (  # noqa: F401 -- the fixtures build the pages
-    _generate, _pick, _section, _type_comparison_words, _user_picks, comparison, dist, noise,
-    summaries, vdep)
+    _generate, _on_the_toolbar, _pick, _section, _type_comparison_words, _user_picks,
+    comparison, dist, noise, summaries, vdep)
 from .test_plot_window_routes import (
     _build, _choose, _click, _edit_double_click, _names, _press_undo, window_handle)
 from .test_plots_reopen_figure import _main, _recordings, _settle
@@ -300,7 +300,10 @@ def test_a_saved_family_that_is_empty_or_longer_than_400_characters_is_not_repla
 # ================================================================================================
 
 def _click_through_window(button) -> None:
-    """A real left click on ``button``, sent to the window it is in."""
+    """A real left click on ``button``, sent to the window it is in (a button the Explorer's
+    toolbar has replaced is clicked on the toolbar)."""
+    if not button.isVisible() and (stand_in := _on_the_toolbar(button)) is not None:
+        button = stand_in
     assert button.isVisible() and button.isEnabled(), button.text()
     QtTest.QTest.mouseClick(window_handle(button), QtCore.Qt.MouseButton.LeftButton,
                             QtCore.Qt.KeyboardModifier.NoModifier,
@@ -908,12 +911,20 @@ def test_reset_figure_in_distributions_takes_back_typed_annotation_words_but_not
 # L1 / C1 -- the Numbers grid in a wide strip; where the widget keeps its status sentence
 # ================================================================================================
 
-def test_the_numbers_boxes_keep_their_natural_spacing_in_a_wide_strip(vdep):
+def test_the_numbers_boxes_keep_their_natural_spacing_in_a_wide_strip(qtbot):
     """Three boxes to a line, but in a strip a thousand pixels wide they sat a third of the width
-    apart; the spare width now goes to an empty fourth column."""
-    page, explorer = vdep
-    _section(page, "Appearance")
-    widget = page._appearance_widget
+    apart; the spare width now goes to an empty fourth column.
+
+    On a bare appearance widget at 1000 px: inside the Explorer the widget lives in the
+    inspector's 360 px Format tab, which is no wide strip (the Format group re-flows it)."""
+    from nanoscope.gui.plot_appearance import PlotAppearanceWidget
+    widget = PlotAppearanceWidget()
+    qtbot.addWidget(widget)
+    widget.set_fit_label_available(True, in_legend=False)
+    widget.resize(1000, 600)
+    widget.show()
+    qtbot.waitExposed(widget)
+    QtWidgets.QApplication.processEvents()
     assert widget.fit_label_fields["equation"].isVisible()
     assert widget.width() > 700, "premise: a wide strip"
     x = {name: box.mapTo(widget, QtCore.QPoint(0, 0)).x() for name, box in widget.fit_label_fields.items()}

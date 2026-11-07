@@ -1,0 +1,216 @@
+{
+  "edition": "2026-11-04",
+  "status": "approved-captures-and-source",
+  "final_approved": true,
+  "installed_utc": "2026-11-04T06:46:26.630889+00:00",
+  "source_revision": null,
+  "source_tree_sha256": "88fb000b74a7602bc2df2d6a576e58d96dfa5041e0e2891ed2d572b5c8355c1a",
+  "source_tree_hash_method": "SHA256 over sorted nanoscope/**/*.py relative path + NUL + bytes + NUL",
+  "source_base_revision": "b31015c9c01955cab40dde21f7be52e34b9a3d32",
+  "source_note": "Approved working-tree source is identified by the source-tree hash. The base revision is retained for comparison; it is not presented as the captured full source.",
+  "method": "Qt offscreen widget/menu captures supplied by the integration acceptance runner; no Qt started by this installer.",
+  "scope": "Acceptance of corrected workflows with synthetic fixtures; existing apo composition metadata read only",
+  "fixture_kind": "Synthetic recording/event/report fixtures; existing apo composition metadata read only.",
+  "capture_report_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/validation.json",
+  "capture_report_observed_sha256": "6de4ab13ba56901f145cbc43beec1885e1dacc3df7f195c4e3737b7de3dd3aea",
+  "capture_checks": {
+    "noise_source_update": {
+      "execution": "completed",
+      "passed": true,
+      "before": "B pending; A unchanged on canvas",
+      "after": "B committed; Current",
+      "screenshots": [
+        "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/01-noise-draft-B-shown-A.png",
+        "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/02-noise-update-commits-B.png"
+      ]
+    },
+    "pinned_source_header": {
+      "execution": "completed",
+      "passed": true,
+      "actual_source": "B",
+      "main_selection": "A",
+      "header": "Noise 1 · Displayed: audit_500mv.dat",
+      "screenshot": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/03-header-describes-displayed-source.png"
+    },
+    "saved_selection_actions": {
+      "execution": "completed",
+      "passed": true,
+      "saved_view_embedded": true,
+      "new_figure_selected": true,
+      "screenshot": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/04-snapshot-in-one-figures-list.png"
+    },
+    "stale_status_disagreement": {
+      "execution": "completed",
+      "passed": true,
+      "pending": "PendingState(count=1, reasons=('the measurement',), busy=False)",
+      "row": "Stale",
+      "header": "STALE",
+      "screenshot": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/05-consistent-stale-state.png"
+    },
+    "fit_label_keep_hand_off": {
+      "execution": "completed",
+      "passed": true,
+      "size_and_color": "inherit style",
+      "wording": "preserved"
+    },
+    "report_dual_title_editors": {
+      "execution": "completed",
+      "passed": true,
+      "title": "One title editor",
+      "competing_visible_controls": false,
+      "screenshot": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/06-report-shared-format.png"
+    },
+    "global_retained_styles": {
+      "execution": "completed",
+      "passed": true,
+      "retained_style_changed_and_undone": true,
+      "private_catalog": true,
+      "screenshots": [
+        "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/07-retained-computer-styles.png",
+        "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/08-all-live-style-scope.png"
+      ]
+    },
+    "composition_export_style": {
+      "execution": "completed",
+      "passed": true,
+      "style": "7 pt Arial · Nature, Elsevier",
+      "column_width_mm": 89.0,
+      "presets": [
+        [
+          "Single column · 89 mm · 7 pt Arial · Nature, Elsevier",
+          89.0
+        ],
+        [
+          "Double column · 183 mm · 7 pt Arial · Nature, Elsevier",
+          183.0
+        ]
+      ],
+      "screenshot": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/09-composition-pinned-style-export.png"
+    },
+    "recipe_import_route": {
+      "execution": "completed",
+      "passed": true,
+      "group": "Import plot settings",
+      "screenshot": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/10-reachable-json-import.png"
+    },
+    "empty_figure_reload": {
+      "execution": "completed",
+      "passed": true,
+      "after_reload": "No data",
+      "export_refusal": "This figure has no committed result. Update it before exporting.",
+      "screenshot": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/11-reopened-empty-figure.png"
+    }
+  },
+  "inputs_unchanged": true,
+  "assets": [
+    {
+      "id": "embedded-saved-figure",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/04-snapshot-in-one-figures-list.png",
+      "manual_image_path": "manual-markdown/images/current_design_saved_view.png",
+      "capture_size": [
+        1450,
+        900
+      ],
+      "caption": "The selected Snapshot opens inside the Explorer. Figures is the single inventory; the frozen canvas has no live Update, Undo or Style target.",
+      "status": "approved",
+      "sha256": "1556d79bb1fb2f75c3081fb18135b92ce21b9d6670ebbd52f3ba3ad090ea13e9"
+    },
+    {
+      "id": "source-ownership-pending",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/01-noise-draft-B-shown-A.png",
+      "manual_image_path": "manual-markdown/images/current_design_sources_pending.png",
+      "capture_size": [
+        1450,
+        900
+      ],
+      "caption": "Noise has a new source selected in Data & analysis while the committed spectrum remains on the canvas. Update plot shows pending changes; the header names the displayed source.",
+      "status": "approved",
+      "sha256": "9e60a6728eebff81980229c15eadbd5573dccf410b9b0488eed667f3692ec3bc"
+    },
+    {
+      "id": "freshness-no-data",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/05-consistent-stale-state.png",
+      "manual_image_path": "manual-markdown/images/current_design_freshness.png",
+      "capture_size": [
+        1450,
+        900
+      ],
+      "caption": "A proposed measurement change leaves the committed comparison visible. Both the Figures row and the header say Stale, and Update plot reports the pending choice.",
+      "status": "approved",
+      "sha256": "7e255944013da5b8c6afa08d4908d9f2afa3350eea84618c496989ea2482122d"
+    },
+    {
+      "id": "empty-reopen-support",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/11-reopened-empty-figure.png",
+      "manual_image_path": "manual-markdown/images/current_design_no_data.png",
+      "capture_size": [
+        1450,
+        900
+      ],
+      "caption": "A reopened figure with no committed result remains No data. Saving a project does not manufacture a numerical result.",
+      "status": "approved",
+      "sha256": "c6826dc70c2f4ff419fcae3192f75ac22044e35216c6cf139325bf9f5ebaac51"
+    },
+    {
+      "id": "configuration-import",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/10-reachable-json-import.png",
+      "manual_image_path": "manual-markdown/images/current_design_json_import.png",
+      "capture_size": [
+        1450,
+        900
+      ],
+      "caption": "Distributions exposes Import JSON in Data & analysis > Import plot settings. Named reusable recipes remain under New and Export.",
+      "status": "approved",
+      "sha256": "696ac97c62f1a2023f0e3373438115a365806cf3472c67851f2c49267d38596e"
+    },
+    {
+      "id": "retained-editor-format",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/06-report-shared-format.png",
+      "manual_image_path": "manual-markdown/images/current_design_report_format.png",
+      "capture_size": [
+        1450,
+        900
+      ],
+      "caption": "A Report title is selected in the shared Format inspector and the floating text toolbar. Figure details retains save/export actions without a second title or colour editor.",
+      "status": "approved",
+      "sha256": "fd9ec9fabdb889d374c30d4b2020ad9de0b600c1f4c55c74d8a07def4ae1cdb4"
+    },
+    {
+      "id": "global-computer-styles",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/08-all-live-style-scope.png",
+      "manual_image_path": "manual-markdown/images/current_design_global_styles.png",
+      "capture_size": [
+        721,
+        257
+      ],
+      "caption": "The Explorer Style menu offers This figure, Selected figures and All live figures. All live includes dormant project figures and open Study/Report editors.",
+      "status": "approved",
+      "sha256": "b6aec069336eef0c9d3cc094bd0a7267942f1afba3c419667fa7269edab652f9"
+    },
+    {
+      "id": "computer-menu-support",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/07-retained-computer-styles.png",
+      "manual_image_path": "manual-markdown/images/current_design_computer_styles.png",
+      "capture_size": [
+        275,
+        176
+      ],
+      "caption": "A retained Report editor offers On this computer alongside built-in and project styles. The displayed Lab style belongs to an isolated test catalog.",
+      "status": "approved",
+      "sha256": "50d805a0406e1ce815444b6d29b03c950a9fa7f32d2f37b22a591b43d291d732"
+    },
+    {
+      "id": "composition-style-export",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/09-composition-pinned-style-export.png",
+      "manual_image_path": "manual-markdown/images/current_design_composition_export.png",
+      "capture_size": [
+        1450,
+        900
+      ],
+      "caption": "Composition export uses the saved composition’s pinned style for physical sizing and named column presets. This 89 mm two-panel example flags text below the readability target; choose a larger width or restyle the live panels before publication.",
+      "status": "approved",
+      "sha256": "bc746880465f3bc869c95497d958731f50541e49d9720b444c3360554097d793"
+    }
+  ],
+  "generated_manual_build": "Use manual-build-manifest.json for the documentation source and generated-output hashes."
+}

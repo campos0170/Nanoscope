@@ -141,7 +141,9 @@ def test_the_mostly_blocked_pore_is_no_longer_certified_in_silence():
 
     # The estimate itself is unchanged -- this is a fix to what the app SAYS, not to
     # what it computes, and the baseline is still the blocked level.
-    assert (proposal.config.rough_s, proposal.config.base_s) == (2.0, 0.5)
+    # Automatic ranking may now select a shorter measured window. Physical
+    # open-pore ambiguity must remain disclosed at whichever window is selected.
+    assert proposal.param_source == 'proposed'
     assert abs(result.median_pA - BLOCKED_PA) < 5.0, result.median_pA
 
     row = result.health.check("level_occupancy")

@@ -1,4 +1,4 @@
-"""The Signal Conditioning window: the classical detectors' chain editor, in execution order.
+"""The Preprocess workspace and classical chain editor, in execution order.
 
 ONE top-level window, built once by MainWindow (parented to it, never deleted). It hosts
 the SAME stage-editor widgets the DetectionPanel builds and owns — reparented through
@@ -445,18 +445,14 @@ def _fit_axis_label(vb: pg.ViewBox, axis: pg.AxisItem, side: str, full: str,
 
 
 def _duration_text(seconds: float | None) -> str:
-    """'51.0 µs', '3.48 ms', '1.2 s' (or '—')."""
+    """A scientific duration in milliseconds (or unavailable)."""
     if seconds is None or not np.isfinite(seconds):
         return "—"
-    if seconds < 1e-3:
-        return f"{seconds * 1e6:.1f} µs"
-    if seconds < 1.0:
-        return f"{seconds * 1e3:.3g} ms"
-    return f"{seconds:.3g} s"
+    return f"{seconds * 1000.:.3g} ms"
 
 
 def _seconds_text(seconds: float) -> str:
-    return f"{seconds:.0f} s" if seconds >= 10 else f"{seconds:.2g} s"
+    return f"{seconds * 1000.:.0f} ms" if seconds >= 10 else f"{seconds * 1000.:.2g} ms"
 
 
 def _settles_text(title: str, seconds: float, pad_s: float) -> str:
@@ -484,12 +480,8 @@ class _LinesList(QtWidgets.QListWidget):
 
 
 def _scaled_seconds(values: np.ndarray, span_s: float) -> tuple[np.ndarray, str]:
-    """``values`` in µs or ms (whichever reads better for ``span_s``), and the unit."""
-    if span_s < 2e-3:
-        return np.asarray(values) * 1e6, "µs"
-    if span_s < 2.0:
-        return np.asarray(values) * 1e3, "ms"
-    return np.asarray(values), "s"
+    """Detached millisecond presentation of a seconds-valued preview result."""
+    return np.asarray(values) * 1000., "ms"
 
 
 class _FormHost(QtWidgets.QWidget):
@@ -528,7 +520,10 @@ class _FormHost(QtWidgets.QWidget):
 
 
 class SignalConditioningWindow(QtWidgets.QWidget):
-    """The classical detectors' signal-chain workspace. See the module docstring.
+    """A chain editor with optional shared Event reference and Comparison routes.
+
+    The initial standalone editor remains usable without the optional pages. MainWindow
+    installs the unified workspace once, reusing the existing authoritative widgets.
 
     Emits (MainWindow routes every one):
         stageSelected(str): a stage row was selected — raise that stage's form.
@@ -567,6 +562,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
     saveProjectAsRequested = QtCore.Signal()
     undoRequested = QtCore.Signal()
     redoRequested = QtCore.Signal()
+    workspaceSectionChanged = QtCore.Signal(str)
     #: GUI thread -> the worker (queued): a request is waiting in the mailbox.
     _previewPosted = QtCore.Signal()
 
@@ -584,6 +580,8 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self.setWindowTitle("Signal Conditioning")
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self._installed = False
+        self._preprocess_installed = False
+        self._source_label = ""
         self._rendering = False
         self._params: dict[str, Any] = {}
         self._chain: dict[str, Any] = {}
@@ -872,6 +870,8 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         return w
 
     def _time_plot_item(self, item: pg.PlotItem) -> None:
+        item.getAxis("bottom").enableAutoSIPrefix(False)
+        item.getAxis("bottom").setScale(1000.)
         vb = item.getViewBox()
         vb.setMouseEnabled(x=True, y=False)
         vb.enableAutoRange(axis=pg.ViewBox.YAxis)
@@ -1153,14 +1153,231 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self._form_layout.insertWidget(1, parts.notices)
         self._form_host.set_stage_stack(parts.stage_stack)
         # The scope toggle serves all four response views, so it sits above them.
-        old = parts.response_view.layout()
-        if old is not None:
-            old.removeWidget(parts.chain_response_toggle)
+        from .widget_transfer import prepare_widget_move
+        prepare_widget_move(parts.chain_response_toggle)
         self._toggle_slot.addWidget(parts.chain_response_toggle)
         parts.chain_response_toggle.toggled.connect(lambda *_: self._on_view_changed())
         self._response_layout.addWidget(parts.response_view, 1)
         self._parts = parts
         self._order_tab_chain()
+
+    def install_preprocess_pages(self, reference, comparison, processed_display_control,
+                                 processed_error_widget=None) -> None:
+        """Host the existing reference/comparison widgets beside the chain editor.
+
+        The owner retains every scientific setting and connection. Installation only
+        changes widget placement; route selection never writes a parameter or starts
+        a comparison/detection. A hidden route keeps the same live widgets.
+        """
+        if self._preprocess_installed:
+            return
+        from .widget_transfer import prepare_widget_move
+
+        self._preprocess_installed = True
+        self._workspace_reference = reference
+        self._workspace_comparison = comparison
+        self.DEFAULT_WIDTH = 760
+        # Persistent target/effect controls need room without collapsing the
+        # chain plots. The compact standalone editor retains its 560 px minimum.
+        self.MIN_HEIGHT = 700
+        self.setMinimumHeight(self.MIN_HEIGHT)
+        comparison.set_workspace_hosted(True)
+        root = self.layout()
+
+        self.filters_page = QtWidgets.QWidget()
+        self.filters_page.setObjectName("preprocessFiltersPage")
+        filters_layout = QtWidgets.QVBoxLayout(self.filters_page)
+        filters_layout.setContentsMargins(0, 0, 0, 0)
+        filters_layout.setSpacing(4)
+        for widget in (self.toolbar, self.scope_line, self._status_row, self.splitter):
+            prepare_widget_move(widget)
+            filters_layout.addWidget(widget, 1 if widget is self.splitter else 0)
+
+        # Target and scope never disappear when a custom comparison source is chosen.
+        target_row = QtWidgets.QWidget()
+        target_layout = QtWidgets.QHBoxLayout(target_row)
+        target_layout.setContentsMargins(0, 0, 0, 0)
+        self.workspace_target = _ElidedLine("")
+        self.workspace_target.setObjectName("preprocessTarget")
+        self.workspace_target.setStyleSheet("font-weight:600;")
+        target_layout.addWidget(self.workspace_target, 1)
+        for action in (self.act_show_main, self.act_ml_chain):
+            self.toolbar.removeAction(action)
+            button = QtWidgets.QToolButton()
+            button.setDefaultAction(action)
+            button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+            target_layout.addWidget(button)
+        self.act_ml_chain.setText("ML preprocessing…")
+        self.act_ml_chain.setToolTip(
+            "Open the ML model's separate preprocessing. The event reference in this "
+            "workspace is shared with event measurement, including ML results.")
+        root.addWidget(target_row)
+
+        self.workspace_scope = QtWidgets.QGroupBox("Display and processing state")
+        self.workspace_scope.setObjectName("preprocessScopeBar")
+        scope = QtWidgets.QVBoxLayout(self.workspace_scope)
+        scope.setContentsMargins(8, 5, 8, 6)
+        scope.setSpacing(3)
+        display_row = QtWidgets.QWidget()
+        display_layout = QtWidgets.QHBoxLayout(display_row)
+        display_layout.setContentsMargins(0, 0, 0, 0)
+        display_layout.addWidget(QtWidgets.QLabel("Main trace · display only:"))
+        for control, label in ((reference.show_track, "Baseline overlay"),
+                               (reference.subtract_view, "Zero-centred display"),
+                               (processed_display_control, "Processed overlay")):
+            prepare_widget_move(control)
+            control.setText(label)
+            display_layout.addWidget(control)
+            control.show()
+        display_layout.addStretch(1)
+        scope.addWidget(display_row)
+        # Both display toggles can remain checked while their calculations refuse.
+        # Their explanations must travel with those controls, not stay on a hidden
+        # Inspector page or inside the separate event-reference editor.
+        self.workspace_processed_error = processed_error_widget
+        if processed_error_widget is not None:
+            prepare_widget_move(processed_error_widget)
+            processed_error_widget.setMinimumWidth(0)
+            processed_error_widget.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                                QtWidgets.QSizePolicy.Preferred)
+            processed_error_widget.setToolTip(processed_error_widget.text())
+            scope.addWidget(processed_error_widget)
+            processed_error_widget.setVisible(bool(processed_error_widget.text()))
+        self.workspace_view_status = _ElidedLine("", lines=2)
+        self.workspace_view_status.setObjectName("preprocessBaselineViewStatus")
+        self.workspace_view_status.setStyleSheet("color:#FFB74D;")
+        scope.addWidget(self.workspace_view_status)
+        status_signal = getattr(reference, "viewStatusChanged", None)
+        if status_signal is not None:
+            status_signal.connect(self._set_workspace_view_status)
+        status_getter = getattr(reference, "view_status", None)
+        self._set_workspace_view_status(status_getter() if callable(status_getter) else "")
+
+        runtime_row = QtWidgets.QWidget()
+        runtime_layout = QtWidgets.QHBoxLayout(runtime_row)
+        runtime_layout.setContentsMargins(0, 0, 0, 0)
+        for control in (comparison.runtime_enabled, comparison.advanced_button,
+                        comparison.input_state_label):
+            prepare_widget_move(control)
+            runtime_layout.addWidget(control, 1 if control is comparison.input_state_label else 0)
+            control.show()
+        comparison.runtime_enabled.setText("Automatic drift")
+        comparison.advanced_button.setText("Edit drift settings…")
+        scope.addWidget(runtime_row)
+        self.workspace_chain_state = _ElidedLine("")
+        self.workspace_chain_state.setObjectName("preprocessChainState")
+        scope.addWidget(self.workspace_chain_state)
+        self.workspace_result_state = _ElidedLine("Shown results: " + self.status_line.text())
+        self.workspace_result_state.setObjectName("preprocessResultState")
+        self.workspace_result_state.setStyleSheet("color:#8b9199;")
+        scope.addWidget(self.workspace_result_state)
+        root.addWidget(self.workspace_scope)
+        # The remaining method proxy and descriptive display text are retained as
+        # state holders, not a second editor. Their live controls now live above.
+        comparison.runtime_box.hide()
+        if hasattr(reference, "display_group"):
+            reference.display_group.hide()
+
+        self.workspace_tabs = QtWidgets.QTabWidget()
+        self.workspace_tabs.setObjectName("preprocessWorkspaceSections")
+        self.workspace_tabs.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                          QtWidgets.QSizePolicy.Expanding)
+        self.workspace_tabs.addTab(self.filters_page, "Filters && drift")
+
+        self.reference_page = QtWidgets.QWidget()
+        self.reference_page.setObjectName("preprocessReferencePage")
+        reference_layout = QtWidgets.QVBoxLayout(self.reference_page)
+        reference_layout.setContentsMargins(0, 4, 0, 0)
+        reference_note = QtWidgets.QLabel(
+            "Event reference sets the open-pore level for future event measurements, "
+            "including ML. Existing results retain their recorded settings until an "
+            "explicit new analysis. Main-trace display is controlled above.")
+        reference_note.setWordWrap(True)
+        reference_layout.addWidget(reference_note)
+        self.reference_scroll = QtWidgets.QScrollArea()
+        self.reference_scroll.setObjectName("preprocessReferenceScroll")
+        self.reference_scroll.setWidgetResizable(True)
+        self.reference_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.reference_scroll.setMinimumSize(0, 0)
+        self.reference_scroll.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                            QtWidgets.QSizePolicy.Expanding)
+        self.reference_host = QtWidgets.QWidget()
+        reference_host_layout = QtWidgets.QVBoxLayout(self.reference_host)
+        reference_host_layout.setContentsMargins(0, 0, 0, 0)
+        reference_host_layout.setSpacing(0)
+        prepare_widget_move(reference)
+        reference.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                QtWidgets.QSizePolicy.Maximum)
+        reference_host_layout.addWidget(reference, 0, QtCore.Qt.AlignTop)
+        reference_host_layout.addStretch(1)
+        self.reference_scroll.setWidget(self.reference_host)
+        reference.show()
+        reference_layout.addWidget(self.reference_scroll, 1)
+        self.workspace_tabs.addTab(self.reference_page, "Event reference")
+
+        prepare_widget_move(comparison)
+        self.workspace_tabs.addTab(comparison, "Background comparison")
+        root.addWidget(self.workspace_tabs, 1)
+        self.workspace_tabs.currentChanged.connect(self._on_workspace_section_changed)
+        self._refresh_workspace_target()
+        self._refresh_workspace_chain_state()
+        self.set_source_label(self._source_label)
+        self._order_tab_chain()
+
+    def current_workspace_section(self) -> str:
+        """Stable navigation key; it carries no scientific state."""
+        if not self._preprocess_installed:
+            return "filters"
+        return ("filters", "reference", "comparison")[self.workspace_tabs.currentIndex()]
+
+    def show_workspace_section(self, key: str) -> bool:
+        """Reveal one task without changing its settings or starting an analysis."""
+        keys = ("filters", "reference", "comparison")
+        if key not in keys or not self._preprocess_installed:
+            return False
+        self.workspace_tabs.setCurrentIndex(keys.index(key))
+        return True
+
+    def _on_workspace_section_changed(self, _index: int) -> None:
+        key = self.current_workspace_section()
+        if key == "filters":
+            self._schedule(immediate=True)
+        else:
+            # A route that is not visible should not start chain-preview work.
+            # In-flight jobs retain their existing source/recipe acceptance checks.
+            self._debounce.stop()
+            self._dirty = True
+        self.workspaceSectionChanged.emit(key)
+
+    def _set_workspace_view_status(self, message: str) -> None:
+        text = str(message or "")
+        self.workspace_view_status.setText(
+            "Main-trace reference: " + text if text else "")
+        self.workspace_view_status.setVisible(bool(text))
+
+    def _refresh_workspace_target(self) -> None:
+        if not self._preprocess_installed:
+            return
+        source = self._source
+        if source is None:
+            text = "Target: " + (self._source_label or "Select a current recording")
+        else:
+            rate = f"{source.fs:,.8g} Hz" if source.fs else "sample rate unknown"
+            text = (f"Target: {self._source_label or source.label} · "
+                    f"{rate} · {source.units or 'units unknown'}")
+        self.workspace_target.setText(text)
+
+    def _refresh_workspace_chain_state(self) -> None:
+        if not self._preprocess_installed:
+            return
+        names = [row.title for row in self._rows if row.enabled]
+        self.workspace_chain_state.setText(
+            "Next classical run / processed export: " +
+            (" → ".join(names) if names else "no signal-chain stage enabled") +
+            ". ML model preprocessing is separate.")
+
+    def _chain_preview_visible(self) -> bool:
+        return self.isVisible() and self.current_workspace_section() == "filters"
 
     def _order_tab_chain(self) -> None:
         """Tab from the stage list goes straight into the shown stage's form, then its
@@ -1242,6 +1459,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             self.stage_list.blockSignals(was)
             self._rendering = False
         self._render_marks()
+        self._refresh_workspace_chain_state()
 
     def _render_marks(self) -> None:
         """Mark the rows whose stage differs from the run, and give every row its tooltip.
@@ -1320,6 +1538,8 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             "No Schmitt/CUSUM detection is shown, so the chain has nothing to be compared "
             "with." if status.kind == "none" else "")
         self.status_line.setText(text)
+        if self._preprocess_installed:
+            self.workspace_result_state.setText("Shown results: " + text)
         # One line at the default width: the differences lead, the sentence is the tip.
         self.status_line.setToolTip(status.sentence or text)
         warn = status.kind == "differs"
@@ -1402,7 +1622,10 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self.run_button.setEnabled(bool(enabled))
 
     def set_source_label(self, label: str) -> None:
-        self.setWindowTitle(f"Signal Conditioning — {label}" if label else "Signal Conditioning")
+        self._source_label = str(label or "")
+        title = "Preprocess workspace" if self._preprocess_installed else "Signal Conditioning"
+        self.setWindowTitle(f"{title} — {label}" if label else title)
+        self._refresh_workspace_target()
 
     def set_source(self, source: ConditioningSource | None) -> None:
         """The selected channel's calibrated samples (None: nothing to preview)."""
@@ -1410,6 +1633,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         old = previous.key if previous is not None else None
         new = source.key if source is not None else None
         self._source = source
+        self._refresh_workspace_target()
         if old == new:
             # The same samples at the same rate (the key holds the calibration and the
             # rate): a re-cached array, a moved clock origin or a renamed unit needs no
@@ -1645,7 +1869,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
     # -- scheduling ---------------------------------------------------------------------------
     def _schedule(self, *, immediate: bool = False) -> None:
         """Restart the 250 ms debounce; a hidden window only marks itself dirty."""
-        if not self.isVisible():
+        if not self._chain_preview_visible():
             self._dirty = True
             self._debounce.stop()
             return
@@ -1727,7 +1951,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         return stages, omitted, f"{STAGE_TITLES.get(key, key)} — {state}"
 
     def _post_preview(self) -> None:
-        if not self.isVisible():
+        if not self._chain_preview_visible():
             self._dirty = True
             return
         self._dirty = False
@@ -1940,9 +2164,9 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         units = src.units or "units"
         u = self._units()
         self._refresh_legends()
-        x_label = clock.axis_label("s", clock.INSTRUMENT, src.x_offset_s)
-        x_short = (f"s ({clock.CLOCK_SHORT.get(clock.INSTRUMENT, clock.INSTRUMENT)})"
-                   if x_label.startswith("s (") else x_label)
+        x_label = clock.axis_label("s", clock.INSTRUMENT, src.x_offset_s, display_unit="ms")
+        x_short = (f"ms ({clock.CLOCK_SHORT.get(clock.INSTRUMENT, clock.INSTRUMENT)})"
+                   if x_label.startswith("ms (") else x_label)
         pages = {"overlay": (self.raw_curve, self.processed_curve, None),
                  "split": (self.split_raw_curve, self.split_processed_curve, None),
                  "difference": (None, None, self.difference_curve)}
@@ -2043,13 +2267,13 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         # Short: a legend wider than the plot is clipped from the left, samples first.
         _set_legend_text(self.spectrum_legend, 1,
                          "processed (no normalize)" if sp.normalize_omitted else "processed")
-        note = f"Δf {sp.df_hz:.2f} Hz (nperseg {sp.nperseg:,}) on a {sp.window_s:.2f} s window"
+        note = f"Δf {sp.df_hz:.2f} Hz (nperseg {sp.nperseg:,}) on a {sp.window_s * 1000:.2f} ms window"
         if sp.normalize_omitted:
             note += " · the processed curve leaves Normalize out (it only rescales)"
         if sp.df_hz > 1.0 and self._source is not None and self._source.fs:
             need = window_for_resolution_s(float(self._source.fs), 1.0)
             note += (" — resolving mains needs Δf ≤ 1 Hz: widen the window to ≥ "
-                     f"{need:.0f} s" if need is not None else
+                     f"{need * 1000:.0f} ms" if need is not None else
                      " — Δf ≤ 1 Hz is not reachable at this sample rate")
         self.spectrum_note.setText(note)
         q = float(self._chain.get("notch_q") or 30.0)
@@ -2200,6 +2424,19 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             st = res.step
             span = float(st.t_s[-1] - st.t_s[0]) / 2.0
             t, unit = _scaled_seconds(st.t_s, span)
+            vb = plot.getViewBox()
+            if vb.autoRangeEnabled()[0]:
+                # Prime the new domain before peak downsampling sees the new data.
+                # After a slow-to-fast design edit, the old range can make a bin
+                # larger than the entire new curve. pyqtgraph then produces no
+                # display points and cannot auto-range back from those empty bounds.
+                # Keep auto-range enabled and leave a user's manual zoom alone.
+                # Clear first to avoid redrawing the old, potentially huge curve
+                # at the new, much finer resolution during the range change.
+                applied.clear()
+                reference.clear()
+                vb.setRange(xRange=(float(t[0]), float(t[-1])),
+                            disableAutoRange=False)
             applied.setData(t, st.applied)
             if st.reference is not None:
                 reference.setData(t, st.reference)
@@ -2338,7 +2575,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             a, b = res.start, res.stop
         dur = (b - a) / fs
         # The clamp comes straight after the verdict, ahead of any advice or timing.
-        clamp = (f" · centre {dur:.1f} s of the {(rng[1] - rng[0]) / fs:.1f} s view (preview "
+        clamp = (f" · centre {dur * 1000:.1f} ms of the {(rng[1] - rng[0]) * 1000 / fs:.1f} ms view (preview "
                  f"limit)" if rng[1] - rng[0] > MAX_PREVIEW_WINDOW_SAMPLES else "")
         advice = (" · press Compute exact for the true trace"
                   if self._exact_token is None and not failed else "")
@@ -2355,7 +2592,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
                 elapsed = self._exact_elapsed.get(self._current_memo_key())
                 took = ("" if elapsed is None else f" · the pass took {elapsed:.1f} s"
                         if elapsed >= 0.1 else f" · the pass took {elapsed * 1e3:.0f} ms")
-                verdict = (f"Whole recording (exact){clamp or f' · showing {dur:.2f} s'}"
+                verdict = (f"Whole recording (exact){clamp or f' · showing {dur * 1000:.2f} ms'}"
                            + took)
         if verdict is None:
             chain = self._chain
@@ -2363,11 +2600,11 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             exact = res.exact if not stale else (
                 window_is_exact(chain, fs) or (a - pad <= 0 and b + pad >= src.n))
             if not conditioning_enabled(chain):
-                verdict = f"No stage is on, so processed = raw{clamp} · window {dur:.2f} s"
+                verdict = f"No stage is on, so processed = raw{clamp} · window {dur * 1000:.2f} ms"
             elif exact:
                 took = "" if stale else f" · {res.elapsed_s * 1e3:.0f} ms"
-                verdict = (f"Exact for these stages{clamp} · window {dur:.2f} s, padded "
-                           f"±{pad / fs:.2f} s" + took)
+                verdict = (f"Exact for these stages{clamp} · window {dur * 1000:.2f} ms, padded "
+                           f"±{pad * 1000 / fs:.2f} ms" + took)
             else:
                 why = []
                 estimators = estimate_stage_titles(chain)

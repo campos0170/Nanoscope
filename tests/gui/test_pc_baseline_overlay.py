@@ -431,9 +431,8 @@ def test_both_boxes_are_reachable_and_draw_the_baseline_in_the_real_window(qapp,
     horizontal scrollbar inside a dock and drags it. A control the owner cannot click is
     not a control.
 
-    The connection from these boxes to the trace view lives in ``gui/analysis_panel.py``,
-    which this pass does not own, so the test makes that connection itself — the exact
-    five lines handed over as wiring — and then drives the CHECKBOX, not the slot.
+    Uses the production asynchronous AnalysisPanel wiring, then drives each checkbox
+    and waits for its source-bound baseline drawing.
     """
     from pathlib import Path
 
@@ -454,31 +453,11 @@ def test_both_boxes_are_reachable_and_draw_the_baseline_in_the_real_window(qapp,
     panel = win._analysis_panel
     win._inspector_tabs.setCurrentWidget(panel)
     panel._detection.mode_tabs.setCurrentIndex(0)          # the Preprocess page
+    panel._detection.preprocess_section_selector.setCurrentIndex(1)
     qtbot.wait(50)
     bp = panel.baseline_panel
 
-    # -- THE WIRING, as it will be applied in AnalysisPanel ------------------------
     view = win._trace_view
-
-    def _apply_baseline_views() -> None:
-        view.clear_baseline_views()
-        sel = panel._sel
-        if sel is None or not (bp.show_baseline() or bp.subtract_baseline()):
-            return
-        doc_id, channel = sel
-        data = np.asarray(win._session.calibrated(doc_id, channel).data)
-        fs = win._session.calibrated(doc_id, channel).sample_rate_hz
-        pol = panel._detection.params().get("polarity")
-        result = characterisation_baseline(
-            data, float(fs), config=bp.config(),
-            polarity=None if pol is None else int(pol), health=False)
-        if bp.subtract_baseline():
-            view.set_baseline_subtracted(doc_id, channel, result.baseline)
-        if bp.show_baseline():
-            view.set_baseline_track(doc_id, channel, *decimate_track(result.baseline))
-
-    bp.showBaselineToggled.connect(lambda _on: _apply_baseline_views())
-    bp.subtractBaselineToggled.connect(lambda _on: _apply_baseline_views())
 
     # -- 1. reachable at his own display size -------------------------------------
     rows = {}
@@ -499,7 +478,7 @@ def test_both_boxes_are_reachable_and_draw_the_baseline_in_the_real_window(qapp,
         QtWidgets.QApplication.processEvents()
         from PySide6.QtTest import QTest
         QTest.mouseClick(box, QtCore.Qt.LeftButton, pos=QtCore.QPoint(8, box.height() // 2))
-        qtbot.wait(200)
+        qtbot.waitUntil(lambda: panel._baseline_view_identity is None, timeout=20000)
 
     assert bp.show_baseline() is True and bp.subtract_baseline() is True, (
         f"the clicks landed on the boxes: {rows}")

@@ -157,7 +157,8 @@ def _until(predicate, timeout=20_000) -> None:
 
 
 def _idle(qtbot, ws, timeout=20_000):
-    _until(lambda: ws.preview_state() != "pending" and not ws._debounce.isActive(), timeout)
+    _until(lambda: ws.preview_state() != "pending" and not ws._debounce.isActive()
+           and ws.worker_idle(), timeout)
     _pump(5)
 
 
@@ -433,7 +434,7 @@ def test_the_time_axis_labels_fit_their_axes_and_keep_the_full_text(loaded, qtbo
         assert left.toolTip() == full_unit
         # The shortest tier drops the word the legend already says, never the "DC".
         assert left.labelText in (full_unit, "processed (pA, no DC)", "pA, no DC"), size
-        assert bottom.toolTip().startswith("s (instrument clock")
+        assert bottom.toolTip().startswith("ms (instrument clock")
     assert left.labelText == full_unit, "a tall enough axis shows the whole unit"
 
 
@@ -515,8 +516,8 @@ def test_a_stage_settling_past_the_pad_is_an_estimate_named_on_two_fixed_lines(
     _idle(qtbot, ws)
     assert ws.preview_state() == "window"
     text = ws.time_status.text()
-    assert text.startswith("Window estimate — High-pass settles over 2 s, longer than the "
-                           "±0.2 s padding"), text
+    assert text.startswith("Window estimate — High-pass settles over 2e+03 ms, longer than the "
+                           "±2e+02 ms padding"), text
     assert "whole-recording statistics" not in text
     assert ws.exact_button.isEnabled() and ws.exact_button.toolTip().startswith("Condition")
     shown = QtWidgets.QLabel.text(ws.time_status)        # what is painted, after eliding
@@ -525,9 +526,9 @@ def test_a_stage_settling_past_the_pad_is_an_estimate_named_on_two_fixed_lines(
     # A stage whose settling prints like the pad (a 1 Hz low-pass: 2,000,001 samples
     # against 2,000,000) says "more than", never "over 40 s, longer than the ±40 s".
     assert sc._settles_text("Low-pass", 40.00002, 39.99999) == (
-        "Low-pass settles over more than the ±40 s padding")
+        "Low-pass settles over more than the ±40000 ms padding")
     assert sc._settles_text("High-pass", 400.0, 40.0) == (
-        "High-pass settles over 400 s, longer than the ±40 s padding")
+        "High-pass settles over 400000 ms, longer than the ±40000 ms padding")
 
 
 def test_every_terminal_path_clears_a_pending_exact_pass(loaded, qtbot, monkeypatch):
@@ -612,7 +613,7 @@ def test_a_pending_preview_never_shows_the_previous_chains_verdict(loaded, qtbot
     ws = _open(window, qtbot)
     _zoom_main(window, qtbot, 1.0, 2.0)
     _idle(qtbot, ws)
-    assert ws.time_status.text().startswith("Exact for these stages · window 1.00 s")
+    assert ws.time_status.text().startswith("Exact for these stages · window 1000.02 ms")
     assert "processed — exact" in ws.legend_texts()
     gate = threading.Event()
     _blocking_kernel(monkeypatch, gate)
@@ -732,6 +733,43 @@ def test_return_sends_the_current_line_and_an_off_notch_keeps_its_list(loaded, q
 
 
 # -- Response ---------------------------------------------------------------------------------
+def test_step_response_survives_a_large_reduction_in_time_span(loaded, qtbot):
+    """A slow-to-fast design edit must not downsample the new curve to zero points."""
+    window, _ = loaded
+    det = window._analysis_panel.detection_panel
+    det.set_params({"filter_cutoff_hz": 1.0})
+    ws = _open(window, qtbot, tab="response")
+    ws.set_response_view("step")
+    _idle(qtbot, ws, timeout=30_000)
+    widgets = ws.response_view_widgets("step")
+    slow_x, _ = widgets["applied"].getData()
+    assert slow_x is not None and len(slow_x) > 10
+    slow_span = np.ptp(slow_x)
+
+    det.filter_cutoff_hz.setValue(10_000.0)
+    _idle(qtbot, ws)
+    assert ws._last_response.step is not None
+    assert widgets["plot"].getViewBox().autoRangeEnabled()[0]
+    for name in ("applied", "reference"):
+        curve = widgets[name]
+        x, y = curve.getData()
+        assert x is not None and len(x) > 10, (
+            name, curve.getOriginalDataset()[0].size,
+            widgets["plot"].viewRange(), curve._adsLastValue)
+        assert np.isfinite(y).all()
+        assert np.ptp(x) < slow_span / 100
+    assert widgets["note"].text().startswith("Applied: 10–90 % rise")
+    # Users can still inspect a small part of the response without the next
+    # redraw resetting their chosen range.
+    widgets["plot"].setXRange(-0.1, 0.1, padding=0.0)
+    before = tuple(widgets["plot"].viewRange()[0])
+    ws._render_response()
+    _pump(10)
+    assert tuple(widgets["plot"].viewRange()[0]) == before
+    assert not widgets["plot"].getViewBox().autoRangeEnabled()[0]
+    widgets["plot"].getViewBox().enableAutoRange(axis=0)
+
+
 def test_the_response_views_draw_phase_group_delay_and_step(loaded, qtbot):
     window, _ = loaded
     det = window._analysis_panel.detection_panel
@@ -745,7 +783,7 @@ def test_the_response_views_draw_phase_group_delay_and_step(loaded, qtbot):
         assert ws.response_stack.currentIndex() == ("magnitude", "phase", "group_delay",
                                                     "step").index(view)
         x, y = widgets["applied"].getData()
-        assert x is not None and len(x) > 10, view
+        assert x is not None and len(x) > 10, (view, widgets["note"].text())
         assert widgets["reference"].getData()[0] is not None
         note = widgets["note"].text()
         assert "Not representable as a linear response: Median" in note, note
@@ -838,5 +876,8 @@ def test_the_window_class_reaches_only_the_allowed_gui_seams():
            if isinstance(n, ast.ImportFrom) and n.level == 1}
     # key_sequences: the one rule for the Undo/Redo keys the window forwards (design §3.7);
     # a widgetless leaf that imports nothing from gui/ (test_measure_navigation proves it).
-    assert gui == {"axes", "key_sequences", "trace_view", "worker_thread"}
+    # widget_transfer invalidates native layout items before the existing toggle
+    # changes owners; this leaf helper reaches no panel or analysis controller.
+    assert gui == {"axes", "key_sequences", "trace_view", "worker_thread",
+                   "widget_transfer"}
     assert SignalConditioningWindow.DEBOUNCE_MS == 250

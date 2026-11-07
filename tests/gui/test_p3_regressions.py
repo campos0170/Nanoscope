@@ -441,18 +441,22 @@ def test_c29_closing_a_recording_without_a_project_does_not_arm_the_quit_guard(w
 # ================================================================================================
 
 def test_c22_closing_the_recording_empties_the_plots_window(win, tmp_path):
-    """Measured: close the recording -> open documents ``()``, and the Plots window still
-    holding its 5 rows, with a working Fit and a working Export CSV attributing numbers to
-    a session that no longer contains the recording."""
+    """A retained figure becomes stale; Update removes a closed recording's rows."""
     doc_id, ch = _install(win, _doc(tmp_path / "a.dat", _trace()))
     _detect_into(win, doc_id, ch)
     win._open_plots()
+    win._analysis_explorer.refresh_current()
+    owner=win._figure_workspace;key=owner.current_id()
     assert len(win._plots_window._sources) == 1
 
     win._session.close_document(doc_id)
 
     assert win._session.documents() == ()
+    assert len(win._plots_window._sources) == 1, "the committed snapshot is retained"
+    assert owner.get(key).spec.result.status == "stale"
+    win._analysis_explorer.refresh_current()
     assert len(win._plots_window._sources) == 0
+    assert owner.get(key).spec.result.status == "empty"
 
 
 def test_c22_closing_an_unselected_recording_also_refreshes_the_plots_window(win, tmp_path):
@@ -464,10 +468,15 @@ def test_c22_closing_an_unselected_recording_also_refreshes_the_plots_window(win
     _detect_into(win, id_b, 0)
     win._on_selection(id_b, 0)             # B is selected; A is not
     win._open_plots()
+    win._analysis_explorer.refresh_current()
+    owner=win._figure_workspace;key=owner.current_id()
     assert len(win._plots_window._sources) == 2
 
     win._session.close_document(id_a)      # close the UNSELECTED one
 
+    assert len(win._plots_window._sources) == 2
+    assert owner.get(key).spec.result.status == "stale"
+    win._analysis_explorer.refresh_current()
     assert len(win._plots_window._sources) == 1
 
 
@@ -483,6 +492,8 @@ def test_c22_deleting_a_hand_measurement_empties_it_out_of_the_plots_window(win,
     _add_measurements(win, doc_id, [(2_000, 2_300), (5_000, 5_400), (8_000, 8_300)])
     mp = win._analysis_panel.measure_panel
     win._open_plots()
+    win._analysis_explorer.refresh_current()
+    owner=win._figure_workspace;key=owner.current_id()
     source = lambda: next(s for s in win._plots_window._sources.values()
                           if s.label == "Manual measurements")
     assert len(source().df) == 3
@@ -493,6 +504,9 @@ def test_c22_deleting_a_hand_measurement_empties_it_out_of_the_plots_window(win,
     mp.remove_selected()
 
     assert len(mp.measurements_df) == 2
+    assert len(source().df) == 3, "a passive edit must retain the previous figure inputs"
+    assert owner.get(key).spec.result.status == "stale"
+    win._analysis_explorer.refresh_current()
     assert len(source().df) == 2
     assert float(source().df.iloc[0]["t_start_s"]) != first_t
 
@@ -510,6 +524,8 @@ def test_c22_undoing_that_delete_puts_the_row_back_in_the_window_too(win, tmp_pa
     mp._table_view.selectRow(0)
     mp.remove_selected()
     win._open_plots()
+    win._analysis_explorer.refresh_current()
+    owner=win._figure_workspace;key=owner.current_id()
     source = lambda: next(s for s in win._plots_window._sources.values()
                           if s.label == "Manual measurements")
     assert len(source().df) == 2
@@ -517,6 +533,9 @@ def test_c22_undoing_that_delete_puts_the_row_back_in_the_window_too(win, tmp_pa
     win._undo_events()
 
     assert len(mp.measurements_df) == 3
+    assert len(source().df) == 2
+    assert owner.get(key).spec.result.status == "stale"
+    win._analysis_explorer.refresh_current()
     assert len(source().df) == 3
 
 
@@ -573,12 +592,16 @@ def test_c22_opening_another_project_re_feeds_the_plots_window(qapp, qtbot, tmp_
                            if s.label == "Manual measurements"), None)
     assert len(w._analysis_panel.measure_panel.measurements_df) == 3
     assert len(source().df) == 3
+    outgoing=w._figure_workspace.current_id()
 
     with qtbot.waitSignal(w.projectRestored, timeout=30_000):
         w._open_project(str(proj_b))
     qtbot.wait(50)
 
     assert len(w._analysis_panel.measure_panel.measurements_df) == 1
+    assert w._figure_workspace.get(outgoing) is None
+    assert w._plots_window is None, "the outgoing project's figure must not survive"
+    w._open_plots()
     assert len(source().df) == 1
 
 

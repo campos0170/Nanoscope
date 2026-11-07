@@ -316,8 +316,8 @@ def test_successful_explicit_save_retires_only_the_revision_it_committed(
                         lambda revision: retired.append(int(revision)))
     original_save = project_module.save_project
 
-    def save_then_edit(path, state, notes=None):
-        result = original_save(path, state, notes)
+    def save_then_edit(path, state, notes=None, **options):
+        result = original_save(path, state, notes, **options)
         # A nested event loop or a slow filesystem can let this happen while the explicit
         # write is in flight.  This edit is not represented by ``state`` above.
         window._label_vocab.add("condition", "late", "2")

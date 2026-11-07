@@ -60,9 +60,7 @@ CASES = (
     (
         DetectCusum,
         {"cusum_k": 0.75, "cusum_h": 28.0},
-        ((8_226, 8_876), (10_000, 10_295), (30_000, 30_250),
-         (50_000, 50_399), (70_000, 70_193), (83_284, 83_846),
-         (85_000, 85_350), (86_667, 87_920)),
+        None,  # CUSUM candidate bounds are checked against its direct core below.
     ),
 )
 
@@ -114,7 +112,15 @@ def test_auto_polarity_comes_from_measurement_branch(
     prov = result.payload.provenance
     got = tuple(zip(result.payload.df["start_idx"], result.payload.df["end_idx"]))
 
-    assert got == expected_bounds
+    candidate = preprocess_for_detection(_trace(), FS, params)
+    cfg, source = baseline_config_from_params(params)
+    core = detect_events if module_cls is DetectSchmitt else detect_events_cusum
+    direct, _ = core(candidate, FS, polarity=-1, baseline_config=cfg,
+                     baseline_param_source=source, min_dwell_s=5e-4,
+                     **detector_params)
+    assert got == tuple(zip(direct["start_idx"], direct["end_idx"]))
+    if expected_bounds is not None:
+        assert got == expected_bounds  # Independently planted Schmitt spans.
     assert prov["polarity_requested"] is None
     assert prov["polarity"] == -1
     assert prov["polarity_source"] == "measured"
@@ -188,13 +194,15 @@ def test_candidate_bounds_and_measurement_metrics_are_independent(
     assert prov["noise_rms_pA"] == pytest.approx(measurement_noise)
     np.testing.assert_allclose(
         frame["snr"], frame["depth_pA"] / prov["noise_rms_pA"])
-    assert prov["baseline_median_pA"] == pytest.approx(99.95198822021484)
+    candidate = np.asarray(preprocess_for_detection(raw, FS, params), dtype=np.float64)
+    candidate_baseline = characterisation_baseline(
+        candidate, FS, config=cfg, polarity=-1, param_source=source)
+    candidate_noise = noise_rms(candidate - candidate_baseline.baseline)
+    assert prov["baseline_median_pA"] == pytest.approx(np.median(baseline))
     assert prov["detection_baseline_median_pA"] == pytest.approx(
-        0.104190144687891)
-    assert prov["detection_noise_rms_pA"] == pytest.approx(
-        1.725675600376725)
-    assert prov["measurement_noise_rms_pA"] == pytest.approx(
-        1.5329976768493652)
+        candidate_baseline.median_pA)
+    assert prov["detection_noise_rms_pA"] == pytest.approx(candidate_noise)
+    assert prov["measurement_noise_rms_pA"] == pytest.approx(measurement_noise)
 
     if module_cls is DetectSchmitt:
         assert prov["threshold_in_pA"] == pytest.approx(

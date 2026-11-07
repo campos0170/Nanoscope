@@ -65,6 +65,9 @@ def _choose(menu, text):
 
 
 def _tick_point(plot, side):
+    # Tick measurement schedules a second layout pass; settle before hit testing.
+    for _ in range(6):
+        QtWidgets.QApplication.processEvents()
     vb = plot.getViewBox().sceneBoundingRect()
     if side == "bottom":
         return QtCore.QPointF(vb.center().x() + 30, vb.bottom() + 9)

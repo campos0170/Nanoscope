@@ -9,6 +9,8 @@ results. No default decision is represented as human review.
 """
 from __future__ import annotations
 
+from ..core.atomic_write import staged_path, write_staged
+
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -58,14 +60,20 @@ class _AcidPlot:
         from matplotlib.backends.backend_agg import FigureCanvasAgg
         kwargs.pop('num',None)
         self.current=Figure(**kwargs);FigureCanvasAgg(self.current);self.owned.append(self.current)
-        if self.on_saved is not None:
-            fig=self.current;original=fig.savefig
-            def savefig(path,*a,**kw):
-                result=original(path,*a,**kw)
-                if isinstance(path,(str,Path)) and str(path).endswith('.png'):self.on_saved(fig,Path(path))
-                return result
-            fig.savefig=savefig
         return self.current
+    def save_figure(self,fig,path,*args,**kwargs):
+        """Publish the PNG after capturing its recipe under the final filename.
+
+        The containing study transaction owns the image/recipe/array family.
+        Keep capture inside the PNG staging context so capture failure cannot
+        replace an existing image; never expose temporary names to callbacks.
+        """
+        path=Path(path)
+        with staged_path(path) as temporary:
+            result=fig.savefig(temporary,*args,**kwargs)
+            if self.on_saved is not None and path.suffix=='.png':
+                self.on_saved(fig,path)
+        return result
     def subplots(self,nrows=1,ncols=1,**kwargs):
         subplot={k:kwargs.pop(k) for k in ('sharex','sharey','squeeze','subplot_kw','gridspec_kw') if k in kwargs}
         fig=self.figure(**kwargs);return fig,fig.subplots(nrows,ncols,**subplot)
@@ -345,7 +353,7 @@ class AcidRuntime:
         check_cancelled(self.cancel)
         fig=self.plot.gcf();fig.tight_layout()
         path=self.namespace['FIG_DIR']/(str(name)+'.png')
-        fig.savefig(path,dpi=int(self.namespace['FIG_DPI']),bbox_inches='tight')
+        self.plot.save_figure(fig,path,dpi=int(self.namespace['FIG_DPI']),bbox_inches='tight')
         self.plot.close(fig);check_cancelled(self.cancel)
 
     def _figure_saved(self,fig,path):
@@ -599,15 +607,15 @@ def analyze_study(state,folder,progress=None,cancel=None):
                 try:rt.run(36)
                 finally:ns['FIGURE_GROUPS']=figure_groups
                 output=ns['OUT_DIR'];output.mkdir(exist_ok=True)
-                row['catalog'].to_csv(output/(row['tag']+'_all_candidates.csv'),index=False)
-                row['families'].to_csv(output/(row['tag']+'_family_memberships.csv'),index=False)
+                write_staged(output/(row['tag']+'_all_candidates.csv'), row['catalog'].to_csv, index=False)
+                write_staged(output/(row['tag']+'_family_memberships.csv'), row['families'].to_csv, index=False)
                 summary=dict(tag=row['tag'],incubation_h=row['incubation_h'],n_candidates=len(row['catalog']),
                     n_accepted=int(row['catalog'].accepted.sum()),duration_s=ns['duration_s'],rate_per_s=len(ns['primary_catalog'])/ns['duration_s'],
                     primary_set=ns['PRIMARY_SET_NAME'],families=ns['event_families'],
                     screening_outcome=ns.get('screening_outcome'),extended_outcome=ns.get('extended_outcome'),
                     calibration=row['detection'],thin_substructure=thin,
                     pore_note=row.get('pore_note','Separate physical pore; descriptive comparison'))
-                (output/'nanoscope_summary.json').write_text(json.dumps(summary,indent=2,default=_plain))
+                write_staged(output/'nanoscope_summary.json', Path.write_text, json.dumps(summary,indent=2,default=_plain))
                 row['analysis']=dict(folder=output,summary=summary,selection_sha256=_selection_hash(row))
                 summaries.append(summary);all_figures.extend(rt.figures)
                 # Save the lightweight namespace context needed for final cohort plots.
@@ -676,7 +684,7 @@ def render_figures(state,folder,progress=None,cancel=None):
                 fig,data,_=reconstruct_figure(state,original,cancel=cancel)
                 target=path/str(i+1).zfill(3)/Path(original).name
                 target.parent.mkdir(parents=True,exist_ok=True)
-                fig.savefig(target,dpi=int(state['settings']['FIG_DPI']),bbox_inches='tight')
+                write_staged(target, fig.savefig, dpi=int(state['settings']['FIG_DPI']), bbox_inches='tight')
                 capture_figure(fig,target,data);made.append(target)
                 key=figure_style_key(state,original)
                 updated['figure_keys'][target]=key

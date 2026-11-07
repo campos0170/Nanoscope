@@ -1,4 +1,6 @@
 """Descriptive comparisons for reviewed signal events; no implied depth floor."""
+
+from ..core.atomic_write import write_staged
 from pathlib import Path
 import json
 import numpy as np
@@ -58,8 +60,8 @@ def compare_recordings(analyses, recordings, settings, *, folder, progress=None,
         caveat='one recording per condition; nominal pore labels do not establish conductance matching; descriptive event-level statistics',
         floor='No single sustained-depth floor describes the spike/plateau selection; single-depth-floor gate-transfer calculations are not applicable')
     folder=Path(folder); folder.mkdir(parents=True,exist_ok=True)
-    events.to_csv(folder/'events.csv',index=False); summary.to_csv(folder/'summary.csv',index=False)
-    for name,table in tables.items(): table.to_csv(folder/(name+'.csv'),index=False)
-    (folder/'report.json').write_text(json.dumps(info,indent=2))
+    write_staged(folder/'events.csv', events.to_csv, index=False); write_staged(folder/'summary.csv', summary.to_csv, index=False)
+    for name,table in tables.items(): write_staged(folder/(name+'.csv'), table.to_csv, index=False)
+    write_staged(folder/'report.json', Path.write_text, json.dumps(info,indent=2))
     if progress: progress(1.,'Signal comparisons complete')
     return ComparisonResult(events,summary,tables,info)

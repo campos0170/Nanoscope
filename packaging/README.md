@@ -3,7 +3,7 @@
 This directory builds `NanoScope.app` — a self-contained, double-clickable macOS application
 that needs no Python, no Anaconda and no `pip install` on the machine it runs on.
 
-**Target:** Apple Silicon (arm64) only, macOS 15+ (the bundled PySide6 is built for 15.0). Not universal2, not Intel, not Windows/Linux.
+**Target:** Apple Silicon (arm64) only, macOS 15+ (the release deployment floor, checked against every bundled native library). Not universal2, not Intel, not Windows/Linux.
 **Signing:** ad-hoc only (no Apple Developer ID). See [Installing](#installing-for-a-labmate).
 **Size:** 1125 MB installed, 346 MB as a compressed DMG. TensorFlow is 716 MB of that, by design —
 the ML detector works out of the box.
@@ -12,10 +12,10 @@ the ML detector works out of the box.
 
 ## Rebuilding
 
-One command, from anywhere:
+From the source checkout, using the isolated build interpreter prepared below:
 
 ```bash
-/Users/abrahamcampos/Desktop/nanoscope/packaging/build_app.sh
+NANOSCOPE_PYTHON="$PWD/.build-env/bin/python" ./packaging/build_app.sh
 ```
 
 It generates the icon, freezes with PyInstaller, checks the bundle, ad-hoc signs it, and writes
@@ -32,14 +32,42 @@ The default is `/opt/anaconda3/bin/python3`.
 
 ### Prerequisites
 
+Create a separate Python 3.11 environment on macOS arm64; do not repair the build
+by upgrading packages in a shared Anaconda installation. The validated runtime
+closure and its platform information are recorded in
+`environments/macos-arm64-py311-validated.constraints.txt` and the companion JSON.
+
 ```bash
-/opt/anaconda3/bin/python3 -m pip install -e /Users/abrahamcampos/Desktop/nanoscope
-/opt/anaconda3/bin/python3 -m pip install 'pyinstaller>=6.11'
+python3.11 -m venv .build-env
+.build-env/bin/python -m pip install \
+  -c packaging/environments/macos-arm64-py311-validated.constraints.txt \
+  -e . 'tensorflow==2.19.0' 'keras==3.12.0' 'numba==0.59.0' 'pyinstaller>=6.11'
+.build-env/bin/python packaging/build_identity.py --check-environment
 ```
 
 The `-e` install matters: the spec calls `copy_metadata("nanoscope")` so
 `importlib.metadata.version("nanoscope")` works inside the bundle, which is what stamps the app
 version onto every detection result's provenance. `build_app.sh` refuses to start without it.
+Both build scripts also refuse missing TensorFlow/Keras or inconsistent runtime
+dependency requirements. Source-only use may omit ML, but release builds include it.
+
+The validated macOS runtime uses PySide6/Qt **6.9.3**, with all four matching
+PySide6, Essentials, Addons and Shiboken distributions. The application requirement
+is `PySide6>=6.9.3,<6.10`. Repeated window construction exposed a native
+`SignalManager::retrieveMetaObject` crash in 6.11.1 and 6.11.3; the latter was
+observed receiving a stale `QWidgetItem` wrapper during QObject construction.
+6.9.1 avoided that crash but broke QGraphicsItem parent roundtrips and plot
+rendering. 6.9.3 passed the 80-cycle window-lifetime probe and the explicit
+graphics-parent/rendering checks. This is a tested version mitigation, not a
+claim that the newer binding defect has been repaired. Raising this bound requires
+rerunning both sets of checks. These runtime results are for macOS arm64/Python
+3.11; they do not validate a Windows release.
+
+TensorFlow 2.19.0 and Keras 3.12.0 also passed training, optimizer-state save/reload,
+continued training and NanoScope model inference checks. The previous combination
+of tensorflow-macos 2.15 and Keras 3.12 violated TensorFlow's declared Keras bound.
+The captured constraints describe the tested runtime, not a cross-platform lock
+or a claim of binary reproducibility.
 
 ### After changing the app
 
@@ -110,10 +138,11 @@ unpack the whole thing to a temp directory on every launch.
 `nanoscope/bootstrap.py` exists because `/opt/anaconda3/bin/qt.conf` declares
 `Prefix = /opt/anaconda3`, and Qt reads `qt.conf` from the directory of the running executable.
 PyInstaller determines where Qt lives by importing PySide6 **in a subprocess whose executable is
-`/opt/anaconda3/bin/python3`** and asking `QLibraryInfo`. It is therefore told:
+`/opt/anaconda3/bin/python3`** and asking `QLibraryInfo`. The original failing
+build reported (this is historical diagnostic output, not the selected runtime):
 
 ```
-version       = 6.11.1            <- PySide6's Qt6, correct
+version       = 6.11.1            <- PySide6's Qt6 at the time
 PluginsPath   = /opt/anaconda3/plugins   <- conda's Qt 5.15 plugins, WRONG
 LibrariesPath = /opt/anaconda3/lib
 ```
@@ -148,6 +177,15 @@ LSTM. The bundle takes the belt-and-braces route: `tensorflow-plugins/` (i.e.
 register in the first place, and the runtime hook sets `CUDA_VISIBLE_DEVICES=-1` before TF's C++
 core loads. The self-test asserts `tf.config.get_visible_devices("GPU")` is empty and that no
 plugin dylib shipped.
+
+The TensorFlow Python extension must also share one native image with its native
+dependents. PyInstaller can collect `_pywrap_tensorflow_internal.so` twice when
+the build environment points through symlinks: once in `tensorflow/python` and
+once at the bundle root. `tensorflow_runtime.py` replaces the root duplicate
+with a relative symlink only after checking that both sources are the same file.
+Different runtime sources fail the build. Bundle verification checks image
+identity both before and after signing; the compiled-app ML acceptance test
+imports TensorFlow, trains, saves/reloads, and runs the real detector.
 
 ### 4. The `google3` protobuf stub
 

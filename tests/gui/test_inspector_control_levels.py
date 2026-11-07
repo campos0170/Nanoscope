@@ -72,7 +72,10 @@ def test_essential_keeps_active_filters_warnings_polarity_and_expert_summary(pan
     assert "NORMALIZE ON" in panel.control_level_summary()
     assert "high-pass" in panel.control_level_summary()
     assert "merge 2 ms" in panel.control_level_summary()
-    assert "max dwell 0.07 s" in panel.control_level_summary()
+    # The summary uses the same milliseconds as the duration controls; the
+    # analysis parameter remains seconds.
+    assert "max dwell 70 ms" in panel.control_level_summary()
+    assert panel.params()["max_dwell_s"] == pytest.approx(.07)
     panel.show_detection_tab()
     assert panel.polarity_override.isVisible()
     assert panel.detect_button.isVisible()

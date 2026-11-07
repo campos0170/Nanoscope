@@ -11,7 +11,7 @@ job needs in ``AnalysisPanel._merge_job`` / ``_remeasure_target`` and clears the
 finishes, fails or is cancelled -- and ``AnalysisController.start()`` / ``run_callable()`` replace
 a running job with ``abort()``, which emits NOTHING. ``study_event_bridge._assert_idle`` reads the
 leftovers as "an operation is running". S8-THREAD1 is the same cause one widget over: Detect during
-"Measure this recording" leaves the probe button reading "Measuring..." (and refusing a second
+"Estimate window settings" leaves the probe button reading "Measuring..." (and refusing a second
 click) for as long as the recording stays selected, and the Baseline-correction workspace's
 "Refreshing comparison..." is stuck the same way.
 
@@ -251,7 +251,7 @@ def _start_job(win, holds, monkeypatch, kind: str, **hold_kw) -> _Hold:
 
 
 def _hold_probe(holds, monkeypatch) -> _Hold:
-    """Hold "Measure this recording" in flight. The probe answers with a stand-in that is not a
+    """Hold "Estimate window settings" in flight. The probe answers with a stand-in that is not a
     ``BaselineProposal`` (so the panel ignores it on arrival) and the health pass is refused, which
     the job already tolerates: these tests are about the button, not about the proposal."""
     proposal = types.SimpleNamespace(config=None, probe=None)
@@ -337,7 +337,7 @@ def test_nothing_brings_the_leftover_back_afterwards(
 
 
 def test_a_job_that_replaces_it_need_not_be_a_detection(win, holds, monkeypatch, qtbot, tmp_path):
-    """FAILING BEFORE -- the fix is at the controller, not at Detect. "Measure this recording"
+    """FAILING BEFORE -- the fix is at the controller, not at Detect. "Estimate window settings"
     also replaces a running Merge-all; while the probe runs its button reads "Measuring..."
     (the replacement must not take the NEW job's busy state away), and when it ends the guard
     is open and the button is back."""
@@ -355,7 +355,7 @@ def test_a_job_that_replaces_it_need_not_be_a_detection(win, holds, monkeypatch,
     _settle(win, qtbot)
 
     assert _guard(win) is None
-    assert bp.probe_button.text() == "Measure this recording" and not bp.is_busy()
+    assert bp.probe_button.text() == "Estimate window settings" and not bp.is_busy()
 
 
 # ================================================================================================
@@ -375,7 +375,7 @@ def test_detect_during_measure_this_recording_releases_the_button(
     _press_detect(win)
     _settle(win, qtbot)
 
-    assert bp.probe_button.text() == "Measure this recording" and not bp.is_busy()
+    assert bp.probe_button.text() == "Estimate window settings" and not bp.is_busy()
     bp.probe_button.click()                          # a working button starts a probe
     assert probe.slots[1].entered.wait(10), "the second click started nothing"
     assert win._analysis_controller.is_busy()
@@ -402,7 +402,7 @@ def test_detect_during_a_reference_preview_releases_the_button(
     _settle(win, qtbot)
 
     assert preview.calls == 2
-    assert not bp.is_busy() and bp.probe_button.text() == "Measure this recording"
+    assert not bp.is_busy() and bp.probe_button.text() == "Estimate window settings"
     assert _guard(win) is None
 
 
@@ -418,12 +418,12 @@ def test_detect_during_a_comparison_refresh_releases_the_refresh_button(
 
     workspace.refresh_button.click()
     assert compare.slots[0].entered.wait(10)
-    assert workspace.is_busy() and workspace.refresh_button.text() == "Refreshing comparison…"
+    assert workspace.is_busy() and workspace.refresh_button.text() == "Calculating comparison…"
     _press_detect(win)
     _settle(win, qtbot)
 
     assert not workspace.is_busy()
-    assert workspace.refresh_button.text() == "Refresh comparison"
+    assert workspace.refresh_button.text() == "Update comparison"
     assert "Calculating" not in workspace.preview_status.text(), (
         "nothing is calculating any more, and the status line must not say so")
     assert _guard(win) is None
@@ -445,12 +445,12 @@ def test_an_export_replacing_a_running_comparison_keeps_the_button_busy(
     assert compare.slots[0].entered.wait(10)
     assert panel.export_baseline_correction(tmp_path / "baseline.csv")
     assert compare.slots[1].entered.wait(10)
-    assert workspace.is_busy() and workspace.refresh_button.text() == "Refreshing comparison…", (
+    assert workspace.is_busy() and workspace.refresh_button.text() == "Calculating comparison…", (
         "the replaced comparison released the busy state the export is using")
 
     compare.release_all()
     _settle(win, qtbot)
-    assert not workspace.is_busy() and workspace.refresh_button.text() == "Refresh comparison"
+    assert not workspace.is_busy() and workspace.refresh_button.text() == "Update comparison"
     assert (tmp_path / "baseline.csv").exists()
 
 

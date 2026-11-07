@@ -532,8 +532,12 @@ def test_the_project_version_moved_and_old_projects_still_load(tmp_path):
     sections (builtin.plots). A v11 build restores its own artifacts from the keys it knows
     and re-captures them on save, so it would show a heatmap as a histogram and strip the
     rest; v11's opaque carry-through covers only kinds and fields it does not own.
+
+    Moved to 13 for named live FigureSpec records, their frozen resources and applied/draft
+    recipes. A v12 build cannot restore or safely edit those records, so it must refuse
+    the project rather than silently dropping live analytical views on its next save.
     """
-    assert VERSION == 12
+    assert VERSION == 13
     from nanoscope.core.project import MIN_READ_VERSION
     assert MIN_READ_VERSION == 1
 
@@ -649,6 +653,7 @@ def test_deleting_the_whole_file_reports_every_note_in_it(tmp_path):
 # THE GUARD — every write over user data goes through the door
 # ================================================================================================
 _WRITE_CALLS = {"write_text", "write_bytes", "to_csv", "to_parquet", "savefig"}
+_NUMPY_WRITERS = {"save", "savez", "savez_compressed", "savetxt"}
 _STAGERS = {"staged_path", "staged_write", "stage"}
 # An in-memory buffer is not a file on the user's disk. `project._df_to_parquet_bytes`
 # serialises into one and the ZIP member is written through the staged handle, which is the
@@ -656,60 +661,159 @@ _STAGERS = {"staged_path", "staged_write", "stage"}
 _BUFFERS = {"BytesIO", "StringIO"}
 
 
-def _root_name(node: ast.AST) -> str | None:
-    while isinstance(node, (ast.Attribute, ast.Subscript)):
-        node = node.value
-    return node.id if isinstance(node, ast.Name) else None
+def _call_name(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Call):
+        return None
+    return node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
 
 
 def unstaged_writes(src: str, filename: str = "<src>") -> list[str]:
-    """``"<function>:<line>: <call>"`` for every write whose target was not staged.
+    """Conservative lexical check of file serializers and their staged destinations.
 
-    A write is accepted when the expression it writes to is rooted at a name bound by
-    ``with staged_path(...) as X`` / ``with staged_write(...) as X`` or by
-    ``X = <group>.stage(...)``. Deliberately syntactic: this is a build guard, not an
-    analysis, and it has to be readable by whoever it stops.
+    Track a staged name only after it is bound and only inside its context. A fresh
+    TemporaryDirectory and streams derived from it are also safe: they cannot truncate
+    an existing user file. Nested functions are inspected once, in their own scope.
+    This remains a syntactic build guard, not a proof about arbitrary Python programs.
     """
-    tree = ast.parse(src, filename)
     out: list[str] = []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        staged: set[str] = set()
-        for node in ast.walk(fn):
-            if isinstance(node, ast.withitem):
-                call = node.context_expr
-                name = (call.func.attr if isinstance(getattr(call, "func", None), ast.Attribute)
-                        else getattr(getattr(call, "func", None), "id", None))
-                if name in _STAGERS and isinstance(node.optional_vars, ast.Name):
-                    staged.add(node.optional_vars.id)
-            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-                func = node.value.func
-                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-                if name in _STAGERS | _BUFFERS:
-                    for tgt in node.targets:
-                        if isinstance(tgt, ast.Name):
-                            staged.add(tgt.id)
-        for node in ast.walk(fn):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-                continue
-            if node.func.attr not in _WRITE_CALLS:
-                continue
-            if node.func.attr in ("write_text", "write_bytes"):
-                target: ast.AST | None = node.func.value
+
+    class Guard(ast.NodeVisitor):
+        def __init__(self):
+            self.safe: set[str] = set()
+            self.hashes: set[str] = set()
+            self.memory_sinks: set[str] = set()
+            self.function = "<module>"
+
+        def staged(self, node):
+            if isinstance(node, ast.Name):
+                return node.id in self.safe
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                return self.staged(node.left)
+            if not isinstance(node, ast.Call):
+                return False
+            name = _call_name(node)
+            if name in _STAGERS | _BUFFERS | self.memory_sinks | {"TemporaryDirectory"}:
+                return True
+            if name in {"Path", "TextIOWrapper"} and node.args:
+                return self.staged(node.args[0])
+            if name == "fdopen" and node.args:
+                return self.staged(node.args[0])
+            if name == "open" and isinstance(node.func, ast.Attribute):
+                return self.staged(node.func.value)
+            if name == "GzipFile":
+                return any(kw.arg == "fileobj" and self.staged(kw.value) for kw in node.keywords)
+            return False
+
+        def visit_FunctionDef(self, node):
+            before, function = self.safe, self.function
+            hashes, sinks = self.hashes, self.memory_sinks
+            self.safe, self.function = set(before), node.name
+            self.hashes, self.memory_sinks = set(hashes), set(sinks)
+            for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                self.safe.discard(argument.arg)
+                self.hashes.discard(argument.arg)
+                self.memory_sinks.discard(argument.arg)
+            for statement in node.body:
+                self.visit(statement)
+            self.safe, self.function = before, function
+            self.hashes, self.memory_sinks = hashes, sinks
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Assign(self, node):
+            self.visit(node.value)
+            staged = self.staged(node.value)
+            for target in node.targets:
+                if isinstance(target, ast.Tuple) and _call_name(node.value) == "mkstemp":
+                    # Both the descriptor and path came from a fresh exclusive file.
+                    self.safe.update(item.id for item in target.elts if isinstance(item, ast.Name))
+                if isinstance(target, ast.Name):
+                    if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
+                            and isinstance(node.value.func.value, ast.Name)
+                            and node.value.func.value.id == "hashlib"):
+                        self.hashes.add(target.id)
+                    else:
+                        self.hashes.discard(target.id)
+                    if staged:
+                        self.safe.add(target.id)
+                    else:
+                        self.safe.discard(target.id)
+
+        def visit_ClassDef(self, node):
+            # Recognize the small streaming hash sink used to compute an NPY digest.
+            # It must only feed bytes into a known hashlib object and return len(data).
+            # An arbitrary class named Sink is not sufficient evidence.
+            methods = {method.name: method for method in node.body if isinstance(method, ast.FunctionDef)}
+            write = methods.get("write")
+            if write and len(write.args.args) == 2 and len(write.body) == 2:
+                data = write.args.args[1].arg
+                first, last = write.body
+                update = first.value if isinstance(first, ast.Expr) else None
+                returned = last.value if isinstance(last, ast.Return) else None
+                if (isinstance(update, ast.Call) and isinstance(update.func, ast.Attribute)
+                        and isinstance(update.func.value, ast.Name) and update.func.value.id in self.hashes
+                        and update.func.attr == "update" and len(update.args) == 1
+                        and isinstance(update.args[0], ast.Name) and update.args[0].id == data
+                        and isinstance(returned, ast.Call) and isinstance(returned.func, ast.Name)
+                        and returned.func.id == "len" and len(returned.args) == 1
+                        and isinstance(returned.args[0], ast.Name) and returned.args[0].id == data
+                        and set(methods) <= {"write", "flush"}
+                        and ("flush" not in methods or all(isinstance(x, ast.Pass) for x in methods["flush"].body))):
+                    self.memory_sinks.add(node.name)
+            self.generic_visit(node)
+
+        def visit_With(self, node):
+            before = set(self.safe)
+            for item in node.items:
+                self.visit(item.context_expr)
+                if isinstance(item.optional_vars, ast.Name):
+                    if self.staged(item.context_expr):
+                        self.safe.add(item.optional_vars.id)
+                    else:
+                        self.safe.discard(item.optional_vars.id)
+            for statement in node.body:
+                self.visit(statement)
+            self.safe = before
+
+        visit_AsyncWith = visit_With
+
+        def visit_If(self, node):
+            self.visit(node.test)
+            before = set(self.safe)
+            for statement in node.body:
+                self.visit(statement)
+            left = self.safe
+            self.safe = set(before)
+            for statement in node.orelse:
+                self.visit(statement)
+            self.safe &= left
+
+        def visit_Call(self, node):
+            self.generic_visit(node)
+            if not isinstance(node.func, ast.Attribute):
+                return
+            name = node.func.attr
+            numpy_write = (name in _NUMPY_WRITERS and isinstance(node.func.value, ast.Name)
+                           and node.func.value.id in {"np", "numpy"})
+            if name not in _WRITE_CALLS and not numpy_write:
+                return
+            # FigureFormatPane.write_text edits an ElementRef. Its required 'run'
+            # keyword is not accepted by pathlib.Path.write_text; no file API is exempt.
+            if name == "write_text" and any(kw.arg == "run" for kw in node.keywords):
+                return
+            if name in {"write_text", "write_bytes"}:
+                target = node.func.value
             else:
-                target = node.args[0] if node.args else None
-            if target is None:
-                continue
-            # A direct `group.stage(...)` / `staged_path(...)` in argument position is
-            # itself proof the write is staged.
-            if isinstance(target, ast.Call):
-                f = target.func
-                if (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)) in _STAGERS:
-                    continue
-            if _root_name(target) in staged:
-                continue
-            out.append(f"{fn.name}:{node.lineno}: {ast.unparse(node)[:90]}")
+                keyword = {"to_csv": "path_or_buf", "to_parquet": "path", "savefig": "fname",
+                           "save": "file", "savez": "file", "savez_compressed": "file", "savetxt": "fname"}[name]
+                target = node.args[0] if node.args else next(
+                    (kw.value for kw in node.keywords if kw.arg == keyword), None)
+            if target is None or (isinstance(target, ast.Constant) and target.value is None):
+                return  # pandas returns an in-memory string/bytes when no path is supplied
+            if not self.staged(target):
+                out.append(f"{self.function}:{node.lineno}: {ast.unparse(node)[:90]}")
+
+    Guard().visit(ast.parse(src, filename))
     return out
 
 
@@ -760,6 +864,119 @@ def test_the_guard_is_not_satisfied_by_staging_a_DIFFERENT_path():
         "        other.write_text('and this one too')\n"
     )
     assert len(unstaged_writes(sneaky)) == 1
+
+
+def test_guard_tracks_staging_order_scope_and_reassignment():
+    source = '''
+def export(path, other):
+    staged.write_text('before staging')
+    with staged_path(path) as staged:
+        staged.write_text('safe')
+        staged = other
+        staged.write_text('reassigned')
+    staged.write_text('after context')
+'''
+    assert len(unstaged_writes(source)) == 3
+
+
+def test_guard_counts_nested_writers_once_and_checks_keyword_destinations():
+    source = '''
+def outer(frame, path):
+    def inner():
+        frame.to_csv(path_or_buf=path)
+        frame.to_parquet(path=path)
+        fig.savefig(fname=path)
+'''
+    found = unstaged_writes(source)
+    assert len(found) == 3
+    assert all(item.startswith('inner:') for item in found)
+
+
+def test_guard_proves_compressed_stream_comes_from_private_directory():
+    source = '''
+def export(frame, folder):
+    with tempfile.TemporaryDirectory(dir=folder) as stage:
+        stage = Path(stage)
+        staged_trace = stage / 'trace.csv.gz'
+        with staged_trace.open('wb') as binary:
+            with gzip.GzipFile(fileobj=binary, mode='wb') as zipped:
+                with io.TextIOWrapper(zipped) as text:
+                    frame.to_csv(text)
+'''
+    assert unstaged_writes(source) == []
+    assert len(unstaged_writes(source.replace('staged_trace.open', 'destination.open'))) == 1
+
+
+def test_guard_distinguishes_figure_text_edits_from_path_writes():
+    assert unstaged_writes("pane.write_text(ref, 'text', value, run=True)") == []
+    assert len(unstaged_writes("path.write_text(value, encoding='utf-8')")) == 1
+
+
+def test_guard_checks_numpy_paths_and_their_keyword_spellings():
+    assert len(unstaged_writes('''
+np.save(path, values)
+np.savez_compressed(file=path, array=values)
+numpy.savetxt(fname=path, X=values)
+''')) == 3
+    assert unstaged_writes('''
+with staged_path(path) as temporary:
+    np.savez_compressed(temporary, array=values)
+''') == []
+
+
+@pytest.mark.parametrize("suffix,serializer", [(".npy", "save"), (".npz", "savez_compressed")])
+def test_numpy_partial_archive_failure_preserves_existing_file(tmp_path, monkeypatch, suffix, serializer):
+    from nanoscope.core.atomic_write import write_staged
+
+    path = tmp_path / ("arrays" + suffix)
+    original = np.arange(8, dtype=np.float64)
+    getattr(np, serializer)(path, original)
+    before = path.read_bytes()
+
+    def partial_write(stream, *args, **kwargs):
+        stream.write(b"incomplete NPY payload")
+        raise OSError(28, "injected disk full after writing archive data")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(np.lib.format, "write_array", partial_write)
+        with pytest.raises(OSError):
+            write_staged(path, getattr(np, serializer), np.arange(100))
+    assert path.read_bytes() == before
+    assert list(tmp_path.iterdir()) == [path]
+    write_staged(path, getattr(np, serializer), original + 3)
+    if suffix == ".npz":
+        with np.load(path) as loaded:
+            np.testing.assert_array_equal(loaded["arr_0"], original + 3)
+    else:
+        np.testing.assert_array_equal(np.load(path), original + 3)
+    assert list(tmp_path.iterdir()) == [path], "NumPy must not append a second suffix to staging"
+
+
+def test_path_serializer_failure_preserves_destination_and_cleans_staging(tmp_path):
+    from nanoscope.core.atomic_write import write_staged
+
+    path = tmp_path / "table.csv"
+    path.write_bytes(b"previous complete export")
+
+    def failing_writer(staged, *, marker):
+        assert staged != path and staged.suffix == ".csv"
+        staged.write_text(marker)
+        raise OSError(28, "injected disk full")
+
+    with pytest.raises(OSError):
+        write_staged(path, failing_writer, marker="partial")
+    assert path.read_bytes() == b"previous complete export"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_path_serializer_preserves_return_value_and_real_suffix(tmp_path):
+    from pathlib import Path
+    from nanoscope.core.atomic_write import write_staged
+
+    path = tmp_path / "figure.svg"
+    assert write_staged(path, Path.write_text, "<svg/>", encoding="utf-8") == 6
+    assert path.read_text() == "<svg/>"
+    assert list(tmp_path.iterdir()) == [path]
 
 
 # ================================================================================================

@@ -796,3 +796,41 @@ def test_iv_and_voltage_dependence_restore_do_not_run_fit_solvers(qapp, qtbot, m
     assert len(vdep_window.points()) == 2 and vdep_window.fit() is not None
     assert iv_window._scatter_item is not None and iv_window._fit_item is not None
     assert vdep_window._scatter_item is not None and vdep_window._fit_item is not None
+
+
+def test_partial_fit_restore_does_not_draw_discarded_sources_bands():
+    frame = pd.DataFrame({'a':[1.,2.], 'b':[3.,4.]})
+    one = _source('one', frame, kind='manual')
+    two = _source('two', frame.copy(), kind='manual')
+    one.doc_key, two.doc_key = 'manual-one', 'manual-two'
+    _, _, fit = _derived(frame)
+    before = _PlotWindow([one,two], ['one','two'], fits={'one':fit,'two':fit})
+    before._presentation_bands = [(np.array([1.,2.]),np.array([.1,.2]),np.array([.2,.3]),'#0072b2','saved band','fit')]
+    artifact = workspace.capture_plots(before)
+    changed = _source('two', frame*2, kind='manual')
+    changed.doc_key = 'manual-two'
+    after = _PlotWindow([one,changed], ['one','two'])
+    report = workspace.restore_plots(after, artifact)
+    assert not report.skipped
+    assert set(after._fits)=={'one'}, report.warnings
+    assert not getattr(after,'_presentation_bands',[])
+    assert report.warnings
+
+
+def test_fit_display_snapshot_roundtrips_and_rejects_mismatched_residuals():
+    import pytest
+    frame = pd.DataFrame({'a':[1.,2.], 'b':[3.,4.]})
+    source = _source('one', frame, kind='manual')
+    _, _, fit = _derived(frame)
+    before = _PlotWindow([source], ['one'], fits={'one':fit})
+    before._presentation_bands = [(np.array([1.,2.]),np.array([.1,.2]),np.array([.2,.3]),'#0072b2','saved band','fit')]
+    before._presentation_residual = ({'centers':np.array([1.,2.]),'residual':np.array([.2,-.1]),'note':'saved'},False)
+    artifact = workspace.capture_plots(before)
+    after = _PlotWindow([source], ['one'])
+    assert not workspace.restore_plots(after, artifact).skipped
+    np.testing.assert_array_equal(after._presentation_bands[0][0],[1,2])
+    np.testing.assert_array_equal(after._presentation_residual[0]['residual'],[.2,-.1])
+    before._presentation_residual[0]['centers']=np.array([1.,2.,3.])
+    malformed=workspace.capture_plots(before)
+    with pytest.raises(ValueError,match='residual coordinates'):
+        workspace._restore_fit_display(after,malformed)

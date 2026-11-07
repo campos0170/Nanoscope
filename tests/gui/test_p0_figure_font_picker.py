@@ -800,7 +800,9 @@ def test_event_waveforms_colour_bar_and_the_noise_spectrogram_bar_draw_in_arial(
     page = rig.page
     bar_axis = page._colorbar.axis
     assert tick_family(bar_axis) == "Arial"
-    label = page._colorbar.getAxis("left").label
+    # The event color scale sits horizontally below the heatmap. Inspect the
+    # active axis, including the glyphs that are actually drawn.
+    label = bar_axis.label
     assert label.isVisible() and in_family(drawn_families(label), "Arial")
     marginal = page._density_top.getAxis("left").label
     assert in_family(drawn_families(marginal), "Arial")
@@ -1468,12 +1470,37 @@ def test_an_old_stored_family_round_trips_through_save_and_open(
 
 def test_an_old_project_that_names_no_font_draws_in_arial_after_reopening(
         qapp, qtbot, tmp_path, monkeypatch, arial):
+    from nanoscope.core import project as project_format
+    from nanoscope.core.analysis_workspace import IV_ARTIFACT_ID
+    from nanoscope.core.figure_codecs import record_from_artifact, encode_legacy
+    from nanoscope.core.figure_spec import FIGURE_ARTIFACT_KIND
+
     window = _restored_main_window(qtbot, tmp_path, monkeypatch)
     window._open_iv()
     QtWidgets.QApplication.processEvents()
-    assert "font_family" not in window._iv_window.appearance_state()
+    current = tmp_path / "current-fonts.nanoscope"
+    window._iv_window._refresh_from_user()
+    assert len(window._iv_window.points()) == 3, "the legacy fixture contains a plotted result"
+    assert window._write_project(str(current))
+    state = project_format.load_project(current)
+    native = []
+    for artifact in state.workspace.artifacts:
+        if artifact.kind == FIGURE_ARTIFACT_KIND:
+            record = record_from_artifact(artifact)
+            artifact = encode_legacy(record.spec, record.resources)
+        if artifact.artifact_id == IV_ARTIFACT_ID:
+            # A v12 native IV artifact predates the explicit default style binding.
+            # Its empty appearance has no chosen font; retain its scientific tables.
+            artifact.payload['appearance'] = {}
+        native.append(artifact)
+    state.workspace.artifacts = native
+    state.workspace.extra.pop('figure_workspace_v1', None)
+    assert any(a.artifact_id == IV_ARTIFACT_ID and a.payload['appearance'] == {} for a in native)
     project = tmp_path / "nofont.nanoscope"
-    assert window._write_project(str(project))
+    with monkeypatch.context() as historical:
+        historical.setattr(project_format, 'VERSION', 12)
+        project_format.save_project(project, state)
+    assert project_format.read_project_container_version(project) == 12
     window._dirty = False
     reopened = _main_window(qtbot)
     with qtbot.waitSignal(reopened.projectRestored, timeout=30_000):

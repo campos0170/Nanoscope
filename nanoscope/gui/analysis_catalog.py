@@ -1,5 +1,5 @@
 """Canonical analysis navigation metadata. No widgets, recordings or analysis imports."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 PAGE_HOME = "analysis_home"
 PAGE_IDS = ("distributions", "distribution_summaries", "comparison_figures", "event_waveforms",
@@ -25,9 +25,15 @@ STATUS_HELP = (
     "event review or scientific validity.\n\n"
     "Stale: source data or analytical settings changed after this result was generated. Inspect the "
     "difference before refreshing; the visible numbers have not silently changed.\n\n"
-    "Saved snapshot: a frozen project result is shown without recomputation. It may differ from today's "
-    "live source and remains available for inspection and export.\n\n"
+    "Saved result: this editable live figure displays a retained project result without recomputation. "
+    "It may differ from today's source; use Update plot deliberately to generate a replacement. "
+    "Frozen Snapshots are separate entries in the Figures list.\n\n"
     "No data: this view has no result yet. Read its input requirements before running an analysis."
+)
+
+FIGURE_NAVIGATION_HELP = (
+    "Analysis opens your most recently used figure of this type, or an empty figure if none exists. "
+    "Use New in the Analysis Explorer to create a separate figure. Update plot applies its chosen inputs."
 )
 
 
@@ -81,4 +87,32 @@ ANALYSIS_ENTRIES = (
         "Inspect named frozen figures, compose publication panels, and export pictures or reproducible bundles.",
         "Open the library at any time. Save an Explorer figure first to populate it. Original plotted data and provenance stay with each saved figure."),
 )
+ANALYSIS_ENTRIES = tuple(
+    replace(entry, description=entry.description + "\n\n" + FIGURE_NAVIGATION_HELP)
+    if entry.route in PAGE_IDS else entry for entry in ANALYSIS_ENTRIES
+)
 ENTRY_BY_ROUTE = {entry.route: entry for entry in ANALYSIS_ENTRIES}
+
+# Plain initial recipes consumed by the figure workspace; no analytical page is imported
+# or constructed while the New menu is populated.
+NEW_FIGURES = (
+    ("Histogram", "distributions", {"plot_type": "Histogram"}),
+    ("Scatter", "distributions", {"plot_type": "Scatter"}),
+    ("KDE", "distributions", {"plot_type": "KDE (density)"}),
+    ("Event-count heatmap", "distributions", {"plot_type": "Event-count heatmap"}),
+    ("ECDF", "distribution_summaries", {"kind": "ecdf"}),
+    ("Survival", "distribution_summaries", {"kind": "survival"}),
+    ("Box", "distribution_summaries", {"kind": "box"}),
+    ("Violin", "distribution_summaries", {"kind": "violin"}),
+    ("Comparison", "comparison_figures", None),
+    ("Pair-plot matrix", "comparison_figures", {"kind": "pairs"}),
+    ("Faceted comparisons", "comparison_figures", {"kind": "facets"}),
+    ("Individual-event overlays", "comparison_figures", {"kind": "events"}),
+    ("Event map", "event_waveforms", {"view": "density"}),
+    ("Event ensemble", "event_waveforms", {"view": "ensemble"}),
+    ("Noise PSD", "noise", {"view": "psd"}),
+    ("Spectrogram", "noise", {"view": "spectrogram"}),
+    ("I-V / conductance", "iv", None),
+    ("Voltage dependence", "voltage_series", None),
+    ("Subpopulations", "subpopulations", None),
+)

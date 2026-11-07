@@ -1,20 +1,10 @@
-"""USABLE-2/3: what the kernels' SHIPPED DEFAULTS do on the OWNER'S OWN recording.
+"""Historical controlled kernel benchmark plus current adaptive-noise truth checks.
 
-The section header and the `detect_derivative` / `detect_peaks` / `detect_tkeo`
-docstrings now quote recall, precision and dwell against `detect_events`' own answer
-on the 15 s apo-ferritin file. Those are the numbers a user would get if they picked
-one of these kernels off the menu, so they are the numbers a test has to hold: a
-caption is a claim, and a claim about a recording is checked on that recording.
-
-Two kinds of test here:
-
-* THE MEASUREMENT, re-scored on the real file (skipped when it is not on this
-  machine): every number quoted in a docstring, reproduced.
-* THE SENTENCE, checked always: a default cannot move without the claim about it
-  moving too.
-
-Set ``NANOSCOPE_DETECT_MODULE`` to another copy of ``detect.py`` to run these against
-it -- that is how they were shown to fail against the pre-fix file.
+The quoted corpus comparisons were measured with the notebook masked baseline
+and global Schmitt thresholds. Keep that numerical input explicit and fixed so
+kernel changes remain detectable; these counts are not current automatic-mode
+promises and the reference detector is not manually labelled scientific truth.
+Current auto detection is separately checked against planted events below.
 """
 
 from __future__ import annotations
@@ -56,7 +46,7 @@ def D():
 
 @pytest.fixture(scope="module")
 def apo(D):
-    """The owner's 15 s apo recording, the app's answer on it, and one basis.
+    """The historical 15 s apo benchmark, its explicit reference, and one basis.
 
     ONE `DetectionBasis` for every kernel, which is the comparison the section is
     built to make: whatever the kernels disagree about, it is not the baseline.
@@ -70,12 +60,19 @@ def apo(D):
     cur = [c for c in doc.meta.channels if c.kind is ChannelKind.CURRENT]
     raw = np.asarray(doc.channels[cur[0].index], np.float32)
     fs = float(doc.meta.sample_rate_hz)
-    df, _prov = D.detect_events(raw, fs)
+    from nanoscope.analysis.ml_preprocess import baseline_masked_median
+    # Fixed historical recipe; do not read changing DEFAULT_BASELINE settings.
+    _, legacy_baseline = baseline_masked_median(
+        np.asarray(raw, np.float64), fs, rough_s=.5, base_s=.1, decim=66,
+        mask_sigma=3.5, dilate_ms=1., _legacy_sample_counts=True,
+        _legacy_mask_noise=True)
+    df, _prov = D.detect_events(raw, fs, baseline=legacy_baseline, noise_policy='global')
+    assert _prov['noise_policy_effective'] == 'global'
     ref = (
         df["start_idx"].to_numpy().astype(np.int64),
         df["end_idx"].to_numpy().astype(np.int64),
     )
-    return raw, fs, df, ref, D.detection_basis(raw, fs)
+    return raw, fs, df, ref, D.detection_basis(raw, fs, baseline=legacy_baseline)
 
 
 def _score(ref, starts, ends, fs):
@@ -104,7 +101,7 @@ def _score(ref, starts, ends, fs):
 # ---------------------------------------------------------------------------
 # the reference the whole section is scored against
 # ---------------------------------------------------------------------------
-def test_the_apps_own_answer_on_the_recording_is_what_the_header_says_it_is(apo):
+def test_historical_fixed_baseline_reference_matches_the_documented_benchmark(apo):
     _raw, _fs, df, _ref, _basis = apo
     assert len(df) == 115
     assert np.median(df["dwell_s"]) * 1e3 == pytest.approx(20.1, abs=0.2)
@@ -247,3 +244,28 @@ def test_the_section_header_names_the_two_kernels_that_need_tuning(D):
     assert "detect_derivative" in header and "detect_peaks" in header
     assert "115 events" in header and "412.9 ms" in header
     assert "detect_events` remains the default detector" in header
+
+
+@pytest.mark.parametrize('seed', [976021, 976103])
+@pytest.mark.parametrize('polarity', [-1, 1])
+def test_current_auto_uses_local_noise_and_preserves_known_planted_events(D, seed, polarity):
+    """Independent current-policy oracle, with a known baseline and noisy burst."""
+    fs = 5000.
+    rng = np.random.default_rng(seed)
+    scale = np.ones(40000)
+    scale[14537:21603] = 8.
+    raw = polarity * 100. + rng.normal(size=scale.size) * scale
+    truth = [(5000, 5100, 60.), (17500, 17600, 120.), (32500, 32600, 60.)]
+    for start, stop, depth in truth:
+        raw[start:stop] += polarity * depth
+    preserved = raw.copy()
+    frame, provenance = D.detect_events(
+        raw, fs, baseline=polarity * 100., polarity=polarity, noise_policy='auto',
+        noise_window_s=.25, k_in=5., k_out=2., min_dwell_s=.0016)
+    assert provenance['noise_policy_effective'] == 'local'
+    assert len(frame) == len(truth), frame[['start_idx', 'end_idx']]
+    for row, (start, stop, depth) in zip(frame.itertuples(), truth):
+        overlap = max(0, min(row.end_idx, stop) - max(row.start_idx, start))
+        assert overlap >= .95 * (stop - start)
+        assert abs(row.depth_pA - depth) <= 4.
+    np.testing.assert_array_equal(raw, preserved)

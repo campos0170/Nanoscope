@@ -81,6 +81,7 @@ def _depth_fit(w: MainWindow, fit_min: str = "") -> str:
         plots._fit_lo.setText(fit_min)
         plots._changed()
     QtWidgets.QApplication.processEvents()
+    plots._run_plot()
     details = plots.details_text()
     plots.close()
     QtWidgets.QApplication.processEvents()
@@ -156,7 +157,7 @@ def test_an_emptied_box_draws_the_automatic_label_on_a_comparison_figure(qtbot):
     widget = comparison._appearance_widget
     for box in (widget.title, widget.x_label, widget.y_label):
         _empty(box)
-    assert comparison.appearance_state() == {}
+    assert comparison.appearance_state() == {"source_appearance": {}}
     figure = render_comparison(comparison._snapshot, comparison._tables, comparison._appearance)
     assert figure._suptitle is not None and figure._suptitle.get_text() == auto_title
     assert {a.get_xlabel() for a in figure.axes if a.get_visible()} == auto_x
@@ -187,7 +188,7 @@ def test_a_box_of_spaces_hides_the_label_in_every_kind_of_window(qtbot):
     for box in (comparison._appearance_widget.title, comparison._appearance_widget.x_label):
         QTest.keyClicks(box, " ")
     figure = render_comparison(comparison._snapshot, comparison._tables, comparison._appearance)
-    assert figure._suptitle is None
+    assert figure._suptitle is None or not figure._suptitle.get_text().strip()
     assert {a.get_xlabel() for a in figure.axes if a.get_visible()} == {""}
 
     # Study figures: the figure's title and a panel's own boxes

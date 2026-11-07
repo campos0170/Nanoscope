@@ -178,7 +178,12 @@ class WindowTemplateControls(QtWidgets.QGroupBox):
         self.delete_button = QtWidgets.QPushButton("Delete")
         self.delete_button.setToolTip("Forget the selected template (asks first).")
         self.delete_button.clicked.connect(self._ask_delete)
-        for button in (self.save_button, self.rename_button, self.delete_button):
+        # Two rows, not one: the three buttons side by side asked for 324 px, and the
+        # Explorer's inspector offers a column under 290 (a minimum of 0 lets the group
+        # shrink to what its rows need).
+        self.setMinimumWidth(0)
+        layout.addWidget(self.save_button)
+        for button in (self.rename_button, self.delete_button):
             buttons.addWidget(button)
         layout.addLayout(buttons)
         # THE SPLIT, ON SCREEN, as the Distributions template group states its own: what a

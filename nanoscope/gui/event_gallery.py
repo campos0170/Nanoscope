@@ -317,14 +317,11 @@ def _cmd_key() -> str:
 
 
 def _fmt_dwell(dwell_s: float) -> str:
-    """A dwell in the largest unit that keeps it readable, for a caption with ~9 chars."""
+    """A displayed dwell in milliseconds; sorting and stored values remain seconds."""
     if not np.isfinite(dwell_s):
         return "--"
-    us = dwell_s * 1e6
-    if us < 1000.0:
-        return f"{us:.0f}µs"
-    ms = us / 1000.0
-    return f"{ms:.2f}ms" if ms < 100.0 else f"{ms:.0f}ms"
+    return f"{dwell_s * 1000.:.3g}ms"
+
 
 
 # =================================================================================================

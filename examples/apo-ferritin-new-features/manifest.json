@@ -1,0 +1,321 @@
+{
+  "capture_method": "QT_QPA_PLATFORM=offscreen; QWidget.grab(); no desktop capture",
+  "nanoscope_version": "0.1.0",
+  "recording": "/Users/abrahamcampos/500 pM Apo ferritin_1 x PBS_22 nm_0006_Process_-600 mV.abf",
+  "steps": [
+    {
+      "name": "Load recording",
+      "ok": true,
+      "fs_hz": 50000.001192092925,
+      "duration_s": 59.88
+    },
+    {
+      "name": "Measure and apply the open-pore baseline",
+      "ok": true,
+      "proposal": "Noise (robust sigma)  \n4.52 pA\nLongest state  \n499 ms (422 states)\nMedian state (base_s floor)  \n20.7 ms -> base_s >= 100 ms\nPore stepping (gating)  \nno -- 0.5x noise\nProposed rough window  \n2 s\nProposed base window  \n500 ms\nDecimation (derived)  \n333\nRanked: 1 s / 300 ms  \nbaseline follows NONE (0.000%) of the state depth at the median (239 states) but RIDES INTO a 473 ms state at t = 38.3 s, 55.6% of its excursion followed\nRanked: 2 s / 500 ms  \nbaseline follows NONE of the state depth (0.000%, 240 states; worst single state NONE (-11.2%)) \u2014 CHOSEN\n\nLongest state 499 ms (422 states, 9.3% of the trace) -> the rule's rough window 2 s, so no single state fills more than ~33% of the window; no gating detected (0.5); shortest level dwell n/a -> the rule's base window 500 ms. RANKED BY MEASURED INTRUSION, on two criteria. The MEDIAN share of each state's own depth the tracked baseline follows is the same statistic Baseline health condemns above 3% of the state depth, from the same estimator; the WORST single state is measured beside it because one state ridden into cannot move a median over hundreds, and a window whose baseline follows more than 50% of any one state's excursion has ridden INTO that state and loses to any window that stays out. Measured here: 1 s / 300 ms follows NONE (0.000%) of each state's own depth at the MEDIAN, but RIDES INTO its worst single state -- 55.6% of a 473 ms state's own excursion followed, at t = 38.3 s -- which one state among 239 cannot move a median to show; 2 s / 500 ms follows NONE of each state's own depth (0.000%, i.e. its baseline sits at or just outside them) (worst single state NONE of its own excursion, -11.2%). Inside the 473 ms state that 1 s / 300 ms rides into, depths would be measured against a baseline that has followed 56% of the state itself -- a blockade that long can stop being detectable at all -- while at 2 s / 500 ms no single state is followed more than 0.0% of the way. 2 s / 500 ms is taken: it is the SHORTEST window ESTIMATED that scores best on both criteria -- riding into no state, then the lowest measured median intrusion. Shortest, because a longer window is not free -- it tracks slower drift less well -- so among windows that measure the same on both criteria the app takes the least smoothing it can get away with. No wider window was estimated: under this ranking's objective -- no state ridden into, then median intrusion, ties to the shortest window -- nothing WIDER can beat a window already clean on both criteria: it could at best match them and then lose the tie-break. That is a claim about the objective on the ladder walked, not a measurement of any window left unestimated. What could have beaten it is a SHORTER window that is equally clean on both criteria, and the search looked: the nearest one, 1 s / 300 ms, was estimated and RIDES INTO a 473 ms state (55.6% of its own excursion followed), so nothing shorter was taken. 2 shorter windows on the grid (0.3 s / 100 ms; 0.5 s / 100 ms) were NOT estimated -- intrusion grows, and riding deepens, as the tracking window shortens, which is measured and not proved, so this is where the search stops rather than a claim that they are worse. (1 wider window on the grid was not estimated at all: under the objective above it could at best match this window on both criteria and then lose the tie-break -- a stop rule, not a measurement of it.)"
+    },
+    {
+      "name": "CUSUM detection",
+      "ok": true,
+      "events": 650,
+      "accepted": 649,
+      "summary": "650 events \u00b7 649 accepted"
+    },
+    {
+      "name": "Toggle the Results dock",
+      "ok": true
+    },
+    {
+      "name": "Open Signal Conditioning (Time preview)",
+      "ok": true,
+      "state": "exact",
+      "status": "Exact for these stages \u00b7 window 10.00 s, padded \u00b10.01 s \u00b7 22 ms",
+      "stages": [
+        "StageRow(key='notch', position=1, title='Notch', enabled=False, summary='60/120/180 Hz \u00b7 Q 30', role='', linear=True, detail='')",
+        "StageRow(key='median', position=2, title='Median', enabled=False, summary='0.1 ms', role='', linear=False, detail='')",
+        "StageRow(key='highpass', position=3, title='High-pass', enabled=False, summary='100 Hz \u00b7 Butterworth 4', role='localization only', linear=True, detail='')",
+        "StageRow(key='detrend', position=4, title='Baseline drift', enabled=False, summary='block median \u00b7 0.5 s', role='estimator', linear=False, detail='')",
+        "StageRow(key='rmean', position=5, title='Running mean', enabled=False, summary='0.5 ms', role='', linear=True, detail='')",
+        "StageRow(key='savgol', position=6, title='Savitzky-Golay', enabled=False, summary='1 ms \u00b7 order 3', role='', linear=True, detail='')",
+        "StageRow(key='normalize', position=7, title='Normalize', enabled=False, summary='z-score', role='changes units', linear=False, detail='')",
+        "StageRow(key='lowpass', position=8, title='Low-pass', enabled=True, summary='Bessel 8 \u00b7 5 kHz', role='applied inside detection', linear=True, detail='\u22123 dB 3.6 kHz')"
+      ]
+    },
+    {
+      "name": "Spectrum preview",
+      "ok": true,
+      "lines": [
+        "4569.8 Hz \u00b7 +15.1 dB"
+      ]
+    },
+    {
+      "name": "Edit the chain after detection",
+      "ok": true,
+      "sentence": "\u26a0 The form differs from the chain the CUSUM detection on screen ran with: low-pass 5000 \u2192 10000 Hz. Revert, or run detection to apply it."
+    },
+    {
+      "name": "Save and export the chain as a protocol",
+      "ok": true,
+      "protocol": "Apo example - 10 kHz Bessel low-pass"
+    },
+    {
+      "name": "Copy as Python",
+      "ok": true,
+      "chars": 2855
+    },
+    {
+      "name": "Revert the chain to the shown detection",
+      "ok": true,
+      "after": "match"
+    },
+    {
+      "name": "Decide with Advance after decision",
+      "ok": true,
+      "visited": [
+        217,
+        218,
+        219,
+        220
+      ],
+      "progress": "Reviewed 3 / 650 \u00b7 accepted 649 \u00b7 labels: shape=single-level 1, shape=multi-level 1"
+    },
+    {
+      "name": "Labelled filter",
+      "ok": true,
+      "shown": 219
+    },
+    {
+      "name": "Event gallery on Unreviewed",
+      "ok": true,
+      "progress": "Reviewed 3 / 650 \u00b7 accepted 649 \u00b7 labels: shape=single-level 1, shape=multi-level 1"
+    },
+    {
+      "name": "Dock the Event inspector",
+      "ok": true
+    },
+    {
+      "name": "Window menu",
+      "ok": true,
+      "entries": [
+        "Bring All to Front",
+        "NanoScope",
+        "Event inspector",
+        "Event gallery",
+        "Analysis Explorer",
+        "Figure Library",
+        "Signal Conditioning",
+        "Dock Event inspector beside the trace",
+        "Reset Window Layout\u2026"
+      ]
+    },
+    {
+      "name": "Save the example project",
+      "ok": true
+    }
+  ],
+  "screenshots": [
+    {
+      "file": "screenshots/01-results-dock-events.png",
+      "caption": "Results dock under the trace: the CUSUM event table, with the Inspector keeping only the parameter forms.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/02-results-dock-summary.png",
+      "caption": "Results dock, Summary tab: event counts, dwell and depth summaries.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/03-results-dock-hidden.png",
+      "caption": "View > Panels > Results (Shift+Cmd+R) hides the dock; the trace takes the full height and nothing is lost.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/04-sc-time-overlay.png",
+      "caption": "Signal Conditioning, Time preview (Overlay): raw against the 5 kHz Bessel output over the main trace's visible 10 s (30-40 s into the recording; the axis shows the instrument clock).",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/05-sc-time-difference.png",
+      "caption": "Time preview, Raw - processed: what the low-pass removes from the current.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/06-sc-spectrum.png",
+      "caption": "Spectrum preview: Welch PSD before and after the chain, with the peaks the line finder flags.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/07-sc-response-magnitude.png",
+      "caption": "Response preview: magnitude of the 5 kHz Bessel low-pass.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/08-sc-response-step.png",
+      "caption": "Response preview, Step: how the low-pass rounds an ideal blockade edge.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/09-sc-chain-edited.png",
+      "caption": "The low-pass raised from 5 to 10 kHz after detection; the window names how the form now differs from the CUSUM table on screen.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/10-results-chain-changed.png",
+      "caption": "The Results toolbar shows '\u26a0 Chain changed' with Revert / Run / Open.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/11-inspector-advance.png",
+      "caption": "Event inspector on the Unreviewed filter with Advance after decision: each A / R / label key moves to the next unreviewed event; the progress line counts them.",
+      "size": [
+        1200,
+        880
+      ]
+    },
+    {
+      "file": "screenshots/12-inspector-labelled-filter.png",
+      "caption": "The Labelled: shape=multi-level filter shows only events carrying that label.",
+      "size": [
+        1200,
+        880
+      ]
+    },
+    {
+      "file": "screenshots/13-gallery-unreviewed.png",
+      "caption": "Event gallery on the Unreviewed filter, with the shared progress line and First unreviewed (Cmd+U).",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/14-inspector-docked.png",
+      "caption": "Window > Dock Event inspector beside the trace: the same inspector as a tab in the right column, with Details collapsed.",
+      "size": [
+        1600,
+        1000
+      ]
+    },
+    {
+      "file": "screenshots/15-window-menu.png",
+      "caption": "The new Window menu: open windows, Dock Event inspector beside the trace and Reset Window Layout\u2026",
+      "size": [
+        353,
+        258
+      ]
+    }
+  ],
+  "files": [
+    "outputs/cusum-600mV-events.csv",
+    "outputs/conditioning-protocols.json",
+    "outputs/rebuild_processed_trace.py",
+    "outputs/apo-ferritin-new-features.nanoscope"
+  ],
+  "recording_meta": {
+    "n_samples": 2993798,
+    "fs_hz": 50000.001192092925,
+    "duration_s": 59.87595857244587
+  },
+  "detection_params": {
+    "detector": "detect.cusum",
+    "polarity": -1,
+    "k_in": 5.0,
+    "k_out": 2.0,
+    "cusum_k": 0.75,
+    "cusum_h": 28.0,
+    "min_dwell_s": 0.001,
+    "max_dwell_s": null,
+    "filter_cutoff_hz": 5000.0,
+    "filter_order": 8,
+    "filter_kind": "bessel",
+    "merge_gap_s": 0.0005,
+    "detrend_enabled": false,
+    "detrend_method": "block_median",
+    "detrend_window_s": 0.5,
+    "detrend_percentile": 80.0,
+    "detrend_asls_lam": 60000.0,
+    "detrend_asls_p": 0.001,
+    "detrend_asls_niter": 10,
+    "detrend_asls_decim": 0.1,
+    "detrend_rough_s": 0.5,
+    "detrend_base_s": 0.1,
+    "detrend_mask_sigma": 3.5,
+    "detrend_dilate_ms": 1.0,
+    "detrend_decim": 0,
+    "detrend_sg_poly": 3,
+    "detrend_sg_decim": 50,
+    "notch_enabled": false,
+    "notch_freq_hz": 60.0,
+    "notch_harmonics": 3,
+    "notch_q": 30.0,
+    "notch_freqs": null,
+    "median_enabled": false,
+    "median_window_s": 0.0001,
+    "hp_enabled": false,
+    "hp_cutoff_hz": 100.0,
+    "hp_order": 4,
+    "hp_kind": "butter",
+    "rmean_enabled": false,
+    "rmean_window_s": 0.0005,
+    "savgol_enabled": false,
+    "savgol_window_s": 0.001,
+    "savgol_polyorder": 3,
+    "normalize_enabled": false,
+    "normalize_mode": "zscore",
+    "normalize_clip_sigma": 30.0,
+    "baseline_method": "masked_median",
+    "baseline_rough_s": 2.0,
+    "baseline_base_s": 0.5,
+    "baseline_decim": null,
+    "baseline_mask_sigma": 3.5,
+    "baseline_dilate_ms": 1.0,
+    "baseline_window_s": 0.5,
+    "baseline_despike_size": 0,
+    "baseline_param_source": "proposed"
+  },
+  "demo_decisions": [
+    {
+      "event_id": 217,
+      "action": "accept (A)"
+    },
+    {
+      "event_id": 218,
+      "action": "label shape=single-level (1)"
+    },
+    {
+      "event_id": 219,
+      "action": "label shape=multi-level (2)"
+    }
+  ],
+  "completed": true
+}

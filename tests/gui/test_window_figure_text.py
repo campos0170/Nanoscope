@@ -55,8 +55,8 @@ def test_event_waveforms_colour_bar_and_marginal_labels_are_editable(qapp, qtbot
     depth = widget._history.depth()[0]
     _commit_inline(controller, "colorbar.label", "Events per bin")
     assert w.label_text("colorbar.label") == "Events per bin"
-    # On the label the user SEES: a vertical bar draws its label on its left axis.
-    seen = w._colorbar.getAxis("left")
+    # On the label the user SEES: use the horizontal color scale's active axis.
+    seen = w._colorbar.axis
     assert seen.label.isVisible() and seen.label.toPlainText().strip() == "Events per bin"
     assert w.appearance_state()["text"]["colorbar.label"]["text"] == "Events per bin"
     assert widget._history.depth()[0] == depth + 1

@@ -29,6 +29,7 @@ real :class:`MainWindow` selection and detection paths.
 from __future__ import annotations
 
 import os
+import re
 
 import nanoscope  # noqa: F401  -> runs bootstrap.py, fixes the plugin path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -140,21 +141,21 @@ def test_the_run_windows_line_quotes_the_form_as_it_is_now(panel):
     lab = panel.run_windows_label
     panel.set_run_windows(_CLAMPED)
     assert lab.isVisibleTo(panel)
-    assert "rough 0.08 s / base 0.016 s" in lab.text()
-    assert "not the 0.5 s / 0.1 s above" in lab.text()
-    assert "ms" not in lab.text(), "one unit for both halves of one line"
+    assert "rough 80 ms / base 16 ms" in lab.text()
+    assert "not the 500 ms / 100 ms above" in lab.text()
+    assert not re.search(r"\d\s+s\b", lab.text()), "both halves use displayed milliseconds"
 
     # The spins themselves -- the gesture the skeptic measured.
     panel.rough_s.setValue(1.0)
     panel.base_s.setValue(0.25)
-    assert "not the 1 s / 0.25 s above" in lab.text(), lab.text()
-    assert "0.5 s / 0.1 s" not in lab.text()
+    assert "not the 1000 ms / 250 ms above" in lab.text(), lab.text()
+    assert "500 ms / 100 ms" not in lab.text()
     assert "CLAMPED" in lab.text()
 
     # Back to the asked-for windows: the original contrast returns.
     panel.rough_s.setValue(0.5)
     panel.base_s.setValue(0.1)
-    assert "not the 0.5 s / 0.1 s above" in lab.text()
+    assert "not the 500 ms / 100 ms above" in lab.text()
 
     # Typed to the clamped widths: still on screen (the depths are still not
     # comparable), but "ran at 0.08 s, not the 0.08 s above" is not a sentence.
@@ -165,7 +166,7 @@ def test_the_run_windows_line_quotes_the_form_as_it_is_now(panel):
 
     # Back to default: the same writer runs, the contrast is back.
     panel.reset_button.click()
-    assert "not the 0.5 s / 0.1 s above" in lab.text()
+    assert "not the 500 ms / 100 ms above" in lab.text()
 
 
 def test_the_run_windows_line_follows_a_seed_a_confirmation_and_a_plain_edit(panel):
@@ -174,11 +175,11 @@ def test_the_run_windows_line_follows_a_seed_a_confirmation_and_a_plain_edit(pan
     # A seed moves the form with `_on_edited` muted; the line must still follow.
     panel.set_params({"baseline_rough_s": 2.0, "baseline_base_s": 0.5,
                       "baseline_param_source": "restored"})
-    assert "not the 2 s / 0.5 s above" in lab.text(), lab.text()
+    assert "not the 2000 ms / 500 ms above" in lab.text(), lab.text()
     # ...and so does the confirmation click.
     panel.set_proposal(_proposal(rough=1.0, base=0.2))
     assert panel.apply_proposal()
-    assert "not the 1 s / 0.2 s above" in lab.text(), lab.text()
+    assert "not the 1000 ms / 200 ms above" in lab.text(), lab.text()
 
     # A run at the form's own windows, not clamped: nothing to say...
     panel.set_run_windows({"baseline_rough_s": 1.0, "baseline_base_s": 0.2})
@@ -188,7 +189,7 @@ def test_the_run_windows_line_follows_a_seed_a_confirmation_and_a_plain_edit(pan
     # form", read in both directions.
     panel.rough_s.setValue(1.5)
     assert lab.isVisibleTo(panel)
-    assert "ran at rough 1 s / base 0.2 s, not the 1.5 s / 0.2 s above" in lab.text()
+    assert "ran at rough 1000 ms / base 200 ms, not the 1500 ms / 200 ms above" in lab.text()
     assert "CLAMPED" not in lab.text()
     panel.rough_s.setValue(1.0)
     assert not lab.isVisibleTo(panel)
@@ -216,13 +217,13 @@ def test_the_wired_line_follows_the_knob_above_it_on_a_clamped_detection(
     assert res.payload.provenance.get("baseline_fallback") == B.FALLBACK_CLAMPED
     lab = bl.run_windows_label
     assert lab.isVisibleTo(bl)
-    assert "not the 0.5 s / 0.1 s above" in lab.text(), lab.text()
+    assert "not the 500 ms / 100 ms above" in lab.text(), lab.text()
 
     bl.rough_s.setValue(1.0)
     qapp.processEvents()
     assert float(bl.rough_s.value()) == 1.0
-    assert "not the 1 s / 0.1 s above" in lab.text(), lab.text()
-    assert "0.5 s / 0.1 s" not in lab.text()
+    assert "not the 1000 ms / 100 ms above" in lab.text(), lab.text()
+    assert "500 ms / 100 ms" not in lab.text()
 
 
 def test_the_run_windows_line_sits_under_the_button_row_so_a_click_there_never_moves_the_button(
@@ -262,7 +263,7 @@ def test_the_run_windows_line_sits_under_the_button_row_so_a_click_there_never_m
     qtbot.mouseClick(panel.apply_button, QtCore.Qt.LeftButton)
     qtbot.wait(50)
     assert panel.run_windows_label.isVisibleTo(panel)
-    assert "not the 2 s / 0.5 s above" in panel.run_windows_label.text()
+    assert "not the 2000 ms / 500 ms above" in panel.run_windows_label.text()
     assert y(panel.apply_button) == before
 
     # Back to default: the line VANISHES; the row stays.

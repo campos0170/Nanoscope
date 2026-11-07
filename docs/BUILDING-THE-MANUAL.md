@@ -1,88 +1,94 @@
 # Rebuilding the manual
 
-Current documentation edition: **2026-09-29**, incubation workflow checked against
-NanoScope build **40.15.59**. Other chapters and retained illustrations carry their
-own earlier review dates. See `MANUAL_REVISION_2026-09-29.md` for scope.
+Documentation edition **2026-11-05** describes the plotting and analysis controls in
+installed **NanoScope build 45.37.98**, build ID
+`20261105T043813486839Z-nogit-5447ddda145a`. Its source SHA-256 is
+`5447ddda145a83c1e898dab5d309da3a703739fd339745d340cb473f5c498813`.
+This is a documentation update, not an application rebuild. Earlier scientific chapters,
+apo-ferritin outputs and capture manifests retain their original dates and limitations.
+See `MANUAL_REVISION_2026-11-05.md` for the current scope.
 
-    /opt/anaconda3/bin/python3 docs/gen_page.py --pdf --zip
+## Authoritative sources
 
-That is the whole build. It runs from a clean checkout: every path is resolved relative to
-`docs/gen_page.py`, nothing is read from `/tmp`, and nothing is written outside `docs/`.
-Needs Python-Markdown (`python3 -m pip install markdown`); `--pdf` also needs Google Chrome
-in `/Applications`.
+| Source | Purpose |
+|---|---|
+| `manual-markdown/manual.md` | Illustrated manual prose; edit this source rather than generated HTML/PDF |
+| `USER_GUIDE.md` | Companion written guide; keep shared control names and procedures aligned |
+| `inventory.json` | Control reference, including individual notes and shortcuts |
+| `manual-markdown/images/` | Actual PNG/WebP screenshots, embedded into generated HTML |
+| `gen_manual.py` | Generates the reference tables; `AREA_IMG` contains reference-area captions |
+| `gen_page.py` | Builds and validates HTML, PDF, ZIP and build manifest |
+| `render_manual_pdf.py` | Offline ReportLab PDF rendering |
+| `manual-usability-captures.json` | Current-build screenshot hashes, original evidence paths and fixture descriptions |
 
-When headless Chrome is unavailable, use the offline ReportLab renderer:
+The markdown's own Control reference subsections are replaced by the inventory-rendered
+tables; the section preamble remains. The build omits a repeated reference screenshot
+when the prose has already shown it. Historical images and manifests must not be relabelled
+as new captures. The current images are unaltered offscreen captures from synthetic
+validation fixtures, not fresh apo-ferritin measurements.
 
-    python3 docs/gen_page.py --pdf --zip --pdf-engine reportlab --pdf-python /path/to/python-with-reportlab
+## Build without using the screen
 
-For this edition's offline build, a verified environment combination is:
+Run from the application checkout or the staged workspace containing `docs/`:
 
 ```sh
-/opt/anaconda3/bin/python3 docs/gen_page.py --pdf --zip --pdf-engine reportlab \
+/Users/abrahamcampos/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 \
+  docs/gen_page.py --pdf --zip --pdf-engine reportlab \
   --pdf-python /Users/abrahamcampos/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
 ```
 
-These are environment-specific interpreter locations, not paths required by the
-manual content. Use equivalent local interpreters elsewhere.
+Paths are environment-specific; use equivalent local runtimes elsewhere. The preferred
+Markdown engine is Python-Markdown. When it is absent, `markdown_backend.py` uses the
+bundled Node `marked` engine through the local bridge while retaining legacy heading IDs.
+The selected engine is recorded in `manual-build-manifest.json`. The PDF interpreter
+needs ReportLab, Pillow and pypdf. ReportLab uses local macOS Arial/Courier fonts;
+adjust the font paths for another operating system. No screen or desktop browser is
+needed for this route.
 
-The authoring Python needs `markdown`; the PDF Python needs `reportlab`, `Pillow` and `pypdf`.
-They may be different environments. The ReportLab route reads the same verified HTML, includes
-its prose, tables and embedded illustrations, and adds page numbers and a generated PDF contents
-page. It uses the macOS Arial/Courier font files; adapt those paths before building on another OS.
-Inspect rendered pages after either route. Browser and ReportLab pagination can differ.
+All content paths resolve relative to `gen_page.py`; outputs stay under `docs/`.
+The previous PDF is preserved if rendering fails. Use `--pdf --zip` together so an
+updated HTML file cannot ship with an older PDF. The optional Chrome renderer remains
+available in the generator, but is not needed for the background documentation build.
 
-The previous PDF is preserved if rendering fails. `--zip` requires `--pdf` in the same invocation
-so an updated HTML document cannot silently ship beside an older PDF.
+## Verify and distribute
 
-## What comes from where
+1. Confirm the prose, inventory and screenshot captions name the intended build.
+   Match every current image to `manual-usability-captures.json`; preserve older manifests.
+2. Run the build. It checks image embedding, missing image files, internal links,
+   contents headings and absence of scripts, iframes and external stylesheets.
+3. Render the PDF to page images and inspect the new control chapters, reference tables,
+   captions, page breaks and representative retained chapters. PDF pagination can differ
+   from browser print layout. Text/link checks alone do not establish readable layout.
+4. Confirm both HTML copies have identical SHA-256; inspect the ZIP for the matching
+   PDF, source prose, images, inventory, companion guides and capture/build manifests.
+5. Distribute the generated files and record their hashes. Documentation changes do not
+   require modifying or replacing the application bundle.
 
-| Source | Holds |
+| Output | Contents |
 |---|---|
-| `docs/manual-markdown/manual.md` | **all of the prose.** Edit this file — it is the source of truth. |
-| `docs/manual-markdown/images/*.webp` | the screenshots. Dropping a `.webp` in and referencing it from the markdown is all that is needed; it gets inlined as a `data:` URI. |
-| `docs/inventory.json` | the control inventory. `gen_manual.py` renders the `Control reference` section from it. |
+| `manual.html` | Single offline HTML manual with embedded images |
+| `manual-markdown/manual.html` | Byte-identical HTML copy beside the source |
+| `nanoscope-manual.pdf` | Paginated offline manual with contents and page numbers |
+| `nanoscope-manual.zip` | Matching manual, source, images, PDF and companion documents under `nanoscope-manual-md/` |
+| `manual-build-manifest.json` | Edition/build identity, render engines, validation checks and hashes |
+| `_build/reference.html` | Optional scratch output from running `gen_manual.py` directly; not a second manual source |
 
-The markdown's own `Control reference` subsections are **dropped** at build time and replaced
-by the inventory-rendered tables: the inventory carries each control's shortcut, notes and
-corrections as separate fields, which a markdown table flattens into one run-on cell. The
-section's preamble paragraphs in the markdown are kept. Screenshots the prose already shows
-are not repeated in the reference — the build tracks that through the `data-img` attribute
-it puts on every figure.
+The installed 45.37.98 app's reviewed packaging specification does not collect these
+manual files, and the reviewed main-window menu does not provide a User Guide/manual
+action. Open the distributed HTML or PDF directly. Do not claim that an in-app Help
+manual has been updated or that documentation must wait for another app release.
 
-Which screenshot heads each reference area, and its caption, is `AREA_IMG` in
-`docs/gen_manual.py`. That is the only place manual captions live outside the markdown.
+## Retained provenance
 
-## Outputs
+`manual-current-captures.json`, `manual-plot-navigation-captures.json`,
+`manual-phase1-captures.json`, `manual-phase4-captures.json`,
+`manual-design-connections-captures.json` and `manual-incubation-captures.json`
+document earlier captures and keep their original identities. Their corresponding
+capture-plan files describe those earlier handoffs. The 2026-09-29 incubation chapter
+and 2026-09-11 main-analysis review remain historical in this edition. The build includes
+available companion guides and dated revision notes without claiming every scientific
+workflow was rerun for this documentation update.
 
-| File | Made by |
-|---|---|
-| `docs/manual.html` | `gen_page.py` — one self-contained file, images inlined, loads nothing from the network |
-| `docs/manual-markdown/manual.html` | a byte-identical copy of it (`shasum -a 256` the two to check) |
-| `docs/nanoscope-manual.pdf` | `--pdf`: Chrome with the page's print stylesheet, or the selected offline ReportLab renderer |
-| `docs/nanoscope-manual.zip` | `--zip`: markdown + images + html + pdf, under `nanoscope-manual-md/` |
-| `docs/manual-build-manifest.json` | edition, rendering engine, validation checks and source/output hashes |
-| `docs/manual-current-captures.json` | current-source screenshot provenance, unchanged input-project hashes |
-| `docs/manual-incubation-captures.json` | provenance for the 2026-09-29 incubation illustrations; earlier capture manifests remain dated |
-| `docs/_build/reference.html` | only if you run `gen_manual.py` by itself; a scratch view of the reference section, not shipped |
-
-## The build checks itself
-
-`gen_page.py` fails rather than shipping a broken page. It refuses to write if an `<img>` is
-not inlined, if the markdown references an image that is not in `images/`, if an internal
-link points at an id that is not on the page, if a heading is missing from the contents rail,
-or if the page grows a `<script>`, `<iframe>` or external stylesheet. The contents rail and
-the section anchors are both generated from the headings, so they cannot drift apart.
-
-The ZIP also includes the written User Guide, incubation companion, Zn/Cu/Acid workflow
-guides, recording-specific reference guide, edition notes, inventory and verification
-manifests. Finalize companion Markdown and captures before the distribution build.
-Application executables/DMGs are not rebuilt by this command;
-installed Help retains the bundled edition until a separate application release is built/installed.
-
-## History
-
-Before 2026-08-20 both scripts wrote into a git worktree that no longer exists and read
-`/tmp/inventory.json`, `/tmp/docimgs.json` and `/tmp/manual_parts.json`, so neither would
-run; and the page's prose was a second copy of the manual held as HTML string literals
-inside `gen_page.py`, which is how it went stale against `manual.md`. There is now one copy
-of the prose, and it is the markdown.
+Before 2026-08-20, the scripts depended on a removed worktree and temporary inventory
+files, and the prose existed twice. The maintained build now reads local documentation
+sources, with one authoritative illustrated prose file.

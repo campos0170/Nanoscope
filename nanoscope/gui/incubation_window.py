@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from numbers import Real
 import os
 from pathlib import Path
 import threading
@@ -11,6 +12,7 @@ import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..analysis import incubation_study as study
+from ..core.quantity_display import quantity_for, column_entry, to_display, from_display
 from ..analysis.cancel import OperationCancelled, cancel_scope
 from .export_paths import ask_export_path
 from .numeric_text import parse_strict_number
@@ -23,10 +25,13 @@ class _FrameModel(QtCore.QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.frame = pd.DataFrame()
+        self._quantities = {}
 
-    def set_frame(self, frame):
+    def set_frame(self, frame, *, schema=None):
         self.beginResetModel()
         self.frame = frame.copy(deep=False)
+        metadata = schema if schema is not None else frame.attrs.get("schema")
+        self._quantities = {str(key): quantity_for(str(key), schema=metadata) for key in frame.columns}
         self.endResetModel()
 
     def rowCount(self, parent=QtCore.QModelIndex()):  # noqa: N802
@@ -36,17 +41,29 @@ class _FrameModel(QtCore.QAbstractTableModel):
         return 0 if parent.isValid() else len(self.frame.columns)
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
-        if not index.isValid() or role not in (QtCore.Qt.DisplayRole, QtCore.Qt.ToolTipRole):
+        if not index.isValid():
             return None
         value = self.frame.iat[index.row(), index.column()]
-        if isinstance(value, float):
-            return "" if math.isnan(value) else format(value, ".8g")
+        if role == QtCore.Qt.UserRole:
+            return value
+        if role not in (QtCore.Qt.DisplayRole, QtCore.Qt.ToolTipRole):
+            return None
+        key = str(self.frame.columns[index.column()])
+        descriptor = self._quantities[key]
+        if role == QtCore.Qt.ToolTipRole:
+            return column_entry(key, descriptor)[2]
+        if isinstance(value, Real) and not isinstance(value, bool):
+            return "" if math.isnan(value) else format(to_display(value, descriptor), ".8g")
         return "" if value is None else str(value)
 
     def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):  # noqa: N802
-        if role != QtCore.Qt.DisplayRole:
+        if orientation != QtCore.Qt.Horizontal:
+            return str(section + 1) if role == QtCore.Qt.DisplayRole else None
+        if not 0 <= section < len(self.frame.columns):
             return None
-        return str(self.frame.columns[section]) if orientation == QtCore.Qt.Horizontal else str(section + 1)
+        key = str(self.frame.columns[section])
+        entry = column_entry(key, self._quantities[key])
+        return entry[1] if role == QtCore.Qt.DisplayRole else entry[2] if role == QtCore.Qt.ToolTipRole else None
 
 
 class _FigureView(QtWidgets.QGraphicsView):
@@ -122,7 +139,7 @@ class IncubationStudyWindow(QtWidgets.QMainWindow):
     studyFailed = QtCore.Signal(str)
     studyCancelled = QtCore.Signal()
     _COLUMNS = (
-        "Tag", "Incubation (h)", "Pore ID", "Pore diameter (nm)",
+        "Tag", "Incubation (ms)", "Pore ID", "Pore diameter (nm)",
         "Concentration (pM)", "Voltage (mV)", "Prepared CSV", "Metadata JSON",
     )
 
@@ -328,7 +345,7 @@ class IncubationStudyWindow(QtWidgets.QMainWindow):
         try:
             self._recordings.setRowCount(len(recordings))
             for row, rec in enumerate(recordings):
-                values = (rec.tag, rec.incubation_h, rec.pore_id, rec.pore_diameter_nm,
+                values = (rec.tag, to_display(rec.incubation_h, quantity_for("incubation_h")), rec.pore_id, rec.pore_diameter_nm,
                           rec.concentration_pm, rec.voltage_mv, rec.trace_path, rec.metadata_path)
                 for col, value in enumerate(values):
                     unknown = value is None or (isinstance(value, float) and not math.isfinite(value))
@@ -389,7 +406,7 @@ class IncubationStudyWindow(QtWidgets.QMainWindow):
                         raise ValueError(f"{prefix}: input file does not exist: {path}")
             records.append(study.StudyRecording(
                 tag=tag, trace_path=paths[0], metadata_path=paths[1],
-                incubation_h=self._number(self._text(row, 1), f"{prefix}: incubation", nonnegative=True),
+                incubation_h=from_display(self._number(self._text(row, 1), f"{prefix}: incubation", nonnegative=True), quantity_for("incubation_h")),
                 pore_id=pore,
                 pore_diameter_nm=self._number(self._text(row, 3), f"{prefix}: pore diameter", positive=True),
                 concentration_pm=self._number(self._text(row, 4), f"{prefix}: concentration", positive=True),

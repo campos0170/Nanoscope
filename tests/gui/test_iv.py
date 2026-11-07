@@ -187,10 +187,20 @@ def test_iv_action_gated_and_opens_single_window(qapp, qtbot, tmp_path):
     win._open_iv()
     first = win._iv_window
     assert first is not None
+    # Managed figures live inside one Explorer and wait for explicit Update.
+    assert not first.isWindow()
+    assert first.points() == []
+    owner = win._figure_workspace
+    figure_id = owner.current_id()
+    assert owner.page(figure_id) is first
+    first.inspector_adapter().update()
     assert len(first.points()) == 1
-    # Re-opening focuses the SAME window instance (never a second one).
+    assert owner.get(figure_id).spec.result.status == 'current'
+    # Re-opening focuses the SAME hosted page (never a duplicate figure).
     win._open_iv()
     assert win._iv_window is first
+    assert owner.current_id() == figure_id
+    assert len(owner.records()) == 1
 
 
 def test_iv_action_dead_without_voltage(qapp, qtbot, tmp_path):

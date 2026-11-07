@@ -70,6 +70,7 @@ def _plots_fit(w: MainWindow, column: str) -> None:
     plots.set_histogram_column(column)
     plots.set_fit("gaussian-mixture")
     QtWidgets.QApplication.processEvents()
+    plots._run_plot()
     plots.close()
     QtWidgets.QApplication.processEvents()
 

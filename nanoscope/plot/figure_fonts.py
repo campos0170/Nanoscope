@@ -72,16 +72,45 @@ def is_symbol_family(family: str | None) -> bool:
     return str(family or "").strip().casefold() in {f.casefold() for f in SYMBOL_FAMILIES}
 
 
+def standin_of(family: str | None) -> str | None:
+    """The main-list family that ``family`` is a stand-in for (``"Liberation Serif"`` ->
+    ``"Times New Roman"``), or ``None`` when it is not one. Case-insensitive. A stand-in that two
+    listed families share (``Liberation Sans``: Arial's and Helvetica's) goes to the first of
+    them; both are sans-serif.
+
+    A figure drawn where its family is missing is drawn in a stand-in, and that is the name Qt
+    writes into an SVG; this is how the writer finds the family's kind again."""
+    key = effective_family(family).casefold()
+    if key in _STACKS:                      # a listed family is nobody's stand-in
+        return None
+    for listed in FIGURE_FAMILIES:
+        if key in {name.casefold() for name in _STACKS[listed.casefold()][0]}:
+            return listed
+    return None
+
+
+def _entry(family: str | None) -> tuple[tuple[str, ...], str] | None:
+    """The stack entry of a main-list family, or of the one a stand-in belongs to; else None."""
+    eff = effective_family(family).casefold()
+    entry = _STACKS.get(eff)
+    if entry is None:
+        listed = standin_of(family)
+        entry = _STACKS[listed.casefold()] if listed else None
+    return entry
+
+
 def generic_family(family: str | None) -> str:
     """``"sans-serif"``, ``"serif"`` or ``"monospace"`` -- the generic a viewer falls back to.
-    A family off the main list is assumed sans-serif."""
-    entry = _STACKS.get(effective_family(family).casefold())
+    A stand-in has its listed family's (``Liberation Serif``: serif); any other family off the
+    main list is assumed sans-serif."""
+    entry = _entry(family)
     return entry[1] if entry else "sans-serif"
 
 
 def fallback_stack(family: str | None) -> tuple[str, ...]:
     """The named family first, then its metric-compatible substitutes, then the Arial stack
-    for a family off the main list, then the generic. No duplicates (case-insensitive).
+    for a family off the main list, then the generic. No duplicates (case-insensitive). A
+    substitute named first (``Liberation Serif``) is followed by its own family's list.
 
     >>> fallback_stack("Arial")[:2]
     ('Arial', 'Helvetica')
@@ -92,6 +121,13 @@ def fallback_stack(family: str | None) -> tuple[str, ...]:
     if entry is not None:
         names.extend(entry[0])
         generic = entry[1]
+    elif (listed := standin_of(eff)) is not None:
+        # A stand-in (the name Qt writes for a figure drawn in one, ``Liberation Serif`` for
+        # Times New Roman) keeps its family's kind: the listed family next, so a viewer that
+        # has it draws what was chosen, then the other stand-ins, then the family's generic.
+        names.append(listed)
+        names.extend(_STACKS[listed.casefold()][0])
+        generic = _STACKS[listed.casefold()][1]
     else:
         # Off the main list: fall back to Arial's stack, so a missing family never leaves a
         # viewer to pick a face of its own.

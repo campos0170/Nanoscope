@@ -36,7 +36,7 @@ from typing import Callable, Iterable, Sequence
 
 from PySide6 import QtWidgets
 
-__all__ = ["ask_export_path", "existing_of", "confirm_overwrite"]
+__all__ = ["ask_export_path", "ask_export_directory", "existing_of", "confirm_overwrite"]
 
 #: What a caller passes to describe its outputs: chosen path -> every path it may write.
 OutputsFn = Callable[[Path], Sequence[Path]]
@@ -128,4 +128,15 @@ def ask_export_path(
     targets = [Path(p) for p in (outputs(path) if outputs is not None else (path,))]
     if not confirm_overwrite(parent, title, existing_of(targets)):
         return None
+    return path
+
+
+def ask_export_directory(parent=None, *, title="Export selected figures", suggestion=""):
+    """Choose an existing destination folder; callers confirm their exact file manifest."""
+    chosen = QtWidgets.QFileDialog.getExistingDirectory(parent, title, str(suggestion))
+    if not chosen:
+        return None
+    path = Path(chosen)
+    if not path.is_dir():
+        raise ValueError("Choose an existing export folder.")
     return path

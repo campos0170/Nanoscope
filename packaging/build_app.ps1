@@ -48,6 +48,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "nanoscope is not importable: run pip install -e . from $Root" }
     $AppVersion = python (Join-Path $Here "build_identity.py") --version
     if ($LASTEXITCODE -ne 0) { throw "Unable to read the NanoScope version" }
+    python (Join-Path $Here "build_identity.py") --check-environment
+    if ($LASTEXITCODE -ne 0) { throw "Runtime dependency preflight failed; use the validated release environment" }
 
     # --- icon --------------------------------------------------------------------------------
     # Checked in, so this is a no-op on a normal build; regenerated only if it is missing.

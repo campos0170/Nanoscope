@@ -132,7 +132,7 @@ def test_rejected_fit_keeps_parameters_but_moves_verdict_into_details(kind, fit_
     detail = figures.figure_details(fig)["plots"][0]
     assert detail["fit"]["meta"]["gof"] == REJECTED_GOF
     assert detail["fit"]["ci"] == fit.ci
-    assert any("fit REJECTED" in line for line in detail["details"])
+    assert any("mismatch" in line and "descriptive check; not a calibrated test" in line for line in detail["details"])
     assert REJECTED_GOF["note"] in detail["details"]
     unstamped, _ = getattr(figures, kind)(events, fit=fit_type(None))
     pd.testing.assert_frame_equal(getattr(fig, "_nanoscope_source_data"),

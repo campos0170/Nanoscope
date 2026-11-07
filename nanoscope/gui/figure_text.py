@@ -21,6 +21,13 @@ pyqtgraph's own Python dispatch or a Qt signal:
   :class:`EditableLabelItem`) that override ``mouseClickEvent`` and say so with signals;
 * the legend's Qt double click arrives as ``LegendItem.sigDoubleClicked``.
 
+SELECTION (Phase 1, the Format tab) USES THE SAME ENTRY POINTS. The wrappers above, and the
+``selectRequested`` signal of the annotation items, say which element a left or right click
+landed on (:attr:`FigureTextController.claimed`) BEFORE they do what they did; a left click that
+nobody claimed reaches ``scene().sigMouseClicked`` and says :attr:`FigureTextController.cleared`.
+A pan is a drag and sends no click, so it keeps the selection. The outline and the mini toolbar
+(``format_toolbar``) are children of the view's viewport, never scene items.
+
 THE DOUBLE CLICK IS A GATE, NOT ``ev.double()``. pyqtgraph 0.14 turns Qt's double click into
 ``MouseClickEvent(double=True)`` only for the order Press, Release, DblClick, Release. For
 Qt 6's Press, Release, Press, DblClick, Release the scene forwards the second PRESS as a
@@ -39,11 +46,12 @@ ms`` draws as typed; ``_{…}`` and ``^{…}`` are the one markup, for sub- and 
 """
 from __future__ import annotations
 
+import functools
 import html
 import math
 import re
 import weakref
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any, Callable, Mapping, Protocol
 
 import pyqtgraph as pg
@@ -52,13 +60,15 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..plot import figure_fonts as ff
 from .font_picker import FontPicker, html_font_family
+from .widget_transfer import prepare_widget_move
 
 __all__ = [
-    "AXIS_SIDES", "HIDDEN_TEXT", "AxisPin", "AxisPropertiesPopover", "AxisState",
+    "AXIS_SIDES", "HIDDEN_TEXT", "AxisFields", "AxisPin", "AxisPropertiesPopover", "AxisState",
     "DoubleClickGate", "EditableLabelItem", "FigureTextController", "FigureTextHost",
-    "InlineTextEditor", "TextStyle", "TextStylePopover", "TextTarget", "apply_text_style",
-    "appearance_text_host", "attach_figure_text", "css_args", "figure_text_for",
-    "label_args", "rich_text", "shown_text", "valid_element_key", "view_pin_key",
+    "InlineTextEditor", "SetHereDot", "TextStyle", "TextStyleFields", "TextStylePopover",
+    "TextTarget", "apply_text_style", "appearance_text_host", "attach_figure_text", "css_args",
+    "figure_text_for", "label_args", "rich_text", "shown_text", "valid_element_key",
+    "view_pin_key",
 ]
 
 #: A text that draws nothing: what a box holding only spaces stores (``HIDDEN_LABEL`` in
@@ -392,8 +402,13 @@ class EditableLabelItem(pg.LabelItem):
 
     editRequested = QtCore.Signal()
     menuRequested = QtCore.Signal(object)
+    #: A left or right click landed on it (before it does anything with the click): the
+    #: Format tab selects it.
+    selectRequested = QtCore.Signal()
 
     def mouseClickEvent(self, ev):  # noqa: N802 - pyqtgraph API, our own subclass
+        if ev.button() in (QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton):
+            self.selectRequested.emit()
         if ev.button() == QtCore.Qt.MouseButton.LeftButton and GATE(ev, ("label", id(self))):
             ev.accept()
             self.editRequested.emit()
@@ -498,6 +513,352 @@ class _ColorRow(QtWidgets.QWidget):
         return QtGui.QColor(text).name() if text and QtGui.QColor(text).isValid() else None
 
 
+class SetHereDot(QtWidgets.QToolButton):
+    """The "set here" marker beside a property of the selected element.
+
+    ``element``: "● set here", and a click clears that one property (``cleared``). ``figure``
+    and ``default``: the grey words "from figure (Ticks 10 pt)" or "default", not clickable. The
+    one place the three sources of ``format_inspector.resolve`` are spelled."""
+
+    cleared = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None, *, prop: str = "") -> None:
+        super().__init__(parent)
+        self.setObjectName("formatSetHere")
+        self.prop = prop
+        self.setAutoRaise(True)
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._source = "default"
+        self.clicked.connect(self._clicked)
+        self.set_source("default")
+
+    def set_source(self, source: str, note: str = "") -> None:
+        self._source = source if source in ("element", "figure", "style", "default") else "default"
+        self.setProperty("source", self._source)
+        if self._source == "element":
+            self.setText("● set here")
+            self.setEnabled(True)
+            self.setToolTip("Set on this element, not taken from the figure. Click to clear it.")
+        elif self._source == "figure":
+            self.setText(f"from figure ({note})" if note else "from figure")
+            self.setEnabled(False)
+            self.setToolTip("Taken from the figure's own setting (Format ▸ Figure).")
+        elif self._source == "style":
+            self.setText(f"from style ({note})" if note else "from style")
+            self.setEnabled(False)
+            self.setToolTip("Taken from this figure's referenced style.")
+        else:
+            self.setText("default")
+            self.setEnabled(False)
+            self.setToolTip("Nothing set: the window's default.")
+
+    def source(self) -> str:
+        return self._source
+
+    def is_set(self) -> bool:
+        return self._source == "element"
+
+    def _clicked(self) -> None:
+        if self._source == "element":
+            self.cleared.emit()
+
+
+class _TextSizeSpin(QtWidgets.QDoubleSpinBox):
+    """The text size box: 0 is Default and the next size is the smallest a text draws (4 pt,
+    the range ``TextStyle`` keeps), so a run of arrow clicks never lands on a size the style
+    would drop (``plot_appearance._SizeSpinBox`` says why; this is its text-size twin)."""
+
+    FLOOR = 4.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setRange(0, 72)
+        self.setDecimals(3)
+        self.setSpecialValueText("Default")
+        self.setSuffix(" pt")
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 -- Qt API
+        target = self.value() + steps * self.singleStep()
+        if not 0 < target < self.FLOOR:
+            super().stepBy(steps)
+            return
+        self.setValue(self.FLOOR if steps > 0 else self.minimum())
+
+    def validate(self, text: str, pos: int):
+        state, text, pos = super().validate(text, pos)
+        if (state == QtGui.QValidator.State.Acceptable
+                and 0 < self.valueFromText(text) < self.FLOOR):
+            state = QtGui.QValidator.State.Intermediate
+        return state, text, pos
+
+
+class _ColorButton(QtWidgets.QToolButton):
+    """Colour as ONE button with a menu (Automatic, the swatches, More…): the live fields and
+    the mini toolbar's colour, where the popover's ten-widget row would be too wide and too
+    many widgets. ``picked`` says a person chose; :meth:`set_value` never does."""
+
+    picked = QtCore.Signal(object)         # a "#rrggbb" or None (automatic)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("textColorButton")
+        self.setAccessibleName("Colour")
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._value: str | None = None
+        menu = QtWidgets.QMenu(self)
+        menu.setObjectName("textColorMenu")
+        menu.addAction("Automatic").triggered.connect(functools.partial(self._pick, None))
+        for colour in SWATCHES:
+            pixmap = QtGui.QPixmap(12, 12)
+            pixmap.fill(QtGui.QColor(colour))
+            action = menu.addAction(QtGui.QIcon(pixmap), colour)
+            action.triggered.connect(functools.partial(self._pick, colour))
+        menu.addSeparator()
+        menu.addAction("More…").triggered.connect(self._more)
+        self.setMenu(menu)
+        self.set_value(None)
+
+    def value(self) -> str | None:
+        return self._value
+
+    def set_value(self, value: str | None) -> None:
+        value = QtGui.QColor(value).name() if value and QtGui.QColor(value).isValid() else None
+        self._value = value
+        self.setText(value or "Auto")
+        self.setStyleSheet(f"border-bottom: 3px solid {value};" if value else "")
+
+    def _pick(self, value: str | None, _checked: bool = False) -> None:
+        self.picked.emit(value)
+
+    def _more(self, _checked: bool = False) -> None:
+        colour = QtWidgets.QColorDialog.getColor(
+            QtGui.QColor(self._value or "#000000"), self.window(), "Choose text colour")
+        if colour.isValid():
+            self.picked.emit(colour.name())
+
+
+class TextStyleFields(QtWidgets.QWidget):
+    """Font, size, bold, italic, colour and (the title) alignment of ONE text element: the
+    controls of the "Text style…" popover, extracted so a second place can use them.
+
+    ``live=False`` is the popover's: the "Custom font" box and the picker, a colour row with
+    a hex box, nothing reported (the popover reads :meth:`style` on OK). ``live=True`` is the
+    Format tab's and the mini toolbar's: the picker has a leading ``inherit_label`` row (an
+    explicit Arial on a figure set in Times is a choice, "" is "follow the figure"), colour is
+    one menu button, and every change is reported at once as ``changed(property, value)`` with
+    ``value`` None for "clear it". ``compact=True`` lays the controls out in one row, without
+    labels, for the toolbar; ``dots=True`` adds a :class:`SetHereDot` to every form row.
+
+    A write is ALWAYS one property: the caller starts from the target's current style and
+    replaces that field (``FigureTextController.set_style_property``), because a bare
+    ``TextStyle`` written to the fit label cleared its template and size."""
+
+    changed = QtCore.Signal(str, object)
+    editingFinished = QtCore.Signal()
+    PROPS = ("family", "size_pt", "bold", "italic", "color", "align")
+    _ROW_WORDS = {"family": "Font", "size_pt": "Size", "bold": "Bold", "italic": "Italic",
+                  "color": "Colour", "align": "Alignment"}
+
+    def __init__(self, *, live: bool, inherit_label: str | None = None, parent=None,
+                 compact: bool = False, dots: bool = False) -> None:
+        super().__init__(parent)
+        self.setObjectName("textStyleFields")
+        self.live = bool(live)
+        self._compact = bool(compact)
+        self._loading = False
+        self.key = ""
+        self.use_family = None
+        if self.live:
+            self.family = FontPicker(inherit_label=inherit_label or "Figure font")
+            self.family.changed.connect(self._family_picked)
+        else:
+            self.use_family = QtWidgets.QCheckBox("Custom font")
+            # "Arial" is a family here, not "unset": a text that follows the figure's font is
+            # this box unticked, so the first row stores Arial itself.
+            self.family = FontPicker(first_row=(ff.DEFAULT_FAMILY, ff.DEFAULT_FAMILY))
+            # Not the picker's own sentence ("The first row is the figure default"): here the
+            # first row is an explicit Arial, and the box counts only while Custom font is
+            # ticked.
+            self.family.setToolTip(
+                "Font for this text, used only while Custom font is ticked. The first row is "
+                "Arial itself, whatever the figure's font is; untick Custom font to follow the "
+                f"figure's font. {ff.OTHER_FONT_LABEL} lists every font installed on this "
+                "computer except the system's private fonts and symbol fonts such as Wingdings.")
+        self.size = _TextSizeSpin()
+        self.size.setAccessibleName("Text size")
+        self.bold = QtWidgets.QToolButton(text="B", checkable=True)
+        self.bold.setAccessibleName("Bold")
+        self.italic = QtWidgets.QToolButton(text="I", checkable=True)
+        self.italic.setAccessibleName("Italic")
+        self.color = _ColorButton() if self.live else _ColorRow(None)
+        self.align = QtWidgets.QComboBox()
+        self.align.setAccessibleName("Alignment")
+        for label, value in (("Automatic", None), ("Left", "left"), ("Center", "center"),
+                             ("Right", "right")):
+            self.align.addItem(label, value)
+        self.dots: dict[str, SetHereDot] = {}
+        self._rows: dict[str, QtWidgets.QWidget] = {}
+        if dots and not self._compact:
+            for prop in self.PROPS:
+                dot = SetHereDot(prop=prop)
+                dot.cleared.connect(functools.partial(self.changed.emit, prop, None))
+                self.dots[prop] = dot
+        self._build_layout()
+        if self.live:
+            self.size.setKeyboardTracking(False)     # typing 12 must not apply 1, then 12
+            self.size.valueChanged.connect(self._size_changed)
+            self.size.editingFinished.connect(self.editingFinished)
+            self.bold.toggled.connect(self._bold_toggled)
+            self.italic.toggled.connect(self._italic_toggled)
+            self.color.picked.connect(self._color_picked)
+            self.align.currentIndexChanged.connect(self._align_changed)
+
+    # -- layout -------------------------------------------------------------------------------
+    def _with_dot(self, prop: str, *controls: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        box = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        for control in controls:
+            row.addWidget(control)
+        if prop in self.dots:
+            row.addStretch(1)
+            row.addWidget(self.dots[prop])
+        return box
+
+    def _build_layout(self) -> None:
+        if self._compact:
+            row = QtWidgets.QGridLayout(self)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(3)
+            self._compact_grid = row
+            self._compact_columns = 6
+            self._compact_controls = (self.family, self.size, self.bold, self.italic,
+                                      self.color, self.align)
+            for column, control in enumerate(self._compact_controls):
+                row.addWidget(control, 0, column)
+            self._rows = {"family": self.family, "size_pt": self.size, "bold": self.bold,
+                          "italic": self.italic, "color": self.color, "align": self.align}
+            return
+        form = QtWidgets.QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        self._form = form
+        if not self.live:
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(self.use_family)
+            row.addWidget(self.family, 1)
+            form.addRow("Font", row)
+            srow = QtWidgets.QHBoxLayout()
+            for widget in (self.size, self.bold, self.italic):
+                srow.addWidget(widget)
+            form.addRow("Size / style", srow)
+            form.addRow("Colour", self.color)
+            form.addRow("Alignment", self.align)
+            self._rows = {"align": self.align}
+            return
+        for prop, control in (("family", self.family), ("size_pt", self.size),
+                              ("bold", self.bold), ("italic", self.italic),
+                              ("color", self.color), ("align", self.align)):
+            box = self._with_dot(prop, control)
+            self._rows[prop] = box
+            form.addRow(self._ROW_WORDS[prop], box)
+
+    def fit_compact_width(self, available: int) -> None:
+        """Wrap the existing toolbar fields when the canvas cannot hold their single row."""
+        if not self._compact:
+            return
+        controls = [control for control in self._compact_controls if not control.isHidden()]
+        width = sum(control.sizeHint().width() for control in controls)
+        width += self._compact_grid.spacing() * max(0, len(controls) - 1)
+        columns = 3 if width > available else 6
+        if columns == self._compact_columns:
+            return
+        self._compact_columns = columns
+        for index, control in enumerate(self._compact_controls):
+            prepare_widget_move(control)
+            self._compact_grid.addWidget(control, index // columns, index % columns)
+        self._compact_grid.invalidate()
+        self.updateGeometry()
+
+    def set_capabilities(self, capabilities) -> None:
+        """Show what the element can take: alignment for the title only."""
+        wanted = "align" in capabilities
+        if self._compact:
+            self.align.setVisible(wanted)
+        else:
+            self._form.setRowVisible(self._rows["align"], wanted)
+
+    # -- the value ----------------------------------------------------------------------------
+    def style(self) -> TextStyle:
+        """The style these controls show, without its text (the popover has the text box)."""
+        if self.use_family is not None:
+            family = self.family.value() if self.use_family.isChecked() else None
+        else:
+            family = self.family.value() or None
+        return TextStyle.from_mapping({
+            "family": family, "size_pt": self.size.value() or None,
+            "bold": True if self.bold.isChecked() else None,
+            "italic": True if self.italic.isChecked() else None,
+            "color": self.color.value(), "align": self.align.currentData()})
+
+    def set_style(self, style: TextStyle) -> None:
+        """Show ``style`` and report nothing."""
+        was = self._loading
+        self._loading = True
+        try:
+            if self.use_family is not None:
+                self.use_family.setChecked(bool(style.family))
+            self.family.set_value(style.family)
+            self.size.setValue(style.size_pt or 0)
+            self.bold.setChecked(bool(style.bold))
+            self.italic.setChecked(bool(style.italic))
+            self.color.set_value(style.color)
+            self.align.setCurrentIndex(max(0, self.align.findData(style.align)))
+        finally:
+            self._loading = was
+
+    def set_target(self, key: str, target: TextTarget,
+                   resolved: Mapping[str, tuple[object, str]] | None = None, *,
+                   notes: Mapping[str, str] | None = None) -> None:
+        """Show ``target``'s style, what it can take and where each property comes from.
+
+        ``resolved`` maps a property to ``(effective value, source)`` (``format_inspector.
+        resolve``; source ``element``, ``figure`` or ``default``); ``notes`` the grey words
+        for a ``figure`` source ("Ticks 10 pt"). An inherited size shows the special value
+        "Default", with the figure's value in those words beside it."""
+        self.key = key
+        self.set_style(target.style)
+        self.set_capabilities(target.capabilities)
+        for prop, dot in self.dots.items():
+            _value, source = (resolved or {}).get(prop, (None, "default"))
+            dot.set_source(source, (notes or {}).get(prop, ""))
+
+    # -- live reports -------------------------------------------------------------------------
+    def _report(self, prop: str, value) -> None:
+        if not self._loading:
+            self.changed.emit(prop, value)
+
+    def _family_picked(self, family: str) -> None:
+        self._report("family", family or None)
+
+    def _size_changed(self, value: float) -> None:
+        self._report("size_pt", value or None)
+
+    def _bold_toggled(self, on: bool) -> None:
+        self._report("bold", True if on else None)
+
+    def _italic_toggled(self, on: bool) -> None:
+        self._report("italic", True if on else None)
+
+    def _color_picked(self, value) -> None:
+        self._report("color", value)
+
+    def _align_changed(self, _index: int) -> None:
+        self._report("align", self.align.currentData())
+
+
 class TextStylePopover(_Popover):
     """Text, font, size, bold, italic, colour and (title only) alignment of one element."""
 
@@ -515,50 +876,19 @@ class TextStylePopover(_Popover):
             form.addRow("Text", self.text)
         else:
             self.text.hide()
-        self.use_family = QtWidgets.QCheckBox("Custom font")
-        self.use_family.setChecked(bool(style.family))
-        # "Arial" is a family here, not "unset": a text that follows the figure's font is this
-        # box unticked, so the first row stores Arial itself.
-        self.family = FontPicker(first_row=(ff.DEFAULT_FAMILY, ff.DEFAULT_FAMILY))
-        # Not the picker's own sentence ("The first row is the figure default"): here the first
-        # row is an explicit Arial, and the box counts only while Custom font is ticked.
-        self.family.setToolTip(
-            "Font for this text, used only while Custom font is ticked. The first row is Arial "
-            "itself, whatever the figure's font is; untick Custom font to follow the figure's "
-            f"font. {ff.OTHER_FONT_LABEL} lists every font installed on this computer except the "
-            "system's private fonts and symbol fonts such as Wingdings.")
-        self.family.set_value(style.family)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.use_family)
-        row.addWidget(self.family, 1)
-        form.addRow("Font", row)
-        self.size = QtWidgets.QDoubleSpinBox()
-        self.size.setRange(0, 72)
-        self.size.setDecimals(1)
-        self.size.setSpecialValueText("Default")
-        self.size.setSuffix(" pt")
-        self.size.setValue(style.size_pt or 0)
-        self.bold = QtWidgets.QToolButton(text="B", checkable=True)
-        self.bold.setAccessibleName("Bold")
-        self.bold.setChecked(bool(style.bold))
-        self.italic = QtWidgets.QToolButton(text="I", checkable=True)
-        self.italic.setAccessibleName("Italic")
-        self.italic.setChecked(bool(style.italic))
-        srow = QtWidgets.QHBoxLayout()
-        for widget in (self.size, self.bold, self.italic):
-            srow.addWidget(widget)
-        form.addRow("Size / style", srow)
-        self.color = _ColorRow(style.color)
-        form.addRow("Colour", self.color)
-        self.align = QtWidgets.QComboBox()
-        for label, value in (("Automatic", None), ("Left", "left"), ("Center", "center"),
-                             ("Right", "right")):
-            self.align.addItem(label, value)
-        self.align.setCurrentIndex(max(0, self.align.findData(style.align)))
-        if align:
-            form.addRow("Alignment", self.align)
-        else:
-            self.align.hide()
+        # The controls are TextStyleFields', under the names the popover always had.
+        self.fields = TextStyleFields(live=False, parent=self)
+        self.fields.set_target(key, TextTarget(
+            None, auto, style, "text",
+            frozenset({"style"}) | (frozenset({"align"}) if align else frozenset())))
+        self.use_family = self.fields.use_family
+        self.family = self.fields.family
+        self.size = self.fields.size
+        self.bold = self.fields.bold
+        self.italic = self.fields.italic
+        self.color = self.fields.color
+        self.align = self.fields.align
+        form.addRow(self.fields)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
@@ -571,13 +901,8 @@ class TextStylePopover(_Popover):
         self._text_kept = style.text
 
     def value(self) -> TextStyle:
-        return TextStyle.from_mapping({
-            "text": self.text.text() if self.text.isVisibleTo(self) else self._text_kept,
-            "family": self.family.value() if self.use_family.isChecked() else None,
-            "size_pt": self.size.value() or None,
-            "bold": True if self.bold.isChecked() else None,
-            "italic": True if self.italic.isChecked() else None,
-            "color": self.color.value(), "align": self.align.currentData()})
+        return replace(self.fields.style(), text=TextStyle.from_mapping({
+            "text": self.text.text() if self.text.isVisibleTo(self) else self._text_kept}).text)
 
     def accept(self) -> None:
         value = self.value()
@@ -592,18 +917,26 @@ class TextStylePopover(_Popover):
         self.committed.emit(self.key, value)
 
 
-class AxisPropertiesPopover(_Popover):
-    """Label, units (read-only), range with Auto, log, tick label size and major tick
-    spacing of one axis, typed in the units the axis shows."""
+class AxisFields(QtWidgets.QWidget):
+    """Label, units (read-only), range with Auto, log, tick label size and major tick spacing
+    of one axis, typed in the units the axis shows: the form of "Axis properties…", extracted
+    so the Format tab can hold the same rows. The attribute names are the popover's.
 
-    committed = QtCore.Signal(str, object)
+    ``live=True`` (the Format tab's axis panel): the label and tick-size rows are not shown
+    (their own elements hold them), Log is a read-only mirror of the page's own box, and every
+    committed edit (Auto toggled, a range or tick spacing typed and finished) says ``edited``;
+    :meth:`value` is what to commit, or None with the validation sentence in :attr:`error`."""
 
-    def __init__(self, side: str, state: AxisState, parent=None) -> None:
+    edited = QtCore.Signal()
+
+    def __init__(self, state: AxisState, *, live: bool = False, parent=None) -> None:
         super().__init__(parent)
-        self.side = side
+        self.live = bool(live)
         self._state = state
-        self.setObjectName("plotAxisPropertiesPopover")
+        self._loading = False
         form = QtWidgets.QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+        self._form = form
         self.label = QtWidgets.QLineEdit("" if state.label is None else state.label)
         self.label.setPlaceholderText(f"Automatic: {state.label_auto}" if state.label_auto
                                       else "Automatic")
@@ -627,13 +960,13 @@ class AxisPropertiesPopover(_Popover):
         form.addRow("Range", rrow)
         self.log = QtWidgets.QCheckBox("Log scale")
         self.log.setChecked(state.log)
-        self.log.setEnabled(state.log_available)
+        self.log.setEnabled(state.log_available and not self.live)
         if not state.log_available:
             self.log.setToolTip(state.log_reason)
         form.addRow("", self.log)
         self.tick_size = QtWidgets.QDoubleSpinBox()
         self.tick_size.setRange(0, 30)
-        self.tick_size.setDecimals(1)
+        self.tick_size.setDecimals(3)
         self.tick_size.setSpecialValueText("Default")
         self.tick_size.setValue(state.tick_pt or 0)
         form.addRow("Tick labels (pt)", self.tick_size)
@@ -648,19 +981,52 @@ class AxisPropertiesPopover(_Popover):
         form.setRowVisible(self.major, state.tick_major_available)
         self.error = QtWidgets.QLabel("")
         self.error.setStyleSheet("color: #b00020;")
+        self.error.setWordWrap(True)
         self.error.hide()
         form.addRow(self.error)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.close)
-        form.addRow(buttons)
+        if self.live:
+            self.major.setKeyboardTracking(False)
+            for widget in (self.label, self.tick_size):
+                form.setRowVisible(widget, False)
+            self.auto.toggled.connect(self._edited)
+            self.lo.editingFinished.connect(self._edited)
+            self.hi.editingFinished.connect(self._edited)
+            self.major.valueChanged.connect(self._edited)
         self._sync()
 
-    def _sync(self) -> None:
+    def _sync(self, *_args) -> None:
         for widget in (self.lo, self.hi):
             widget.setEnabled(not self.auto.isChecked())
+
+    def _edited(self, *_args) -> None:
+        if not self._loading:
+            self.edited.emit()
+
+    def set_state(self, state: AxisState) -> None:
+        """Show ``state`` and report nothing (the Format tab retargets one set of rows)."""
+        self._state = state
+        self._loading = True
+        try:
+            self.label.setText("" if state.label is None else state.label)
+            self.label.setPlaceholderText(f"Automatic: {state.label_auto}" if state.label_auto
+                                          else "Automatic")
+            self.label.setReadOnly(bool(state.label_locked))
+            self.units.setText(state.units)
+            lo, hi = state.range if state.range is not None else state.shown_range
+            for box, value in ((self.lo, lo), (self.hi, hi)):
+                if not (self.live and box.hasFocus()):       # never over a number being typed
+                    box.setText(f"{value:.6g}")
+            self.auto.setChecked(state.range is None)
+            self.log.setChecked(state.log)
+            self.log.setEnabled(state.log_available and not self.live)
+            self.log.setToolTip("" if state.log_available else state.log_reason)
+            self.tick_size.setValue(state.tick_pt or 0)
+            self.major.setValue(state.tick_major or 0)
+            self._form.setRowVisible(self.major, state.tick_major_available)
+            self._sync()
+            self.error.hide()
+        finally:
+            self._loading = False
 
     def value(self) -> AxisState | None:
         rng = None
@@ -677,6 +1043,37 @@ class AxisPropertiesPopover(_Popover):
         return replace(self._state, label=_clean_text(self.label.text()), range=rng,
                        log=self.log.isChecked(), tick_pt=self.tick_size.value() or None,
                        tick_major=self.major.value() or None)
+
+
+class AxisPropertiesPopover(_Popover):
+    """Label, units (read-only), range with Auto, log, tick label size and major tick
+    spacing of one axis, typed in the units the axis shows."""
+
+    committed = QtCore.Signal(str, object)
+
+    def __init__(self, side: str, state: AxisState, parent=None) -> None:
+        super().__init__(parent)
+        self.side = side
+        self._state = state
+        self.setObjectName("plotAxisPropertiesPopover")
+        form = QtWidgets.QVBoxLayout(self)
+        self.fields = AxisFields(state, parent=self)
+        for name in ("label", "units", "lo", "hi", "auto", "log", "tick_size", "major",
+                     "error"):
+            setattr(self, name, getattr(self.fields, name))
+        form.addWidget(self.fields)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.close)
+        form.addWidget(buttons)
+
+    def _sync(self) -> None:
+        self.fields._sync()
+
+    def value(self) -> AxisState | None:
+        return self.fields.value()
 
     def accept(self) -> None:
         value = self.value()
@@ -695,9 +1092,17 @@ class FigureTextController(QtCore.QObject):
 
     ``opened`` says which editor opened for which key (``"inline"``, ``"style"``,
     ``"axis"``), so a test can count them.
+
+    ``claimed(key)`` says a left or right click landed on the element ``key`` (a text key, or
+    ``"legend"`` for the legend frame), ``cleared()`` that a left click landed on nothing of
+    ours: the Format tab's selection (see the module docstring). ``editingChanged()`` says the
+    inline editor opened or closed (the mini toolbar steps aside while it is open).
     """
 
     opened = QtCore.Signal(str, str)
+    claimed = QtCore.Signal(str)
+    cleared = QtCore.Signal()
+    editingChanged = QtCore.Signal()
 
     def __init__(self, plot: pg.PlotItem, host: FigureTextHost) -> None:
         super().__init__(plot.getViewBox())
@@ -707,6 +1112,11 @@ class FigureTextController(QtCore.QObject):
         self.popover: QtWidgets.QFrame | None = None
         self.last_menu: QtWidgets.QMenu | None = None
         self._legend = None
+        #: The click event the last wrapper claimed (the scene hands the same object to
+        #: ``sigMouseClicked``), and whether an annotation item claimed one (it has no event).
+        self._claimed = None
+        self._claim_flag = False
+        self._scene_ref = None
 
     # -- plumbing ---------------------------------------------------------------------------
     @property
@@ -745,10 +1155,11 @@ class FigureTextController(QtCore.QObject):
         plot = self.plot
         if plot is None:
             return
+        self._connect_scene(plot)
         legend = getattr(plot, "legend", None)
         if legend is not None and legend is not self._legend and _alive(legend):
             self._legend = legend
-            self._wrap(legend, self._legend_key)
+            self._wrap(legend, self._legend_key, frame_key="legend")
             legend.sigDoubleClicked.connect(self._legend_double)
         ref = weakref.ref(self)
         for key, target in self.targets().items():
@@ -759,15 +1170,19 @@ class FigureTextController(QtCore.QObject):
                 continue
             item._nanoscope_text_controller = ref
             item.editRequested.connect(lambda *_a, k=key, r=ref: r() and r()._edit_or_style(k))
+            if hasattr(item, "selectRequested"):
+                item.selectRequested.connect(lambda *_a, k=key, r=ref: r() and r()._claim_item(k))
             if hasattr(item, "menuRequested"):
                 item.menuRequested.connect(
                     lambda pos, k=key, r=ref: r() and r()._raise_menu_at(k, pos))
             item.setCursor(QtCore.Qt.CursorShape.OpenHandCursor
                            if hasattr(item, "moved") else QtCore.Qt.CursorShape.IBeamCursor)
 
-    def _wrap(self, item, resolve: Callable) -> None:
+    def _wrap(self, item, resolve: Callable, frame_key: str | None = None) -> None:
         """Wrap ``item.mouseClickEvent`` on this instance: double click edits, right click
-        adds the text entries to the app menu, anything else goes to the original."""
+        adds the text entries to the app menu, anything else goes to the original. A left or
+        right click first CLAIMS the element for the Format tab's selection (``frame_key`` is
+        what a click that lands on no element of the item claims: the legend frame)."""
         if getattr(item, "_nanoscope_text_wrapped", False):
             return
         item._nanoscope_text_wrapped = True
@@ -777,7 +1192,10 @@ class FigureTextController(QtCore.QObject):
         def click(ev, original=original, resolve=resolve):
             ctl = ref()
             key = resolve(ev) if ctl is not None else None
+            if key is None and frame_key is not None and ctl is not None:
+                ctl._claim(frame_key, ev)
             if key is not None and ctl.target(key) is not None:
+                ctl._claim(key, ev)
                 if ev.button() == QtCore.Qt.MouseButton.LeftButton and GATE(ev, (id(ctl), key)):
                     ev.accept()
                     ctl._edit_or_style(key)
@@ -810,6 +1228,8 @@ class FigureTextController(QtCore.QObject):
                 axis.label.boundingRect()).contains(ev.pos()))
             key = f"axis.{side}.label" if on_label else f"axis.{side}.ticks"
             known = ctl.target(f"axis.{side}.label") is not None
+            if known:
+                ctl._claim(key, ev)
             if known and ev.button() == QtCore.Qt.MouseButton.LeftButton and GATE(ev, (id(ctl), key)):
                 ev.accept()
                 if on_label:
@@ -848,6 +1268,118 @@ class FigureTextController(QtCore.QObject):
         key = self._legend_row_at(ev.scenePos())
         if key is not None and GATE.take((id(self), key)):
             self._edit_or_style(key)
+
+    # -- selection (the Format tab) -------------------------------------------------------------
+    def _claim(self, key: str, ev) -> None:
+        """A wrapper saw a click on ``key``: remember the event (the scene hands the same
+        object to ``sigMouseClicked``, so no ``id()`` is kept) and say so. Left and right
+        clicks only; what the wrapper does with the click is unchanged."""
+        if ev.button() not in (QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton):
+            return
+        self._claimed = ev
+        self.claimed.emit(key)
+
+    def _claim_item(self, key: str) -> None:
+        """An annotation item (``selectRequested``) saw a click: it has no event to keep."""
+        self._claim_flag = True
+        QtCore.QTimer.singleShot(0, self, self._finish_item_claim)
+        self.claimed.emit(key)
+
+    def _finish_item_claim(self) -> None:
+        # A drag selects an annotation without a scene click afterwards. Its claim must
+        # not swallow the next, unrelated click on the empty canvas.
+        self._claim_flag = False
+
+    def _connect_scene(self, plot) -> None:
+        scene = plot.scene()
+        if scene is None or (self._scene_ref is not None and self._scene_ref() is scene):
+            return
+        self._scene_ref = weakref.ref(scene)
+        scene.sigMouseClicked.connect(self._on_scene_click)
+
+    def _on_scene_click(self, ev) -> None:
+        """Every click of the scene, after the wrappers had theirs: a left click nobody
+        claimed is a click on nothing of ours, and clears the selection. A pan is a drag and
+        sends none."""
+        claimed = self._claimed is ev or self._claim_flag
+        self._claimed, self._claim_flag = None, False
+        if not claimed and ev.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.cleared.emit()
+
+    def view(self) -> QtWidgets.QGraphicsView | None:
+        """The graphics view this plot is shown in (None while it is in none)."""
+        return self._view()
+
+    def anchor_rect(self, key: str) -> QtCore.QRect | None:
+        """Where element ``key`` is, in the view's viewport coordinates, or None. A text
+        element, the legend frame (``"legend"``) or a whole axis (``"axis.bottom"``)."""
+        target = self.target(key)
+        if target is not None:
+            if key.startswith("axis.") and key.endswith(".ticks"):
+                return self._ticks_rect(target)
+            return self._anchor_rect(target)
+        plot, view = self.plot, self._view()
+        if plot is None or view is None:
+            return None
+        item = None
+        if key == "legend":
+            item = self._legend
+        elif key in ("axis.bottom", "axis.left", "axis.top", "axis.right"):
+            item = plot.getAxis(key.split(".")[1])
+        if item is None or not _alive(item) or not item.isVisible():
+            return None
+        return view.mapFromScene(item.sceneBoundingRect()).boundingRect()
+
+    def _ticks_rect(self, target: TextTarget) -> QtCore.QRect | None:
+        """The tick numbers: the axis less its label."""
+        view, axis = self._view(), target.item
+        if view is None or not _alive(axis) or not axis.isVisible():
+            return None
+        rect = view.mapFromScene(axis.sceneBoundingRect()).boundingRect()
+        if axis.label.isVisible():
+            label = view.mapFromScene(axis.label.sceneBoundingRect()).boundingRect()
+            if axis.orientation in ("left", "right"):
+                if axis.orientation == "left":
+                    rect.setLeft(min(rect.right(), label.right() + 1))
+                else:
+                    rect.setRight(max(rect.left(), label.left() - 1))
+            elif axis.orientation == "bottom":
+                rect.setBottom(max(rect.top(), label.top() - 1))
+            else:
+                rect.setTop(min(rect.bottom(), label.bottom() + 1))
+        return rect
+
+    def apply_style(self, key: str, style: TextStyle, *, run: bool = False) -> None:
+        """Hand ``style`` to the host as the new style of ``key``: one Undo step. ``run`` marks
+        a write that is one of a run of the same control (the size box's arrow clicks): a host
+        that has ``apply_text_run`` folds the run into ONE step."""
+        runner = getattr(self.host, "apply_text_run", None) if run else None
+        try:
+            if callable(runner):
+                runner(key, style)
+            else:
+                self.host.apply_text(key, style)
+        except RuntimeError:     # the page was torn down under the gesture
+            pass
+
+    def set_style_property(self, key: str, prop: str, value, *, run: bool = False) -> None:
+        """Change ONE property of ``key``'s style, starting from the style it has NOW: the
+        only way a panel, the mini toolbar or Paste writes, because a bare ``TextStyle`` handed
+        to the fit label cleared its wording and size (``PlotAppearance.with_text_style`` keeps
+        them in the style's own fields). ``value`` None clears the property; an empty family is
+        "follow the figure"."""
+        target = self.target(key)
+        if target is None or prop not in {f.name for f in fields(TextStyle)}:
+            return
+        if prop == "family" and not value:
+            value = None
+        self.apply_style(key, replace(target.style, **{prop: value}), run=run)
+
+    def finish_style_run(self) -> None:
+        """Focus leaving a size/text control closes its coalesced Undo step."""
+        finish = getattr(self.host, "commit_text_run", None)
+        if callable(finish):
+            finish()
 
     # -- the menu -----------------------------------------------------------------------------
     def menu_entries(self, key: str) -> list[tuple[str, Callable[[], None]]]:
@@ -994,10 +1526,13 @@ class FigureTextController(QtCore.QObject):
         editor.setGeometry(x, y, width, 26)
         ref = weakref.ref(self)
         editor.committed.connect(lambda k, t, r=ref: r() and r()._commit_text(k, t))
+        editor.committed.connect(lambda *_a, r=ref: r() and r().editingChanged.emit())
+        editor.cancelled.connect(lambda *_a, r=ref: r() and r().editingChanged.emit())
         editor.show()
         editor.setFocus()
         self.editor = editor
         self.opened.emit("inline", key)
+        self.editingChanged.emit()
         return editor
 
     def _commit_text(self, key: str, text: str) -> None:
@@ -1095,6 +1630,10 @@ def figure_text_for(plot) -> FigureTextController | None:
 def _display_to_view(axis: pg.AxisItem, value: float) -> float:
     """A typed DISPLAY value as the ViewBox coordinate (``plot_interaction.axis_value_text``
     inverted: log axes hold log10, the tick scale and a log display factor multiply)."""
+    basis = getattr(axis, "_nanoscope_quantity_basis", None)
+    if basis is not None:
+        from ..core.quantity_display import display_to_view
+        return float(display_to_view(value, basis))
     factor = float(getattr(axis, "scale", 1.0) or 1.0)
     if axis.logMode:
         factor *= float(getattr(axis, "display_factor", 1.0) or 1.0)
@@ -1103,6 +1642,10 @@ def _display_to_view(axis: pg.AxisItem, value: float) -> float:
 
 
 def _view_to_display(axis: pg.AxisItem, value: float) -> float:
+    basis = getattr(axis, "_nanoscope_quantity_basis", None)
+    if basis is not None:
+        from ..core.quantity_display import view_to_display
+        return float(view_to_display(value, basis))
     factor = float(getattr(axis, "scale", 1.0) or 1.0)
     if axis.logMode:
         factor *= float(getattr(axis, "display_factor", 1.0) or 1.0)
@@ -1289,6 +1832,20 @@ class AppearanceTextHost:
         widget = self.widget
         if widget is not None:
             widget.apply_appearance(widget.state().with_text_style(key, style))
+
+    def apply_text_run(self, key: str, style: TextStyle) -> None:
+        """``apply_text`` for one of a RUN of writes by the same control (the size box's arrow
+        clicks, the mini toolbar's): the widget's burst route, so a run closer together than
+        ``APPEARANCE_COALESCE_MS`` is ONE Undo step. A key a subclass routes elsewhere through
+        ``apply_text`` (the Summaries' legend names) takes no style, so is never written here."""
+        widget = self.widget
+        if widget is not None:
+            widget.edit_text_style(key, style)
+
+    def commit_text_run(self) -> None:
+        widget = self.widget
+        if widget is not None:
+            widget._close_burst()
 
     def axis_state(self, side: str) -> AxisState:
         plot = self.plot

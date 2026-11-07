@@ -91,12 +91,17 @@ from .export_paths import ask_export_path
 from .figure_text import SHARED_LABELS_REASON, appearance_text_host, figure_text_for
 from .fit_label import FitLabelItem, FitReadout
 from .font_picker import figure_qfont, html_font_family
+from .figure_series import tag_pg_series, prepare_pg_series_items, pg_series_descriptors
 from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
-                              apply_tick_family, reframe_axis_pins)
+                              apply_tick_family, apply_colorbar_appearance, reframe_axis_pins)
 from .plot_interaction import (image_value, install_plot_interaction, navigation_for,
                                reset_plot_history, view_button, window_readout)
 from .plot_templates import WindowTemplateControls
-from .plot_workflow import WarningSummary, control_group, install_plot_workflow
+from .pending_analysis import (PendingAnalysis, committed_analysis, combo_value,
+                               spin_value, check_value)
+from .plot_workflow import (DEFAULT_REVEAL, ExportEntry, FormatSpec, InspectorGroup,
+                            PageAdapter, WarningSummary, control_group, form_rows,
+                            install_plot_workflow)
 from .plot_export import (
     DATA_FILTERS,
     IMAGE_FILTERS,
@@ -116,7 +121,7 @@ _AUTO = "Auto"
 
 #: The segment spins' tooltip before a recording is selected. Once one is, the offset
 #: is known and :meth:`PSDWindow._label_segment_clock` replaces this with
-#: ``clock.field_note(clock.RECORDING, offset)``, which names t₀ in numbers.
+#: ``clock.field_note(clock.RECORDING, offset, display_unit="ms")``, which names t₀ in numbers.
 #:
 #: THIS IS THE FIELD THE 5.7x ERROR WAS TYPED INTO (report High-6). The trace x-axis
 #: and the event table both name their clock now; these two spins were the third
@@ -127,7 +132,7 @@ _AUTO = "Auto"
 #: measured as noise. `Analysis > Power spectrum of the measured region` hands the
 #: selection over as sample indices and cannot make the mistake; a user typing can.
 _SEG_SPIN_TIP = (
-    "{edge} of the analysed segment, in seconds FROM THE START OF THIS RECORDING "
+    "{edge} of the analysed segment, in milliseconds FROM THE START OF THIS RECORDING "
     "(0 = first sample). This is the same clock as the event table's t_start_s and "
     "NOT necessarily the clock the trace x-axis is drawn on.")
 
@@ -339,6 +344,8 @@ class PSDCurve:
     x: np.ndarray | None = None  # what was actually drawn (DC dropped, log-filtered)
     y: np.ndarray | None = None
     item: object = None          # the pg.PlotDataItem, for tests + incremental clears
+    #: Calibration used for these arrays; a legacy unknown stays unknown.
+    calibration_fingerprint: tuple[float, float] | None = None
 
     def band_rms(self, f_lo: float, f_hi: float) -> float:
         return psd_mod.band_rms(self.freqs, self.psd, f_lo, f_hi)
@@ -597,6 +604,8 @@ class PSDWindow(QtWidgets.QMainWindow):
     """
 
     workspaceChanged = Signal()
+    pendingChanged = Signal()
+    sourceSelected = Signal(str, int)
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None, *,
                  defer_initial_refresh: bool = False) -> None:
@@ -671,8 +680,23 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._hist_levels: list[dict] = []
 
         self._build_ui()
+        self._pending_analysis = PendingAnalysis(self, {
+            'target_key': (self._rec_combo, self._pending_target_key, self._pending_target),
+            'compare_keys': (self._compare_list, self.compare_keys, self._pending_compares),
+            'start_s': spin_value(self._start_spin), 'end_s': spin_value(self._end_spin),
+            'nperseg': combo_value(self._nperseg_combo), 'window': combo_value(self._window_combo),
+            'overlap_percent': spin_value(self._overlap_spin),
+            'log_log': check_value(self._loglog_check), 'asd': check_value(self._asd_check),
+            'rms_lo_hz': spin_value(self._rms_lo_spin), 'rms_hi_hz': spin_value(self._rms_hi_spin),
+            'view': combo_value(self._view_combo, data=True),
+            'spectrogram_nperseg': combo_value(self._spec_nperseg_combo),
+            'histogram_bins': combo_value(self._hist_bins_combo),
+            'histogram_clip': check_value(self._hist_clip_check),
+            'histogram_levels': check_value(self._hist_levels_check),
+        }, has_result=self.has_data)
         if defer_initial_refresh:
             self._repopulate(None)
+            self._pending_analysis.commit()
         else:
             self.refresh()
 
@@ -681,7 +705,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(Qt.Horizontal)
 
         controls = self._build_controls()
-        scroll = QtWidgets.QScrollArea()
+        scroll = self._controls_scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(controls)
         scroll.setMinimumWidth(300)
@@ -755,7 +779,8 @@ class PSDWindow(QtWidgets.QMainWindow):
             exports=(("Export current figure…", lambda: self.save_image()),
                      ("Export data (CSV)…", lambda: self.export_data())))
         self._workflow.adopt_reset_figure(
-            self._appearance_widget, keeps="the Spectrogram colormap and colour limits")
+            self._appearance_widget, keeps="the Spectrogram colormap and colour limits",
+            takes_ranges=True)
         self._refresh_btn.hide()
         self._install_plot_interaction()
 
@@ -768,8 +793,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         readout follows each axis' own log mode and tick scale, so it reads in the units
         the ticks show; over the spectrogram it adds the image's log10 PSD under the pointer.
         """
-        exports = (("Export current figure…", lambda: self.save_image()),
-                   ("Export data (CSV)…", lambda: self.export_data()))
+        # One list for the right-click menu and the Explorer's Export ▾: they cannot disagree.
+        exports = self._exports = (("Export current figure…", lambda: self.save_image()),
+                                   ("Export data (CSV)…", lambda: self.export_data()))
         self._readout = window_readout(self)
 
         def spectrogram_value(vx: float, vy: float) -> str:
@@ -791,7 +817,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                     "log_reason": "The spectrogram has a log scale on the frequency axis only."}
         hist_log = {"log_reason": "The all-points histogram always counts on a log axis and "
                                   "keeps current linear."}
-        navigations = []
+        navigations = self._navigations = []
         for plot, extra, hooks in ((self._plot, None, loglog), (self._fft_plot, None, loglog),
                                    (self._spec_plot, spectrogram_value, spec_log),
                                    (self._hist_plot, None, hist_log)):
@@ -811,6 +837,86 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._appearance_widget.set_fit_label_available(True, in_legend=False)
         self._workflow.add_view_control(view_button(
             lambda: navigation_for(self.active_plot_item()), navigations))
+
+    def configure_figure_binding(self, follow: bool, on_changed) -> None:
+        """Expose this live figure's source policy without gathering or computing data."""
+        from .figure_adapter_pages import configure_source_binding
+        configure_source_binding(self, self._recording_group, follow, on_changed)
+
+    def inspector_adapter(self) -> PageAdapter:
+        """How the Analysis Explorer hosts this page (Phase 1, "Pages B").
+
+        Built once and cached; nothing but ``AnalysisExplorer.add_page`` (through
+        ``InspectorHost.adopt``) and the hosting test helpers call it. The groups name the
+        page's own group boxes (moved whole); the spectrogram's colour rows leave the Style
+        husk for the Format tab's Colour map panel. It computes nothing: ``update`` is the
+        existing Analyze / refresh handler. Managed figures keep draft analysis controls
+        pending until Update; Format continues to describe the committed picture."""
+        if getattr(self, "_inspector_adapter", None) is None:
+            # The View selector's labels are long (35 characters): the combo may shrink (its
+            # text elides) and its label wraps above it, instead of widening the 290 px column.
+            self._view_combo.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                           QtWidgets.QSizePolicy.Policy.Fixed)
+            self._view_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+            colours = form_rows([("Colormap", self._spec_cmap_combo),
+                                 ("Colour limits", self._spec_levels_combo),
+                                 ("", self._spec_levels_row),
+                                 ("", self._spec_logf_check)])
+            # Keep the controls mounted once; Format lists them only for the spectrogram.
+            colours._nanoscope_format_visible = lambda: self.current_view() == VIEW_SPECTROGRAM
+            self._inspector_adapter = PageAdapter.from_widget(
+                self, "noise", self._appearance_widget,
+                groups=[
+                    InspectorGroup("sources", "Sources",
+                                   [self._recording_group, self._segment_group]),
+                    InspectorGroup("view", "View", [self._view_group, self._display_group]),
+                    InspectorGroup("estimator", "Estimator",
+                                   [self._welch_group, self._rms_group], expanded=False),
+                    InspectorGroup("recipes", "Recipes", [self._export_info], expanded=False)],
+                format=FormatSpec(
+                    self._appearance_widget, controllers=self._text_controllers,
+                    extras={"colour_map": [colours]},
+                    views_changed=self._view_combo.currentIndexChanged,
+                    axis_log_target=self._inspector_log_target,
+                    series_provider=self.series_descriptors),
+                update=self._refresh_from_button,
+                pending=self._pending_analysis.state,
+                pending_changed=self.pendingChanged,
+                update_tooltip="Re-gather the open recordings (pick up any opened since) and "
+                               "recompute the spectrum.",
+                exports=lambda: [ExportEntry(text, run, kind=kind) for (text, run), kind
+                                 in zip(self._exports, ("figure", "data"))],
+                navigation=lambda: navigation_for(self.active_plot_item()),
+                navigations=lambda: tuple(self._navigations),
+                status_bar=self.statusBar,
+                reveal_map={**DEFAULT_REVEAL, "Analysis": "estimator"},
+                chrome=[self._workflow],
+                on_adopt=self._on_adopt)
+        return self._inspector_adapter
+
+    def _inspector_log_target(self, plot: str, side: str):
+        if plot in (VIEW_PSD, VIEW_FFT):
+            return "view", self._loglog_check
+        if plot == VIEW_SPECTROGRAM and side == "left":
+            return "@format:colour_map", self._spec_logf_check
+        return None
+
+    def _text_controllers(self) -> list:
+        """The in-figure editing controller of the view on screen (Format lists those)."""
+        controller = figure_text_for(self.active_plot_item())
+        return [controller] if controller is not None else []
+
+    def _on_adopt(self) -> None:
+        """Hosting steps: the controls the toolbar and the inspector replace stay
+        constructed and hidden (the Style group is a husk of legacy rows), the controls
+        column goes with them, and the four plots may shrink to the room the page area has
+        beside a 320 px inspector."""
+        for hidden in (self._save_btn, self._save_data_btn, self._refresh_btn, self._style_group,
+                       self._controls_scroll):
+            hidden.hide()
+        for widget in (self._plot_widget, self._fft_widget, self._spec_widget, self._hist_widget):
+            widget.setMinimumSize(280, 300)
+        self.setMinimumSize(min(self.minimumWidth(), 280), min(self.minimumHeight(), 360))
 
     def _spec_log_from_figure(self, side: str, on: bool) -> None:
         if side == "left":
@@ -1014,7 +1120,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         """
         box = QtWidgets.QGroupBox("View")
         lay = QtWidgets.QVBoxLayout(box)
-        form = QtWidgets.QFormLayout()
+        form = self._view_form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
         self._view_combo = QtWidgets.QComboBox()
         for key, label in VIEWS:
@@ -1155,13 +1261,14 @@ class PSDWindow(QtWidgets.QMainWindow):
     def _build_segment_group(self) -> QtWidgets.QGroupBox:
         box = QtWidgets.QGroupBox("Segment (quiet open-pore baseline)")
         form = QtWidgets.QFormLayout(box)
-        self._start_spin = QtWidgets.QDoubleSpinBox()
-        self._end_spin = QtWidgets.QDoubleSpinBox()
+        from .time_controls import SecondsSpinBox
+        self._start_spin = SecondsSpinBox()
+        self._end_spin = SecondsSpinBox()
         for sb in (self._start_spin, self._end_spin):
             sb.setDecimals(4)
             sb.setRange(0.0, 1.0)
             sb.setSingleStep(0.1)
-            sb.setSuffix(" s")
+            sb.setSuffix(" ms")
         # The clock is named in :meth:`_label_segment_clock`, per recording, because the
         # offset is a property of the file. Until one is selected, say the general rule.
         self._start_spin.setToolTip(_SEG_SPIN_TIP.format(edge="Start"))
@@ -1405,6 +1512,9 @@ class PSDWindow(QtWidgets.QMainWindow):
             item.setForeground(QtGui.QBrush(QtGui.QColor(source_colour(colour_index))))
             self._compare_list.addItem(item)
             colour_index += 1
+        offered = {rec['key'] for rec in self._recordings}
+        for key in sorted(keep - offered):
+            self._add_unavailable_compare(key)
 
     def refresh(self) -> None:
         """Re-gather the open recordings and recompute, keeping the current selection."""
@@ -1414,6 +1524,12 @@ class PSDWindow(QtWidgets.QMainWindow):
 
     def _refresh_from_button(self) -> None:
         """A deliberate refresh replaces the durable numerical snapshot."""
+        if self._pending_analysis.managed:
+            warnings = self._pending_analysis_warnings()
+            if warnings:
+                self.statusBar().showMessage('; '.join(warnings))
+                self.pendingChanged.emit()
+                return False
         self.refresh()
         self.workspaceChanged.emit()
 
@@ -1432,7 +1548,102 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._repopulate(target)
         self._reconfigure_for_recording()
         if recompute:
-            self._recompute()
+            return self._recompute()
+        elif not self.has_data():
+            self._pending_analysis.commit()
+
+    def _pending_target_key(self):
+        unresolved = self._rec_combo.currentData(Qt.UserRole + 1)
+        if unresolved:
+            return str(unresolved)
+        target = self._current_target()
+        return next((rec['key'] for rec in self._recordings
+                     if (rec['doc_id'], rec['channel']) == target), '')
+
+    def stage_source(self, recipe):
+        """Keep follow-selection inputs pending without replacing the shown result."""
+        from ..core.analysis_workspace import _resolve_source
+        values = self._pending_analysis.read()
+        doc_id, channel, _reason = _resolve_source(self, recipe or {})
+        with self._pending_analysis._blocked():
+            self._repopulate(self._current_target())
+            record = next((rec for rec in self._recordings
+                           if (rec['doc_id'], rec['channel']) == (doc_id, channel)), None)
+            values['target_key'] = (record['key'] if record is not None else
+                                    f"{recipe['source_key']}#{recipe.get('channel', 0)}"
+                                    if recipe and recipe.get('source_key') else '')
+            # A comparison promoted to the primary is no longer a separate curve.
+            values['compare_keys'] = [key for key in values['compare_keys']
+                                      if key != values['target_key']]
+            self._pending_analysis._write(values)
+        self._pending_analysis.defer()
+
+    def _pending_target(self, key):
+        record = next((rec for rec in self._recordings if rec['key'] == key), None)
+        if record is None:
+            if key:
+                index = self._rec_combo.findData(key, role=Qt.UserRole + 1)
+                if index < 0:
+                    index = self._rec_combo.count()
+                    self._rec_combo.addItem(f'Unavailable recording · {key}', None)
+                    self._rec_combo.setItemData(index, key, Qt.UserRole + 1)
+                    self._rec_combo.setItemData(
+                        index, 'Reopen this recording or choose an available recording before Update.',
+                        Qt.ToolTipRole)
+                    # It remains the selected saved identity, but after choosing
+                    # a replacement the unavailable row is not a runnable source.
+                    self._rec_combo.model().item(index).setEnabled(False)
+                self._rec_combo.setCurrentIndex(index)
+            else:
+                self._rec_combo.setCurrentIndex(-1)
+            self._configured_for = None
+            self._clock_offset_s = None
+            # Its duration/rate are unknown, so preserve the saved draft values
+            # rather than clipping them to whichever recording is still open.
+            for spin in (self._start_spin, self._end_spin,
+                         self._rms_lo_spin, self._rms_hi_spin):
+                spin.setRange(0.0, 1e300)
+        else:
+            self._select_combo_target((record['doc_id'], record['channel']))
+            meta = self._session.document(record['doc_id']).meta
+            self._configured_for = (record['doc_id'], int(record['channel']),
+                                    float(meta.duration_s or 0.0),
+                                    float(meta.sample_rate_hz or 0.0) / 2.0)
+            self._clock_offset_s = clock.clock_offset_s(meta)
+            for spin in (self._start_spin, self._end_spin):
+                spin.setRange(0.0, float(meta.duration_s or 0.0))
+            for spin in (self._rms_lo_spin, self._rms_hi_spin):
+                spin.setRange(0.0, float(meta.sample_rate_hz or 0.0) / 2.0)
+        self._label_segment_clock()
+        self._rebuild_compare_list(set())
+
+    def _pending_compares(self, keys):
+        offered = {self._compare_list.item(i).data(Qt.UserRole)
+                   for i in range(self._compare_list.count())}
+        if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys):
+            raise ValueError('Invalid pending Noise comparison identities.')
+        for key in sorted(set(keys) - offered):
+            self._add_unavailable_compare(key)
+        for index in range(self._compare_list.count()):
+            item = self._compare_list.item(index)
+            item.setCheckState(Qt.Checked if item.data(Qt.UserRole) in keys else Qt.Unchecked)
+
+    def _add_unavailable_compare(self, key):
+        item = QtWidgets.QListWidgetItem(f'Unavailable recording · {key}')
+        item.setData(Qt.UserRole, key)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked)
+        item.setToolTip('Reopen this recording or uncheck it before updating the figure.')
+        self._compare_list.addItem(item)
+
+    def _pending_analysis_warnings(self):
+        offered = {rec['key'] for rec in self._gather_recordings()}
+        missing = []
+        if self._pending_target_key() and self._pending_target_key() not in offered:
+            missing.append('selected recording unavailable')
+        if set(self.compare_keys()) - offered:
+            missing.append('comparison recording unavailable')
+        return tuple(missing)
 
     def _select_combo_target(self, target: tuple[str, int] | None) -> bool:
         """Select the combo entry whose ``(doc_id, channel)`` equals ``target``.
@@ -1536,6 +1747,8 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._start_spin.setValue(0.0)
         self._end_spin.setValue(float(dur))
         self._updating = False
+        if self._pending_analysis.defer():
+            return
         self._recompute()
         self.workspaceChanged.emit()
 
@@ -1550,21 +1763,32 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._rebuild_compare_list(keep)
         self._updating = False
         self._reconfigure_for_recording()
+        target = self._current_target()
+        if target is not None:
+            self.sourceSelected.emit(str(target[0]), int(target[1]))
+        if self._pending_analysis.defer():
+            return
         self._recompute()
         self.workspaceChanged.emit()
 
     def _on_compare_changed(self, *_a) -> None:
         if not self._updating:
+            if self._pending_analysis.defer():
+                return
             self._recompute()
             self.workspaceChanged.emit()
 
     def _on_param_changed(self, *_a) -> None:
         if not self._updating:
+            if self._pending_analysis.defer():
+                return
             self._recompute()
             self.workspaceChanged.emit()
 
     def _on_display_changed(self, *_a) -> None:
         if not self._updating:
+            if self._pending_analysis.defer():
+                return
             moved = self._asd_shown not in (None, self._asd_check.isChecked())
             self._redraw_and_views()
             if moved:       # PSD against ASD is the PSD view's y axis, and only that axis
@@ -1582,6 +1806,8 @@ class PSDWindow(QtWidgets.QMainWindow):
 
     def _on_rms_changed(self, *_a) -> None:
         if not self._updating:
+            if self._pending_analysis.defer():
+                return
             self._update_rms_readout()
             self.workspaceChanged.emit()
 
@@ -1732,6 +1958,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._spec_bar.setLevels(levels)
         self._refresh_spec_caption()
 
+    @committed_analysis
     def _refresh_spec_caption(self) -> None:
         if self._spec is not None and self._spec_drawn_span is not None:
             self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(
@@ -1807,8 +2034,11 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._refresh_spec_caption()
         self.workspaceChanged.emit()
 
+    @committed_analysis
     def _restyle_existing_views(self) -> None:
         """Change only scene appearance; never read a trace or rebuild a result."""
+        prepare_pg_series_items([*(curve.item for curve in self._curves),
+                                 self._fit_item, self._fft_item, self._hist_item])
         views = (
             (VIEW_PSD, self._plot_widget, self._plot),
             (VIEW_FFT, self._fft_widget, self._fft_plot),
@@ -1827,7 +2057,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         for index, curve in enumerate(self._curves):
             if curve.item is not None:
                 pen = pg.mkPen(curve.item.opts["pen"])
-                pen.setColor(QtGui.QColor(self._style.data_color if index == 0 else curve.colour))
+                binding = self._appearance.style_binding
+                inherited = binding is not None and 'data_color' not in binding.get('overrides', {})
+                pen.setColor(QtGui.QColor(curve.colour if inherited or index else self._style.data_color))
                 curve.item.setPen(pen)
         for item, color in ((self._fit_item, self._style.fit_color),
                             (self._fft_item, self._style.data_color),
@@ -1875,6 +2107,9 @@ class PSDWindow(QtWidgets.QMainWindow):
     def appearance_state(self) -> dict:
         return self._appearance.to_dict()
 
+    def series_descriptors(self):
+        return pg_series_descriptors((self.active_plot_item(),))
+
     def _pin_view(self, plot: pg.PlotItem) -> str:
         """The view whose Axis properties pins ``plot`` draws (``PlotAppearance.for_view``)."""
         return {id(self._plot): VIEW_PSD, id(self._fft_plot): VIEW_FFT,
@@ -1889,6 +2124,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._apply_appearance()
 
     def _apply_appearance(self) -> None:
+        from ..core.quantity_display import quantity_for
+        from .quantity_axis import present_page_axes
+        present_page_axes(self, self._spec_plot,
+            {"bottom": quantity_for("time_s", clock_basis="recording")},
+            view=VIEW_SPECTROGRAM, primary=VIEW_PSD)
         view = self.current_view()
         self._appearance_widget.set_legend_available(
             getattr(self.active_plot_item(), "legend", None) is not None)
@@ -1909,18 +2149,24 @@ class PSDWindow(QtWidgets.QMainWindow):
                 (self._fft_widget, self._fft_plot, [self._fft_item], []),
                 (self._spec_widget, self._spec_plot, [], []),
                 (self._hist_widget, self._hist_plot, [self._hist_item], [])):
-            apply_plot_appearance(
-                plot, self._appearance.for_view(self._pin_view(plot), primary=VIEW_PSD),
-                plot_widget=widget, data_items=data, fit_items=fits)
+            appearance = self._appearance.for_view(self._pin_view(plot), primary=VIEW_PSD)
+            binding = appearance.style_binding
+            if plot is self._plot and binding is not None and 'data_color' not in binding.get('overrides', {}):
+                # Inherited single-ink defaults cannot erase recording identities.
+                appearance = replace(appearance, data_color=None)
+            apply_plot_appearance(plot, appearance, plot_widget=widget, data_items=data, fit_items=fits)
             controller = figure_text_for(plot)
             if controller is not None:
                 controller.refresh()        # a legend may be new since the last draw
+        if self._spec_bar is not None:
+            apply_colorbar_appearance(self._spec_bar, self._appearance,
+                                      self._spec_plot.getAxis("left"))
         fit_label = getattr(self, "_fit_label", None)
         if fit_label is not None:
             # Never In legend: a single curve's row does not carry the α line.
-            fit_label.apply_state(replace(self._appearance.fit_label_state(), in_legend=False),
+            fit_label.apply_state(replace(self._appearance.effective_fit_label_state(), in_legend=False),
                                   self._fit_readouts,
-                                  self._appearance.text_style("annotation.fit"),
+                                  self._appearance.effective_text_style("annotation.fit"),
                                   self._appearance.font_family)
         # Level positions and occupancies are scientific results; only their ink
         # changes here. InfiniteLine is not a PlotDataItem handled by the helper.
@@ -2047,6 +2293,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                 return dict(c.summary)
         return None
 
+    @committed_analysis
     def band_rms_per_curve(self) -> dict[str, float]:
         """``{label: band RMS}`` over the current band, one entry per drawn curve."""
         lo, hi = self._rms_lo_spin.value(), self._rms_hi_spin.value()
@@ -2071,6 +2318,7 @@ class PSDWindow(QtWidgets.QMainWindow):
     def summary(self) -> dict | None:
         return None if self._summary is None else dict(self._summary)
 
+    @committed_analysis
     def rms_value(self) -> float:
         """The band RMS currently shown in the read-out (0.0 when unavailable)."""
         if self._freqs is None or self._psd is None:
@@ -2094,6 +2342,7 @@ class PSDWindow(QtWidgets.QMainWindow):
     def curve_item(self) -> pg.PlotDataItem | None:
         return self._curve_item
 
+    @committed_analysis
     def details_text(self) -> str:
         return self._details.toPlainText()
 
@@ -2110,7 +2359,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                  "overlap_percent": self._overlap_spin.value(),
                  "log_log": self._loglog_check.isChecked(), "asd": self._asd_check.isChecked(),
                  "rms_lo_hz": self._rms_lo_spin.value(), "rms_hi_hz": self._rms_hi_spin.value(),
-                 "view": self.current_view(),
+                 "view": str(self._view_combo.currentData() or VIEW_PSD),
                  "spectrogram_nperseg": self._spec_nperseg_combo.currentText(),
                  "spectrogram_colormap": self._spec_cmap_combo.currentText(),
                  "spectrogram_levels_mode": self._spec_levels_mode(),
@@ -2130,8 +2379,8 @@ class PSDWindow(QtWidgets.QMainWindow):
         """A recalled template, as one gesture: every control set, then each CHANGED group
         handled the way its own hand edit is.
 
-        This window has no draft, so the recall does what setting the controls by hand
-        would, once instead of once per control -- and only for what actually moved: a new
+        Managed analytical controls remain pending until Update. A standalone recall
+        acts once instead of once per control, and only for what actually moved: a new
         Welch setup recomputes over the recording and span already chosen, PSD/ASD or log
         axes redraw, a view option drops only its own view's cache, and the RMS band, the
         style and the appearance never touch the data or the zoom. A template whose
@@ -2218,6 +2467,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         # each group sent where its own signal sends a hand edit (_wire_signals).
         after, _appearance = self.template_settings()
         moved = {key for key in after if after[key] != current[key]}
+        if self._pending_analysis.managed:
+            analytical = moved & self._pending_analysis.controls.keys()
+            if analytical:
+                self._pending_analysis.defer()
+                moved -= analytical
         view_inputs = {VIEW_SPECTROGRAM: {"spectrogram_nperseg"},
                        VIEW_ALLPOINTS: {"histogram_bins", "histogram_clip",
                                         "histogram_levels"}}
@@ -2308,12 +2562,12 @@ class PSDWindow(QtWidgets.QMainWindow):
         i1 = int(np.clip(int(round(want1 * fs)), 0, n_total))
         seg = data[i0:i1]
         if seg.size < 2:
-            return (f"{label}: the selected {want0:.4g}–{want1:.4g} s window holds "
+            return (f"{label}: the selected {want0*1000.:.4g}–{want1*1000.:.4g} ms window holds "
                     f"{seg.size} sample(s) of this recording — nothing to transform.")
         note = ""
         if i1 < int(round(want1 * fs)):
             note = (f"window clipped to this recording's length "
-                    f"({i0 / fs:.4g}–{i1 / fs:.4g} s)")
+                    f"({i0 / fs*1000.:.4g}–{i1 / fs*1000.:.4g} ms)")
         return _Span(chan=chan, seg=seg, fs=float(fs), i0=int(i0), i1=int(i1), note=note)
 
     def _compute_curve(self, rec: dict, colour: str) -> PSDCurve | str:
@@ -2359,9 +2613,31 @@ class PSDWindow(QtWidgets.QMainWindow):
             n_samples=int(seg.size), i0=int(i0), note=note,
             channel_issues=tuple(chan.issues),
             constant=constant, underflow=underflow, time_rms=time_rms,
+            calibration_fingerprint=tuple(self._session.calibration(doc_id, channel).fingerprint()),
         )
 
     def _recompute(self) -> None:
+        pending = getattr(self, '_pending_analysis', None)
+        if pending is None:
+            return self._recompute_current()
+        if pending.managed:
+            warnings = self._pending_analysis_warnings()
+            if warnings:
+                self.statusBar().showMessage('; '.join(warnings))
+                self.pendingChanged.emit()
+                return False
+        old_view, old_asd = self._view_shown, self._asd_shown
+        with pending.applying():
+            self._recompute_current()
+            pending.commit()
+        if pending.managed:
+            if old_view != self._view_shown:
+                self._reset_words(_SHOWS_VIEW[self._view_shown])
+            elif old_asd not in (None, self._asd_shown):
+                self._reset_words('the amplitude spectral density' if self._asd_shown
+                                  else 'the power spectral density', ((VIEW_PSD, 'left'),))
+
+    def _recompute_current(self) -> None:
         """Welch-estimate the primary recording and every ticked comparison.
 
         The primary's result is mirrored onto the single-curve fields (``_freqs`` /
@@ -2455,6 +2731,9 @@ class PSDWindow(QtWidgets.QMainWindow):
                 continue
             colour = self._style.data_color if i == 0 else curve.colour
             item = pg.PlotDataItem(x=xs, y=ys, pen=pg.mkPen(colour, width=1))
+            tag_pg_series(item, view='noise.psd', identity=curve.key, identity_kind='source',
+                          label=curve.label, color=curve.colour,
+                          capabilities=('color', 'line_width_pt', 'visible'))
             self._plot.addItem(item)
             curve.item = item
             drawn += 1
@@ -2594,13 +2873,19 @@ class PSDWindow(QtWidgets.QMainWindow):
             return
         self._fit_item = pg.PlotDataItem(
             x=grid, y=line, pen=pg.mkPen(self._style.fit_color, width=2, style=Qt.DashLine))
+        if self._curves:
+            curve = self._curves[0]
+            tag_pg_series(self._fit_item, view='noise.psd', role='fit', identity=curve.key,
+                          identity_kind='source', label=curve.label + ' — 1/f fit',
+                          color=self._style.fit_color, capabilities=('color', 'line_width_pt', 'visible'))
         self._plot.addItem(self._fit_item)
         if len(self._curves) == 1:
             n = int(fl.get("n", 0))
             mark = " · MARGINAL" if fl.get("status") == "marginal" else ""
+            quality = self._flicker_quality_text(fl)
             self._fit_readouts = [FitReadout(
                 parts={"equation": f"1/f fit: α = {alpha:.3f}{mark}",
-                       "n": f"{n} bins, {lo:.3g}–{hi:.3g} Hz"},
+                       "r2": quality, "n": f"{n} bins, {lo:.3g}–{hi:.3g} Hz"},
                 source=self._curves[0].label, colour=self._style.fit_color)]
         if len(self._curves) > 1:
             # Every surface that prints α prints what it rests on — a legend entry is
@@ -2609,7 +2894,15 @@ class PSDWindow(QtWidgets.QMainWindow):
             mark = ", MARGINAL" if fl.get("status") == "marginal" else ""
             self._legend_add(
                 self._fit_item,
-                f"{self._curves[0].label} 1/f fit (α = {alpha:.3f}, {n} bins{mark})")
+                f"{self._curves[0].label} 1/f fit (α = {alpha:.3f}, {n} bins{mark}; "
+                f"{self._flicker_quality_text(fl)})")
+
+    @staticmethod
+    def _flicker_quality_text(fit) -> str:
+        r2 = fit.get("r2")
+        if r2 is None or not np.isfinite(r2):
+            return "R² unavailable; descriptive fit only"
+        return f"R² = {r2:.3f} (descriptive fit only)"
 
     # -- legend ----------------------------------------------------------------------------------
     def _drop_legend(self) -> None:
@@ -2636,6 +2929,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         legend.setBrush(pg.mkBrush(backing))
         legend.setPen(pg.mkPen(border))
         legend.setVisible(True)
+        defaults = getattr(self._plot, "_nanoscope_appearance_defaults", {})
+        if "legend" in defaults:
+            # The legacy page theme is the current automatic look, not a one-time
+            # startup colour. Shared appearance overrides are applied afterwards.
+            defaults["legend"].update(color=fg, brush=pg.mkBrush(backing), pen=pg.mkPen(border))
         return legend
 
     def _legend_add(self, item, label: str) -> None:
@@ -2718,7 +3016,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._start_spin.setToolTip(_SEG_SPIN_TIP.format(edge="Start"))
             self._end_spin.setToolTip(_SEG_SPIN_TIP.format(edge="End"))
             return
-        note = clock.field_note(clock.RECORDING, offset)
+        note = clock.field_note(clock.RECORDING, offset, display_unit="ms")
         self._start_spin.setToolTip(_SEG_SPIN_TIP.format(edge="Start") + "\n\n" + note)
         self._end_spin.setToolTip(_SEG_SPIN_TIP.format(edge="End") + "\n\n" + note)
 
@@ -2732,13 +3030,13 @@ class PSDWindow(QtWidgets.QMainWindow):
         """
         fs = self._fs or 0.0
         dur = (i1 - i0) / fs if fs else 0.0
-        text = f"{n:,} samples · {dur:.4g} s"
+        text = f"{n:,} samples · {dur*1000.:.4g} ms"
         offset = getattr(self, "_clock_offset_s", None)
         if fs and offset is not None and not clock.clocks_agree(offset):
             a = clock.to_instrument_s(offset, i0 / fs)
             b = clock.to_instrument_s(offset, i1 / fs)
-            text += (f"\n{i0 / fs:.4f}–{i1 / fs:.4f} s into the recording "
-                     f"(= {a:.4f}–{b:.4f} s on the trace's instrument clock)")
+            text += (f"\n{i0 / fs*1000.:.1f}–{i1 / fs*1000.:.1f} ms into the recording "
+                     f"(= {a*1000.:.1f}–{b*1000.:.1f} ms on the trace's instrument clock)")
         self._seg_label.setText(text)
 
     def _fill_details(self) -> None:
@@ -2774,12 +3072,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                 f"these curves are in DIFFERENT units ({named}); the y axis "
                 f"is labelled in the primary's ({primary}), so their heights are not "
                 f"comparable as drawn. Calibrate them to a common unit first.")
-        fps = []
-        for curve in self._curves:
-            try:
-                fps.append(self._session.calibration(curve.doc_id, curve.channel).fingerprint())
-            except (KeyError, TypeError, ValueError):
-                fps.append(None)
+        fps = [curve.calibration_fingerprint for curve in self._curves]
         # `alternatives=()`: this window is looking at NOISE SPECTRA, and it does not
         # hold the detections' provenance, so it cannot vouch for an event column. The
         # default advice ("dwell_s and frac_depth (dI/I0) ARE comparable — plot those
@@ -3095,6 +3388,9 @@ class PSDWindow(QtWidgets.QMainWindow):
     # every existing PSD read-out, export and test sees exactly the numbers it saw before.
     def current_view(self) -> str:
         """Which of :data:`VIEWS` is on screen."""
+        pending = getattr(self, '_pending_analysis', None)
+        if pending is not None and pending.managed and not pending.depth and not self._updating:
+            return self._view_shown
         return str(self._view_combo.currentData() or VIEW_PSD)
 
     def set_view(self, view: str) -> None:
@@ -3137,6 +3433,8 @@ class PSDWindow(QtWidgets.QMainWindow):
     def _on_view_changed(self, *_a) -> None:
         if self._updating:
             return
+        if self._pending_analysis.defer():
+            return
         moved = self._view_shown != self.current_view()
         self._refresh_view()
         self._apply_appearance()
@@ -3146,6 +3444,8 @@ class PSDWindow(QtWidgets.QMainWindow):
 
     def _on_view_option_changed(self, *_a) -> None:
         if self._updating:
+            return
+        if self._pending_analysis.defer():
             return
         # A per-view option invalidates only its own view's cache: changing the histogram
         # bin count must not throw away a spectrogram that took 160 ms to compute.
@@ -3378,6 +3678,10 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._view_message(self._fft_plot, self._fft_empty_reason(spec, log_log))
         else:
             item = pg.PlotDataItem(x=xs, y=ys, pen=pg.mkPen(self._style.data_color, width=1))
+            key = str(rec.get('key') or '')
+            tag_pg_series(item, view='noise.fft', identity=key or 'primary',
+                          identity_kind='source' if key else 'none', label=rec['label'],
+                          capabilities=('color', 'line_width_pt', 'visible'))
             self._fft_plot.addItem(item)
             self._fft_item = item
             self._fft_plot.setLogMode(x=log_log, y=log_log)
@@ -3413,7 +3717,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         nseg = self._nseg_used or 1
         lines = [
             f"Single-shot FFT: ONE {spec.window}-tapered transform of {spec.n_samples:,} "
-            f"samples ({dur:.4g} s). Resolution {spec.df_hz:.4g} Hz over "
+            f"samples ({dur*1000.:.4g} ms). Resolution {spec.df_hz:.4g} Hz over "
             f"{spec.n_bins:,} bins.",
         ]
         if spec.reduced:
@@ -3506,7 +3810,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._spec_plot.setXRange(0.0, 1.0, padding=0)
             self._spec_plot.setYRange(0.0, 1.0, padding=0)
             self._spec_msg.setPos(0.5, 0.5)
-            self._spec_plot.setLabel("bottom", "Time (s from the start of this recording)",
+            self._spec_plot.setLabel("bottom", "Time (ms from the start of this recording)",
                                      **self._label_style())
             self._spec_plot.setLabel("left", "Frequency (Hz)", **self._label_style())
             self._view_titles[VIEW_SPECTROGRAM] = f"Spectrogram — {rec['label']}"
@@ -3540,7 +3844,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._spec_bar.setLevels(levels)
         self._spec_bar.getAxis("right").setLabel(f"log₁₀ PSD ({_sq_units(span.chan.units)})",
                                                  **self._label_style())
-        self._spec_plot.setLabel("bottom", "Time (s from the start of this recording)",
+        self._spec_plot.setLabel("bottom", "Time (ms from the start of this recording)",
                                  **self._label_style())
         self._view_titles[VIEW_SPECTROGRAM] = f"Spectrogram — {rec['label']}"
         self._spec_plot.setTitle(self._style.title or self._view_titles[VIEW_SPECTROGRAM],
@@ -3673,7 +3977,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             )
         lines = [
             f"{sg.freqs.size:,} frequency bins x {sg.times.size:,} time columns over "
-            f"{t0:.4g}–{t1:.4g} s. {timing} Frequency spacing is "
+            f"{t0*1000.:.4g}–{t1*1000.:.4g} ms. {timing} Frequency spacing is "
             f"{sg.fs / sg.nperseg:.4g} Hz.",
         ]
         if sg.uncovered_tail_samples:
@@ -3787,6 +4091,10 @@ class PSDWindow(QtWidgets.QMainWindow):
         ys = np.where(counts > 0, counts, np.nan)
         item = pg.PlotDataItem(x=hist.centers, y=ys, connect="finite",
                                pen=pg.mkPen(self._style.data_color, width=1))
+        key = str(rec.get('key') or '')
+        tag_pg_series(item, view='noise.allpoints', identity=key or 'primary',
+                      identity_kind='source' if key else 'none', label=rec['label'],
+                      capabilities=('color', 'line_width_pt', 'visible'))
         self._hist_plot.addItem(item)
         self._hist_item = item
         self._hist_plot.setLogMode(x=False, y=True)
@@ -4104,6 +4412,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             "time_bin_start_from_span_s": time_centres - half_time_bin,
             "time_bin_stop_from_span_s": time_centres + half_time_bin,
             "plot_time_s": plot_time,
+            "plot_time_ms": plot_time * 1000.,
             "frequency_hz": plot_frequency,
             "psd_value": np.asarray(sg.psd).T.reshape(-1),
             "display_log10_psd": shown.reshape(-1),
@@ -4180,6 +4489,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             })
         return pd.DataFrame(rows)
 
+    @committed_analysis
     def _plot_data(self) -> pd.DataFrame:
         """Exact numeric data behind the currently visible analytical view."""
         return {

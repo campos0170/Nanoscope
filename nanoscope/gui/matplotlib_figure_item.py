@@ -3,12 +3,14 @@
 Only ``update_figure`` visits the supplied artists. Display, capture, composition
 and export replay immutable vector commands, never an estimator. SVG is retained
 from Matplotlib itself; PNG/PDF and composition use QPicture, not QtSvg's lossy
-SVG Tiny clipping implementation. Text uses vector glyph outlines.
+SVG Tiny clipping implementation. Literal text retains editable font commands;
+mathematical glyph layout retains its exact vector-path fallback.
 """
 from __future__ import annotations
 
 import io
 import math
+import weakref
 
 import numpy as np
 from matplotlib import rc_context
@@ -49,6 +51,49 @@ def _color(value, gc):
     return QtGui.QColor.fromRgbF(red, green, blue, alpha)
 
 
+_QT_FONT_FAMILIES = {}
+
+
+def _font_families(prop):
+    """Register the exact faces Matplotlib resolved, including bundled fallback fonts."""
+    from matplotlib import font_manager
+    families = []
+    for filename in font_manager.fontManager._find_fonts_by_props(prop):
+        if filename not in _QT_FONT_FAMILIES:
+            identifier = QtGui.QFontDatabase.addApplicationFont(str(filename))
+            names = tuple(QtGui.QFontDatabase.applicationFontFamilies(identifier)) if identifier >= 0 else ()
+            if not names:
+                raise ValueError('The resolved figure font could not be retained for editable export.')
+            _QT_FONT_FAMILIES[filename] = names
+        families.extend(name for name in _QT_FONT_FAMILIES[filename] if name not in families)
+    return families
+
+
+def restore_retained_font_faces(descriptors):
+    """Restore recorded face names from installed/bundled fonts before QPicture replay.
+
+    No font programs or arbitrary paths are accepted from a project. A missing recorded
+    face refuses faithful PDF replay; the original SVG/PNG bytes remain exportable.
+    """
+    from matplotlib.font_manager import FontProperties, findfont
+    if not isinstance(descriptors, (list, tuple)) or len(descriptors) > 256:
+        raise ValueError('The retained font metadata exceeds the replay budget.')
+    for descriptor in descriptors:
+        families = descriptor.get('families') if isinstance(descriptor, dict) else None
+        if (not isinstance(families, (list, tuple)) or not 1 <= len(families) <= 32
+                or any(not isinstance(name, str) or not 0 < len(name) <= 200 for name in families)):
+            raise ValueError('The retained figure font metadata is invalid.')
+        options = {key: descriptor.get(key, default) for key, default in
+                   (('style', 'normal'), ('weight', 'normal'), ('stretch', 'normal'))}
+        try:
+            for family in families:
+                findfont(FontProperties(family=[family], **options), fallback_to_default=False)
+            _font_families(FontProperties(family=list(families), **options))
+        except (ValueError, TypeError, OSError) as exc:
+            raise ValueError('A recorded figure font is unavailable for faithful replay. '
+                             'Use its original PNG/SVG or restore the recorded font. ' + str(exc)) from exc
+
+
 class _PictureRenderer(RendererBase):
     """Translate already prepared artists into native vector painter commands."""
 
@@ -56,6 +101,8 @@ class _PictureRenderer(RendererBase):
         super().__init__()
         self.painter = painter
         self.width, self.height, self.dpi = width, height, dpi
+        self.qt_font_families = set()
+        self.qt_font_faces = {}
 
     def get_canvas_width_height(self):
         return self.width, self.height
@@ -110,9 +157,45 @@ class _PictureRenderer(RendererBase):
             painter.restore()
 
     def draw_text(self, gc, x, y, text, prop, angle, ismath=False, mtext=None):
-        text_gc = self.new_gc()
-        text_gc.copy_properties(gc)
-        self._draw_text_as_path(text_gc, x, y, text, prop, angle, ismath)
+        if ismath:
+            text_gc = self.new_gc()
+            text_gc.copy_properties(gc)
+            self._draw_text_as_path(text_gc, x, y, text, prop, angle, ismath)
+            return
+        # Store text commands, so QPdfWriter embeds fonts rather than glyph outlines.
+        # The renderer's coordinates are figure pixels; QFont sizes are device points.
+        from matplotlib.font_manager import weight_dict, stretch_dict
+        families = _font_families(prop)
+        self.qt_font_families.update(families)
+        descriptor = {'families': families, 'style': prop.get_style(),
+                      'weight': prop.get_weight(), 'stretch': prop.get_stretch()}
+        self.qt_font_faces[repr(descriptor)] = descriptor
+        font = QtGui.QFont()
+        font.setFamilies(families)
+        font.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
+        stretch = prop.get_stretch()
+        # Matplotlib's CSS selection scale is100..900 (normal500); Qt takes
+        # percentages (normal100). Passing500 stretches all literal text fivefold.
+        numeric_stretch = stretch_dict[stretch] if isinstance(stretch, str) else float(stretch)
+        font.setStretch(round(float(np.interp(numeric_stretch,
+            [100, 200, 300, 400, 500, 600, 700, 800, 900],
+            [50, 62, 75, 87, 100, 112, 125, 150, 200]))))
+        font.setPointSizeF(float(prop.get_size_in_points()) * self.dpi / self.painter.device().logicalDpiY())
+        weight = prop.get_weight()
+        font.setWeight(QtGui.QFont.Weight(int(weight_dict.get(weight, weight) if isinstance(weight, str) else weight)))
+        font.setItalic(prop.get_style() in ('italic', 'oblique'))
+        painter = self.painter
+        painter.save()
+        try:
+            self._clip(gc)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
+            painter.setFont(font)
+            painter.setPen(_color(gc.get_rgb(), gc))
+            painter.translate(float(x), self.height - float(y))
+            painter.rotate(-float(angle))
+            painter.drawText(QtCore.QPointF(0., 0.), str(text))
+        finally:
+            painter.restore()
 
     def draw_tex(self, *args, **kwargs):
         raise ValueError("External TeX rendering is not supported in comparison figures.")
@@ -146,12 +229,76 @@ class MatplotlibFigureItem(QtWidgets.QGraphicsObject):
     The source Figure is not retained and cannot be consulted by later exports.
     """
 
+    seriesSelected = QtCore.Signal(str)
+
     def __init__(self, figure: Figure, parent=None):
         super().__init__(parent)
         self._rect = QtCore.QRectF()
         self._picture = QtGui.QPicture()
         self._svg = b""
+        self._targets, self._axes = (), ()
+        self._legend_rects = {}
+        self._series_geometry = {}
+        self._controllers = []
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton | QtCore.Qt.MouseButton.RightButton)
         self.update_figure(figure)
+
+    def text_targets(self):
+        return self._targets
+
+    def axis_targets(self):
+        return self._axes
+
+    def legend_rect(self, panel):
+        return self._legend_rects.get(panel)
+
+    def set_text_controllers(self, controllers):
+        self._controllers = [weakref.ref(c) for c in controllers]
+
+    def _hit(self, point):
+        # The smallest painted text wins where a long tick-group extent overlaps it.
+        hits = [target for target in self._targets if target.visible
+                and QtCore.QRectF(*target.rect).adjusted(-2, -2, 2, 2).contains(point)]
+        return min(hits, key=lambda t: t.rect[2] * t.rect[3]) if hits else None
+
+    def _text_event(self, event, *, double=False):
+        target = self._hit(event.pos())
+        controllers = [c for ref in self._controllers if (c := ref()) is not None]
+        controller = next((c for c in controllers if target is not None and c.panel == target.panel), None)
+        if controller is None:
+            if event.button() == QtCore.Qt.MouseButton.LeftButton:
+                for other in controllers: other.cleared.emit()
+            return False
+        controller.claimed.emit(target.key)
+        if event.button() == QtCore.Qt.MouseButton.RightButton:
+            controller._raise_menu_at(target.key, event.screenPos())
+        elif double:
+            if target.key.endswith(".ticks"):
+                controller.open_axis_properties(target.key.split(".")[1])
+            else:
+                controller._edit_or_style(target.key)
+        event.accept()
+        return True
+
+    def series_geometry(self):
+        return self._series_geometry
+
+    def series_at(self, point):
+        return next((key for key, geometry in reversed(tuple(self._series_geometry.items()))
+                     if geometry.hit(point)), None)
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if self._text_event(event):
+            return
+        key = self.series_at(event.pos()) if event.button() == QtCore.Qt.MouseButton.LeftButton else None
+        if key is not None:
+            self.seriesSelected.emit(key)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        if not self._text_event(event, double=True): super().mouseDoubleClickEvent(event)
 
     def figure_export_target(self):
         return self
@@ -159,6 +306,11 @@ class MatplotlibFigureItem(QtWidgets.QGraphicsObject):
     def native_figure_svg(self) -> bytes:
         """Native vector protocol, intentionally detached from Matplotlib."""
         return self._svg
+
+    def capture_rendering_metadata(self):
+        """Facts recorded with this immutable drawing, without revisiting its Figure."""
+        from copy import deepcopy
+        return deepcopy(self._rendering_metadata)
 
     def boundingRect(self):
         return QtCore.QRectF(self._rect)
@@ -193,7 +345,21 @@ class MatplotlibFigureItem(QtWidgets.QGraphicsObject):
         if not painter.isActive():
             raise ValueError("The comparison figure could not be recorded.")
         try:
-            figure.draw(_PictureRenderer(painter, width, height, dpi))
+            renderer = _PictureRenderer(painter, width, height, dpi)
+            figure.draw(renderer)
+            from ..plot.matplotlib_targets import capture_targets, panel_identity
+            targets, axes = capture_targets(figure, renderer)
+            from .matplotlib_series import capture_series_geometry
+            series_geometry = capture_series_geometry(figure, height)
+            legend_rects = {}
+            for panel, legend in [*(('figure', legend) for legend in figure.legends),
+                                  *((panel_identity(axis, i), axis.get_legend())
+                                    for i, axis in enumerate(figure.axes) if axis.get_legend() is not None)]:
+                if not legend.get_visible():
+                    continue
+                box = legend.get_window_extent(renderer)
+                legend_rects[panel] = (float(box.x0), height - float(box.y1),
+                                       float(box.width), float(box.height))
         finally:
             painter.end()
         picture.setBoundingRect(QtCore.QRect(0, 0, math.ceil(width), math.ceil(height)))
@@ -204,17 +370,35 @@ class MatplotlibFigureItem(QtWidgets.QGraphicsObject):
             # A second backend must not solve constrained/tight layout again:
             # both frozen formats describe the axes positions just recorded.
             figure.set_layout_engine("none")
-            with rc_context({"svg.fonttype": "path", "svg.hashsalt": "nanoscope-comparison",
+            with rc_context({"svg.fonttype": "none", "svg.hashsalt": "nanoscope-comparison",
                              "savefig.bbox": None, "svg.image_inline": True}):
                 figure.savefig(stream, format="svg", transparent=False,
                                metadata={"Date": None}, bbox_inches=None)
         finally:
             figure.set_canvas(canvas)
             figure.set_layout_engine(layout_engine)
-        svg = stream.getvalue()
+        from ..plot.svg_fonts import editable_font_stacks
+        svg = editable_font_stacks(stream.getvalue())
         if not svg or picture.isNull():
             raise ValueError("The comparison figure did not produce a vector drawing.")
         self.prepareGeometryChange()
         self._rect = QtCore.QRectF(0, 0, width, height)
         self._picture, self._svg = picture, svg
+        import matplotlib
+        from matplotlib.text import Text
+        from ..plot.quantity_axes import figure_quantity_metadata
+        self._rendering_metadata = {
+            "renderer": "matplotlib-to-QPicture", "matplotlib_version": matplotlib.__version__,
+            "display_basis": figure_quantity_metadata(figure),
+            "figure_dpi": dpi, "retained_qt_font_families": sorted(renderer.qt_font_families),
+            "retained_text_faces": [renderer.qt_font_faces[key] for key in sorted(renderer.qt_font_faces)],
+            "picture_logical_dpi": [picture.logicalDpiX(), picture.logicalDpiY()],
+            "requested_font_families": sorted({family for text in figure.findobj(Text)
+                                                for family in text.get_fontfamily()}),
+            "svg_text_policy": "editable text with fallback families",
+            "picture_text_policy": "literal text commands; mathematical glyph paths",
+        }
+        self._targets, self._axes = targets, axes
+        self._legend_rects = legend_rects
+        self._series_geometry = series_geometry
         self.update()

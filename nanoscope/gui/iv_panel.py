@@ -87,7 +87,8 @@ from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_a
                               reframe_axis_pins)
 from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
                                window_readout)
-from .plot_workflow import (WarningSummary, bounded_controls, control_group,
+from .plot_workflow import (ExportEntry, FormatSpec, InspectorGroup, PageAdapter, PendingState,
+                            WarningSummary, bounded_controls, control_group,
                             ensure_item_legend, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
                           choose_live_plot_export, data_write_failure_text, write_live_plot_image,
@@ -176,6 +177,9 @@ class IVWindow(QtWidgets.QMainWindow):
     #: intentionally silent so MainWindow can keep the derived view current
     #: without turning that maintenance into an unsaved project edit.
     workspaceChanged = Signal()
+    #: The visible verb's state moved: a background gather started or ended (the Explorer's
+    #: Update plot greys while one runs). Carries nothing; the toolbar reads ``pending()``.
+    pendingChanged = Signal()
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None, *,
                  defer_initial_refresh: bool = False) -> None:
@@ -282,14 +286,15 @@ class IVWindow(QtWidgets.QMainWindow):
         root.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
-        exports = (("Export current figure…", lambda: self.save_image()),
-                   ("Export data (CSV)…", lambda: self.export_data()))
+        # One list for the right-click menu and the Explorer's Export ▾: they cannot disagree.
+        exports = self._exports = (("Export current figure…", lambda: self.save_image()),
+                                   ("Export data (CSV)…", lambda: self.export_data()))
         self._workflow = install_plot_workflow(
             self, sections={"Data": (self._data_section,), "Analysis": (self._analysis_section,),
                             "Appearance": (self._appearance_section,), "Export": (self._export_section,)},
             actions=(("Analyze / refresh", self._refresh_from_user),),
             exports=exports)
-        self._workflow.adopt_reset_figure(self._appearance_widget)
+        self._workflow.adopt_reset_figure(self._appearance_widget, takes_ranges=True)
         # View only (plot_interaction): Reset view, zoom history, the app right-click menu
         # in place of pyqtgraph's, and the pointer readout on the status line.
         self._readout = window_readout(self)
@@ -308,6 +313,44 @@ class IVWindow(QtWidgets.QMainWindow):
         self._text_host.register_fit_label(self._fit_label)
         self._appearance_widget.set_fit_label_available(True, in_legend=False)
         self._appearance_widget.set_automatic_text("x_label", _VOLTAGE_LABEL)
+
+    def inspector_adapter(self) -> PageAdapter:
+        """How the Analysis Explorer hosts this page (the reference adapter of Phase 1).
+
+        Built once and cached. Nothing but ``AnalysisExplorer.add_page`` (through
+        ``InspectorHost.adopt``) and the hosting test helpers call it: building it is the
+        move's first half, and it names this page's private attributes so that nothing else
+        has to. It computes nothing: ``update`` is the existing handler, ``pending`` only
+        reads the gather in flight, history comes from the appearance widget."""
+        if getattr(self, "_inspector_adapter", None) is None:
+            bar = self._workflow
+            self._inspector_adapter = PageAdapter.from_widget(
+                self, "iv", self._appearance_widget,
+                groups=[InspectorGroup("estimator", "Estimator",
+                                       [self._data_section, self._analysis_section])],
+                format=FormatSpec(
+                    self._appearance_widget,
+                    controllers=lambda: [c for c in (figure_text_for(self._plot),) if c]),
+                update=self._refresh_from_user,
+                update_tooltip="Re-gather the I-V points from the open recordings and redraw.",
+                pending=lambda: PendingState(busy=self._gather_worker is not None),
+                pending_changed=self.pendingChanged,
+                exports=lambda: [ExportEntry(text, run, kind=kind) for (text, run), kind
+                                 in zip(self._exports, ("figure", "data"))],
+                navigation=lambda: self._plot_nav,
+                navigations=lambda: (self._plot_nav,),
+                status_bar=self.statusBar,
+                chrome=[bar],                   # hidden when hosted; its objects stay alive
+                on_adopt=self._on_adopt)
+        return self._inspector_adapter
+
+    def _on_adopt(self) -> None:
+        """Hosting steps: the buttons the Explorer's toolbar replaces, and the appearance
+        wrapper whose widget the Format tab now holds, stay constructed and hidden."""
+        for hidden in (self._refresh_btn, self._save_btn, self._save_data_btn,
+                       self._export_section, self._appearance_section):
+            hidden.hide()
+        self._plot_widget.setMinimumWidth(280)
 
     def _appearance_from_user(self, state: PlotAppearance) -> None:
         self._appearance = state
@@ -332,6 +375,11 @@ class IVWindow(QtWidgets.QMainWindow):
                                        (self._fit_item, "I-V fit")))
         self._appearance_widget.set_legend_available(self._scatter_item is not None)
         shown = self._plot.viewRange() if self._message_item is not None else None
+        from .figure_series import tag_pg_series
+        if self._scatter_item is not None and not hasattr(self._scatter_item,"_nanoscope_series_descriptor"):
+            tag_pg_series(self._scatter_item,view="iv",identity="observations",label="Open-pore current")
+        if self._fit_item is not None and not hasattr(self._fit_item,"_nanoscope_series_descriptor"):
+            tag_pg_series(self._fit_item,view="iv",role="fit",identity="fit",label="I-V fit")
         apply_plot_appearance(
             self._plot, self._appearance, plot_widget=self._plot_widget,
             data_items=(self._scatter_item,), fit_items=(self._fit_item,))
@@ -345,8 +393,8 @@ class IVWindow(QtWidgets.QMainWindow):
         if fit_label is None:
             return                      # a draw during construction, before the label
         # Never In legend: the legend row does not carry the numbers or the dof tag here.
-        fit_label.apply_state(replace(self._appearance.fit_label_state(), in_legend=False),
-                              self._fit_readouts, self._appearance.text_style("annotation.fit"),
+        fit_label.apply_state(replace(self._appearance.effective_fit_label_state(), in_legend=False),
+                              self._fit_readouts, self._appearance.effective_text_style("annotation.fit"),
                               self._appearance.font_family)
         controller = figure_text_for(self._plot)
         if controller is not None:
@@ -413,6 +461,7 @@ class IVWindow(QtWidgets.QMainWindow):
         self._gather_worker = worker
         self._gather_thread = start_worker_thread(
             worker, domain=JOB_NONE, label="iv-gather", owner=self)
+        self.pendingChanged.emit()
 
     @QtCore.Slot(object)
     def _on_gather_ready(self, outcome: object) -> None:
@@ -439,6 +488,7 @@ class IVWindow(QtWidgets.QMainWindow):
         if results:
             iv.install_channel_medians(results)
         self._refresh_btn.setEnabled(True)
+        self.pendingChanged.emit()
         self.refresh()
 
     def abort(self) -> None:
@@ -461,6 +511,7 @@ class IVWindow(QtWidgets.QMainWindow):
             pass
         retire_worker_thread(worker, thread, wait_ms=DEFAULT_JOIN_MS)
         self._refresh_btn.setEnabled(True)
+        self.pendingChanged.emit()
 
     def _render_workspace_snapshot(self) -> None:
         """Draw already-restored values without gathering or fitting them again.
@@ -752,13 +803,25 @@ class IVWindow(QtWidgets.QMainWindow):
         # is real), the pane carries the reason.
         dof_note = stats.r2_dof_caveat(fit.n, _IV_FIT_PARAMS, model="line",
                                        noun="recording")
-        return [
+        lines = [
             f"Conductance (slope):  {g}",
             f"                      slope = {fit.slope:.5g} {u}/V",
             f"Leak (intercept):     {fit.intercept:.5g} {u} at 0 V",
             f"Goodness of fit:      R² = {fit.r2:.5f}   ·   n = {fit.n} recording(s)"
             + (f"\n                      {dof_note}" if dof_note else ""),
         ]
+        if fit.slope_ci95 is not None:
+            lo, hi = fit.slope_ci95
+            lines.append(f"95% slope interval:   [{lo:.5g}, {hi:.5g}] {u}/V")
+        if fit.conductance_ci95_nS is not None:
+            lo, hi = fit.conductance_ci95_nS
+            lines.append(f"95% conductance interval: [{lo:.5g}, {hi:.5g}] nS")
+        if fit.intercept_ci95 is not None:
+            lo, hi = fit.intercept_ci95
+            lines.append(f"95% leak interval:    [{lo:.5g}, {hi:.5g}] {u}")
+        if fit.slope_ci95 is not None:
+            lines.append("Intervals: Student-t OLS; independent, constant-variance current errors.")
+        return lines
 
     @staticmethod
     def _chord_lines(pts: list[iv.IVPoint], dropped: list[iv.IVPoint],
@@ -934,6 +997,12 @@ class IVWindow(QtWidgets.QMainWindow):
             "fit_intercept_units": "" if fit is None else current_units,
             "fit_r2": np.nan if fit is None else fit.r2,
             "fit_n": np.nan if fit is None else fit.n,
+            "fit_slope_ci95_low": np.nan if fit is None or fit.slope_ci95 is None else fit.slope_ci95[0],
+            "fit_slope_ci95_high": np.nan if fit is None or fit.slope_ci95 is None else fit.slope_ci95[1],
+            "fit_intercept_ci95_low": np.nan if fit is None or fit.intercept_ci95 is None else fit.intercept_ci95[0],
+            "fit_intercept_ci95_high": np.nan if fit is None or fit.intercept_ci95 is None else fit.intercept_ci95[1],
+            "fit_conductance_ci95_low_nS": np.nan if fit is None or fit.conductance_ci95_nS is None else fit.conductance_ci95_nS[0],
+            "fit_conductance_ci95_high_nS": np.nan if fit is None or fit.conductance_ci95_nS is None else fit.conductance_ci95_nS[1],
             "fit_conductance_nS": (np.nan if fit is None or fit.conductance_nS is None
                                     else fit.conductance_nS),
         }

@@ -71,21 +71,28 @@ def test_removing_current_page_does_not_activate_next_outgoing_page(qapp, qtbot)
     assert activated == []
 
 
-def test_main_window_uses_one_shell_and_never_duplicates_pages(qapp, qtbot):
+def test_analysis_openers_reuse_one_shell_and_the_most_recent_managed_figure(qapp, qtbot):
     window = MainWindow(recovery_enabled=False)
     qtbot.addWidget(window)
 
     window._open_plots()
     explorer = window._analysis_explorer
+    owner = window._figure_workspace
     plots = window._plots_window
+    plots_id = owner.current_id()
     assert explorer is not None and explorer.isVisible()
-    assert explorer.current_page_id() == PAGE_DISTRIBUTIONS
+    assert explorer.current_page_id() == plots_id
+    assert owner.get(plots_id).spec.kind == PAGE_DISTRIBUTIONS
+    assert owner.page(plots_id) is plots
 
     window._open_iv()
     iv = window._iv_window
+    iv_id = owner.current_id()
     assert window._analysis_explorer is explorer
-    assert explorer.page_ids() == (PAGE_DISTRIBUTIONS, PAGE_IV)
-    assert explorer.current_page_id() == PAGE_IV
+    assert explorer.page_ids() == (plots_id, iv_id)
+    assert explorer.current_page_id() == iv_id
+    assert owner.get(iv_id).spec.kind == PAGE_IV
+    assert owner.page(iv_id) is iv
 
     window._open_plots()
     window._open_iv()
@@ -93,6 +100,24 @@ def test_main_window_uses_one_shell_and_never_duplicates_pages(qapp, qtbot):
     assert window._plots_window is plots
     assert window._iv_window is iv
     assert explorer.page_count() == 2
+    assert len(owner.records()) == 2
+
+    # New is allowed to create a second figure of the same kind. Analysis then
+    # reopens whichever figure of that kind was most recently used.
+    second_id = owner.create(PAGE_DISTRIBUTIONS)
+    second = owner.page(second_id)
+    assert second_id != plots_id and second is not plots
+    window._open_iv()
+    window._open_plots()
+    assert explorer.current_page_id() == second_id
+    assert window._plots_window is second
+    assert owner.page(plots_id) is plots
+    assert owner.activate(plots_id)
+    window._open_iv()
+    window._open_plots()
+    assert explorer.current_page_id() == plots_id
+    assert window._plots_window is plots
+    assert explorer.page_count() == 3 and len(owner.records()) == 3
 
 
 def test_closing_shell_closes_pages_and_the_same_objects_can_reopen(qapp, qtbot):
@@ -137,17 +162,28 @@ def test_project_reset_never_refreshes_the_next_outgoing_analysis_page(
     window._open_plots()
     window._open_iv()       # current; removing it would normally activate Distributions
     explorer = window._analysis_explorer
+    owner = window._figure_workspace
+    outgoing_ids = explorer.page_ids()
     refreshed: list[str] = []
-    monkeypatch.setattr(window, "_refresh_plots",
-                        lambda: refreshed.append("distributions"))
-    monkeypatch.setattr(window._iv_window, "refresh",
-                        lambda: refreshed.append("iv"))
+    # Managed pages route refresh by stable figure ID, not by a singleton kind.
+    monkeypatch.setattr(window, "_refresh_figure", refreshed.append)
 
     window._reset_analytical_workspace()
     qapp.processEvents()
 
     assert refreshed == []
-    assert explorer.page_ids() == (PAGE_DISTRIBUTIONS,)
+    assert explorer.page_ids() == ()
+    assert owner.records() == ()
+    assert window._plots_window is None and window._iv_window is None
+    assert all(owner.page(key) is None and owner.get(key) is None for key in outgoing_ids)
+
+    # The new project's first figure is a new page with a new refresh binding.
+    window._open_plots()
+    new_id = owner.current_id()
+    assert new_id not in outgoing_ids
+    assert explorer.page_ids() == (new_id,)
+    explorer.refresh_current()
+    assert refreshed == [new_id]
 
 
 def _install_events(window: MainWindow, tmp_path) -> tuple[str, EventSet]:

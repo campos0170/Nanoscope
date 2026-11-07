@@ -6,6 +6,7 @@ from nanoscope.gui.baseline_panel import _OpenPoreReferenceEditor
 from nanoscope.gui.first_analysis_guide import FirstAnalysisGuide
 from nanoscope.gui.main_window import MainWindow
 from nanoscope.gui.panels import DetectionPanel
+from . import p1_hosting as H
 from .test_psd import _current_doc, _install
 
 
@@ -43,7 +44,7 @@ def test_baseline_guide_tooltip_explains_baseline_and_preserves_disabled_reason(
     button = guide._buttons[0]
     assert button.property("route") == "baseline"
     assert "open-pore reference" in button.toolTip()
-    assert "Measure this recording" in button.toolTip()
+    assert "Estimate window settings" in button.toolTip()
     assert "pre-filter" not in button.toolTip()
     available[0] = False
     guide.refresh_context()
@@ -94,5 +95,19 @@ def test_first_noise_open_computes_only_the_requested_spectrum(
         assert samples == [25000]
     else:
         win._open_psd()
+        # Opening a managed Noise figure stages its source; Update plot is the
+        # explicit calculation request. The measured-region action above is
+        # already an explicit request and must not compute the full trace first.
+        assert samples == []
+        assert not win._psd_window.has_data()
+        H.press_update(win._analysis_explorer)
         assert samples == [doc.meta.n_samples]
-    assert win._psd_window.has_data()
+    page = win._psd_window
+    assert page.has_data()
+    frequencies, spectrum = (array.copy() for array in page.psd_result())
+    calls = samples.copy()
+    win._open_psd()
+    assert win._psd_window is page
+    assert samples == calls
+    np.testing.assert_array_equal(page.psd_result()[0], frequencies)
+    np.testing.assert_array_equal(page.psd_result()[1], spectrum)

@@ -1,0 +1,242 @@
+{
+  "revision": "56bdf1e60a8122b242c5e83cf983f2fddc8c56d6",
+  "dialect": "D2",
+  "writer_project_version": 12,
+  "writer_app_version": "0.1.0",
+  "source_archive_sha256": "1cd1fc4838ab7d900a2a7c4c3a19cc4e27ad0d80bc3a24f45e21aa1bc476bb57",
+  "method": "Historical actual PlotConfig value and tagged metadata codec, actual historical save_project; no QWidget/QApplication or analysis execution.",
+  "data": "Nine synthetic rows from numpy.default_rng(20261103); intentionally not experimental data.",
+  "files": {
+    "d2-defaults.nanoscope": {
+      "sha256": "5ddac2d0b852f405b911f2d1a29e06f51e8a1348654d96077cbf60f55ac53a99",
+      "payload_sha256": "fa1881050da21d4f6e0a3802b8aa2912a816d06bc379c5a96b5adf56ffa294d6",
+      "plot_config": {
+        "format": "nanoscope-plot-config",
+        "version": 3,
+        "app_version": "0.1.0",
+        "plot_type": "Histogram",
+        "norm_user_set": false,
+        "selection": {
+          "source_keys": [],
+          "accepted_only": true
+        },
+        "histogram": {
+          "column": "",
+          "bins": 30,
+          "normalization": "count",
+          "colour_by": "None",
+          "log_x": false,
+          "log_y": false,
+          "include_filter_limited": false,
+          "kde_overlay": false
+        },
+        "scatter": {
+          "x": "",
+          "y": "",
+          "log_x": false,
+          "log_y": false,
+          "colour_by": "None"
+        },
+        "kde": {
+          "x": "",
+          "y": "",
+          "log_x": true,
+          "log_y": false,
+          "levels": 8
+        },
+        "heatmap": {
+          "x": "",
+          "y": "",
+          "log_x": true,
+          "log_y": false,
+          "bins": 40
+        },
+        "cluster": {
+          "features": [],
+          "method": "GMM",
+          "k_mode": "Auto (BIC)",
+          "k": 2
+        },
+        "fit": {
+          "kind": "none",
+          "k": 1,
+          "k_auto": false,
+          "scatter_kind": "none",
+          "applied": "none",
+          "applied_k": 1,
+          "applied_k_auto": false,
+          "applied_scatter": "none",
+          "range_lo": "",
+          "range_hi": "",
+          "range_unit": "ms"
+        },
+        "axes": {
+          "time_unit": "ms",
+          "x_min": "",
+          "x_max": "",
+          "y_min": "",
+          "y_max": "",
+          "manual_x": null,
+          "manual_y": null
+        },
+        "style": {
+          "title": "",
+          "x_label": "",
+          "y_label": "",
+          "show_legend": true,
+          "font_family": "",
+          "font_size_pt": 10,
+          "data_color": "#0072B2",
+          "fit_color": "#D55E00",
+          "point_size": 7,
+          "line_width": 1,
+          "background": "dark",
+          "export_w": 0,
+          "export_h": 0,
+          "fit_values_on_plot": false,
+          "label_overrides": {},
+          "legend_pos": null,
+          "legend_font_size_pt": 0,
+          "legend_counts": true,
+          "legend_include": {},
+          "show_grid": true,
+          "title_font_size_pt": 0,
+          "axis_label_font_size_pt": 0,
+          "tick_font_size_pt": 0,
+          "title_bold": false,
+          "title_italic": false,
+          "show_r2": true,
+          "show_gof": true,
+          "show_ci_band": false,
+          "show_provenance": false,
+          "show_residuals": false,
+          "heatmap_colormap": "viridis",
+          "text_styles": {},
+          "fit_label": {}
+        }
+      },
+      "rows": 9
+    },
+    "d2-legacy-look.nanoscope": {
+      "sha256": "7d18662c965592d35407dd359eefe4a0c449abbf4e519611dd93380f207cf2ac",
+      "payload_sha256": "efefba0865d9dc83f6c0cf90e79d297f5f9d59bf7048cadc6957e137b5eeb535",
+      "plot_config": {
+        "format": "nanoscope-plot-config",
+        "version": 3,
+        "app_version": "0.1.0",
+        "plot_type": "Histogram",
+        "norm_user_set": false,
+        "selection": {
+          "source_keys": [],
+          "accepted_only": true
+        },
+        "histogram": {
+          "column": "",
+          "bins": 30,
+          "normalization": "count",
+          "colour_by": "None",
+          "log_x": false,
+          "log_y": false,
+          "include_filter_limited": false,
+          "kde_overlay": false
+        },
+        "scatter": {
+          "x": "",
+          "y": "",
+          "log_x": false,
+          "log_y": false,
+          "colour_by": "None"
+        },
+        "kde": {
+          "x": "",
+          "y": "",
+          "log_x": true,
+          "log_y": false,
+          "levels": 8
+        },
+        "heatmap": {
+          "x": "",
+          "y": "",
+          "log_x": true,
+          "log_y": false,
+          "bins": 40
+        },
+        "cluster": {
+          "features": [],
+          "method": "GMM",
+          "k_mode": "Auto (BIC)",
+          "k": 2
+        },
+        "fit": {
+          "kind": "none",
+          "k": 1,
+          "k_auto": false,
+          "scatter_kind": "none",
+          "applied": "none",
+          "applied_k": 1,
+          "applied_k_auto": false,
+          "applied_scatter": "none",
+          "range_lo": "",
+          "range_hi": "",
+          "range_unit": "ms"
+        },
+        "axes": {
+          "time_unit": "ms",
+          "x_min": "",
+          "x_max": "",
+          "y_min": "",
+          "y_max": "",
+          "manual_x": null,
+          "manual_y": null
+        },
+        "style": {
+          "title": "Historical synthetic fixture",
+          "x_label": "Own dwell label",
+          "y_label": " ",
+          "show_legend": true,
+          "font_family": "",
+          "font_size_pt": 10,
+          "data_color": "#0072B2",
+          "fit_color": "#D55E00",
+          "point_size": 7,
+          "line_width": 1,
+          "background": "dark",
+          "export_w": 0,
+          "export_h": 0,
+          "fit_values_on_plot": true,
+          "label_overrides": {},
+          "legend_pos": null,
+          "legend_font_size_pt": 0,
+          "legend_counts": true,
+          "legend_include": {},
+          "show_grid": true,
+          "title_font_size_pt": 0,
+          "axis_label_font_size_pt": 0,
+          "tick_font_size_pt": 0,
+          "title_bold": true,
+          "title_italic": true,
+          "show_r2": false,
+          "show_gof": false,
+          "show_ci_band": false,
+          "show_provenance": false,
+          "show_residuals": false,
+          "heatmap_colormap": "viridis",
+          "text_styles": {},
+          "fit_label": {
+            "visible": true,
+            "fields": [
+              "equation",
+              "r2",
+              "n",
+              "ks"
+            ],
+            "template": "Own r2={r2}; ks={ks}",
+            "placement": "top-left",
+            "in_legend": false
+          }
+        }
+      },
+      "rows": 9
+    }
+  }
+}

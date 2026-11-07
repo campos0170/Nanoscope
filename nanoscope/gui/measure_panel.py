@@ -236,6 +236,7 @@ from ..analysis.measure import (
     LIVE_PREVIEW_MAX_SAMPLES,
     RATE_STAMP_STALE,
     MEASUREMENT_DIAGNOSTIC_KEYS,
+    MEASUREMENT_SCHEMA,
     UNKNOWN_CHANNEL_INDEX,
     NonFiniteSelection,
     append_measurement,
@@ -246,6 +247,7 @@ from ..analysis.measure import (
     measure_selection,
 )
 from ..core import clock
+from ..core.quantity_display import quantity_for, column_entry, to_display
 from ..core.analysis import OverlayHint, OverlayKind
 from ..core.atomic_write import staged_path
 from ..core.document import Document
@@ -538,6 +540,7 @@ class _MeasurementsModel(QAbstractTableModel):
         # `column_index` would answer -1 to anything that asked early.
         self._df: pd.DataFrame = ensure_signal_basis_column(empty_measurements_df())
         self._columns: list[str] = list(self._df.columns)
+        self._quantities = {key: quantity_for(key, schema=MEASUREMENT_SCHEMA) for key in self._columns}
         #: ``measurement_id``s of rows whose calibration stamp no longer matches the live
         #: calibration of their channel — pushed in by the panel (the model cannot see
         #: Session), keyed on the stable id so the marking survives sorting and removals.
@@ -651,7 +654,7 @@ class _MeasurementsModel(QAbstractTableModel):
         nudge = float(self._clock_nudge_s)
         if self._clock_offset_s is None or clock.clocks_agree(nudge):
             return ""
-        return (f"This layer is currently shifted {nudge:+.4f} s along the time axis for "
+        return (f"This layer is currently shifted {nudge * 1000:+.1f} ms along the time axis for "
                 f"alignment, so the trace DRAWS it that far from its instrument clock. "
                 f"The nudge is a display alignment and is not stamped into any saved "
                 f"row — add it as well to go from a row to a position on screen.")
@@ -742,8 +745,8 @@ class _MeasurementsModel(QAbstractTableModel):
             # on the recording being shown). See core/clock.py.
             if name in _CLOCK_COLUMNS and self._clock_offset_s is not None \
                     and not clock.clocks_agree(self._clock_offset_s):
-                return f"{name} (t₀=0)"
-            return name
+                return f"{column_entry(name, self._quantities[name])[1]} (t₀=0)"
+            return column_entry(name, self._quantities[name])[1]
         if role == Qt.ToolTipRole:
             if name in _CLOCK_COLUMNS:
                 # The per-row truth first (this table pools recordings with different
@@ -762,12 +765,12 @@ class _MeasurementsModel(QAbstractTableModel):
                           "instrument-clock origin, so t_start_s + t0_s is that row's "
                           "start ON THE INSTRUMENT CLOCK — rows from different "
                           "recordings have different t₀.")
-                parts = [pooled, self._nudge_note()]
+                parts = [column_entry(name, self._quantities[name])[2], pooled, self._nudge_note()]
                 if self._clock_offset_s is not None:
                     parts.insert(0, clock.field_note(clock.RECORDING,
-                                                     self._clock_offset_s))
+                                                     self._clock_offset_s, display_unit="ms"))
                 return "\n\n".join(p for p in parts if p)
-            return _STAMP_COLUMN_TIPS.get(name)
+            return "\n\n".join(filter(None, (column_entry(name, self._quantities[name])[2], _STAMP_COLUMN_TIPS.get(name))))
         return None
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
@@ -799,6 +802,8 @@ class _MeasurementsModel(QAbstractTableModel):
             return ""
         if role == Qt.EditRole and self._columns[index.column()] == _LABEL_COL:
             return str(value)          # edit the text itself, never a formatted view of it
+        if role == Qt.DisplayRole and isinstance(value, (int, np.integer, float, np.floating)) and not isinstance(value, (bool, np.bool_)):
+            value = to_display(value, self._quantities[self._columns[index.column()]])
         if isinstance(value, (float, np.floating)):
             return f"{value:.6g}"
         if isinstance(value, (int, np.integer)):
@@ -849,6 +854,7 @@ class _MeasurementsModel(QAbstractTableModel):
         out[SIGNAL_BASIS_COLUMN] = pd.Series(stamps, index=out.index, dtype="string")
         self._df = out
         self._columns = list(self._df.columns)
+        self._quantities = {key: quantity_for(key, schema=MEASUREMENT_SCHEMA) for key in self._columns}
         self.endInsertRows()
         return at
 
@@ -900,6 +906,7 @@ class _MeasurementsModel(QAbstractTableModel):
         self.beginResetModel()
         self._df = _cast_measurements(df)
         self._columns = list(self._df.columns)
+        self._quantities = {key: quantity_for(key, schema=MEASUREMENT_SCHEMA) for key in self._columns}
         self.endResetModel()
 
 
@@ -2566,11 +2573,7 @@ class MeasurePanel(QtWidgets.QWidget):
 
     @staticmethod
     def _fmt_time(seconds: float) -> str:
-        if seconds < 1e-3:
-            return f"{seconds * 1e6:.4g} µs"
-        if seconds < 1.0:
-            return f"{seconds * 1e3:.4g} ms"
-        return f"{seconds:.4g} s"
+        return f"{seconds * 1e3:.4g} ms"
 
     def _units(self) -> str:
         """The channel's effective units label, without materialising the array."""

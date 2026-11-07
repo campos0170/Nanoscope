@@ -169,8 +169,11 @@ def test_a_proposal_and_the_panels_own_spin_box_agree_on_the_fingerprint():
         decim=None)
     typed = DEFAULT_BASELINE.replace(rough_s=1.0, base_s=0.3, decim=None)
     assert proposed.fingerprint(50_000.0) == typed.fingerprint(50_000.0)
-    # and it is the fingerprint the -500 mV reference run recorded
-    assert proposed.fingerprint(50_000.0) == "sha256:b64a75ebdf29"
+    # The automatic algorithm policy changed since the historical run. Both
+    # entry paths agree on the new identity and cannot masquerade as that run.
+    assert proposed.fingerprint(50_000.0) != "sha256:b64a75ebdf29"
+    restored = B.BaselineConfig.reproducible_from(proposed.to_provenance(50_000.0))
+    assert restored.fingerprint(50_000.0) == proposed.fingerprint(50_000.0)
 
 
 @pytest.mark.parametrize("fs", [1e3, 5e4, 2.5e5, 1e6])

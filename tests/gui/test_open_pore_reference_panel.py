@@ -119,9 +119,9 @@ def test_intervals_need_five_samples_and_recording_bounds(panel):
     panel.add_reference_interval(0, 0.004)
     assert "five" in panel.reference_error()
     editor = panel.reference_editor
-    editor.table.item(0, 1).setText("0.005")
+    editor.table.item(0, 1).setText("5")
     assert panel.reference_error() == ""
-    editor.table.item(0, 1).setText("11")
+    editor.table.item(0, 1).setText("11000")
     assert "beyond" in panel.reference_error()
 
 
@@ -137,7 +137,7 @@ def test_overlap_selection_is_refused_without_replacing_recipe(panel, qtbot):
 def test_manual_overlap_and_out_of_order_are_invalid_drafts(panel):
     panel.add_reference_interval(1, 2)
     panel.add_reference_interval(3, 4)
-    panel.reference_editor.table.item(1, 0).setText("0.5")
+    panel.reference_editor.table.item(1, 0).setText("500")
     assert "time order" in panel.reference_error()
 
 

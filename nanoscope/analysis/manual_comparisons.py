@@ -7,6 +7,8 @@ settings deliberately without changing upstream events.
 """
 from __future__ import annotations
 
+from ..core.atomic_write import write_staged
+
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 import itertools
@@ -266,12 +268,12 @@ def compare_recordings(analyses, recordings, settings=ComparisonSettings(), *, f
         input_tags=[a.tag for a,_ in selected], rate_interval="95% time-block count bootstrap; within-recording uncertainty")
     check_cancelled(cancel)
     out = Path(folder); out.mkdir(parents=True, exist_ok=True)
-    events.to_csv(out/"events.csv", index=False); summary.to_csv(out/"summary.csv", index=False)
-    events.to_csv(out/"incubation_events_local_sustained.csv", index=False)
+    write_staged(out/"events.csv", events.to_csv, index=False); write_staged(out/"summary.csv", summary.to_csv, index=False)
+    write_staged(out/"incubation_events_local_sustained.csv", events.to_csv, index=False)
     legacy = events.copy(); legacy["fracblock"] = legacy.aggregation_fracblock_global
-    legacy.to_csv(out/"incubation_comparison_events_peak_global.csv", index=False)
+    write_staged(out/"incubation_comparison_events_peak_global.csv", legacy.to_csv, index=False)
     for name, table in tables.items():
-        table.to_csv(out/f"{name}.csv", index=False)
+        write_staged(out/f"{name}.csv", table.to_csv, index=False)
     _write_json(out/"report.json", info)
     _notify(progress, 1., "Condition comparisons complete")
     return ComparisonResult(events, summary, tables, info)
@@ -343,9 +345,9 @@ def cluster_features(features, settings=ClusterSettings(), *, folder, progress=N
         for i in range(projection.scores.shape[1]):
             table[f"PC{i+1}"] = projection.scores[:,i]
         out.mkdir(parents=True, exist_ok=True)
-        SC.loading_table(projection).to_csv(out/"loadings.csv", index=False)
-        pd.DataFrame(dict(pc=np.arange(len(projection.explained_variance_ratio))+1,
-            explained_variance_ratio=projection.explained_variance_ratio)).to_csv(out/"variance.csv", index=False)
+        write_staged(out/"loadings.csv", SC.loading_table(projection).to_csv, index=False)
+        write_staged(out/"variance.csv", pd.DataFrame(dict(pc=np.arange(len(projection.explained_variance_ratio))+1,
+            explained_variance_ratio=projection.explained_variance_ratio)).to_csv, index=False)
         X = table[list(columns)].to_numpy(float); X = np.where(np.isfinite(X), X, np.nan)
         lo,hi = np.nanpercentile(X,[1,99],axis=0); clipped=np.clip(X,lo,hi)
         _write_json(out/"transform.json", dict(features=columns,winsor_lo=lo,winsor_hi=hi,
@@ -355,9 +357,9 @@ def cluster_features(features, settings=ClusterSettings(), *, folder, progress=N
         for label in ("hdbscan",label_name):
             if "incubation_h" in table:
                 ct=pd.crosstab(table[label],table.incubation_h)
-                ct.to_csv(out/f"{label}_composition_counts.csv")
-                ct.div(ct.sum(axis=1),axis=0).to_csv(out/f"{label}_composition_fractions.csv")
-            table.groupby(label)[list(columns)].median().to_csv(out/f"{label}_feature_medians.csv")
+                write_staged(out/f"{label}_composition_counts.csv", ct.to_csv)
+                write_staged(out/f"{label}_composition_fractions.csv", ct.div(ct.sum(axis=1),axis=0).to_csv)
+            write_staged(out/f"{label}_feature_medians.csv", table.groupby(label)[list(columns)].median().to_csv)
         info.update(n_pcs=projection.n_kept,pca_metadata=projection.meta,kmeans_column=label_name,
             hdbscan_clusters=int(len(set(table.hdbscan)-{-1})), hdbscan_noise_fraction=float((table.hdbscan < 0).mean()))
         _notify(progress,.7,"Computed PCA and exploratory labels")
@@ -374,7 +376,7 @@ def cluster_features(features, settings=ClusterSettings(), *, folder, progress=N
             info["tsne_status"]="not requested"
     check_cancelled(cancel)
     out.mkdir(parents=True,exist_ok=True)
-    table.to_csv(out/"features_assignments.csv",index=False); _write_json(out/"report.json",info)
+    write_staged(out/"features_assignments.csv", table.to_csv, index=False); _write_json(out/"report.json",info)
     _notify(progress,1.,"Pooled clustering complete")
     return table,info
 
@@ -404,7 +406,7 @@ def fit_mixture(features, analysis, settings=MixtureSettings(), *, folder, progr
     for col in labels:
         table[col]=labels[col]
     for scope,result in clusters.scopes.items():
-        result.loadings.to_csv(out/f"loadings_{scope}.csv",index=False)
+        write_staged(out/f"loadings_{scope}.csv", result.loadings.to_csv, index=False)
         _write_json(out/f"projection_{scope}.json",dict(components=result.pca.components,
             explained_variance_ratio=result.pca.explained_variance_ratio,metadata=result.pca.meta,
             n_hdbscan_clusters=result.n_hdbscan_clusters,hdbscan_noise_fraction=result.hdbscan_noise_fraction,
@@ -430,20 +432,20 @@ def fit_mixture(features, analysis, settings=MixtureSettings(), *, folder, progr
         table.loc[sub.index,"subpop_confidence"]=quant.fit.confidence
         for k in range(quant.fit.k):
             table.loc[sub.index,f"posterior_{k}"]=quant.fit.posteriors[:,k]
-        _appendix_population_table(quant,analysis.duration_s).to_csv(out/"population_quantification.csv",index=False)
-        pd.DataFrame(quant.selection.grid,index=pd.Index(quant.selection.p_grid,name="n_pcs"),
-            columns=pd.Index(quant.selection.k_grid,name="k")).to_csv(out/"cv_grid.csv")
-        pd.DataFrame(quant.ci.samples,columns=[f"subpop_{k}" for k in range(quant.fit.k)]).to_csv(out/"fraction_bootstrap.csv",index=False)
-        pd.DataFrame(dict(k=list(quant.fit.bic or {}),bic=list((quant.fit.bic or {}).values()))).to_csv(out/"bic_ladder.csv",index=False)
+        write_staged(out/"population_quantification.csv", _appendix_population_table(quant,analysis.duration_s).to_csv, index=False)
+        write_staged(out/"cv_grid.csv", pd.DataFrame(quant.selection.grid,index=pd.Index(quant.selection.p_grid,name="n_pcs"),
+            columns=pd.Index(quant.selection.k_grid,name="k")).to_csv)
+        write_staged(out/"fraction_bootstrap.csv", pd.DataFrame(quant.ci.samples,columns=[f"subpop_{k}" for k in range(quant.fit.k)]).to_csv, index=False)
+        write_staged(out/"bic_ladder.csv", pd.DataFrame(dict(k=list(quant.fit.bic or {}),bic=list((quant.fit.bic or {}).values()))).to_csv, index=False)
         if quant.crosstab is not None:
-            quant.crosstab.to_csv(out/"exploratory_crosstab.csv")
+            write_staged(out/"exploratory_crosstab.csv", quant.crosstab.to_csv)
         windows=empty_event_frame().reindex(sub.index)
         for col in ("event_id","recording","pore_id","start_idx","end_idx"):
             windows[col]=sub[col]
         windows["end_idx"]+=1; windows["t_start_s"]=sub.onset_s; windows["dwell_s"]=sub.dwell_ms/1000
         windows["accepted"]=True; windows["flag"]=""
         waves=SR.subpopulation_waveforms(analysis.raw,analysis.fs_hz,windows,quant.fit.labels)
-        waves.to_csv(out/"population_median_waveforms.csv",index=False)
+        write_staged(out/"population_median_waveforms.csv", waves.to_csv, index=False)
         _write_json(out/"population_median_waveforms_metadata.json",dict(n_events=waves.attrs.get("n_events",{}),
             axis="duration-normalized; 200 points; 25% padding; raw current, unchanged input sign"))
         info.update(claim=quant.claim(),selection=quant.selection,separation=quant.separation,n_events=quant.n_events,
@@ -456,6 +458,6 @@ def fit_mixture(features, analysis, settings=MixtureSettings(), *, folder, progr
         if thin:
             info["warnings"].insert(0,thin)
     check_cancelled(cancel)
-    table.to_csv(out/"features_assignments.csv",index=False); _write_json(out/"report.json",info)
+    write_staged(out/"features_assignments.csv", table.to_csv, index=False); _write_json(out/"report.json",info)
     _notify(progress,1.,"Mixture fitting complete")
     return table,quant,info

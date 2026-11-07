@@ -178,12 +178,13 @@ def test_the_exponential_is_rejected_on_every_one_of_the_three_recordings():
 
     Reverted by: ``no-gof-no-comparison`` (the function did not exist).
     """
-    expected = {"apo_-500mV": 0.4577, "apo_-600mV": 0.4478, "apo_-700mV": 0.6395}
-    for run, d_expected in expected.items():
+    from scipy.stats import kstest
+    for run in ("apo_-500mV", "apo_-600mV", "apo_-700mV"):
         t = _accepted(_apo(run))["dwell_s"].to_numpy(float)
         fit = stats.fit_dwell_exponential(t, t_min=APO_TMIN, n_boot=0)
         gof = stats.goodness_of_fit(fit, t)
-        assert gof["ks"] == pytest.approx(d_expected, abs=5e-4), (run, gof["ks"])
+        d_expected = kstest(t, lambda v: 1. - np.exp(-(v-APO_TMIN)/fit.params["tau_1"])).statistic
+        assert gof["ks"] == pytest.approx(d_expected, abs=1e-12), (run, gof["ks"])
         assert gof["ks"] > gof["ks_critical_001"] * 4, run
         assert gof["describes_data"] is False, run
         assert "DOES NOT DESCRIBE" in gof["note"]
@@ -557,7 +558,8 @@ def test_the_verdict_is_printed_by_the_summary_the_inspector_shows(apo_700_dwell
 
     assert "0.0198094" in text, text                    # tau has NOT moved
     assert "goodness of fit:" in text, text
-    assert "KS D = 0.6395" in text, text
+    assert "KS D = 0.5001" in text, text  # full observable-support CDF, not sample-range conditioning
+    assert "descriptive" in text and "not a calibrated significance test" in text
     assert "DOES NOT DESCRIBE THESE DATA" in text, text
 
 
@@ -570,7 +572,8 @@ def test_a_fit_that_does_describe_its_data_says_that_instead():
     fit = stats.fit_dwell_exponential(t, n_components=1, t_min=APO_TMIN)
     gof = fit.meta["gof"]
     assert gof["describes_data"] is True, gof["note"]
-    assert "consistent with these data" in fit.summary()
+    assert "No large CDF discrepancy" in fit.summary()
+    assert gof["calibrated"] is False
 
 
 def test_a_verdict_that_cannot_be_computed_does_not_break_the_fit():
@@ -601,6 +604,9 @@ def test_goodness_of_fit_is_reachable_from_the_fitter_not_only_from_a_panel():
     assert "_stamp_gof" in called, "no fitter routes its result through _stamp_gof"
 
     # ...and every public fitter does, not just the one that was measured.
-    src = inspect.getsource(stats)
-    assert src.count("_stamp_gof(FitResult(") == 4, (
-        "a FitResult is being returned without a verdict; there are four fitters")
+    for fitter in (stats.fit_dwell_exponential, stats.fit_depth_gaussians,
+                   stats.fit_dwell_peaked, stats.fit_dwell_exp_gamma,
+                   stats._truncated_gaussian_result):
+        fitter_tree = ast.parse(inspect.getsource(fitter))
+        assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                   and node.func.id == "_stamp_gof" for node in ast.walk(fitter_tree)), fitter.__name__

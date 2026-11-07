@@ -46,6 +46,9 @@ def _widget(qtbot, **kwargs) -> PlotAppearanceWidget:
 
 
 def _depth(widget) -> tuple[int, int]:
+    if widget._history is None:
+        capsule = widget.capture_history_capsule()  # retained Study owns the complete envelope
+        return len(capsule.past), len(capsule.future)
     return widget._history.depth()
 
 
@@ -385,7 +388,11 @@ def _build(kind):
         return EventPlotWindow(Session())
     if kind == "psd":
         from nanoscope.gui.psd_panel import PSDWindow
-        return PSDWindow(Session(), defer_initial_refresh=True)
+        window = PSDWindow(Session(), defer_initial_refresh=True)
+        # Establish the display-unit witness through its non-computing restore
+        # route before measuring presentation edits and their history.
+        window.set_appearance_state(window.appearance_state())
+        return window
     if kind == "iv":
         return _iv_window()
     if kind == "vdep":
@@ -455,10 +462,14 @@ def test_each_window_undoes_and_redoes_an_edit_a_preset_and_a_reset(host):
     # The keys live on the widget, or on the page that holds it (build 5, FIG-4: a window
     # that edits text in the figure keeps ⌘Z live whatever its Section shows).
     keys = {shortcut.key().toString() for shortcut in window.findChildren(QtGui.QShortcut)}
+    keys.update(action.shortcut().toString() for action in window.findChildren(QtGui.QAction)
+                if not action.shortcut().isEmpty())  # Study's whole-envelope owner uses actions
     assert widget.undo_button is not None and {
         seq.toString() for seq in undo_sequences()} <= keys, (
         "no window an eight-host widget lives in binds Undo or Redo itself")
     start = _applied(kind, window)
+    unstyled = PlotAppearance(quantity_display=start.quantity_display,
+                              source_appearance=start.source_appearance)
     figure = getattr(window, "_figure_item", None)
 
     widget.background.setCurrentIndex(widget.background.findData("light"))     # an edit
@@ -468,7 +479,7 @@ def test_each_window_undoes_and_redoes_an_edit_a_preset_and_a_reset(host):
     preset = _applied(kind, window)
     assert preset.background == "dark" and preset.title_size == 14
     widget.reset_button.click()                                                  # a reset
-    assert _applied(kind, window) == PlotAppearance()
+    assert _applied(kind, window) == unstyled
 
     # Back through all three, then forward again. At every step the HOST holds -- and,
     # where it paints a pyqtgraph canvas, shows -- the state the widget stepped to:
@@ -478,7 +489,7 @@ def test_each_window_undoes_and_redoes_an_edit_a_preset_and_a_reset(host):
         assert widget.state() == expected and _applied(kind, window) == expected
         _assert_painted(kind, window, expected)
     assert not widget.undo_button.isEnabled()
-    for expected in (edited, preset, PlotAppearance()):
+    for expected in (edited, preset, unstyled):
         widget.redo_button.click()
         assert widget.state() == expected and _applied(kind, window) == expected
         _assert_painted(kind, window, expected)
@@ -490,7 +501,9 @@ def test_each_window_undoes_and_redoes_an_edit_a_preset_and_a_reset(host):
 def _restore_doors(kind, window):
     """Every way the host installs a figure from outside: each must end the history."""
     if kind == "study":
-        return [window.reset_style]
+        from nanoscope.core.figure_history_state import HistoryCapsule
+        return [lambda: window._appearance_widget.restore_history_capsule(
+            HistoryCapsule('study-figure-style-v1', window.style()))]
     doors = [lambda: window.set_appearance_state({"title_size": 16})]
     if kind in ("summary", "comparison"):
         def restore():
@@ -514,6 +527,20 @@ def test_a_restored_or_blanked_figure_starts_its_history_over(host):
         assert not widget.undo_button.isEnabled() and not widget.redo_button.isEnabled()
 
 
+def test_study_reset_is_an_undoable_whole_figure_edit(qtbot):
+    window = _study_window()
+    qtbot.addWidget(window)
+    widget = window._appearance_widget
+    widget.preset.activated.emit(1)
+    before, mark = window.style(), window.history_mark()
+    original_data = window._data.copy(deep=True)
+    window.reset_style()
+    assert window.style()['appearance'] == {} and window.history_mark() == mark + 1
+    assert widget.undo() and window.style() == before
+    assert widget.redo() and window.style()['appearance'] == {}
+    pd.testing.assert_frame_equal(window._data, original_data, check_exact=True)
+
+
 def test_comparison_figures_refusing_an_undo_keeps_the_step(qtbot, monkeypatch,
                                                              blocked_modals):
     """THE HOST THAT REFUSES, for real: when the figure will not render, Comparison
@@ -522,22 +549,25 @@ def test_comparison_figures_refusing_an_undo_keeps_the_step(qtbot, monkeypatch,
     window = _build("comparison")
     qtbot.addWidget(window)
     widget = window._appearance_widget
+    unstyled = widget.state()
     widget.preset.activated.emit(1)
+    styled = widget.state()
     render = window._make_figure_item
 
     def fails_unstyled(snapshot, tables, appearance, source_appearance=None):
-        if appearance == PlotAppearance():
+        if appearance == unstyled:
             raise ValueError("synthetic render failure")
         return render(snapshot, tables, appearance, source_appearance)
 
     monkeypatch.setattr(window, "_make_figure_item", fails_unstyled)
     assert not widget.undo()
     assert [m.kind for m in blocked_modals] == ["QMessageBox.warning"]
-    assert widget.state() == _applied("comparison", window) == PUBLICATION
+    assert widget.state() == _applied("comparison", window) == styled
+    assert styled.style_only() == PUBLICATION
     assert _depth(widget) == (1, 0) and not widget.redo_button.isEnabled()
     assert widget.undo_button.toolTip() == "Undo: Publication · light preset"
     monkeypatch.setattr(window, "_make_figure_item", render)
-    assert widget.undo() and _applied("comparison", window) == PlotAppearance()
+    assert widget.undo() and _applied("comparison", window) == unstyled
 
 
 def test_a_box_of_spaces_takes_the_label_off_the_figure(qtbot):
@@ -550,13 +580,14 @@ def test_a_box_of_spaces_takes_the_label_off_the_figure(qtbot):
     comparison = _build("comparison")
     qtbot.addWidget(comparison)
     widget = comparison._appearance_widget
+    before = comparison.appearance_state()
     for box in (widget.title, widget.x_label):
         qtbot.keyClicks(box, " ")
-    assert comparison.appearance_state() == {"title": " ", "x_label": " "}
+    assert comparison.appearance_state() == {**before, "title": " ", "x_label": " "}
     figure = render_comparison(comparison._snapshot, comparison._tables, comparison._appearance)
-    assert figure._suptitle is None
+    assert figure._suptitle is None or figure._suptitle.get_text() == ""
     assert {axis.get_xlabel() for axis in figure.axes if axis.get_visible()} == {""}
-    assert widget.undo() and comparison.appearance_state() == {}
+    assert widget.undo() and comparison.appearance_state() == before
     figure = render_comparison(comparison._snapshot, comparison._tables, comparison._appearance)
     assert figure._suptitle is not None and figure._suptitle.get_text()
 
@@ -578,6 +609,7 @@ def test_in_the_explorer_a_key_reaches_only_the_page_on_screen(qtbot):
     explorer = AnalysisExplorer()
     qtbot.addWidget(explorer)
     pages = {PAGE_IV: _iv_window(), PAGE_VOLTAGE_SERIES: _vdep_window()}
+    initial = {key: page.appearance_state() for key, page in pages.items()}
     for page_id, page in pages.items():
         explorer.show_page(page_id, page)
         page._workflow.set_section("Appearance")
@@ -586,13 +618,13 @@ def test_in_the_explorer_a_key_reaches_only_the_page_on_screen(qtbot):
     qtbot.waitUntil(explorer.isActiveWindow, timeout=3000)
 
     _press(explorer, undo_sequences()[0])     # the voltage series page is in front
-    assert pages[PAGE_VOLTAGE_SERIES].appearance_state() == {}
-    assert pages[PAGE_IV].appearance_state() == {"background": "light"}
+    assert pages[PAGE_VOLTAGE_SERIES].appearance_state() == initial[PAGE_VOLTAGE_SERIES]
+    assert pages[PAGE_IV].appearance_state() == {**initial[PAGE_IV], "background": "light"}
 
     explorer.raise_page(PAGE_IV)
     _press(explorer, undo_sequences()[0])
-    assert pages[PAGE_IV].appearance_state() == {}
-    assert pages[PAGE_VOLTAGE_SERIES].appearance_state() == {}
+    assert pages[PAGE_IV].appearance_state() == initial[PAGE_IV]
+    assert pages[PAGE_VOLTAGE_SERIES].appearance_state() == initial[PAGE_VOLTAGE_SERIES]
 
 
 # ================================================================================================

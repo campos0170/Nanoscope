@@ -321,10 +321,13 @@ PATCH_STATUS: str = install()
 #: Stamped on the replacement so a reload or a second explicit call cannot wrap the wrapper.
 _FONT_MARK = "_nanoscope_font_stack"
 
-_TEXT_TAG = re.compile(r"<text\b[^>]*>")
+#: A ``<text>``, or the ``<tspan>`` inside one (group 1 says which): the two elements that can
+#: carry a face of their own.
+_TEXT_TAG = re.compile(r"<(text|tspan)\b[^>]*>")
 _FONT_FAMILY_ATTR = re.compile(r'(\sfont-family=")([^"]*)(")')
-#: A ``font-family`` on any element but ``<text>``: group 1 is everything before it in the tag.
-_OTHER_FONT_FAMILY = re.compile(r'(<(?!text\b)[A-Za-z][^<>]*?)\sfont-family="[^"]*"')
+#: A ``font-family`` on any element but ``<text>`` and ``<tspan>``: group 1 is everything before it
+#: in the tag.
+_OTHER_FONT_FAMILY = re.compile(r'(<(?!(?:text|tspan)\b)[A-Za-z][^<>]*?)\sfont-family="[^"]*"')
 #: Characters a family name cannot carry into a CSS ``font-family`` without escaping.
 _UNWRITABLE = re.compile(r"""['"\\;,<>{}]""")
 
@@ -355,7 +358,9 @@ def set_font_stack(svg: str) -> str:
     """``svg`` with every ``<text>`` element's ``font-family`` replaced by the family's stack, and
     the ``font-family`` Qt also writes on the enclosing groups dropped.
 
-    A ``<text>`` with no ``font-family`` gets the default (Arial) stack. Nothing else changes: not
+    A ``<text>`` with no ``font-family`` gets the default (Arial) stack. A ``<tspan>`` that names a
+    family of its own gets that family's stack too (it is never dropped, which would hand it the
+    ``<text>``'s face); one that names none keeps inheriting. Nothing else changes: not
     the text, its position, size, weight or colour, and not the number of elements. Applying it to
     its own output changes nothing.
     """
@@ -364,6 +369,8 @@ def set_font_stack(svg: str) -> str:
     def restack(match: "re.Match[str]") -> str:
         tag = match.group(0)
         found = _FONT_FAMILY_ATTR.search(tag)
+        if found is None and match.group(1) == "tspan":
+            return tag      # no face of its own: it takes the stack of the <text> around it
         family = _first_family(found.group(2)) if found else ""
         if family not in stacks:
             stacks[family] = saxutils.escape(_stack_for(family), {'"': "&quot;"})

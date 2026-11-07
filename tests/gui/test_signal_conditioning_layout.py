@@ -145,7 +145,7 @@ def test_the_open_button_is_pinned_above_the_fold(window, qtbot, screen):
                 "Calibration changed since this detection ran — " + "long reason " * 40,
                 kind="calibration", action_label="Re-run")
             _settle(qtbot, window)
-        for widget in (det.open_conditioning_button, det.filter_preview):
+        for widget in (*det.preprocess_route_buttons.values(), det.preprocess_open_button):
             assert widget.isVisible(), widget
             assert not widget.visibleRegion().isEmpty(), (screen, stale, widget)
 
@@ -156,12 +156,12 @@ def test_the_card_moves_nothing_across_states(window, qtbot):
     window._reveal_detection_panel()
     det.show_signal_chain()
     _settle(qtbot, window)
-    rows = (det.chain_status_note, det.chain_warning_note, det.chain_protocol_note,
-            det.chain_scope_note, det.chain_order_note)
+    # Status text can grow below the navigation, but it must never move the route
+    # choices or launcher currently under the user's pointer.
+    rows = (*det.preprocess_route_buttons.values(), det.preprocess_open_button)
 
     def geometry():
-        return [r.geometry() for r in rows] + [det.open_conditioning_button.geometry(),
-                                               det.filter_preview.geometry()]
+        return [r.geometry() for r in rows]
 
     before = geometry()
     states = (
@@ -177,8 +177,10 @@ def test_the_card_moves_nothing_across_states(window, qtbot):
         state()
         _settle(qtbot, window)
         assert geometry() == before
-    assert det.preview_error_label.isVisible()
-    assert det.preview_error_label.y() >= det.chain_order_note.geometry().bottom()
+    window._open_preprocess_workspace("filters")
+    _settle(qtbot, window._signal_conditioning)
+    assert det.preview_error_label.isVisibleTo(window._signal_conditioning)
+    assert det.preview_error_label.window() is window._signal_conditioning
 
 
 def test_the_window_class_is_built_from_its_own_defaults():

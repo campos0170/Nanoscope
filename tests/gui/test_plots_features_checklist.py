@@ -16,7 +16,7 @@ import pandas as pd
 from PySide6 import QtCore, QtWidgets
 
 from nanoscope.core.session import Session
-from nanoscope.gui.column_checklist import ColumnChecklist
+from nanoscope.gui.column_checklist import ColumnChecklist, _KEY_ROLE
 from nanoscope.gui.plots_panel import PlotsWindow
 
 
@@ -60,9 +60,9 @@ def test_set_feature_selection_round_trips_and_a_row_click_is_one_undo_step(qapp
     index = checklist.proxy.mapFromSource(checklist.model.index(row + 0, 0))
     # Toggle one row the way the delegate does on a click: one gesture.
     item = checklist.model.itemFromIndex(checklist.proxy.mapToSource(index))
-    if item.text() != "snr":       # a separator row shifts the index
+    if item.data(_KEY_ROLE) != "snr":       # a separator row shifts the index
         item = next(checklist.model.item(r) for r in range(checklist.model.rowCount())
-                    if checklist.model.item(r).text() == "snr")
+                    if checklist.model.item(r).data(_KEY_ROLE) == "snr")
     item.setCheckState(QtCore.Qt.Checked)
     assert w.feature_selection() == ["dwell_s", "snr", "custom"]
     assert w._history.depth()[0] == back + 1

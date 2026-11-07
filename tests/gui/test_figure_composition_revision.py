@@ -207,6 +207,7 @@ def test_project_epoch_changes_on_reset_not_checkpoint(qtbot):
     window._capture_analytical_workspace()
     assert window._figure_project_epoch == epoch
     window._open_figure_library()
+    window._ensure_saved_figure_view()
     assert window._figure_library._project_token() == epoch
     window._reset_analytical_workspace()
     assert window._figure_project_epoch == epoch + 1
@@ -261,7 +262,7 @@ def test_revision_dialog_restores_layout_and_requires_fresh_preview(composed, qt
 def test_unknown_composition_version_keeps_export_available(composed, qtbot, monkeypatch, tmp_path):
     snapshot = _snapshot(composed)
     config = snapshot.config()
-    config["version"] = 3
+    config["version"] = 99
     future = replace(snapshot, config_json_bytes=json.dumps(config).encode())
     stored = [_entry(future, [])]
     messages = []

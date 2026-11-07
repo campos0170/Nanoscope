@@ -1,8 +1,11 @@
 # NanoScope — User Guide
 
 A specialist walkthrough from opening a recording to exporting a curated event population.
-Edition 2026-09-29, NanoScope build `40.16.59`, with the persistent study library
-and the unified incubation and curation workflow introduced in build `40.15.59`.
+Edition 2026-11-05: plotting and analysis controls checked against installed NanoScope build **45.37.98**.
+Build ID: `20261105T043813486839Z-nogit-5447ddda145a`. The new control illustrations
+use synthetic validation fixtures; historical apo-ferritin results retain their dates.
+The persistent study library and unified incubation/curation workflow retain their
+2026-09-29 review of build `40.16.59` (workflow introduced in `40.15.59`).
 Other main-analysis chapters retain their 2026-09-11 review against source `703a96a`,
 unless a later date is stated. The illustrated manual, HTML, PDF and control reference
 are maintained with this guide. Older illustrations and historical results have not
@@ -36,8 +39,8 @@ claim a new audit of all measurement-advisory behavior.
 > gating pore that default is **3.3× worse than the estimator it replaced, with every health check
 > reading `ok`.**
 >
-> For the Automatic estimator: open the **Preprocess** tab, press **"Measure this recording"**, and inspect the proposal before
-> deciding whether it is appropriate. Only then press **"Use these values"** if you want to apply it,
+> For the Automatic estimator: open **Preprocess workspace → Event reference**, press **"Estimate window settings"**, and inspect the proposal before
+> deciding whether it is appropriate. Only then press **"Use proposed windows"** if you want to apply it,
 > and inspect the updated overlay afterwards. The existing overlay before applying the proposal does
 > not show that proposal's baseline. Measurement usually takes a few seconds — measured 2 s on a 3 M-sample recording
 > and 6 s on 9 M samples — and the button reads "Measuring…" while it runs, so a two-second wait is the
@@ -111,17 +114,134 @@ Analysis menu and Explorer pages. Short labels or glyphs appear when space is li
 to see the full name. A shortcut you cannot use yet stays on the row, greyed;
 hover it to read what the surface does and why it is not available, or click it to have the reason
 posted in the status bar. Each button opens exactly what the matching **Analysis** menu item does.
-The interactive surfaces share one **Analysis Explorer** instead of opening a pile of overlapping
-windows. Its analytical pages are **Distributions**, **Distribution summaries**, **Comparison
-figures**, **Event waveforms**, **Noise spectrum**, **I-V / conductance**, **Voltage dependence**
-and **Subpopulations**. The header keeps the selected recording, result freshness
-(`CURRENT`, `STALE`, or `SAVED SNAPSHOT`), and **Refresh current** visible while you move between
-pages. Pages are created only when first used: a missing tool tab usually means that tool has not
-been opened, not that the feature is absent. Use **Analysis home** to find it. Returning to a live
-page can refresh its inputs or calculation; the opt-in summary/comparison pages only offer current
-sources until **Generate**. A saved project snapshot remains intact until explicit refresh or
-generation. The header names the active recording, but a multi-source plot uses the sources
-checked inside its own **Data** section, not just that header recording.
+The interactive surfaces share **Analysis Explorer**. Its **Figures** list contains independent
+live figures of all eight types: Distributions, Distribution summaries, Comparison figures, Event
+waveforms, Noise spectrum, I-V / conductance, Voltage dependence and Subpopulations. Several figures
+of one type can coexist. Snapshots and compositions are frozen entries in separate groups.
+The toolbar provides **Figures**, **New ▾**, **Duplicate**, **Undo**, **Redo**, **Update plot ▾**, the pinned
+**Style ▾** name, **Export ▾**, and the inspector toggle; **Reset figure** lives in Update plot's
+menu. **Data & analysis** changes the selected figure's recipe; **Format** edits its presentation.
+
+Choose a named figure to open it. A **Dormant** row retains its record without a loaded editor;
+**Current**, **Stale**, **Saved result** and **No data** describe saved-result freshness. The
+live header says **SAVED RESULT** for a retained editable result; frozen **Snapshots** remain separate. New states input requirements
+and creates an empty figure. It does not calculate a result. Duplicate retains the selected live
+figure's sources, pending/applied settings, result, words and appearance for an independent variant.
+Rename changes the list name, not the plot title. Delete removes selected live or saved entries;
+Restore deleted restores live figures during this project session. A selected Snapshot or composition
+opens in the Explorer canvas with live Update/Undo/Style actions disabled; its exports use its saved data.
+The header reports the figure's sources and result state. Noise and Event waveforms keep their own
+Sources choices. With **Follow selection** on, changing the main selection stages the new source
+and preserves the displayed result and analytical drafts until **Update plot**. Turning it off pins
+that staged source. A never-plotted figure stays **No data** on reopening.
+
+**New ▾ > From recipe…** carries the saved analytical settings and look, without sources or
+computed results. Its **Include typed title, axis labels, fit wording and captions** option starts
+off. Save and manage recipes in **Export ▾**. Distributions, summaries, comparisons, events, noise
+and voltage dependence support recipes. I-V and Subpopulations explain why they have no separate
+plotting recipe; Style, Duplicate and the report's analysis controls remain available.
+
+The current project format is **v13**. v11/v12 files open with their saved native fields and frozen
+compatibility defaults. Converting an older file offers Save and convert / Save a copy / Cancel,
+retains a verified original backup, and verifies the staged workspace before replacement. Older
+NanoScope builds cannot open v13. Raw recordings remain referenced files: keep them accessible.
+Unknown/unsupported records and unavailable-source state remain identified and preserved.
+
+### Current plotting controls: choose, update, inspect, export
+
+The **Figures** toolbar toggle shows or hides the project list; **Ctrl/⌘Shift+L**
+does the same. Hiding the list gives the canvas more space and does not delete figures
+or recompute their data. The preference is remembered. The separate **Inspector**
+toggle controls the right-hand panel. In a narrow window, scroll the inspector to reach
+later groups and use the Figures toggle to make room for a pair matrix.
+
+1. Use **New ▾ > Pair-plot matrix**, **Faceted comparisons** or **Individual-event
+   overlays** for a direct comparison entry. Select the required **Sources**, then
+   choose the columns and other settings in **Data & analysis > Plot**. A pair matrix
+   compares several selected features in one figure; it does not require one manually
+   created scatter plot per pair.
+2. Press **Update plot** to apply a pending analytical change. A pending count or stale
+   state means that the displayed result still belongs to the last completed recipe.
+   Distributions also has immediate geometry redraws, including bins, normalization
+   and log axes; inspect the pending indicator rather than assuming every control waits.
+   Changing inspector tabs does not apply the draft. **Ctrl/⌘Return** commits the field
+   being edited and requests Update. If an update fails, the previous result remains
+   visible; the pending/stale state is retained. Correct the input and update again.
+3. Use **Format** for appearance, and **Style ▾** for a reusable look. These controls
+   act on the completed figure's presentation. **Undo** and **Redo** restore supported
+   appearance changes without substituting an earlier measurement quantity or rerunning
+   the analysis. **Reset view** restores the plot viewport; **Reset figure** in
+   **Update plot ▾** resets the figure's appearance. They serve different purposes.
+4. Inspect the figure header, source names and result state before **Export ▾**.
+   Export uses the available completed result; it does not silently calculate a pending
+   recipe. A frozen Snapshot or composition has its own saved data and disables live
+   Update/Undo/Style actions. Select the intended live figure to resume analysis.
+
+### Subpopulations: source identity and Generate UMAP
+
+In a hosted Subpopulations figure, open **Data & analysis > Sources** and read the
+recording, channel and detector before running an update. A report is pinned to its
+original detection. Selecting another recording in the main window does not retarget
+that existing report. For a new report, **Update plot** uses the selected detection
+and the app's model-search defaults. For a bound report, it recomputes from the current
+accepted events of the original detection with those defaults; it does not open an
+analysis-settings dialog. Presentation controls in **View** do not rerun feature
+extraction, PCA or mixture analysis.
+
+If you curate events in the original detection, inspect the curation notice and press
+**Update plot** when ready to replace the report. Until then, its numbers and exports
+describe the completed analysis. If its source is missing, replaced or no longer
+matches its scientific provenance, the update is refused and the saved report remains
+intact. Select and restore the original source rather than relying on the current
+selection as a substitute. **Event gallery…** and **Colour the trace** also require
+the original, valid detection to be selected; reopening a report does not silently
+apply its assignments to another recording.
+
+To add UMAP to a completed report:
+
+1. Open **Data & analysis > View** and press **Generate UMAP**.
+2. Wait for the background calculation to finish. It uses that report's stored PCA
+   scores, preserving its existing t-SNE coordinates, classes and mixture results.
+   The view switches to UMAP when it succeeds. The button is unavailable while busy,
+   when there are no suitable stored PCA scores, or when UMAP already exists.
+3. Use **Embedding** to switch among the available captured embeddings, and
+   **Colour by** to choose the grouping. These are presentation choices.
+4. Save the project to retain the generated coordinates. Reopening shows the saved
+   embedding without recalculation. **Report > Export report and tables…** exports
+   the report; **Copy report** copies its text. A stored report without a valid live
+   detection can still be viewed/exported and can generate UMAP from stored PCA scores.
+
+UMAP and t-SNE are exploratory embeddings. Their neighborhoods, apparent clusters and
+colors do not establish molecular identity; library versions can change coordinates.
+**Full details** expands the explanatory report. On a small window, scroll its content
+and the inspector to reach the remaining text and controls.
+
+### Noise summary and fitting context
+
+In **Noise spectrum**, inspect the source, range and estimator, then press **Update
+plot** to commit analytical changes. The 1/f exponent **α**, fit **R²** and
+**descriptive fit only** qualification remain visible when **Full details** is
+collapsed. Open Full details for the complete report. A descriptive slope is not a
+calibrated test of a physical noise model. Keep the same calibration, bandwidth,
+quiet-segment rule and estimator when comparing recordings. Standalone legacy Noise
+windows label their local run control **Analyze / refresh**.
+
+### Time presentation and stored units
+
+Declared durations and clocks display **ms** in controls, axes, Results/measurement tables,
+readouts, Study and report figures. Friendly labels keep stable scientific column keys. A stored
+`dwell_s=0.01` appears as `Dwell (ms)=10`; ms-labelled inputs convert back to seconds. A clock still
+has an origin: instrument time and time from the first loaded sample must not be interchanged.
+Unknown-rate data remains in samples; normalized time is dimensionless. Frequency/rates and charge
+retain their own units. For a density, inverse unit factors keep the integrated probability
+unchanged. Counts, probabilities and normalized violin width are not densities.
+
+Raw tables, fitted scientific parameters, sample indices and established CSV keys keep their
+canonical basis. Display columns, when exported, are separately named with quantity metadata.
+Historical s/µs figures, saved pins and sampled curves receive a versioned presentation conversion
+once, without rerunning analysis; literal custom wording remains literal. Review a typed unit label
+when reopening it. Earlier prose below may state stored scientific windows in seconds; enter their
+ms equivalents in current ms-labelled widgets (0.5 s = 500 ms). Dated illustrations keep old labels.
 
 ### Incubation studies: shared entry and main-workspace curation
 
@@ -243,10 +363,10 @@ four recordings using the supplied student model. The [manual Cu-insulin guide](
 uses the Cu notebook's model-free Schmitt route and its own measurement settings.
 
 In **6 Figures**, select a saved figure and choose **Style selected figure…**.
-The editor uses NanoScope's shared appearance controls, with **Panel titles and
-axis labels** and **Linked series colors** for the study's multi-panel plots.
-Click **Apply appearance** to preview, then **Save styling to study** to preserve
-the figure and settings. The editor draws the figure in Arial unless you choose a font, and
+The editor uses the shared **Format** inspector for panel titles, axis labels and series colours.
+Select the element in the object list or on the figure; edits use the same appearance history.
+**Study details** retains study save/export actions without a second wording or colour editor.
+Use **Save styling to study** to preserve the figure and settings. The editor draws the figure in Arial unless you choose a font, and
 **Reset all figure styling** leaves it in Arial, not in the font the study drew it in. A font is
 drawn as a list: the family you chose, then those of its stand-ins that are installed (for Arial:
 Helvetica, Liberation Sans, Arimo, TeX Gyre Heros, Nimbus Sans), then matplotlib's own sans-serif,
@@ -256,14 +376,15 @@ figure that has a saved style is then drawn in Arial unless a font was chosen, w
 style holds (even nothing); a figure with no saved style is left in the DejaVu Sans the study draws
 it in, so one regenerated study can hold both. Styling keeps review approval and does not rerun
 detection, waveform features, clustering, or mixture fits. **Export image…** and
-**Save figure bundle…** export an individual figure. **Save to Figure Library…**
-adds it to the main app for composition; use **Save Project** in the main window
-to persist that library entry as part of the project.
+**Save figure bundle…** export an individual figure. **Save snapshot to project…**
+adds it under Figures ▸ Snapshots for composition; use **Save Project** in the main window
+to persist that saved entry as part of the project.
 
 ### Analysis home: find a tool before opening it
 
 Open **Analysis home** from the launcher, the **Analyze** workflow step, or the **Analysis** menu.
-It remains the first Explorer tab, with a header button available from every analytical page.
+It remains available from the Explorer's **Analysis home** header button. Project figures use
+the Figures list; the old tool-tab row is hidden.
 You can open it without a recording or any detected events.
 
 The catalog lists all eight analytical pages, **Event gallery**, **Report figures**, **Figure
@@ -277,23 +398,23 @@ returns to Analysis home with that tool selected and a banner saying why. The ba
 when you dismiss it, open a page, or the tool becomes available.
 
 **Browsing, searching and refreshing availability do not construct analytical pages or run
-calculations.** **Refresh availability** on the home page is different from **Refresh current**
+calculations.** **Refresh availability** on the home page is different from
+**Update plot ▾ ▸ Refresh from recordings**
 on an analytical page, which can update that page's result. Noise and pore-characterization
 tools have their own input requirements; event detection is not a prerequisite for opening
 Analysis home or examining a noise spectrum.
 
-**Three different kinds of navigation:** the Inspector's **Analysis** tab contains preparation,
-detection and measurement controls; the separate Explorer has one tab for each opened analytical
-tool; inside a tool, the **Section** dropdown selects **Data**, **Analysis**, **Appearance** or
-**Export** controls. These are not four more tool tabs. Changing Section only changes what is
-visible. For a histogram or fitted overlay choose **Distributions**; for ECDF, survival, box or
+**Three different kinds of navigation:** the main-window Inspector's **Analysis** tab contains
+preparation, detection and measurement controls; the separate Explorer has one tab for each
+opened analytical tool; its right inspector shows **Data & analysis** or **Format** for that tool.
+Switching an inspector tab or expanding a group only changes which controls are visible. For a histogram or fitted overlay choose **Distributions**; for ECDF, survival, box or
 violin choose **Distribution summaries**; for facets, a pair matrix or strip/swarm choose
 **Comparison figures**. The last two are available through Analysis home or the Analysis menu,
 even though they do not have individual buttons in the short launcher row.
 
 Opening a tool is a distinct action from browsing its description: a live Distributions,
 Event waveforms or Noise spectrum view may calculate immediately. On the two opt-in pages,
-**Refresh current** is another way to execute **Generate**, not a read-only availability check.
+**Update plot** and **Refresh from recordings** execute the page's generation action, not a read-only availability check.
 Read the displayed source and result state before using it.
 
 ### Guided first analysis
@@ -339,7 +460,8 @@ The final normalized filename is checked for overwrite conflicts, and a practice
 cannot replace a recording that is currently open.
 
 The Inspector's **Analysis** tab is where the work happens, and it has its own four-tab strip:
-**Preprocess** (choose **Signal chain** — whose stages you edit in the Signal Conditioning window, §5 — or **Open-pore baseline** from its section selector, §5a) · **Detection** ·
+**Preprocess** (open the workspace at **Filters & drift**, §5, **Event reference**, §5a,
+or **Background comparison**) · **Detection** ·
 **ML** · **Measure**. Preprocess configures the signal and reference; Detection
 and ML produce results shown in the **Results** panel under the trace, on its **Events** tab;
 it also has **Summary**, **Fits** and **Quality** tabs. Essential/Advanced changes control
@@ -394,8 +516,8 @@ Event waveforms, Event gallery, Reconcile detector results, Event labels, Noise 
 **Compare recordings** (I-V / conductance, Voltage dependence) and **Export** (events, training
 data, figures). **Analysis home** and **Guided first analysis** also have menu entries; the guide
 is available from **Help**. **Window** lists the windows NanoScope opens — the main window,
-Event inspector, Event gallery, Analysis Explorer (with one indented entry per open page), Figure
-Library, Signal Conditioning, and — once opened this session — Guided first analysis, About
+Event inspector, Event gallery, Analysis Explorer (with one indented entry per open page), the
+Figure Library compatibility entry that routes to Explorer, Preprocess workspace, and — once opened this session — Guided first analysis, About
 NanoScope, the Incubation study launcher and the Original Zn reference recipe — with a check mark
 beside each one on screen; choosing one opens it or brings it forward through the same door as its own menu
 item. It also holds **Bring All to Front**, **Dock Event inspector beside the trace** (§9) and
@@ -562,7 +684,7 @@ voltage.
   of the calibration fingerprint, so there is no live preview of it): it decides what the channel
   **is to the whole app** — which **pane** it draws in and which **overlay group** it shares, and,
   because the whole pipeline resolves a channel's kind through this one override, which channel
-  **Detect**, **Analysis ▸ Run detection**, **Batch detect**, **Measure this recording**,
+  **Detect**, **Analysis ▸ Run detection**, **Batch detect**, **Estimate window settings**,
   **Noise spectrum** and **I-V / conductance** act on, and what the calibration chip and the workflow strip
   say — once *Apply* commits it. They all ask the same resolver, so *current* on an undeclared
   channel makes it analysable the moment Apply lands (the Detect button goes from refused to
@@ -725,24 +847,37 @@ other enabled transform still applies. In particular, Normalize still recenters 
 makes physical-current and fractional-blockade interpretation invalid. With high-pass off,
 localization and characterization receive the same samples.
 
-### The Signal Conditioning window
+### The Preprocess workspace
 
-The stage controls live in their own window, **Signal Conditioning**. Open it in any of four
-ways: **Analysis ▸ Signal conditioning…** (**Ctrl+Shift+F**), the **Open Signal Conditioning…**
-button pinned at the top of **Preprocess ▸ Signal chain**, the **Filter** step on the workflow
-strip, or **Advanced signal-chain settings** in the open-pore baseline workspace (which opens it on
-the Baseline drift stage). There is one window: closing it hides it, and every setting stays on the form. It opens
-against the right edge of the main window, over the Inspector, so the main trace stays in view;
-**Show main trace** on its toolbar brings the main window back in front, and NanoScope remembers
-where you put it. **Ctrl+S** / **Ctrl+Shift+S** save the project from this window too, and
-**Ctrl/⌘+Z** / **Ctrl/⌘+Shift+Z** run Edit ▸ Undo / Redo (§9b) — they used to do nothing here,
-in the window where the chain is edited.
+The **Preprocess workspace** groups three jobs without combining their settings:
 
-The window edits the same chain the Preprocess tab always held — it moves the controls, it does
-not copy them — so detection, **Measure ‘Processed signal’**, **Export processed trace** and a
-saved project all read exactly what it shows. A grey line under its toolbar says so: the chain is
-*used by Schmitt/CUSUM detection, Measure ‘Processed signal’ and Export processed trace — not by
-the ML detector (ML tab ▸ Model preprocessing)*. **ML chain…** shows that other chain.
+- **Filters & drift** edits the classical signal-conditioning chain and previews the full chain.
+- **Event reference** defines the open-pore reference for future event measurements, including
+  ML event characterization. It also retains the proposal/confirmation workflow (§5a).
+- **Background comparison** compares one background operation and exports full-resolution
+  raw/background/corrected samples. See [Background correction workflow](BACKGROUND_CORRECTION.md).
+
+Open it from **Inspector → Analysis → Preprocess**, **Analysis → Preprocess workspace…**
+(**Ctrl+Shift+F**), or the **Filter** step on the workflow strip. Contextual **Edit drift settings…**
+and **Edit event reference…** links open the appropriate route in this same window. Closing it
+hides it and retains the shared controls and form settings. **Show main trace** brings the main
+window forward, and NanoScope remembers the workspace placement. **Ctrl+S** / **Ctrl+Shift+S**
+save the project here; **Ctrl/⌘+Z** / **Ctrl/⌘+Shift+Z** run the same Edit Undo/Redo (§9b).
+
+The target header identifies the current recording/channel, units and sample rate. Main-trace
+display and automatic-drift controls remain outside source-specific forms, so choosing a custom
+comparison background cannot hide a checked display preference or disable an active drift
+stage's OFF switch. Existing results retain their recorded measurements until an explicit new
+analysis. A persistent **Out of date** indicator belongs to the comparison plot; exporting a new
+recipe does not make an old plot current.
+
+These are the same authoritative controls, moved into the workspace rather than copied.
+Detection, **Measure ‘Processed signal’**, **Export processed trace** and saved projects read the
+same classical chain. Its scope remains *Schmitt/CUSUM detection, Measure ‘Processed signal’ and
+Export processed trace*. **ML preprocessing…** opens the model's separate preprocessing in **ML**; the
+classical filters do not process ML model input. The shared event reference still applies to
+ML event characterization, so “separate ML preprocessing” does not mean every reference setting
+is ignored by ML.
 
 On the left, **Stages, in execution order** lists the eight stages the way they run — notch,
 median, high-pass, baseline drift, running mean, Savitzky-Golay, normalize, then the low-pass,
@@ -890,7 +1025,7 @@ Details list then says *Re-run to apply*. A Revert is one step of
 Edit ▸ Undo (*"Undo Revert chain to Schmitt's run"*, or *"Undo Revert settings to CUSUM's run"*
 once a threshold was among what it put back; §9b).
 
-**One stage at a time.** In the Signal Conditioning window, a stage whose settings differ from the
+**One stage at a time.** In the Preprocess workspace, a stage whose settings differ from the
 run on screen is marked in the stage list — its row turns bold amber, and its tooltip leads with
 what differs — and **Revert stage** and **Reset stage** sit under the stage form, for the selected
 stage. **Revert stage** puts back that stage's settings from the run and leaves the other stages
@@ -913,10 +1048,11 @@ run made it from them. Settings you changed before it and did not run stay on th
 edited, over the table a batch run or a hand-made event gave the recording. They are that table's
 first steps in Edit ▸ Undo (§9b), and the next Detect takes them with it. Closing a recording drops its edits; the rest are saved with the project (§11a).
 
-Open **Preprocess ▸ Signal chain** for the compact card: the comparison with the table on screen,
-any warning, the protocol name, the scope line and the execution order, with **Open Signal
-Conditioning…** and **show processed trace on the plot** pinned above it. The baseline estimator is
-the separate **Open-pore baseline** subsection.
+The Inspector's **Preprocess** card provides a compact summary and opens the workspace at
+**Filters & drift**, **Event reference**, or **Background comparison**. The expanded workspace
+keeps the active display/processing state visible across these routes. It uses a contextual
+primary action for each job: run detection, propose/accept reference windows, or update a
+comparison. There is no universal Apply action that changes all three.
 
 | Filter | What it does | When to use it |
 |---|---|---|
@@ -927,7 +1063,7 @@ the separate **Open-pore baseline** subsection.
 | **Running mean** | Simple moving average. | Fast, coarse smoothing (blurs edges). |
 | **Median** | Sliding median. **Removes impulse/spike noise while preserving square event edges.** | Despiking a noisy trace before detection. |
 | **Baseline drift** | Estimates the slow open-pore level and *subtracts the drift*, keeping event depths intact (not a high-pass). Methods: block-median, percentile, ASLS. | Long recordings with electrode/temperature/clogging drift. |
-| **Normalize** | Rescales the whole conditioned trace onto a **dimensionless** scale — `z-score`, `robust z` (÷ the same 1.4826·MAD sigma the detector thresholds on), `min–max` → [−0.5, +0.5], or the clipped `model input` transform. Applied **last**, after every other stage. **It divides the picoamps out:** current-derived amplitudes, baselines, thresholds and pA/pA·s export fields retain physical-unit labels while no longer carrying physical units. Centering makes `frac_depth`/dI/I0 invalid; model-input clipping can also move boundaries or counts. Index, time, source, review and status fields keep their ordinary meanings. Off by default; while it is on an amber banner stays up under every stage of the Signal Conditioning window, and the Preprocess card says so. | Feeding a model, or putting recordings on a common scale — **never** to measure a conductance. |
+| **Normalize** | Rescales the whole conditioned trace onto a **dimensionless** scale — `z-score`, `robust z` (÷ the same 1.4826·MAD sigma the detector thresholds on), `min–max` → [−0.5, +0.5], or the clipped `model input` transform. Applied **last**, after every other stage. **It divides the picoamps out:** current-derived amplitudes, baselines, thresholds and pA/pA·s export fields retain physical-unit labels while no longer carrying physical units. Centering makes `frac_depth`/dI/I0 invalid; model-input clipping can also move boundaries or counts. Index, time, source, review and status fields keep their ordinary meanings. Off by default; while it is on an amber banner stays up under every stage of the Preprocess workspace, and the Preprocess card says so. | Feeding a model, or putting recordings on a common scale — **never** to measure a conductance. |
 
 Notes:
 - The **Baseline drift** window must be *much longer than your longest event* (it flattens drift, not
@@ -966,7 +1102,13 @@ Notes:
 
 ## 5a. The open-pore baseline — measure this recording
 
-In **Preprocess**, choose **Open-pore baseline** from the section selector. This is not signal conditioning
+For the background comparison workspace, editable anchors, discontinuity regions,
+independent recording subtraction, and full-resolution exports, follow
+[Background correction workflow](BACKGROUND_CORRECTION.md). Custom backgrounds are
+inspection/export recipes; the explicit automatic-drift switch controls future classical
+detector input. A custom comparison leaves an already enabled automatic stage active and editable.
+
+In the **Preprocess workspace**, choose **Event reference**. This is distinct from signal conditioning
 and it is not cosmetic: it is the estimate of `I₀(t)`, the current your pore carries with nothing in
 it, and **every depth in the app is measured against it.** It also feeds the detector's threshold, so
 it decides where events *start and stop*, not only how deep they are. When high-pass is enabled, the
@@ -981,7 +1123,7 @@ The estimator is a two-pass masked median with two windows you set:
 | **Base window** | Pass 2 — **how fast the baseline may follow the trace.** | It must be shorter than the shortest genuine conductance level dwell, or a gating pore's steps get smoothed *into* the baseline instead of being measured against it. |
 | **Decimation** | Derived from the base window, shown but never set by hand. | It is the cost throttle (cost goes as 1/decimation²), not a quality knob. |
 
-### Press "Measure this recording"
+### Press "Estimate window settings"
 
 The button probes the **whole channel on the quantitative characterization branch** — the current
 filter recipe and low-pass, but with high-pass omitted even when the orange localization preview
@@ -1015,13 +1157,13 @@ Ties go to the **shorter** window — a longer one tracks slower drift less well
 least smoothing it can get away with. Windows the search never estimated are counted and named, and
 the reason line is explicit that a stop rule is not a measurement of them.
 
-It proposes; it does not apply. **"Use these values"** is the confirmation — the app never applies a
-measured parameter on its own — and **"Back to default"** returns the two windows to 0.5 s / 0.1 s
+It proposes; it does not apply. **"Use proposed windows"** is the confirmation — the app never applies a
+measured parameter on its own — and **"Reset automatic windows"** returns the two windows to 0.5 s / 0.1 s
 (*Two resets, one thing each*, below).
 
 A proposal the estimator's own health checks condemn is **refused on the first press**, with the
 reason: *REFUSED — 2 of the checks in Baseline health CONDEMN the windows proposed above (…)*. The
-button then re-arms, reading **"Use these values anyway"**, and a second press takes them. It is a
+button then re-arms, reading **"Use proposed windows anyway"**, and a second press takes them. It is a
 two-step and not a refusal because the probe is deterministic — re-running it will offer the same
 windows — so the only remedies are to widen the windows by hand or to accept them knowingly.
 
@@ -1051,20 +1193,19 @@ measured with these windows are not certifiable — see Baseline health below.* 
 half stays, because it is the provenance. The mark is attached to the **window values**, not to the
 click: select another recording and come back — which re-seeds the same windows out of the stored
 detection — and the mark comes back with them. It ends when the windows themselves move, by a hand
-edit, by **Back to default**, or by a clean re-proposal.
+edit, by **Reset automatic windows**, or by a clean re-proposal.
 
 The buttons stay clickable when they cannot act. Click one that is blocked and it tells you the first
 real reason — no current channel selected, no sample rate, a probe already running — rather than
 sitting greyed and unexplained.
 
-**Two resets, one thing each.** **Back to default** resets the estimator — its two windows, where
+**Two resets, one thing each.** **Reset automatic windows** resets the estimator — its two windows, where
 they came from, and the *ACCEPTED OVER* mark — in every mode, and never an open-pore reference you
 supplied. Under such a reference (**Known open-pore current** or **Selected open-pore intervals**;
 see [Recording-specific open-pore references](OPEN_PORE_REFERENCE.md)) the estimator measures
-nothing, so **Measure this recording** and **Use these values** step aside and a caption beside Back
-to default quotes the windows it would reset: *Automatic estimator (not in use): 0.5 s / 0.1 s*.
+nothing, so **Estimate window settings** and **Use proposed windows** step aside and a caption beside **Reset automatic windows** quotes the windows it would reset: *Automatic estimator (not in use): 0.5 s / 0.1 s*.
 Pressing it there does not mark the table on screen stale, because those windows did not measure
-its depths. **Clear reference**, beside the mode combo, is the other reset: it puts the recording
+its depths. **Use automatic reference**, beside the mode combo, is the other reset: it puts the recording
 back on **Automatic (existing estimator)** — the chosen mode, the open-pore current, the intervals
 and the notes are cleared — and keeps the estimator's windows. With nothing to clear it says so
 (*There is no open-pore reference to clear: this recording already uses the Automatic estimator.*)
@@ -1152,7 +1293,7 @@ What it does is **fit the same estimator to the length it has**: `rough_s` is cl
 recording and `base_s` is scaled to keep your own ratio between the two. Nothing is swapped for a
 different estimator, and the result says which happened — the provenance carries
 `baseline_fallback = windows_clamped_to_recording`, and the run carries a warning saying a shorter
-segment is a worse measurement. The Open-pore baseline box keeps its *These values* line as it was
+segment is a worse measurement. The Event reference form keeps its *These values* line as it was
 (the clamp chooses no window for you, so the source — and the never-measured advisory, if that is
 the source — stand) and adds the amber *actually ran at… CLAMPED* line under it, quoting the widths
 it used beside the ones the form asks for. Measured on a synthetic trace with a known −35 pA baseline and a
@@ -1175,6 +1316,36 @@ parent's.
 
 ## 6. Event detection
 
+### Noise thresholds when noise changes over time
+
+In **Analysis → Detection**, choose **Schmitt** and review **Noise thresholds**:
+
+1. **Automatic (recommended)** preserves the global threshold calculation when noise is
+   stationary and switches to local thresholds when strong noise variation is measured.
+2. **Local** requests thresholds that follow the local noise estimate. **Noise window** is
+   displayed in milliseconds; the initial value is **250 ms**. Near changes in noise,
+   conservative thresholds extend into neighboring windows and may hide nearby weak events.
+3. **Global** uses one noise estimate for the recording. Older detections restore this policy
+   so restoring their settings does not silently change the noise-policy selection.
+4. Set **k_in (enter)** and **k_out (exit)**, then run detection. Review the result advisories,
+   especially when a recording is too short to estimate local noise reliably.
+5. Enable **View → Show detection thresholds** to inspect the levels used by the stored run.
+   Local results have varying threshold tracks. Their exported provenance records the requested
+   and effective noise policy, window, algorithm revision and bounded noise profile.
+
+Local thresholds retain the global noise floor and raise the thresholds in noisier regions.
+They do not promise improved sensitivity in quiet intervals. Noise bursts shorter than the
+effective estimation window may remain unresolved. Review the actual window and guard interval
+in the result advisories; the final window can be longer than the requested value.
+
+A local detection threshold is separate from the event table's **SNR**, whose denominator
+remains the whole-recording measurement noise for comparison with existing tables. Local
+thresholds do not define one common depth truncation floor for distribution fitting. Review
+noise-only controls, recovery of known signals, and raw traces; automatic detection does not
+establish that an event is a molecule. The policy applies to Schmitt detection; CUSUM and ML
+retain their own documented inference settings.
+
+
 **Analysis ▸ Run detection** (Ctrl+D). Choose either classical detector in the Detection controls.
 **Schmitt** is a two-threshold trigger: an event is a run where the signal stays beyond
 `baseline ± k_out·σ`, kept only if it also passes `baseline ± k_in·σ`, so it starts and ends at
@@ -1194,7 +1365,7 @@ fractional depth, mean/max deviation and SNR use the independently measured no-h
 The candidate boundaries are deliberately retained, so start/end, dwell and rise/fall remain
 high-pass-dependent; ECD is integrated from the no-high-pass samples but over those same inherited
 limits. If you have not pressed
-**"Measure this recording"** yet, do that first; a re-detection afterwards is one Ctrl/⌘Z away from
+**"Estimate window settings"** yet, do that first; a re-detection afterwards is one Ctrl/⌘Z away from
 being undone (§9b), but a dwell time measured against the wrong baseline is not recoverable by any
 later step.
 
@@ -1812,8 +1983,7 @@ Every depth in the table is measured against an **open-pore baseline** — the c
 carries with nothing in it — and which estimator produced that baseline is stamped on the result,
 next to the calibration stamp.
 
-If a stored detection's stamp does not match the estimator now set in **Preprocess ▸ Open-pore
-baseline** (or if the table predates the stamp entirely), the Results panel's status line turns
+If a stored detection's stamp does not match the estimator now set in **Preprocess workspace ▸ Event reference** (or if the table predates the stamp entirely), the Results panel's status line turns
 amber — *Depths stale — estimator changed* (or *Depths stale — predates the current estimator*) —
 with **Re-measure depths** and **Details**, which shows the full sentence naming the old
 estimator; and the affected columns — `baseline_pA`, `depth_pA`, `frac_depth`,
@@ -1939,9 +2109,9 @@ screen (see below). It covers every edit that changes what the next number will 
   recover is a different job from being able to recover it.
 - **The settings of the table on screen** — the Detection form (the signal chain and the
   thresholds), the ML form and the Baseline form, with one history for each event table. A chain
-  or threshold edit, a stage ticked on or off in Signal Conditioning, notch lines sent from the
+  or threshold edit, a stage ticked on or off in Filters & drift, notch lines sent from the
   spectrum, a protocol recalled, a model preset loaded, Revert, a stage's Revert or Reset, and the
-  baseline's Back to default and Clear reference are each a step. A step is named from what changed
+  baseline's Reset automatic windows and Use automatic reference are each a step. A step is named from what changed
   — *"Undo Change k_in 5 → 6"*, *"Undo Turn on notch"*, *"Undo Change 4 settings"* — or after the
   action that made it — *"Undo Recall protocol ‘Zn2-insulin (zn_30h)’"*, *"Undo Reset Notch
   stage"*. Typing in a field becomes one step once you pause for 700 ms, or sooner when anything else
@@ -2210,32 +2380,31 @@ measurements** not yet converted to events.
 **Use accepted events only** is ticked by default; untick it to plot the rejected rows alongside the
 kept ones.
 
-The page opens with **Data** showing source selection and the plot recipe. The fixed toolbar
-keeps **Plot / Apply**, **Reset figure** and **Export ▾** reachable. Use the **Section** dropdown
-for **Analysis** (plot/fit controls, PCA, clustering and axis limits), **Appearance**, and **Export**;
-only the chosen section is visible. These are control sections within Distributions, not separate Explorer tabs.
-A short **Result** and first actionable
-warning stay under the canvas. Expand **Details — methods and provenance** when you need the full
-audit trail.
+The page opens with **Data & analysis** showing **Sources** and **Plot**. The remaining groups
+are **Fit display** (confidence band and residual strip), **Groups** (features and clustering)
+and **Import plot settings** (**Import JSON…**). Named templates are reached through
+**New ▾ > From recipe…** and **Export ▾ > Save as recipe… / Manage recipes…**. Fit choices stay inside Plot. Use **Update plot** in
+the common toolbar to commit all pending source, plot, KDE and fit choices together. Use **Format**
+for the figure's look, and **Export ▾** for images, data and configuration JSON. **Lasso select**,
+its Pan/zoom mode indicator and **Reset view** sit on the status line.
 
 ### First use: sources, controls, then commit
 
-1. Choose **Section → Data**. Check the source rows you intend to analyze and verify their
+1. Choose **Data & analysis**. Check the source rows you intend to analyze and verify their
    recording, channel and detector identity. A highlighted row is only the row selected for
    editing its name or source colour; its checkbox decides whether its events enter the plot.
 2. Choose **Histogram**, **Scatter**, **KDE (density)**, **Event-count heatmap** or **PCA** and
    the appropriate measurement columns. Check **Use accepted events only**, units and
    normalization deliberately.
-3. Press **Plot / Apply** in the fixed toolbar. The local **Plot** button and the **Apply fit**
-   buttons perform the same commit: all pending source, plot-type, column and fit proposals are
-   applied together. Do not assume Apply fit commits only the fit while leaving a proposed source
-   change unapplied. A **●** indicates a pending proposal; the displayed picture may still be the
+3. Press **Update plot** in the common toolbar: all pending source, plot-type, column and fit
+   proposals are applied together. Selecting a fit does not commit it in isolation from a proposed
+   source change. The pending count indicates proposals; the displayed picture may still be the
    previous result.
 4. Read **Result** and expand **Details — methods and provenance**. Only then choose
-   **Section → Appearance** to style the figure, and export or save a named snapshot.
+   **Format** to style the figure, and export or save a named snapshot.
 
-A live Distributions page normally draws when first populated. Its **Refresh** button in Data,
-and the Explorer's **Refresh current**, repull stored event/manual sources and can redraw; they
+A live Distributions page normally draws when first populated. Its **Refresh** button in Sources,
+and the Explorer's **Update plot ▾ ▸ Refresh from recordings**, repull stored event/manual sources and can redraw; they
 are not just list updates. Existing checked sources are retained where possible, but previous
 PCA/clustering results are cleared when new source tables are supplied. Refreshing a saved
 analytical snapshot explicitly returns that view to current inputs. Save a Figure Library copy
@@ -2274,17 +2443,14 @@ Three behaviors help organize the comparison; none establishes scientific compar
 
 - **Shared bins + normalization.** All drawn sources use ONE set of bin edges, and the y quantity is
   selectable — **count**, **density** or **probability per bin**. It switches to
-  <!-- Renamed from "density (area = 1)" by S6-03: the heights are per the column's STORED
-       unit (per second for a dwell) while the x ticks follow the Time-unit combo, so the
-       drawn area was 1000 on the default ms axis and 23.3 under the shipped log-x dwell
-       template, where no constant factor can repair it. The y axis now names the unit —
-       `density (1/s)`, `density (1/pA)` — and Details says where the drawn area is not 1. -->
   *density* as soon as a second source is shown, unless you have already selected a normalization.
   This removes the simple event-count scaling that would otherwise differ by 25-fold between
   5,000-event and 200-event recordings of identical shape. It does not correct calibration,
   detection efficiency, acquisition duration or sampling bias. Density is counts divided by
-  `n × bin width` in the column's stored unit; its integral is one in that unit, not necessarily
-  on rescaled millisecond ticks or a logarithmic display. Check the printed y-axis units.
+  `n × bin width` in the scientific unit, then receives the inverse display-unit factor.
+  Dwell density is shown in 1/ms; its integral is preserved on the displayed linear-ms measure.
+  A logarithmic axis is still a different measure: visual area in log coordinates is not promised
+  to be one. Check the printed y-axis units.
 - **One fit per source.** With a fit enabled each source is fit **separately, using its own
   detector's resolution** — its own `min_dwell_s`, its own filter-limited exclusion, its own
   right-truncation state. Two sources are never pooled into one number, and one recording's
@@ -2337,11 +2503,10 @@ Three behaviors help organize the comparison; none establishes scientific compar
   or per cluster when the histogram is split by cluster — as a dotted line in that series' colour,
   so it cannot be mistaken for a fit. The bandwidth is Scott's rule, the one the violins use, and
   the curve covers each series' observed range. It is drawn in the bars' own y quantity: for
-  **count** it is `n × bin width × f`, for **density** it is `f` per the column's stored unit (per
-  second for a dwell, whatever the ticks say, exactly as the bars are), and for **probability per
-  bin** it is `bin width × f`. On a **log x** axis the bins are evenly spaced in log10, so the KDE
+  **count** it is `n × bin width × f`, for **density** it receives the same inverse display-unit
+  factor as the bars (1/ms for dwell), and for **probability per bin** it is `bin width × f`. On a **log x** axis the bins are evenly spaced in log10, so the KDE
   is estimated on log10 of the column too and drawn to match the bars at every decade. Ticking the
-  box is a proposal: press **Plot / Apply** to draw it. **Details** names each series' bandwidth,
+  box is a proposal: press **Update plot** to draw it. **Details** names each series' bandwidth,
   in the axis's time unit or, on log x, in decades. A Gaussian kernel spreads a little probability
   past the data's edges (below zero for a dwell on a linear axis), so next to a hard edge such as
   the detection limit the curve reads below the bars. A series with fewer than three values, or
@@ -2376,17 +2541,17 @@ Three behaviors help organize the comparison; none establishes scientific compar
 - **Event-count heatmap** — any two numeric columns binned into a two-dimensional grid of **event
   counts**, coloured by count, with a colour bar labelled *Event count*. It uses the same binning
   as the heatmap in **Analysis ▸ Event waveforms…**, so their counts agree bin for bin on the same
-  events (§14 still asks you not to read dwell-depth coordinates off the Event waveforms *image*
-  until a verified fix is installed; **Export plot data** writes this heatmap's cells, with
-  their edges and counts, as numbers): **Bins** sets the cells per axis (40 × 40 by default), each axis spans the source's own
+  events. The September coordinate caveat applies to historical captures; the November 3
+  asymmetric-bin gate is described in §14. **Export plot data** writes this heatmap's cells,
+  with their edges and counts, as numbers. **Bins** sets the cells per axis (40 × 40 by default), each axis spans the source's own
   minimum to maximum, and **Log x** (on by default) and **Log y** space the bins evenly in log10.
   Rows that are not finite, or not positive on a log axis, are dropped and counted in **Details**.
-  The time axes follow the **Time unit** like every plot here. It shows **one source at a time:
+  Declared time axes display **ms**. It shows **one source at a time:
   the first ticked source**, which the title names; Details says how many other ticked sources are
   not drawn. The colours are counts, not a density and not smoothed — use **KDE (density)** for a
   smoothed estimate. **Details** carries the same comparability and amplitude warnings that
   Scatter gives for the same two columns, judged for the drawn source. The **Heatmap colormap** in
-  the Appearance section recolours it without re-binning or moving your zoom; the colour bar has no
+  **Format ▸ Colour map** recolours it without re-binning or moving your zoom; the colour bar has no
   colormap menu of its own. A configuration file naming a colormap this build does not offer opens
   in viridis, and the import note names it among the settings not taken. Lasso and point-click
   selection are not available on a heatmap, because it has no points.
@@ -2407,29 +2572,29 @@ tool. Clustering runs on the **first ticked** source.
 
 ### Styling & axes
 
-- **Time unit** — `s` / `ms` / `µs`, default **ms**, applied to every time column (`dwell_s`,
-  `rise_s`, `fall_s`, `t_start_s`, `t_end_s`). It rescales the **axis only**: the data, and every
+- **Time unit** — fixed **ms** presentation for declared time columns (`dwell_s`,
+  `rise_s`, `fall_s`, `t_start_s`, `t_end_s`). Current inputs/readouts use ms; the data, and every
   fit computed on it, stay in seconds, so the dwell fit keeps the detector's own `min_dwell_s`.
   Every parameter the window prints — τ, the mixture's μ, their confidence intervals, the
   truncation notes — is shown in the unit the axis is showing; a parameter that is not a time (a
   gamma's dimensionless shape `k`, a depth in pA) is shown in its own. The **Fit range** boxes are
   read in the axis unit too. Axis-range entries follow their displayed unit labels.
-- **Axis range** — type explicit X/Y limits in the displayed units (stored in data units and converted to log internally on a log axis)
+- **Axis range** (**Format ▸ X axis / Y axis**) — type explicit X/Y limits in the displayed units (stored in data units and converted to log internally on a log axis)
   that persist across redraws, until the plot type or the axis's column changes (*What a change
   puts back to automatic*, below); **Auto** releases them. The plot is also mouse zoom/pan-able.
-- **Appearance** — the Text group comes first: Title, X label and Y label (empty = automatic, shown
-  as the placeholder; one space hides the label). Then the font (a short list, under **Figure fonts**
-  in §10) and the text sizes, data-series and fit colours,
-  the Event-count heatmap's colormap, marker size, line width, grid and background. An empty
-  Title, X label or Y label box uses the automatic label, in every plot window; type a single
-  space to show no label, and a hidden title leaves no gap above the plot. These controls, legend
-  edits and fit-decoration toggles update the existing picture without recalculating bins, KDE,
-  PCA or fits, collecting source data, or resetting manual zoom. Appearance-only Undo/Redo has the same guarantee.
-  Pending analytical changes stay pending until **Plot / Apply** or **Apply fit**. Which numbers the
-  fit label shows is chosen in the **Numbers** row of the **Fit label** group (below); the Style
-  rows under it have no switch for them, except that **Residual strip** also adds the strip's
-  χ²/dof after the equation. There is no Title weight box, because the title's bold and italic are
-  its **Text style…**.
+- **Format** — choose Title or an axis Label to edit its words (empty = automatic, shown
+  as the placeholder; one space hides the label). Choose Figure for the font (a short list, under
+  **Figure fonts** in §10), text sizes, data and fit colours, marker size, line width, grid and
+  background. The Event-count heatmap palette is under Colour map. An empty Title, X label or Y label box uses the
+  automatic label, in every plot window; type a single space to show no label, and a hidden title
+  leaves no gap above the plot. These controls, legend edits and fit-decoration toggles update the
+  existing picture without recalculating bins, KDE, PCA or fits, collecting source data, or
+  resetting manual zoom. Appearance-only Undo/Redo has the same guarantee. Pending analytical
+  changes stay pending until **Update plot**. Which numbers the fit label shows is
+  chosen in **Format ▸ Fit label ▸ Numbers** (below); element style controls have no switch for
+  them, except that **Residual strip** in **Data & analysis ▸ Fit display** also adds the strip's
+  χ²/dof after the equation.
+  There is no Title weight box, because the title's bold and italic are its **Text style…**.
 - **Text in the figure** — double-click a title, axis label, legend entry, the fit label or the
   *below detection limit* words to retype it in place (Return keeps it, Esc cancels; Return with
   nothing changed changes nothing), and right-click it for **Text style…** (font, size, bold, italic,
@@ -2458,7 +2623,7 @@ tool. Clustering runs on the **first ticked** source.
   so `_{…}` and `^{…}` are sub- and superscripts there too). Drag it anywhere (the position
   is saved with the plot). Double-click it to write your own words around the live tokens
   `{equation}` `{r2}` `{n}` `{ci}` `{bic}` `{ks}` `{source}`; the numbers always come from the current
-  fit. The Appearance section's **Fit label** group chooses the numbers, size, colour and position,
+  fit. **Format ▸ Fit label** chooses the numbers, size, colour and position,
   or **In legend instead**. Its **Numbers** row ticks Equation, R², n, CI, BIC and KS, with Equation,
   R² and n ticked on a new label; in the automatic text a number the fit does not have is left out,
   and where your own wording names it a dash is drawn. A refusal such as *R² undefined (y does not
@@ -2480,7 +2645,7 @@ tool. Clustering runs on the **first ticked** source.
   had **R² on figure** unticked shows no R² refusal tag on the label (it makes no claim about R² any
   more; Details still carries it), and Details' summary line of a scatter fit always carries R² (it
   left it out while that box was unticked). This build writes none of the old settings itself: a
-  page it saves after an edit holds none of them, and the project format is still version 12. A
+  page it saves after an edit holds none of them. New project saves use version 13 (§11c). A
   project saved again with no edit to the page, and an older Distributions template stored on this
   computer, are carried into the project as they were; they open the same way.
 - **Presets and templates** — an appearance preset keeps a look (fonts, sizes, colours, styles),
@@ -2499,26 +2664,31 @@ tool. Clustering runs on the **first ticked** source.
   single-series data color, fit color and cluster palette are not silently recolored.
 - **What a change puts back to automatic** — changing the **plot type** or a **column** puts the
   Title, X label, Y label and the fit label's wording back to automatic, and an axis whose column
-  moved loses its typed range (a change of plot type moves both axes). Applying a different fit
-  (another model, another fixed number of
-  components for a mixture, or Auto (BIC) switched on or off for one) puts only the fit label's
-  wording back, and leaves the Title, axis labels and ranges as they are; the first fit applied
-  after *none* keeps wording you typed
+  moved loses its typed range (a change of plot type moves both axes). While **Normalize** is
+  *density* a new column moves the Y axis too, since its unit is the column's. Picking another
+  **Normalize** (count, density, probability per bin) is a change of what the Y axis counts: it does
+  the same, with the Y range, in the step of the pick (the density that ticking a second source
+  switches to by itself keeps the words and the range). On the PCA page the **Features** you tick
+  are its columns: another set does the same on both axes (PC1 and PC2 are other combinations of
+  other columns), while on any other plot type that list is a clustering setting and takes nothing.
+  Applying a different fit (another model, another fixed number of components for a mixture, or Auto
+  (BIC) switched on or off for one) puts only the fit label's wording back, and leaves the Title,
+  axis labels and ranges as they are; the first fit applied after *none* keeps wording you typed
   ahead of it. The look stays: fonts, sizes, colours, text styles, the legend, and the fit label's
   numbers, position, size and colour. The reset is part of the same **Configuration** Undo step as
   the change that caused it, and the status line names what was reset, words and ranges alike
   (*Title, X range and Y range reset: the plot is now set to show the scatter of ycol against
-  xcol.*) for ten seconds. A later change
-  of plot type, column or applied fit that finds nothing typed and no range set takes that sentence
-  off the status
-  line; the first fit applied after *none* resets nothing and leaves it. Changing the Time unit
-  keeps the words, and so do ticking another source and a refresh, unless a ticked source then lacks
+  xcol.*) for ten seconds. A later change of plot type, column, Normalize or applied fit that finds
+  nothing typed and no range set takes that sentence off the status line; the first fit applied
+  after *none* resets nothing and leaves it. The sentence also comes off when a word or range it
+  names is typed or set again, as by the **Undo** that brings them back. Migrating a legacy time
+  display to ms keeps the words, and so do ticking another source and a refresh, unless a ticked source then lacks
   the plotted column: the column boxes offer only the columns every ticked source has, so the column
   moves on its own and the words and the range go as they do for a pick (the manual-measurement
   table has no `depth_pA`, so ticking it beside a detection table moves the column of a `depth_pA`
-  plot). Recalling a template installs the title, labels and fit wording it was
-  saved with (none, if it was saved without) in place of the ones typed, and **Undo** and **Redo**
-  step the whole configuration, the plot type and the words together; neither runs the rule.
+  plot). Recalling a template installs the title, labels and fit wording it was saved with (none, if
+  it was saved without) in place of the ones typed, and **Undo** and **Redo** step the whole
+  configuration, the plot type and the words together; neither runs the rule.
 - **Export ▾** keeps the outputs together: **Export current figure…** writes the live plot as PNG, SVG, or
   vector PDF; **Export plot data…** writes the exact plotted values as CSV (a KDE overlay as
   `kde` rows in the bars' y quantity, named for the series it smooths; a heatmap as one `cell` row
@@ -2527,27 +2697,114 @@ tool. Clustering runs on the **first ticked** source.
   dialog first: choose native size or physical dimensions in mm/in, optionally lock the aspect
   ratio, and set PNG resolution. A frozen graphical preview shows the current figure. If a residual
   panel is displayed, explicitly tick **Include residual panel** to place it beneath the fitted
-  plot; it is excluded by default. Physical dimensions apply to all three formats. The 85 mm and
-  180 mm presets are starting widths, not promises of compliance with a particular journal.
+  plot; it is excluded by default. Physical dimensions apply to all three formats. Single- and
+  double-column presets use the figure’s pinned style and show the actual width and style name.
+  Figures without a style use the built-in reference columns (currently 89/183 mm). Edit column
+  widths in the style editor; these are starting widths, not promises of journal compliance.
   At a physical size, **Print check** estimates the smallest measurable text and scalable stroke
   in points. Expand its details before relying on the estimate: outlined text, embedded images,
   nested panels and cosmetic strokes may need manual inspection. The default 8 pt / 0.5 pt targets
   are editable preferences, not journal rules. **Enlarge to measured targets** enlarges the whole
   frozen canvas, preserving its aspect ratio; it does not independently reflow fonts at a fixed
-  column width. For a fixed width, increase typography in Appearance and capture/export again.
+  column width. For a fixed width, increase typography in Format and capture/export again.
   **Approximate print-size preview…** uses the screen's reported resolution; it is uncalibrated,
   not a physical ruler. PNG DPI improves raster sampling, not the physical size of text.
-- **Configuration** (**Section → Export**) — **Undo** / **Redo** step the whole plot recipe,
+- **Configuration history** (the common toolbar) — **Undo** / **Redo** step the whole plot recipe,
   appearance included, back and forward, 200 steps deep; ⌘Z / ⇧⌘Z do the same in this page. This
   history is the page's own and Edit ▸ Undo never reaches it. It starts when a project is opened,
   at the state the project was saved in, so the first change after opening is undone back to that
   state (the words and the look it was saved with), and **Undo** with nothing changed does nothing.
   An **Undo** or **Redo** is a change to the project like the step it takes back: it marks the
-  project unsaved, and a project saved after it holds what is on screen. **Template:** recalls a saved plot
+  project unsaved, and a project saved after it holds what is on screen. In **Data & analysis ▸
+  Recipes**, **Template:** recalls a saved plot
   template — plot type, columns, fit recipe, axes and style at once, leaving your ticked sources
   alone — and **Save as…**, **Rename** and **Delete** manage them. **Delete** asks first and names
   the template, with **Cancel** as the default: a template is a preference kept on this computer,
   so no undo brings it back. A project saved earlier keeps its own copy (§11c).
+
+### Nonlinear curve fitting: Gaussian peaks and logistic models
+
+Choose **Scatter** in Distributions, or open **Voltage dependence**, then press
+**Curve fit…** in **Data & analysis** (the **Fit** group in Voltage dependence).
+Select one plotted source and a model. This fits a continuous X–Y relationship;
+histogram Gaussian mixtures fit the distribution of event values. The nearby
+**Quick fit** selector is a separate, simpler fit control.
+
+Available curve models are straight line, Gaussian peak with baseline, single and
+double exponential with baseline, power law, four-parameter logistic (4PL),
+five-parameter logistic (5PL), Hill, Boltzmann sigmoid, stretched exponential,
+Lorentzian, Voigt and a custom equation. The dialog displays each model's equation
+and parameter convention. Gaussian sigma is standard deviation; the Voigt peak is
+height-normalized. In 5PL the midpoint scale is not generally EC50 when asymmetry differs
+from one. Use a Boltzmann voltage sigmoid for signed voltage; positive-dose Hill/logistic
+models have a different domain.
+
+1. Review **Source**, **Model**, the equation, and the X/Y quantity names and **units
+   shown in the dialog**. Parameters and **Fit x range** use those storage units,
+   including seconds for stored time, even when the parent figure displays milliseconds.
+   **Draft data** shows the observations for the proposed fit.
+2. Expand **Advanced: starts, constraints and loss**. **Estimate starts** estimates
+   free starting values inside your current bounds; it preserves fixed values and
+   constraints. **Reset constraints** restores model bounds and releases fixed
+   parameters while preserving the current starting values. Edit **Start**, **Lower**,
+   **Upper** and **Fixed** deliberately. The **Unit** column identifies each parameter's
+   unit. A custom equation uses `x` and the listed parameter names; arithmetic and the
+   named mathematical functions are supported, without Python statements or file access.
+3. Optionally restrict **Fit x range**. Choose **Error weights**: uniform errors or a
+   measurement-standard-deviation column for weights of 1/sigma². Under **Loss**, select
+   **Least squares**, **Robust soft L1** or **Robust Huber**. **Robust scale** is automatic
+   or a positive value in response units, or sigma units when weighted.
+4. Press **Fit**. **Cancel fit** stops the attempt and preserves the previous completed
+   result. On **Last completed fit**, check the source/model identity, curve,
+   raw-response residuals, metrics and parameter table. Expand **Detailed diagnostics**
+   for the full report. An estimate or high R² alone does not establish a suitable model.
+5. Press **Apply to figure** to attach a successful fit matching the current draft.
+   Editing the draft keeps the previous result on **Last completed fit**, but disables
+   Apply until a matching fit succeeds. **Remove applied fit** removes the figure's
+   overlay; it does not alter the original observations.
+6. **Export last completed fit…** writes that identified completed result as a JSON
+   fit record or CSV observations, predictions, residuals and sampled bands. It exports
+   the original source, model and settings of that result, even if a newer draft is
+   visible. Draft edits are not exported. Save the project after applying the fit to
+   retain its settings and evaluated outputs. Reopening restores those outputs without
+   running the optimizer. Changing the source or plotted coordinates invalidates the
+   old overlay.
+
+All these curve models minimize residuals in the original response space. The Scatter
+**Quick fit** power-law option fits log10–log10 values, and the Voltage dependence
+**Quick fit** exponential option fits log-response values; their R² describes that
+transformed space. These objectives can return different parameters on the same noisy
+observations.
+
+Intervals are local linearized approximations; bands are pointwise rather than
+simultaneous. Robust fits and poorly identified/boundary-constrained fits withhold
+conventional symmetric intervals. Supplied sigma is treated as known uncertainty;
+weighted prediction bands interpolate sigma across the fitted range. Residual
+structure, limited range and missing plateaus can make a smooth curve scientifically
+unconvincing. The solver refuses insufficient free-parameter observations: three
+apo-ferritin voltage summaries cannot identify an unconstrained 4PL or 5PL fit.
+Shared-parameter fitting across several sources is not offered by this dialog.
+
+### Distribution-fit reliability and saved diagnostics
+
+Histogram likelihood fits retain detector truncation. Explicit Gaussian fit-range
+bounds now use a conditional Gaussian-mixture likelihood; the detector depth-floor
+advisory alone does not assume a uniform detection threshold. Exponential-mixture
+weak-component warnings count expected observed events after selection.
+
+The CDF diagnostic uses the declared observable support, including tails outside
+observed minima/maxima. Its comparison threshold is a descriptive reference, **not a
+calibrated fitted-model hypothesis test or p-value**. A smaller BIC ranks models on
+identical observations and support; it does not establish model adequacy. Historical
+screenshots and quoted outputs elsewhere in this manual retain their original dates;
+their older “KS rejected (1%)” or “far beyond chance” wording is superseded by this
+qualification and the current CDF mismatch label.
+
+Confidence-band and residual geometry now survive saving/reopening, with stored fit
+uncertainty. The Inspector's dwell/depth Fit action runs in a cancellable background
+worker and discards an answer if its events or calibration changed during the run.
+I-V details and CSV include Student-t OLS intervals when residual degrees of freedom
+exist; these assume independent constant-variance current errors.
 
 ### A consistent plotting workflow
 
@@ -2580,61 +2837,124 @@ dependence a value at or below zero leaves the plot and the fit while Log y is o
 turn it off; untick it to go back. Where a window has none, the box is greyed with the reason. On
 the Event-count map, whose axes hold log10 values while Log x or Log y is ticked, a range typed in
 the same dialog as the Log scale change is kept, and ticking the Analysis box takes the range of
-its axis (*When a figure's quantity changes*, below). In Noise, Event waveforms and Subpopulations
-the views share one X and one Y label
-(Appearance), so there an axis label is renamed in Appearance; on the figure it takes a
-text style, and Axis properties shows it read-only. In Distribution summaries, renaming a legend
-entry in the figure sets that source's display label in Source names and colors, as one Undo step
-(Reset figure leaves the name alone). **Ctrl+1–4**
-(⌘1–4) choose the Section (Data, Analysis, Appearance, Export) of the page in front (not yet in
-Distributions).
+its axis (*When a figure's quantity changes*, below). A range the dialog hands back as it
+opened (the pinned one, or the one the view shows when you untick Auto and leave the boxes alone)
+is carried across to the units the axis is about to have, log10 of it when Log scale is ticked and
+ten to the power when it is unticked, so the map keeps its frame instead of going blank; the major
+tick spacing the dialog opened with, which does not carry across, goes (one you type in the same
+dialog is kept, as a range is), and so does a range that cannot be (a minimum at or below zero
+cannot be logged). In Noise, Event waveforms and Subpopulations
+the views share one X and one Y label, so rename it in the corresponding Format axis Label panel;
+on the figure it takes a text style, and Axis properties shows it read-only. In Distribution
+summaries, renaming a legend entry in the figure sets that figure's local source display label
+as one Undo step (Reset figure leaves the name alone). **Ctrl/⌘1** opens **Data &
+analysis** and **Ctrl/⌘2** opens **Format** for the page in front. **Ctrl/⌘Return** (or keypad Enter)
+commits the field you are typing in and runs **Update plot**. Ctrl/⌘3 and Ctrl/⌘4 have no hosted action.
 
-Analytical pages use the **Section** dropdown for **Data → Analysis → Appearance → Export**.
-The selector only changes which controls are visible; it does not change their values or run an
-analysis. It is distinct from the Explorer's tool tabs. The primary **Analyze**, **Generate** or
-**Plot / Apply** action stays reachable independently of appearance controls, and so does **Reset
-figure**, which sits just before **Export ▾** in the page toolbar. In Distributions,
-**Apply fit** is another entry point to the same full Plot / Apply commit, not a separate fit-only
-commit. Where a report consumes an already-computed result, its Data/Analysis
-sections explain the source and route an explicit new run to the existing analysis dialog.
+The right inspector replaces the hosted pages' Section dropdowns and stacked control bands.
+Its width, visibility, tab and each group's expanded state are remembered on this computer.
+On a fresh page the first two **Data & analysis** groups are open; later groups start collapsed.
+The toolbar stays reachable while the inspector is hidden. Standalone legacy windows retain their
+page-specific controls. In the scientific descriptions below, **Generate**, **Plot / Apply** and
+**Apply fit** name the existing commit operations; on a hosted page invoke them with **Update plot**.
 
-The shared Appearance controls include typography, titles/axis labels, canvas/grid, colours,
-line width, marker size and legend visibility/size. Controls that do not apply to the current
-plot are disabled with an explanation. Category-coloured plots retain category identity;
-heatmap colour scales have their own palette controls. Use **Save appearance preset…** to reuse
-your style across plot types. Presets are local application preferences and contain appearance
-only—not recordings, event filters, bins, axis scaling, fitting choices or detector settings.
+| Page | Data & analysis groups | Update plot and pending count |
+| --- | --- | --- |
+| Distributions | Sources, Plot, Fit display, Groups, Import plot settings | Commits the full pending recipe once; counts independent pending reasons plus a proposed fit, or 1 before the first plot |
+| Distribution summaries / Comparison figures | Sources, Plot | Generates the chosen figure; counts draft choices differing from the displayed result, with 1 before generation or when stale |
+| Voltage dependence | Sources, Plot, Fit | Applies a waiting fit without gathering again; otherwise refreshes the points. A waiting fit counts as 1 |
+| I-V / conductance | Estimator | Refreshes the observations and fit; no pending count, and disabled while gathering |
+| Event waveforms | Sources, Plot · Event-count map or Plot · Ensemble | Commits pending analytical choices against the figure's bound events; appearance and existing-view navigation stay immediate |
+| Noise spectrum | Sources, View, Estimator | Commits pending source, range, estimator and view choices using the figure's own source binding |
+| Subpopulations | Sources, View, Report | Recomputes the pinned detection with model-search defaults; a curation-change notice counts as 1. A missing or mismatched source is refused |
+
+**Format** shows an element list above one properties panel: **Figure**, **Title**, **X axis**
+and **Y axis** (with **Label** and **Numbers**), **Legend** and its entries, **Series**, **Fit label**,
+**Caption** and other elements available in the current view. Colour map appears for a view that
+uses one. Comparison/Study matplotlib views expose their supported text, axis and series targets
+through the same Format controls; unsupported properties are disabled explicitly.
+
+Single-click text on an editable figure to select it, open Format and show its floating mini
+toolbar: font, size, bold, italic, colour, title alignment and **Edit text**. A list pick selects
+without changing tabs; select series from that list. Click empty plot to deselect; panning preserves
+the selection. Double-click editing and right-click menus still work. Selection outlines and the
+mini toolbar never appear in exported artwork. **Figure font** in an element's font box follows
+the figure; a named font overrides it. **● set here** clears just that property's override when
+clicked; **from figure** links to the inherited setting, and **default** identifies an unset value.
+
+**Reset element** clears that element's styles and keeps its words. On an axis it also returns
+range and major tick spacing to Auto, in the same Undo step. **Reset look** on Figure returns the
+look and element styles to defaults while preserving words, axis ranges, annotation positions and
+legend names. **Copy format** / **Paste format** transfer compatible looks, never wording or axis
+geometry; a Figure paste preserves the destination fit label's own settings. The axis panels show
+range, Auto, major tick spacing and units. Their read-only **Log** indicator links to the owning
+Data & analysis control. A run of size clicks is one Undo step; leaving the size box ends the run.
+
+**Style ▾** has **This figure**, **Selected figures** and **All live figures** scopes, with
+**Built in**, **Project styles** and **On this computer** sections. It applies one Undo step per
+figure, including dormant records. **All live figures** also includes open retained Study/Report
+figure editors; **Selected figures** uses the live rows selected in Figures. Frozen Snapshots and
+compositions are excluded. Each figure pins a
+style revision and a portable snapshot. Editing a style creates a new revision; existing figures
+remain pinned until explicitly restyled. **Project default for new figures** supplies plain New
+figures, while Duplicate preserves its source and From recipe carries the recipe's look.
+
+**Save this figure's look as…** / **Manage saved looks…** manage project definitions. The explicit
+**Save this figure's look on this computer…** / **Manage styles on this computer…** routes manage
+local reusable styles. Neither saves scientific settings or wording. **Keep text styles I set by
+hand** is on by default. **Undo style on N figures** lasts only while the affected histories remain
+at the batch result. The toolbar shows pinned name/revision and a dot for local look overrides.
+
+The editor includes text roles and panel-letter size, fractional line/marker sizes, grid, frame,
+palette, optional physical canvas width/height and single/double-column presets. Its labelled
+synthetic preview does not analyze project data. Palette defaults preserve source/category identity
+colors and explicit overrides. Undefined canvas dimensions retain native size; one defined dimension
+keeps the captured aspect, and two define the export canvas. These are export defaults, not a
+scientific redraw or a verified publisher requirement.
+
+**Format ▸ Series** lists individual series with stable identities. Supported per-series color,
+line width, marker size and visibility are figure-owned edits. Hidden series remain in the data.
+**Project Sources…** opens the central display-name/color table using exact existing source IDs,
+without gathering inputs. Figure-local names/colors take precedence; frozen Snapshots stay unchanged.
+Use Format/on-canvas legend editing for a figure-local name and its Series controls for a local
+colour. These edits participate in the figure's Undo history. Study/Report editors use the same
+Format controls, and their style menus include computer styles as well as built-ins and project styles.
+
 **Reset figure** puts the title, axis labels, fit-label wording, any caption or other annotation
 text you typed (Voltage dependence's caption, for one) and the look (fonts, sizes, colours, element
-styles) back to the plot's defaults as one Undo step, and ⌘Z brings them back. It is in
-the page toolbar from every Section; the study figure editor, which has no such toolbar, keeps it
-in its Appearance section. It leaves the data, fits and analysis settings alone. On every page that
-has Axis properties except Distributions, a range or tick spacing typed there goes with the look.
-Event waveforms keeps its **Event-count heatmap colormap**, and Noise spectrum its **Spectrogram
-colormap** and **colour limits**: they sit in the Appearance section but are not part of the shared
-look.
-Distributions keeps its range in the **Axis range** boxes, which Reset figure leaves, and leaves
-**Font size (body)**, the legend's position, entries and (n = …) switch, source names, **Confidence
-band**, **Residual strip**, **Provenance caption** and **Heatmap colormap** as well; there it
-returns the fit label's numbers to Equation, R² and n and the title's bold and italic to plain.
-Appearance used by a figure is saved in its project, and a saved project also carries a copy of
-your presets and templates (§11c).
+styles) back to the plot's defaults as one Undo step, and ⌘Z brings them back. It is in the page
+toolbar's **Update plot ▾** menu regardless of the inspector tab. Study/Report editors offer
+**Reset all figure styling** in **Study details** or **Figure details**. It leaves the data, fits and analysis settings alone. On every page that has
+Axis properties except Distributions, a range or tick spacing typed there goes with the look, and
+the button's tool tip says so. Event waveforms keeps its **Event-count heatmap colormap**, and Noise
+spectrum its **Spectrogram colormap** and **colour limits**; these are not part of the shared look.
+**Build 45.37.98 limitation:** Event waveforms > Event-count heatmap currently shows an empty
+**Format ▸ Colour map** panel, so its palette cannot be changed through that hosted panel.
+The separate Distributions **Heatmap colormap** control works. This limitation does not
+change the computed event-count matrix. Noise uses its own supported Colour map controls. Distributions keeps its range in the same Axis range store, edited through **Format ▸ X axis /
+Y axis** (or Axis properties); Reset figure leaves it, and leaves **Font size (body)**, the legend's position, entries and (n = …)
+switch, source names, **Confidence band**, **Residual strip**, **Provenance caption** and **Heatmap
+colormap** as well; there it returns the fit label's numbers to Equation, R² and n and the title's
+bold and italic to plain. Appearance used by a figure is saved in its project, and a saved project
+also carries a copy of your presets and templates (§11c).
 
-**Templates keep a page's recipe.** Noise spectrum, Voltage dependence, Event waveforms,
-Distribution summaries and Comparison figures have a **Templates** group in their **Export**
-section: a template combo, **Save as template…**, **Rename** and **Delete**. A template keeps the
-page's analysis settings and its appearance. It never keeps the sources, the Noise spectrum's
-recordings or time span, per-source colours or any result, so you can put it on another recording.
+**Recipes keep analytical settings and appearance.** In Figures, use **Export ▾ > Save as recipe… /
+Manage recipes…**, then **New ▾ > From recipe…** for an independent figure. Legacy standalone editors
+may retain their template combo and Save/Rename/Delete controls. Recipes do not copy source bindings
+or results; Noise recordings and time spans and per-source colours are not transferable template inputs.
+Inspect the new figure's sources and pending state before updating. The following table describes the
+settings kept and the hosted editor's commit behavior when those settings are recalled.
 
 | Page | A template keeps | Recalling it |
 | --- | --- | --- |
-| Distribution summaries | Measurement, summary type, violin grid points, accepted-only, appearance | A draft, marked unapplied, until **Generate** |
-| Comparison figures | Figure type, measurements, pair features, bins, columns, layout, log axes, box, accepted-only, appearance | A draft, marked unapplied, until **Generate** |
+| Distribution summaries | Measurement, summary type, violin grid points, accepted-only, appearance | A draft, marked unapplied, until **Update plot** |
+| Comparison figures | Figure type, measurements, pair features, bins, columns, layout, log axes, box, accepted-only, appearance | A draft, marked unapplied, until **Update plot** |
 | Voltage dependence | Metric, chosen fit, \|V\|, log y, accepted-only, appearance | The fit arrives selected and waits for **Apply fit**. A changed metric or accepted-only re-gathers the points, as picking it does |
-| Noise spectrum | Welch length, window and overlap, PSD/ASD, log axes, RMS band, the view shown and its options (the spectrogram's colour limits and log-frequency axis included), style, appearance | Recomputes once over the recording and span already chosen, only if its Welch settings differ. Changed PSD/ASD or log axes redraw; a changed view option redraws only that view |
-| Event waveforms | Heatmap metrics, log axes, bins and colormap; ensemble normalisation, alignment (extremum included), points, padding, Events subset and band; the view shown; appearance | Redraws the heatmap or the ensemble from the events already bound, only if one of its settings differs. A changed colormap only recolours, and a changed band only re-shades |
+| Noise spectrum | Welch length, window and overlap, PSD/ASD, log axes, RMS band, the view shown and its options (the spectrogram's colour limits and log-frequency axis included), style, appearance | Analytical choices, including the selected view, wait for **Update plot**; spectral colormap, levels and log-frequency formatting restyle immediately |
+| Event waveforms | Heatmap metrics, log axes, bins and colormap; ensemble normalisation, alignment (extremum included), points, padding, Events subset and band; the view shown; appearance | Metrics, bins, normalization, alignment, subset, points, padding and band wait for **Update plot**; colormap and title formatting, and navigation between existing views, remain immediate |
 
-A recall does only what changing the same controls by hand would do. A template that matches
+In standalone legacy Noise/Event windows, template recall retains the original immediate behavior.
+A recall otherwise follows the same commit rules as changing those controls by hand. A template that matches
 the page's analysis settings, and differs only in appearance or style, keeps your zoom and
 recomputes nothing; in Distribution summaries and Comparison figures it does not mark the figure
 unapplied. A recalled template's appearance is one step of that plot's appearance Undo.
@@ -2645,21 +2965,18 @@ appearance, which a preset keeps.
 
 **Each plot keeps its own appearance Undo.** Event waveforms, Noise spectrum, I-V / conductance,
 Voltage dependence, Distribution summaries, Comparison figures, Subpopulations and the study figure
-editor (**Style selected figure…**, §1) have **Undo** and **Redo** in their Appearance section,
-beside **Reset figure** in the study figure editor (on the other pages **Reset figure** is in the
-page toolbar), and ⌘Z / ⇧⌘Z do the same whenever the page is in front, whatever its **Section**
-shows, so an edit made in the figure can be undone from the keyboard; in the Analysis Explorer only the page in front
-answers. (In the study figure editor the keys answer while the Appearance controls are on
-screen.) A text box you are typing in keeps ⌘Z for its typing;
-with nothing typed in it, ⌘Z undoes the plot's last change.
-Every change is a step — an edit, a preset, a saved appearance, a colour, Reset — and edits less
-than 700 ms apart, such as the keystrokes of one size, make one; the buttons' tooltips name the step
-(*Undo: title size 12 → 14 pt*). Each plot keeps 200 steps, and once older ones have been dropped
-the Undo tooltip says how many. The history is the plot's own: Edit ▸ Undo never reaches a plot, and
-a plot's ⌘Z never reaches an event table or a setting. It ends when the figure is replaced from
-outside — a project opened, a saved state restored, or **Reset all figure styling** in the study
-figure editor. Distributions has no second one: its **Configuration** Undo already covers its
-appearance.
+editor (**Style selected figure…**, §1) have **Undo** and **Redo**: in the common toolbar for
+Explorer pages, and in the retained Study/Report editor's Figure toolbar. ⌘Z / ⇧⌘Z do
+the same whenever the page is in front, whatever its inspector shows, so an edit made in the figure can be undone from the keyboard; in the Analysis Explorer only
+the page in front answers. A text box you are typing in keeps ⌘Z for its typing; with nothing typed in it, ⌘Z
+undoes the plot's last change. Every change is a step — an edit, a preset, a saved appearance, a
+colour, Reset — and edits less than 700 ms apart, such as the keystrokes of one size, make one; the
+buttons' tooltips name the step (*Undo: title size 12 → 14 pt*). Each plot keeps 200 steps, and once
+older ones have been dropped the Undo tooltip says how many. The history is the plot's own: Edit ▸
+Undo never reaches a plot, and a plot's ⌘Z never reaches an event table or a setting. It ends when
+the figure is replaced from outside — a project opened, a saved state restored, or **Reset all
+figure styling** in the study figure editor. Distributions has no second one: its **Configuration**
+Undo already covers its appearance.
 
 **When a figure's quantity changes, the words you typed go back to automatic.** The Title, X label,
 Y label and fit-label wording you typed belong to what the figure showed when you typed them. When
@@ -2668,21 +2985,24 @@ own Undo, and its status line names only what was reset (*Title and Y label rese
 shows median depth.*). So does the range pinned in **Axis properties** on each axis whose quantity
 moved, with the major tick spacing typed beside it (*range* below means both): a Y range pinned
 for the capture rate in Hz frames nothing over median depths in pA. It goes in the same Undo step,
-and the sentence names it
-after the words (*Title, Y label and Y range reset: the plot now shows median depth.*); the range
-of an axis whose quantity did not move stays, and so does another view's unless its axis shows
-the same quantity (the two pairs of Distribution summaries, below). The sentence names a major
-tick spacing apart from the range (*Y range and Y major tick reset: …*, or *Y major tick reset: …*
-when only a spacing was typed). A figure with no
-typed words records no step and says nothing, unless a range is pinned on an axis that moved (it
-takes that range alone, and says so); and when the
-status line still shows the sentence of an earlier change, that sentence is removed, because the
-figure has moved on since and it may name a quantity the plot no longer shows (any other message
-on the status bar stays). A title or
-label you hid, with **Hide title** or a single space in its box, counts as typed and goes back to
-automatic too: the window's automatic title or label comes back if it draws one (Voltage dependence
-and Subpopulations draw no automatic title, so a hidden title coming back shows nothing there; the
-step and the sentence are the only sign). What counts:
+and the sentence names it after the words (*Title, Y label and Y range reset: the plot now shows
+median depth.*); the range of an axis whose quantity did not move stays, and so does another view's
+unless its axis shows the same quantity (the two pairs of Distribution summaries, below). The
+sentence names a major tick spacing apart from the range (*Y range and Y major tick reset: …*, or *Y
+major tick reset: …* when only a spacing was typed). A figure with no typed words records no step
+and says nothing, unless a range is pinned on an axis that moved (it takes that range alone, and
+says so); and when the status line still shows the sentence of an earlier change, that sentence is
+removed, because the figure has moved on since and it may name a quantity the plot no longer shows
+(any other message on the status bar stays). The sentence also stands only while it is true. It says
+that what it names is automatic, so it comes off the status line (or, in Subpopulations and
+Comparison figures, off the line it stands on) as soon as one of those words or ranges is typed or
+pinned again: the **Undo** of the reset, which brings them back, a title or label typed since, a
+range pinned again. A change of look, **Reset figure** and its **Undo** and **Redo** leave it, since
+nothing it names is typed or pinned then; **Redo** takes the words and ranges away again without
+bringing the sentence back. A title or label you hid, with **Hide title** or a single space in its
+box, counts as typed and goes back to automatic too: the window's automatic title or label comes
+back if it draws one (Voltage dependence and Subpopulations draw no automatic title, so a hidden
+title coming back shows nothing there; the step and the sentence are the only sign). What counts:
 
 - **Voltage dependence:** the **Metric**, which is the Y axis (the X axis is voltage whatever the
   metric, so its range stays); and the applied fit, when **Apply fit** replaces one
@@ -2699,12 +3019,16 @@ step and the sentence are the only sign). What counts:
   value axis changing, which is X in ECDF and Survival and Y in Box and Violin: it takes the value
   range pinned in both pairs (the sentence says *value range* once), and leaves the ECDF's and
   Survival's fraction axis alone. A new summary type takes no range: each pair keeps its own, and
-  the one you leave is waiting when you come back. A Comparison figure is a picture without Axis
-  properties, so it has no range to take.
+  the one you leave is waiting when you come back. Comparison figures expose supported axis
+  properties through Format; changing the plotted quantity releases the affected saved range.
 - **Event waveforms:** **X** and **Y** of the heatmap, switching between the Event-count heatmap and
-  Ensemble tabs, and **Normalize time**. The heatmap's **X** takes the map's X range and its **Y**
-  the map's Y range, **Normalize time** takes the ensemble's X range (current stays current), and
-  switching tabs takes none: each view keeps its own. **Log x** and **Log y** take the range of
+  Ensemble tabs, **Normalize time**, and **Align**. The heatmap's **X** takes the map's X range and
+  its **Y** the map's Y range, **Normalize time** takes the ensemble's X range (current stays
+  current), and switching tabs takes none: each view keeps its own. **Align** (start, center,
+  extremum) is what t = 0 means on the ensemble's X axis once time is a duration in ms, so another
+  alignment takes the words and that X range too (*…the plot now shows the ensemble with t = 0 at
+  each event's deepest sample.*); while time is normalised the alignment is immaterial and the
+  combo is greyed out, and setting it then takes nothing. **Log x** and **Log y** take the range of
   their own axis of the map and leave the words: with one ticked the map draws log10 values on a
   linear axis, so a range pinned over the other state frames nothing.
 - **Noise:** the **Show** view, and **Amplitude spectral density** on or off. The view takes no
@@ -2713,44 +3037,63 @@ step and the sentence are the only sign). What counts:
   takes the PSD's Y range and leaves its frequency range.
 - **Subpopulations:** the **Embedding**, which is what both axes of the scatter show, so both of
   its ranges go with the words (the waveforms' ranges stay). The sentence stays on the standing
-  line under the report
-  text until a new report is shown, the embedding changes again or a saved figure is restored.
-- **Distributions:** the plot type, a column and the applied fit (above); the typed range of an
-  axis whose column moved goes with the first two, and the sentence names it. A column also moves
-  when you tick a source that lacks it, because the column boxes offer only the columns every
-  ticked source has.
+  line under the report text until a new report is shown, the embedding changes again or a saved
+  figure is restored, or until a word or range it names is typed or pinned again (the **Undo** of
+  the reset); Reset figure and a change of look leave it.
+- **Distributions:** the plot type, a column and the applied fit (above); the typed range of an axis
+  whose column moved goes with the first two, and the sentence names it. A column also moves when
+  you tick a source that lacks it, because the column boxes offer only the columns every ticked
+  source has. The histogram's **Normalize** (count, density, probability per bin) is what its Y axis
+  counts, so picking another takes the words and the Y range back, in the step of the pick, and the
+  sentence says what the histogram is now set to show (*…the histogram of dwell_s as density, fitted
+  with exponential.*). The switch to density that ticking a second source makes by itself takes
+  nothing. While **Normalize** is *density* the Y axis is per the column's unit (*density (1/s)*
+  over a dwell time, plain *density* over a fractional depth), so a new column takes the Y range
+  too; with *count* or *probability per bin* the Y axis does not depend on the column and keeps its
+  range. The **Features** ticked on the PCA page count as well: another set takes the words and both
+  ranges, and the tick that changed it carries the reset in its own Undo step.
 - **I-V** has no such control: it always shows open-pore current against voltage.
 
 The look stays: fonts, sizes, colours, text styles, the legend, the ranges pinned on axes whose
 quantity did not move, and the fit label's numbers, position, size and colour. A caption or other
-annotation text, such as Voltage dependence's caption, is not touched by this rule (**Reset
-figure** takes it back). **Undo** brings the words and the ranges back over the quantity that is on
-screen and does not move the control. To return to the earlier quantity with its words, pick it
-first (in Distribution summaries and Comparison figures, pick it and press **Generate**; nothing
-is typed any more, so that records no step) and then **Undo**; **Undo** first and the pick after
-is a new change, which clears the words again. Distributions is the exception: its
-**Configuration** Undo takes the plot type and the words back together, so press **Undo** alone
+annotation text, such as Voltage dependence's caption, is not touched by this rule (**Reset figure**
+takes it back). **Undo** brings the words and the ranges back over the quantity that is on screen
+and does not move the control. On the pages with an appearance Undo the Undo and Redo tooltips name
+the step by what it took back (*Undo: reset title and Y label*, *Undo: reset title, Y label and Y
+range*), where a real **Reset figure** reads *Undo: reset figure* because it also takes the look
+back; a figure whose only customisation is typed words and ranges has nothing else for Reset figure
+to take, so there the two read alike. Distributions' **Configuration** Undo names no step of any
+kind: its tooltip only counts them (*Undo the last change to this plot's configuration (3 to step
+back).*). **Reset figure** pressed straight after a change of quantity, on a figure with nothing
+else customised, finds nothing to take back and records no step. To return to the earlier quantity
+with its words, pick it first (in Distribution summaries and Comparison figures, pick it and press
+**Generate**; nothing is typed any more, so that records no step) and then **Undo**; **Undo** first
+and the pick after is a new change, which clears the words again. Distributions is the exception:
+its **Configuration** Undo takes the plot type and the words back together, so press **Undo** alone
 there (picking the earlier plot type first is a step of its own, and the words stay cleared).
-Choosing another recording or ticking another source that has the plotted column,
-applying a preset, a refresh of the same quantity and a figure's first draw keep the words, and so
-do a log axis, bin counts, a colormap, a colour-by choice, the band, a subset of events, Welch
-settings, |V| and Accepted only: they change how a quantity is drawn or which events feed it, not
-what is plotted. Of these, **|V|** and the Event-count heatmap's **Log x** and **Log y** still
-take a range, because they change the numbers on the axis it was typed in (both above); the words
-stay. Opening a project and recalling a template do not run the rule: a project opens
-with the words and ranges it was saved with, and a template installs the title, labels and wording
-it was
-saved with (none, if it was saved without) in place of the ones typed, and the ranges it was saved
-with in place of the ones pinned. A template recalled in
-Distribution summaries or Comparison figures brings its words with its measurement, so the
-Generate that commits it keeps them; in Voltage dependence the template's fit arrives selected, and
-the **Apply fit** that commits it keeps the wording that came with it.
+Choosing another recording or ticking another source that has the plotted column, applying a preset,
+a refresh of the same quantity and a figure's first draw keep the words, and so do a log axis, bin
+counts, a colormap, a colour-by choice, the band, a subset of events, Welch settings, |V| and
+Accepted only: they change how a quantity is drawn or which events feed it, not what is plotted. Of
+these, **|V|** and the Event-count heatmap's **Log x** and **Log y** still take a range, because
+they change the numbers on the axis it was typed in (both above); the words stay. Opening a project
+and recalling a template do not run the rule: a project opens with the words and ranges it was saved
+with, and a template installs the title, labels and wording it was saved with (none, if it was saved
+without) in place of the ones typed, and the ranges it was saved with in place of the ones pinned. A
+template recalled in Distribution summaries or Comparison figures brings its words with its
+measurement, so the Generate that commits it keeps them; in Voltage dependence the template's fit
+arrives selected, and the **Apply fit** that commits it keeps the wording that came with it. They
+are kept only while the words (and, in Distribution summaries, the ranges) are still the template's:
+**Undo** on the recall, a word or range typed or pinned after it, another quantity picked after it,
+or saving the project and opening it again before the **Generate** or **Apply fit** makes that an
+ordinary change of quantity, and they go back to automatic (one **Undo** step and the sentence, as
+for any change).
 
 **Exploring a plot: Reset view, zoom history and the pointer readout.** Distributions, Noise
 spectrum, I-V / conductance, Voltage dependence, Event waveforms, Distribution summaries and
 Subpopulations work the same way:
 
-- **Reset view** (in the toolbar beside **Section**, and on the right-click menu) puts the zoom and
+- **Reset view** (on the page status line and the right-click menu) puts the zoom and
   pan back to the plot's own framing: the fit to the data it was drawn with, the full category
   slots of a box or violin, or in Distributions your typed **Axis range**. It changes nothing
   else. It does not re-plot, restyle, change a setting or add a step to the plot's Undo. On a
@@ -2772,7 +3115,7 @@ Subpopulations work the same way:
 - **The status line at the bottom of the window** (in Subpopulations, the middle of the toolbar
   row) shows the values under the pointer, named as the axes are (your own axis label, if you
   typed one), in the units the axes show. On a log axis it gives the real value, not its log10.
-  In Distributions it follows the **Time unit**, so a dwell axis in ms reads in ms. Over a box
+  In Distributions it follows the displayed quantity, so a dwell axis reads in ms. Over a box
   or violin it names the source. Over Event waveforms' density map and Distributions'
   Event-count heatmap it adds the count of the cell under the pointer (*Event count N*, as the
   colour bar is labelled; over Event waveforms' map, mind the §14 caveat before reading
@@ -2790,13 +3133,14 @@ same plot. Counts, probability-per-bin and density retain their existing numeric
 
 ### Figure fonts
 
-Every font control for a figure offers the same four fonts, then **Other font…**: Arial, Helvetica,
-Times New Roman and Courier New. The first row reads **Arial (default)** in all of them but one; in
-**Text style…** it reads plain **Arial** (below). They are the **Font** row of the **Appearance**
-section on every plot page (Distributions included), the font box of **Text style…**, and the
-panel-label font of the figure composer.
+Figure font controls offer the same four fonts, then **Other font…**: Arial, Helvetica,
+Times New Roman and Courier New. The figure-level first row reads **Arial (default)**; a text
+element adds **Figure font** for inheritance and names its explicit Arial choice **Arial**. The shared **Font** row is in **Format ▸ Figure**
+on hosted plot pages (Distributions included) and retained Study/Report editors. The font
+box of **Text style…** and the element panels add **Figure font** to inherit the figure; the
+panel-label font of the figure composer uses the same named families.
 
-- In the **Appearance** sections, **Arial (default)** saves no font name, so a project keeps saying
+- In **Format ▸ Figure**, **Arial (default)** saves no font name, so a project keeps saying
   "default". A figure with no font chosen is drawn in Arial: its title, axis labels, tick numbers,
   legend entries and fit label, in Distributions, Voltage dependence, I-V, Noise spectrum, Event
   waveforms, Distribution summaries and Subpopulations. Voltage dependence's caption, the colour
@@ -2820,13 +3164,13 @@ panel-label font of the figure composer.
   and its row says so: on Windows, which has no Helvetica, the row reads *Helvetica (drawn in Arial
   on this computer)*; on a Linux computer with only the Liberation fonts, *Arial (default; drawn in
   Liberation Sans on this computer)*. The row still stores the family, so a figure styled on a Mac
-  opens unchanged. Arial: Helvetica, Liberation Sans, Arimo, TeX Gyre Heros, Nimbus Sans. Helvetica: Arial, TeX Gyre
-  Heros, Nimbus Sans, Liberation Sans, Arimo. Times New Roman: Times, Liberation Serif, Tinos, TeX
-  Gyre Termes, Nimbus Roman. Courier New: Courier, Liberation Mono, Cousine, Nimbus Mono PS. Any
-  other missing font falls back to Arial, then to Arial's substitutes. If none of them is
-  installed, the figure's text is drawn in the font Qt picks for that kind of face: a sans-serif
-  font (a serif one for Times New Roman, a fixed-width one for Courier New), the same one for the
-  labels and for the tick numbers.
+  opens unchanged. Arial: Helvetica, Liberation Sans, Arimo, TeX Gyre Heros, Nimbus Sans. Helvetica:
+  Arial, TeX Gyre Heros, Nimbus Sans, Liberation Sans, Arimo. Times New Roman: Times, Liberation
+  Serif, Tinos, TeX Gyre Termes, Nimbus Roman. Courier New: Courier, Liberation Mono, Cousine,
+  Nimbus Mono PS. Any other missing font falls back to Arial, then to Arial's substitutes. If none
+  of them is installed, the figure's text is drawn in the font Qt picks for that kind of face: a
+  sans-serif font (a serif one for Times New Roman, a fixed-width one for Courier New), the same one
+  for the labels and for the tick numbers.
 - **Greek letters and symbols** are ordinary Unicode characters. Type τ, µ or Δ into a title or a
   label and it is drawn in the figure's font. A character that font lacks (the subscript zero in
   Times New Roman is one) is drawn in another font installed on this computer: an axis label, a
@@ -2840,81 +3184,78 @@ panel-label font of the figure composer.
   first row is plain **Arial**: with Custom font ticked and Arial left in the list, that text is
   Arial whatever the figure's font is. Choosing **Other font…** hides the Text style box while the
   list is open and shows it again afterwards.
-- A font chosen in an **Appearance** section or in **Text style…** is one Undo step of the page's
+- A font chosen in **Format** or in **Text style…** is one Undo step of the page's
   history.
 - Saved projects keep the same fields: a project that names a font keeps it, and one that names
   none is drawn in Arial.
 - **Exports follow the figure.** The PNG and the PDF of a live plot draw what is on screen, and the
   PDF embeds the TrueType fonts it draws with. An SVG keeps its text as text and names the font
   first, then its stand-ins (**Export current figure…**, §12). Comparison figures and the study
-  figure editor are drawn by matplotlib: with no font chosen they too are Arial, a font you choose is
-  drawn as a list of its stand-ins ending in DejaVu Sans, and their SVG and PDF hold the text as
-  outlines (Comparison figures, step 5; the study figure editor, §1). On a Mac matplotlib reads only
-  one face of Helvetica, so bold or italic text set in Helvetica (a study figure's bold title, y
-  tick labels and bar text) is drawn in the regular weight there; pick Arial when you need bold. The report figures of
-  **Analysis ▸ Generate Report figures…** are Arial too, their PDFs embed TrueType (Type 42) fonts,
-  and Greek they write as math text is set in DejaVu Sans (§12).
+  figure editor are drawn by matplotlib. They retain literal text in SVG with fallback families
+  and font-backed text in PDF, including supported bold/italic faces. Older frozen captures
+  retain their original bytes and may contain outlines. Inspect the actual export on the target
+  computer; a fallback font can differ from the requested family. The
+  report figures of **Analysis ▸ Generate Report figures…** are Arial too, their PDFs embed TrueType
+  (Type 42) fonts, and Greek they write as math text is set in DejaVu Sans (§12).
 
-### Figure Library
+### Snapshots and compositions in Figures
 
-Use **Analysis Explorer ▸ Save to Figure Library…** to name and freeze the current figure. It
-proposes a name from the tool and the plot type the figure shows (for example *I-V / conductance*
-or *Distributions · Histogram*); edit it as you like. The list shows each figure's recording file
-names; hover for the full paths, which are also in the details beside the list.
-The library is separate from the Event Gallery: it stores figures, not curated event selections.
-**Save Project** writes the library into the `.nanoscope` project, including:
+Use **Analysis Explorer ▸ Export ▾ ▸ Snapshot to Figures…** to name and freeze the current figure.
+The saved entry is selected under **Figures ▸ Snapshots** and appears in the same Explorer canvas.
+The shared list is the inventory; there is no second Library list to manage. **Analysis ▸ Figure
+Library…** and **Snapshot details…** remain routes to the same saved-figure view. Event gallery
+still curates individual events and is a different tool. **Save Project** retains the saved entry's:
 
-- A named thumbnail and full PNG/vector SVG picture of the saved view.
-- Exact plotted data, source-recording identities, analysis settings, appearance and provenance.
-- The associated analytical tables and resources, including saved fitted or derived results.
+- PNG/vector SVG picture and exact plotted numerical tables.
+- Source identities, analysis settings, appearance and provenance.
+- Associated fitted/derived resources and the applied figure specification when available.
 
-Open **Analysis ▸ Figure Library…** without opening any analytical page. Selecting a thumbnail
-does not rerun analysis, even if the recording is missing. **Duplicate** makes an independent
-frozen entry, not an editable analytical page. Reopen the appropriate Analysis tool and generate
-from stored event data for an editable variant. **Rename** changes only its name. **Export saved figure…** offers the same publication
-sizing/preview for PNG, SVG and PDF. **Save figure bundle…** exports its complete frozen data and
-configuration; **Reveal file** selects its most recent exported file in Finder. These actions do
-not overwrite another library entry or replace its saved numbers with live results.
+Selecting a saved row does not rerun analysis even if its recording is missing. The header describes
+that entry's sources and lineage; expand **Analysis settings and provenance** for the captured recipe.
+**Duplicate** makes and selects another frozen entry. **Rename** changes only its list name.
+**Delete** removes selected entries, leaving unselected snapshots and compositions intact.
 
-Each entry has a source-status label:
+With frozen artwork selected, live **Update**, **Undo/Redo** and **Style** are disabled. The common
+**Export ▾** offers **Figure…** with publication sizing/preview, **Data…** for the saved CSV and
+**Bundle…** for all retained resources. To edit the artwork, choose a live figure, configure and
+Update as needed, edit Format, and capture a new Snapshot.
 
-- **Current:** its recorded source/calibration/result lineage still matches. The picture continues
-  to use its *saved* analysis settings and appearance, not any new settings on another open plot.
-- **Outdated:** source data, curation, parameters or calibration changed, or the plot was already
-  stale when captured. The old picture and numbers remain intact.
-- **Saved snapshot:** source lineage is unavailable or was not verified at capture. This is not a
-  claim that a missing recording has been checked. Restored analytical snapshots are captured
-  conservatively in this state.
+Saved-entry status describes lineage, not scientific validity:
 
-Status is checked when the library opens, when project edits occur while it is visible, or with
-**Check status**. Source checks combine a content hash of the immutable loaded samples (cached
-once per load without copying the recording), the existing bounded on-disk fingerprint, and
-result/metadata checks. No detection, baseline estimation or fitting is run. Appearance edits do not make
-scientific source lineage outdated. A snapshot taken with pending controls records those controls
-separately from the visible numerical result; Distributions also records its applied plot recipe.
+- **Current:** tracked source/calibration/result lineage matches; the picture still uses its saved settings.
+- **Outdated:** source, curation, parameters or calibration changed, or the result was stale at capture.
+- **Saved snapshot:** source lineage is unavailable or was not verified at capture.
+
+Opening a saved entry and project changes refresh these checks without detection, baseline estimation
+or fitting. Appearance edits do not make scientific source lineage outdated. Pending controls are
+recorded separately from the visible committed result. A live figure with no committed result remains
+**No data** after reopening, rather than being labelled a saved result merely because it was persisted.
 
 ### Multi-panel composition
 
-First save the individual plots to the Figure Library. In **Analysis ▸ Figure Library…**, choose
-**Compose multi-panel figure…**. Check 2–12 figures, edit their panel labels (up to 32 characters),
+First save the individual plots as Snapshots. Multi-select at least two saved rows in **Figures**,
+then choose **Compose…**. In the composition dialog, check 2–12 figures and edit their panel labels (up to 32 characters),
 and use **Move up / Move down** to arrange them in reading order. Choose 1–4 columns. The **Rows**
 and **Cols** cells set each panel's span (1–4 cells); a column span must fit the grid. Panels are
-automatically packed without overlap and fitted without cropping. Use a wider span for a trace
-above smaller summary panels. **Panel spacing** and the label font, size, boldness and color are
-editable; sizes are native canvas pixels and scale with publication export. Spacing is in whole
-pixels. The label font is the figure-font list (**Figure fonts**, §10) and starts at **Arial
-(default)**; the composition stores the family by name, and revising a composition shows the font it
-was saved with. The label colour button shows the colour itself. The Arial labels match the panels of
-figures saved by this version with no font chosen, which are Arial. A figure saved to the Library by an earlier version
-is a frozen picture: its text stays in the font it was drawn in (the application font when none was
+automatically packed without overlap and fitted without cropping. Use a wider span for a trace above
+smaller summary panels. **Panel spacing** and the label font, size, boldness and color are editable;
+sizes are native canvas pixels and scale with publication export. Spacing is in whole pixels. The
+label font is the figure-font list (**Figure fonts**, §10) and starts at **Arial (default)**; the
+composition stores the family by name, and revising a composition shows the font it was saved with
+(one that an earlier Mac build saved in the application font, a private face, shows it on a row of
+its own, **Application font (older figure)**, and keeps it so the letters match the saved panels;
+its SVG writes Arial for those letters, and choosing Arial changes them everywhere). The label
+colour button shows the colour itself. The Arial labels match the panels of figures saved by this
+version with no font chosen, which are Arial. A figure saved to the Library by an earlier version is
+a frozen picture: its text stays in the font it was drawn in (the application font when none was
 chosen), so Arial labels will not match its panels (on a Mac, where the application font is a
 private face, the list has no row for it; where it is an ordinary family such as Segoe UI, **Other
 font…** lists it, so it can be picked to match). To get Arial panels, reopen the Analysis tool,
-generate the figure again and use **Save to Figure Library…**. Panels with a fit label, a caption or
-per-element text styles are composed as frozen pictures when axes are shared. **Update
-preview** builds a frozen composition; changing the selection, labels or layout invalidates that
-preview until you update it again. **Save to Figure Library** creates a new entry and does not
-modify any component figure. Save the project to retain it.
+generate the figure again and use **Snapshot to Figures…**. Panels with a fit label, a caption or
+per-element text styles are composed as frozen pictures when axes are shared. **Update preview**
+builds a frozen composition; changing the selection, labels or layout invalidates that preview until
+you update it again. **Save to Figure Library** selects the new entry under **Figures ▸ Compositions**
+and does not modify any component figure. Save the project to retain it.
 
 **Share X range / Share Y range** uses the union of the saved view ranges on detached copies of
 compatible Cartesian plots. It does not stretch an independently scaled picture and call that a
@@ -2941,17 +3282,18 @@ detached panel copies. Different names, counts, colors or custom legend items ar
 silently merged. Keep independent legends in those cases. Older snapshots remain usable as frozen
 panels; saving a new source snapshot captures the extended legend model.
 
-Export the composition through the usual Library publication controls (PNG, SVG, PDF, mm/inches
+Select the composition in Figures, then use **Export ▾ ▸ Figure…** (PNG, SVG, PDF, mm/inches
 and DPI). A composition's bundle stores a panel index at the top level; each panel's **original,
 exact** numerical tables, configuration, provenance and rendering resources remain under its
 `panels/panel_NNN/` folder. No concatenation or rescaling changes the original numbers. Compositions
 are labeled **Saved snapshot** rather than claiming that all component analyses were refreshed.
 
-To revise an existing composition, select it in the Library and choose **Revise composition…**.
+To revise an existing composition, select it under **Figures ▸ Compositions** and choose
+**Revise composition…** in the saved-figure view.
 The composer restores its panel order, labels, column count, spans, spacing, label styling and
 shared-range/legend choices. Older layouts retain their equal-grid defaults. Reorder or
 uncheck panels, edit labels, change the layout and select **Update preview**. A revision can retain
-1–12 panels. **Save as new figure** creates a separate Library entry; the selected composition and
+1–12 panels. **Save as new figure** creates a separate Composition entry; the selected composition and
 all original panels remain unchanged. Changing layout after preview disables saving until a new
 preview is generated. Cancel saves nothing.
 
@@ -2966,8 +3308,8 @@ versions or damaged panel resources block revision without replacing the stored 
 
 ### Lasso selection in Scatter and PCA
 
-In the **Distributions** page, generate a Scatter or PCA plot, then enable **Lasso select** in the
-toolbar. Histograms, KDE contours and the Event-count heatmap have no points to select, so Lasso
+In the **Distributions** page, generate a Scatter or PCA plot, then enable **Lasso select** on the
+status line. Histograms, KDE contours and the Event-count heatmap have no points to select, so Lasso
 select is unavailable there. Drag an outline inside the plotting area and release to select the
 enclosed displayed events. Selection uses event identifiers, not point positions or table row numbers; it follows the
 displayed logarithmic coordinates when applicable. Ctrl/Cmd/Shift toggles the enclosed events in
@@ -2987,15 +3329,15 @@ the established histogram, fitting or detection workflows. This page is opt-in: 
 its controls or returning to its tab does not calculate a new result.
 
 You can also find it through **Analysis home → Distribution summaries → Open Distribution
-summaries**. It is not the Histogram option inside Distributions. Use the page's **Section**
-dropdown to alternate between the following control groups. Its **Generate** button and the
-Explorer's **Refresh current** both calculate a new summary from current inputs; the latter is
+summaries**. It is not the Histogram option inside Distributions. Use **Data & analysis ▸ Sources**
+and **Plot** for the controls below. **Update plot** and
+**Update plot ▾ ▸ Refresh from recordings** both calculate a new summary from current inputs; the latter is
 not simply refreshing the list. Unapplied controls leave the previous figure visible.
 
-1. In **Data**, check the desired sources. Each stays a separate distribution; values are not pooled.
+1. In **Data & analysis ▸ Sources**, check the desired sources. Each stays a separate distribution; values are not pooled.
    **Accepted events only** is on by default. Choose dwell time, median depth, fractional depth or
    the explicitly selected amplitude. Values keep their recorded units and measurement domain.
-2. In **Analysis**, choose a summary and press **Generate**:
+2. In **Plot**, choose the measurement and summary and press **Update plot**:
    - **ECDF:** the unweighted fraction of finite observations less than or equal to each value,
      `F(x) = count(X ≤ x) / n`. Repeated values share one right-continuous jump.
    - **Empirical survival (uncensored):** `P(X > x) = count(X > x) / n`. This is **not Kaplan–Meier**:
@@ -3015,13 +3357,13 @@ not simply refreshing the list. Unapplied controls leave the previous figure vis
    Boolean, complex and typed date/time measurements are refused, as are integer measurements
    beyond ±2⁵³; they are not silently converted or rounded. Long display names are abbreviated
    in plot labels, with complete names retained in details and exported numerical provenance.
-4. Use **Appearance** to style the committed graphics without recomputing the summary or resetting
+4. Use **Format** to style the committed graphics without recomputing the summary or resetting
    zoom. Data/Analysis edits leave the previous result visible and marked as unapplied until Generate.
-   **Source names and colors → Apply to figure** gives each source a short condition label and
-   a local color override. **Use as project source default** also saves it for that exact source
-   identity (recording/segment, channel and detector) for subsequently generated figures. Save the
-   project to persist defaults. Other frozen figures are not rewritten. Clearing an override
-   restores the figure's captured source style; original names remain in tables and Details.
+   Edit a legend entry on the canvas or in Format for a short figure-local condition label, and
+   choose its **Format ▸ Series** row for local colour. These edits use the figure's Undo history.
+   **Project Sources…** saves defaults for that exact recording/segment, channel and detector for
+   new or explicitly refreshed figures. Save the project to persist defaults; frozen figures
+   remain unchanged. Original identities remain in tables and Details.
    ECDF and survival ticks retain probabilities between 0 and 1, without automatic SI scaling.
    Measurement ticks stay in the recorded units stated on the axis. **Generate** puts the typed
    Title, X label and Y label back to automatic when it commits another measurement or summary (one
@@ -3050,15 +3392,14 @@ Open **Analysis ▸ Comparison figures…**. This opt-in page displays measureme
 in event tables; opening it never detects events, recalibrates currents or fits a model.
 
 The equivalent catalog route is **Analysis home → Comparison figures → Open Comparison figures**.
-The **Figure** choice is under **Section → Data**; its detailed controls are under
-**Section → Analysis**. Opening or returning to this page does not generate new comparison
-geometry. Press **Generate** deliberately; **Refresh current** in the Explorer executes the same
+The **Figure** choice and its detailed controls are under **Data & analysis ▸ Plot**. Opening or returning to this page does not generate new comparison
+geometry. Press **Generate** deliberately; **Update plot ▾ ▸ Refresh from recordings** in the Explorer executes the same
 generation path. Checkmarked sources are included; simply highlighting a row does not include it.
 
-1. In **Data**, check the recordings to compare and choose the figure type. **Accepted events
+1. In **Data & analysis ▸ Sources**, check the recordings to compare. In **Plot**, choose the figure type. **Accepted events
    only** starts enabled. Sources remain separately identified, even when their names or event
    IDs repeat. Missing sources can still be viewed in a saved snapshot but cannot be regenerated.
-2. In **Analysis**, configure the selected view, then press **Generate**:
+2. In **Plot**, configure the selected view, then press **Update plot**:
    - **Faceted comparisons:** choose X and Y measurements and the number of columns. One scatter
      panel is drawn per source with shared numerical axis limits. Optional logarithmic axes
      exclude nonpositive values explicitly; they do not transform the stored measurements.
@@ -3080,21 +3421,22 @@ generation path. Checkmarked sources are included; simply highlighting a row doe
    measurement-domain warnings, method settings and complete source names. Warnings are not
    printed on the figure. The `depth_pA` field is the original median depth; **Selected amplitude**
    is the separate, explicitly curated amplitude. Neither is recalculated by this page.
-4. Use **Appearance** for typography, background, grid, marker size and line width. Source colours
+4. Use **Format** for typography, background, grid, marker size and line width. Source colours
    retain recording identity. Styling uses saved geometry; it never recalculates bin counts, box
    statistics or swarm offsets. Data/Analysis changes remain drafts until Generate. **Fit canvas**,
    scrolling and dragging magnify/pan the canvas only; exports retain the complete figure.
-   **Source names and colors** offers the same figure-local labels/colors and explicit project
-   defaults as distribution summaries. Short labels appear on facets and legends; full identities
-   and overrides remain in Details and the saved configuration. Duplicate names are disambiguated,
+   Format legend/series controls offer local labels and colours; **Project Sources…** sets explicit
+   project defaults. Short labels appear on facets and legends; full identities and overrides
+   remain in Details and the saved configuration. Duplicate names are disambiguated,
    not treated as one source. Saved geometry and numerical exports do not change.
 5. Use **Export current figure…** for PNG, PDF or SVG and the shared physical-size/preview controls.
-   The figure's text is drawn in the font chosen in **Appearance**, followed by that font's installed
+   The figure's text is drawn in the font chosen in **Format ▸ Figure**, followed by that font's installed
    stand-ins, matplotlib's own sans-serif, serif or monospace face and DejaVu Sans (in Arial when none
    is chosen); a character the font lacks, such as a subscript digit in Arial, is drawn from the next
-   of them that has it. The SVG and PDF hold the text as glyph outlines, not as editable text.
+   of them that has it. Current SVG export retains literal text with fallback font families;
+   PDF retains font-backed text. Older frozen snapshots retain their original outline content.
    **Export plotted values CSV…** writes committed drawing values with primitive type, source and
-   measurement labels. Use **Save to Figure Library…** or **Save figure bundle…** to retain source
+   measurement labels. Use **Snapshot to Figures…** or **Save figure bundle…** to retain source
    observations, panel exclusions, exact geometry, configuration and full provenance together.
    Project reopening draws the saved snapshot without requiring the original recordings.
 
@@ -3105,11 +3447,12 @@ subsampled. Figures can be used as frozen panels in compositions; detached share
 is not offered for these already-multi-panel canvases. These comparisons do not change baseline
 removal, detection, calibration, amplitude estimation, fitting defaults or existing numerical exports.
 
-In Comparison figures, **Generate** puts the typed Title, X label and Y label back to automatic when
+In Comparison figures, **Update plot** puts the typed Title, X label and Y label back to automatic when
 it commits another figure type, another X, Y or measurement, or other pair-matrix features (one Undo
 step; the status line at the top of the page begins with the sentence until a later change rewrites
-it); generating the same figure again keeps them. The figure is a picture without Axis properties,
-so there is no pinned range to take.
+it, or until a title or label is typed again, as by the **Undo** of the reset); generating the same
+figure again keeps them. Format exposes supported axis properties; a changed quantity clears
+the affected saved axis range and major-tick override in the same history step.
 
 ### Event waveforms: alignment, band and events
 
@@ -3150,18 +3493,20 @@ The alignment, band, subset and the band's numbers are saved with the project's 
 A reopened ensemble draws the saved band without recomputing it.
 
 Changing the heatmap's **X** or **Y**, switching between the Event-count heatmap and Ensemble tabs,
-or toggling **Normalize time** puts the typed Title, X label and Y label (shared by both views) back
-to automatic as one Undo step, and the status line at the bottom of the window names them for ten
-seconds. A range pinned in Axis properties on an axis that moved goes in the same step: the
+toggling **Normalize time**, or changing **Align** (once time is a duration in ms, when it is what t = 0
+means on the ensemble's X axis) puts the typed Title, X label and Y label (shared by both views)
+back to automatic as one Undo step, and the status line at the bottom of the window names them for
+ten seconds. A range pinned in Axis properties on an axis that moved goes in the same step: the
 heatmap's **X** takes the map's X range and its **Y** the map's Y range, **Normalize time** takes
-the ensemble's X range, and switching tabs takes none (each view keeps its own). **Log x** and
-**Log y** take the range of their own axis of the map in the same way, with a sentence (*X range
-reset: the plot now shows median depth against log10 of dwell.*) and without the words, because
-the map draws log10 values on a linear axis while one is ticked. Changing **Log scale** in the
-map's Axis properties takes no range: that dialog commits the range typed beside it, and
-unticking Log scale there to type a range in seconds is how the map's X axis, which opens on a
-log axis, is pinned. Bins, the colormap, the band, the subset and the alignment keep both the
-words and the ranges.
+the ensemble's X range, and switching tabs takes none (each view keeps its own). **Align** takes the
+ensemble's X range too. **Log x** and **Log y** take the range of their own axis of the map in the
+same way, with a sentence (*X range reset: the plot now shows median depth against log10 of dwell.*)
+and without the words, because the map draws log10 values on a linear axis while one is ticked.
+Changing **Log scale** in the map's Axis properties takes no range: that dialog commits the range
+typed beside it, and unticking Log scale there to type a range in milliseconds is how the map's X axis,
+which opens on a log axis, is pinned. A range left as the dialog opened with it is carried across to
+the new units instead (log10 of it, or ten to the power). Bins, the colormap, the band, the subset
+and the number of points keep both the words and the ranges.
 
 ---
 
@@ -3188,8 +3533,8 @@ unit. Set the channel's units (and gain) in **Calibration** to make the noise fi
 builds before this one the blank was filled in with `pA`, which printed a 4.2 fA noise floor for a
 recording whose own loader note said the magnitudes suggest nA.
 
-**Setting the window: don't type the numbers.** *Start* and *End* are seconds from the start of the
-recording, while the trace's x-axis is on the instrument clock (§2), so a recording with a non-zero
+**Setting the window:** *Start* and *End* display milliseconds from the start of the
+recording and retain seconds internally, while the trace's x-axis is the instrument clock in ms (§2), so a recording with a non-zero
 t₀ will not agree with what you read off the trace. Bracket the quiet stretch with the Measure
 tool's cursors and use **Analysis ▸ Noise spectrum of the measured region** instead — the selection
 is carried as sample indices, so the two clocks cannot be confused.
@@ -3409,6 +3754,41 @@ copy the recovery folder (`~/Library/Application Support/NanoScope/Recovery`) if
 
 ## 11c. Complete analytical projects — Stage 3
 
+### Named figures and project format v13
+
+Analysis Explorer keeps separate named figures for Distributions, Distribution summaries,
+Comparison figures, Event waveforms, Noise, I–V, Voltage dependence and Subpopulations. Create
+another figure of the same type, rename it, or duplicate its settings and saved result. Editing
+one does not change another. A duplicate starts with its own empty Undo history. Delete removes
+that live figure; **Restore deleted** remains available until the project closes. Existing
+snapshots and compositions remain independent of the live figure that produced them.
+
+Each figure retains its sources, pending controls, applied result, typed wording, appearance,
+axis pins and saved view. Leaving a figure or saving the project does not run **Update plot**.
+Inactive figures remain in the project even when their editor is unloaded. Reopening displays
+saved results without repeating analysis; a missing recording does not silently select a
+replacement. Undo histories remain session-only. New snapshots retain the applied figure state;
+pending changes belong to the live figure until Update plot commits them.
+
+**Every new project save uses format v13. Older NanoScope builds cannot open a version 13
+project.** This build continues to read projects from versions 1–12. Opening an older project
+converts its supported analytical pages in memory and leaves the original file unchanged;
+unsupported figures and their resources remain carried in the project.
+
+The first save over a v12-or-older file offers **Save and convert**, **Save a copy**, and
+**Cancel**. Save and convert retains an exact, verified original beside the project as
+`<project>.v12.bak`. An existing matching backup is reused; an unrelated backup is retained and
+a numbered name is chosen. The save reports the backup's actual path. Save a copy to a new name
+leaves the original untouched, and Cancel writes nothing. Saving still checks for another
+writer's changes before replacing the target.
+
+The replacement is written to a temporary sibling and reopened before it is installed. Figure
+payloads, unknown fields, tables and blobs are compared with the captured workspace. A failed
+write or verification leaves the existing project unchanged, keeps the unsaved mark, and does
+not retire its recovery checkpoint. Recovery remains a separate safety net, not project autosave.
+
+### Earlier analytical project formats
+
 Project format v11 made the ordinary `.nanoscope` file a complete analytical project, and v12
 (below) keeps that design. It saves the
 durable session underneath the analysis windows and the project-owned analytical workspace: live
@@ -3426,13 +3806,15 @@ The important distinction is between a **saved result** and a **redrawn view**:
 | A missing or changed recording/model | Named as missing, changed, or stale. The saved result is retained where it can stand alone; no replacement analysis starts automatically. |
 | **Refresh** or **Run…** | Explicitly computes a new result and marks the project unsaved. |
 
-Population Plots preserves a KDE's recipe but does not store its sampled density grid. After a
-reopen it shows **Press Plot to recompute** instead of silently running the KDE. An applied scatter
+Legacy v11/v12 Population Plots artifacts preserve a KDE's recipe but do not store its sampled
+density grid. After a reopen such an artifact shows **Press Plot to recompute** instead of silently running the KDE. An applied scatter
 fit (Linear, Power law) is not recomputed either: the reopened Scatter shows its points with **Plot
 ●** and a note in Details, and pressing **Plot** draws the line and its fit label. A histogram fit
 is drawn from the saved fit with every number it had: all parameters, n, BIC, and the KS statistic
 and verdict saved with it. The Event Density view does store and restore its frozen count grid and
-physical bin edges.
+physical bin edges. New v13 figures also retain sampled Distributions curves and frozen source
+frames when present, so an already drawn result can be restored without recomputation. An older
+file cannot acquire samples it never stored merely by being converted.
 
 **Plot presets and templates travel with the project.** Your appearance presets, Distributions
 templates and window templates are kept on this computer. Save Project also writes a copy of all of
@@ -3449,16 +3831,17 @@ computer does not have are added to it and the banner names them:
 - Adding them does not mark the project unsaved. Deleting one later still asks first, and a
   project saved earlier keeps its own copy.
 - A computer with no presets or templates writes no copy. The copy is an optional section of the
-  analytical workspace and needed no format change of its own; it is saved in a version 12
-  project all the same, which a version 11 app refuses as a whole (next paragraph).
+  analytical workspace and needed no format change of its own. Current saves use v13; earlier
+  v12 projects carried these copies too.
 
 **Project format v12** adds, inside the same workspace, the Distributions KDE overlay and
 Event-count heatmap settings, the Noise spectrum's spectrogram colour limits and log-frequency
 axis, and the Event waveforms ensemble's band, extremum alignment and Events subset. A v11 app
 (the 2026-10-31 and 2026-11-01 releases) would have opened such a project, shown a heatmap as a
 histogram and an extremum-aligned ensemble as *start*, and dropped those settings on its next save;
-with the version at 12 it says the project needs a newer NanoScope instead, and it lists a
-crash-recovery copy written by this build as one it cannot read, and keeps it.
+the v12 gate made those builds report that the project needed a newer NanoScope instead. The
+v13 gate now protects independent figures in the same way. Older recovery scanners retain a
+newer-format recovery copy as unreadable rather than deleting it.
 
 Older projects will continue to open with empty defaults for the new analytical blocks. The reverse
 is intentionally refused: an app limited to an older project version (v10, or v11) must tell you a
@@ -3468,6 +3851,22 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
 ---
 
 ## 12. Exporting
+
+Current project routes: **Export ▾ > Snapshot to Figures…** freezes the displayed result and
+lineage; **Snapshot details…** opens saved details. Save Project persists those entries. A Snapshot
+is not the live figure's editor. Compositions use frozen panels; shared panel-letter styles preserve
+typed letters, positions and explicit typography. Refresh the preview before saving a changed layout.
+
+**Export selected figures…** processes a selection of live figures, Snapshots and compositions
+serially without running Update plot or fitting. Review its filename/size plan and completion
+report. **Style canvas (Native if unset)** follows each pinned style's physical dimensions; a missing
+requested named column width is reported, not guessed. Explicit Native/physical sizes and PNG DPI
+remain available. Single export starts with style canvas dimensions only when supplied. Font
+fallback is reported for the installed fonts; inspect actual PDF/SVG/PNG output at intended size.
+A style preset or synthetic preview is not proof of journal compliance. Bundles keep image, raw
+numerical context and display metadata together; a preceding image export does not change a
+bundle's frozen native geometry.
+
 
 - **Analysis ▸ Export events…** — the current detection's events to CSV (accepted rows), plus a
   `<name>.meta.json` sidecar naming the detector, the preprocessing chain, the **open-pore
@@ -3519,9 +3918,9 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   does not have (the subscript zero of ΔI/I₀, the superscript minus of s⁻¹) is taken from the next of
   Helvetica, Liberation Sans, Arimo, TeX Gyre Heros and Nimbus Sans that is installed and has it, and
   last from DejaVu Sans, which matplotlib brings with it. On a computer without Arial, the first of
-  those that is installed sets the text, and DejaVu Sans when none is. Greek letters and subscripts
-  that a figure writes as math text (τ, µs, t_min) are set in DejaVu Sans, matplotlib's math font,
-  which the PDF embeds as well. **Each figure's three files land together or not at all**, so a
+  those that is installed sets the text, and DejaVu Sans when none is. Literal Greek and ms labels
+  use that same font stack. Any retained mathematical notation uses its configured math font,
+  embedded separately when needed. **Each figure's three files land together or not at all**, so a
   figure can never disagree with the numbers beside it. So does the export as a whole
   against anything environmental: a permission or disk error while staging, or a failure at the
   moment of commit, writes nothing and tells you the folder is exactly as it was. What is *not*
@@ -3541,32 +3940,34 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   Plots-window fit over a typed Fit range: that histogram gets the table's saved whole-column fit,
   or is fitted afresh. A project saved by an earlier version keeps the ranged fit it saved;
   refitting the column replaces it.
-- **Analysis Explorer ▸ Export current figure…** — the plot that is actually on
-  screen, including companion axes such as density marginals and spectrogram colour bars. The
-  Distributions page exposes the same choices from **Export ▾**. This is distinct from the standard
-  report generator above: it keeps your current view and styling. Distributions exports its main
-  axes by default; explicitly enable **Include residual panel** in the preview dialog to include
-  the displayed residual strip. Physical PNG exports embed resolution metadata,
-  PDF uses a vector page, and SVG records mm dimensions without changing its viewBox. In an SVG the
-  text stays text (Comparison figures and the study figure editor are the exception: their text is
-  outlines) and no font is embedded: every text element names the font the figure is drawn in,
-  followed by stand-ins (for Arial: Helvetica, Liberation Sans, Arimo, TeX Gyre Heros, Nimbus Sans,
-  then the generic sans-serif; Times New Roman and Courier New have lists of their own that end in
-  serif and monospace; any other family is followed by Arial's list), so a viewer without the first
-  one falls back to the next. The font the figure is drawn in is the one you chose or, when this
-  computer does not have it (**Figure fonts**, §10), the first of its substitutes that it has: an
-  SVG exported here names Arial first for a figure set in a Calibri this computer lacks, and also
-  for a figure whose font was never chosen, which is drawn in Arial. A family you picked is named
-  first even when it is the application's own font (Segoe UI on Windows). Text that has no font of
-  its own, such as the grey message a plot shows instead of data, is drawn in the application's own
-  font: its SVG names that family, or Arial when it is a private system face (a name starting with
-  a dot, as the Mac's is), never the private face itself. An SVG exported from the Figure Library (**Export saved figure…**, **Save figure
-  bundle…**) carries the text it was saved with: a figure saved by an earlier version of NanoScope has
-  the single font family per text element it was captured with, and one saved by this version has the
-  lists. The PDF embeds the fonts it draws with. Sizing scales
-  the entire canvas, including text and lines: inspect readability at the final printed size.
+- **Analysis Explorer ▸ Export ▾ ▸ Export current figure…** — the plot that is actually on screen, including
+  companion axes such as density marginals and spectrogram colour bars. The Distributions page
+  exposes the same choices from **Export ▾**. This is distinct from the standard report generator
+  above: it keeps your current view and styling. Distributions exports its main axes by default;
+  explicitly enable **Include residual panel** in the preview dialog to include the displayed
+  residual strip. Physical PNG exports embed resolution metadata, PDF uses a vector page, and SVG
+  records mm dimensions without changing its viewBox. In an SVG the text stays text (Comparison
+  figures and the study figure editor are the exception: their text is outlines) and no font is
+  embedded: every text element names the font the figure is drawn in, followed by stand-ins (for
+  Arial: Helvetica, Liberation Sans, Arimo, TeX Gyre Heros, Nimbus Sans, then the generic
+  sans-serif; Times New Roman and Courier New have lists of their own that end in serif and
+  monospace, and so does the stand-in that a computer without them draws them in, such as Liberation
+  Serif or Liberation Mono (it is named first, then its family's list); any other family is followed
+  by Arial's list), so a viewer without the first one falls back to the next. The font the figure is
+  drawn in is the one you chose or, when this computer does not have it (**Figure fonts**, §10), the
+  first of its substitutes that it has: an SVG exported here names Arial first for a figure set in a
+  Calibri this computer lacks, and also for a figure whose font was never chosen, which is drawn in
+  Arial. A family you picked is named first even when it is the application's own font (Segoe UI on
+  Windows). Text that has no font of its own, such as the grey message a plot shows instead of data,
+  is drawn in the application's own font: its SVG names that family, or Arial when it is a private
+  system face (a name starting with a dot, as the Mac's is), never the private face itself. An SVG
+  exported from a saved Figures row (**Export ▾ ▸ Figure…** or **Bundle…**) carries the
+  text it was saved with: a figure saved by an earlier version of NanoScope has the single font
+  family per text element it was captured with, and one saved by this version has the lists. The PDF
+  embeds the fonts it draws with. Sizing scales the entire canvas, including text and lines: inspect
+  readability at the final printed size.
 
-- **Analysis Explorer ▸ Save figure bundle…** — one atomic ZIP containing the current PNG and
+- **Analysis Explorer ▸ Export ▾ ▸ Save figure bundle…** — one atomic ZIP containing the current PNG and
   vector SVG, `data.csv` (17-digit numerical precision), lossless `data.parquet` (including dtypes,
   missing values and index), `config.json`, `provenance.json` and a checksummed `manifest.json`.
   Ordinary numerical Parquet columns remain native numbers. Heterogeneous object fields (such as
@@ -3578,12 +3979,12 @@ test contract is in [STAGE_3_ANALYTICAL_PROJECTS.md](STAGE_3_ANALYTICAL_PROJECTS
   frozen vector drawing commands for faithful PNG/PDF rendering, including clipping and backgrounds.
   Additional analytical tables/resources referenced by the configuration are included. Nothing
   is recomputed. Bundles are self-contained exports, not raw-recording archives or project files;
-  use `.nanoscope` to resume work. The Figure Library can export the same bundle from a saved
-  snapshot, without live recordings. Residual inclusion is explicit when capturing a live figure;
+  use `.nanoscope` to resume work. Select a saved Figures row and choose **Export ▾ ▸ Bundle…**
+  to export the same bundle without live recordings. Residual inclusion is explicit when capturing a live figure;
   a saved figure keeps the panels captured with it.
 
-**Presentation controls.** Every analytical page exposes the shared **Appearance** section with
-opt-in built-in and reusable user presets. Shared settings are saved with project workspaces;
+**Presentation controls.** Every hosted analytical page exposes **Format** and the toolbar's
+**Style ▾** menu, with opt-in built-in and reusable saved looks. Shared settings are saved with project workspaces;
 style edits and reopening saved figures do not rerun fits or analyses. Existing automatic units,
 source/category colours and full scientific warnings are retained. The main preview is scaled to
 fit the dialog. An optional approximate print-size view uses reported screen DPI but is not calibrated.
@@ -3683,11 +4084,13 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Trace focused: X / Esc** | **Discard the mask (Esc first cancels a draw in progress)** |
 | **Trace focused: E** | **Annotate mode on or off** |
 | **Trace: right-click** | **Add event here, Add the selection as an event, Discard the selection, Delete this hand-made event, Annotate** |
+| **Plot: click text** | Select an editable element in Format and show its mini toolbar; click empty plot to deselect |
 | **Plot: double-click text** | **Edit it in place (Return keeps it, Esc cancels); right-click for Text style… and Axis properties…** |
-| **Ctrl+Shift+F** | **Open the Signal Conditioning window (the classical detectors' signal chain)** |
-| **Signal Conditioning:** Ctrl+1 / Ctrl+2 / Ctrl+3 | Time / Spectrum / Response preview tab |
-| **Plot pages:** Ctrl/⌘+1 / 2 / 3 / 4 | Section: Data / Analysis / Appearance / Export (shows controls only; never runs an analysis; not yet in Distributions) |
-| **Signal Conditioning:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Edit ▸ Undo / Redo without leaving the window (a field you are typing in keeps them for its typing) |
+| **Ctrl+Shift+F** | **Open the Preprocess workspace** |
+| **Preprocess / Filters & drift:** Ctrl+1 / Ctrl+2 / Ctrl+3 | Time / Spectrum / Response preview tab |
+| **Explorer plot pages:** Ctrl/⌘+1 / 2 | Data & analysis / Format inspector tab (shows controls only; never runs an analysis) |
+| **Explorer plot pages:** Ctrl/⌘+Return / Enter | Commit the focused field and Update plot |
+| **Preprocess / Filters & drift:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Edit ▸ Undo / Redo without leaving the window (a field you are typing in keeps them for its typing) |
 | Ctrl+0 / trace-focused Home / **Full** button | Reset zoom to the complete trace |
 | Ctrl+← / Ctrl+→ (or Alt+← / Alt+→) | Zoom Back / Forward (view history; greyed out in the View menu when there is nowhere to go) |
 | **Ctrl/⌘+J** | **Go to event…: select an event by its ID and zoom the trace to it (in the Event inspector's own window: its ID…)** |
@@ -3711,7 +4114,7 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Event gallery:** PageDown / PageUp | Next / previous page |
 | **Event gallery:** Home / End | First / last page |
 | **Event gallery:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo on the main window's history, as the **Undo** and **Redo** buttons do |
-| **Plot windows:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo the plot's own history — its appearance, whatever the page's Section shows (the study figure editor: while the Appearance controls are on screen); in Distributions, the whole plot recipe. Never Edit ▸ Undo (§10) |
+| **Plot windows:** Ctrl/⌘+Z / Ctrl/⌘+Shift+Z | Undo / redo the plot's own history — its appearance, whatever the page's inspector shows (including the retained Study/Report editor); in Distributions, the whole plot recipe. Never Edit ▸ Undo (§10) |
 | **Plot windows:** right-click a plot | Reset view, Zoom back / Zoom forward and the page's exports. No key is bound to them; ⌘Z stays the plot's Undo (§10) |
 | **Event inspector & Event gallery:** 1–9 | Apply the matching label from the palette (**Analysis ▸ Event labels…**) — same digits, same meanings, in both windows |
 | **Event inspector & Event gallery:** custom one-character label hotkey | Apply that palette label (reserved and duplicate keys cannot be saved) |
@@ -3720,14 +4123,14 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 
 ## 14. Known limitations & caveats
 
-- **Text in the matplotlib windows** (Comparison figures, Study figures, report figures) cannot yet
-  be edited in the figure. In SVG exports the rotated y-axis label is written one glyph per text
-  element (pyqtgraph's behaviour).
-- **Current event-count heatmap display limitation:** the Event waveforms image can transpose
-  bin coordinates relative to the correctly indexed counts/marginals. Do not read dwell-depth
-  coordinates from it until a verified fix is installed. Use numerical tables, scatter or the
-  validated histogram. This is distinct from KDE probability density. Documentation does not
-  repair the display code.
+- **Element support differs by renderer.** Comparison/Study/report surfaces expose their supported
+  text and series targets through Format. An unsupported element/property remains unavailable.
+  Inspect font fallback and literal text in the actual PDF/SVG export; selecting an element does
+  not add editing controls to the exported artwork.
+- **Historical event-count heatmap caveat:** the September 11 audit found transposed bin
+  coordinates despite correct counts/marginals. Current code has an explicit image-axis convention
+  and passed all eight asymmetric-bin live/frozen/project-reopen/export tests on November 3
+  development source `9ddafefa`. Older screenshots remain historical. Event-count maps are distinct from KDE probability density.
 - **Background sub-state fits use frozen inputs.** Cancellation or a changed source, event table,
   calibration, sample rate, parameters or provenance can prevent a pending fit being installed.
   Review the message; do not assume a finished worker implies a current result.
@@ -3782,8 +4185,9 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
   checkpoint (§11b), but a durable or shareable analysis still requires **File ▸ Save Project**
   (⌘S). Closing and choosing **Discard** moves the unsaved recovery data to the recovery folder's
   **Discarded** folder, which keeps it for 7 days. A project or recovery copy written by this build
-  (project version 12) cannot be opened by an older build — the 2026-10-31 and 2026-11-01 builds
-  read up to version 11 — and every older project still opens here.
+  (project version 13) cannot be opened by older builds limited to versions 11 or 12. This build
+  still reads earlier projects; converting an original on explicit Save keeps the verified backup
+  described in §11c.
 - **`CPYA`-variant ABF files** cannot be read; they are refused with a specific message.
 - **Legacy TDMS** files declare no sample rate → the x-axis is in samples and detection is disabled,
   until you declare the rate under **Inspector ▸ File Info ▸ Sample rate / time unit…** (§2).

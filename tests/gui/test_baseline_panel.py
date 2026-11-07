@@ -126,7 +126,7 @@ def test_a_probe_that_could_not_decide_says_so_in_the_proposal_text(panel):
     panel.set_proposal(fallback)
     text = panel.reason_label.text()
     assert "Could not measure" in text
-    assert "0.5" in text and "0.1" in text
+    assert "500 ms" in text and "100 ms" in text
     panel.apply_proposal()
     assert panel.param_source() == "default"
     assert panel.rough_s.value() == pytest.approx(B.DEFAULT_BASELINE.rough_s)
@@ -169,12 +169,12 @@ def test_the_gate_reports_the_first_real_blocker_and_not_a_downstream_one(panel)
     panel.set_gate(False, "Select a CURRENT channel to measure its baseline.")
     panel.apply_button.click()
     assert "CURRENT channel" in panel.gate_label.text()
-    assert "Measure this recording" not in panel.gate_label.text()
+    assert "Estimate window settings" not in panel.gate_label.text()
 
     # ...and once that is fixed, the next real blocker appears in its place.
     panel.set_gate(True)
     panel.apply_button.click()
-    assert "Measure this recording" in panel.gate_label.text()
+    assert "Estimate window settings" in panel.gate_label.text()
 
 
 def test_a_probe_in_flight_refuses_a_second_one_and_says_why(panel, qtbot):
@@ -189,9 +189,9 @@ def test_a_probe_in_flight_refuses_a_second_one_and_says_why(panel, qtbot):
 
 def test_the_probe_button_says_it_is_working(panel):
     panel.set_busy(True)
-    assert panel.probe_button.text() != "Measure this recording"
+    assert panel.probe_button.text() != "Estimate window settings"
     panel.set_busy(False)
-    assert panel.probe_button.text() == "Measure this recording"
+    assert panel.probe_button.text() == "Estimate window settings"
 
 
 # ===========================================================================
@@ -513,9 +513,10 @@ def test_the_baseline_panel_imports_no_sibling_gui_panel():
     # numeric_text is a genuinely shared, panel-free leaf (2026-09-13): pure ASCII
     # number-parsing functions, no QWidget subclass, no import of anything in gui/
     # itself -- the same "shared leaf" exemption this codebase already grants
-    # categorical.py and worker_thread.py elsewhere. A real sibling PANEL (anything
+    # categorical.py and worker_thread.py elsewhere. time_controls is likewise a
+    # shared duration spinbox/formatter leaf, not a sibling panel. A real sibling PANEL (anything
     # that builds a widget another window owns) must still trip this.
-    allowed = {"numeric_text"}
+    allowed = {"numeric_text", "time_controls"}
     assert reached <= allowed, (
         f"baseline_panel must import no sibling gui module beyond {sorted(allowed)}: "
         f"{sorted(reached - allowed)}")
@@ -745,3 +746,30 @@ def test_the_baseline_gate_follows_the_detectors_gate(window, tmp_path):
     window._on_selection(doc_id, 0)
     assert panel.can_run()
     assert not bp._blocker("probe")
+
+
+@pytest.mark.parametrize('fs,taps', [(1999.9999999999982, 101), (2000.0, 101),
+                                    (np.nextafter(2000., 0.), 101),
+                                    (np.nextafter(2000., np.inf), 101),
+                                    (1999.99, 99)])
+def test_decimation_label_quotes_actual_odd_kernel_taps_at_rate_boundaries(panel, fs, taps):
+    panel.set_recording(fs)
+    panel.base_s.setValue(.1)
+    assert panel.decim_label.text() == f'2  ({taps} taps)'
+
+
+@pytest.mark.parametrize('restored', [False, True])
+def test_passed_window_checks_do_not_visually_certify_an_unknown_open_level(panel, restored):
+    from types import SimpleNamespace
+    row = B.BaselineCheck('level_occupancy', 'ok', 'tracked level', .79,
+                         'numerical window criterion', 'The physical open level is unverified.')
+    health = SimpleNamespace(checks=(row,), level_occupancy=.79, alt_level_occupancy=.19)
+    if restored:
+        health = dict(checks=[row.to_dict()], level_occupancy=.79, alt_level_occupancy=.19)
+    panel.set_health(health)
+    assert 'PASS' in panel.health_label.text()
+    assert 'Open-pore reference unverified' in panel.health_scope_label.text()
+    assert 'does not identify which conductance level is open' in panel.health_scope_label.text()
+    quiet = dict(checks=[row.to_dict()], level_occupancy=.99, alt_level_occupancy=0.)
+    panel.set_health(quiet)
+    assert 'reference unverified' not in panel.health_scope_label.text()

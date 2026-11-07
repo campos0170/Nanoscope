@@ -39,7 +39,7 @@ def _settle(ms: int = 30) -> None:
 
 
 @pytest.fixture
-def inspector(qapp, qtbot, real_font, tmp_path):
+def inspector(qapp, qtbot, real_font, tmp_path, request):
     data = np.full(40_000, 100.0) + np.random.default_rng(3).normal(0, .5, 40_000)
     for start in range(2_000, 38_000, 4_000):
         data[start:start + 300] -= 60.0
@@ -52,7 +52,12 @@ def inspector(qapp, qtbot, real_font, tmp_path):
     doc_id = session.add_document(TraceDocument(meta=meta, channels=(data,)))
     frame, prov = detect_events(data, FS, baseline=100.0, polarity=-1, min_dwell_s=2e-5)
     insp = EventInspectorWindow(session)
-    qtbot.addWidget(insp)
+    # A docked inspector is owned by column's main window, including when a
+    # test reparents it as that window's transient child. Register only the
+    # top-level owner with qtbot: independently deleting the child first leaves
+    # QDockWidget's native teardown touching a destroyed widget in Qt 6.9.
+    if "column" not in request.fixturenames:
+        qtbot.addWidget(insp)
     insp.set_events(doc_id, 0, frame, provenance=prov)
     assert insp._amplitude.apply_current(method="mean")   # the title's amplitude clause
     return insp

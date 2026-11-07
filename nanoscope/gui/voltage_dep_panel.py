@@ -80,13 +80,16 @@ The fit label's wording also belongs to the trend that is APPLIED: :meth:`VDepWi
 puts the wording alone back to automatic when the trend goes from one fit to another, or to
 none (the title, axis labels and both pins stay: no axis moves). The first fit after none keeps
 wording typed ahead of it, and so does the Apply that commits a recalled template's own fit
-(``_fit_words_for``): the template arrives with its wording and its fit selected, and the fit
-waits for Apply. A restore sets the applied trend directly and reaches nothing of this.
+(``_fit_words_for``) while the wording is still the template's (Undo of the recall, or wording
+typed after it, makes that Apply an ordinary change of trend): the template arrives with its
+wording and its fit selected, and the fit waits for Apply. A restore sets the applied trend
+directly and reaches nothing of this.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -112,12 +115,24 @@ from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_a
                               reframe_axis_pins)
 from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
                                window_readout)
-from .plot_workflow import (WarningSummary, bounded_controls, control_group,
-                            ensure_item_legend, install_plot_workflow)
+from .plot_workflow import (ExportEntry, FormatSpec, InspectorGroup, PageAdapter, PendingState,
+                            WarningSummary, bounded_controls, control_group, ensure_item_legend,
+                            form_rows, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FILTERS, IMAGE_FORMATS,
                           choose_live_plot_export, data_write_failure_text, write_live_plot_image,
                           write_plot_csv)
 from .plot_templates import WindowTemplateControls
+from .quantity_reset import promise, promise_stands
+
+
+def _duration_group_label_ms(label: str) -> str:
+    """Display the core's seconds-labelled group without regrouping or mutating it."""
+    match = re.fullmatch(r"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)) s", str(label))
+    if match is None:
+        return label  # Unknown or future labels are not guessed or rewritten.
+    from ..core.quantity_display import format_quantity, quantity_for
+    return format_quantity(float(match.group(1)), quantity_for("analyzed_duration_s"))
+
 
 __all__ = ["VDepWindow"]
 
@@ -187,7 +202,7 @@ class _ProvenanceCaption(FitLabelItem):
 # once the reader can see the number is an absolute current.
 _METRIC_LABELS: tuple[tuple[str, str], ...] = (
     ("Capture rate (Hz)", "capture_rate_hz"),
-    ("Median dwell (s)", "median_dwell_s"),
+    ("Median dwell (ms)", "median_dwell_s"),
     ("Median depth (pA)", "median_depth"),
     ("Median dI/I₀", "median_frac_depth"),
     ("Event count", "n_events"),
@@ -219,6 +234,8 @@ _VOLTAGE_PHRASE: dict[bool, str] = {True: "|V|", False: "the signed voltage"}
 def _metric_unit(metric: str) -> str:
     """The metric's unit as its axis label names it ("Hz" of "Capture rate (Hz)"); ""
     for a ratio or a count, whose label names none."""
+    if metric == "median_dwell_s":
+        return "s"  # raw numerical/CSV parameter unit; display conversion is explicit
     label = _Y_LABEL.get(metric, "")
     return label[label.rfind("(") + 1:-1] if label.endswith(")") else ""
 
@@ -231,7 +248,7 @@ _FIT_EXP = "exponential"
 #: The per-recording table's columns. Index 2 is filled with the metric's own label
 #: at fill time (the axis, the combo and this header are one metric named once).
 _TABLE_COLUMNS: tuple[str, ...] = (
-    "Recording", "V (mV)", "metric", "V source", "Duration (s)",
+    "Recording", "V (mV)", "metric", "V source", "Duration (ms)",
     "Baseline", "Merge", "Gain")
 _COL_RECORDING = 0
 _COL_VOLTAGE = 1
@@ -268,6 +285,9 @@ class VDepWindow(QtWidgets.QMainWindow):
     #: setters and :meth:`refresh` are deliberately silent so project restore and
     #: MainWindow's data refreshes do not immediately dirty the project again.
     workspaceChanged = Signal()
+    #: The visible verb's state moved: the chosen fit is (or is no longer) the drawn one.
+    #: Carries nothing; the Explorer's Update plot reads ``pending()`` of the adapter.
+    pendingChanged = Signal()
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None, *,
                  defer_initial_refresh: bool = False) -> None:
@@ -304,9 +324,10 @@ class VDepWindow(QtWidgets.QMainWindow):
         #: Whether the x axis shows |V| (True) or the signed voltage (False) now (None: no
         #: points drawn). A range pinned on it belongs to that, as the words do to the metric.
         self._drawn_abs: bool | None = None
-        #: The fit a recalled template's fit-label wording was written for: the Apply that
-        #: commits that fit is not a change of trend for those words (quantity_reset).
-        self._fit_words_for: str | None = None
+        #: What a recalled template promised (``quantity_reset.promise``): the fit its fit-label
+        #: wording was written for. The Apply that commits that fit is not a change of trend
+        #: for those words -- while they are still the template's (``promise_stands``).
+        self._fit_words_for: tuple | None = None
         self._appearance = PlotAppearance()
 
         self._build_ui()
@@ -332,12 +353,13 @@ class VDepWindow(QtWidgets.QMainWindow):
             "Which per-recording event summary to plot against voltage.")
         controls.addWidget(self._metric_combo)
 
-        controls.addWidget(QtWidgets.QLabel("Fit"))
+        controls.addWidget(QtWidgets.QLabel("Quick fit"))
         self._fit_combo = QtWidgets.QComboBox()
         self._fit_combo.addItems([_FIT_NONE, _FIT_LINEAR, _FIT_EXP])
         self._fit_combo.setToolTip(
-            "Overlay a trend: a straight line, or the A·exp(V/V0) capture-rate model. "
-            "Press Apply fit to draw the one you have chosen.")
+            "Straight line uses raw response; A·exp(V/V0) fits ln(response), and its "
+            "R² is in log-response space. Curve fit… offers raw-response models. "
+            "Use Update plot in the Explorer (Apply fit in the standalone view) to draw your choice.")
         controls.addWidget(self._fit_combo)
 
         # THE CONFIRMATION STEP (owner note #12), the same gate the Plots window's two
@@ -349,6 +371,19 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._fit_apply_btn = QtWidgets.QPushButton("Apply fit")
         self._fit_apply_btn.clicked.connect(self._apply_fit_from_user)
         controls.addWidget(self._fit_apply_btn)
+        self._nonlinear_fit_btn = QtWidgets.QPushButton("Curve fit…")
+        self._nonlinear_fit_btn.setToolTip("Fit the plotted voltage–metric points in raw-response space with linear, nonlinear or custom models, constraints and uncertainty.")
+        self._nonlinear_fit_btn.clicked.connect(self.open_nonlinear_fit)
+        fit_actions = QtWidgets.QWidget()
+        fit_actions_layout = QtWidgets.QVBoxLayout(fit_actions)
+        fit_actions_layout.setContentsMargins(0, 0, 0, 0)
+        fit_actions_layout.setSpacing(2)
+        fit_actions_layout.addWidget(self._nonlinear_fit_btn)
+        controls.addWidget(fit_actions)
+        self._nonlinear_fit_status = QtWidgets.QLabel("No curve fit applied.")
+        self._nonlinear_fit_status.setWordWrap(True)
+        self._nonlinear_fit_status.setAccessibleName("Applied curve fit status")
+        fit_actions_layout.addWidget(self._nonlinear_fit_status)
 
         self._abs_v = QtWidgets.QCheckBox("|V|")
         self._abs_v.setToolTip("Plot against the voltage MAGNITUDE |V| instead of signed V.")
@@ -432,9 +467,15 @@ class VDepWindow(QtWidgets.QMainWindow):
         root.addWidget(self._warning_scroll)
 
         splitter = QtWidgets.QSplitter(Qt.Vertical)
-        self._plot_widget = pg.PlotWidget()
+        from .axes import ReadableLogAxis
+        self._plot_widget = pg.PlotWidget(axisItems={"bottom": ReadableLogAxis("bottom"),
+                                                      "left": ReadableLogAxis("left")})
         self._plot_widget.setMinimumSize(480, 320)
         self._plot: pg.PlotItem = self._plot_widget.getPlotItem()
+        # With no title, an endpoint Y tick is centred on the upper canvas edge.
+        # Reserve room for its glyphs without changing the data/view range.
+        left, top, right, bottom_margin = self._plot.layout.getContentsMargins()
+        self._plot.layout.setContentsMargins(left, max(top, 12), right, bottom_margin)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         splitter.addWidget(self._plot_widget)
 
@@ -476,15 +517,16 @@ class VDepWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(1, 0)
         root.addWidget(splitter, 1)
         self.setCentralWidget(central)
-        exports = (("Export current figure…", lambda: self.save_image()),
-                   ("Export data (CSV)…", lambda: self.export_data()))
+        # One list for the right-click menu and the Explorer's Export ▾: they cannot disagree.
+        exports = self._exports = (("Export current figure…", lambda: self.save_image()),
+                                   ("Export data (CSV)…", lambda: self.export_data()))
         self._workflow = install_plot_workflow(
             self, sections={"Data": (self._data_section,), "Analysis": (self._analysis_section,),
                             "Appearance": (self._appearance_section,), "Export": (self._export_section,)},
             actions=(("Analyze / refresh", self._refresh_from_user),
                      ("Apply fit", self._apply_fit_from_user)),
             exports=exports)
-        self._workflow.adopt_reset_figure(self._appearance_widget)
+        self._workflow.adopt_reset_figure(self._appearance_widget, takes_ranges=True)
         # View only (plot_interaction): Reset view, zoom history, the app right-click menu
         # in place of pyqtgraph's, and the pointer readout (log y shows the real value).
         self._readout = window_readout(self)
@@ -538,6 +580,72 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._accepted_only.clicked.connect(self._notify_workspace_changed)
         self._sync_fit_apply_btn()
 
+    def inspector_adapter(self) -> PageAdapter:
+        """How the Analysis Explorer hosts this page (Phase 1, "one layout for every page").
+
+        Built once and cached; nothing but ``AnalysisExplorer.add_page`` (through
+        ``InspectorHost.adopt``) and the hosting test helpers call it. Building it is the
+        move's first half: the one-row Analysis strip (518 px) is re-flowed into two forms,
+        Plot and Fit, whose widgets are the SAME instances (``self._metric_combo is`` the
+        one in the inspector); the strip stays behind as a hidden husk with its inline
+        labels and the Apply fit button. It computes nothing: ``update`` is an existing
+        handler, ``pending`` only compares two strings the page already keeps."""
+        if getattr(self, "_inspector_adapter", None) is None:
+            for box in (self._abs_v, self._log_y):
+                # as wide as its words, as in the strip: a click in the middle of the row's
+                # empty space would otherwise miss a check box that fills the column
+                box.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            plot = form_rows([("Metric", self._metric_combo), ("Voltage", self._abs_v),
+                              ("Y axis", self._log_y)])
+            fit = form_rows([("Quick fit", self._fit_combo), ("", self._nonlinear_fit_btn),
+                             ("", self._nonlinear_fit_status)])
+            self._inspector_adapter = PageAdapter.from_widget(
+                self, "voltage_series", self._appearance_widget,
+                groups=[InspectorGroup("sources", "Sources", [self._data_section]),
+                        InspectorGroup("plot", "Plot", [plot]),
+                        InspectorGroup("fit", "Fit", [fit], expanded=False),
+                        InspectorGroup("recipes", "Recipes", [self._templates], expanded=False)],
+                format=FormatSpec(
+                    self._appearance_widget,
+                    controllers=lambda: [c for c in (figure_text_for(self._plot),) if c],
+                    axis_log_target=lambda _plot, side: ("plot", self._log_y)
+                    if side == "left" else None),
+                update=self._update_from_inspector,
+                update_tooltip="Draw the fit you have chosen when it is waiting; otherwise "
+                               "re-gather (V, metric) from every open recording and redraw.",
+                pending=self._pending,
+                pending_changed=self.pendingChanged,
+                exports=lambda: [ExportEntry(text, run, kind=kind) for (text, run), kind
+                                 in zip(self._exports, ("figure", "data"))],
+                navigation=lambda: self._plot_nav,
+                navigations=lambda: (self._plot_nav,),
+                status_bar=self.statusBar,
+                chrome=[self._workflow],        # hidden when hosted; its objects stay alive
+                on_adopt=self._on_adopt)
+        return self._inspector_adapter
+
+    def _on_adopt(self) -> None:
+        """Hosting steps: the controls the Explorer's toolbar and the inspector replace stay
+        constructed and hidden (their text still changes: ``Apply fit ●``)."""
+        for hidden in (self._refresh_btn, self._save_btn, self._save_data_btn,
+                       self._export_section, self._appearance_section, self._analysis_section):
+            hidden.hide()
+        self._plot_widget.setMinimumWidth(280)
+
+    def _update_from_inspector(self) -> None:
+        """Update plot: draw the chosen fit when it is waiting (Apply fit), and then do not
+        gather again; with none waiting, re-gather as Analyze / refresh did."""
+        if self._fit_combo.currentText() != self._applied_fit:
+            self._apply_fit_from_user()
+        else:
+            self._refresh_from_user()
+
+    def _pending(self) -> PendingState:
+        """0 or 1: the fit in the combo is not the fit on the plot (the ``Apply fit ●`` mark)."""
+        if self._fit_combo.currentText() != self._applied_fit:
+            return PendingState(1, ("fit model: Apply pending",))
+        return PendingState()
+
     def _appearance_from_user(self, state: PlotAppearance) -> None:
         self._appearance = state
         self._apply_appearance()
@@ -558,10 +666,23 @@ class VDepWindow(QtWidgets.QMainWindow):
         return self._appearance.to_dict()
 
     def _apply_appearance(self) -> None:
+        from ..core.quantity_display import quantity_for
+        from .quantity_axis import present_page_axes
+        # Empty/log-ineligible data use a linear message canvas. Persist the
+        # scientific axis choice, not that temporary canvas's coordinate frame;
+        # otherwise reopening migrates an out-of-date linear quantity witness.
+        present_page_axes(self, self._plot,
+                          {"left": quantity_for(self._drawn_metric or self._metric())},
+                          frames={"left": "log10" if self._log_y.isChecked() else "linear"})
         ensure_item_legend(self._plot, ((self._scatter_item, "Per recording"),
                                        (self._fit_item, "Applied trend")))
         self._appearance_widget.set_legend_available(self._scatter_item is not None)
         shown = self._plot.viewRange() if self._message_item is not None else None
+        from .figure_series import tag_pg_series
+        if self._scatter_item is not None and not hasattr(self._scatter_item,"_nanoscope_series_descriptor"):
+            tag_pg_series(self._scatter_item,view="voltage",identity="observations",label="Per recording")
+        if self._fit_item is not None and not hasattr(self._fit_item,"_nanoscope_series_descriptor"):
+            tag_pg_series(self._fit_item,view="voltage",role="fit",identity="fit",label="Applied trend")
         apply_plot_appearance(
             self._plot, self._appearance, plot_widget=self._plot_widget,
             data_items=(self._scatter_item,), fit_items=(self._fit_item,))
@@ -575,9 +696,9 @@ class VDepWindow(QtWidgets.QMainWindow):
             return                      # a draw during construction, before the labels
         # Never In legend: the legend row does not carry the numbers or the R² refusal here.
         self._fit_label.apply_state(
-            replace(self._appearance.fit_label_state(), in_legend=False), self._fit_readouts,
-            self._appearance.text_style("annotation.fit"), self._appearance.font_family)
-        style = self._appearance.text_style(_CAPTION_KEY)
+            replace(self._appearance.effective_fit_label_state(), in_legend=False), self._fit_readouts,
+            self._appearance.effective_text_style("annotation.fit"), self._appearance.font_family)
+        style = self._appearance.effective_text_style(_CAPTION_KEY)
         body = (self._wrap_title(self._caption_segments) if style.text is None
                 else "" if style.text == HIDDEN_TEXT else rich_text(style.text))
         self._caption.show_caption(body, style, _MSG_HEX,
@@ -614,6 +735,51 @@ class VDepWindow(QtWidgets.QMainWindow):
 
     def figure_export_target(self):
         return self._plot
+
+    def _nonlinear_datasets(self):
+        from .nonlinear_fit_dialog import CurveDataset
+        if self._scatter_item is None or self._drawn_metric is None:
+            return []
+        # xData/yData are storage coordinates; getData would apply a log display transform.
+        x = np.asarray(self._scatter_item.xData, dtype=float)
+        y = np.asarray(self._scatter_item.yData, dtype=float)
+        return [CurveDataset("voltage-series", "Voltage series: " + self._drawn_metric,
+            x.copy(), y.copy(), "absolute_voltage_V" if self._drawn_abs else "voltage_V",
+            self._drawn_metric, "V", _metric_unit(self._drawn_metric), {},
+            {"recordings": [p.recording for p in self._points],
+             "source_doc_ids": [getattr(p, "doc_id", "") for p in self._points],
+             "accepted_only": self._accepted_only.isChecked(),
+             "warnings": list(self._series.warnings)})]
+
+    def _nonlinear_controller(self):
+        from .nonlinear_fit_dialog import NonlinearFitController
+        if not hasattr(self, "_nonlinear_fitter"):
+            self._nonlinear_fitter = NonlinearFitController(self, self._nonlinear_datasets,
+                self._plot, self._nonlinear_applied, "voltage")
+        return self._nonlinear_fitter
+
+    def _nonlinear_applied(self):
+        from .nonlinear_fit_dialog import result_summary
+        state = self.nonlinear_fit_state()
+        base = self.details_text().split("\n\nNonlinear fit:", 1)[0]
+        self._details.setPlainText(base + ("\n\n" + result_summary(state) if state else ""))
+        self._nonlinear_controller().sync_controls()
+        self._notify_workspace_changed()
+
+    def open_nonlinear_fit(self):
+        self._nonlinear_controller().open()
+
+    def nonlinear_fit_state(self):
+        return self._nonlinear_fitter.snapshot() if hasattr(self, "_nonlinear_fitter") else None
+
+    def restore_nonlinear_fit_state(self, state):
+        self._nonlinear_controller().restore(state)
+        self._nonlinear_controller().sync_controls()
+        if state:
+            from .nonlinear_fit_dialog import result_summary
+            summary = result_summary(state)
+            if summary not in self.details_text():
+                self._details.setPlainText(self.details_text() + "\n\n" + summary)
 
     # -- window templates ------------------------------------------------------------------------
     def template_settings(self) -> tuple[dict, dict]:
@@ -661,7 +827,8 @@ class VDepWindow(QtWidgets.QMainWindow):
             self._redraw()          # |V| and log y's own signal
         # The shared look answers through _appearance_from_user, zoom-preserving.
         self._appearance_widget.apply_appearance(appearance)
-        self._fit_words_for = fit       # its wording came with this fit (quantity_reset)
+        # Its wording came with this fit, as installed just now (quantity_reset).
+        self._fit_words_for = promise(fit, self._appearance_widget.state(), ("fit_label",))
         if moved:
             self.workspaceChanged.emit()
 
@@ -736,7 +903,8 @@ class VDepWindow(QtWidgets.QMainWindow):
         self._applied_fit = self._fit_combo.currentText()
         self._sync_fit_apply_btn()
         self._redraw()
-        if was not in (_FIT_NONE, self._applied_fit) and words_for != self._applied_fit:
+        if was not in (_FIT_NONE, self._applied_fit) and not promise_stands(
+                words_for, self._applied_fit, self._appearance_widget.state(), ("fit_label",)):
             self._appearance_widget.reset_typed_words(
                 _TREND_PHRASE[self._applied_fit], self.statusBar(), only=("fit_label",))
 
@@ -762,6 +930,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             f"Draw “{self._fit_combo.currentText()}” — the plot still shows "
             f"“{self._applied_fit}”." if pending else
             f"“{self._applied_fit}” is the trend on the plot.")
+        self.pendingChanged.emit()      # the Explorer's Update plot count follows this mark
 
     # -- data ------------------------------------------------------------------------------------
     def refresh(self) -> None:
@@ -916,6 +1085,8 @@ class VDepWindow(QtWidgets.QMainWindow):
 
     # -- rendering -------------------------------------------------------------------------------
     def _clear(self) -> None:
+        if hasattr(self, "_nonlinear_fitter"):
+            self._nonlinear_fitter.clear_graphics()
         self._plot.clear()
         reset_plot_history(self._plot)   # new geometry: old zoom ranges mean nothing now
         self._plot.setTitle(None)
@@ -965,6 +1136,11 @@ class VDepWindow(QtWidgets.QMainWindow):
             # steps apply without this and keep a manual zoom.
             reframe_axis_pins(self._plot)
             self._apply_appearance()
+            if hasattr(self, "_nonlinear_fitter"):
+                self._nonlinear_fitter.redraw()
+                if self.nonlinear_fit_state():
+                    from .nonlinear_fit_dialog import result_summary
+                    self._details.setPlainText(self.details_text() + "\n\n" + result_summary(self.nonlinear_fit_state()))
 
     def _redraw_analysis(self) -> None:
         pts = self._points
@@ -1188,11 +1364,11 @@ class VDepWindow(QtWidgets.QMainWindow):
             if series.duration_warnings:
                 spans = sorted(p.analyzed_duration_s for p in series.points
                                if p.analyzed_duration_s is not None)
-                span = (f" {spans[0]:.3g}–{spans[-1]:.3g} s, {spans[-1] / spans[0]:.2f}×"
+                span = (f" {spans[0]*1000.:.3g}–{spans[-1]*1000.:.3g} ms, {spans[-1] / spans[0]:.2f}×"
                         if len(spans) >= 2 and spans[0] > 0 else "")
                 parts.append(f"⚠ UNEQUAL analysed durations{span}")
             elif len(groups) == 1:
-                parts.append(f"over {groups[0][0]} each")
+                parts.append(f"over {_duration_group_label_ms(groups[0][0])} each")
         # Whether the x-axis is measured or read off a filename. Stated only when the
         # series MIXES them: one shared source is already in the provenance block, but
         # a law fitted through both kinds of x at once is a different claim.
@@ -1229,7 +1405,7 @@ class VDepWindow(QtWidgets.QMainWindow):
                     parts.append(prefix + value)
         if (voltage_dep.depends_on_duration(series.metric)
                 and not series.duration_warnings and len(series.duration_groups) == 1):
-            parts.append(f"over {series.duration_groups[0][0]} each")
+            parts.append(f"over {_duration_group_label_ms(series.duration_groups[0][0])} each")
         return parts
 
     def _provenance_title(self, series: voltage_dep.VDepSeries) -> str:
@@ -1262,7 +1438,8 @@ class VDepWindow(QtWidgets.QMainWindow):
         # writer so they read as part of one list rather than as an afterthought.
         # A count IS proportional to the duration; every other metric divided it out
         # or never touched it, and says so in the same words the other rows use.
-        block("Duration:", series.duration_groups,
+        block("Duration:", tuple((_duration_group_label_ms(key), recs)
+                                 for key, recs in series.duration_groups),
               "" if voltage_dep.depends_on_duration(series.metric) else unread)
         # No "[not read]" note on this one: EVERY metric here is plotted against the
         # x-axis these sources produced, so it is read by all of them.
@@ -1349,7 +1526,11 @@ class VDepWindow(QtWidgets.QMainWindow):
 
     def _apply_fit_summary(self, fit: dict[str, Any], use_abs: bool) -> list[str]:
         """Set the headline from the fit and return its detail lines + R²/n."""
-        p = fit.get("params", {})
+        p = dict(fit.get("params", {}))
+        if self._metric() == "median_dwell_s":
+            for key in ("A", "intercept", "slope"):
+                if key in p:
+                    p[key] *= 1000.
         r2, n = fit.get("r2", float("nan")), fit.get("n", 0)
         # NEVER let a non-finite R² reach a bare format spec (the PSD panel's _fmt_q
         # rule). `populations.linear_fit` returns r2 = nan for exactly one cause: the
@@ -1369,7 +1550,8 @@ class VDepWindow(QtWidgets.QMainWindow):
         # budget is real); the sentence goes in the Goodness line below.
         r2_finite = np.isfinite(r2)
         dof_tag = stats.r2_dof_tag(n, _VDEP_FIT_PARAMS)
-        r2_short = (f"R² = {r2:.4f}" + (f" ({dof_tag})" if dof_tag else "")
+        r2_label = "R² (log response)" if fit.get("model") == "exponential" else "R²"
+        r2_short = (f"{r2_label} = {r2:.4f}" + (f" ({dof_tag})" if dof_tag else "")
                     if r2_finite else "R² undefined")
         vsym = "|V|" if use_abs else "V"
         # The headline number and the title both carry the pooled provenance: the
@@ -1383,7 +1565,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         # is -0.0733 Hz per mV: read off the axis it was 1000x out, and V₀ in V the same
         # (review intent-3). The headline, the fit label and Details all give the mV-frame
         # number with its unit; the CSV keeps the fit's own V-frame values, labelled.
-        unit = _metric_unit(self._metric())
+        unit = "ms" if self._metric() == "median_dwell_s" else _metric_unit(self._metric())
         in_unit = f" {unit}" if unit else ""
         if fit.get("model") == "exponential":
             v0 = p["V0"] * 1000.0
@@ -1392,6 +1574,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             lines = [
                 f"Exponential:  value = {p['A']:.4g} · exp({vsym} / {v0:.4g})   ({vsym} in mV)",
                 f"              A = {p['A']:.5g}{in_unit}   V₀ = {v0:.5g} mV",
+                "Objective: least squares of ln(response); R² and residual quality refer to log response. Curve fit… offers raw-response exponential regression.",
             ]
             lead = [v0_text, r2_short]
         else:
@@ -1415,7 +1598,7 @@ class VDepWindow(QtWidgets.QMainWindow):
         if r2_finite:
             dof_note = stats.r2_dof_caveat(n, _VDEP_FIT_PARAMS, model="trend",
                                            noun="recording")
-            lines.append(f"Goodness of fit:  R² = {r2:.5f}   ·   n = {n} recording(s)"
+            lines.append(f"Goodness of fit:  {r2_label} = {r2:.5f}   ·   n = {n} recording(s)"
                          + (f"\n                  {dof_note}" if dof_note else ""))
         else:
             lines.append(
@@ -1447,7 +1630,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             self._table.setItem(r, _COL_RECORDING, name)
             self._table.setItem(r, _COL_VOLTAGE,
                                 QtWidgets.QTableWidgetItem(f"{p.v_volts * 1000.0:.4g}"))
-            self._table.setItem(r, _COL_METRIC, QtWidgets.QTableWidgetItem(f"{p.value:.6g}"))
+            self._table.setItem(r, _COL_METRIC, QtWidgets.QTableWidgetItem(f"{p.value * (1000. if metric == 'median_dwell_s' else 1.):.6g}"))
             # Where this row's x-coordinate came from: a command-channel median, or a
             # number parsed out of the file name. The I-V window prints the same tag
             # against the same recording, from the same resolver.
@@ -1457,7 +1640,7 @@ class VDepWindow(QtWidgets.QMainWindow):
             # (a count is a rate times this) and informative for everything else.
             self._table.setItem(r, _COL_DURATION, QtWidgets.QTableWidgetItem(
                 "unknown" if p.analyzed_duration_s is None
-                else f"{p.analyzed_duration_s:.3f}"))
+                else f"{p.analyzed_duration_s * 1000.:.3f}"))
             self._table.setItem(r, _COL_BASELINE,
                                 QtWidgets.QTableWidgetItem(p.baseline_fingerprint))
             self._table.setItem(r, _COL_MERGE, QtWidgets.QTableWidgetItem(p.merge_state))
@@ -1549,7 +1732,7 @@ class VDepWindow(QtWidgets.QMainWindow):
                        for item in self._series.excluded])
         common = {
             "view": "voltage_dependence", "metric": metric,
-            "metric_label": _Y_LABEL.get(metric, metric),
+            "metric_label": "Median dwell (s)" if metric == "median_dwell_s" else _Y_LABEL.get(metric, metric),
             "absolute_voltage": use_abs, "log_y": log_y,
             "accepted_only": self._accepted_only.isChecked(),
             "applied_fit": self._fit_model(),
@@ -1623,7 +1806,13 @@ class VDepWindow(QtWidgets.QMainWindow):
                     "signal_domain": "", "source_warnings_json": "[]",
                     "warning": "", "warning_detail": "", **common,
                 })
-        return pd.DataFrame(rows)
+        if hasattr(self, "_nonlinear_fitter"):
+            rows.extend(self._nonlinear_fitter.export_rows())
+        from .quantity_axis import export_display_columns
+        from ..core.quantity_display import quantity_for
+        return export_display_columns(pd.DataFrame(rows), {
+            "metric_value": quantity_for(metric),
+            "analyzed_duration_s": quantity_for("analyzed_duration_s")})
 
     def export_data(self, path: str | None = None) -> Path | None:
         """Export the exact visible voltage-series view and provenance as staged CSV."""

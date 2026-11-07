@@ -34,7 +34,7 @@ STEPS = (
         (("Show Calibration", "calibration"),)),
     GuideStep("3 · Inspect noise and baseline",
         "Open Baseline reference and choose a reference for THIS recording. Automatic retains the existing "
-        "estimator: Measure this recording proposes windows; Use these values confirms them. The overlay "
+        "estimator: Estimate window settings proposes windows; Use proposed windows confirms them. The overlay "
         "before confirmation still uses the old windows. Known open-pore current accepts a signed current "
         "in calibrated pA, for example −120 pA, not its positive magnitude. Selected open-pore intervals "
         "uses trustworthy quiet regions: enter ordered start/end times in seconds from the recording start "
@@ -216,8 +216,8 @@ class FirstAnalysisGuide(QtWidgets.QDialog):
                 button.setEnabled(bool(available))
                 if available and route == "baseline":
                     reason = ("Inspect the open-pore reference for this recording. "
-                              "Measure this recording proposes baseline windows; "
-                              "Use these values confirms them.")
+                              "Estimate window settings proposes baseline windows; "
+                              "Use proposed windows confirms them.")
                 button.setToolTip(reason)
         self.previous.setEnabled(index > 0)
         self.next.setEnabled(index < len(STEPS) - 1)

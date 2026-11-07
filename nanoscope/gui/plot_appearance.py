@@ -21,6 +21,8 @@ from .figure_text import (AXIS_SIDES, AxisPin, TextStyle, _alive, _display_to_vi
 from .fit_label import FIT_FIELDS, FitLabelState, valid_offset
 from .font_picker import FontPicker, figure_family, figure_qfont, html_font_family
 from .key_sequences import redo_sequences, undo_sequences
+from .widget_transfer import prepare_widget_move
+from ..core.figure_spec import FrozenMap as StyleBindingMap, thaw_json
 
 #: How many appearance values one widget's history keeps, and how long a run of edits
 #: may stay open before it becomes one undo step. EQUAL to ``plots_panel``'s
@@ -61,6 +63,7 @@ class PlotAppearance:
     axis_size: float | None = None
     tick_size: float | None = None
     grid: bool | None = None
+    frame: bool | None = None
     background: str | None = None
     data_color: str | None = None
     fit_color: str | None = None
@@ -80,12 +83,46 @@ class PlotAppearance:
     #: pairs. An annotation not here sits at its window's own place. The fit label's
     #: place stays in ``fit_label`` (placement "custom" and its offset).
     annotations: tuple[tuple[str, tuple[float, float]], ...] | None = None
+    #: The style binding rides the same value/history as its renderer projection.
+    style_binding: StyleBindingMap | None = None
+    #: Versioned display-unit evidence, separate from the figure's reusable look.
+    quantity_display: StyleBindingMap | None = None
+    #: Stable per-series overrides belong to this figure, never a reusable style.
+    series_styles: StyleBindingMap | None = None
+    #: Figure-local source aliases and colours share the appearance Undo owner.
+    #: Native snapshot envelopes retain their top-level compatibility projection.
+    source_appearance: StyleBindingMap | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_appearance is not None:
+            from ..core.source_style import validate_source_appearance
+            object.__setattr__(self, "source_appearance", StyleBindingMap(
+                validate_source_appearance(self.source_appearance)))
+        if self.series_styles is not None:
+            from ..core.figure_series import validate_series_styles
+            object.__setattr__(self, "series_styles", validate_series_styles(self.series_styles))
+        if self.quantity_display is not None:
+            object.__setattr__(self, "quantity_display", StyleBindingMap(self.quantity_display))
+        if self.style_binding:
+            from ..core.figure_style import normalize_style_binding
+            object.__setattr__(self, "style_binding", StyleBindingMap(
+                normalize_style_binding(self.style_binding)))
+        elif self.style_binding is not None:
+            object.__setattr__(self, "style_binding", None)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe overrides only; an empty mapping means the original style."""
         out = {f.name: getattr(self, f.name) for f in fields(self)
                if getattr(self, f.name) is not None
-               and f.name not in ("text", "fit_label", "axes", "annotations")}
+               and f.name not in ("text", "fit_label", "axes", "annotations", "style_binding", "quantity_display", "series_styles", "source_appearance")}
+        if self.source_appearance is not None:
+            out["source_appearance"] = thaw_json(self.source_appearance)
+        if self.style_binding is not None:
+            out["style_binding"] = thaw_json(self.style_binding)
+        if self.quantity_display is not None:
+            out["quantity_display"] = thaw_json(self.quantity_display)
+        if self.series_styles:
+            out["series_styles"] = thaw_json(self.series_styles)
         if self.text:
             out["text"] = {key: style.to_dict() for key, style in self.text}
         if self.fit_label is not None:
@@ -109,6 +146,20 @@ class PlotAppearance:
             style = replace(style, text=label.template or None, size_pt=label.size_pt,
                             color=label.color)
         return style
+
+    def effective_text_style(self, key: str) -> TextStyle:
+        """Resolve inheritance for drawing only; editing still reads explicit values."""
+        explicit = self.text_style(key)
+        if not self.style_binding:
+            return explicit
+        from ..core.figure_style import resolve_bound_text
+        values, _origins = resolve_bound_text(self.style_binding, key, explicit.to_dict())
+        return replace(explicit, **values)
+
+    def effective_fit_label_state(self) -> FitLabelState:
+        state = self.fit_label_state()
+        style = self.effective_text_style(FIT_LABEL_KEY)
+        return replace(state, size_pt=style.size_pt, color=style.color)
 
     def with_text_style(self, key: str, style: TextStyle) -> "PlotAppearance":
         """A copy with ``key``'s style replaced. The title's and axis labels' text go to
@@ -229,27 +280,48 @@ class PlotAppearance:
                                                                         else self.fit_label.placement))
         return replace(self, title=None, x_label=None, y_label=None,
                        text=tuple(sorted(items.items())) or None, fit_label=label, axes=None,
-                       annotations=None)
+                       annotations=None, quantity_display=None, series_styles=None, source_appearance=None)
 
-    def restyled(self, look: "PlotAppearance") -> "PlotAppearance":
+    def restyled(self, look: "PlotAppearance", *, keep_hand: bool = False,
+                 vocabulary: str = "plot_appearance") -> "PlotAppearance":
         """``look``'s style with THIS appearance's wording, pins and annotation places: a
-        preset applied."""
+        preset applied.
+
+        ``keep_hand`` (the Explorer's Style ▾ ticks it by default): the figure's own
+        non-legend element text styles also win over the look's, field by field, so a
+        title set bold at 16 pt keeps both when a look sets its size. Off, the look
+        replaces every element style, as a preset always has."""
         look = look.style_only()
+        if look.style_binding:
+            from .figure_style_binding import project_native, preserve_legacy_baseline
+            raw = preserve_legacy_baseline(look.to_dict(), self.to_dict(), vocabulary)
+            look = PlotAppearance.from_mapping(project_native(raw, vocabulary))
         items = dict(look.text or ())
         for key, style in (self.text or ()):
             if key.startswith("legend.entry."):
                 items[key] = style
+            elif keep_hand:
+                mine = {name: value for name, value in
+                        ((f.name, getattr(style, f.name)) for f in fields(TextStyle))
+                        if value is not None}
+                if mine:
+                    items[key] = replace(items.get(key, TextStyle()), **mine)
             elif style.text is not None:
                 items[key] = replace(items.get(key, TextStyle()), text=style.text)
         label = look.fit_label
         if label is None:
-            label = self.fit_label
+            label = (replace(self.fit_label, size_pt=None, color=None)
+                     if self.fit_label is not None and not keep_hand else self.fit_label)
         elif self.fit_label is not None:
             label = replace(label, template=self.fit_label.template,
                             placement=self.fit_label.placement, offset=self.fit_label.offset)
+            if keep_hand:
+                label = replace(label, **{key: getattr(self.fit_label, key)
+                    for key in ("size_pt", "color") if getattr(self.fit_label, key) is not None})
         return replace(look, title=self.title, x_label=self.x_label, y_label=self.y_label,
                        text=tuple(sorted(items.items())) or None, fit_label=label,
-                       axes=self.axes, annotations=self.annotations)
+                       axes=self.axes, annotations=self.annotations, quantity_display=self.quantity_display,
+                       series_styles=self.series_styles, source_appearance=self.source_appearance)
 
     def template_form(self) -> "PlotAppearance":
         """What a window TEMPLATE carries (owner, Q-T6): wording and element styles, but no
@@ -257,13 +329,25 @@ class PlotAppearance:
         Dragged annotation places stay, as the fit label's dragged offset does."""
         items = {key: style for key, style in (self.text or ())
                  if not key.startswith("legend.entry.")}
-        return replace(self, text=tuple(sorted(items.items())) or None)
+        return replace(self, text=tuple(sorted(items.items())) or None, series_styles=None,
+                       source_appearance=None)
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any] | None) -> "PlotAppearance":
         """Ignore unknown/invalid saved fields without changing analysis defaults."""
         values = values if isinstance(values, Mapping) else {}
         valid: dict[str, Any] = {}
+        if values.get("source_appearance") is not None:
+            from ..core.source_style import validate_source_appearance
+            valid["source_appearance"] = StyleBindingMap(validate_source_appearance(values["source_appearance"]))
+        if values.get("series_styles") is not None:
+            from ..core.figure_series import validate_series_styles
+            valid["series_styles"] = validate_series_styles(values["series_styles"])
+        if values.get("quantity_display") is not None:
+            valid["quantity_display"] = StyleBindingMap(values["quantity_display"])
+        if values.get("style_binding"):
+            from ..core.figure_style import normalize_style_binding
+            valid["style_binding"] = StyleBindingMap(normalize_style_binding(values["style_binding"]))
         text = values.get("text")
         if isinstance(text, Mapping):
             items = {}
@@ -311,10 +395,11 @@ class PlotAppearance:
         for key, (low, high) in _SIZE_RANGES.items():
             value = values.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if math.isfinite(value) and low <= value <= high:
+                if math.isfinite(value) and (0 < value if valid.get("style_binding") else low <= value <= high):
                     valid[key] = float(value)
-        if isinstance(values.get("grid"), bool):
-            valid["grid"] = values["grid"]
+        for key in ("grid", "frame"):
+            if isinstance(values.get(key), bool):
+                valid[key] = values[key]
         if isinstance(values.get("legend_visible"), bool):
             valid["legend_visible"] = values["legend_visible"]
         if values.get("background") in ("dark", "light"):
@@ -337,6 +422,24 @@ _BUILTIN_PRESETS: dict[str, PlotAppearance] = {
         font_family="Arial", title_size=14, axis_size=12, tick_size=10, grid=True,
         background="dark", data_color="#0072b2", fit_color="#d55e00", line_width=2,
         marker_size=11),
+    # The journal looks (Phase 1, Style ▾). Appended AFTER the two above, whose indexes
+    # (1 and 2 of the preset combo) tests and habit pin. Figure-wide fields and the title /
+    # axis sizes only, by the rule "headline size N for title and axis labels, N-1 for
+    # ticks and legend": no fit label and no element style, so a figure with one applied
+    # still composes live. Known limits, said in the guide: line width is drawn as an
+    # integer of at least 1 by the Distributions window, and the size floors are 6 pt.
+    "7 pt Arial · Nature, Elsevier": PlotAppearance(
+        font_family="Arial", title_size=7, axis_size=7, tick_size=6, legend_size=6, grid=False,
+        background="light", line_width=0.75, marker_size=3),
+    "8 pt Arial · PLOS, Springer, AIP": PlotAppearance(
+        font_family="Arial", title_size=8, axis_size=8, tick_size=7, legend_size=7, grid=False,
+        background="light", line_width=1, marker_size=4),
+    "9 pt Times New Roman · IEEE": PlotAppearance(
+        font_family="Times New Roman", title_size=9, axis_size=9, tick_size=8, legend_size=8,
+        grid=False, background="light", line_width=1, marker_size=4),
+    "Slides · 18 pt Arial": PlotAppearance(
+        font_family="Arial", title_size=18, axis_size=18, tick_size=16, legend_size=16,
+        grid=False, background="light", line_width=3, marker_size=12),
 }
 
 #: The element keys whose TEXT lives in a field of its own (the Appearance boxes edit it).
@@ -356,6 +459,7 @@ _STEP_WORDS: dict[str, tuple[str, str]] = {
     "legend_size": ("legend text", "default"), "font_family": ("font", "default"),
     "title_size": ("title size", "default"), "axis_size": ("axis label size", "default"),
     "tick_size": ("tick size", "default"), "grid": ("grid", "automatic"),
+    "frame": ("frame", "native"),
     "background": ("background", "automatic"), "data_color": ("data color", "default"),
     "fit_color": ("fit color", "default"), "line_width": ("line width", "default"),
     "marker_size": ("marker size", "default"), "text": ("text style", "automatic"),
@@ -435,7 +539,7 @@ def _describe_axes(before: "PlotAppearance", after: "PlotAppearance") -> str:
     bare = {key for key in moved if "." not in key and any(m.endswith("." + key) for m in moved)}
     moved = [key for key in moved if key not in bare]
     if len(moved) != 1:
-        return f"{len(moved)} axes"
+        return _describe_reset(before, after) or f"{len(moved)} axes"
     key = moved[0]
     side = key.rpartition(".")[2]
     old, new = before.axis_pin(side if side in bare else key), after.axis_pin(key)
@@ -487,17 +591,42 @@ def _spell(key: str, value) -> str:
     return str(value)
 
 
+def _describe_reset(before: PlotAppearance, after: PlotAppearance) -> str | None:
+    """"reset title, Y label and Y range": a step that only took typed words and pinned ranges
+    back to automatic, which is what a change of quantity records (``gui.quantity_reset``),
+    named by what it took. None for any other step."""
+    from .quantity_reset import name_list, took_back
+
+    took = took_back(before, after)
+    return f"reset {name_list(took)}" if took else None
+
+
 def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
     """Name the step from ``before`` to ``after`` for its Undo or Redo tooltip.
 
     Read off the two VALUES, so the stack holds nothing but appearances. A single field is
     named with both of its values, whatever moved it: a size typed back to Default is
-    that, not a reset. Several fields that land exactly on a shipped preset are that
-    preset, several that land on no override at all are a reset, and any other several
-    are counted.
+    that, not a reset. Several fields that only took typed words and pinned ranges back to
+    automatic are named by them (what a change of quantity records), several that land
+    exactly on a shipped preset are that preset, several that land on no override at all are a
+    reset, and any other several are counted.
     """
     moved = [f.name for f in fields(PlotAppearance)
              if getattr(before, f.name) != getattr(after, f.name)]
+    if moved == ["style_binding"]:
+        binding = after.style_binding
+        if not binding:
+            return "figure style reset"
+        definition = binding.get("snapshot", {})
+        name = definition.get("name", "Figure style")
+        revision = definition.get("revision")
+        return f"figure style {name}" + (f" · revision {revision}" if revision else "")
+    if moved == ["series_styles"]:
+        return "series formatting"
+    if moved == ["source_appearance"]:
+        return "source names and colors"
+    if moved == ["quantity_display"]:
+        return "display units"
     if moved == ["axes"]:
         return _describe_axes(before, after)
     if moved == ["annotations"]:
@@ -521,6 +650,9 @@ def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
             elif old is not None:
                 said_old += " pt"
         return f"{_STEP_WORDS[key][0]} {said_old} → {said_new}"
+    reset = _describe_reset(before, after)
+    if reset is not None:
+        return reset
     for name, preset in _BUILTIN_PRESETS.items():
         # A preset keeps the figure's wording, so the step lands on the preset's LOOK.
         if after.style_only() == preset and before.style_only() != preset:
@@ -603,6 +735,17 @@ class _AppearanceHistory:
         self.dropped = 0
 
 
+def set_projected_spin_value(spin, value):
+    """Display a validated shared style exactly even outside a legacy control's range."""
+    if hasattr(spin, "_floor") and 0 < value < spin._floor:
+        spin._floor = value
+    if value > spin.maximum():
+        spin.setMaximum(value)
+    if value < spin.minimum():
+        spin.setMinimum(value)
+    spin.setValue(value)
+
+
 class _SizeSpinBox(QtWidgets.QDoubleSpinBox):
     """A size whose 0 is Default and whose next value is the smallest size a figure draws.
 
@@ -616,6 +759,7 @@ class _SizeSpinBox(QtWidgets.QDoubleSpinBox):
     def __init__(self, floor: float, maximum: float) -> None:
         super().__init__()
         self._floor = floor
+        self.setDecimals(3)
         self.setRange(0, maximum)
 
     def stepBy(self, steps: int) -> None:  # noqa: N802 -- Qt API
@@ -707,15 +851,29 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
     """
 
     changed = QtCore.Signal(object)
+    #: The sentence the last quantity change put up ("Title reset: the plot now shows ...") is
+    #: no longer true of the figure: what it named is typed or pinned again
+    #: (:meth:`reset_typed_words`). A window that keeps the sentence on a line of its own takes it
+    #: down on this.
+    resetLapsed = QtCore.Signal()
+    #: Emitted at the end of every refresh of the Undo / Redo buttons, after they moved: a
+    #: host that mirrors them (the Explorer's toolbar) re-reads on it.
+    historyChanged = QtCore.Signal()
+    #: Emitted when ``set_state`` installs a state from OUTSIDE (a restore, a template, a
+    #: host's reset), never for this widget's own announce: a host that shows the state
+    #: elsewhere (the Format tab) re-reads on it.
+    restored = QtCore.Signal()
 
     def __init__(self, state: PlotAppearance | None = None, parent=None, *,
                  include_colors=True, compact=False, include_markers=True,
                  include_labels=True, include_legend=True,
                  multi_view_labels: bool | str = False, history=True, shortcuts=True,
                  shortcut_parent: QtWidgets.QWidget | None = None,
-                 reset_keeps: Callable[[str], bool] | None = None):
+                 reset_keeps: Callable[[str], bool] | None = None,
+                 style_vocabulary: str = "plot_appearance"):
         super().__init__(parent)
-        self._state = state or PlotAppearance()
+        self.style_vocabulary = style_vocabulary
+        self._state = self._project_state(state or PlotAppearance())
         self._reset_keeps = reset_keeps
         self._reset_taken = False       # see take_reset_button
         #: The sentence the last quantity change put on the host's status bar ("" for none).
@@ -725,6 +883,11 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         #: arriving then is the host answering the value it was just handed, not an
         #: install from outside (see :meth:`set_state`).
         self._emitting = 0
+        #: What the sentence the last quantity change put up says it took back, as
+        #: ``(names, axes, primary)`` (``quantity_reset.stands``), and the status bar it is on;
+        #: None when no sentence is standing.
+        self._reset_took: tuple | None = None
+        self._reset_bar = None
         self._history = _AppearanceHistory(self._state) if history else None
         layout = QtWidgets.QGridLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -752,6 +915,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             setattr(self, key, edit)
             label = QtWidgets.QLabel(caption + (f" ({self.title_scope})" if self.title_scope else ""))
             label.setBuddy(edit)
+            edit._nanoscope_row_label = label
             label.setVisible(include_labels)
             edit.setVisible(include_labels)
             text_rows.append((label, edit))
@@ -842,7 +1006,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
                 ("line_width", "Line width", 4, 0),
                 ("marker_size", "Marker size", 4, 2)):
             spin = _SizeSpinBox(*_SIZE_RANGES[key])
-            spin.setDecimals(1)
+            spin.setDecimals(3)
             spin.setSingleStep(.5 if key == "line_width" else 1)
             spin.setSpecialValueText("Default")
             spin.valueChanged.connect(lambda value, field=key: self._edit(field, value or None))
@@ -895,6 +1059,15 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             layout.setColumnStretch(3, 0)
         columns = 2 if compact else 4
         row = layout.rowCount()
+        self.frame = QtWidgets.QComboBox()
+        for label, value in (("Native", None), ("Closed box", True), ("Open top and right", False)):
+            self.frame.addItem(label, value)
+        self.frame.currentIndexChanged.connect(lambda: self._edit("frame", self.frame.currentData()))
+        caption = QtWidgets.QLabel("Frame")
+        self.frame._nanoscope_row_label = caption
+        layout.addWidget(caption, row, 0)
+        layout.addWidget(self.frame, row, 1, 1, columns - 1)
+        row += 1
         self.legend_visible = QtWidgets.QComboBox()
         for label, value in (("Automatic", None), ("Show", True), ("Hide", False)):
             self.legend_visible.addItem(label, value)
@@ -905,6 +1078,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self.legend_size.valueChanged.connect(lambda value: self._edit("legend_size", value or None))
         for label, control in (("Legend", self.legend_visible), ("Legend text (pt)", self.legend_size)):
             caption = QtWidgets.QLabel(label)
+            control._nanoscope_row_label = caption
             layout.addWidget(caption, row, 0)
             layout.addWidget(control, row, 1, 1, columns - 1)
             caption.setVisible(include_legend)
@@ -934,6 +1108,9 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
     def _add_control(layout, row, column, label, control):
         label_widget = QtWidgets.QLabel(label)
         label_widget.setBuddy(control)
+        #: The row's label, found by whoever moves the control (the Explorer's Format tab):
+        #: no walk over the layout's items, which can hold wrappers of moved widgets.
+        control._nanoscope_row_label = label_widget
         layout.addWidget(label_widget, row, column)
         layout.addWidget(control, row, column + 1)
 
@@ -1045,6 +1222,20 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
     def state(self) -> PlotAppearance:
         return self._state
 
+    def _project_state(self, state: PlotAppearance) -> PlotAppearance:
+        if state.style_binding is None:
+            return state
+        from .figure_style_binding import project_native
+        return PlotAppearance.from_mapping(project_native(
+            state.to_dict(), self.style_vocabulary))
+
+    def _edited_state(self, state: PlotAppearance) -> PlotAppearance:
+        if state.style_binding is None:
+            return state
+        from .figure_style_binding import reconcile_native_edit
+        return PlotAppearance.from_mapping(reconcile_native_edit(
+            self._state.to_dict(), state.to_dict(), self.style_vocabulary))
+
     def set_state(self, state: PlotAppearance | Mapping[str, Any]):
         """Adopt ``state`` silently: a restore, a recipe load, a host's reset or its answer.
 
@@ -1063,20 +1254,23 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         if outside:
             self._history.rebase(self._state)
             self._sync_history_buttons()
+        if not self._emitting:
+            self.restored.emit()
 
     def _write(self, state: PlotAppearance) -> None:
         """Put ``state`` on the controls without any of them reporting an edit."""
+        state = self._project_state(state)
         self._state = state
         self._loading = True
         try:
             self.font_family.set_value(self._state.font_family)
             for key in ("title_size", "axis_size", "tick_size", "line_width", "marker_size"):
-                getattr(self, key).setValue(getattr(self._state, key) or 0)
+                set_projected_spin_value(getattr(self, key), getattr(self._state, key) or 0)
             for key in ("title", "x_label", "y_label"):
                 getattr(self, key).setText(getattr(self._state, key) or "")
-            self.legend_size.setValue(self._state.legend_size or 0)
+            set_projected_spin_value(self.legend_size, self._state.legend_size or 0)
             self.legend_visible.setCurrentIndex(self.legend_visible.findData(self._state.legend_visible))
-            for key in ("background", "grid"):
+            for key in ("background", "grid", "frame"):
                 combo = getattr(self, key)
                 combo.setCurrentIndex(combo.findData(getattr(self._state, key)))
             for key in ("data_color", "fit_color"):
@@ -1148,7 +1342,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             return False
         # A preset is a LOOK (owner, Q-T2): a preset made on I-V used to stamp its title onto
         # the noise spectrum. The wording stays with the figure it was typed on.
-        values[name] = self.state().style_only().to_dict()
+        # Older builds share this local-preset wire format: keep a detached look.
+        values[name] = replace(self.state().style_only(), style_binding=None).to_dict()
         settings = QtCore.QSettings()
         settings.setValue(self._PRESETS_KEY, json.dumps(values, sort_keys=True, allow_nan=False))
         settings.sync()
@@ -1191,7 +1386,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         pin a bare side key may be. ``status`` is the host's status bar when the sentence is
         read there: it is shown for ten seconds, and a change that resets nothing takes the
         earlier sentence off it (``quantity_reset.announce``). ``only`` limits the words, e.g.
-        ``("fit_label",)``; ``()`` is no word at all, a pin alone.
+        ``("fit_label",)``; ``()`` is no word at all, a pin alone. The sentence is taken down
+        again when what it names is typed or pinned again (:meth:`_lapse_reset_sentence`).
         """
         from .quantity_reset import announce, cleared_pins, cleared_words, reset_sentence
 
@@ -1200,9 +1396,35 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         if names or pins:
             self._apply(state)
         said = reset_sentence(names + pins, shows)
+        # The sentence is true while what it names stays automatic (``stands``); a change that
+        # brings one of them back takes it down (:meth:`_lapse_reset_sentence`).
+        self._reset_took = (names + pins, tuple(axes), primary) if said else None
         if status is not None:
             self._reset_said = announce(status, said, self._reset_said)
+            self._reset_bar = status
         return said
+
+    def _lapse_reset_sentence(self) -> None:
+        """Take the sentence of the last quantity change down once it is no longer true.
+
+        It says that its words and ranges are automatic, so the first change that types or pins
+        one of them again (Undo of the reset, a title typed since) ends it; a change of look, and
+        Reset figure with its Undo, do not. On the status bar it goes only if the bar still shows
+        it (:func:`~nanoscope.gui.quantity_reset.announce`); a window with a line of its own hears
+        :attr:`resetLapsed`.
+        """
+        if self._reset_took is None:
+            return
+        from .quantity_reset import announce, pinned_axes, stands, typed_words
+
+        names, axes, primary = self._reset_took
+        now = typed_words(self._state) + pinned_axes(self._state, axes, primary)
+        if stands(names, now):
+            return
+        self._reset_took = None
+        if self._reset_bar is not None:
+            self._reset_said = announce(self._reset_bar, "", self._reset_said)
+        self.resetLapsed.emit()
 
     def delete_user_preset(self, name: str) -> bool:
         values = self.user_preset_states()
@@ -1247,6 +1469,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         if self._loading:
             return
         updated = PlotAppearance.from_mapping({**self._state.to_dict(), key: value})
+        updated = self._edited_state(updated)
         if updated != self._state:
             self._state = updated
             self._announce(updated)
@@ -1264,6 +1487,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         must still reach it. Announcing an unchanged state records no step.
         """
         self._close_burst()      # a run of edits still open is its own, earlier step
+        state = self._edited_state(state)
         if state == self._state and not always:
             return
         self._write(state)
@@ -1276,6 +1500,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             self.changed.emit(state)
         finally:
             self._emitting -= 1
+        self._lapse_reset_sentence()       # after the host has answered: what it left on screen
 
     def _choose_color(self, field):
         color = QtWidgets.QColorDialog.getColor(
@@ -1285,7 +1510,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             self._apply(PlotAppearance.from_mapping({**self._state.to_dict(), field: color.name()}))
 
     def _reset(self):
-        state = PlotAppearance()
+        state = PlotAppearance(quantity_display=self._state.quantity_display,
+                               source_appearance=self._state.source_appearance)
         if self._reset_keeps is not None:
             for key, style in self._state.text or ():
                 if self._reset_keeps(key):
@@ -1299,7 +1525,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         button = self.reset_button
         if not self._reset_taken:
             self._reset_taken = True
-            button.setParent(None)      # its layout lets go of a child that leaves
+            prepare_widget_move(button)
+            button.setParent(None)
             if self._reset_row is not None:
                 self._reset_row.addStretch(1)
         return button
@@ -1310,6 +1537,125 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             return
         self.preset.setCurrentIndex(0)
         self._apply(self._state.restyled(presets[index - 1]), always=True)
+
+    def capture_history_capsule(self):
+        """Close the current edit and detach plain-value history for a dormant figure."""
+        from nanoscope.core.figure_history_state import HistoryCapsule
+
+        self._close_burst()
+        history = self._history
+        if history is None:
+            return None
+        return HistoryCapsule(
+            "nanoscope.appearance-history/1", history.base.to_dict(),
+            tuple(state.to_dict() for state in history._past),
+            tuple(state.to_dict() for state in history._future), history.dropped)
+
+    def adopt_quantity_bases(self, axes):
+        """Adopt a different drawn measurement without closing an author edit.
+
+        Quantity witnesses describe the renderer, not an appearance gesture. Change
+        the witness on both current controls and the edit base, keeping their separate
+        style/pin values and the pending timer. Historical pins retain their original
+        bases; any Undo/Redo draw adopts the current measurement here before its host
+        rebases the returned state. No scientific or restoration callback is emitted.
+        """
+        from ..core.figure_quantity_basis import quantity_witness
+
+        def adopt(state):
+            return replace(state, quantity_display=quantity_witness(
+                axes, original=state.quantity_display))
+
+        state = adopt(self._state)
+        if state == self._state:
+            return self._state
+        self._write(state)
+        if self._history is not None:
+            self._history.rebase(adopt(self._history.base))
+            self._sync_history_buttons()
+        return self._state
+
+    def migrate_quantity_bases(self, axes, *, legacy_axes=None, legacy_view_pins=()):
+        """Reader/draw boundary conversion; no new Undo step and no scientific callback."""
+        from ..core.figure_quantity_basis import migrate_appearance_basis, migrate_appearance_history
+        converted = migrate_appearance_basis(self._state.to_dict(), axes, legacy_axes=legacy_axes, legacy_view_pins=legacy_view_pins)
+        if converted == self._state.to_dict():
+            return self._state
+        # Finish a focused run before converting every state. Style refreshes whose
+        # witness already matches return above and cannot interrupt text coalescing.
+        capsule = self.capture_history_capsule() if self._history is not None else None
+        migrated = (migrate_appearance_history(capsule, axes, legacy_axes=legacy_axes, legacy_view_pins=legacy_view_pins)
+                    if capsule is not None else None)
+        self._write(PlotAppearance.from_mapping(converted))
+        if migrated is not None:
+            self.restore_history_capsule(migrated)
+        return self._state
+
+    def restore_history_capsule(self, capsule) -> None:
+        """Install a validated session stack after frozen restoration; never replay edits."""
+        from nanoscope.core.figure_history_state import HistoryCapsule
+        from nanoscope.core.figure_spec import FigureValidationError, thaw_json
+
+        if self._history is None:
+            if capsule is not None:
+                raise FigureValidationError("This appearance widget has no local history")
+            return
+        if not isinstance(capsule, HistoryCapsule):
+            capsule = HistoryCapsule.from_dict(capsule)
+        if capsule.codec != "nanoscope.appearance-history/1":
+            raise FigureValidationError("Incompatible appearance history codec")
+        if len(capsule.past) + len(capsule.future) > APPEARANCE_HISTORY_DEPTH:
+            raise FigureValidationError("Appearance history exceeds its depth bound")
+
+        def decode(value):
+            raw = thaw_json(value)
+            state = PlotAppearance.from_mapping(raw)
+            if state.to_dict() != raw:
+                raise FigureValidationError("Appearance history cannot be restored losslessly")
+            return state
+
+        base = decode(capsule.base)
+        past = [decode(state) for state in capsule.past]
+        future = [decode(state) for state in capsule.future]
+        if base != self._state:
+            raise FigureValidationError("Appearance history does not match the restored figure")
+        self._burst.stop()
+        self._history.base = base
+        self._history._past = past
+        self._history._future = future
+        self._history.dropped = capsule.dropped
+        self._sync_history_buttons()
+
+    def apply_look(self, look: PlotAppearance, *, keep_hand: bool = True) -> bool:
+        """Apply ``look`` (a preset's value) to this figure as ONE Undo step. True if the
+        state moved. The Explorer's Style ▾ calls it, page by page; ``keep_hand`` lets the
+        text styles set by hand survive (:meth:`PlotAppearance.restyled`)."""
+        before = self._state
+        self._apply(before.restyled(look, keep_hand=keep_hand,
+                                    vocabulary=self.style_vocabulary), always=True)
+        return self._state != before
+
+    def reset_figure(self) -> None:
+        """Reset figure as the toolbar calls it: the button's own handler, one Undo step."""
+        self._reset()
+
+    def edit_text_style(self, key: str, style: TextStyle) -> None:
+        """One element's text style edited from the Format tab or the mini toolbar.
+
+        The burst route of :meth:`_edit` (a run of spin-box clicks closer together than
+        :data:`APPEARANCE_COALESCE_MS` is ONE step), for a value that lives in the text map
+        rather than in a control of this widget."""
+        if self._loading:
+            return
+        updated = self._state.with_text_style(key, style)
+        updated = self._edited_state(updated)
+        if updated == self._state:
+            return
+        self._write(updated)      # the title / label boxes show the words, should they have moved
+        self._announce(updated)
+        if self._history is not None:
+            self._burst.start()
+            self._sync_history_buttons()
 
     # -- history ------------------------------------------------------------------------
     def undo(self) -> bool:
@@ -1427,6 +1773,21 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self.redo_button.setToolTip(
             "Redo is cleared by a new change." if pending and step else
             f"Redo: {_describe_step(*step)}" if step else "Nothing to redo.")
+        self.historyChanged.emit()
+
+    def history_mark(self) -> int:
+        """How many steps stand behind the current appearance, an open run of edits counted
+        (as Undo counts it) and the steps lost to the ceiling too, so the number keeps
+        growing past it. A host compares two readings to learn whether anything moved this
+        history since (the Explorer's "Undo style on N pages"). 0 without a history.
+
+        Depth, not a serial: an Undo followed by a different edit lands on the number it
+        had, so a reading proves "nothing was added" only for a host that also watches
+        ``historyChanged`` (documented in docs/phase1_changes/F.md)."""
+        if self._history is None:
+            return 0
+        back, _forward = self._history.depth()
+        return back + self._history.dropped + (1 if self._history.base != self._state else 0)
 
 
 def _item_defaults(item):
@@ -1494,6 +1855,19 @@ def _style_data_item(item, state, color):
         item.setSize(state.marker_size if state.marker_size is not None else defaults["size"])
 
 
+def apply_plot_frame(plot: pg.PlotItem, frame: bool | None, *, foreground=None) -> None:
+    """Set a decorative plot box only; preserve axes, ticks, data and view ranges."""
+    view = plot.getViewBox()
+    if not hasattr(plot, '_nanoscope_original_frame_border'):
+        plot._nanoscope_original_frame_border = QtGui.QPen(view.border)
+    if frame is None:
+        view.setBorder(plot._nanoscope_original_frame_border)
+    elif frame:
+        view.setBorder(pg.mkPen(foreground or plot.getAxis('left').pen(), width=1))
+    else:
+        view.setBorder(None)
+
+
 def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
                           plot_widget=None, data_items: Sequence = (),
                           fit_items: Sequence = (), title_prefix: str = "") -> None:
@@ -1503,9 +1877,13 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
     them. Data/fit items replaced by explicit analysis refresh acquire their own
     original styles. Existing manual zoom is retained.
     """
+    from .figure_series import prepare_pg_series_items, apply_pg_series_styles
+    data_items, fit_items = tuple(data_items), tuple(fit_items)
+    prepare_pg_series_items((*data_items, *fit_items))
     defaults = getattr(plot, "_nanoscope_appearance_defaults", None)
     if defaults is None and not state.to_dict():
         _draw_in_figure_family(plot, None)
+        apply_pg_series_styles(plot, state, data_items=data_items, fit_items=fit_items)
         return
     if defaults is None:
         defaults = {
@@ -1528,10 +1906,18 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
     auto = list(view.autoRangeEnabled())
     view.disableAutoRange()
     elements = dict(state.text or ())
+    if state.style_binding:
+        keys = {"title", *(f"axis.{side}.{role}" for side in AXIS_SIDES for role in ("label", "ticks"))}
+        legend = getattr(plot, "legend", None)
+        if legend is not None:
+            keys.update(f"legend.entry.{plain_text(getattr(label, '_nanoscope_auto_text', label.text))}"[:213]
+                        for _sample, label in legend.items)
+        elements = {key: state.effective_text_style(key) for key in keys | elements.keys()}
     # Read by figure_composition: a style its model cannot replay makes a frozen panel.
     plot._nanoscope_text_elements = elements
     try:
         foreground = {"light": "#20242b", "dark": "#e6e9ef"}.get(state.background)
+        apply_plot_frame(plot, state.frame, foreground=foreground)
         if plot_widget is not None:
             background = {"light": "#ffffff", "dark": "#151a21"}.get(state.background)
             plot_widget.setBackground(background if background else defaults["background"])
@@ -1613,12 +1999,15 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             _style_data_item(item, state, state.data_color)
         for item in fit_items:
             _style_data_item(item, state, state.fit_color)
+        apply_pg_series_styles(plot, state, data_items=data_items, fit_items=fit_items)
         legend = getattr(plot, "legend", None)
         if legend is not None:
             if "legend" not in defaults:
                 defaults["legend"] = {"visible": legend.isVisible(),
                                       "size": legend.opts.get("labelTextSize", "9pt"),
-                                      "color": legend.opts.get("labelTextColor")}
+                                      "color": legend.opts.get("labelTextColor"),
+                                      "brush": legend.opts.get("brush"),
+                                      "pen": legend.opts.get("pen")}
             original = defaults["legend"]
             legend.setVisible(original["visible"] if state.legend_visible is None else
                               bool(state.legend_visible and legend.items))
@@ -1626,8 +2015,16 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
             # Axis text already follows the canvas theme; legend text must do
             # the same or a white publication preset leaves pale labels on white.
             legend.setLabelTextColor(foreground or original["color"] or pg.getConfigOption("foreground"))
+            # Text and plate are one surface: changing only the text turns a light
+            # publication preset into dark-on-dark labels on subpopulation legends.
+            # Restoring Automatic also restores the page's original custom plate.
+            plate = {"light": "#ffffff", "dark": "#151a21"}.get(state.background)
+            legend.setBrush(pg.mkBrush(plate) if plate else original.get("brush"))
+            legend.setPen(pg.mkPen(foreground) if foreground else original.get("pen"))
             apply_legend_family(legend, state.font_family)
             _style_legend_entries(legend, elements, state.font_family)
+            from .figure_series import sync_series_legend
+            sync_series_legend(plot)
     finally:
         view.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
         pins = _apply_axis_pins(plot, state, auto)
@@ -1664,6 +2061,40 @@ def apply_tick_family(axis: pg.AxisItem, family: str | None) -> None:
         axis.setStyle(tickFont=figure_qfont(family, font or QtWidgets.QApplication.font()))
 
 
+def apply_colorbar_appearance(bar, state: PlotAppearance, reference_axis: pg.AxisItem) -> None:
+    """Give an existing colour bar the rendered figure's foreground and typography.
+
+    A ColorBarItem owns separate axes, outside apply_plot_appearance's PlotItem.
+    Read the actual plot ink so a shared light/dark look also reaches those axes;
+    image values, levels, colour maps and view ranges are never touched here.
+    Page-owned explicit colour-bar label styles can be applied afterward.
+    """
+    foreground = reference_axis.pen().color()
+    for side in ("bottom", "left", "top", "right"):
+        axis = bar.getAxis(side)
+        defaults = getattr(axis, "_nanoscope_colorbar_defaults", None)
+        if defaults is None:
+            defaults = axis._nanoscope_colorbar_defaults = {
+                "label": dict(axis.labelStyle),
+                "font": QtGui.QFont(axis.style.get("tickFont") or QtWidgets.QApplication.font()),
+            }
+        axis.setPen(pg.mkPen(foreground))
+        axis.setTextPen(pg.mkPen(foreground))
+        axis.labelStyle["color"] = foreground.name()
+        axis.labelStyle["font-family"] = html_font_family(state.font_family)
+        if state.axis_size is not None:
+            axis.labelStyle["font-size"] = f"{state.axis_size:g}pt"
+        elif "font-size" in defaults["label"]:
+            axis.labelStyle["font-size"] = defaults["label"]["font-size"]
+        else:
+            axis.labelStyle.pop("font-size", None)
+        axis._updateLabel()
+        font = figure_qfont(state.font_family, defaults["font"])
+        if state.tick_size is not None:
+            font.setPointSizeF(state.tick_size)
+        axis.setStyle(tickFont=font)
+
+
 def _draw_in_figure_family(plot: pg.PlotItem, family: str | None) -> None:
     """An untouched figure keeps its original look in everything but its text family: that
     is the figure default, Arial, and not the application font a journal does not have.
@@ -1698,6 +2129,10 @@ def _style_legend_entries(legend, elements: Mapping[str, TextStyle],
         auto = getattr(label, "_nanoscope_auto_text", label.text)
         style = elements.get(f"legend.entry.{plain_text(auto)}"[:213], TextStyle())
         if style.is_default() and label.text == auto and not getattr(label, "_nanoscope_styled", False):
+            # LegendItem's color/size setters only change LabelItem.opts. Refresh
+            # the rendered QTextDocument too, even when neither its family nor
+            # its words changed (the common light/dark switch).
+            label.setText(label.text)
             label._nanoscope_applied_text = label.text
             continue
         text = auto if style.text is None else ("" if not style.text.strip() else rich_text(style.text))

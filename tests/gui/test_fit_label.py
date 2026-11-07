@@ -144,6 +144,37 @@ def test_dragging_moves_the_label_not_the_view_and_saves_one_step(qtbot):
     assert appearance.undo_button.toolTip() == "Undo: fit label moved"
 
 
+@pytest.mark.parametrize("placement", ["top-left", "top-right", "bottom-left", "bottom-right", "custom"])
+def test_fit_readout_wraps_to_narrow_plot_without_losing_words_or_saved_position(qtbot, placement):
+    widget = pg.PlotWidget()
+    qtbot.addWidget(widget)
+    widget.resize(320, 450)
+    widget.show()
+    qtbot.waitExposed(widget)
+    view = widget.getPlotItem().getViewBox()
+    state = FitLabelState(placement=placement, offset=(30.0, 25.0) if placement == "custom" else None)
+    readouts = [FitReadout({"equation": "1/f fit: alpha = -0.026; descriptive model over the measured spectrum",
+                           "r2": "R² = 0.000; descriptive fit only", "n": "81 bins; 1.22–100 Hz"},
+                          ("R² is descriptive, not a mechanistic validation",))]
+    label = FitLabelItem(view)
+    label.apply_state(state, readouts)
+    QtWidgets.QApplication.processEvents()
+    narrow_height = label.boundingRect().height()
+    text = label.plain_text()
+    assert "81 bins" in text and "not a mechanistic validation" in text
+    assert view.boundingRect().adjusted(-1, -1, 1, 1).contains(label.mapRectToParent(label.boundingRect()))
+    if placement == "custom":
+        assert label.offset() == pytest.approx(state.offset)
+    widget.resize(1000, 450)
+    QtWidgets.QApplication.processEvents()
+    assert label.boundingRect().height() < narrow_height
+    assert label.plain_text() == text and label.state() == state
+    widget.resize(320, 450)
+    QtWidgets.QApplication.processEvents()
+    assert view.boundingRect().adjusted(-1, -1, 1, 1).contains(label.mapRectToParent(label.boundingRect()))
+    assert label.plain_text() == text and label.state() == state
+
+
 # -- other dragged annotations (build 5: the provenance caption's saved place) --------------
 
 CAPTION = "annotation.provenance"

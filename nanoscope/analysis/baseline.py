@@ -51,9 +51,10 @@ what counts as an event, ``base_s`` decides how fast the baseline may track.
 
 **The kernel is IMPORTED from `nanoscope.analysis.ml_preprocess`, never
 reimplemented here.** That module's `baseline_masked_median` /
-`baseline_robust_median` / `_decimated_median` are bit-exact against the owner's
-persisted training corpus (``CSVData/ferritin_data{1,2,3}.csv.gz``, max|diff| = 0)
-and are already hardened against the non-deterministic 1-D
+`baseline_robust_median` / `_decimated_median` retain explicit legacy modes for
+bit-exact model-input preprocessing against the owner's persisted training corpus.
+The automatic analysis path versions stable sample boundaries and local mask noise.
+The shared median is hardened against the non-deterministic 1-D
 ``scipy.ndimage.median_filter``. A second copy of a 20-line function with five
 silent bit-exactness traps is the single largest risk in this change; there is
 exactly one definition of `_decimated_median` in this tree and it must stay that
@@ -147,6 +148,8 @@ from scipy.ndimage import binary_dilation, maximum_filter1d
 from scipy.signal import savgol_filter
 
 from .cancel import check_cancelled
+from .sample_count import SAMPLE_COUNT_POLICY, ceil_sample_count, floor_sample_count
+from .baseline_mask import MASK_NOISE_POLICY, baseline_mask_noise_scale
 from .open_pore_reference import (
     OPEN_PORE_REFERENCE_PARAM_KEY, OpenPoreReference, build_reference,
 )
@@ -155,7 +158,7 @@ from .open_pore_reference import (
 # ``tests/analysis/test_masked_baseline.py::test_exactly_one_decimated_median_in_the_tree``.
 # ``_decimated_median`` is private in its own module only because nothing outside it
 # needed it; re-exporting it here under a public name gives it a supported spelling
-# without touching that file (its md5 is a frozen contract).
+# with explicit legacy model-input behavior retained in that shared module.
 from .ml_preprocess import _decimated_median as decimated_median
 from .ml_preprocess import baseline_masked_median as _masked_median_kernel
 from .ml_preprocess import baseline_robust_median as _robust_median_kernel
@@ -188,6 +191,17 @@ __all__ = [
     "decimate_track",
     "BASELINE_TRACK_MAX_POINTS",
     "remove_baseline_wander",
+    "baseline_wander_result",
+    "BaselineWanderResult",
+    "DetrendAttenuationWarning",
+    "baseline_endpoint_policy",
+    "baseline_sample_count_policy",
+    "baseline_mask_noise_policy",
+    "SAMPLE_COUNT_POLICY",
+    "MASK_NOISE_POLICY",
+    "BLOCK_ENDPOINT_POLICY",
+    "require_current_detrend_policy",
+    "BaselinePolicyChangedError",
     "estimated_wander",
     "baseline_intrusion",
     "baseline_health",
@@ -812,6 +826,12 @@ INTRUSION_PAD_S = 0.005
 #: removes noise rather than signal looks like -- and it is the difference between a
 #: 1.4x margin on `BASELINE_INTRUSION_MAX` and a 7x one.
 INTRUSION_MIN_DEPTH_SIGMA = 5.0
+# Long coherent reference states have already survived the reference mask's
+# 3.5-sigma seed and a duration longer than the candidate tracking window. The
+# stricter headline gate must not erase a damaged moderate-SNR long state merely
+# because that candidate pulled its own flanking baseline down.
+INTRUSION_LONG_MIN_DEPTH_SIGMA = 3.5
+LONG_STATE_INTRUSION_MAX = 0.5
 
 #: Most states the intrusion measurement will visit, evenly spaced through the
 #: recording. It is a Python loop over states (a median of ~2500 samples x3 each), so
@@ -910,6 +930,79 @@ class AmplifiedWanderWarning(BaselineWarning):
     A SUBCLASS of `BaselineWarning` for the same reason `ConstantBaselineWarning` is:
     filters and ``pytest.warns`` keep matching, and `modules.DetectSchmitt.run` can
     stamp ``detrend_amplified`` in provenance without parsing prose."""
+
+
+class DetrendAttenuationWarning(BaselineWarning):
+    """The fitted baseline follows independently identified states.
+
+    This is a measured risk to event depths, not a classification of a state as an
+    event: a true conductance change may legitimately be treated as background.
+    """
+
+
+# An algorithm revision, not a user parameter. Only these methods interpolate
+# block knots, so other baseline/reference fingerprints remain unchanged.
+BLOCK_ENDPOINT_POLICY = "local-data-bounded-pchip-v1"
+
+
+class BaselinePolicyChangedError(ValueError):
+    """Stored samples/rows require a different baseline algorithm revision."""
+
+
+def baseline_endpoint_policy(method: str) -> str | None:
+    """The current endpoint algorithm when a method expands block knots."""
+    return BLOCK_ENDPOINT_POLICY if method in ("block_median", "percentile", "asls") else None
+
+
+def baseline_sample_count_policy(method: str) -> str | None:
+    """Identity of sample-grid rounding used by automatic windowed estimators.
+
+    All windowed methods share length validation/adaptation. Constants and
+    supplied references do not consume those windows and keep their identity.
+    """
+    return SAMPLE_COUNT_POLICY if method in METHODS and method != "constant" else None
+
+
+def baseline_mask_noise_policy(method: str) -> str | None:
+    """Identity of the automatic masked estimator's noise adaptation."""
+    return MASK_NOISE_POLICY if method == "masked_median" else None
+
+
+def require_current_detrend_policy(provenance: Mapping[str, Any]) -> None:
+    """Refuse exact replay of a saved signal made with another baseline algorithm.
+
+    Controls can still be restored for an explicitly new detection. This guard
+    applies when a caller claims to reconstruct the signal behind EXISTING rows.
+    """
+    if not provenance.get("detrend_enabled"):
+        return
+    method = str(provenance.get("detrend_method", "block_median"))
+    if method not in METHODS:
+        raise ValueError(f"Saved runtime baseline correction method {method!r} is unknown; re-run detection with current settings.")
+    expected = baseline_endpoint_policy(method)
+    if expected is not None and provenance.get("detrend_endpoint_policy") != expected:
+        raise BaselinePolicyChangedError(
+            "Saved runtime baseline correction used a different or unrecorded "
+            "endpoint policy. Its processed samples cannot be replayed exactly "
+            "with the current algorithm. Re-run detection with current settings; "
+            "the existing rows have not been changed."
+        )
+    expected = baseline_sample_count_policy(method)
+    if expected is not None and provenance.get("detrend_sample_count_policy") != expected:
+        raise BaselinePolicyChangedError(
+            "Saved runtime baseline correction used a different or unrecorded "
+            "sample-count policy. Its processed samples cannot be replayed exactly "
+            "with the current algorithm. Re-run detection with current settings; "
+            "the existing rows have not been changed."
+        )
+    expected = baseline_mask_noise_policy(method)
+    if expected is not None and provenance.get("detrend_mask_noise_policy") != expected:
+        raise BaselinePolicyChangedError(
+            "Saved runtime baseline correction used a different or unrecorded "
+            "mask-noise policy. Its processed samples cannot be replayed exactly "
+            "with the current algorithm. Re-run detection with current settings; "
+            "the existing rows have not been changed."
+        )
 
 
 #: Thread-local carrier for `collect_baseline_warnings`. ``warnings.catch_warnings``
@@ -1113,13 +1206,13 @@ def derive_decim(base_s: float, fs: float, *, taps_target: int = TAPS_TARGET) ->
         raise ValueError(f"base_s must be a positive number of seconds, got {base_s!r}")
     if not (np.isfinite(fs) and fs > 0):
         raise ValueError(f"fs must be a positive number of Hz, got {fs!r}")
-    hi = int(math.floor(base_s * fs / MIN_TAPS))
+    hi = floor_sample_count(base_s * fs / MIN_TAPS)
     if hi < 1:
         raise ValueError(
             f"a {base_s * 1e3:g} ms window at {fs:g} Hz is only {base_s * fs:.1f} samples; "
             f"a decimated median needs at least {MIN_TAPS} taps. Widen the window."
         )
-    return int(min(max(int(math.floor(base_s * fs / int(taps_target))), 1), hi))
+    return int(min(max(floor_sample_count(base_s * fs / int(taps_target)), 1), hi))
 
 
 def _validate_masked_params(
@@ -1186,7 +1279,8 @@ class BaselineConfig:
     Fields:
         method: One of `METHODS`. ``'masked_median'`` is the estimator this app now
             characterises with; the block-based methods remain reachable and
-            bit-identical for stored results and the detrending stage.
+            numerically stable for stored results and the detrending stage, with
+            endpoint extrapolation now bounded by local measured data.
         rough_s: Pass-1 window, seconds. Sets **which excursions become "events"**.
             Must be >= ~4x the longest state you want rejected -- the longest state
             has to occupy <~25% of it, or the rough median moves *into* that state
@@ -1285,13 +1379,13 @@ class BaselineConfig:
         if self.decim is None:
             return derive_decim(win, fs)
         decim = int(self.decim)
-        taps = int(win * float(fs) / decim)
+        taps = floor_sample_count(win * float(fs) / decim)
         if taps < MIN_TAPS:
             raise ValueError(
                 f"decim={decim} leaves only {taps} tap(s) for a {win * 1e3:g} ms window "
                 f"at {fs:g} Hz (need >= {MIN_TAPS}). The 'baseline' would be one or two "
                 f"samples broadcast over the whole recording. Use decim <= "
-                f"{max(1, int(win * float(fs) / MIN_TAPS))}."
+                f"{max(1, floor_sample_count(win * float(fs) / MIN_TAPS))}."
             )
         return decim
 
@@ -1337,6 +1431,16 @@ class BaselineConfig:
         """
         cfg = self.resolve(fs) if fs is not None else self
         parts = [f"{name}={getattr(cfg, name)!r}" for name in self._FIELDS]
+        if cfg.open_pore_reference is None:
+            policy = baseline_endpoint_policy(cfg.method)
+            if policy is not None:
+                parts.append(f"endpoint_policy={policy!r}")
+            policy = baseline_sample_count_policy(cfg.method)
+            if policy is not None:
+                parts.append(f"sample_count_policy={policy!r}")
+            policy = baseline_mask_noise_policy(cfg.method)
+            if policy is not None:
+                parts.append(f"mask_noise_policy={policy!r}")
         if cfg.open_pore_reference is not None:
             parts.append("open_pore_reference=" + json.dumps(
                 cfg.open_pore_reference.to_dict(), sort_keys=True,
@@ -1365,6 +1469,16 @@ class BaselineConfig:
             "baseline_despike_size": int(cfg.despike_size),
             "baseline_fingerprint": cfg.fingerprint(),
         }
+        if cfg.open_pore_reference is None:
+            policy = baseline_endpoint_policy(cfg.method)
+            if policy is not None:
+                prov["baseline_endpoint_policy"] = policy
+            policy = baseline_sample_count_policy(cfg.method)
+            if policy is not None:
+                prov["baseline_sample_count_policy"] = policy
+            policy = baseline_mask_noise_policy(cfg.method)
+            if policy is not None:
+                prov["baseline_mask_noise_policy"] = policy
         if cfg.open_pore_reference is not None:
             prov[OPEN_PORE_REFERENCE_PARAM_KEY] = cfg.open_pore_reference.to_dict()
             prov["baseline_reference_applied"] = True
@@ -1396,6 +1510,18 @@ class BaselineConfig:
             # restore as the legacy baseline estimator.
             reference = OpenPoreReference.from_dict(reference)
         method = prov.get("baseline_method", DEFAULT_BASELINE.method if reference is not None else None)
+        policy = prov.get("baseline_endpoint_policy")
+        if (reference is None and baseline_endpoint_policy(method) is not None
+                and policy is not None and policy != baseline_endpoint_policy(method)):
+            raise BaselinePolicyChangedError(f"unsupported baseline endpoint policy {policy!r}; choose current settings for a fresh analysis")
+        policy = prov.get("baseline_sample_count_policy")
+        if (reference is None and baseline_sample_count_policy(method) is not None
+                and policy is not None and policy != baseline_sample_count_policy(method)):
+            raise BaselinePolicyChangedError(f"unsupported baseline sample-count policy {policy!r}; choose current settings for a fresh analysis")
+        policy = prov.get("baseline_mask_noise_policy")
+        if (reference is None and baseline_mask_noise_policy(method) is not None
+                and policy is not None and policy != baseline_mask_noise_policy(method)):
+            raise BaselinePolicyChangedError(f"unsupported baseline mask-noise policy {policy!r}; choose current settings for a fresh analysis")
         if method not in METHODS:
             if reference is not None:
                 raise ValueError("user-reference provenance has an unknown dormant baseline method")
@@ -1440,6 +1566,11 @@ class BaselineConfig:
         """
         if not prov:
             return None
+        # Unknown legacy baseline provenance can fall back to local flanks, but
+        # an obsolete PROCESSING recipe cannot: that would reinterpret samples
+        # and could skip active-reference validation in callers that use None as
+        # the ordinary legacy path. Fail closed before any row can be rebuilt.
+        require_current_detrend_policy(prov)
         if prov.get("baseline_reference_restore_error"):
             raise ValueError(str(prov["baseline_reference_restore_error"]))
         if prov.get("baseline_reference_applied") or prov.get("baseline_estimator_bypassed"):
@@ -1455,7 +1586,28 @@ class BaselineConfig:
             return None
         if prov.get("baseline_method") not in METHODS:
             return None
-        return cls.from_provenance(prov)
+        cfg = cls.from_provenance(prov)
+        policies = (
+            ("endpoint", "baseline_endpoint_policy", baseline_endpoint_policy(cfg.method)),
+            ("sample-count", "baseline_sample_count_policy", baseline_sample_count_policy(cfg.method)),
+            ("mask-noise", "baseline_mask_noise_policy", baseline_mask_noise_policy(cfg.method)),
+        )
+        for label, key, policy in policies:
+            if policy is not None and prov.get(key) != policy:
+                # Settings remain restorable for a NEW calculation. An exact
+                # rebuild must never reinterpret rows under another algorithm.
+                raise BaselinePolicyChangedError(
+                    f"Saved baseline {label} policy differs from the current algorithm "
+                    "or was not recorded. Exact row reconstruction is unavailable; "
+                    "Re-run detection with current settings. Existing rows were not changed."
+                )
+        if any(policy is not None for _, _, policy in policies) and prov.get("baseline_fingerprint") != cfg.fingerprint():
+            raise BaselinePolicyChangedError(
+                "Saved baseline algorithm fingerprint does not match its current settings. "
+                "Exact row reconstruction is unavailable; Re-run detection with current "
+                "settings. Existing rows were not changed."
+            )
+        return cfg
 
     def describe(self) -> str:
         """One line for a dialog or a log."""
@@ -1506,6 +1658,15 @@ UNPROBED_DEFAULT_WARNING = (
 #: default so old and new exports carry one fingerprint; `adapt_to_length`'s too-short
 #: constant pins the legacy 10 ms and fingerprints differently.
 STUDY_EXPORT_BASELINE = BaselineConfig(method="constant")
+
+
+def level_occupancy_unverified(level_occupancy: float | None,
+                               alt_occupancy: float | None) -> bool:
+    """Whether the result must disclose an unverified physical open-pore level."""
+    return level_occupancy is not None and (
+        level_occupancy < LEVEL_OCCUPANCY_MIN
+        or (alt_occupancy is not None and alt_occupancy >= ALT_LEVEL_OCCUPANCY_MIN)
+    )
 
 
 def level_occupancy_warning(
@@ -1771,18 +1932,45 @@ def _block_stat(x: np.ndarray, nb: int, q: float | None) -> tuple[np.ndarray, np
     return np.concatenate(vals), np.concatenate(centres)
 
 
-def _expand(centres: np.ndarray, knots: np.ndarray, n: int) -> np.ndarray:
+def _expand(centres: np.ndarray, knots: np.ndarray, n: int, *,
+            edge_bounds: tuple[tuple[float, float], tuple[float, float]] | None = None) -> np.ndarray:
     """Interpolate block knots back to full sample rate.
 
-    PchipInterpolator, not CubicSpline: Pchip is shape-preserving, so it cannot
-    overshoot. A natural cubic spline rings at a drift step, and the overshoot
-    lobe is a phantom deviation that detection reports as an event.
+    Pchip is shape-preserving BETWEEN knots only. Outside their support restrict
+    extrapolation to the local edge data's central 99% range (plus the fitted
+    terminal knot). This permits observed edge drift while preventing a final
+    flat plateau from curving into a new, unsupported level. Without data bounds,
+    hold the terminal knots. Interior interpolation remains exactly unchanged.
     """
     if knots.size < 2:
         return np.full(n, float(knots[0]), dtype=np.float64)
-    return PchipInterpolator(centres, knots, extrapolate=True)(
-        np.arange(n, dtype=np.float64)
-    )
+    samples = np.arange(n, dtype=np.float64)
+    curve = PchipInterpolator(centres, knots, extrapolate=True)(samples)
+    if edge_bounds is None:
+        edge_bounds = ((float(knots[0]), float(knots[0])),
+                       (float(knots[-1]), float(knots[-1])))
+    left, right = samples < centres[0], samples > centres[-1]
+    curve[left] = np.clip(curve[left], *edge_bounds[0])
+    curve[right] = np.clip(curve[right], *edge_bounds[1])
+    return curve
+
+
+def _validate_asls(lam: float, p: float, niter: int, decim: float) -> None:
+    """Reject invalid solver domains before casting or constructing sparse arrays."""
+    original_niter = niter
+    try:
+        lam, p, niter, decim = map(float, (lam, p, niter, decim))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("AsLS parameters must be finite numbers") from exc
+    if not (np.isfinite(lam) and lam > 0):
+        raise ValueError(f"asls_lam must be finite and positive, got {lam!r}")
+    if not (np.isfinite(p) and 0 < p < 1):
+        raise ValueError(f"asls_p must be finite and in (0, 1), got {p!r}")
+    if (isinstance(original_niter, (bool, np.bool_)) or not np.isfinite(niter)
+            or niter < 1 or niter != int(niter)):
+        raise ValueError(f"asls_niter must be a positive integer, got {niter!r}")
+    if not (np.isfinite(decim) and 0 < decim <= 1):
+        raise ValueError(f"asls_decim must be finite and in (0, 1], got {decim!r}")
 
 
 def _asls_knots(y: np.ndarray, polarity: int, lam: float, p: float, niter: int) -> np.ndarray:
@@ -1806,11 +1994,15 @@ def _asls_knots(y: np.ndarray, polarity: int, lam: float, p: float, niter: int) 
         return y.copy()
     d = sp.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(m - 2, m), format="csc")
     dtd = lam * (d.T @ d)
+    if not np.isfinite(dtd.data).all():
+        raise ValueError("asls_lam exceeds the finite solver range")
     w = np.ones(m)
     z = y.copy()
     for _ in range(niter):
         wd = sp.diags(w, 0, format="csc")
         z = spla.spsolve(wd + dtd, w * y)
+        if not np.isfinite(z).all():
+            raise ValueError("AsLS solver produced a non-finite baseline; review its parameters")
         w = np.where(polarity * (y - z) > 0, p, 1.0 - p)
     return z
 
@@ -1882,7 +2074,7 @@ def _savgol_baseline(
         raise ValueError(f"sg_poly must be a positive integer, got {poly}")
 
     xs = np.ascontiguousarray(x[::decim], dtype=np.float64)
-    w = int(float(window_s) * float(fs) / decim)
+    w = floor_sample_count(float(window_s) * float(fs) / decim)
     if w % 2 == 0:
         w += 1
     # A window must host more points than the polynomial has coefficients, and be ODD
@@ -1896,7 +2088,7 @@ def _savgol_baseline(
         # The notebook's clamp: the largest ODD length that fits the decimated series.
         w = xs.size - ((xs.size + 1) % 2)
         _warn_baseline(
-            f"the {window_s:g} s SavGol baseline window is {int(float(window_s) * float(fs) / decim)} "
+            f"the {window_s:g} s SavGol baseline window is {floor_sample_count(float(window_s) * float(fs) / decim)} "
             f"taps on the decim-{decim} grid but the recording has only {xs.size} "
             f"decimated sample(s); the window was CLAMPED to {w}. A clamped window is "
             "a different estimator from the one you asked for -- it fits one polynomial "
@@ -1980,7 +2172,15 @@ def _single_pass(
     if method == "asls":
         knots = _asls_knots(knots, polarity, asls_lam, asls_p, asls_niter)
 
-    return _expand(centres, knots, n)
+    # Bounds come from measured samples, not extrapolated knot derivatives. The
+    # fitted knot remains admissible: AsLS can legitimately span an occupied edge
+    # block whose raw samples never reach the open-pore level. Symmetric quantiles
+    # preserve sign mirroring and stop isolated extreme samples setting the bound.
+    edge_bounds = []
+    for samples, knot in ((x[:nb], knots[0]), (x[-nb:], knots[-1])):
+        lo, hi = np.quantile(samples, (.005, .995))
+        edge_bounds.append((min(float(lo), float(knot)), max(float(hi), float(knot))))
+    return _expand(centres, knots, n, edge_bounds=tuple(edge_bounds))
 
 
 # ---------------------------------------------------------------------------
@@ -2002,9 +2202,9 @@ def _kernel_baseline(
         pol == -1  ->  call the kernel with the signal untouched
         pol == +1  ->  call the kernel with -x, and negate the baseline back
 
-    At ``pol == -1`` there is no arithmetic in this wrapper at all, so **the corpus
-    contract holds by construction rather than by assertion** -- the bytes that come
-    back are the kernel's own. At ``pol == +1`` it is the exact mirror algorithm:
+    At ``pol == -1`` this wrapper returns the shared automatic kernel's result
+    without further arithmetic. Model-input preprocessing separately opts into
+    the historical notebook contract. At ``pol == +1`` this is the mirror algorithm:
     every step involved (odd-window order statistics, medians, ``np.interp``,
     the float32 cast) is exactly sign-symmetric in IEEE754, so mirroring loses
     nothing. Both claims are pinned by tests rather than argued.
@@ -2014,10 +2214,9 @@ def _kernel_baseline(
     mirrored anyway so there is ONE polarity rule in this module instead of two.
 
     The kernel returns float32; this returns float64 holding those float32 values,
-    which is what `estimate_baseline` has always returned. Per the notebook's own
-    dtype trajectory the cast lands on the BASELINE before the subtraction, so
-    ``(signal - float64_view).astype(float32)`` is byte-identical to the notebook's
-    ``current_detr_pA``.
+    which is what `estimate_baseline` has always returned. The cast lands on the
+    baseline before subtraction, preserving the shared kernel's dtype trajectory.
+    Notebook bit parity is separately maintained by the explicit legacy model path.
     """
     kw = config.kernel_kwargs(fs)
     kernel = _masked_median_kernel if config.method == "masked_median" else _robust_median_kernel
@@ -2100,10 +2299,12 @@ def _rough_pass(
     med = np.median(rough)
     sigma = 1.4826 * np.median(np.abs(rough - med))
     upper_mad = upper_mad_sigma(rough, median=med)
+    scale = baseline_mask_noise_scale(rough, fs, sigma, signal=x)
     mask = binary_dilation(
-        rough < med - float(config.mask_sigma) * sigma,
-        iterations=max(1, int(float(config.dilate_ms) * 1e-3 * float(fs))),
+        rough < med - float(config.mask_sigma) * scale,
+        iterations=max(1, floor_sample_count(float(config.dilate_ms) * 1e-3 * float(fs))),
     )
+    del scale
     check_cancelled()
     return rough, mask, float(sigma), upper_mad
 
@@ -2363,7 +2564,7 @@ def state_runs(
     s, e = _mask_runs(mask)
     if s.size == 0:
         return s, e
-    k = max(0, int(float(dilate_ms) * 1e-3 * float(fs)))
+    k = max(0, floor_sample_count(float(dilate_ms) * 1e-3 * float(fs)))
     keep = (e - s) > (2 * k + 1)
     return s[keep], e[keep]
 
@@ -2407,7 +2608,8 @@ def tracked_intrusion(
     min_depth_pA: float = 0.0,
     dilate_ms: float = 0.0,
     worst_min_dwell_s: float = 0.0,
-) -> dict[str, float] | None:
+    worst_min_depth_pA: float | None = None,
+) -> dict[str, float | int | None] | None:
     """How far the tracked baseline sits INSIDE the states, per state, directly.
 
     The measurement from the -700 mV report, generalised: for every run of ``mask``,
@@ -2457,6 +2659,12 @@ def tracked_intrusion(
     out reads <= 0.061 (or has no state long enough to qualify, reported as ``None``).
     At the default 0.0 every good state qualifies.
 
+    ``worst_min_depth_pA`` optionally supplies a separate gate for those long
+    states. By default it equals ``min_depth_pA`` and preserves the historical
+    direct-call contract. A worst-state reading may exist when no state meets the
+    stricter headline gate; the three headline scalars then remain ``None`` with
+    ``n_states=0``. This is missing median evidence, not zero intrusion.
+
     Returns ``None`` when the mask has no run with a measurable depth. Otherwise a
     dict of ``fraction`` / ``intrusion_pA`` / ``depth_pA`` / ``n_states`` (medians
     over the states visited) plus ``worst_fraction`` / ``worst_dwell_s`` /
@@ -2494,14 +2702,20 @@ def tracked_intrusion(
         depth[i] = ref - float(np.median(x[a:c]))
 
     good = np.isfinite(depth) & (depth > max(0.0, float(min_depth_pA)))
-    if not good.any():
+    worst_depth = min_depth_pA if worst_min_depth_pA is None else worst_min_depth_pA
+    long_enough = ((e - s) / fs > float(worst_min_dwell_s))
+    worst_good = (np.isfinite(depth) & (depth > max(0.0, float(worst_depth)))
+                  & long_enough)
+    if not good.any() and not worst_good.any():
         return None
     frac = intr[good] / depth[good]
-    gs, ge = s[good], e[good]
     out = {
-        "fraction": float(np.median(frac)),
-        "intrusion_pA": float(np.median(intr[good])),
-        "depth_pA": float(np.median(depth[good])),
+        # A long moderate-SNR state can support a worst-state reading without
+        # supporting the stricter 5-sigma headline population. Missing evidence
+        # remains explicit; it must never become a fabricated zero median.
+        "fraction": float(np.median(frac)) if good.any() else None,
+        "intrusion_pA": float(np.median(intr[good])) if good.any() else None,
+        "depth_pA": float(np.median(depth[good])) if good.any() else None,
         "n_states": int(good.sum()),
         "worst_fraction": None,
         "worst_dwell_s": None,
@@ -2510,13 +2724,12 @@ def tracked_intrusion(
     # The single worst state, by the same ratio the median is taken over, among the
     # states at least ``worst_min_dwell_s`` long -- see the docstring for why it
     # travels beside the median and why the short states are excluded from it.
-    long_enough = (ge - gs) / fs > float(worst_min_dwell_s)
-    if long_enough.any():
-        idx = np.flatnonzero(long_enough)
-        worst = int(idx[np.argmax(frac[idx])])
-        out["worst_fraction"] = float(frac[worst])
-        out["worst_dwell_s"] = float((int(ge[worst]) - int(gs[worst])) / fs)
-        out["worst_t_s"] = float(int(gs[worst]) / fs)
+    if worst_good.any():
+        idx = np.flatnonzero(worst_good)
+        worst = int(idx[np.argmax(intr[idx] / depth[idx])])
+        out["worst_fraction"] = float(intr[worst] / depth[worst])
+        out["worst_dwell_s"] = float((int(e[worst]) - int(s[worst])) / fs)
+        out["worst_t_s"] = float(int(s[worst]) / fs)
     return out
 
 
@@ -2724,7 +2937,7 @@ def estimate_baseline(
             raise ValueError(f"fs must be a positive number of Hz, got {fs!r}")
         if not np.isfinite(window_s) or window_s <= 0:
             raise ValueError(f"window_s must be a positive number of seconds, got {window_s!r}")
-        if min_dwell_s <= 0:
+        if not np.isfinite(min_dwell_s) or min_dwell_s <= 0:
             raise ValueError(f"min_dwell_s must be positive, got {min_dwell_s!r}")
         if window_s < MIN_WINDOW_TO_DWELL * min_dwell_s:
             _warn_baseline(
@@ -2739,6 +2952,9 @@ def estimate_baseline(
     if not (0.0 < percentile < 100.0):
         raise ValueError(f"percentile must be in (0, 100), got {percentile!r}")
 
+    if method == "asls":
+        _validate_asls(asls_lam, asls_p, asls_niter, asls_decim)
+
     pol = derive_polarity(x) if polarity is None else require_polarity(polarity)
 
     kw = dict(
@@ -2749,7 +2965,7 @@ def estimate_baseline(
         percentile=float(percentile),
         asls_lam=float(asls_lam),
         asls_p=float(asls_p),
-        asls_niter=int(asls_niter),
+        asls_niter=int(float(asls_niter)),
         asls_decim=float(asls_decim),
         sg_poly=int(sg_poly),
         sg_decim=int(sg_decim),
@@ -2808,7 +3024,7 @@ def _require_length(n: int, fs: float, config: BaselineConfig) -> None:
     if config.method == "constant":
         return
     win = config.tracking_window_s
-    need = int(math.ceil(win * float(fs)))
+    need = ceil_sample_count(win * float(fs))
     if n < need:
         fitted, _ = adapt_to_length(config, n, float(fs))
         raise ValueError(
@@ -3084,9 +3300,9 @@ def _qc_block(
     d = np.asarray(detr)
     noise = float(1.4826 * np.median(np.abs(d - np.median(d))))
     evm = binary_dilation(d < np.median(d) - 3.5 * noise,
-                          iterations=max(1, int(1e-3 * float(fs))))
+                          iterations=max(1, floor_sample_count(1e-3 * float(fs))))
     op = d[~evm]
-    w = int(0.5 * float(fs))
+    w = floor_sample_count(0.5 * float(fs))
     m = (len(op) // w * w) if w else 0
     bm = np.median(op[:m].reshape(-1, w), axis=1) if m else np.array([0.0])
     n_up = int((d > 4 * noise).sum())
@@ -3275,7 +3491,7 @@ def baseline_health(
             )
         mask_frac = float(np.count_nonzero(mask)) / max(n, 1)
         run_p99 = _mask_run_p99_s(mask, fs)
-        k = max(1, int(float(config.dilate_ms) * 1e-3 * fs))
+        k = max(1, floor_sample_count(float(config.dilate_ms) * 1e-3 * fs))
         # Phi(-mask_sigma) * (2k + 1): the fraction a DILATED threshold masks on pure
         # Gaussian noise with no events in it at all.
         mask_free = float(
@@ -3289,7 +3505,8 @@ def baseline_health(
                 f">= {MASK_FRACTION_FLOOR:.3f}",
                 f"only {mask_frac:.2%} of samples were masked. The +-{config.dilate_ms:g} ms "
                 f"dilation multiplies the {config.mask_sigma:g}-sigma false-positive rate by "
-                f"{2 * k + 1}x, so an EVENT-FREE trace masks {mask_free:.2%} by construction. "
+                f"{2 * k + 1}x: stationary Gaussian noise alone masks about {mask_free:.2%}. "
+                "Conservative local thresholds can reduce this fraction when noise varies. "
                 "A fraction at or below that has TWO readings and they are opposite, so "
                 "look at the trace before acting: either there really are no events (the "
                 "baseline is then a plain short-window median and is fine), or the "
@@ -3506,17 +3723,52 @@ def baseline_health(
                     blind_note if n_cfg else quiet_note,
                 ))
 
+
             check_cancelled()
             # ``worst_min_dwell_s = base_s`` for the same reason `config_intrusion`
-            # passes it: the check consumes only the median half today, but the two
-            # callers are one measurement and must not quietly diverge on the other.
+            # passes it: the two callers share both headline and long-state readings.
             intr = tracked_intrusion(
                 x if pol == -1 else -x, b if pol == -1 else -b, state_mask, fs,
                 min_depth_pA=INTRUSION_MIN_DEPTH_SIGMA * noise,
                 dilate_ms=config.dilate_ms,
                 worst_min_dwell_s=float(config.base_s),
+                worst_min_depth_pA=INTRUSION_LONG_MIN_DEPTH_SIGMA * noise,
             )
-            if intr is not None:
+            if intr is not None and intr.get('worst_fraction') is not None:
+                worst_fraction = float(intr['worst_fraction'])
+                rides = (not gating) and worst_fraction > LONG_STATE_INTRUSION_MAX
+                checks.append(BaselineCheck(
+                    'baseline_long_state', 'warn' if rides else 'ok',
+                    'baseline vs the worst long state', worst_fraction,
+                    f'<= {LONG_STATE_INTRUSION_MAX:.0%} of a long state depth',
+                    gate_note if gating else
+                    f"The worst coherent state lasts {intr['worst_dwell_s'] * 1e3:.1f} ms "
+                    f"at {intr['worst_t_s']:.3f} s, longer than the {config.base_s * 1e3:g} ms "
+                    f"tracking window. Its baseline intrusion is {worst_fraction:.1%}; "
+                    f"the separate long-state measurement requires depth above "
+                    f"{INTRUSION_LONG_MIN_DEPTH_SIGMA:g} sigma. "
+                    + ("This baseline follows more than half of that state's excursion. "
+                       "Widen the tracking windows and re-measure before accepting its depth."
+                       if rides else "The tracker stays on the open-pore side of this state."),
+                ))
+
+            if intr is not None and intr['fraction'] is None:
+                checks.append(BaselineCheck(
+                    "baseline_intrusion", "info" if gating else "warn",
+                    "baseline vs the open pore beside each state", None,
+                    f"headline states > {INTRUSION_MIN_DEPTH_SIGMA:g} sigma; "
+                    f"long states > {INTRUSION_LONG_MIN_DEPTH_SIGMA:g} sigma",
+                    gate_note if gating else
+                    f"The headline intrusion median is not measurable: no state "
+                    f"clears {INTRUSION_MIN_DEPTH_SIGMA:g} sigma. A coherent long "
+                    f"state at {intr['worst_t_s']:.3f} s lasts "
+                    f"{intr['worst_dwell_s'] * 1e3:.1f} ms and clears the separate "
+                    f"{INTRUSION_LONG_MIN_DEPTH_SIGMA:g}-sigma long-state gate; "
+                    f"its measured baseline intrusion is {intr['worst_fraction']:.1%}. "
+                    "The missing median must not be read as zero intrusion. "
+                    "Inspect this state and the open-pore reference before accepting these windows.",
+                ))
+            elif intr is not None:
                 frac = intr["fraction"]
                 deep = (not gating) and frac > BASELINE_INTRUSION_MAX
                 checks.append(BaselineCheck(
@@ -3767,7 +4019,7 @@ def baseline_health(
     # (`level_occupancy_warning`), which is the surface that can say "I do not know
     # which of these two levels is the open pore" without pretending a check measured it.
     check_cancelled()
-    k_off = max(1, int(float(config.dilate_ms) * 1e-3 * fs))
+    k_off = max(1, floor_sample_count(float(config.dilate_ms) * 1e-3 * fs))
     off = binary_dilation(
         np.abs(detr) > INTRUSION_MIN_DEPTH_SIGMA * noise, iterations=k_off)
     off_frac = float(np.count_nonzero(off)) / max(n, 1)
@@ -3932,9 +4184,9 @@ def baseline_health(
         state_dwell_s=(None if dwell is None or not np.isfinite(dwell)
                        else float(dwell)),
         base_state_ratio=None if base_ratio is None else float(base_ratio),
-        intrusion_fraction=None if intr is None else float(intr["fraction"]),
-        intrusion_pA=None if intr is None else float(intr["intrusion_pA"]),
-        intrusion_depth_pA=None if intr is None else float(intr["depth_pA"]),
+        intrusion_fraction=None if intr is None or intr['fraction'] is None else float(intr["fraction"]),
+        intrusion_pA=None if intr is None or intr['intrusion_pA'] is None else float(intr["intrusion_pA"]),
+        intrusion_depth_pA=None if intr is None or intr['depth_pA'] is None else float(intr["depth_pA"]),
         intrusion_n_states=None if intr is None else int(intr["n_states"]),
         gating_score=(None if g_score is None or not np.isfinite(g_score)
                       else float(g_score)),
@@ -4063,10 +4315,7 @@ class BaselineResult:
         # 81% of the time and said nothing at 90%, 95% or 97%. The second level is there
         # in all four. See `ALT_LEVEL_OCCUPANCY_MIN` for why it fires on the owner's own
         # recordings too, and why that is the honest outcome rather than a false alarm.
-        if occ is not None and (
-            occ < LEVEL_OCCUPANCY_MIN
-            or (alt_occ is not None and alt_occ >= ALT_LEVEL_OCCUPANCY_MIN)
-        ):
+        if level_occupancy_unverified(occ, alt_occ):
             out.append(level_occupancy_warning(
                 float(occ),
                 alt_occupancy=None if alt_occ is None else float(alt_occ),
@@ -4488,7 +4737,7 @@ def adapt_to_length(
         return config, None
     if not (np.isfinite(fs) and fs > 0) or n <= 0:
         return config, None
-    if n >= int(math.ceil(config.tracking_window_s * fs)):
+    if n >= ceil_sample_count(config.tracking_window_s * fs):
         return config, None
     if config.is_masked and n >= _min_clamped_samples(config):
         if config.method == "robust_median":
@@ -4499,10 +4748,9 @@ def adapt_to_length(
             rough = n / fs
             base = rough * (float(config.base_s) / float(config.rough_s))
             fitted = config.replace(rough_s=rough, base_s=base, decim=None)
-        # `_min_clamped_samples` is the floor in exact arithmetic; `derive_decim` is
-        # the floor the FLOATS actually reach (n = 15 at the default ratio gives
-        # base_s * fs = 2.9999999999999996, which is not 3 taps). Asking the same
-        # function the estimator will ask is the only way the two cannot disagree.
+        # Use the estimator's shared sample-boundary rule. For example, the
+        # default 15-sample clamp gives 2.9999999999999996 taps: round-off must not
+        # turn an exactly supported 3-tap window into a constant fallback.
         try:
             fitted.resolved_decim(fs)
         except ValueError:
@@ -4679,7 +4927,7 @@ def _polarity_rung_windows(n: int, fs: float) -> tuple[tuple[float, int], ...]:
             decim = derive_decim(win, fs_f) * _POLARITY_DECIM_COARSEN
         except ValueError:
             continue
-        if int(win * fs_f / max(decim, 1)) < MIN_TAPS:
+        if floor_sample_count(win * fs_f / max(decim, 1)) < MIN_TAPS:
             continue
         out.append((float(win), int(decim)))
     return tuple(out)
@@ -5118,7 +5366,7 @@ def characterisation_baseline(
     fallback = None
     token = FALLBACK_TOO_SHORT
     if np.isfinite(fs_f) and fs_f > 0:
-        need = int(math.ceil(cfg.tracking_window_s * fs_f))
+        need = ceil_sample_count(cfg.tracking_window_s * fs_f)
         fitted, token_or_none = adapt_to_length(cfg, n, fs_f)
         if token_or_none is not None:
             token = token_or_none
@@ -5361,6 +5609,89 @@ def _block_median_wander(x: np.ndarray, fs: float, window_s: float) -> tuple[flo
     return float(np.sqrt(np.mean(bm * bm))), float(np.abs(bm).max())
 
 
+@dataclass(frozen=True)
+class BaselineWanderResult:
+    """One automatic estimate shared by the preview, correction and diagnostics.
+
+    ``reference`` is the median of the fitted baseline. ``corrected`` retains that
+    level; a zero-centred display can instead subtract ``baseline`` from its input.
+    Health reports describe the fit, not proof of a physically open pore.
+    """
+
+    baseline: np.ndarray
+    corrected: np.ndarray
+    reference: float
+    health: BaselineHealth | None
+    warnings: tuple[str, ...]
+    method: str
+    window_s: float
+    polarity: int
+    method_kwargs: dict[str, Any]
+    endpoint_policy: str | None = None
+
+
+def _detrend_health(x: np.ndarray, b: np.ndarray, fs: float, cfg: BaselineConfig,
+                    polarity: int) -> BaselineHealth:
+    """Judge the actual fitted curve using the reference health implementation.
+
+    In addition, measure intrusion against a wide, independently selected state
+    mask for EVERY method. Its scale is independent of the candidate windows, so
+    a baseline that erased a state cannot also erase the evidence used to judge it.
+    A warning rather than automatic refusal preserves deliberate gating correction.
+    """
+    health = baseline_health(x, b, fs, config=cfg, polarity=polarity)
+    w = reference_rough_s(x.size, fs)
+    intr = None
+    if w >= REFERENCE_MIN_ROUGH_S:
+        diagnostic_cfg = BaselineConfig(rough_s=w, base_s=w / ROUGH_BASE_RATIO)
+        canonical = x if polarity == -1 else -x
+        _, mask, _, _ = _rough_pass(canonical, fs, config=diagnostic_cfg)
+        intr = tracked_intrusion(
+            canonical, b if polarity == -1 else -b, mask, fs,
+            min_depth_pA=INTRUSION_MIN_DEPTH_SIGMA * health.noise_pA,
+            dilate_ms=diagnostic_cfg.dilate_ms,
+            worst_min_dwell_s=0.5 * cfg.tracking_window_s,
+            worst_min_depth_pA=INTRUSION_LONG_MIN_DEPTH_SIGMA * health.noise_pA,
+        )
+    if intr is None:
+        check = BaselineCheck(
+            "detrend_attenuation", "ok", "event/state attenuation", None, None,
+            "Event/state attenuation was not measurable: no sufficiently deep "
+            "independent states or too little signal for a wide reference. This "
+            "does not establish that event depths are preserved.",
+        )
+    else:
+        median = intr["fraction"]
+        worst = intr["worst_fraction"]
+        # The median uses the reference health's 3% criterion; the single-state
+        # guard is deliberately stronger and dwell-gated to avoid noisy short runs.
+        risk = (median is None or median > BASELINE_INTRUSION_MAX
+                or (worst is not None and worst > LONG_STATE_INTRUSION_MAX))
+        message = (
+            f"Measured event/state attenuation risk: the baseline follows "
+            f"{median:.1%} of the median excursion across {intr['n_states']} "
+            "independently identified states"
+            if median is not None else
+            "The headline attenuation median is not measurable: no independent "
+            f"state clears {INTRUSION_MIN_DEPTH_SIGMA:g} sigma. A separate coherent "
+            f"long-state measurement clears {INTRUSION_LONG_MIN_DEPTH_SIGMA:g} sigma"
+        ) + (
+            (f"; worst eligible state {worst:.1%} at {intr['worst_t_s']:.3g} s"
+               if worst is not None else "")
+            + ". Subtracting this baseline removes that portion of a state's depth. "
+            "Inspect the raw signal and baseline; widen the estimation windows or "
+            "disable detrending if these states are events. A true conductance "
+            "change can instead be intended background; this check cannot decide "
+            "that physical interpretation."
+        )
+        check = BaselineCheck(
+            "detrend_attenuation", "warn" if risk else "ok",
+            "event/state attenuation", median,
+            f"median <= {BASELINE_INTRUSION_MAX:.0%}; worst long state <= 50%", message,
+        )
+    return _dc_replace(health, checks=(*health.checks, check))
+
+
 def remove_baseline_wander(
     signal: np.ndarray,
     fs: float,
@@ -5370,103 +5701,102 @@ def remove_baseline_wander(
     polarity: int | None = None,
     **method_kwargs: Any,
 ) -> np.ndarray:
-    """Flatten slow baseline drift while PRESERVING event shapes and depths.
+    """Subtract a fitted baseline, retain its median level and emit measured QC.
 
-    Tracks the time-varying open-pore level ``base(t)`` with `estimate_baseline`
-    (which excludes events by construction, given a sane ``window_s``), then subtracts
-    it and adds back a single representative level so the trace is not re-zeroed:
-
-        base      = estimate_baseline(signal, fs, method, window_s, polarity)
-        reference = median(base)            # the representative open-pore current
-        out       = signal - base + reference
-
-    Because ``base`` is flat across each event (it must be -- that is the whole point
-    of the event-aware estimator and its ``window_s >> dwell`` guard), subtracting it
-    removes the drift *between* events without touching the excursion *within* an
-    event: a blockade that was 40 pA below its local open pore is still 40 pA below
-    ``reference`` afterwards. Adding ``reference`` back keeps the open-pore level and
-    the absolute event depths where downstream detection/characterisation expect them,
-    rather than collapsing everything onto zero.
-
-    THE HAZARD IS INHERITED, NOT ESCAPED. If ``window_s`` is not comfortably larger
-    than the longest event, ``base`` dives into the events and this SUBTRACTS them --
-    depths come out shallow and short events vanish. `estimate_baseline` raises a
-    `BaselineWarning` in that regime (window_s < 20x min_dwell_s); heed it. The default
-    ``window_s`` (`DEFAULT_DETREND_WINDOW_S`) is wide for exactly this reason.
-
-    THE FLIP SIDE OF THAT HAZARD IS MEASURED HERE, NOT ASSUMED AWAY. Wander FASTER
-    than the window is not merely left in place: for wander periods between roughly
-    half the window and the window, the block median is phase-INVERTED against the
-    wander it sampled (the sign flip of a moving average's first sinc side lobe), so
-    the subtraction ADDS wander -- measured, 80 pA of 3 Hz wander came out as a
-    110.6 pA peak (+38%) under the default 0.5 s window. Nothing downstream can see
-    that from the data, so this function compares the block-median wander of its own
-    output against its input (`_block_median_wander`, two O(n) passes) and raises an
-    `AmplifiedWanderWarning` when the output is worse by more than
-    `DETREND_AMPLIFIED_PEAK_RATIO`. Silent amplification is not an option: the
-    warning reaches ``res.warnings`` through the same `collect_baseline_warnings`
-    sink the no-op detrend already reports through.
-
-    Args:
-        signal: Current trace (1-D, pA). ``float32`` in is fine.
-        fs: Sample rate in Hz. Required for every method except 'constant'.
-        method: Estimator for the open-pore envelope -- 'block_median' (default),
-            'percentile', 'asls', or 'constant'. See `estimate_baseline`. 'constant'
-            subtracts a flat median and adds it straight back, i.e. a no-op; it exists
-            only so the panel's method list maps 1:1.
-        window_s: Smoothing window in seconds. **Must be >> the longest dwell.** The
-            drift-removal default is far wider than the I0-tracking default.
-        polarity: ``dev = polarity*(current-baseline)`` sign factor; ``None`` measures
-            it. Only matters for the one-sided 'percentile'/'asls' methods.
-        **method_kwargs: Forwarded verbatim to `estimate_baseline` (``two_pass``,
-            ``min_dwell_s``, ``percentile``, ``asls_*`` ...).
-
-    Returns:
-        ``float32`` array, ``len == signal.size``: the drift-flattened trace, still
-        centred on the open-pore level.
-
-    Raises:
-        ValueError: propagated from `estimate_baseline` (empty/non-finite trace,
-            missing/invalid rate, non-positive or over-long ``window_s``, unknown
-            method). A silently wrong detrend is worse than a crash.
+    This preserves the array API. `baseline_wander_result` shares the fitted curve
+    and structured health with preview/export callers. Warnings are also collected
+    by `collect_baseline_warnings` for the application's analysis result.
     """
-    base = estimate_baseline(
-        signal, fs, method=method, window_s=window_s, polarity=polarity, **method_kwargs
-    )
-    reference = float(np.median(base))  # keep the representative open-pore level
-    out = np.asarray(signal, dtype=np.float64) - base + reference
+    return baseline_wander_result(
+        signal, fs, method=method, window_s=window_s, polarity=polarity,
+        **method_kwargs,
+    ).corrected
 
-    # SELF-JUDGEMENT: is the output's wander worse than the input's? 'constant' is a
-    # documented no-op (out == signal to the bit) with nothing to measure, and a rate
-    # of None never reaches here (estimate_baseline refuses it first for every other
-    # method). The peak trips the warning; the RMS must corroborate the direction so
-    # one event-owned block -- identical on both sides of the subtraction by
-    # construction of the shared grid -- cannot fake an amplification on its own.
-    if method != "constant":
-        got_in = _block_median_wander(signal, fs, window_s)
-        got_out = _block_median_wander(out, fs, window_s)
-        if got_in is not None and got_out is not None:
-            rms_in, peak_in = got_in
-            rms_out, peak_out = got_out
-            if (np.isfinite(peak_in) and peak_in > 0.0
-                    and peak_out > DETREND_AMPLIFIED_PEAK_RATIO * peak_in
-                    and rms_out > rms_in):
-                _warn_baseline(
-                    f"the detrend AMPLIFIED the baseline wander it exists to remove: "
-                    f"peak wander {peak_in:.1f} pA in -> {peak_out:.1f} pA out "
-                    f"({100.0 * (peak_out / peak_in - 1.0):+.0f}%), RMS "
-                    f"{rms_in:.1f} -> {rms_out:.1f} pA, measured on "
-                    f"{window_s / _WANDER_BLOCKS_PER_WINDOW:g} s block medians. "
-                    f"Wander with a period between about half the {window_s:g} s "
-                    "window and the window itself is phase-inverted by the block "
-                    "median, so subtracting the estimate ADDS it. A detrend cannot "
-                    "remove wander this fast: strip it with the high-pass stage "
-                    "instead (a detrend window short enough to follow it would eat "
-                    "the events), or disable the detrend.",
-                    category=AmplifiedWanderWarning,
-                    stacklevel=3,
-                )
-    return np.ascontiguousarray(out, dtype=np.float32)
+
+def baseline_wander_result(
+    signal: np.ndarray,
+    fs: float,
+    *,
+    method: str = "block_median",
+    window_s: float = DEFAULT_DETREND_WINDOW_S,
+    polarity: int | None = None,
+    **method_kwargs: Any,
+) -> BaselineWanderResult:
+    """Estimate once, retain the median level, and report measured correction risks.
+
+    The output is ``signal - baseline + median(baseline)`` in float32. Diagnostics
+    reuse the reference health machinery on this exact baseline and independently
+    identify states on a wide time scale. Warnings are nonfatal because the data
+    alone cannot distinguish an event from an intended conductance-level change;
+    they reach both this result and the application's thread-local warning sink.
+    Invalid numeric inputs still raise before any corrected result is returned.
+    """
+    x = require_finite(signal)
+    if x.ndim != 1:
+        raise ValueError(f"signal must be one-dimensional, got shape {x.shape}")
+    pol = derive_polarity(x) if polarity is None else require_polarity(polarity)
+    with collect_baseline_warnings() as captured:
+        base = estimate_baseline(
+            x, fs, method=method, window_s=window_s, polarity=pol, **method_kwargs
+        )
+        reference = float(np.median(base))
+        out = np.asarray(x, dtype=np.float64) - base + reference
+        health = None
+        if method != "constant":
+            cfg = BaselineConfig(
+                method=method, window_s=float(window_s),
+                **{k: method_kwargs[k] for k in
+                   ("rough_s", "base_s", "decim", "mask_sigma", "dilate_ms")
+                   if k in method_kwargs},
+            )
+            health = _detrend_health(
+                np.asarray(x, dtype=np.float64), base, float(fs), cfg, pol)
+            for check in health.checks:
+                if not check.ok:
+                    category = (DetrendAttenuationWarning
+                                if check.name == "detrend_attenuation" else BaselineWarning)
+                    _warn_baseline("Detrend health: " + check.message,
+                                   category=category, stacklevel=3)
+        # SELF-JUDGEMENT: is the output's wander worse than the input's? 'constant' is a
+        # documented no-op (out == signal to the bit) with nothing to measure, and a rate
+        # of None never reaches here (estimate_baseline refuses it first for every other
+        # method). The peak trips the warning; the RMS must corroborate the direction so
+        # one event-owned block -- identical on both sides of the subtraction by
+        # construction of the shared grid -- cannot fake an amplification on its own.
+        if method != "constant":
+            got_in = _block_median_wander(signal, fs, window_s)
+            got_out = _block_median_wander(out, fs, window_s)
+            if got_in is not None and got_out is not None:
+                rms_in, peak_in = got_in
+                rms_out, peak_out = got_out
+                if (np.isfinite(peak_in) and peak_in > 0.0
+                        and peak_out > DETREND_AMPLIFIED_PEAK_RATIO * peak_in
+                        and rms_out > rms_in):
+                    _warn_baseline(
+                        f"the detrend AMPLIFIED the baseline wander it exists to remove: "
+                        f"peak wander {peak_in:.1f} pA in -> {peak_out:.1f} pA out "
+                        f"({100.0 * (peak_out / peak_in - 1.0):+.0f}%), RMS "
+                        f"{rms_in:.1f} -> {rms_out:.1f} pA, measured on "
+                        f"{window_s / _WANDER_BLOCKS_PER_WINDOW:g} s block medians. "
+                        f"Wander with a period between about half the {window_s:g} s "
+                        "window and the window itself is phase-inverted by the block "
+                        "median, so subtracting the estimate ADDS it. A detrend cannot "
+                        "remove wander this fast: strip it with the high-pass stage "
+                        "instead (a detrend window short enough to follow it would eat "
+                        "the events), or disable the detrend.",
+                        category=AmplifiedWanderWarning,
+                        stacklevel=3,
+                    )
+        if (not np.isfinite(out).all()
+                or np.any(np.abs(out) > np.finfo(np.float32).max)):
+            raise ValueError("baseline correction exceeds the finite float32 range")
+        corrected = np.ascontiguousarray(out, dtype=np.float32)
+    return BaselineWanderResult(
+        baseline=base, corrected=corrected, reference=reference, health=health,
+        warnings=tuple(str(w) for w in captured), method=method,
+        window_s=float(window_s), polarity=pol, method_kwargs=dict(method_kwargs),
+        endpoint_policy=baseline_endpoint_policy(method),
+    )
 
 
 def config_intrusion(
@@ -5570,6 +5900,7 @@ def config_intrusion(
         min_depth_pA=INTRUSION_MIN_DEPTH_SIGMA * noise,
         dilate_ms=config.dilate_ms,
         worst_min_dwell_s=float(config.base_s),
+        worst_min_depth_pA=INTRUSION_LONG_MIN_DEPTH_SIGMA * noise,
     )
 
 

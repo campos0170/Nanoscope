@@ -695,12 +695,12 @@ def test_the_documented_allowances_are_still_true():
 
 def test_the_user_guide_has_no_sentence_that_two_groups_wrote_against_each_other():
     """The corrections the integration made to the four groups' paragraphs, pinned: the Numbers
-    row is inside the Style box; Reset figure leaves two colormap rows; the exports follow the
+    row is under Format ▸ Fit label; Reset figure leaves two colormap rows; the exports follow the
     picker's fallback; Distributions' Undo is the exception to 'pick first, then Undo'."""
     guide = (REPO / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
     flat = " ".join(guide.split())
     assert "not in the Style group" not in flat
-    assert "the Style rows under it have no switch for them, except that **Residual strip**" in flat
+    assert "element style controls have no switch for them, except that **Residual strip**" in flat
     assert "Event waveforms keeps its **Event-count heatmap colormap**" in flat
     assert "Noise spectrum its **Spectrogram colormap** and **colour limits**" in flat
     assert "Distributions is the exception: its **Configuration** Undo takes the plot type" in flat

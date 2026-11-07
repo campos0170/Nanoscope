@@ -235,6 +235,10 @@ class Navigator(pg.PlotWidget):
             return
 
         xaxis = self._session.x_axis(layer.doc_id, layer.time_offset_s)
+        axis = self.getPlotItem().getAxis("bottom")
+        axis.enableAutoSIPrefix(False)
+        axis.setScale(1000. if xaxis.is_time else 1.)
+        self.getPlotItem().setLabel("bottom", "ms" if xaxis.is_time else xaxis.unit)
         chan = self._session.calibrated(layer.doc_id, layer.channel)
         if len(xaxis.values) == 0:
             self._extent = None

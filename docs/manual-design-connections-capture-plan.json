@@ -1,0 +1,88 @@
+{
+  "edition": "2026-11-04",
+  "status": "completed-and-approved",
+  "source_revision": null,
+  "capture_manifest": "manual-design-connections-captures.json",
+  "note": "Seven workflow slots are covered by nine installed images from the approved offscreen integration captures. The capture manifest records scope, source fingerprint, image hashes and unchanged-input checks.",
+  "assets": [
+    {
+      "id": "embedded-saved-figure",
+      "section": "Figures, snapshots and publication export",
+      "status": "approved",
+      "manual_image_path": "manual-markdown/images/current_design_saved_view.png",
+      "installation": "Replace the historical current_figure_library.webp illustration only after the new file exists.",
+      "required_evidence": "One selected Snapshot or composition is visible inside Explorer; the only inventory is Figures; matching selected-row/header identity; Update/Undo/Style disabled; common Figure/Data/Bundle exports.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/04-snapshot-in-one-figures-list.png",
+      "sha256": "1556d79bb1fb2f75c3081fb18135b92ce21b9d6670ebbd52f3ba3ad090ea13e9"
+    },
+    {
+      "id": "source-ownership-pending",
+      "section": "Select the actual data, not just the visible recording",
+      "status": "approved",
+      "manual_image_path": "manual-markdown/images/current_design_sources_pending.png",
+      "installation": "Add beside the pinned/follow-selection explanation.",
+      "required_evidence": "Noise source chosen inside its own Sources group, Follow selection off, pending count before Update, and source/header matching the committed picture. Record different main selection in capture metadata.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/01-noise-draft-B-shown-A.png",
+      "sha256": "9e60a6728eebff81980229c15eadbd5573dccf410b9b0488eed667f3692ec3bc"
+    },
+    {
+      "id": "freshness-no-data",
+      "section": "Work with several figures in one project",
+      "status": "approved",
+      "manual_image_path": "manual-markdown/images/current_design_freshness.png",
+      "installation": "Use alongside or replace the older multi-figure screenshot if clearer.",
+      "required_evidence": "Stale row and header agree for a draft metric; reopened never-plotted figure remains No data. Include before/after assertions in manifest rather than fabricating one simultaneous screen.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/05-consistent-stale-state.png",
+      "sha256": "7e255944013da5b8c6afa08d4908d9f2afa3350eea84618c496989ea2482122d",
+      "supporting_assets": [
+        "manual-markdown/images/current_design_no_data.png"
+      ]
+    },
+    {
+      "id": "configuration-import",
+      "section": "Work with several figures in one project",
+      "status": "approved",
+      "manual_image_path": "manual-markdown/images/current_design_json_import.png",
+      "installation": "Add after Import plot settings paragraph.",
+      "required_evidence": "Distributions Data & analysis shows Import plot settings / Import JSON; export menu still offers configuration JSON; use a separate capture if both cannot be shown together.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/10-reachable-json-import.png",
+      "sha256": "696ac97c62f1a2023f0e3373438115a365806cf3472c67851f2c49267d38596e"
+    },
+    {
+      "id": "retained-editor-format",
+      "section": "Styles, source identity and element selection",
+      "status": "approved",
+      "manual_image_path": "manual-markdown/images/current_design_report_format.png",
+      "installation": "Add beside Study/Report Format paragraph.",
+      "required_evidence": "Real Study or Report figure with a selected title/series in shared Format; Details has no competing wording/colour controls; source dataset and selected panel identity recorded.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/06-report-shared-format.png",
+      "sha256": "fd9ec9fabdb889d374c30d4b2020ad9de0b600c1f4c55c74d8a07def4ae1cdb4"
+    },
+    {
+      "id": "global-computer-styles",
+      "section": "Styles, source identity and element selection",
+      "status": "approved",
+      "manual_image_path": "manual-markdown/images/current_design_global_styles.png",
+      "installation": "Replace or supplement current_phase4_styles.png, preserving old provenance if retained.",
+      "required_evidence": "All live scope includes open retained Study/Report editor, and retained style menu offers On this computer. Separate menu images must be declared as an arranged illustration if combined.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/08-all-live-style-scope.png",
+      "sha256": "b6aec069336eef0c9d3cc094bd0a7267942f1afba3c419667fa7269edab652f9",
+      "supporting_assets": [
+        "manual-markdown/images/current_design_computer_styles.png"
+      ]
+    },
+    {
+      "id": "composition-style-export",
+      "section": "Publication-sized export, in dialog order",
+      "status": "approved",
+      "manual_image_path": "manual-markdown/images/current_design_composition_export.png",
+      "installation": "Add beside composition/style export sizing discussion.",
+      "required_evidence": "Composition selected in Figures and export sizing obtained from its own pinned style (canvas and named-column width). Record exact stored binding and offered values; do not imply reference widths are publisher requirements.",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/design-audit-20261104/validation-captures/09-composition-pinned-style-export.png",
+      "sha256": "bc746880465f3bc869c95497d958731f50541e49d9720b444c3360554097d793"
+    }
+  ],
+  "build_command": "/opt/anaconda3/bin/python3 docs/gen_page.py --pdf --zip --pdf-engine reportlab --pdf-python /Users/abrahamcampos/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+  "source_tree_sha256": "88fb000b74a7602bc2df2d6a576e58d96dfa5041e0e2891ed2d572b5c8355c1a",
+  "source_tree_hash_method": "SHA256 over sorted nanoscope/**/*.py relative path + NUL + bytes + NUL"
+}

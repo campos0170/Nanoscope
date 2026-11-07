@@ -54,7 +54,9 @@ def test_save_duplicate_rename_and_bundle_do_not_recompute(window, qtbot, monkey
     assert entry is not None
     assert window._has_work_to_lose() and window._dirty
     library = window._figure_library
-    assert library._list.count() == 1
+    assert library._list is None
+    assert window._analysis_explorer.current_page_id() == entry.artifact_id
+    assert window._analysis_explorer.figures_list().selected_ids("saved") == (entry.artifact_id,)
     assert not library._pixmap.isNull()
     snapshot = FigureSnapshot.from_storage(entry.payload["snapshot"], entry.blobs)
     pd.testing.assert_frame_equal(snapshot.dataframe(), before_data, check_exact=True)
@@ -91,15 +93,18 @@ def test_project_reopen_keeps_library_without_constructing_analysis(window, qtbo
     monkeypatch.setattr(other, "_open_iv", lambda: pytest.fail("Library opened an analysis"))
     other._open_figure_library()
     assert other._iv_window is None
-    assert other._analysis_explorer is None
-    assert other._figure_library._list.count() == 1
+    assert other._analysis_explorer is not None
+    assert other._analysis_explorer.page_count() == 0
+    assert other._figure_library._list is None
+    assert len(other._figure_entries()) == 1
     restored = other._figure_library.current_entry()
     assert restored.blobs == entry.blobs
     assert other._figure_status(restored)[0] == "Saved snapshot"
     out = other._figure_library.export_current(tmp_path / "restored.svg")
     assert out.read_bytes() == entry.blobs["svg"]
     other._reset_analytical_workspace()
-    assert other._figure_library._list.count() == 0
+    assert not other._figure_entries()
+    assert other._figure_library.current_entry() is None
     other._dirty = False
     other._figure_library.close()
 
@@ -137,14 +142,18 @@ def test_library_reveal_uses_exact_exported_filename(window, tmp_path, monkeypat
 def test_library_preview_and_actions_fit_window(window, qtbot, tmp_path):
     window._save_analysis_figure(PAGE_IV, "I–V comparison · publication snapshot")
     library = window._figure_library
-    library.resize(1120, 740)
+    explorer = window._analysis_explorer
+    explorer.resize(1120, 740)
     qtbot.wait(30)
     assert library._preview.width() > 280
     assert library._preview.height() > 220
-    assert all(not button.isHidden() for button in (
-        library._rename_btn, library._duplicate_btn, library._export_btn,
-        library._bundle_btn, library._reveal_btn))
-    assert library.grab().save(str(tmp_path / "figure-library.png"))
+    assert not library.isWindow()
+    assert explorer.figures_list().rename_button.isEnabled()
+    assert explorer.figures_list().duplicate_button.isEnabled()
+    explorer.toolbar()._fill_export_menu()
+    labels = {action.text() for action in explorer.toolbar()._export_menu.actions()}
+    assert {"Figure…", "Data…", "Bundle…"} <= labels
+    assert explorer.grab().save(str(tmp_path / "saved-figure-explorer.png"))
 
 
 @pytest.mark.parametrize("bad_path", [123, [], {}, "relative.svg", "\u0000bad"])

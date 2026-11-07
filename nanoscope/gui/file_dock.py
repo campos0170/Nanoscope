@@ -4,6 +4,8 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from .time_controls import SecondsSpinBox
+
 from ..core.document import Document
 from ..core.layer import ViewMode
 from ..core.segment import SegmentDocument
@@ -187,7 +189,7 @@ class FileDock(QtWidgets.QDockWidget):
 
         self._tree = QtWidgets.QTreeWidget(container)
         self._tree.setColumnCount(4)
-        self._tree.setHeaderLabels(["Channel", "Units", "Colour", "Δt (s)"])
+        self._tree.setHeaderLabels(["Channel", "Units", "Colour", "Δt (ms)"])
         self._tree.setRootIsDecorated(True)
         self._tree.setUniformRowHeights(False)
         self._tree.setAlternatingRowColors(True)
@@ -360,7 +362,7 @@ class FileDock(QtWidgets.QDockWidget):
             font.setItalic(True)
             doc_item.setFont(_COL_NAME, font)
             doc_item.setForeground(_COL_NAME, QtGui.QBrush(QtGui.QColor("#4DB6AC")))
-            when = f" · t₀={o.t0_abs_s:.6g}s" if meta.sample_rate_hz is not None else ""
+            when = f" · t₀={o.t0_abs_s * 1000:.6g}ms" if meta.sample_rate_hz is not None else ""
             doc_item.setToolTip(
                 _COL_NAME,
                 f"segment of {parent_name}\nsamples {o.i0:,}–{o.i1:,}{when}\n\n{_DOC_TIP}")
@@ -407,11 +409,11 @@ class FileDock(QtWidgets.QDockWidget):
         self._install_row_widget(item, _COL_COLOR, wrap)   # the WRAPPER is what the item holds
         self._swatches[layer_id] = swatch
 
-        spin = QtWidgets.QDoubleSpinBox()
+        spin = SecondsSpinBox()
         spin.setDecimals(6)
         spin.setRange(-1e6, 1e6)
         spin.setSingleStep(0.001)
-        spin.setSuffix(" s")
+        spin.setSuffix(" ms")
         spin.setKeyboardTracking(False)
         spin.setToolTip("Shift this layer along the time axis to align it with others")
         spin.valueChanged.connect(lambda val, lid=layer_id: self._on_offset_changed(lid, val))

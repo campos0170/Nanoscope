@@ -299,7 +299,7 @@ def test_unsupported_detector_refuses_without_dispatch(rig, monkeypatch, module)
     assert calls == []
 
 
-def test_legacy_baseline_workspace_refuses_preview_and_export(rig, monkeypatch):
+def test_automatic_comparison_routes_user_reference_to_its_explicit_source(rig, monkeypatch):
     window, panel, _target = rig
     choose_current(panel)
     calls = []
@@ -307,16 +307,16 @@ def test_legacy_baseline_workspace_refuses_preview_and_export(rig, monkeypatch):
     panel._on_baseline_workspace_refresh()
     panel._on_baseline_workspace_export()
     assert calls == []
-    assert "Preview reference and detection" in panel.baseline_workspace.preview_status.text()
+    assert "Choose Current open-pore reference" in panel.baseline_workspace.preview_status.text()
 
 
-def test_baseline_overlay_uses_supplied_signed_current_without_results(rig, monkeypatch):
+def test_baseline_overlay_uses_supplied_signed_current_without_results(rig, monkeypatch, qtbot):
     _window, panel, target = rig
     captured = []
     monkeypatch.setattr(panel._trace_view, "set_baseline_track", lambda *args: captured.append(args))
     choose_current(panel, -118.5)
     panel.baseline_panel.show_track.setChecked(True)
-    assert captured
+    qtbot.waitUntil(lambda: bool(captured), timeout=20000)
     assert captured[-1][:2] == target
     np.testing.assert_array_equal(captured[-1][-1], -118.5)
     assert panel.current_detection() is None

@@ -209,6 +209,9 @@ def _adopt(w, qtbot, doc_id: str):
     w._subpop_signal_pending = signal
     w._subpop_accepted_ids_pending = frozenset(
         int(e) for e in res.payload.accepted.df["event_id"])
+    # The hosted figure callback resolves this launch's durable detection recipe;
+    # mirror the real worker launch rather than falling back to current selection.
+    w._subpop_source_recipe_pending = w._subpop_result_recipe(res)
     w._subpop_target = res
     w._on_subpop_finished(report)
     qtbot.wait(20)
@@ -491,23 +494,34 @@ def test_an_untouched_run_exports_exactly_the_caveats_it_raised(
 # ================================================================================================
 
 def _open_gallery_on_the_report(w, qtbot):
+    before = {
+        "enabled": w._subpop_window._gallery_btn.isEnabled(),
+        "visible": w._subpop_window._gallery_btn.isVisible(),
+        "assignment": w._subpop_window.assignment_state(),
+        "source_recipe": getattr(w._subpop_window, "_nanoscope_workspace_source", None),
+    }
     w._subpop_window._gallery_btn.click()
     qtbot.wait(60)
     gal = w._event_gallery
-    assert gal is not None, "the report's own button opened no gallery"
+    assert gal is not None, ("the report's own button opened no gallery", before,
+                            w._subpop_state(), w.statusBar().currentMessage())
     return gal
 
 
 def test_the_round_trip_puts_back_the_trace_and_the_sample_the_report_turned_on(two, qtbot):
     w, a, b = two
     _adopt(w, qtbot, a)
+    signal = w._subpop_signal
     gal = _open_gallery_on_the_report(w, qtbot)
+    assert w._subpop_signal is signal and gal._pending_detrended is signal
     assert gal.trace_name() == TRACE_DETRENDED
     assert gal.is_representative(), "the report's button no longer turns the sample on"
 
     _focus(w, qtbot, b)
     assert gal.subpopulations() is None
     assert gal.trace_name() == TRACE_CALIBRATED, "the detrended trace was not withdrawn"
+    assert gal._pending_detrended is None
+    assert w._subpop_signal is signal, "navigation destroyed the held original signal"
 
     _focus(w, qtbot, a)
     assert gal.subpopulations() == dict(w._subpop_assignment)
@@ -516,6 +530,7 @@ def test_the_round_trip_puts_back_the_trace_and_the_sample_the_report_turned_on(
     assert gal.is_representative(), (
         "the representative sample came back off, with no word that it had changed")
     assert "representative sample" in gal.status.text(), gal.status.text()
+    assert gal._pending_detrended is signal
 
 
 def test_the_round_trip_restores_the_curators_choice_and_not_the_buttons_default(two, qtbot):
@@ -545,3 +560,164 @@ def test_a_gallery_opened_after_the_round_trip_is_not_told_a_remembered_choice_i
     assert w._subpop_gallery_representative is False
     gal = _open_gallery_on_the_report(w, qtbot)
     assert gal.trace_name() == TRACE_DETRENDED and gal.is_representative()
+
+
+def test_native_gallery_buttons_keep_two_figures_on_their_own_detections(
+        two, qtbot, monkeypatch, tmp_path):
+    w, a, b = two
+    report_a = _adopt(w, qtbot, a)
+    owner = w._figure_workspace
+    page_a = w._subpop_window
+    key_a = owner.id_for_page(page_a)
+    signal_a = w._subpop_signal.copy()
+    assign_a = dict(w._subpop_assignment)
+    gal = _open_gallery_on_the_report(w, qtbot)
+    _focus(w, qtbot, b)
+    assert gal.subpopulations() is None and gal._pending_detrended is None
+    owner.create("subpopulations")
+    _adopt(w, qtbot, b)
+    page_b = w._subpop_window
+    signal_b = w._subpop_signal
+    assign_b = dict(w._subpop_assignment)
+    assert page_b is not page_a
+    _open_gallery_on_the_report(w, qtbot)
+    assert gal.subpopulations() == assign_b and gal._pending_detrended is signal_b
+    _curate(w, qtbot, sorted(_accepted_ids(w, b))[0], False)
+    b_note = w._subpop_curation_note()
+    assert b_note
+    # The dormant A page is unavailable while B is selected. Even a queued action
+    # reaching its connected callback must not touch the held B assignment/trace.
+    assert not page_a._gallery_btn.isEnabled()
+    page_a._gallery_btn.click()
+    page_a.galleryRequested.emit()
+    qtbot.wait(30)
+    assert w._subpop_key[0] == b and w._subpop_signal is signal_b
+    assert gal.subpopulations() == assign_b and gal._pending_detrended is signal_b
+    assert "original detection" in w.statusBar().currentMessage()
+    _focus(w, qtbot, a)
+    assert gal.subpopulations() is None and gal._pending_detrended is None
+    assert owner.activate(key_a)
+    assert page_a._gallery_btn.isEnabled(), page_a.assignment_state()
+    assert page_a.assignment_state()[0] == SW.ASSIGNMENT_READY
+    assert "apply its stored classes" in page_a.live_note_full()
+    assert w._subpop_signal is signal_b and w._subpop_assignment == assign_b
+    assert gal.subpopulations() is None and gal._pending_detrended is None
+    assert not page_a.curation_note()
+    _, meta = _export(w, qtbot, monkeypatch, tmp_path)
+    assert list(meta["warnings"]) == list(report_a.warnings)
+    for event_id in sorted(_accepted_ids(w, a))[:2]:
+        _curate(w, qtbot, event_id, False)
+    a_note = page_a.curation_note()
+    assert a_note and a_note != b_note
+    text, meta = _export(w, qtbot, monkeypatch, tmp_path)
+    assert a_note in text and b_note not in text
+    assert any(a_note in warning for warning in meta["warnings"])
+    page_a._gallery_btn.click()
+    qtbot.wait(30)
+    assert w._subpop_key[0] == a and w._subpop_assignment_figure_id == key_a
+    assert gal.subpopulations() == assign_a and gal.trace_name() == TRACE_DETRENDED
+    np.testing.assert_array_equal(gal._pending_detrended, signal_a)
+    assert gal._pending_detrended is not signal_b
+
+
+@pytest.mark.parametrize("saved_state", ["installed", "ready"])
+def test_reopened_native_gallery_reconstructs_original_trace_without_recomputing_report(
+        two, qtbot, tmp_path, saved_state):
+    w, a, b = two
+    report = _adopt(w, qtbot, a)
+    key = w._figure_workspace.id_for_page(w._subpop_window)
+    expected = w._subpop_signal.copy()
+    expected_assignment = dict(w._subpop_assignment)
+    if saved_state == "ready":
+        _focus(w, qtbot, b)
+        w._figure_workspace.create("subpopulations")
+        _adopt(w, qtbot, b)
+        _focus(w, qtbot, a)
+        assert w._figure_workspace.activate(key)
+        assert w._subpop_window.assignment_state()[0] == SW.ASSIGNMENT_READY
+        assert not w._subpop_window.curation_note()
+    project = tmp_path / "gallery-original-source.nanoscope"
+    assert w._write_project(str(project))
+    reopened = MainWindow(); qtbot.addWidget(reopened)
+    reopened._confirm_close_choice = lambda: "discard"
+    with qtbot.waitSignal(reopened.projectRestored, timeout=30_000):
+        reopened._open_project(str(project))
+    docs = {doc.meta.path.name: doc.doc_id for doc in reopened._session.documents()}
+    reopened._on_selection(docs["a.csv"], 0)
+    owner = reopened._ensure_figure_workspace()
+    assert owner.activate(key)
+    page = owner.page(key); retained = page.report()
+    assert reopened._subpop_assignment is None and reopened._subpop_signal is None
+    assert page.assignment_state()[0] == SW.ASSIGNMENT_READY
+    assert not page.curation_note()
+    assert page._nanoscope_workspace_source_result is reopened._analysis_panel.current_detection()
+    gal = _open_gallery_on_the_report(reopened, qtbot)
+    assert gal.trace_name() == TRACE_DETRENDED and gal.subpopulations() == expected_assignment
+    np.testing.assert_array_equal(gal._pending_detrended, expected)
+    pd.testing.assert_frame_equal(retained.features, report.features)
+    assert page.report() is retained and not reopened._subpop_pending
+    assert not page.curation_note()
+    assert page._nanoscope_workspace_source_result.doc_id == docs["a.csv"]
+    reopened._analysis_controller.abort(); reopened._controller.abort()
+
+
+def test_native_gallery_after_curation_keeps_run_trace_and_discloses_original_fraction(two, qtbot):
+    w, a, _b = two
+    report = _adopt(w, qtbot, a)
+    signal = w._subpop_signal
+    _curate(w, qtbot, sorted(_accepted_ids(w, a))[0], False)
+    gal = _open_gallery_on_the_report(w, qtbot)
+    assert gal._pending_detrended is signal and gal.trace_name() == TRACE_DETRENDED
+    assert w._subpop_window.report() is report
+    assert w._subpop_window.curation_note()
+    assert w._subpop_n_fired == report.n_fired
+
+
+def test_no_mixture_report_export_does_not_borrow_other_figures_curation(
+        two, qtbot, monkeypatch, tmp_path):
+    from dataclasses import replace
+    w, a, b = two
+    report_a = _adopt(w, qtbot, a)
+    owner = w._figure_workspace
+    key_a = owner.id_for_page(w._subpop_window)
+    _focus(w, qtbot, b)
+    owner.create("subpopulations")
+    _adopt(w, qtbot, b)
+    _curate(w, qtbot, sorted(_accepted_ids(w, b))[0], False)
+    assert w._subpop_curation_note()
+    assert owner.activate(key_a)
+    page_a = owner.page(key_a)
+    page_a.set_report(replace(report_a, quantification=None))
+    _, meta = _export(w, qtbot, monkeypatch, tmp_path)
+    assert not page_a.curation_note()
+    assert page_a.assignment_state()[0] == SW.ASSIGNMENT_NONE
+    assert not page_a._gallery_btn.isEnabled()
+    assert list(meta["warnings"]) == list(report_a.warnings)
+
+
+@pytest.mark.parametrize("change", ["replacement", "missing", "calibration"])
+def test_native_gallery_refuses_replaced_missing_or_stale_source(two, qtbot, change):
+    from dataclasses import replace
+    w, a, _b = two
+    report = _adopt(w, qtbot, a)
+    page = w._subpop_window
+    result = w._session.results.get(a, 0, SCHMITT)
+    assert page._gallery_btn.isEnabled()
+    if change == "replacement":
+        w._session.add_result(replace(result, payload=replace(
+            result.payload, df=result.payload.df.copy())))
+    elif change == "missing":
+        w._session.close_document(a)
+    else:
+        calibration = w._session.calibration(a, 0)
+        w._session.set_calibration(a, 0, replace(calibration, gain=2.))
+    # Closure/replacement disable native controls immediately; a queued action
+    # still reaching the connected callback must independently validate its source.
+    if change in ("replacement", "missing"):
+        assert not page._gallery_btn.isEnabled()
+    page._gallery_btn.click()
+    page.galleryRequested.emit(); qtbot.wait(30)
+    assert w._event_gallery is None and page.report() is report
+    reason = w.statusBar().currentMessage()
+    assert reason and "fitted no mixture" not in reason
+    assert any(word in reason.lower() for word in ("replaced", "unavailable", "not", "stale", "changed")), reason

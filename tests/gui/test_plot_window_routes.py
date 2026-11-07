@@ -383,7 +383,9 @@ def test_a_range_pinned_on_the_event_count_map_stays_the_maps_through_the_ensemb
     assert not page._logx.isChecked()
     lo, hi = mp.getViewBox().viewRange()[0]
     pin = (float(f"{lo + 0.2 * (hi - lo):g}"), float(f"{lo + 0.7 * (hi - lo):g}"))
-    _pin_through_axis_properties(mp, "bottom", *pin)
+    # ViewBox coordinates are seconds; the visible dwell range editor uses ms.
+    display_pin = tuple(value * 1000.0 for value in pin)
+    _pin_through_axis_properties(mp, "bottom", *display_pin)
     assert set(page.appearance_state()["axes"]) == {"map.bottom"}
     assert mp.getViewBox().viewRange()[0] == pytest.approx(pin, rel=1e-4)
     bar = page._tabs.tabBar()
@@ -402,7 +404,7 @@ def test_a_range_pinned_on_the_event_count_map_stays_the_maps_through_the_ensemb
     QtTest.QTest.mouseClick(bar, L, NOMOD, bar.tabRect(0).center())
     QtWidgets.QApplication.processEvents()
     assert mp.getViewBox().viewRange()[0] == pytest.approx(pin, rel=1e-4)
-    assert figure_text_for(mp).host.axis_state("bottom").range == pytest.approx(pin)
+    assert figure_text_for(mp).host.axis_state("bottom").range == pytest.approx(display_pin)
     assert set(page.appearance_state()["axes"]) == {"map.bottom"}
 
 
@@ -469,9 +471,11 @@ def test_a_noise_range_saved_before_pins_were_per_view_frames_only_the_psd(
     with qtbot.waitSignal(window.projectRestored, timeout=20_000):
         window._begin_restore(ProjectState(documents=[DocumentRef(str(recording))]))
     window._open_psd()
+    window._analysis_explorer.update_current()
     QtWidgets.QApplication.processEvents()
     page = window._psd_window
     assert page.has_data()
+    figure_id = window._figure_workspace.current_id()
     _pin_through_axis_properties(page._plot, "bottom", 10.0, 1000.0)
     assert page.appearance_state()["axes"] == {"psd.bottom": {"min": 10.0, "max": 1000.0}}
     saved = tmp_path / "pinned.nanoscope"
@@ -487,24 +491,29 @@ def test_a_noise_range_saved_before_pins_were_per_view_frames_only_the_psd(
                 renamed += data.count(b'"psd.bottom"')
                 data = data.replace(b'"psd.bottom"', b'"bottom"')
             dst.writestr(info, data)
-    assert renamed == 1
+    # The native binding ledger also records the axis key in v13. Both copies
+    # must describe the same legacy bare pin; the assertions below check its
+    # restored meaning, independent of how many serialization witnesses exist.
+    assert renamed >= 1
 
     reopened = _main_window(qtbot)
     with qtbot.waitSignal(reopened.projectRestored, timeout=20_000):
         reopened._open_project(str(older))
-    reopened._open_psd()
+    assert reopened._figure_workspace.activate(figure_id)
     QtWidgets.QApplication.processEvents()
-    page = reopened._psd_window
+    page = reopened._figure_workspace.page(figure_id)
     assert page.appearance_state()["axes"] == {"bottom": {"min": 10.0, "max": 1000.0}}
     host = figure_text_for(page._plot).host
     assert host.axis_state("bottom").range == pytest.approx((10.0, 1000.0))
     assert host.axis_state("bottom").shown_range == pytest.approx((10.0, 1000.0), rel=1e-3)
     _choose_in_combo(page._view_combo, VIEW_ALLPOINTS)
+    reopened._analysis_explorer.update_current()
     assert _allpoints_framed(page)
     assert figure_text_for(page._hist_plot).host.axis_state("bottom").range is None
     # Typed again on the PSD, the range moves to the PSD's own key, as one Undo step that
     # names the axis it changed.
     _choose_in_combo(page._view_combo, "psd")
+    reopened._analysis_explorer.update_current()
     _pin_through_axis_properties(page._plot, "bottom", 20.0, 500.0)
     assert page.appearance_state()["axes"] == {"psd.bottom": {"min": 20.0, "max": 500.0}}
     assert page._appearance_widget.undo_button.toolTip() == "Undo: x axis range 20–500"
@@ -673,8 +682,17 @@ def _restored_main_window(qtbot, tmp_path, monkeypatch):
 
 def _click_tab(explorer, page):
     tabs = explorer._tabs
-    bar = tabs.tabBar()
-    QtTest.QTest.mouseClick(bar, L, NOMOD, bar.tabRect(tabs.indexOf(page)).center())
+    owner = explorer.figure_workspace()
+    if owner is not None:
+        listing = explorer.figures_list()
+        explorer.refresh_figures()
+        item = listing._items[owner.id_for_page(page)]
+        listing.tree.scrollToItem(item)
+        QtTest.QTest.mouseClick(listing.tree.viewport(), L, NOMOD,
+                               listing.tree.visualItemRect(item).center())
+    else:
+        bar = tabs.tabBar()
+        QtTest.QTest.mouseClick(bar, L, NOMOD, bar.tabRect(tabs.indexOf(page)).center())
     QtWidgets.QApplication.processEvents()
     assert tabs.currentWidget() is page
 
@@ -683,12 +701,14 @@ def test_in_the_explorer_only_the_page_in_front_answers_the_undo_key(
         qapp, qtbot, tmp_path, monkeypatch):
     """FIG-4 inside the real Analysis Explorer, where the pages share one window: the key
     reaches the page in front, never one behind it, and never Edit ▸ Undo (another window).
-    A tab switch refreshes the page, and its pinned range survives that too (FIG-2)."""
+    Figure selection preserves the committed result and its pinned range (FIG-2)."""
     window = _restored_main_window(qtbot, tmp_path, monkeypatch)
     window._open_iv()
     iv = window._iv_window
+    iv.inspector_adapter().update()
     window._open_psd()
     noise = window._psd_window
+    noise.inspector_adapter().update()
     explorer = window._analysis_explorer
     _click_tab(explorer, iv)
     plot = iv.plot_item()
@@ -703,7 +723,7 @@ def test_in_the_explorer_only_the_page_in_front_answers_the_undo_key(
     _press_undo(noise)
     assert axis.label.toPlainText().strip() == "Bias", "the page behind answered"
     assert iv_history.depth() == iv_depth and noise_history.depth() == noise_depth
-    _click_tab(explorer, iv)           # a tab switch refreshes I-V (MainWindow)
+    _click_tab(explorer, iv)           # selecting the figure does not recompute it
     assert _shown(plot) == pytest.approx((-700.0, -300.0))
     _press_undo(iv)
     assert axis.label.toPlainText().strip() == automatic
@@ -762,6 +782,7 @@ def test_a_dragged_caption_is_saved_with_the_project_and_reopens_there(
     _install_series(window, ())
     window._open_vdep()
     page = window._vdep_window
+    page.inspector_adapter().update()
     QtWidgets.QApplication.processEvents()
     assert page.caption_text(), "the series has a caption to drag"
     _caption_drag(page)
@@ -810,7 +831,9 @@ def test_a_summaries_generate_puts_a_pinned_range_back_in_view(summaries):
     QtTest.QTest.mouseClick(button, L)
     QtWidgets.QApplication.processEvents()
     assert _shown(plot) == pytest.approx((1.5, 3.0))
-    plot.getViewBox().setXRange(2.0, 2.5, padding=0)       # a zoom by hand…
+    scale = plot.getAxis('bottom').scale
+    plot.getViewBox().setXRange(2.0 / scale, 2.5 / scale, padding=0)  # zoom to 2–2.5 displayed ms
+    assert _shown(plot) == pytest.approx((2.0, 2.5))
     _edit_double_click(plot, plot.titleLabel, "Dwell ECDF")
     assert _shown(plot) == pytest.approx((2.0, 2.5))        # …kept by an appearance step
 
@@ -848,7 +871,9 @@ def test_a_summaries_pin_does_not_frame_a_type_with_other_axes(summaries, kind, 
         check()
         assert _shown(plot, "bottom") == pytest.approx((-0.6, 0.6))
         lo, hi = _shown(plot, "left")
-        assert lo <= 1.0 and hi >= 4.0, (lo, hi)
+        scale = plot.getAxis('left').scale
+        assert scale == 1000, 'Dwell seconds are displayed in milliseconds'
+        assert lo <= 1.0 * scale and hi >= 4.0 * scale, (lo, hi)
     assert figure_text_for(plot).host.axis_state(side).range is None
     assert page._appearance_widget._history.depth() == steps, "a Type change is no appearance step"
     _generate(page, "survival" if side == "bottom" else "ecdf")
@@ -897,7 +922,7 @@ def test_a_summaries_legend_rename_is_one_undo_step(summaries):
     assert page.source_appearance_state()["measurements"]["label"] == "Apo <1>"
     assert widget._history.depth() == (depth[0] + 1, 0)
     assert widget.undo_button.isEnabled()
-    assert widget.undo_button.toolTip() == "Undo: legend ‘Measured events’ ‘Apo <1>’"
+    assert widget.undo_button.toolTip() == "Undo: source names and colors"
     assert page._source_appearance_editor.state()["measurements"]["label"] == "Apo <1>"
     _press_undo(page)
     assert _legend_text(page).startswith("Measured events · n=4")
@@ -915,27 +940,29 @@ def test_a_summaries_legend_rename_is_one_undo_step(summaries):
 
 
 def test_a_name_set_in_source_names_is_where_undo_and_redo_land(summaries):
-    """A name applied in Source names and colors (not a step) between figure renames: Undo
-    takes back the figure's rename to the name before it, and Redo lands on the name the
-    editor set, never on one it replaced."""
+    """Canvas and source-editor renames are consecutive steps in the same history."""
     page = summaries
     widget = page._appearance_widget
     _edit_double_click(page._plot, _legend_row(page), "A")
     editor = page._source_appearance_editor
     editor.label.setText("B")
-    QtTest.QTest.mouseClick(editor.apply, L)
+    editor.apply.click()  # hidden compatibility route; visible renames use Format/legend
     assert page.source_appearance_state()["measurements"]["label"] == "B"
     assert widget.undo()
+    assert page.source_appearance_state()["measurements"]["label"] == "A"
+    assert widget.undo()
     assert "measurements" not in page.source_appearance_state()
+    assert widget.redo()
+    assert page.source_appearance_state()["measurements"]["label"] == "A"
     assert widget.redo()
     assert page.source_appearance_state()["measurements"]["label"] == "B"
 
 
 def _editor_rename(page, text):
-    """Source names and colors: type the label, click Apply to figure."""
+    """Exercise the retained legacy source-edit API beside visible canvas editing."""
     editor = page._source_appearance_editor
     editor.label.setText(text)
-    QtTest.QTest.mouseClick(editor.apply, L)
+    editor.apply.click()
     QtWidgets.QApplication.processEvents()
 
 
@@ -956,10 +983,8 @@ def test_reset_figure_after_a_legend_rename_records_no_empty_step(summaries):
     assert _legend_text(page).startswith("Measured events · n=4")
 
 
-def test_undoing_a_template_that_dropped_a_name_keeps_a_name_set_after_it(summaries):
-    """A template recall drops the legend name's carrier (templates carry no names). A name
-    then set in Source names and colors was overwritten by the Undo of the recall, which
-    brought the carrier back and read it as a rename."""
+def test_source_rename_and_template_recall_undo_in_edit_order(summaries):
+    """A recipe preserves source identity, and the later source edit has its own Undo."""
     page = summaries
     _edit_double_click(page._plot, _legend_row(page), "Apo")
     settings, _appearance = page.template_settings()
@@ -967,9 +992,12 @@ def test_undoing_a_template_that_dropped_a_name_keeps_a_name_set_after_it(summar
     QtWidgets.QApplication.processEvents()
     assert page.source_appearance_state()["measurements"]["label"] == "Apo"
     _editor_rename(page, "Typed in editor")
-    _press_undo(page)                       # takes back the template
+    _press_undo(page)                       # takes back the later source edit
+    assert page._appearance_widget.state().title == "From template"
+    assert page.source_appearance_state()["measurements"]["label"] == "Apo"
+    _press_undo(page)                       # then takes back the template
     assert page._appearance_widget.state().title != "From template"
-    assert page.source_appearance_state()["measurements"]["label"] == "Typed in editor"
+    assert page.source_appearance_state()["measurements"]["label"] == "Apo"
 
 
 # -- Add title… in every window ------------------------------------------------------------------

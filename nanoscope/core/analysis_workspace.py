@@ -632,6 +632,20 @@ def _type_name(value: type) -> str:
     return f"{value.__module__}:{value.__qualname__}"
 
 
+def _plain_quantity_display(value):
+    """The display witness is strict JSON, including unknown future arrays."""
+    from .figure_spec import freeze_json, thaw_json
+    return thaw_json(freeze_json(value))
+
+
+def _plain_style_binding(value):
+    """Native frozen maps may contain tuples; style snapshots contain JSON arrays."""
+    from .figure_spec import freeze_json, thaw_json
+    from .figure_style import normalize_style_binding
+    plain = thaw_json(freeze_json(value))
+    return normalize_style_binding(plain) if plain else plain
+
+
 def _encode(value: Any, resources: _Resources, hint: str) -> Any:
     """Encode a value tree into JSON metadata plus copied table/blob resources."""
 
@@ -692,7 +706,10 @@ def _encode(value: Any, resources: _Resources, hint: str) -> Any:
         return {
             _TAG: "dataclass",
             "type": _type_name(type(value)),
-            "fields": {f.name: _encode(getattr(value, f.name), resources, f"{hint}.{f.name}")
+            "fields": {f.name: (_plain_style_binding(getattr(value, f.name))
+                                if f.name == "style_binding" else
+                                _plain_quantity_display(getattr(value, f.name)) if f.name in ("quantity_display", "series_styles") else
+                                _encode(getattr(value, f.name), resources, f"{hint}.{f.name}"))
                        for f in fields(value)},
         }
     if isinstance(value, tuple) and hasattr(value, "_fields"):
@@ -897,6 +914,13 @@ def _preprocessing(frame: pd.DataFrame | None, result: Any) -> dict[str, Any]:
 def _plot_source_recipe(window: Any, source: Any) -> dict[str, Any]:
     """Durable identity of one PlotSource, never its launch-local key alone."""
 
+    frozen_recipe = getattr(window, "_frozen_plot_source_recipe", None)
+    if callable(frozen_recipe):
+        carried = frozen_recipe(source)
+        if carried is not None:
+            if not isinstance(carried, Mapping):
+                raise TypeError("Frozen plot source capture must return a recipe mapping or None")
+            return _clone_plain(dict(carried))
     kind = str(getattr(source, "kind", "detection") or "detection")
     if kind == "manual":
         return {
@@ -930,6 +954,17 @@ def _plot_source_recipe(window: Any, source: Any) -> dict[str, Any]:
 def _resolve_plot_recipe(window: Any, recipe: Mapping[str, Any], *,
                          require_same_rows: bool = False) -> tuple[str | None, str | None]:
     """Map one saved PlotSource recipe onto the source key offered in this session."""
+
+    frozen_resolver = getattr(window, "_resolve_frozen_plot_source", None)
+    if callable(frozen_resolver):
+        # A Phase 2 figure can own a frozen source catalog even when the recording
+        # is closed. Its temporary resolver owns exact recipe/fingerprint matching;
+        # a refusal must not fall through and silently retarget a live source.
+        resolved = frozen_resolver(recipe, require_same_rows=require_same_rows)
+        if (not isinstance(resolved, tuple) or len(resolved) != 2
+                or any(value is not None and not isinstance(value, str) for value in resolved)):
+            raise TypeError("Frozen plot source resolver must return (key, warning)")
+        return resolved
 
     candidates: list[tuple[str, Any, str | None]] = []
     for key, source in dict(getattr(window, "_sources", {}) or {}).items():
@@ -1019,6 +1054,94 @@ def _decode_plot_fit(value: Any, artifact: WorkspaceArtifact) -> Any:
     return _decode(value, artifact.tables, artifact.blobs)
 
 
+def _capture_fit_display(window: Any, resources: _Resources) -> Any:
+    """Preserve evaluated diagnostics in their displayed units, without rerunning statistics."""
+    bands = []
+    for entry in getattr(window, "_presentation_bands", ()):
+        values = list(entry)
+        if hasattr(values[3], "name"):
+            values[3] = values[3].name()
+        bands.append(values)
+    return _encode({
+        "version": 1, "bands": bands,
+        "residual": getattr(window, "_presentation_residual", None),
+        "residual_note": getattr(window, "_presentation_residual_note", ""),
+    }, resources, "fit_display")
+
+
+def _restore_fit_display(window: Any, artifact: WorkspaceArtifact) -> None:
+    """Install saved geometry after the base plot has been drawn; never invoke a fitter."""
+    raw = artifact.payload.get("fit_display")
+    if not raw:
+        return
+    value = _decode(raw, artifact.tables, artifact.blobs)
+    if not isinstance(value, Mapping) or value.get("version") != 1:
+        raise ValueError("Unsupported fit display snapshot")
+    bands = value.get("bands", [])
+    if not isinstance(bands, list) or len(bands) > 128:
+        raise ValueError("Invalid fit confidence-band snapshot")
+    for band in bands:
+        if not isinstance(band, (list, tuple)) or len(band) not in (6, 7):
+            raise ValueError("Invalid fit confidence-band coordinates")
+        arrays = [np.asarray(v, dtype=float) for v in band[:3]]
+        if any(a.ndim != 1 or a.size > 1_000_000 or np.isinf(a).any() for a in arrays):
+            raise ValueError("Invalid fit confidence-band coordinates")
+        if len({a.size for a in arrays}) != 1:
+            raise ValueError("Mismatched fit confidence-band coordinates")
+    residual = value.get("residual")
+    if residual is not None:
+        if not isinstance(residual, (tuple, list)) or len(residual) != 2:
+            raise ValueError("Invalid fit residual snapshot")
+        data = residual[0]
+        if not isinstance(data, Mapping):
+            raise ValueError("Invalid fit residual snapshot")
+        centers = np.asarray(data.get("centers"), dtype=float)
+        values = np.asarray(data.get("residual"), dtype=float)
+        if (centers.ndim != 1 or values.ndim != 1 or centers.size != values.size
+                or centers.size > 1_000_000 or not np.isfinite(centers).all()
+                or np.isinf(values).any()):
+            raise ValueError("Invalid fit residual coordinates")
+    # A legacy draw-only restore may have reconstructed approximate ornaments.
+    # Replace them with the saved geometry rather than layering duplicate bands.
+    plot = getattr(window, "_plot", None)
+    if plot is not None:
+        for item in getattr(window, "_band_items", ()):
+            plot.removeItem(item)
+        window._band_items = []
+    clear_residual = getattr(window, "_clear_residual_strip", None)
+    if callable(clear_residual):
+        clear_residual()
+    window._presentation_bands = bands
+    window._presentation_residual = residual
+    window._presentation_residual_ready = residual is not None
+    window._presentation_residual_note = str(value.get("residual_note", ""))
+    restyle = getattr(window, "_restyle_committed_decorations", None)
+    if callable(restyle):
+        restyle()
+
+
+def _capture_nonlinear_fit(window: Any) -> Any:
+    capture = getattr(window, "nonlinear_fit_state", None)
+    value = capture() if callable(capture) else None
+    return _clone_plain(value if value is not None else
+                        getattr(window, "_nanoscope_unresolved_nonlinear_fit", None))
+
+
+def _restore_nonlinear_fit(window: Any, artifact: WorkspaceArtifact, *, validate_source=False) -> bool:
+    restore = getattr(window, "restore_nonlinear_fit_state", None)
+    if callable(restore):
+        state = _clone_plain(artifact.payload.get("nonlinear_fit"))
+        controller = getattr(window, "_nonlinear_controller", None)
+        if state and validate_source and callable(controller) and not controller()._matches(state):
+            window._nanoscope_unresolved_nonlinear_fit = state
+            restore(None)
+            return False
+        restore(state)
+        if hasattr(window, "_nanoscope_unresolved_nonlinear_fit"):
+            delattr(window, "_nanoscope_unresolved_nonlinear_fit")
+    return True
+
+
 # -------------------------------------------------------------------------------------------------
 # Plots: whole PlotConfig + current PCA and current GMM/k-means result.
 # -------------------------------------------------------------------------------------------------
@@ -1051,6 +1174,8 @@ def capture_plots(window: Any) -> WorkspaceArtifact:
         "cluster": None,
         "pca": None,
         "fits": [],
+        "fit_display": _capture_fit_display(window, resources),
+        "nonlinear_fit": _capture_nonlinear_fit(window),
     }
 
     for key, fit in dict(getattr(window, "_fits", {}) or {}).items():
@@ -1253,6 +1378,17 @@ def restore_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
         render = getattr(window, "_render_workspace_snapshot", None)
         if callable(render):
             render()
+        try:
+            # A direct/legacy restore can resolve only part of an overlay. Never
+            # draw ornaments belonging to a fit whose source failed validation.
+            if len(restored_fits) == len(payload.get("fits", ())):
+                _restore_fit_display(window, artifact)
+            if not _restore_nonlinear_fit(window, artifact, validate_source=True):
+                warnings.append("saved nonlinear result retained without its overlay because its plotted source changed")
+        except (ValueError, TypeError, KeyError) as exc:
+            warnings.append(f"one saved fitting display was invalid and was skipped: {exc}")
+    elif payload.get("nonlinear_fit"):
+        window._nanoscope_unresolved_nonlinear_fit = _clone_plain(payload["nonlinear_fit"])
     if carry_cluster is not None or carry_pca is not None or carried_fits:
         setattr(window, "_nanoscope_unresolved_plot_results", {
             "artifact": _clone_artifact(artifact),
@@ -1368,6 +1504,9 @@ def restore_subpopulation(window: Any, artifact: WorkspaceArtifact) -> RestoreRe
 
 
 def _psd_target_key(window: Any) -> str | None:
+    pending_key = getattr(window, '_pending_target_key', None)
+    if callable(pending_key):
+        return pending_key() or None
     getter = getattr(window, "_current_target", None)
     target = getter() if callable(getter) else None
     for record in list(getattr(window, "_recordings", ())):
@@ -1405,7 +1544,35 @@ def _restore_appearance(window: Any, payload: Mapping) -> None:
         restore(value if isinstance(value, Mapping) else {})
 
 
+def _capture_pending_analysis(window, capture):
+    pending = getattr(window, '_pending_analysis', None)
+    if pending is None:
+        return capture(window)
+    draft = pending.saved_draft()
+    with pending.committed():
+        artifact = capture(window)
+    return replace(artifact, payload={**artifact.payload, 'pending_analysis': draft})
+
+
+def _restore_pending_analysis(window, artifact, restore):
+    pending = getattr(window, '_pending_analysis', None)
+    if pending is None:
+        return restore(window, artifact)
+    with pending.applying():
+        report = restore(window, artifact)
+    if not report.skipped:
+        try:
+            pending.restore(artifact.payload.get('pending_analysis'))
+        except (ValueError, TypeError, KeyError) as exc:
+            return RestoreReport(skipped=(artifact.artifact_id,), warnings=(str(exc),))
+    return report
+
+
 def capture_psd(window: Any) -> WorkspaceArtifact:
+    return _capture_pending_analysis(window, _capture_psd)
+
+
+def _capture_psd(window: Any) -> WorkspaceArtifact:
     resources = _Resources()
     style = window.style()
     remembered_curve_list = [item for item in
@@ -1419,12 +1586,9 @@ def capture_psd(window: Any) -> WorkspaceArtifact:
     for index, curve in enumerate(window.curves()):
         table = pd.DataFrame({"frequency_hz": np.asarray(curve.freqs),
                               "psd": np.asarray(curve.psd)})
-        calibration_fingerprint = None
-        try:
-            calibration_fingerprint = list(
-                window._session.calibration(curve.doc_id, int(curve.channel)).fingerprint())
-        except (AttributeError, KeyError, TypeError, ValueError):
-            pass
+        computed_calibration = getattr(curve, 'calibration_fingerprint', None)
+        calibration_fingerprint = (None if computed_calibration is None
+                                   else list(computed_calibration))
         identity = _stable_source(window, str(curve.doc_id), int(curve.channel))
         if not identity["source_key"]:
             carried = remembered_curves.get(str(curve.key))
@@ -1464,6 +1628,10 @@ def capture_psd(window: Any) -> WorkspaceArtifact:
     ]
     for carried in getattr(window, "_nanoscope_unresolved_psd_compare", ()) or ():
         if isinstance(carried, Mapping):
+            if callable(getattr(window, '_pending_compares', None)):
+                key = f"{carried.get('source_key')}#{carried.get('channel')}"
+                if key not in window.compare_keys():
+                    continue  # Deliberately unchecked; do not resurrect it on reopen.
             compare_sources.append(_clone_plain(dict(carried)))
     payload = {
         "config": {
@@ -1541,6 +1709,10 @@ def _blocked(widget: Any, action: Any) -> None:
 
 
 def restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
+    return _restore_pending_analysis(window, artifact, _restore_psd)
+
+
+def _restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
     ok, reason = _artifact_ok(artifact, PSD_ARTIFACT_ID)
     if not ok:
         return RestoreReport(skipped=(PSD_ARTIFACT_ID,), warnings=(reason,))
@@ -1574,6 +1746,12 @@ def restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
                     select((target_record["doc_id"], int(target_record["channel"])))
             else:
                 warnings.append(f"PSD target {target_key!r} is not open")
+
+        select_key = getattr(window, '_pending_target', None)
+        if target_key and callable(select_key):
+            # Keep an unavailable identity visible beside the durable result.  A
+            # new runtime document id is resolved through the stable recording key.
+            select_key(target_record['key'] if target_record is not None else str(target_key))
 
         getattr(window, "_start_spin").setValue(float(config.get("start_s", 0.0)))
         getattr(window, "_end_spin").setValue(float(config.get("end_s", 0.0)))
@@ -1645,6 +1823,13 @@ def restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
             setattr(window, "_nanoscope_unresolved_psd_compare", unresolved_compare)
         else:
             wanted_compare = {str(v) for v in config.get("compare_keys", ())}
+        if unresolved_compare:
+            # Frozen comparison arrays keep their unresolved identities until the
+            # user deliberately removes them or reopens the source recording.
+            wanted_compare.update(str(v) for v in config.get('compare_keys', ()))
+        select_compares = getattr(window, '_pending_compares', None)
+        if callable(select_compares):
+            select_compares(sorted(wanted_compare))
         compare_list = getattr(window, "_compare_list", None)
         if compare_list is not None:
             for index in range(compare_list.count()):
@@ -1705,6 +1890,8 @@ def restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
                 constant=bool(raw_curve.get("constant", False)),
                 underflow=bool(raw_curve.get("underflow", False)),
                 time_rms=float(raw_curve.get("time_rms", 0.0)),
+                calibration_fingerprint=(None if raw_curve.get('calibration_fingerprint') is None
+                                         else tuple(raw_curve['calibration_fingerprint'])),
             )
             curves.append(curve)
             saved_cal = raw_curve.get("calibration_fingerprint")
@@ -1781,6 +1968,10 @@ def restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
 
 
 def capture_event_plots(window: Any) -> WorkspaceArtifact:
+    return _capture_pending_analysis(window, _capture_event_plots)
+
+
+def _capture_event_plots(window: Any) -> WorkspaceArtifact:
     resources = _Resources()
     source = _event_window_source_recipe(window)
     amplitude_snapshot = bool(getattr(window, "_amplitude_frozen_snapshot", False))
@@ -1855,6 +2046,10 @@ def _set_text(owner: Any, attr: str, value: Any) -> None:
 
 
 def restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
+    return _restore_pending_analysis(window, artifact, _restore_event_plots)
+
+
+def _restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
     ok, reason = _artifact_ok(artifact, EVENT_PLOTS_ARTIFACT_ID)
     if not ok:
         return RestoreReport(skipped=(EVENT_PLOTS_ARTIFACT_ID,), warnings=(reason,))
@@ -1923,6 +2118,9 @@ def restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreRepo
         source = artifact.payload.get("source")
         if isinstance(source, Mapping):
             setattr(window, "_nanoscope_workspace_event_source", _clone_plain(dict(source)))
+            set_pending_source = getattr(window, '_set_pending_source_recipe', None)
+            if callable(set_pending_source):
+                set_pending_source(_clone_plain(dict(source)))
             live = _event_window_source_recipe(window)
             if live is None:
                 warnings.append(
@@ -1986,7 +2184,7 @@ def restore_event_plots(window: Any, artifact: WorkspaceArtifact) -> RestoreRepo
             window._updating = False
         return RestoreReport(skipped=(EVENT_PLOTS_ARTIFACT_ID,),
                              warnings=(f"could not restore event-plot configuration: {exc}",))
-    if not window.has_data():
+    if _event_window_source_recipe(window) is None:
         warnings.append("event-plot controls were restored, but MainWindow has not rebound an event source")
     return RestoreReport(restored=(EVENT_PLOTS_ARTIFACT_ID,), warnings=tuple(warnings))
 
@@ -2033,6 +2231,7 @@ def capture_iv(window: Any) -> WorkspaceArtifact:
         "exclusions": exclusions,
         "appearance": _capture_appearance(window),
         "fit": _encode(window.fit(), resources, "fit"),
+        "nonlinear_fit": _capture_nonlinear_fit(window),
         "details_text": str(window.details_text()),
         "headline": str(_widget_value(window, "_headline", "text", "")),
     }
@@ -2088,6 +2287,7 @@ def restore_iv(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
         render = getattr(window, "_render_workspace_snapshot", None)
         if callable(render):
             render()
+        _restore_nonlinear_fit(window, artifact)
     except Exception as exc:
         return RestoreReport(skipped=(IV_ARTIFACT_ID,),
                              warnings=(f"could not restore I-V state: {exc}",))
@@ -2185,6 +2385,7 @@ def capture_voltage_dependence(window: Any) -> WorkspaceArtifact:
         "series_excluded": excluded,
         "point_sources": point_sources,
         "fit": _encode(window.fit(), resources, "fit"),
+        "nonlinear_fit": _capture_nonlinear_fit(window),
         "not_in_fit": _encode(getattr(window, "_not_in_fit", {}), resources, "not_in_fit"),
         "details_text": str(window.details_text()),
         "warning_text": str(window.warning_text()),
@@ -2287,6 +2488,7 @@ def restore_voltage_dependence(window: Any, artifact: WorkspaceArtifact) -> Rest
         render = getattr(window, "_render_workspace_snapshot", None)
         if callable(render):
             render()
+        _restore_nonlinear_fit(window, artifact)
     except Exception as exc:
         return RestoreReport(skipped=(VOLTAGE_DEPENDENCE_ARTIFACT_ID,),
                              warnings=(f"could not restore voltage-dependence state: {exc}",))

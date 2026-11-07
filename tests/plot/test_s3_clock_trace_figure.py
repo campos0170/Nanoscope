@@ -212,8 +212,8 @@ def test_x_label_names_the_clock_in_core_clocks_own_words():
     # `gui/trace_view.py` builds its label from clock.clock_offset_s(meta, offset);
     # the figure must produce that same string, not merely a similar one.
     assert ax.get_xlabel() == clock.axis_label("s", clock.INSTRUMENT,
-                                               clock.clock_offset_s(meta))
-    assert "1154.9909" in ax.get_xlabel()
+                                               clock.clock_offset_s(meta), display_unit="ms")
+    assert "1154990.9" in ax.get_xlabel()
 
 
 def test_x_label_claims_no_clock_when_the_document_was_not_handed_over():
@@ -227,10 +227,10 @@ def test_x_label_claims_no_clock_when_the_document_was_not_handed_over():
     _fig, ax = figures.trace_preview(ch, xax)
     label = ax.get_xlabel()
 
-    assert "1154.9909" in label                      # the origin it really used
+    assert "1154990.9" in label                      # the origin it really used
     assert "not supplied" in label                   # ...and the missing half, said
     assert "read alike" not in label                 # no agreement claim
-    assert label != clock.axis_label("s", clock.INSTRUMENT, T0_APO)
+    assert label != clock.axis_label("s", clock.INSTRUMENT, T0_APO, display_unit="ms")
 
 
 def test_source_data_csv_carries_both_origins(tmp_path):
@@ -407,9 +407,9 @@ def test_a_rebased_cut_is_never_told_its_two_clocks_agree():
 
     label = ax.get_xlabel()
     assert "read alike" not in label
-    assert "1155.7909" in label
+    assert "1155790.9" in label
     # The on-screen axis for this same document, character for character.
-    assert label == clock.axis_label("s", clock.INSTRUMENT, clock.clock_offset_s(meta))
+    assert label == clock.axis_label("s", clock.INSTRUMENT, clock.clock_offset_s(meta), display_unit="ms")
 
 
 def test_a_rebased_cut_claims_nothing_at_all_when_the_document_is_withheld():
@@ -449,8 +449,8 @@ def test_a_layer_alignment_nudge_never_becomes_a_recording_origin(tmp_path):
     assert float(d["t0_s"].iloc[0]) == pytest.approx(REBASED_FROM)
     # ...and the label discloses BOTH, in core.clock's words.
     assert ax.get_xlabel() == clock.axis_label("s", clock.INSTRUMENT,
-                                               clock.clock_offset_s(meta, 2.5))
-    assert "2.5000" in ax.get_xlabel() and "1155.7909" in ax.get_xlabel()
+                                               clock.clock_offset_s(meta, 2.5), display_unit="ms")
+    assert "2500.0" in ax.get_xlabel() and "1155790.9" in ax.get_xlabel()
 
 
 def test_a_meta_from_another_document_is_refused_not_believed():

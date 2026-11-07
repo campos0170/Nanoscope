@@ -6,6 +6,8 @@ scientific results. Unsupported artists stop recipe creation rather than disappe
 """
 from __future__ import annotations
 
+from ..core.atomic_write import write_staged
+
 import json
 import hashlib
 import re
@@ -212,11 +214,11 @@ def capture_figure(fig, path, source=None):
     recipe['legends']=[legend_recipe(legend) for legend in fig.legends]
     if fig.artists: raise ValueError('Unsupported editable figure-level artist: '+type(fig.artists[0]).__name__)
     archive=path.with_suffix('.artists.npz'); metadata=path.with_suffix('.recipe.json')
-    np.savez_compressed(archive,**arrays)
+    write_staged(archive, np.savez_compressed, **arrays)
     recipe['arrays']=archive.name
     if isinstance(source,pd.DataFrame) and len(source.columns):
-        source_path=path.with_suffix('.data.csv'); source.to_csv(source_path,index=False); recipe['source']=source_path.name
-    metadata.write_text(json.dumps(recipe,indent=2,default=_plain,allow_nan=False))
+        source_path=path.with_suffix('.data.csv'); write_staged(source_path, source.to_csv, index=False); recipe['source']=source_path.name
+    write_staged(metadata, Path.write_text, json.dumps(recipe,indent=2,default=_plain,allow_nan=False))
     return metadata
 
 

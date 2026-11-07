@@ -1,6 +1,6 @@
 """Post-build integrity checks on NanoScope.app. Run by build_app.sh before signing.
 
-Five jobs, all of which exist because the failure they catch is invisible until launch or leaks
+Six jobs, all of which exist because the failure they catch is invisible until launch or leaks
 details of the build machine into the release artifact:
 
 1. QT MAJOR VERSION. This build runs inside an Anaconda env whose qt.conf misdirects Qt's own
@@ -36,6 +36,9 @@ details of the build machine into the release artifact:
    editable install records the developer's checkout as ``file:///Users/...``; conda packages
    record private temporary build paths. None is needed by ``importlib.metadata``, so remove only
    those files inside ``*.dist-info`` directories while retaining METADATA and entry points.
+
+6. TENSORFLOW IMAGE IDENTITY. The top-level native dependency and Python extension must
+   resolve to one file. Two copied images register the same ops twice and break ML import.
 """
 from __future__ import annotations
 
@@ -258,14 +261,31 @@ def clean_dangling_symlinks(app: Path) -> None:
     print(f"    removed {len(dangling)} unreferenced symlink(s): {sorted(names)}")
 
 
+def check_tensorflow_image_identity(app: Path) -> None:
+    framework = app / "Contents" / "Frameworks"
+    canonical = framework / "tensorflow/python/_pywrap_tensorflow_internal.so"
+    alias = framework / "_pywrap_tensorflow_internal.so"
+    if not canonical.is_file():
+        raise SystemExit("FATAL: bundled TensorFlow Python extension is missing")
+    if alias.is_symlink() and not alias.exists():
+        raise SystemExit("FATAL: bundled TensorFlow native alias is dangling")
+    if alias.exists() and not alias.samefile(canonical):
+        raise SystemExit("FATAL: duplicate TensorFlow native images would register ops twice")
+    print("    TensorFlow Python extension and native dependents share one image")
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[0] == "--check-tensorflow-image":
+        check_tensorflow_image_identity(Path(argv[1]).resolve())
+        return 0
     if len(argv) != 1:
-        print("usage: verify_bundle.py /path/to/NanoScope.app", file=sys.stderr)
+        print("usage: verify_bundle.py [--check-tensorflow-image] /path/to/NanoScope.app", file=sys.stderr)
         return 2
     app = Path(argv[0]).resolve()
     if not app.is_dir():
         raise SystemExit(f"FATAL: {app} is not a directory")
     check_qt_major(app)
+    check_tensorflow_image_identity(app)
     check_deployment_target(app)
     clean_dangling_symlinks(app)
     clean_non_system_absolute_rpaths(app)

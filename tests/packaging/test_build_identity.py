@@ -67,6 +67,38 @@ def test_scoped_transitive_inventory_records_incompatibility_without_private_url
     assert "unrelated-anaconda-tool" not in json.dumps(manifest)
 
 
+@pytest.mark.parametrize("ml", ["tensorflow", "tensorflow-macos"])
+def test_release_preflight_accepts_either_compatible_tensorflow_distribution(source, monkeypatch, ml):
+    monkeypatch.setattr(identity, "BUILD_TOOLS", ())
+    distributions = {
+        "top": SimpleNamespace(version="1.0", requires=[]),
+        ml: SimpleNamespace(version="2.19.0", requires=["keras>=3.5"]),
+        "keras": SimpleNamespace(version="3.12.0", requires=[]),
+    }
+    def lookup(name):
+        if name not in distributions:
+            raise metadata.PackageNotFoundError(name)
+        return distributions[name]
+    assert identity.require_build_environment(source, distribution=lookup)["compatibility_issues"] == []
+
+
+def test_release_preflight_refuses_missing_ml_backend_and_bad_dependency_pair(source, monkeypatch):
+    monkeypatch.setattr(identity, "BUILD_TOOLS", ())
+    distributions = {"top": SimpleNamespace(version="1.0", requires=[])}
+    def lookup(name):
+        if name not in distributions:
+            raise metadata.PackageNotFoundError(name)
+        return distributions[name]
+    with pytest.raises(ValueError, match="release builds require TensorFlow"):
+        identity.require_build_environment(source, distribution=lookup)
+    distributions.update({
+        "tensorflow-macos": SimpleNamespace(version="2.15.0", requires=["keras>=2.15,<2.16"]),
+        "keras": SimpleNamespace(version="3.12.0", requires=[]),
+    })
+    with pytest.raises(ValueError, match="keras<2.16,>=2.15"):
+        identity.require_build_environment(source, distribution=lookup)
+
+
 def test_build_record_uses_build_time_and_source_not_only_marketing_version(source, monkeypatch):
     monkeypatch.setattr(identity, "_git", lambda root, *args: "a" * 40 if args[0] == "rev-parse" else " M nanoscope/example.py")
     monkeypatch.setattr(identity, "environment_manifest", lambda root: {"packages": {}})

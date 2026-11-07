@@ -23,6 +23,7 @@ def test_every_page_captures_exact_tables_and_project_resources(page, monkeypatc
                    "subpopulations": SUBPOPULATION_ARTIFACT_ID}[kind]
     owner = SimpleNamespace(
         _session=getattr(panel, "_session", None),
+        _figure_workspace=None,  # This fixture exercises the legacy page adapter.
         _figure_page=lambda _page_id: (artifact_id, panel),
         _workspace_kwarg=MainWindow._workspace_kwarg,
         _analysis_explorer_status=lambda _page_id, _panel: ("CURRENT", "current"))

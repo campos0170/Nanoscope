@@ -120,7 +120,10 @@ def _busy_config() -> PlotConfig:
     round-trip test, and the point of ``test_the_fixture_actually_exercises_every_field``
     is that this builder cannot quietly stop covering one.
     """
-    return PlotConfig(
+    from nanoscope.core.figure_style import builtin_styles, style_binding
+    from nanoscope.core.figure_quantity_basis import quantity_witness
+
+    cfg = PlotConfig(
         plot_type=pp.KDE,
         norm_user_set=True,
         selection=SelectionConfig(source_keys=("doc0:0", "doc1:1"), accepted_only=False),
@@ -145,7 +148,7 @@ def _busy_config() -> PlotConfig:
             title="figure 3b", x_label="dwell (ms)", y_label="events",
             show_legend=False, font_family="Helvetica", font_size_pt=13,
             data_color="#ff0000", fit_color="#00ff00", point_size=9, line_width=3,
-            background="light", export_w=1600, export_h=1200,
+            background="light", frame=False, export_w=1600, export_h=1200,
             label_overrides=FrozenMap({"doc0:0": "pore A"}),
             legend_pos=(0.31, 0.42), legend_font_size_pt=8, legend_counts=False,
             legend_include=FrozenMap({"series:doc0:0": False, "cluster:1": False}),
@@ -154,9 +157,13 @@ def _busy_config() -> PlotConfig:
             show_residuals=True, heatmap_colormap="magma",
             # plotux G3: per-element styles and the fit label ride the config too.
             text_styles=FrozenMap({"axis.left.ticks": {"size_pt": 11.0, "bold": True}}),
+            style_binding=FrozenMap(style_binding(builtin_styles()[1])),
+            series_styles=FrozenMap({"series:doc0:0": {"color": "#123456", "line_width_pt": 2.}}),
             fit_label=FrozenMap({"fields": ("equation", "n"), "placement": "custom",
                                  "offset": (40.0, 30.0), "template": "Fit: {equation}"})),
     )
+    return replace(cfg, axes=replace(cfg.axes, quantity_display=FrozenMap(
+        quantity_witness(pp._plot_quantity_bases(cfg)))))
 
 
 # ================================================================================================
@@ -407,13 +414,15 @@ def test_a_template_drops_exactly_the_three_unportable_groups():
     assert (tpl.fit.applied, tpl.fit.applied_k, tpl.fit.applied_k_auto,
             tpl.fit.applied_scatter) == (pp._FIT_NONE, 1, False, pp._SFIT_NONE)
     assert tpl.style.label_overrides == {} and tpl.style.legend_include == {}
+    assert tpl.style.series_styles == {}, "series identities name this figure's sources"
     # ...and NOTHING else moved.
     assert tpl == replace(
         cfg,
         selection=replace(cfg.selection, source_keys=()),
         fit=replace(cfg.fit, applied=pp._FIT_NONE, applied_k=1, applied_k_auto=False,
                     applied_scatter=pp._SFIT_NONE),
-        style=replace(cfg.style, label_overrides=FrozenMap(), legend_include=FrozenMap()))
+        style=replace(cfg.style, label_overrides=FrozenMap(), legend_include=FrozenMap(),
+                      series_styles=FrozenMap()))
     assert tpl.as_template() == tpl, "idempotent, so a hand-edited file is sanitised too"
 
 
@@ -875,6 +884,7 @@ def _v1_sidecar_payload(cfg: PlotConfig) -> dict:
         cfg, histogram=replace(cfg.histogram, normalization="density")))
     payload["histogram"]["normalization"] = "density (area = 1)"
     payload["version"] = 1
+    payload["axes"].pop("quantity_display", None)  # v1 predates derived quantity witnesses
     return payload
 
 
@@ -1076,9 +1086,10 @@ def test_a_template_that_did_land_keeps_its_name(win):
     name whenever anything is resolved": a template whose every setting installed is
     still describing the window, and a combo that dropped to "— manual —" the instant the
     user picked their own template would be the pre-fix bug wearing the fix's name."""
-    stored = plot_config_to_json(replace(
-        win.config(), histogram=replace(win.config().histogram, bins=44,
-                                        normalization="density")))
+    # Capture a coherent current configuration, including its derived density unit.
+    win.set_bins(44)
+    win.set_normalization("density")
+    stored = plot_config_to_json(win.config())
     PlotsWindow._store_templates({"my dwell figure": stored})
     win._load_templates_into_combo()
 
@@ -1499,6 +1510,10 @@ def _colleague_payload(win, kind: str) -> dict:
     payload["selection"]["source_keys"] = ["doc0:0", "a run this session never loaded"]
     payload["style"]["halo_width_px"] = 3
     payload["their_own_block"] = {"lab": "somewhere else"}
+    # This older foreign build never wrote a quantity witness. Retaining today's
+    # witness after rewriting the plot/column invents additional independent losses.
+    payload["version"] = PLOT_CONFIG_MIN_READ_VERSION
+    payload["axes"].pop("quantity_display", None)
     return payload
 
 
@@ -1642,6 +1657,7 @@ def test_a_faithful_round_trip_does_not_cry_wolf(win, tmp_path):
         legacy = json.loads(src.read_text(encoding="utf-8"))
         legacy["version"] = PLOT_CONFIG_MIN_READ_VERSION
         legacy["histogram"]["normalization"] = "density (area = 1)"
+        legacy["axes"].pop("quantity_display", None)
         old = tmp_path / "v1.json"
         old.write_text(json.dumps(legacy), encoding="utf-8")
 
@@ -1710,9 +1726,11 @@ def test_no_draw_path_can_return_early_without_going_through_the_one_funnel():
     Speaking the refusal on four pages is a list; every early return going through
     ``_message`` is a rule, and only the rule survives a fifth page or a twelfth empty
     state. This walks the AST of the five methods that can end a draw and asserts that
-    every ``return`` in them is immediately preceded by a ``self._message(...)`` call in
-    the same block — which is what makes "``_message`` carries the disclosure" equal to
-    "every state carries the disclosure".
+    every empty-state ``return`` in them is immediately preceded by a
+    ``self._message(...)`` call. A successful restoration of cached KDE contours is a
+    completed render, not an empty state: the artifact adapter restores its saved
+    details afterward. That single exact branch has its own end-to-end regression in
+    test_p2_figure_surface_adapters (sampled estimates restore without estimating).
 
     Eleven returns across the five methods at the time of writing; the exact count is not
     asserted, because the rule is what matters and a twelfth is welcome as long as it says
@@ -1725,17 +1743,24 @@ def test_no_draw_path_can_return_early_without_going_through_the_one_funnel():
                if isinstance(n, ast.ClassDef) and n.name == "PlotsWindow")
     wanted = {"_redraw_current", "_draw_histogram", "_draw_scatter", "_draw_kde",
               "_draw_pca"}
-    seen, silent, total = set(), [], 0
+    seen, silent, total, cached_successes = set(), [], 0, 0
 
-    def walk(fn_name, body):
-        nonlocal total
+    def walk(fn_name, body, cached_success=False):
+        nonlocal total, cached_successes
         for i, st in enumerate(body):
             for sub in ("body", "orelse", "finalbody"):
                 if hasattr(st, sub):
-                    walk(fn_name, getattr(st, sub))
+                    successful_restore = (fn_name == '_redraw_current' and sub == 'body'
+                        and isinstance(st, ast.If)
+                        and ast.unparse(st.test) == 'restore_sampled_contours(self)')
+                    walk(fn_name, getattr(st, sub), successful_restore)
             if isinstance(st, ast.Return):
                 total += 1
                 prev = body[i - 1] if i else None
+                if cached_success:
+                    assert isinstance(prev, ast.Expr) and ast.unparse(prev) == 'self._draw_provenance_caption()'
+                    cached_successes += 1
+                    continue
                 if prev is None or "self._message(" not in ast.unparse(prev):
                     silent.append((fn_name, st.lineno))
 
@@ -1746,6 +1771,7 @@ def test_no_draw_path_can_return_early_without_going_through_the_one_funnel():
 
     assert seen == wanted, f"a draw path was renamed away from this guard: {wanted - seen}"
     assert total >= 11, "premise: the draw paths still have early returns to check"
+    assert cached_successes == 1, "only the successful frozen-contour render bypasses the empty-state funnel"
     assert not silent, (
         f"these returns end a draw without going through _message, so whatever the "
         f"window was asked for and could not honour is not said in that state: {silent}")

@@ -150,6 +150,8 @@ def _press_fit(window: MainWindow, qtbot, *, dwell_k: int = 1, depth_k: int = 1)
     stats.n_components_dwell.setValue(dwell_k)
     stats.n_components_depth.setValue(depth_k)
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     qtbot.wait(30)
 
 

@@ -215,9 +215,10 @@ def test_cutoff_accepts_fractional_hz(panel):
 # The rise-time readout follows the SELECTED design
 # ================================================================================================
 
-def _rise_us(panel) -> float:
+def _rise_ms(panel) -> float:
     text = panel.rise_time_label.text()
     assert text.startswith("rise time: "), text
+    assert " ms (" in text, text
     return float(text.split("rise time: ")[1].split(" ")[0])
 
 
@@ -227,20 +228,20 @@ def test_rise_time_readout_changes_with_the_kind(panel):
     panel.filter_cutoff_hz.setValue(3_000.0)
 
     panel.set_filter_kind("bessel")
-    bessel = _rise_us(panel)
+    bessel = _rise_ms(panel)
     assert "Bessel" in panel.rise_time_label.text()
 
     panel.set_filter_kind("butter")
-    butter = _rise_us(panel)
+    butter = _rise_ms(panel)
     assert "Butterworth" in panel.rise_time_label.text()
 
     panel.set_filter_kind("gaussian")
-    gaussian = _rise_us(panel)
+    gaussian = _rise_ms(panel)
     assert "Gaussian" in panel.rise_time_label.text()
     # Gaussian has no order, so the readout must not claim one.
     assert "pole" not in panel.rise_time_label.text()
 
-    assert len({round(bessel), round(butter), round(gaussian)}) == 3
+    assert len({round(bessel, 3), round(butter, 3), round(gaussian, 3)}) == 3
 
 
 def test_rise_time_readout_changes_with_the_order(panel):
@@ -250,11 +251,11 @@ def test_rise_time_readout_changes_with_the_order(panel):
     panel.set_filter_kind("bessel")
 
     panel.set_filter_order(1)
-    first = _rise_us(panel)
+    first = _rise_ms(panel)
     assert "1-pole Bessel" in panel.rise_time_label.text()
 
     panel.set_filter_order(8)
-    eighth = _rise_us(panel)
+    eighth = _rise_ms(panel)
     assert "8-pole Bessel" in panel.rise_time_label.text()
     assert first != eighth
 
@@ -266,8 +267,8 @@ def test_rise_time_readout_matches_the_kernel_for_the_selected_design(panel):
     panel.filter_cutoff_hz.setValue(5_000.0)
     panel.set_filter_kind("butter")
     panel.set_filter_order(2)
-    expected = filters.measure_rise_time(FS, 5_000.0, order=2, kind="butter") * 1e6
-    assert _rise_us(panel) == pytest.approx(round(expected), abs=1.0)
+    expected = filters.measure_rise_time(FS, 5_000.0, order=2, kind="butter") * 1e3
+    assert _rise_ms(panel) == pytest.approx(expected, abs=.001)  # the same 1 µs tolerance, expressed in ms
 
 
 def test_rise_time_warns_in_the_gui_when_the_cutoff_is_above_fs_over_2p5(panel):

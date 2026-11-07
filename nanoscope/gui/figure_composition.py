@@ -18,7 +18,7 @@ import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..plot import figure_fonts
+from ..plot import pg_svg
 from .figure_bundle import (
     FigureSnapshot, MAX_SNAPSHOT_BYTES, capture_figure_snapshot, encode_figure_table,
 )
@@ -28,7 +28,7 @@ CARTESIAN_RESOURCE = "rendering/cartesian.json"
 PICTURE_RESOURCE = "rendering/figure.qpic"
 MAX_PANELS = 12
 MAX_LABEL_LENGTH = 32
-DEFAULT_LABEL_STYLE = {"family": "Arial", "size_px": 18, "bold": True, "color": "#111111"}
+from ..core.figure_composition_style import DEFAULT_LABEL_STYLE, panel_style
 _NS = "http://www.w3.org/2000/svg"
 _MAX_MODEL_BYTES = 64 * 1024 * 1024
 _MAX_POINTS = 1_000_000
@@ -744,6 +744,8 @@ def _shared_pictures(snapshots, share_x, share_y, shared_legend=False):
 
 
 def _load_picture(snapshot):
+    from .figure_bundle import restore_snapshot_fonts
+    restore_snapshot_fonts(snapshot)
     payload = dict(snapshot.additional_resources).get(PICTURE_RESOURCE)
     if payload is None:
         raise ValueError("A selected figure lacks frozen vector commands. Capture it again before composing.")
@@ -793,7 +795,8 @@ def _png_dimensions(payload):
     return size
 
 
-def validate_publication_layout(count, columns, panel_spans=None, spacing=20, label_style=None):
+def validate_publication_layout(count, columns, panel_spans=None, spacing=20, label_style=None,
+                                *, bound_letters=False):
     """Bound layout metadata before allocation. Spans use row-major first-fit packing."""
     if type(columns) is not int or not 1 <= columns <= 4:
         raise ValueError("Choose between 1 and 4 columns.")
@@ -806,13 +809,20 @@ def validate_publication_layout(count, columns, panel_spans=None, spacing=20, la
                    or type(span[1]) is not int or not 1 <= span[1] <= columns for span in spans)):
         raise ValueError("Give every panel a row span from 1–4 and a column span within the grid width.")
     style = dict(DEFAULT_LABEL_STYLE) if label_style is None else label_style
-    if (not isinstance(style, dict) or set(style) != set(DEFAULT_LABEL_STYLE)
+    valid_keys = set(DEFAULT_LABEL_STYLE) | ({'italic'} if bound_letters else set())
+    valid_size = (type(style.get('size_px')) in (int, float)
+                  and math.isfinite(style['size_px']) and 0 < style['size_px'] <= 4000 / 3
+                  if isinstance(style, dict) and bound_letters else
+                  isinstance(style, dict) and type(style.get('size_px')) is int
+                  and 6 <= style['size_px'] <= 72)
+    if (not isinstance(style, dict) or set(style) != valid_keys
             or not isinstance(style["family"], str) or not style["family"].strip()
             or len(style["family"]) > 100 or any(c in style["family"] for c in "\r\n")
-            or type(style["size_px"]) is not int or not 6 <= style["size_px"] <= 72
+            or not valid_size
             or type(style["bold"]) is not bool
+            or (bound_letters and type(style.get('italic')) is not bool)
             or not isinstance(style["color"], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", style["color"])):
-        raise ValueError("Invalid panel-label typography. Choose a font, 6–72 native pixels and an RGB color.")
+        raise ValueError("Invalid panel-label typography. Choose a font, a bounded positive size and an RGB color.")
     occupied, positions = set(), []
     for row_span, column_span in spans:
         for row in range(4 * count):
@@ -830,7 +840,8 @@ def validate_publication_layout(count, columns, panel_spans=None, spacing=20, la
 
 
 def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
-                    panel_spans=None, spacing=20, label_style=None, shared_legend=False) -> FigureSnapshot:
+                    panel_spans=None, spacing=20, label_style=None, shared_legend=False,
+                    style_binding=None, label_overrides=None) -> FigureSnapshot:
     """Compose 1–12 frozen figures; original resources retain all numerical data.
 
     The top-level table is an explicit panel index. Every panel's exact CSV,
@@ -844,11 +855,17 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
         raise TypeError("Composition requires saved FigureSnapshot objects.")
     if type(columns) is not int or not 1 <= columns <= 4:
         raise ValueError("Choose between 1 and 4 columns.")
+    from ..core.figure_style import normalize_style_binding
+    from ..core.figure_spec import FrozenMap, thaw_json
+    binding = normalize_style_binding(style_binding) if style_binding else None
+    if binding:
+        label_overrides = thaw_json(FrozenMap(label_overrides or {}))
+        label_style = panel_style(binding, label_overrides, legacy=label_style)
     advanced_layout = panel_spans is not None or spacing != 20 or label_style is not None or shared_legend
     if panel_spans is None:
         columns = min(columns, len(snapshots))
     spans, gap, label_style, positions = validate_publication_layout(
-        len(snapshots), columns, panel_spans, spacing, label_style)
+        len(snapshots), columns, panel_spans, spacing, label_style, bound_letters=bool(binding))
     if type(shared_legend) is not bool:
         raise ValueError("Shared legend must be enabled or disabled explicitly.")
     labels = [chr(65 + i) for i in range(len(snapshots))] if labels is None else list(labels)
@@ -874,9 +891,13 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
         planned_h = max(model["canvas"][1] for model in models)
     font = figure_qfont(label_style["family"])     # a family this computer lacks: its substitute
     font.setBold(label_style["bold"])
-    font.setPixelSize(label_style["size_px"])
+    font.setItalic(label_style.get('italic', False))
+    # QFont's pixel setter is integer-only. Fractional physical sizes stay exact
+    # through a painter transform; legacy integer pixels retain the same glyphs.
+    font.setPixelSize(math.ceil(label_style["size_px"]))
+    font_scale = label_style["size_px"] / font.pixelSize()
     metrics = QtGui.QFontMetricsF(font)
-    header = max(32, math.ceil(metrics.height()) + 12) if any(labels) else 0
+    header = max(32, math.ceil(metrics.height() * font_scale) + 12) if any(labels) else 0
     rows = max(row + row_span for row, _, row_span, _ in positions)
     planned_width = math.ceil(columns * planned_w + (columns - 1) * gap)
     planned_height = math.ceil(rows * (planned_h + header) + (rows - 1) * gap)
@@ -904,7 +925,7 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
             or width * height > 100_000_000):
         raise ValueError("The composite exceeds 32,768 pixels per side or 100 megapixels. "
                          "Use fewer or smaller panels.")
-    if any(metrics.horizontalAdvance(label) > span[1] * cell_w + (span[1] - 1) * gap - 12
+    if any(metrics.horizontalAdvance(label) * font_scale > span[1] * cell_w + (span[1] - 1) * gap - 12
            for label, span in zip(labels, spans)):
         raise ValueError("A panel label is too wide for its canvas. Shorten that label.")
     pictures = []
@@ -931,11 +952,17 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
             scale = min(area_w / snapshot.width, area_h / snapshot.height)
             panel_w, panel_h = snapshot.width * scale, snapshot.height * scale
             left, y = x + (area_w - panel_w) / 2, top + header + (area_h - panel_h) / 2
-            label_y = top + (header - metrics.height()) / 2 + metrics.ascent()
+            label_y = top + (header - metrics.height() * font_scale) / 2 + metrics.ascent() * font_scale
             for painter in (raster, vector):
-                painter.setFont(font)
-                painter.setPen(QtGui.QColor(label_style["color"]))
-                painter.drawText(QtCore.QPointF(x + 4, label_y), label)
+                painter.save()
+                try:
+                    painter.translate(x + 4, label_y)
+                    painter.scale(font_scale, font_scale)
+                    painter.setFont(font)
+                    painter.setPen(QtGui.QColor(label_style["color"]))
+                    painter.drawText(QtCore.QPointF(0, 0), label)
+                finally:
+                    painter.restore()
             # Replay vector commands for the preview too. Enlarging a spanned
             # panel must not simply magnify its low-resolution PNG thumbnail.
             for painter in (raster, vector):
@@ -950,9 +977,12 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
                     painter.restore()
             panel_id = f"panel_{index + 1:03d}"
             ET.SubElement(svg, f"{{{_NS}}}text", {"x": str(x + 4), "y": str(label_y),
-                          "font-family": figure_fonts.css_font_family(label_style["family"]),
+                          # The rule of every other SVG this build writes: a private system face
+                          # (a composition an older Mac build saved) is the figure default, Arial.
+                          "font-family": pg_svg._stack_for(label_style["family"]),
                           "font-size": str(label_style["size_px"]),
                           "font-weight": "bold" if label_style["bold"] else "normal",
+                          "font-style": "italic" if label_style.get('italic', False) else "normal",
                           "fill": label_style["color"], "id": panel_id + "_label"}).text = label
             _svg_panel(snapshot.svg_bytes, svg, panel_id, left, y, panel_w, panel_h)
         if legend_snapshot is not None:
@@ -994,11 +1024,14 @@ def compose_figures(snapshots, labels, columns, share_x=False, share_y=False, *,
                         "data_csv_resource": prefix + "data.csv",
                         "data_parquet_resource": prefix + "data.parquet"})
     catalog = pd.DataFrame(records)
-    config = {"kind": "figure-composition", "version": 2 if advanced_layout else 1, "columns": columns,
+    config = {"kind": "figure-composition", "version": 3 if binding else 2 if advanced_layout else 1, "columns": columns,
               "panel_labels": labels, "share_x": bool(share_x), "share_y": bool(share_y),
               "view_ranges": ranges, "panels": panels}
     if advanced_layout:
         config.update(panel_spans=spans, spacing=gap, label_style=label_style, shared_legend=shared_legend)
+    if binding:
+        config.update(style_binding=binding, label_overrides=label_overrides,
+                      label_coordinate_dpi=96.)
     provenance = {"kind": "frozen multi-panel composition", "analysis_recomputed": False,
                   "source_figures_modified": False,
                   "shared_axis_contract": "range unions applied only to detached Cartesian graphics",

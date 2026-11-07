@@ -254,6 +254,8 @@ def test_psd_action_gated_and_opens_single_window(qapp, qtbot, tmp_path):
     win._open_psd()
     first = win._psd_window
     assert first is not None
+    assert not first.has_data()
+    first.inspector_adapter().update()
     assert first.has_data()
     assert first.summary()["total_rms"] == pytest.approx(SIGMA, rel=0.05)
     # re-opening focuses the SAME instance (never a second window)
@@ -292,6 +294,14 @@ def test_psd_window_follows_the_active_selection(qapp, qtbot, tmp_path):
     win._on_selection(id_a, 0)
     win._open_psd()
     assert win._psd_window._current_target() == (id_a, 0)
+    page = win._psd_window
+    page.inspector_adapter().update()
+    win._figure_workspace.set_follow_selection(win._figure_workspace.current_id(), True)
 
     win._on_selection(id_b, 0)                            # switch recordings
     assert win._psd_window._current_target() == (id_b, 0)
+    assert page.curves()[0].doc_id == id_a                 # displayed result stays applied
+    assert page.inspector_adapter().pending().count > 0
+    page.inspector_adapter().update()
+    assert page.curves()[0].doc_id == id_b
+    assert page.inspector_adapter().pending().count == 0

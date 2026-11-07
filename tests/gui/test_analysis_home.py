@@ -102,6 +102,12 @@ def test_explorer_home_is_persistent_and_never_activates_or_refreshes_analysis(q
     assert shell.current_page_id() == PAGE_HOME
     assert shell._tabs.count() == 1
     assert states == []
+    # The Figure Library buttons became Export ▾ items (Phase 1): the whole menu is off with no
+    # page (its two save items were off, and "Open Figure Library" has no page to open from
+    # Home); the retired, hidden buttons follow the same rule.
+    bar = shell.toolbar()
+    assert not bar.export_button.isEnabled() and not bar.library_enabled()
+    assert shell._save_figure_btn.isHidden() and shell._save_bundle_btn.isHidden()
     assert not shell._save_figure_btn.isEnabled() and not shell._save_bundle_btn.isEnabled()
     shell.show_home()
     shell.refresh_current()

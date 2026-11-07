@@ -132,7 +132,7 @@ def test_a_window_told_not_to_autoplot_opens_on_the_prompt(qapp, qtbot):
     assert w._message_item is not None and pp._PLOT_PROMPT in w._message_item.toPlainText()
     # ...and the sources really did arrive; only the picture is waiting.
     assert w.source_labels() == ["a"]
-    assert "dwell_s" in [w._hist_col.itemText(i) for i in range(w._hist_col.count())]
+    assert "dwell_s" in [w._hist_col.itemData(i) for i in range(w._hist_col.count())]
 
     w._plot_btn.click()
     assert w._plot_armed and w._hist_item is not None

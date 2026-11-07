@@ -1124,6 +1124,8 @@ def vdep_fit(voltages, values, *, model: str = "linear") -> dict[str, Any]:
 
     v = np.asarray(voltages, dtype=np.float64).ravel()
     y = np.asarray(values, dtype=np.float64).ravel()
+    if v.shape != y.shape:
+        raise ValueError("voltages and values must have the same length")
 
     finite = np.isfinite(v) & np.isfinite(y)
     if model == "linear":
@@ -1133,6 +1135,8 @@ def vdep_fit(voltages, values, *, model: str = "linear") -> dict[str, Any]:
             "params": {"slope": lf.slope, "intercept": lf.intercept},
             "r2": lf.r2,
             "n": lf.n,
+            "objective": "response least squares", "r2_space": "response",
+            "uncertainty": lf.meta.get("ci95", {}),
             "n_input": int(v.size),
             # linear_fit drops non-finite pairs before fitting; say which.
             "dropped": tuple(int(i) for i in np.flatnonzero(~finite)),
@@ -1149,7 +1153,7 @@ def vdep_fit(voltages, values, *, model: str = "linear") -> dict[str, Any]:
             f"got {vg.size}"
         )
     lf = linear_fit(vg, np.log(yg), xlabel="V (V)", ylabel="ln(metric)")
-    if lf.slope == 0.0:
+    if abs(lf.slope) * float(np.ptp(vg)) <= 64 * np.finfo(float).eps * max(1.0, float(np.max(np.abs(np.log(yg))))):
         raise ValueError("degenerate exponential fit: the metric does not vary with V")
     v0 = 1.0 / lf.slope
     amp = float(np.exp(lf.intercept))
@@ -1167,6 +1171,8 @@ def vdep_fit(voltages, values, *, model: str = "linear") -> dict[str, Any]:
         "params": {"A": amp, "V0": v0},
         "r2": lf.r2,
         "n": lf.n,
+        "objective": "log-response least squares", "r2_space": "ln(response)",
+        "log_parameter_uncertainty": lf.meta.get("ci95", {}),
         "n_input": int(v.size),
         "dropped": tuple(int(i) for i in np.flatnonzero(~good)),
         "drop_reason": "; ".join(causes),

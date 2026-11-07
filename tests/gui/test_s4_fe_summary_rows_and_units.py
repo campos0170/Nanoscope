@@ -145,8 +145,11 @@ def test_the_medians_move_when_the_curator_rejects_events(win, tmp_path):
     adf = df[df["accepted"].to_numpy(dtype=bool)]
     assert float(after["median_depth_pA"]) == pytest.approx(
         float(np.nanmedian(adf["depth_pA"].to_numpy())), rel=1e-3)
+    # This legacy statistics key is retained for storage; the visible summary
+    # explicitly presents milliseconds, consistent with the event/plot controls.
+    assert _label(win, "median_dwell_us") == "median dwell (ms, accepted)"
     assert float(after["median_dwell_us"]) == pytest.approx(
-        float(np.median(adf["dwell_s"].to_numpy())) * 1e6, rel=1e-3)
+        float(np.median(adf["dwell_s"].to_numpy())) * 1e3, rel=1e-3)
     assert float(after["median_baseline_pA"]) == pytest.approx(
         float(np.nanmedian(adf["baseline_pA"].to_numpy())), rel=1e-3)
     assert float(after["median_frac_depth"].split()[0]) == pytest.approx(

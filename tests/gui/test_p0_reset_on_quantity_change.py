@@ -47,8 +47,44 @@ def _gate():
 
 # -- real gestures --------------------------------------------------------------------------------
 
+def _hosted_control(control):
+    """Find the exact page owning a facade or a control moved into its inspector."""
+    explorer = control.window()
+    if not isinstance(explorer, AnalysisExplorer):
+        return None
+    host = explorer.inspector()
+    owners = [host.adapter(key) for key in host.keys()
+              if host.adapter(key).page.isAncestorOf(control)
+              or host.pane(key).isAncestorOf(control)]
+    assert len(owners) <= 1, "a control belongs to more than one hosted page"
+    if not owners:
+        return None
+    adapter = owners[0]
+    assert explorer.toolbar().adapter() is adapter, "the requested page must be in front"
+    return explorer, adapter
+
+
+def _reveal_control(control):
+    """Use the owning inspector's real group route, leaving view-disabled rows hidden."""
+    owned = _hosted_control(control)
+    if owned is None:
+        return
+    explorer, adapter = owned
+    for group in adapter.groups:
+        if any(root is control or root.isAncestorOf(control) for root in group.widgets):
+            if not explorer.inspector().user_visible():
+                QtTest.QTest.mouseClick(explorer.toolbar().inspector_toggle, L)
+            assert explorer.inspector().reveal(group.key, key=adapter.key)
+            QtWidgets.QApplication.processEvents()
+            area = explorer.inspector().pane(adapter.key).data_pane
+            area.ensureWidgetVisible(control, 0, 0)
+            QtWidgets.QApplication.processEvents()
+            return
+
+
 def _pick(combo, *, text=None, data=None):
     """Click the combo, walk the popup with the arrow keys and press Return: a person's pick."""
+    _reveal_control(combo)
     assert combo.isVisible(), "the control must be on screen to be picked from"
     combo.setFocus()
     QtTest.QTest.mouseClick(combo, L)
@@ -58,9 +94,15 @@ def _pick(combo, *, text=None, data=None):
     else:
         target = next(i for i in range(combo.count()) if combo.itemText(i) == text)
     popup = combo.view()
-    while popup.currentIndex().row() != target:
+    for _ in range(combo.count() + 1):      # a key per row is enough: a row the keys cannot reach
+        if popup.currentIndex().row() == target:       # (a disabled item) fails the test
+            break
         down = popup.currentIndex().row() < target
         QtTest.QTest.keyClick(popup, QtCore.Qt.Key.Key_Down if down else QtCore.Qt.Key.Key_Up)
+    else:
+        combo.hidePopup()
+        raise AssertionError(f"the popup cannot reach item {target} ({combo.itemText(target)!r}); "
+                             "is it disabled?")
     QtTest.QTest.keyClick(popup, QtCore.Qt.Key.Key_Return)
     QtWidgets.QApplication.processEvents()
     assert combo.currentIndex() == target
@@ -69,6 +111,8 @@ def _pick(combo, *, text=None, data=None):
 def _user_picks(combo, text):
     """Choose ``text`` the way the Plots window tells a person from code: with the dropdown
     open (its run gate arms Apply for a person and commits at once for code)."""
+    _reveal_control(combo)
+    assert combo.isVisible(), "the control must be on screen to be picked from"
     combo.showPopup()
     QtWidgets.QApplication.processEvents()
     combo.setCurrentText(text)
@@ -77,7 +121,42 @@ def _user_picks(combo, text):
     QtWidgets.QApplication.processEvents()
 
 
+def _on_the_toolbar(button):
+    """Map only this page's replaced button to the action its native adapter will run."""
+    owned = _hosted_control(button)
+    if owned is None:
+        return None
+    explorer, adapter = owned
+    page, bar = adapter.page, explorer.toolbar()
+    appearance = getattr(page, "_appearance_widget", None)
+    if button is getattr(appearance, "reset_button", None):
+        return bar.reset_figure_button
+    workflow = getattr(page, "_workflow", None)
+    verbs = list(getattr(workflow, "primary_actions", ()))
+    if adapter.kind == "distributions":
+        # All three doors call _run_plot, including the hidden Plot button. Run PCA
+        # remains a separate, visible action in Groups and must not be substituted.
+        replaced = [getattr(page, name) for name in
+                    ("_plot_btn", "_fit_apply_btn", "_scatter_fit_apply_btn")]
+    elif adapter.kind == "voltage_series":
+        fit = [page._fit_apply_btn, verbs[1]]
+        refresh = [page._refresh_btn, verbs[0]]
+        replaced = fit if page._fit_combo.currentText() != page._applied_fit else refresh
+        if button in fit + refresh:
+            assert button in replaced, (
+                f"Update plot would run a different action from {button.text()!r}")
+    else:
+        # The other native adapters have one primary action, the same callback as
+        # their workflow button and (where present) the old Refresh facade.
+        assert len(verbs) <= 1
+        replaced = verbs + [getattr(page, "_refresh_btn", None)]
+    return bar.update_button if button in replaced else None
+
+
 def _click_button(button):
+    _reveal_control(button)
+    if not button.isVisible() and (stand_in := _on_the_toolbar(button)) is not None:
+        button = stand_in
     assert button.isVisible() and button.isEnabled(), button.text()
     QtTest.QTest.mouseClick(button, L)
     QtWidgets.QApplication.processEvents()
@@ -138,6 +217,18 @@ def _label(plot, side):
     if not (axis.isVisible() and axis.label.isVisible()):
         return ""
     return figure_text.plain_text(axis.labelText)
+
+
+def _same_words_and_look(actual, expected):
+    """Author choices survive recall; the authoritative drawn quantity witness can change."""
+    assert replace(actual, quantity_display=expected.quantity_display) == expected
+
+
+def _assert_quantity(plot, side, key, unit, factor):
+    basis = plot.getAxis(side)._nanoscope_quantity_basis
+    assert (basis.quantity.key, basis.quantity.display_unit, basis.quantity.factor) == (key, unit, factor)
+    if basis.coordinate_frame == "linear":
+        assert plot.getAxis(side).scale == factor
 
 
 def _boxes(widget):
@@ -324,13 +415,14 @@ def test_voltage_dependence_metric_pick_resets_the_words_and_keeps_the_look(vdep
     assert page.caption_text() == "Pooled by hand"
     assert after.axis_pin("bottom").range() == (-1100.0, -100.0)
     assert _shown(plot) == pytest.approx((-1100.0, -100.0))
-    _add_title(plot, "Depth vs voltage")
-    assert _drawn_title(plot) == ("Depth vs voltage", 16.0, True, ORANGE)
-    assert widget.undo()
     # ... and the status line, where the user sees it, names exactly what went.
     assert _said(page, explorer) == (
         "Title, X label, Y label and fit label wording reset: the plot now shows median depth.",
         True)
+    _add_title(plot, "Depth vs voltage")
+    assert _drawn_title(plot) == ("Depth vs voltage", 16.0, True, ORANGE)
+    assert _said(page, explorer)[0] == ""                # a title typed since: it no longer stands
+    assert widget.undo()
     assert widget._history.depth()[0] == steps + 1       # the title typed after the reset: undone
     _press_undo(page)
     assert _drawn_title(plot) == ("Capture vs voltage", 16.0, True, ORANGE)
@@ -352,10 +444,11 @@ def test_voltage_dependence_with_nothing_typed_records_no_step_and_says_nothing(
     steps = widget._history.depth()
     _section(page, "Analysis")
     _clear_status(page)
-    _pick(page._metric_combo, text="Median dwell (s)")
+    _pick(page._metric_combo, text="Median dwell (ms)")
     assert widget._history.depth() == steps
     assert _said(page, explorer)[0] == ""
-    assert _label(page.plot_item(), "left") == "Median dwell (s)"
+    assert _label(page.plot_item(), "left") == "Median dwell (ms)"
+    _assert_quantity(page.plot_item(), "left", "median_dwell_s", "ms", 1000.)
 
 
 def test_voltage_dependence_same_quantity_routes_keep_the_words(vdep, tmp_path):
@@ -598,7 +691,9 @@ def test_summaries_regenerating_the_same_quantity_keeps_the_words(summaries):
     assert page._stale and widget.state() == words
     _generate(page)
     assert page._applied_config["metric"] == "frac_depth"
-    assert widget.state() == words and widget._history.depth() == steps
+    _same_words_and_look(widget.state(), words)
+    _assert_quantity(plot, "bottom", "frac_depth", "", 1.)
+    assert widget._history.depth() == steps
     assert _said(page, explorer)[0] == ""
     # Only the NEXT change of quantity resets them.
     _section(page, "Data")
@@ -810,7 +905,7 @@ def test_comparison_with_nothing_typed_records_no_step(comparison):
     _pick(page._y_combo, data="snr")
     _generate(page)
     assert widget._history.depth() == steps and not page._status.text().startswith("Title")
-    assert page._status.text().startswith("Generated snapshot")
+    assert page._status.text().startswith("Generated result")
 
 
 # -- I-V: one quantity, so no rule to wire ------------------------------------------------------------
@@ -883,7 +978,7 @@ def test_event_waveforms_x_metric_pick_resets_the_shared_words_and_keeps_the_loo
     assert _drawn_title(plot) == (_squash(page._density_auto_title), 16.0, True, ORANGE)
     assert page._density_auto_title.startswith("Median depth (pA) vs dI/I₀")
     assert (_label(plot, "bottom"), _label(plot, "left")) == (
-        "dI/I₀ (log10)", "Median depth (pA)")
+        "dI/I₀ (log)", "Median depth (pA)")
     assert _boxes(widget) == ("", "", "")
     assert _said(page, explorer) == (
         "Title, X label and Y label reset: the plot now shows median depth against dI/I₀.", True)
@@ -924,9 +1019,10 @@ def test_event_waveforms_view_switch_and_normalize_time_reset_the_shared_words(e
     _section(page, "Analysis")
     _click_button(page._normalize)
     assert page._normalize.isChecked() is False and widget.state().title is None
-    assert _label(plot, "bottom") == "Time (s)"
+    assert _label(plot, "bottom") == "Time (ms)"
+    _assert_quantity(plot, "bottom", "time_s", "ms", 1000.)
     assert _said(page, explorer) == (
-        "Title reset: the plot now shows the ensemble against time in seconds.", True)
+        "Title reset: the plot now shows the ensemble against time in milliseconds.", True)
 
     QtTest.QTest.mouseClick(bar, L, NOMOD, bar.tabRect(0).center())     # and back: nothing typed
     steps = widget._history.depth()
@@ -937,8 +1033,10 @@ def test_event_waveforms_view_switch_and_normalize_time_reset_the_shared_words(e
 
 def test_event_waveforms_presentation_recordings_templates_and_restores_keep_the_words(
         events, tmp_path):
-    """Log axes, bins, the colormap, the band, the alignment, another recording, a template
-    carrying another metric, and a workspace restore are not changes of quantity."""
+    """Log axes, bins, the colormap, the band, the alignment while time is normalised (it is
+    immaterial then; a real-time ensemble's is a change, see test_p0_g6b_reset_rule_review_fixes),
+    another recording, a template carrying another metric, and a workspace restore are not changes
+    of quantity."""
     from nanoscope.core import analysis_workspace as workspace
 
     from .test_event_plot import _doc_and_events, _install_detection
@@ -970,10 +1068,14 @@ def test_event_waveforms_presentation_recordings_templates_and_restores_keep_the
     # not run, and the words are the template's and the workspace's own.
     settings, _appearance = page.template_settings()
     page.apply_template_settings({**settings, "x_metric": "frac_depth"}, page.appearance_state())
-    assert page._x_combo.currentData() == "frac_depth" and widget.state() == words
+    assert page._x_combo.currentData() == "frac_depth"
+    _same_words_and_look(widget.state(), words)
+    _assert_quantity(page._density_main, "bottom", "frac_depth", "", 1.)
     artifact = workspace.capture_event_plots(page)
     assert workspace.restore_event_plots(page, artifact).restored
-    assert widget.state() == words and _said(page, explorer)[0] == ""
+    _same_words_and_look(widget.state(), words)
+    _assert_quantity(page._density_main, "bottom", "frac_depth", "", 1.)
+    assert _said(page, explorer)[0] == ""
     assert _drawn_title(page._density_main)[0] == "Dwell vs depth"
     # The next metric measured from what the restore drew.
     _section(page, "Analysis")
@@ -1002,9 +1104,12 @@ def test_event_waveforms_words_saved_over_another_metric_open_unchanged(
     page = window._event_plot_window
     explorer = _explorer_of(window)
     page.activateWindow()
+    _click_button(explorer.toolbar().update_button)
     assert page.density_counts() is not None
     _section(page, "Analysis")
     _pick(page._y_combo, data="frac_depth")
+    _click_button(explorer.toolbar().update_button)
+    assert page._density_shown[1] == "frac_depth"
     _type_event_words(page)
     project = tmp_path / "events.nanoscope"
     assert window._write_project(str(project))
@@ -1025,7 +1130,10 @@ def test_event_waveforms_words_saved_over_another_metric_open_unchanged(
     _section(page, "Analysis")
     _pick(page._y_combo, data="frac_depth")                 # the same metric: nothing
     assert widget.state().title == "Dwell vs depth"
-    _pick(page._y_combo, data="depth_pA")                   # the next change resets
+    _pick(page._y_combo, data="depth_pA")                   # pending until Update plot
+    assert widget.state().title == "Dwell vs depth"
+    _click_button(explorer.toolbar().update_button)
+    assert page._density_shown[1] == "depth_pA"
     assert widget.state().title is None and _said(page, explorer)[0].startswith(
         "Title, X label and Y label reset:")
     reopened._dirty = False
@@ -1077,7 +1185,8 @@ def test_noise_view_pick_resets_the_shared_words_and_keeps_the_look(noise):
     spec = page._spec_plot
     assert _drawn_title(spec)[0].startswith("Spectrogram — ") and _drawn_title(spec)[1:] == (
         16.0, True, ORANGE)                                             # the look, on the new view
-    assert _label(spec, "bottom") == "Time (s from the start of this recording)"
+    assert _label(spec, "bottom") == "Time (ms from the start of this recording)"
+    _assert_quantity(spec, "bottom", "time_s", "ms", 1000.)
     assert _label(spec, "left") == "Frequency (Hz)"
     assert _boxes(widget) == ("", "", "")
     assert _said(page, explorer) == (
@@ -1182,9 +1291,11 @@ def test_noise_words_saved_over_another_view_open_unchanged(qapp, qtbot, tmp_pat
     page = window._psd_window
     explorer = _explorer_of(window)
     page.activateWindow()
+    _click_button(explorer.toolbar().update_button)
     assert page.has_data()
     _section(page, "Data")
     _pick(page._view_combo, data="fft")
+    _click_button(explorer.toolbar().update_button)
     _edit_double_click(page._fft_plot, page._fft_plot.titleLabel, "FFT of pore A")
     project = tmp_path / "noise.nanoscope"
     assert window._write_project(str(project))
@@ -1205,6 +1316,9 @@ def test_noise_words_saved_over_another_view_open_unchanged(qapp, qtbot, tmp_pat
     _pick(page._view_combo, data="fft")                      # the same view: nothing
     assert widget.state().title == "FFT of pore A"
     _pick(page._view_combo, data="allpoints")
+    assert widget.state().title == "FFT of pore A"
+    _click_button(explorer.toolbar().update_button)
+    assert page.current_view() == "allpoints"
     assert widget.state().title is None
     assert _said(page, explorer) == (
         "Title reset: the plot now shows the all-points histogram.", True)
@@ -1730,6 +1844,8 @@ def test_the_public_setters_reset_like_the_controls_that_they_move(
     page.set_plot_type("Histogram")
     page.set_histogram_column("dwell_s")
     page.set_fit("exponential")
+    QtWidgets.QApplication.processEvents()  # settle deferred plot/label layout after the setters
+    assert page._fit_label_item.isVisible() and page._applied_fit == "exponential"
     _edit_double_click(page._plot, page._fit_label_item, "Exp: {equation}")
     page.set_fit("gamma (peaked)")                         # a setter commits at once
     assert _dist_words(page)[3] == ""
@@ -1947,7 +2063,7 @@ def test_event_waveforms_a_restored_snapshot_is_what_the_next_change_is_measured
     _clear_status(page)
     _click_button(page._normalize)                                      # off the restored picture
     assert widget.state().title is None and _said(page, explorer)[0].endswith(
-        "the plot now shows the ensemble against time in seconds.")
+        "the plot now shows the ensemble against time in milliseconds.")
 
     # A snapshot saved with nothing to show, restored over a window that shows an ensemble ...
     _type_event_words(page, plot=page._ensemble_plot)
@@ -2054,7 +2170,7 @@ def test_voltage_dependence_a_later_change_that_resets_nothing_takes_the_sentenc
     assert _said(page, explorer)[0] == ""
 
     _add_title(plot, "Counts")
-    _pick(page._metric_combo, text="Median dwell (s)")
+    _pick(page._metric_combo, text="Median dwell (ms)")
     assert _said(page, explorer)[0] == "Title reset: the plot now shows median dwell."
     page.statusBar().showMessage("Voltage dependence has a log scale on the y axis only.", 5000)
     _pick(page._metric_combo, text="Median dI/I₀")              # not our message: it stays
@@ -2069,7 +2185,7 @@ def test_event_waveforms_a_later_change_that_resets_nothing_takes_the_sentence_d
     assert _said(page, explorer)[0].startswith("Title, X label and Y label reset:")
     _pick(page._y_combo, data="dwell_s")                       # nothing typed any more
     assert (_label(page._density_main, "bottom"), _label(page._density_main, "left")) == (
-        "dI/I₀ (log10)", "Dwell (s)")
+        "dI/I₀ (log)", "Dwell (ms)")
     assert _said(page, explorer)[0] == ""
     # The tabs and Normalize time are quantities too.
     bar = page._tabs.tabBar()
@@ -2183,7 +2299,7 @@ def test_comparison_and_subpopulations_replace_their_line_on_every_change(compar
     assert page._status.text().startswith("Title, X label and Y label reset:")
     _pick(page._y_combo, data="snr")
     _generate(page)                                            # nothing typed any more
-    assert page._status.text().startswith("Generated snapshot")
+    assert page._status.text().startswith("Generated result")
 
     page, explorer = subpop
     scatter = page.embedding_view()
@@ -2532,6 +2648,8 @@ def test_voltage_dependence_fit_wording_saved_with_a_trend_opens_unchanged(
     QtWidgets.QApplication.processEvents()
     page.activateWindow()
     page.set_fit("linear")
+    _click_button(window._analysis_explorer.toolbar().update_button)
+    assert page._fit_label.isVisible() and page._applied_fit == "linear"
     _edit_double_click(page.plot_item(), page._fit_label, "Linear fit: {equation}")
     project = tmp_path / "trend.nanoscope"
     assert window._write_project(str(project))
@@ -2603,7 +2721,9 @@ def test_event_waveforms_a_template_that_flips_the_tab_or_normalize_time_resets_
                                  page.appearance_state())
 
     assert page.current_view() == "Ensemble" and not page._normalize.isChecked()
-    assert widget.state() == words and widget._history.depth() == steps
+    _same_words_and_look(widget.state(), words)
+    _assert_quantity(page._ensemble_plot, "bottom", "time_s", "ms", 1000.)
+    assert widget._history.depth() == steps
     assert _said(page, explorer)[0] == ""
     # What the recall drew is where the next change starts from.
     bar = page._tabs.tabBar()
@@ -2668,7 +2788,7 @@ def test_the_guide_states_the_rule_where_each_window_s_appearance_is_described()
         assert window in text, window
     assert "**What a change puts back to automatic**" in text                      # Distributions
     assert "**Generate** puts the typed\n   Title, X label and Y label back to automatic" in text
-    assert "In Comparison figures, **Generate** puts the typed Title, X label and Y label" in text
+    assert "In Comparison figures, **Update plot** puts the typed Title, X label and Y label" in text
     assert "Switching **Show** to another view" in text                          # Noise
     assert "Changing the heatmap's **X** or **Y**" in text                        # Event waveforms
 

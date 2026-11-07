@@ -1,0 +1,108 @@
+{
+  "edition": "2026-11-05",
+  "application_build": "45.37.98",
+  "build_id": "20261105T043813486839Z-nogit-5447ddda145a",
+  "source_sha256": "5447ddda145a83c1e898dab5d309da3a703739fd339745d340cb473f5c498813",
+  "executable_sha256": "d4c89fed8124f7726c1145bd0940a7e3191e25cdf394dc572dbb44de3b89c1c9",
+  "screen_use": false,
+  "capture_method": "Offscreen captures from the compiled application in the completed usability acceptance workflows; reused without recapture or image alteration.",
+  "evidence": {
+    "compiled_ux_acceptance": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-ux-acceptance.json",
+    "compiled_ux_acceptance_sha256": "ea26fe39ecbc513cb0ac7c6599bd55bfe4c5e50bb4c4c3112d68f4f98dfbaa9a",
+    "installed": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/installed.json",
+    "installed_sha256": "aeb62c4b9e75aed3678b7e223c59dd7a58fe30a6fe3b96e388bf0e20c3a27e96"
+  },
+  "scope": "Current controls and result/source ownership; these synthetic illustrations do not replace historical apo-ferritin scientific results.",
+  "captures": [
+    {
+      "file": "manual-markdown/images/current_453798_pairplot.png",
+      "sha256": "407a79a8534fb3bfbaff35a50fd0c490f9c60f50c177b36898315b70e234ae40",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-navigation/02-pairplot-normal-1024.png",
+      "workflow": "navigation",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-navigation/verification.json",
+      "evidence_report_sha256": "280d2917159d749b3a9c3ce6e31730675e5d27150890639d342f040f5a6f8702",
+      "purpose": "Synthetic multi-feature pair plot; Figures list and Data & analysis inspector visible.",
+      "data_kind": "synthetic validation fixture"
+    },
+    {
+      "file": "manual-markdown/images/current_453798_pairplot_compact.png",
+      "sha256": "e2da0917f1bb106c71d68b1bf0a239d858b34dfe797acb3158a07c36b9df2c59",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-navigation/03-pairplot-compact-1024.png",
+      "workflow": "navigation",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-navigation/verification.json",
+      "evidence_report_sha256": "280d2917159d749b3a9c3ce6e31730675e5d27150890639d342f040f5a6f8702",
+      "purpose": "Same synthetic pair plot with Figures list hidden; presentation space changes without recalculation.",
+      "data_kind": "synthetic validation fixture"
+    },
+    {
+      "file": "manual-markdown/images/current_453798_fit_setup.png",
+      "sha256": "74ff2d5ed1189599652d871e568cdbd26df2470cd35e32eb824ec4d8651704b6",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-fit-controls/02-advanced-constraints.png",
+      "workflow": "fit-controls",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-fit-controls/verification.json",
+      "evidence_report_sha256": "708ed973a300fe1ad0dd3504a7939b71ec8172288b8e77cf32db3f87de209c9f",
+      "purpose": "Synthetic Gaussian observations; advanced starts, constraints, error weights and loss controls.",
+      "data_kind": "synthetic validation fixture"
+    },
+    {
+      "file": "manual-markdown/images/current_453798_fit_result.png",
+      "sha256": "e72160f02cb830d3b8c3004ce581cb8cdad0a6f573fc0ea7ff9870582b656d07",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-fit-controls/03-completed-results.png",
+      "workflow": "fit-controls",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-fit-controls/verification.json",
+      "evidence_report_sha256": "708ed973a300fe1ad0dd3504a7939b71ec8172288b8e77cf32db3f87de209c9f",
+      "purpose": "Completed synthetic Gaussian fit with raw-response residuals, metrics and parameter intervals.",
+      "data_kind": "synthetic validation fixture"
+    },
+    {
+      "file": "manual-markdown/images/current_453798_fit_draft.png",
+      "sha256": "0b002c4eb354561dbc56aa0f452ed72c579ef96c53fb21c9878782886f6ca752",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-fit-controls/04-edited-draft-identity.png",
+      "workflow": "fit-controls",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-fit-controls/verification.json",
+      "evidence_report_sha256": "708ed973a300fe1ad0dd3504a7939b71ec8172288b8e77cf32db3f87de209c9f",
+      "purpose": "Edited fit draft is explicitly distinguished from the last completed fit.",
+      "data_kind": "synthetic validation fixture"
+    },
+    {
+      "file": "manual-markdown/images/current_453798_subpop_source.png",
+      "sha256": "d12ff2a551fd73775e413042e42088743395a5e5e15cf57ee2a791a9b862d918",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-source-pinning/01-original-A-source-with-B-selected.png",
+      "workflow": "source-pinning",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-source-pinning/source-pinning-report.json",
+      "evidence_report_sha256": "1c23e5267e77900f57045f4ace105500231c702b9343ba1074fe331e6a166b25",
+      "purpose": "Synthetic source A report remains pinned to A while source B is selected in the main window.",
+      "data_kind": "synthetic validation fixture"
+    },
+    {
+      "file": "manual-markdown/images/current_453798_umap_button.png",
+      "sha256": "cd11e1b9c8233430ef007765ebc80a0cc554bfcc06bd8ea68075ace77be82121",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-umap/01-generate-umap-button.png",
+      "workflow": "umap",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-umap/verification.json",
+      "evidence_report_sha256": "6c80fbe4d4d93872dee53c9e2485a261352634a7506243505a67a0efd3acb9a7",
+      "purpose": "Synthetic subpopulation report before generating UMAP; Generate UMAP control.",
+      "data_kind": "synthetic validation fixture"
+    },
+    {
+      "file": "manual-markdown/images/current_453798_umap_result.png",
+      "sha256": "4897746e7c8c3c3566555e046025f416e774c83fa5c6cadf8ebe6872357e7b38",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-umap/02-generated-umap-result.png",
+      "workflow": "umap",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-umap/verification.json",
+      "evidence_report_sha256": "6c80fbe4d4d93872dee53c9e2485a261352634a7506243505a67a0efd3acb9a7",
+      "purpose": "UMAP computed from the synthetic report’s stored PCA scores; original analysis retained.",
+      "data_kind": "synthetic validation fixture"
+    },
+    {
+      "file": "manual-markdown/images/current_453798_noise.png",
+      "sha256": "7a1a1527ca2302ee84d2d279a703f5c32367ca72e9411eb09625143fb3fd8ab4",
+      "original_file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-signals/03-noise-overlay-light.png",
+      "workflow": "signals",
+      "evidence_report": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/usability-fixes-20261104/compiled-signals/signals-acceptance.json",
+      "evidence_report_sha256": "63bcb7fa00831af6dc0fed3ca2902204baa9fd9b3f757802a3b30362c5c0d359",
+      "purpose": "Synthetic noise spectrum with visible descriptive 1/f summary; not a calibrated pore-noise benchmark.",
+      "data_kind": "synthetic validation fixture"
+    }
+  ]
+}

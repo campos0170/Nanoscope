@@ -1,4 +1,6 @@
 """Signal-study plots from committed detections and review, with numerical sidecars."""
+
+from ..core.atomic_write import write_staged
 from pathlib import Path
 import json
 import numpy as np
@@ -6,6 +8,7 @@ import pandas as pd
 from .incubation_figures import _figure, _save, _pore_caveat
 from ..analysis.study_signal import source_indices
 from ..analysis.cancel import check_cancelled
+from .quantity_axes import time_axis, log_time_axis
 
 COLORS={'spike':'#147D92','plateau':'#CA7627','shallow_long':'#9B9B9B'}
 
@@ -49,7 +52,8 @@ def recording_figures(a,nulls,folder,*,cancel=None,study_metadata=None):
     fig=_figure(height=7); axes=fig.subplots(2,1)
     for ax,values,label in zip(axes,(a.raw,a.detrended),('Raw current (pA)','Prepared current (pA)')):
         x,y=_envelope(a,values); ax.plot(x,y,lw=.45,color='#354C59')
-        ax.set(xlabel='Original source time (s)',ylabel=label)
+        ax.set(xlabel='Original source time (ms)',ylabel=label)
+        time_axis(ax, 'bottom', 'original_time_s', clock_basis='recording')
     for kind,color in COLORS.items():
         selected=ev[ev.kind==kind]; axes[1].scatter(selected.original_onset_s,
             [a.detrended[int(s):int(e)+1].min() for s,e in zip(selected.start_idx,selected.end_idx)],s=9,color=color,label=f'{kind}: {len(selected)} accepted')
@@ -64,6 +68,8 @@ def recording_figures(a,nulls,folder,*,cancel=None,study_metadata=None):
         axes[1].hist(np.log10(selected.dwell_ms),bins=20,alpha=.55,color=color)
         axes[2].hist(selected.f_sust*100,bins=20,alpha=.55,color=color)
     axes[0].set(xscale='log',xlabel='Dwell (ms)',ylabel='Sustained current change (pA)'); axes[0].legend(fontsize=8)
+    time_axis(axes[0], 'bottom', 'dwell_ms', stored_unit='ms')
+    log_time_axis(axes[1], 'bottom')
     axes[1].set(xlabel='log10 dwell (ms)',ylabel='Accepted events'); axes[2].set(xlabel='Local fractional current change (%)',ylabel='Accepted events')
     fig.suptitle(f'{tag}: accepted event measurements (unsmoothed trace)'); save(fig,'distributions',ev)
     fig=_figure(height=9); axes=fig.subplots(3,3); examples=[]
@@ -77,7 +83,8 @@ def recording_figures(a,nulls,folder,*,cancel=None,study_metadata=None):
             pad=max(100,e-s+1); lo=max(0,s-pad); hi=min(len(a.raw),e+1+pad)
             x=(np.arange(lo,hi)-s)/a.fs_hz*1000
             ax.plot(x,a.detrended[lo:hi],color='#354C59',lw=.7); ax.axvspan(0,event.dwell_ms,color=COLORS[kind],alpha=.2)
-            ax.set(title=f'{kind} / depth quantile {q:g}\nsource {event.original_onset_s:.5f} s; '+('accepted' if event.accepted else 'excluded'),xlabel='Time relative to onset (ms)',ylabel='Current (pA)')
+            ax.set(title=f'{kind} / depth quantile {q:g}\nsource {event.original_onset_s * 1000:.5f} ms; '+('accepted' if event.accepted else 'excluded'),xlabel='Time relative to onset (ms)',ylabel='Current (pA)')
+            time_axis(ax, 'bottom', 'time_from_onset_ms', stored_unit='ms', clock_basis='relative')
             bind_event_panel(ax, tag=tag, event_id=event.get('event_id', f'{tag}:{s}:{e}'),
                              start_idx=s, end_idx=e)
             examples.append(event.to_dict())
@@ -104,24 +111,28 @@ def recording_figures(a,nulls,folder,*,cancel=None,study_metadata=None):
         axes[0,1].scatter(selected.original_onset_s,selected.dwell_ms,s=8,color=color)
     axes[0,0].set(ylabel='Sustained change (pA)'); axes[0,0].legend(fontsize=8)
     axes[0,1].set(ylabel='Dwell (ms)',yscale='log')
+    time_axis(axes[0,1], 'left', 'dwell_ms', stored_unit='ms')
     axes[1,0].scatter(ev.original_onset_s,ev.I0_local_pA,s=8,color='#147D92'); axes[1,0].set(ylabel='Local |I0| (pA)')
     counts,edges=np.histogram(ev.onset_s,bins=np.linspace(0,a.duration_s,21)); axes[1,1].stairs(counts/np.diff(edges),edges,color='#147D92')
-    axes[1,1].set(xlabel='Retained acquisition time (s)',ylabel='Accepted events / s')
-    for ax in (axes[0,0],axes[0,1],axes[1,0]): ax.set_xlabel('Original source time (s)')
-    fig.suptitle(f'{tag}: within-recording changes; exposure {a.duration_s:.5f} s'); save(fig,'time_dependence',ev)
-    (folder/f'signal_{tag}_methods.json').write_text(json.dumps(a.provenance,indent=2,default=str))
+    axes[1,1].set(xlabel='Retained acquisition time (ms)',ylabel='Accepted events / s')
+    time_axis(axes[1,1], 'bottom', 'time_s', clock_basis='relative')
+    for ax in (axes[0,0],axes[0,1],axes[1,0]):
+        time_axis(ax, 'bottom', 'original_time_s', clock_basis='recording', label='Original source time (ms)')
+    fig.suptitle(f'{tag}: within-recording changes; exposure {a.duration_s * 1000:.5f} ms'); save(fig,'time_dependence',ev)
+    write_staged(folder/f'signal_{tag}_methods.json', Path.write_text, json.dumps(a.provenance,indent=2,default=str))
     return paths
 
 
 def comparison_figures(result,records,folder,*,cancel=None,study_metadata=None):
     folder=Path(folder); folder.mkdir(parents=True,exist_ok=True); paths=[]
-    s=result.summary; ev=result.events; x=np.arange(len(s)); labels=[f'{v:g} h' for v in s.incubation_h]
+    s=result.summary; ev=result.events; x=np.arange(len(s)); labels=[f'{v * 3600000:.3g} ms' for v in s.incubation_h]
     def save(fig,name,data):
         _label_study(fig,study_metadata)
         paths.append(_save(fig,folder,'signal_comparison_'+name,data,cancel=cancel))
     fig=_figure(height=7); axes=fig.subplots(2,3)
     for ax,col,label in zip(axes.flat,('rate_per_s','duty','dwell_med','depth_sust_med','f_sust_med','G_nS'),('Accepted events / s','Occupied fraction','Median dwell (ms)','Median sustained change (pA)','Median local fractional change','Open-pore conductance (nS)')):
         ax.plot(x,s[col],'o-',color='#147D92'); ax.set_xticks(x,labels); ax.set_ylabel(label)
+        if col == 'dwell_med': time_axis(ax, 'left', 'dwell_ms', stored_unit='ms')
     fig.suptitle('Accepted-event summaries\n'+_pore_caveat(s))
     save(fig,'summary',s)
     pairs=result.tables['nominal_pairs']; fig=_figure(height=5); ax=fig.subplots()
@@ -133,9 +144,11 @@ def comparison_figures(result,records,folder,*,cancel=None,study_metadata=None):
     fig=_figure(height=5); axes=fig.subplots(1,3)
     for ax,col,label in zip(axes,('dwell_ms','depth_sust_pA','f_sust'),('Dwell (ms)','Sustained current change (pA)','Local fractional current change')):
         for i,row in enumerate(s.itertuples()):
-            vals=np.sort(ev.loc[ev.tag==row.tag,col]); ax.step(vals,np.arange(1,len(vals)+1)/max(1,len(vals)),where='post',label=f'{row.incubation_h:g} h; n={len(vals)}',color=f'C{i}')
+            vals=np.sort(ev.loc[ev.tag==row.tag,col]); ax.step(vals,np.arange(1,len(vals)+1)/max(1,len(vals)),where='post',label=f'{row.incubation_h * 3600000:.3g} ms; n={len(vals)}',color=f'C{i}')
         ax.set(xlabel=label,ylabel='Cumulative accepted-event fraction')
-        if col=='dwell_ms': ax.set_xscale('log')
+        if col=='dwell_ms':
+            ax.set_xscale('log')
+            time_axis(ax, 'bottom', 'dwell_ms', stored_unit='ms')
     axes[0].legend(fontsize=8); fig.suptitle('Empirical distributions; events are not independent biological replicates'); save(fig,'distributions',ev)
     fig=_figure(height=6); axes=fig.subplots(1,2)
     for i,kind in enumerate(('spike','plateau')):
@@ -156,6 +169,7 @@ def comparison_figures(result,records,folder,*,cancel=None,study_metadata=None):
         if len(table): ax.bar(np.arange(len(table)),table[col],color=['#147D92' if not v else '#CA7627' for v in table.supplementary]); ax.set_xticks(np.arange(len(table)),table.tag,rotation=20)
         else: ax.text(.5,.5,'No supplementary recording',ha='center',transform=ax.transAxes)
         ax.set_ylabel(label)
+        if col == 'dwell_med': time_axis(ax, 'left', 'dwell_ms', stored_unit='ms')
     fig.suptitle('Same nominal incubation, different recording state; supplementary excerpts are not additional timepoints')
     save(fig,'excerpt_check',table)
     return paths

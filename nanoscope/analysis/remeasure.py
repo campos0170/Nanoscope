@@ -1221,13 +1221,39 @@ def describe_stored_baseline(prov: Mapping[str, Any] | None) -> str:
     is what this whole change exists to replace. Saying so is more useful than
     "unknown", so the fallback names the estimator that was in force.
     """
-    from .baseline import BaselineConfig
+    from .baseline import BaselineConfig, BaselinePolicyChangedError, METHODS
 
+    if prov is None:
+        prov = {}
+    if not isinstance(prov, Mapping):
+        return "invalid stored user reference (review the recipe before a fresh detection)"
+    # Historical algorithm revisions can be named without using their numerical
+    # implementation. Validate the settings/reference recipe independently of
+    # the revision, then let the strict gate determine the reconstruction note.
+    settings = {k: v for k, v in prov.items() if k not in (
+        "baseline_endpoint_policy", "baseline_sample_count_policy", "baseline_mask_noise_policy")}
     try:
-        cfg = BaselineConfig.reproducible_from(prov)
+        cfg = BaselineConfig.from_provenance(settings)
     except (TypeError, ValueError):
         return "invalid stored user reference (review the recipe before a fresh detection)"
+    method = prov.get("baseline_method")
+    has_reference = cfg is not None and cfg.open_pore_reference is not None
+    if not method and not has_reference:
+        return "block_median @ 10 ms (this table predates the baseline stamp)"
+    if method not in METHODS and not has_reference:
+        window = prov.get("baseline_window_s")
+        win = f" @ {float(window) * 1e3:g} ms" if window else ""
+        return f"{method}{win}"
     if cfg is not None:
+        # Naming a historical setting does not reconstruct samples. Keep the
+        # settings readable while separately stating that its old algorithm may
+        # no longer be available; scientific rebuilds retain the strict gate.
+        try:
+            reproducible = BaselineConfig.reproducible_from(prov)
+        except BaselinePolicyChangedError:
+            return cfg.describe() + " (saved algorithm unavailable; re-run detection for exact reconstruction)"
+        if reproducible is None:
+            return cfg.describe() + " (saved algorithm unrecorded; re-run detection for exact reconstruction)"
         return cfg.describe()
     method = prov.get("baseline_method") if prov else None
     if method:

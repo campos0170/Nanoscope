@@ -108,6 +108,8 @@ def test_fits_tab_and_substate_export(journey, qtbot, monkeypatch):
     before = df.copy(deep=True)
     note("fits_button_click", events=len(df))
     QtTest.QTest.mouseClick(stats.fit_button, QtCore.Qt.LeftButton)
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     dwell = window._session.results.get(doc_id, 0, "fit.dwell")
     depth = window._session.results.get(doc_id, 0, "fit.depth")
     assert dwell is not None and depth is not None, stats.results.toPlainText()

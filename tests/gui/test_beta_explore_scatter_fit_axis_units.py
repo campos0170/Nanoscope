@@ -2,7 +2,7 @@
 
 ``_overlay_scatter_fit`` used to print slope/intercept (and the power law's
 coefficient) in RAW storage units — seconds for the time columns — under an axis whose
-ticks show ms/µs, with no unit stated anywhere: "y = 2000·x + 5" over "dwell (ms)" for
+ticks show ms/µs, with no unit stated anywhere: "y = 2·x + 5" over "dwell (ms)" for
 data lying exactly on depth = 2 pA/ms · dwell + 5 pA. A reader taking x off the axis
 computed depths 1000x too large. The fix routes the caption through the same
 :meth:`PlotsWindow._display_unit` rule the exponential's tau and the mixture's mu
@@ -83,20 +83,22 @@ def test_linear_fit_caption_follows_ms_axis(window):
 
 def test_linear_fit_caption_follows_us_axis(window):
     _scatter(window, _dwell_vs_depth(), "dwell_s", "depth_pA", "linear")
-    window.set_time_unit("µs")
+    with pytest.raises(ValueError, match="unknown time unit"):
+        window.set_time_unit("µs")
     for text in _texts(window):
-        assert "y = 0.002·x + 5" in text                  # 2000 pA/s == 0.002 pA/µs
-        assert "(x in µs, y in pA)" in text
+        assert "y = 2·x + 5" in text                  # 2000 pA/s == 0.002 pA/µs
+        assert "(x in ms, y in pA)" in text
 
 
 def test_linear_fit_caption_in_seconds_still_states_units(window):
     # With the axis in raw seconds the NUMBER was always right; the unit must
     # still be said, or the caption is one axis-relabel away from lying again.
     _scatter(window, _dwell_vs_depth(), "dwell_s", "depth_pA", "linear")
-    window.set_time_unit("s")
+    with pytest.raises(ValueError, match="unknown time unit"):
+        window.set_time_unit("s")
     for text in _texts(window):
-        assert "y = 2000·x + 5" in text
-        assert "(x in s, y in pA)" in text
+        assert "y = 2·x + 5" in text
+        assert "(x in ms, y in pA)" in text
 
 
 def test_linear_fit_converts_a_time_column_on_the_y_axis(window):
@@ -139,12 +141,13 @@ def test_power_law_exponent_is_untouched_by_the_unit(window):
     dwell = np.linspace(2e-4, 3e-3, 60)
     df = _frame(dwell_s=dwell, depth_pA=3e6 * dwell ** 2)
     _scatter(window, df, "dwell_s", "depth_pA", "power law")
-    window.set_time_unit("s")
+    with pytest.raises(ValueError, match="unknown time unit"):
+        window.set_time_unit("s")
     title, details = _texts(window)
     assert "x^2" in title
-    assert "y = 3e+06·x^2" in title
-    assert "(x in s, y in pA)" in title
-    assert "y = 3e+06·x^2" in details
+    assert "y = 3·x^2" in title
+    assert "(x in ms, y in pA)" in title
+    assert "y = 3·x^2" in details
 
 
 # ================================================================================================

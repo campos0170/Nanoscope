@@ -208,7 +208,7 @@ def test_dialog_scales_frozen_preview_and_residual_is_explicit(plots, qtbot, mon
     dialog.residual_check.setChecked(True)
     assert dialog.options().include_residual
     dialog.preset_combo.setCurrentIndex(1)
-    assert dialog.options().physical_width_mm == 85
+    assert dialog.options().physical_width_mm == 89
     dialog.dpi_spin.setValue(600)
     dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(".svg"))
     assert not dialog.preview_label.pixmap().isNull()

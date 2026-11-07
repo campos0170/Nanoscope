@@ -23,8 +23,8 @@ def extract_composition(snapshot: FigureSnapshot) -> tuple[tuple[FrozenPanel, ..
     snapshot = FigureSnapshot.from_storage(metadata, blobs)
     config = snapshot.config()
     if (not isinstance(config, dict) or config.get("kind") != "figure-composition"
-            or type(config.get("version")) is not int or config["version"] not in (1, 2)):
-        raise ValueError("This figure is not a supported version-1 or version-2 composition. Its saved image can still be exported.")
+            or type(config.get("version")) is not int or config["version"] not in (1, 2, 3)):
+        raise ValueError("This figure is not a supported version-1, version-2 or version-3 composition. Its saved image can still be exported.")
     panels = config.get("panels")
     labels = config.get("panel_labels")
     if (not isinstance(panels, list) or not 1 <= len(panels) <= 12
@@ -35,13 +35,26 @@ def extract_composition(snapshot: FigureSnapshot) -> tuple[tuple[FrozenPanel, ..
             or any(type(config.get(key)) is not bool for key in ("share_x", "share_y"))):
         raise ValueError("The saved composition layout is malformed; nothing has been changed.")
     layout = {key: config[key] for key in ("columns", "share_x", "share_y", "panel_labels")}
-    if config["version"] == 2:
+    if config["version"] >= 2:
         from .figure_composition import validate_publication_layout
         required = ("panel_spans", "spacing", "label_style", "shared_legend")
         if any(key not in config for key in required) or type(config["shared_legend"]) is not bool:
-            raise ValueError("The saved version-2 composition layout is malformed; nothing has been changed.")
+            raise ValueError(f"The saved version-{config['version']} composition layout is malformed; nothing has been changed.")
+        if config['version'] == 3:
+            from ..core.figure_style import normalize_style_binding
+            from ..core.figure_composition_style import panel_style
+            if config.get('label_coordinate_dpi') != 96.:
+                raise ValueError('Unsupported composition label coordinate basis.')
+            binding = normalize_style_binding(config.get('style_binding'))
+            overrides = config.get('label_overrides', {})
+            projected = panel_style(binding, overrides, legacy=config['label_style'])
+            if projected != config['label_style']:
+                raise ValueError('Composition lettering disagrees with its saved shared style.')
+            layout.update(style_binding=binding, label_overrides=overrides,
+                          label_coordinate_dpi=96.)
         validate_publication_layout(len(panels), config["columns"], config["panel_spans"],
-                                    config["spacing"], config["label_style"])
+                                    config["spacing"], config["label_style"],
+                                    bound_letters=config['version'] == 3)
         layout.update({key: config[key] for key in required})
     resources = dict(snapshot.additional_resources)
     extracted = []

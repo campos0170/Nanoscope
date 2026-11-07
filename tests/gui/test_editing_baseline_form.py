@@ -1,18 +1,18 @@
 """The Baseline form gets a real SET for undo, and resets that reset one thing.
 
-Editing foundation, design §3.9 and the "Baseline ▸ Back to default" row of §6 (approved
+Editing foundation, design §3.9 and the "Baseline ▸ Reset automatic windows" row of §6 (approved
 by the owner 2026-10-30):
 
 * ``BaselinePanel.set_params`` is a SEED, and a seed deliberately steps aside for a
   confirmed form ("the app proposes, the user confirms"). Edit ▸ Undo is the user's own
   act, so it cannot go through it: ``form_state()`` is the snapshot the settings history
   keeps, ``restore_form_state()`` the set it writes back through.
-* Back to default was hidden outside Automatic, so with a user-provided reference chosen
+* Reset automatic windows was hidden outside Automatic, so with a user-provided reference chosen
   the estimator's windows -- which still travel in ``params`` and in the baseline
   fingerprint -- had no reset at all. It now resets them in every mode, and never the
-  reference. Under a reference it stands without Measure and Use these values, beside a
+  reference. Under a reference it stands without Measure and Use proposed windows, beside a
   caption that names the estimator and quotes the windows it resets.
-* The reference had no reset of its own. "Clear reference" is it, and it keeps the
+* The reference had no reset of its own. "Use automatic reference" is it, and it keeps the
   windows.
 * Each reset names its own step (``resetPerformed``), because only the button knows
   which part of the form it reset.
@@ -154,12 +154,14 @@ def test_interval_rows_come_back_as_typed_including_an_invalid_draft(panel):
     panel.add_reference_interval(8.0, 9.0)
     editor = panel.reference_editor
     editor.method.setCurrentIndex(editor.method.findData("linear"))
+    assert panel.params()["baseline_open_pore_reference"]["intervals_s"] == [[.5, 1.], [8., 9.]]
     editor.table.item(1, 1).setText("9.5x")
     error = panel.reference_error()
     assert "Interval 2" in error
     state = panel.form_state()
     params = panel.params()
-    assert state["reference"]["intervals"] == [["0.5", "1.0"], ["8.0", "9.5x"]]
+    assert state["reference"]["intervals"] == [["500.0", "1000.0"], ["8000.0", "9.5x"]]
+    assert state["reference"]["interval_display"] == {"version": 1, "units": [["ms", "ms"], ["ms", "ms"]]}
     assert state["reference"]["interpolation"] == "linear"
 
     editor.clear_button.click()
@@ -224,7 +226,7 @@ def test_a_confirmed_form_is_set_back_where_a_seed_steps_aside(panel):
     assert editor.current.text() == "-120"
     # A muted write moves the spins under a reference too, and the caption quoting them
     # follows it.
-    assert panel.estimator_windows_label.text().endswith(": 2 s / 0.5 s")
+    assert panel.estimator_windows_label.text().endswith(": 2000 ms / 500 ms")
 
 
 def test_an_unconfirmed_form_comes_back_unconfirmed(panel):
@@ -236,7 +238,7 @@ def test_an_unconfirmed_form_comes_back_unconfirmed(panel):
     seeded = panel.form_state()
     assert seeded["source"] == "restored"
     assert seeded["reference"]["confirmed"] is False
-    assert panel.estimator_windows_label.text().endswith(": 2 s / 0.5 s")
+    assert panel.estimator_windows_label.text().endswith(": 2000 ms / 500 ms")
 
     panel.reference_editor.current.setText("-150")       # confirms the reference
     panel.restore_form_state(seeded)
@@ -330,7 +332,7 @@ def test_a_missing_key_leaves_its_part_alone(panel):
 
 
 # ===========================================================================
-# 2. Back to default: the estimator, in every mode, never the reference
+# 2. Reset automatic windows: the estimator, in every mode, never the reference
 # ===========================================================================
 @pytest.mark.parametrize("mode", ["constant", "intervals"])
 def test_back_to_default_is_on_screen_and_works_under_a_reference(panel, mode):
@@ -345,11 +347,11 @@ def test_back_to_default_is_on_screen_and_works_under_a_reference(panel, mode):
         panel.add_reference_interval(1.0, 2.0)
 
     assert panel.reset_button.isVisibleTo(panel), (
-        "Back to default is hidden while a user-provided reference is chosen")
+        "Reset automatic windows is hidden while a user-provided reference is chosen")
     assert panel.reset_button.isEnabled()
     caption = panel.estimator_windows_label
     assert caption.isVisibleTo(panel)
-    assert caption.text() == "Automatic estimator (not in use): 2 s / 0.5 s"
+    assert caption.text() == "Automatic estimator (not in use): 2000 ms / 500 ms"
 
     reference = editor.form_state()
     recipe = panel.params()["baseline_open_pore_reference"]
@@ -362,8 +364,8 @@ def test_back_to_default_is_on_screen_and_works_under_a_reference(panel, mode):
     assert _windows(panel) == DEFAULT_WINDOWS
     # The spins are hidden in this mode; without the caption the press would change
     # nothing anyone could see.
-    assert caption.text() == "Automatic estimator (not in use): 0.5 s / 0.1 s"
-    assert editor.form_state() == reference, "Back to default touched the reference"
+    assert caption.text() == "Automatic estimator (not in use): 500 ms / 100 ms"
+    assert editor.form_state() == reference, "Reset automatic windows touched the reference"
     assert panel.params()["baseline_open_pore_reference"] == recipe
     assert panel.param_source() == "user", "the reference's own confirmation moved"
     choose(panel, "automatic")
@@ -381,7 +383,7 @@ def test_back_to_default_in_automatic_names_its_step_and_drops_the_mark(panel):
 
 
 def test_back_to_default_under_a_reference_does_not_raise_the_run_windows_line(panel):
-    """The line quotes the spins "above", which a reference hides. Back to default moves
+    """The line quotes the spins "above", which a reference hides. Reset automatic windows moves
     those spins in every mode now, and its refresh used to put the line back up."""
     panel.rough_s.setValue(2.0)
     panel.base_s.setValue(0.5)
@@ -395,18 +397,18 @@ def test_back_to_default_under_a_reference_does_not_raise_the_run_windows_line(p
     # Back in Automatic the contrast is true, and said.
     choose(panel, "automatic")
     assert panel.run_windows_label.isVisibleTo(panel)
-    assert "not the 0.5 s / 0.1 s above" in panel.run_windows_label.text()
+    assert "not the 500 ms / 100 ms above" in panel.run_windows_label.text()
 
 
 def test_under_a_reference_back_to_default_stands_alone_beside_what_it_resets(panel):
     """Of the estimator's three actions, only the reset stays under a reference: Measure
-    and Use these values propose and confirm windows for the estimator a reference
+    and Use proposed windows propose and confirm windows for the estimator a reference
     replaces. Apply's cell names that estimator instead, so the button left beside it
     does not read as the reference form's reset."""
     panel.set_proposal(_proposal(0.04, 0.01))
     panel.set_health(CONDEMNING, measured_for="proposal")
     panel.apply_button.click()                       # refused; armed
-    assert panel.apply_button.text() == "Use these values anyway"
+    assert panel.apply_button.text() == "Use proposed windows anyway"
     caption = panel.estimator_windows_label
     assert not caption.isVisibleTo(panel)
 
@@ -422,11 +424,11 @@ def test_under_a_reference_back_to_default_stands_alone_beside_what_it_resets(pa
     choose(panel, "automatic")
     assert panel.probe_button.isVisibleTo(panel) and panel.apply_button.isVisibleTo(panel)
     assert not caption.isVisibleTo(panel)
-    assert panel.apply_button.text() == "Use these values anyway"
+    assert panel.apply_button.text() == "Use proposed windows anyway"
 
 
 # ===========================================================================
-# 3. Clear reference: the reference, never the windows
+# 3. Use automatic reference: the reference, never the windows
 # ===========================================================================
 def test_clear_reference_resets_the_reference_and_keeps_the_windows(panel):
     panel.rough_s.setValue(2.0)
@@ -448,11 +450,11 @@ def test_clear_reference_resets_the_reference_and_keeps_the_windows(panel):
     assert editor.current.text() == editor.notes.text() == ""
     assert editor.method.currentData() == "constant"
     assert not panel.automatic_controls.isHidden()
-    assert _windows(panel) == (2.0, 0.5), "Clear reference touched the windows"
+    assert _windows(panel) == (2.0, 0.5), "Use automatic reference touched the windows"
     assert panel.param_source() == "user"
 
     # A reset, not a choice: the confirmation went with it, so a stored run may seed the
-    # reference again -- as Back to default's 'default' lets one seed the windows.
+    # reference again -- as Reset automatic windows's 'default' lets one seed the windows.
     assert editor.form_state()["confirmed"] is False
     panel.set_params(known(-80.0))
     assert panel.reference_mode() == "constant"
@@ -498,15 +500,15 @@ def test_clear_reference_is_one_click_out_of_a_reference_that_could_not_be_resto
 def test_each_reset_says_what_it_keeps(panel):
     clear_tip = panel.reference_editor.clear_button.toolTip()
     assert "rough and base windows are kept" in clear_tip
-    assert "Back to default" in clear_tip
+    assert "Reset automatic windows" in clear_tip
     reset_tip = panel.reset_button.toolTip()
-    assert "every mode" in reset_tip and "Clear reference" in reset_tip
+    assert "every mode" in reset_tip and "Use automatic reference" in reset_tip
 
 
 def test_neither_reset_moves_out_from_under_the_pointer(qapp, qtbot):
-    """Hosted the way the page hosts it (a column ending in a stretch). Clear reference
+    """Hosted the way the page hosts it (a column ending in a stretch). Use automatic reference
     changes the mode, and everything under the mode's row changes with it -- which is
-    why the button rides that row. Back to default re-words the caption beside it, and
+    why the button rides that row. Reset automatic windows re-words the caption beside it, and
     at this width the new words take a line fewer: measured, a button centred in its row
     then moved 8 px, which is why it is top-aligned."""
     host = QtWidgets.QWidget()

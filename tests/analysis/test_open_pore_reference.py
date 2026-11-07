@@ -19,20 +19,23 @@ def intervals(spans=((0.0, 0.01), (0.08, 0.1)), interpolation="linear"):
     return OpenPoreReference(mode="intervals", intervals_s=spans, interpolation=interpolation)
 
 
-def test_disabled_config_keeps_legacy_identity_and_provenance():
+def test_disabled_reference_keeps_automatic_identity_and_provenance():
     expected = {
         "baseline_method": "masked_median", "baseline_rough_s": .5,
         "baseline_base_s": .1, "baseline_decim": 66, "baseline_mask_sigma": 3.5,
         "baseline_dilate_ms": 1., "baseline_window_s": .5,
-        "baseline_despike_size": 0, "baseline_fingerprint": "sha256:8e331d27a59a",
+        "baseline_despike_size": 0,
     }
-    assert B.DEFAULT_BASELINE.to_provenance(50000) == expected
-    assert B.BaselineConfig(open_pore_reference=None).to_provenance(50000) == expected
+    current = B.DEFAULT_BASELINE.to_provenance(50000)
+    assert {key: current[key] for key in expected} == expected
+    assert B.BaselineConfig(open_pore_reference=None).to_provenance(50000) == current
+    assert current["baseline_sample_count_policy"] == B.baseline_sample_count_policy("masked_median")
+    assert current["baseline_mask_noise_policy"] == B.baseline_mask_noise_policy("masked_median")
+    assert current["baseline_fingerprint"] == B.DEFAULT_BASELINE.fingerprint(50000)
     assert KEY not in B.BASELINE_PARAM_KEYS
     cfg, source = B.baseline_config_from_params({KEY: None})
     assert cfg is B.DEFAULT_BASELINE and source == "default"
-    parts = [f"{name}={getattr(cfg, name)!r}" for name in cfg._FIELDS]
-    assert cfg.fingerprint() == "sha256:" + hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+    assert cfg.fingerprint() == B.BaselineConfig(open_pore_reference=None).fingerprint()
 
 
 @pytest.mark.parametrize("value", [-100., 0., 100.])

@@ -51,6 +51,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+import sys
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -201,9 +202,15 @@ def _import_tf() -> Any:
     try:
         tf = importlib.import_module("tensorflow")
     except Exception as exc:  # ImportError, or a broken TF install
+        recovery = (
+            "Reinstall the latest NanoScope app to repair its bundled ML runtime."
+            if getattr(sys, "frozen", False) else
+            "Install a compatible TensorFlow and Keras pair in this Python environment; "
+            "see packaging/README.md for the validated versions."
+        )
         raise MLUnavailable(
             "TensorFlow is not available, so the ML event detector cannot run. "
-            "Install tensorflow (2.15) to enable ML detection."
+            + recovery
         ) from exc
     # protobuf (pulled in by TF) leaves 'google3.*' parent packages out of
     # sys.modules, which FATALLY crashes PySide6/shiboken on the next

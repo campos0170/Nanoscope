@@ -36,6 +36,7 @@ say "Preflight"
 [[ "$(uname -m)" == "arm64" ]] || { echo "This build is Apple Silicon only; you are on $(uname -m)." >&2; exit 1; }
 command -v "$PYTHON" >/dev/null || { echo "Python not found at $PYTHON (override with NANOSCOPE_PYTHON=)" >&2; exit 1; }
 APP_VERSION="$("$PYTHON" "$HERE/build_identity.py" --version)"
+"$PYTHON" "$HERE/build_identity.py" --check-environment
 DMG="$DIST/$APP_NAME-$APP_VERSION-arm64.dmg"
 "$PYTHON" -c "import PyInstaller" 2>/dev/null || { echo "PyInstaller missing: $PYTHON -m pip install 'pyinstaller>=6.11'" >&2; exit 1; }
 # The spec calls copy_metadata("nanoscope"), which needs the package's dist-info to exist.
@@ -79,6 +80,7 @@ say "Sanitising and verifying bundle integrity"
 say "Ad-hoc signing"
 codesign --force --deep --sign - --timestamp=none "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/    /'
+"$PYTHON" "$HERE/verify_bundle.py" --check-tensorflow-image "$APP"
 echo "    signature: $(codesign -dv "$APP" 2>&1 | grep -i 'Signature=' || echo 'ad-hoc')"
 
 # --- report -----------------------------------------------------------------------------------

@@ -19,10 +19,13 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
+import shiboken6
 from PySide6 import QtCore, QtWidgets
 
 from ..plot.style import BASELINE_TRACK_INK, PALETTE
 from .inspector_widgets import Disclosure
+from .background_controls import BackgroundControls
+from .widget_transfer import prepare_widget_move
 
 __all__ = [
     "BaselineCorrectionWorkspace",
@@ -84,6 +87,8 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
     modeChanged = QtCore.Signal(str)
     runtimeEnabledRequested = QtCore.Signal(bool)
     runtimeMethodRequested = QtCore.Signal(str)
+    recipeChanged = QtCore.Signal()
+    referenceEditRequested = QtCore.Signal()
 
     def __init__(
         self,
@@ -105,6 +110,9 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         self._updating = False
         self._busy = False
         self._stale = False
+        self._stale_reason = ""
+        self._workspace_hosted = False
+        self._comparison_splitter = None
         self._display_show = False
         self._display_subtract = False
         self._runtime_enabled = False
@@ -115,23 +123,31 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         self._preview_corrected: np.ndarray | None = None
         self._expanded_dialog = None
         self._expanded_status = None
+        self._expanded_freshness = None
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
+
+        self.background = BackgroundControls(self)
+        root.addWidget(self.background)
 
         # The existing form stays the owner of the open-pore estimator and its
         # proposal/confirmation workflow.  Keep it first: its two trace-display
         # checkboxes are the direct, familiar controls and must remain reachable
         # without scrolling through the new comparison workspace in the Inspector.
         # QLayout handles reparenting here.
-        root.addWidget(self.baseline_panel)
         if hasattr(self.baseline_panel, 'display_group'):
+            prepare_widget_move(self.baseline_panel.display_group)
             root.addWidget(self.baseline_panel.display_group)
-        root.addWidget(self._build_contract_box(method_choices))
+        prepare_widget_move(self.baseline_panel)
+        root.addWidget(self.baseline_panel)
+        self.runtime_box = self._build_contract_box(method_choices)
         self.action_widget = self._build_actions()
         root.addWidget(self.action_widget)
-        root.addWidget(self._build_preview_box())
+        self.preview_box = self._build_preview_box()
+        root.addWidget(self.preview_box)
+        root.addWidget(self.runtime_box)
 
         self.output_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.runtime_enabled.toggled.connect(self._on_runtime_enabled_toggled)
@@ -139,14 +155,16 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         self.refresh_button.clicked.connect(self._on_refresh_clicked)
         self.export_button.clicked.connect(self._on_export_clicked)
         self.advanced_button.clicked.connect(self.advancedRequested.emit)
+        self.background.changed.connect(self._on_background_changed)
         self._refresh_contract_text()
         self._refresh_display_state()
+        self._refresh_freshness()
 
     # -- construction ---------------------------------------------------------------------------
     def _build_contract_box(
         self, method_choices: Iterable[tuple[str, str]]
     ) -> QtWidgets.QGroupBox:
-        box = QtWidgets.QGroupBox("Detection input · drift correction")
+        box = QtWidgets.QGroupBox("Automatic drift for detection")
         box.setToolTip(
             "Open-pore baseline estimates the reference used for event depth; "
             "baseline drift correction is a runtime signal-chain transformation.")
@@ -159,13 +177,16 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         # A narrow dock should show an ordinary horizontal scrollbar only where one
         # is genuinely needed, not permanently steal width from the signal viewer.
         self.output_mode_combo = QtWidgets.QComboBox()
-        self.output_mode_combo.addItem("Inspect at zero — visual only", DISPLAY_ZERO)
-        self.output_mode_combo.addItem("Correct drift — retain open-pore offset",
+        self.output_mode_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.output_mode_combo.setMinimumContentsLength(14)
+        self.output_mode_combo.addItem("Event-reference residual (zero)", DISPLAY_ZERO)
+        self.output_mode_combo.addItem("Drift-stage correction (offset retained)",
                                       RUNTIME_RETAIN_OFFSET)
         self.output_mode_combo.setToolTip(
-            "Choose what the comparison's lower panel means. Inspect at zero is a "
-            "display residual only. Correct drift keeps a representative open-pore "
-            "offset and is the contract used by the signal-chain operation.")
+            "Choose the comparison and exported output. This does not change the "
+            "main-trace display or detector input. Use the separate display checkboxes "
+            "or automatic runtime switch deliberately.")
         self.contract_label = _caption()
         self.contract_label.setObjectName("baselineCorrectionContract")
 
@@ -179,14 +200,15 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         else:
             layout.addWidget(self.display_state_label)
 
-        self.runtime_enabled = QtWidgets.QCheckBox("Apply drift correction")
+        self.runtime_enabled = QtWidgets.QCheckBox("Enable automatic drift")
         self.runtime_enabled.setToolTip(
             "Apply signal-chain baseline-drift correction before detection and when "
             "exporting the processed trace. It retains a representative open-pore "
             "offset; it does not use the zero-centred display residual.")
         layout.addWidget(self.runtime_enabled)
 
-        layout.addWidget(QtWidgets.QLabel("Correction method"))
+        self.runtime_method_label = QtWidgets.QLabel("Drift estimator")
+        layout.addWidget(self.runtime_method_label)
         self.runtime_method = QtWidgets.QComboBox()
         self.runtime_method.setToolTip(
             "Estimator used by signal-chain drift correction. Advanced settings "
@@ -214,9 +236,26 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         layout.setContentsMargins(8, 6, 8, 8)
         layout.setSpacing(4)
         self._preview_layout = layout
-        layout.addWidget(QtWidgets.QLabel('Comparison output'))
+        self.output_mode_label = QtWidgets.QLabel('Comparison calculation')
+        layout.addWidget(self.output_mode_label)
         layout.addWidget(self.output_mode_combo)
         layout.addWidget(self.contract_label)
+        self.reference_summary_box = QtWidgets.QGroupBox("Shared event reference")
+        reference_layout = QtWidgets.QVBoxLayout(self.reference_summary_box)
+        reference_layout.setContentsMargins(8, 6, 8, 8)
+        self.reference_summary = _caption("Uses the current event-reference settings.")
+        reference_layout.addWidget(self.reference_summary)
+        self.edit_reference_button = QtWidgets.QPushButton("Edit event reference…")
+        self.edit_reference_button.clicked.connect(self.referenceEditRequested.emit)
+        reference_layout.addWidget(self.edit_reference_button)
+        reference_layout.addWidget(_caption(
+            "Editing the shared reference changes future event measurements, including "
+            "ML characterization. Calculating this comparison does not change stored results."))
+        layout.addWidget(self.reference_summary_box)
+        self.reference_summary_box.hide()
+        self.freshness_label = _caption()
+        self.freshness_label.setObjectName("baselineComparisonFreshness")
+        layout.addWidget(self.freshness_label)
         self._expanded_placeholder = _caption('Comparison is open in a separate window.')
         self._expanded_placeholder.hide()
         layout.addWidget(self._expanded_placeholder)
@@ -237,10 +276,11 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
             plot.hideButtons()
             plot.showGrid(x=True, y=True, alpha=0.15)
             plot.getAxis("bottom").enableAutoSIPrefix(False)
+            plot.getAxis("bottom").setScale(1000.)
             plot.getAxis("left").enableAutoSIPrefix(False)
         self.raw_plot.setLabel("left", "Current")
         self.corrected_plot.setLabel("left", "Corrected current")
-        self.corrected_plot.setLabel("bottom", "Time", units="s")
+        self.corrected_plot.setLabel("bottom", "Time from recording start (ms)")
         self.raw_plot.getAxis("bottom").setStyle(showValues=False)
         self.raw_plot.setTitle("Raw current + fitted baseline")
         self.corrected_plot.setTitle("Selected corrected output")
@@ -262,26 +302,28 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
             "Choose a current recording, then refresh the comparison.")
         self.preview_status.setObjectName("baselinePreviewStatus")
         layout.addWidget(self.preview_status)
-        secondary = QtWidgets.QGridLayout()
-        secondary.addWidget(self.export_button, 0, 0)
-        secondary.addWidget(self.expand_button, 1, 0)
-        layout.addLayout(secondary)
+        self._preview_secondary = QtWidgets.QGridLayout()
+        self._preview_secondary.addWidget(self.export_button, 0, 0)
+        self._preview_secondary.addWidget(self.expand_button, 1, 0)
+        layout.addLayout(self._preview_secondary)
         return box
 
     def _build_actions(self) -> QtWidgets.QWidget:
         host = QtWidgets.QWidget()
         actions = QtWidgets.QVBoxLayout(host)
+        self._action_layout = actions
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(6)
-        self.refresh_button = QtWidgets.QPushButton("Refresh comparison")
+        self.refresh_button = QtWidgets.QPushButton("Update comparison")
         self.refresh_button.setToolTip(
             "Calculate a fresh raw / fitted-baseline / corrected comparison in the "
             "background for the selected recording.")
-        self.export_button = QtWidgets.QPushButton("Export raw, baseline & corrected…")
+        self.export_button = QtWidgets.QPushButton("Export current recipe…")
         self.export_button.setToolTip(
-            "Export full-resolution time, raw current, fitted baseline and corrected "
-            "current together. This never exports the decimated preview.")
-        self.advanced_button = QtWidgets.QPushButton("Advanced signal-chain settings")
+            "Calculate the CURRENT recipe and export full-resolution time, raw, "
+            "baseline and corrected current plus provenance. An older visible comparison "
+            "is not exported. Raw recordings and detection results are unchanged.")
+        self.advanced_button = QtWidgets.QPushButton("Edit drift settings…")
         self.advanced_button.setToolTip(
             "Open the baseline-drift page in Signal chain for runtime windows and "
             "method-specific controls.")
@@ -292,7 +334,7 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         advanced_layout = QtWidgets.QVBoxLayout(advanced_host)
         advanced_layout.setContentsMargins(0, 0, 0, 0)
         runtime_layout = self.runtime_note.parentWidget().layout()
-        runtime_layout.removeWidget(self.runtime_note)
+        prepare_widget_move(self.runtime_note)
         advanced_layout.addWidget(self.runtime_note)
         self.runtime_details = Disclosure('Correction details', advanced_host)
         runtime_layout.addWidget(self.advanced_button)
@@ -312,11 +354,14 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         dialog.setWindowTitle('Baseline comparison')
         dialog.resize(960, 720)
         layout = QtWidgets.QVBoxLayout(dialog)
-        self._preview_layout.removeWidget(self.preview)
+        prepare_widget_move(self.preview)
         self._expanded_placeholder.show()
         layout.addWidget(self.preview, 1)
         self._expanded_status = _caption(self.preview_status.text())
         self._expanded_status.setStyleSheet(self.preview_status.styleSheet())
+        self._expanded_freshness = _caption()
+        layout.insertWidget(0, self._expanded_freshness)
+        self._refresh_freshness()
         layout.addWidget(self._expanded_status)
         close = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         close.rejected.connect(dialog.close)
@@ -329,17 +374,140 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         dialog = self._expanded_dialog
         if dialog is None:
             return
-        dialog.layout().removeWidget(self.preview)
-        self._preview_layout.insertWidget(4, self.preview)
+        prepare_widget_move(self.preview)
+        index = self._preview_layout.indexOf(self._expanded_placeholder)
+        self._preview_layout.insertWidget(index + 1, self.preview)
         self._expanded_placeholder.hide()
         self._expanded_dialog = None
         self._expanded_status = None
+        self._expanded_freshness = None
         dialog.deleteLater()
+
+    def set_workspace_hosted(self, hosted: bool = True) -> None:
+        """Arrange comparison controls beside the plot in the shared workspace.
+
+        The owner may reparent ``baseline_panel``, its ``display_group`` and
+        ``runtime_box`` to separate reference/global sections. They remain the
+        same widgets, and source changes never show or hide those hosted sections.
+        Calling this method again is harmless; it never changes scientific state.
+        """
+        hosted = bool(hosted)
+        if self._workspace_hosted == hosted:
+            return
+        self._workspace_hosted = hosted
+        root = self.layout()
+        if hosted:
+            if self._comparison_splitter is None:
+                self._comparison_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+                self._comparison_splitter.setObjectName("backgroundComparisonSplitter")
+                self._comparison_splitter.setChildrenCollapsible(False)
+                self._recipe_host = QtWidgets.QWidget()
+                self._recipe_layout = QtWidgets.QVBoxLayout(self._recipe_host)
+                self._recipe_layout.setContentsMargins(0, 0, 4, 0)
+                self._recipe_scroll = QtWidgets.QScrollArea()
+                self._recipe_scroll.setWidgetResizable(True)
+                self._recipe_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+                self._recipe_scroll.setMinimumWidth(240)
+                self._recipe_scroll.setWidget(self._recipe_host)
+                self._calculation_box = QtWidgets.QGroupBox("Calculation and scope")
+                self._calculation_layout = QtWidgets.QVBoxLayout(self._calculation_box)
+                self._comparison_splitter.addWidget(self._recipe_scroll)
+            # action_widget may currently belong to the Inspector's pinned action
+            # holder. Detach from its actual layout before reclaiming the footer.
+            for widget in (self.background, self.preview_box, self.action_widget):
+                prepare_widget_move(widget)
+            self._recipe_layout.addWidget(self.background)
+            for widget in (self.output_mode_label, self.output_mode_combo,
+                           self.contract_label, self.reference_summary_box):
+                prepare_widget_move(widget)
+                self._calculation_layout.addWidget(widget)
+            prepare_widget_move(self._calculation_box)
+            self._recipe_layout.addWidget(self._calculation_box)
+            self._recipe_layout.addStretch(1)
+            self._comparison_splitter.addWidget(self.preview_box)
+            self._comparison_splitter.setStretchFactor(0, 0)
+            self._comparison_splitter.setStretchFactor(1, 1)
+            self._comparison_splitter.setSizes([320, 620])
+            root.addWidget(self._comparison_splitter, 1)
+            root.addWidget(self.action_widget)
+            self._action_layout.setDirection(QtWidgets.QBoxLayout.LeftToRight)
+            prepare_widget_move(self.export_button)
+            self._action_layout.addWidget(self.export_button)
+            self._action_layout.addStretch(1)
+            self.preview_box.setMinimumWidth(0)
+            self._comparison_splitter.show()
+        else:
+            # The shared host normally lives until teardown, but retaining the
+            # compact form makes this presentation seam useful in isolation too.
+            prepare_widget_move(self._comparison_splitter)
+            prepare_widget_move(self.action_widget)
+            prepare_widget_move(self.background)
+            prepare_widget_move(self._calculation_box)
+            while self._recipe_layout.count():
+                shiboken6.delete(self._recipe_layout.takeAt(0))
+            for index, widget in enumerate((self.output_mode_label,
+                                            self.output_mode_combo,
+                                            self.contract_label,
+                                            self.reference_summary_box)):
+                prepare_widget_move(widget)
+                self._preview_layout.insertWidget(index, widget)
+            root.insertWidget(0, self.background)
+            root.addWidget(self.action_widget)
+            prepare_widget_move(self.preview_box)
+            root.addWidget(self.preview_box)
+            prepare_widget_move(self.export_button)
+            self._preview_secondary.addWidget(self.export_button, 0, 0)
+            self._action_layout.setDirection(QtWidgets.QBoxLayout.TopToBottom)
+            for index in reversed(range(self._action_layout.count())):
+                if self._action_layout.itemAt(index).spacerItem() is not None:
+                    shiboken6.delete(self._action_layout.takeAt(index))
+            self._comparison_splitter.hide()
+        self._refresh_contract_text()
+
+    def sync_reference_summary(self, text: str) -> None:
+        """Describe the owner's shared reference without creating a second form."""
+        self.reference_summary.setText(str(text))
 
     # -- state exposed to the owner -------------------------------------------------------------
     def output_mode(self) -> str:
         """Return the stable selected output token, never the visible label."""
         return str(self.output_mode_combo.currentData() or DISPLAY_ZERO)
+
+    def form_state(self) -> dict[str, Any]:
+        return {"output_mode": self.output_mode(), "draft": self.background.state()}
+
+    def has_recipe_draft(self) -> bool:
+        state = self.background.state()
+        return (self.output_mode() != DISPLAY_ZERO or state['source'] != 'automatic'
+                or bool(state['regions'] or state['anchors'] or state['reference']))
+
+    def restore_form_state(self, state: Mapping[str, Any]) -> None:
+        self._updating = True
+        try:
+            mode = state.get("output_mode", DISPLAY_ZERO)
+            index = self.output_mode_combo.findData(mode)
+            if index < 0:
+                raise ValueError(f"Unknown background output mode: {mode}")
+            self.output_mode_combo.setCurrentIndex(index)
+            self.background.restore(state.get("draft", {}))
+        finally:
+            self._updating = False
+        self._on_background_changed()
+
+    def _on_background_changed(self) -> None:
+        automatic = self.background.source_key() == 'automatic'
+        reference = self.background.source_key() == 'intervals'
+        # Comparison source is independent of both runtime and main-trace display.
+        # In particular it must never disable an already-enabled automatic stage.
+        self.runtime_box.setEnabled(True)
+        if not self._workspace_hosted:
+            self.baseline_panel.setVisible(automatic or reference)
+            if hasattr(self.baseline_panel, 'display_group'):
+                self.baseline_panel.display_group.show()
+        self._refresh_contract_text()
+        if not self._updating:
+            self.mark_preview_stale('Background recipe changed — calculate comparison to inspect it.')
+            self.recipeChanged.emit()
 
     def is_busy(self) -> bool:
         """Whether a refresh/export job is currently owned by the controller."""
@@ -441,25 +609,37 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         # branch and remain visible in the owner's status/provenance validation.
         selected_mode = self.output_mode() if not mode else str(mode)
         if selected_mode == DISPLAY_ZERO:
-            lower_title = "Zero-centred residual — display only"
+            lower_title = ("Zero-centred residual — inspection/export"
+                           if self.background.source_key() != 'automatic' else
+                           "Event-reference residual — zero")
             lower_label = "Δ vs baseline"
             default_message = (
-                "Preview is a zero-centred residual. It is visual only: detection "
-                "and processed-trace export still use the raw/runtime signal.")
+                "Comparison/export uses raw minus the custom background. Main-trace "
+                "display and detection settings are unchanged."
+                if self.background.source_key() != 'automatic' else
+                "Comparison/export uses raw minus the event reference. Main-trace "
+                "display and detection settings are unchanged.")
         else:
-            lower_title = "Drift-corrected signal — retained open-pore offset"
+            lower_title = ("Corrected signal — retained background offset"
+                           if self.background.source_key() != 'automatic' else
+                           "Drift-corrected signal — retained open-pore offset")
             lower_label = "Corrected current"
             default_message = (
+                "Comparison/export uses raw minus the custom background plus its "
+                "median level. Main-trace display and detection settings are unchanged."
+                if self.background.source_key() != 'automatic' else
                 "Preview uses the runtime drift-correction contract and retains a "
                 "representative open-pore offset for detection and processed export."
                 if self._runtime_enabled else
-                "This is a runtime-style preview only. Enable drift correction above "
+                "This is a runtime-style preview only. Enable automatic drift "
                 "before detection or processed export will use it.")
         self.corrected_plot.setTitle(lower_title)
         self.corrected_plot.setLabel("left", lower_label, units=str(units))
         self.raw_plot.setLabel("left", "Current", units=str(units))
 
         self._stale = False
+        self._stale_reason = ""
+        self._refresh_freshness()
         self.set_busy(False)
         self._set_preview_status(message or default_message, _CAPTION_CSS)
         if self._preview_time_s.size:
@@ -482,6 +662,8 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         for curve in (self.raw_curve, self.baseline_curve, self.corrected_curve):
             curve.setData([], [])
         self._stale = False
+        self._stale_reason = ""
+        self._refresh_freshness()
         self.set_busy(False)
         self._set_preview_status(message, _CAPTION_CSS)
 
@@ -489,7 +671,7 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         """Show an in-flight job without disabling controls that should explain it."""
         self._busy = bool(busy)
         self.refresh_button.setText(
-            "Refreshing comparison…" if self._busy else "Refresh comparison")
+            "Calculating comparison…" if self._busy else "Update comparison")
         # Keep buttons clickable: a second click reports the first real state instead
         # of silently swallowing an intent because a disabled Qt button gets no click.
         dim = "color:#6b7178;" if self._busy else ""
@@ -506,6 +688,8 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
     def mark_preview_stale(self, reason: str | None = None) -> None:
         """Keep the last preview visible, but mark it as out of date."""
         self._stale = True
+        self._stale_reason = reason or "Settings changed — update comparison."
+        self._refresh_freshness()
         if not self._busy:
             self._set_preview_status(
                 reason or "Settings changed — refresh comparison to update it.", _WARN_CSS)
@@ -533,6 +717,7 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
         if not method:
             return
         self._runtime_method = method
+        self._refresh_contract_text()
         self.mark_preview_stale("Runtime method changed — refresh comparison to update it.")
         self.runtimeMethodRequested.emit(method)
 
@@ -554,21 +739,55 @@ class BaselineCorrectionWorkspace(QtWidgets.QWidget):
 
     # -- rendering helpers ----------------------------------------------------------------------
     def _refresh_contract_text(self) -> None:
+        automatic = self.background.source_key() == 'automatic'
+        with QtCore.QSignalBlocker(self.output_mode_combo):
+            self.output_mode_combo.setItemText(
+                0, "Event-reference residual (zero)" if automatic else
+                "Raw − background (zero residual)")
+            self.output_mode_combo.setItemText(
+                1, "Drift-stage correction (offset retained)" if automatic else
+                "Raw − background + median(background)")
+        self.output_mode_label.setText(
+            "Comparison calculation" if automatic else "Output equation")
+        uses_reference = (self.background.source_key() == 'intervals' or
+                          (automatic and self.output_mode() == DISPLAY_ZERO))
+        self.reference_summary_box.setVisible(self._workspace_hosted and uses_reference)
         self.input_state_label.setText(
             'Drift correction is ON for detection and processed export.' if self._runtime_enabled
             else 'Drift correction is OFF. Other enabled signal-chain stages still apply.')
-        if self.output_mode() == DISPLAY_ZERO:
+        if not automatic:
             self.contract_label.setText(
-                "Inspect at zero subtracts a fitted open-pore reference for a clearer "
-                "view. It is display-only: no detection, event depth, or processed export changes.")
-        elif self._runtime_enabled:
+                'Custom comparison and export only. Selecting or calculating this recipe '
+                'does not change main-trace display, automatic drift, or stored results. '
+                'Retained-offset output adds the median background level.')
+        elif self.output_mode() == DISPLAY_ZERO:
             self.contract_label.setText(
-                "Runtime drift correction is enabled. Detection and processed export use "
-                "the signal-chain output, which retains a representative open-pore offset.")
+                "Estimator: automatic event reference, using Event reference Rough/Base "
+                "windows. Output: raw − estimated reference. The drift estimator is separate. "
+                "Calculating leaves main-trace display, detection and stored results unchanged.")
         else:
             self.contract_label.setText(
-                "Runtime-style comparison selected. Turn on drift correction to use this "
-                "output for detection and processed export.")
+                f"Estimator: automatic drift ({self.runtime_method.currentText()}). Uses "
+                "Filters & drift parameters, not Event reference windows. Output: raw − "
+                "drift baseline + median(baseline). Other signal-chain stages are excluded; "
+                "calculation does not enable this stage.")
+
+    def _refresh_freshness(self) -> None:
+        """Keep plot validity separate from transient export and progress messages."""
+        if self._stale:
+            text = "Out of date — update comparison before relying on this plot."
+            css = _WARN_CSS + "font-weight:600;"
+        elif self._preview_time_s is None:
+            text, css = "No comparison calculated for the current settings.", _CAPTION_CSS
+        else:
+            text, css = "Current comparison · full-recording calculation, reduced preview", _CAPTION_CSS
+        self.freshness_label.setText(text)
+        self.freshness_label.setStyleSheet(css)
+        self.freshness_label.setToolTip(self._stale_reason)
+        if self._expanded_freshness is not None:
+            self._expanded_freshness.setText(text)
+            self._expanded_freshness.setStyleSheet(css)
+            self._expanded_freshness.setToolTip(self._stale_reason)
 
     def _refresh_display_state(self) -> None:
         if self._display_subtract:

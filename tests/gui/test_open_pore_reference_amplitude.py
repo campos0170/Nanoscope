@@ -4,7 +4,7 @@ import copy
 import pandas as pd
 import pytest
 
-from nanoscope.analysis.baseline import BaselineConfig
+from nanoscope.analysis.baseline import BaselineConfig, baseline_endpoint_policy
 from nanoscope.analysis.detect import detect_events
 from nanoscope.analysis.events import EventSet
 from .test_event_amplitude_curation import builders
@@ -28,7 +28,9 @@ def referenced(qapp, qtbot, tmp_path):
 @pytest.mark.parametrize("change", [
     {KEY: {}}, {KEY: None}, {"remove_recipe": True},
     {"baseline_fingerprint": None}, {"normalize_enabled": True},
-    {"hp_enabled": True}, {"detrend_enabled": True}, {"units": "nA"},
+    {"hp_enabled": True}, {"detrend_enabled": True},
+    {"detrend_enabled": True, "detrend_endpoint_policy": baseline_endpoint_policy('block_median')},
+    {"units": "nA"},
 ])
 def test_restore_and_note_only_refresh_refuse_bad_reference_without_row_writes(referenced, change):
     inspector, doc_id, channel, events = referenced

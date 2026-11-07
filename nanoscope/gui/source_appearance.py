@@ -2,10 +2,36 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core.source_style import MAX_LABEL_LENGTH, validate_source_appearance
+
+
+def with_source_appearance_edit(appearance, state, *, view, source_key=None):
+    """One legacy gesture updates local aliases/ink and the shared series cascade.
+
+    The old editor remains an API for saved callers. An explicit source colour
+    must replace a higher-priority colour for that source, preserving other series
+    properties and every other source. Canvas-only renames leave series ink alone.
+    """
+    from ..core.figure_series import stable_series_id
+    from ..core.figure_spec import thaw_json
+    overrides = validate_source_appearance(state)
+    previous = appearance.source_appearance or {}
+    affected = {key for key in previous.keys() | overrides.keys()
+                if previous.get(key, {}).get('color') != overrides.get(key, {}).get('color')}
+    if source_key is not None:
+        affected.add(source_key)
+    series = thaw_json(appearance.series_styles or {})
+    for key in affected:
+        identity = stable_series_id(view, 'data', key)
+        if identity in series:
+            series[identity].pop('color', None)
+            if not series[identity]:
+                series.pop(identity)
+    return replace(appearance, source_appearance=overrides, series_styles=series or None)
 
 
 class SourceAppearanceEditor(QtWidgets.QGroupBox):
@@ -18,14 +44,17 @@ class SourceAppearanceEditor(QtWidgets.QGroupBox):
 
     changed = QtCore.Signal(dict)
 
-    def __init__(self, parent=None, *, session=None):
+    def __init__(self, parent=None, *, session=None, project_only=False):
         super().__init__("Source names and colors", parent)
         self._session = session
+        self._project_only = bool(project_only)
         self._sources = {}
         self._state = {}
         self._color_override = None
         self._reset_project_color = False
-        layout = QtWidgets.QGridLayout(self)
+        layout = QtWidgets.QFormLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         self.source = QtWidgets.QComboBox()
         self.source.setAccessibleName("Source appearance identity")
         self.source.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -48,16 +77,30 @@ class SourceAppearanceEditor(QtWidgets.QGroupBox):
         self.project.setToolTip("Save this name and color for this exact recording/segment, channel and detector. "
                                 "Newly generated figures use it. Other saved figures are not rewritten.")
         note = QtWidgets.QLabel("Appearance only. Reset uses the captured source style. Project defaults apply to future figures for this exact source identity.")
+        if self._project_only:
+            self.setTitle("Project source defaults")
+            self.apply.hide()
+            self.project.setText("Save project source default")
+            self.label.setPlaceholderText("Original source label (clear to restore)")
+            self.reset_color.setText("Default palette color")
+            self.reset_color.setToolTip("Restore this exact source's project palette color.")
+            note.setText("Appearance only. These defaults are used by new or explicitly refreshed figures. "
+                         "Existing figure overrides and saved snapshots are unchanged.")
         note.setWordWrap(True)
-        layout.addWidget(QtWidgets.QLabel("Source"), 0, 0)
-        layout.addWidget(self.source, 0, 1, 1, 3)
-        layout.addWidget(QtWidgets.QLabel("Display label"), 1, 0)
-        layout.addWidget(self.label, 1, 1, 1, 3)
-        layout.addWidget(self.color, 2, 0)
-        layout.addWidget(self.reset_color, 2, 1)
-        layout.addWidget(self.apply, 2, 2)
-        layout.addWidget(self.project, 2, 3)
-        layout.addWidget(note, 3, 0, 1, 4)
+        # Label/field pairs may wrap in the narrow Format column. A fixed two-column
+        # grid made the label width and the source combo's minimum width add together,
+        # pushing its containing panel beyond the inspector's 290 px budget.
+        self.setMinimumWidth(0)
+        layout.addRow("Source", self.source)
+        layout.addRow("Display label", self.label)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(6)
+        buttons.addWidget(self.color)
+        buttons.addWidget(self.reset_color)
+        layout.addRow(buttons)
+        layout.addRow(self.apply)
+        layout.addRow(self.project)
+        layout.addRow(note)
         self.source.currentIndexChanged.connect(self._load_source)
         self.color.clicked.connect(self._choose_color)
         self.reset_color.clicked.connect(self._reset_color)
@@ -113,7 +156,8 @@ class SourceAppearanceEditor(QtWidgets.QGroupBox):
         pixmap = QtGui.QPixmap(18, 18)
         pixmap.fill(color)
         self.color.setIcon(QtGui.QIcon(pixmap))
-        self.color.setToolTip(color.name() + (" · figure override" if self._color_override else " · source default"))
+        scope = "project override" if self._project_only else "figure override"
+        self.color.setToolTip(color.name() + (" · " + scope if self._color_override else " · source default"))
 
     def _choose_color(self):
         fallback = self._sources.get(self.source.currentData(), {}).get("color", "#0072b2")
@@ -149,11 +193,13 @@ class SourceAppearanceEditor(QtWidgets.QGroupBox):
         self.changed.emit(self.state())
 
     def _apply_project(self):
-        if not callable(getattr(self._session, "set_source_appearance", None)):
+        if (self.source.currentData() not in self._sources
+                or not callable(getattr(self._session, "set_source_appearance", None))):
             return
         key, entry = self._entry()
         self._session.set_source_appearance(key, label=entry.get("label", ""), color=entry.get("color"),
                                             reset_color=self._reset_project_color)
         # This is an explicit styling action on the current figure as well.
         # The other saved figures keep their pinned metadata.
-        self._apply()
+        if not self._project_only:
+            self._apply()

@@ -37,7 +37,8 @@ def test_workspace_hosts_the_existing_open_pore_panel(workspace):
     assert widget.baseline_panel is panel
     assert panel.parent() is widget
     assert widget.output_mode() == DISPLAY_ZERO
-    assert "display-only" in widget.contract_label.text()
+    assert "Estimator: automatic event reference" in widget.contract_label.text()
+    assert "detection and stored results unchanged" in widget.contract_label.text()
 
 
 def test_workspace_does_not_floor_the_inspector_dock_width(workspace):

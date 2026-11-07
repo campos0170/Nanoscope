@@ -64,7 +64,7 @@ def _frame(n: int = 1200, *, tau: float = 1.5e-3, seed: int = 3) -> pd.DataFrame
 
 
 def _window(qtbot, *, col="dwell_s", fit="exponential", lo=None, hi=None,
-            provenance=True, unit="s") -> PlotsWindow:
+            provenance=True, unit="ms") -> PlotsWindow:
     w = PlotsWindow(Session())
     qtbot.addWidget(w)
     prov = {"min_dwell_s": DET_MIN_S, "max_dwell_s": DET_MAX_S, "fs": 50_000.0}
@@ -102,51 +102,51 @@ def _bounds(line: str) -> tuple[float, float]:
                                  "inverse-gaussian (first passage)"])
 def test_fit_range_prints_the_intersection_not_the_typed_pair(qapp, qtbot, fit):
     """Type a window WIDER than the detector's on both sides: the detector's wins."""
-    w = _window(qtbot, fit=fit, lo="1e-9", hi="9.0")
+    w = _window(qtbot, fit=fit, lo="1e-6", hi="9000")
     result = w.fit_result()
     assert result is not None
     shown_lo, shown_hi = _bounds(_fit_range_line(w))
     # Round-trips to the fit's OWN censoring bounds, which is the whole point: this
     # line is copied into a methods section beside those numbers.
-    assert shown_lo == pytest.approx(float(result.meta["t_min"]), rel=0, abs=1e-12)
-    assert shown_hi == pytest.approx(float(result.meta["t_max"]), rel=0, abs=1e-12)
-    assert shown_lo == pytest.approx(DET_MIN_S, rel=1e-9)
-    assert shown_hi == pytest.approx(DET_MAX_S, rel=1e-9)
+    assert shown_lo/1000 == pytest.approx(float(result.meta["t_min"]), rel=0, abs=1e-12)
+    assert shown_hi/1000 == pytest.approx(float(result.meta["t_max"]), rel=0, abs=1e-12)
+    assert shown_lo == pytest.approx(DET_MIN_S*1000, rel=1e-9)
+    assert shown_hi == pytest.approx(DET_MAX_S*1000, rel=1e-9)
 
 
 def test_the_pane_never_states_two_truncations_for_one_fit(qapp, qtbot):
     """The FIT RANGE bounds and the censoring string must agree, in one pane."""
-    w = _window(qtbot, lo="1e-9", hi="9.0")
+    w = _window(qtbot, lo="1e-6", hi="9000")
     result = w.fit_result()
     censoring = str(result.meta.get("censoring", ""))
     shown_lo, shown_hi = _bounds(_fit_range_line(w))
     nums = [float(x) for x in re.findall(r"t_m(?:in|ax)=([0-9.eE+-]+)", censoring)]
     assert nums, censoring
-    assert shown_lo == pytest.approx(nums[0], rel=1e-9)
-    assert shown_hi == pytest.approx(nums[-1], rel=1e-9)
+    assert shown_lo/1000 == pytest.approx(nums[0], rel=1e-9)
+    assert shown_hi/1000 == pytest.approx(nums[-1], rel=1e-9)
 
 
 def test_a_narrowed_range_says_so_rather_than_silently_swapping_numbers(qapp, qtbot):
     """A refusal (and a correction) names its real cause: the typed pair is quoted."""
-    line = _fit_range_line(_window(qtbot, lo="1e-9", hi="9.0"))
+    line = _fit_range_line(_window(qtbot, lo="1e-6", hi="9000"))
     assert "typed range" in line, line
-    assert "1e-09" in line and "9" in line, line
+    assert "1e-06" in line and "9000" in line, line
     assert "intersected" in line, line
 
 
 def test_an_unnarrowed_range_prints_no_correction_clause(qapp, qtbot):
     """When the typed window IS the fitted window the line stays as it was."""
-    line = _fit_range_line(_window(qtbot, lo="0.001", hi="0.004"))
+    line = _fit_range_line(_window(qtbot, lo="1", hi="4"))
     assert "typed range" not in line, line
     lo, hi = _bounds(line)
-    assert (lo, hi) == pytest.approx((0.001, 0.004))
+    assert (lo, hi) == pytest.approx((1., 4.))
 
 
 def test_fit_range_prints_in_the_axis_unit(qapp, qtbot):
     """The unit rule the earlier sweeps installed is untouched by the window rule.
 
     The boxes are read in the axis's own unit, so 1-4 ms is the same window as the
-    0.001-0.004 s typed above; it must come back out labelled ms.
+    0.001-0.004 s used internally; it must come back out labelled ms.
     """
     w = _window(qtbot, lo="1", hi="4", unit="ms")
     line = _fit_range_line(w)
@@ -155,14 +155,15 @@ def test_fit_range_prints_in_the_axis_unit(qapp, qtbot):
     assert (lo, hi) == pytest.approx((1.0, 4.0))
 
 
-def test_the_gaussian_mixture_says_cropped_because_it_does_not_truncate(qapp, qtbot):
-    """``fit_gaussian_mixture`` is fitted to the surviving values, not conditioned on
-    the window -- so the sentence that says "TRUNCATED, not merely cropped" is exactly
-    backwards there."""
+def test_the_gaussian_mixture_declares_and_normalizes_its_truncated_likelihood(qapp, qtbot):
+    """The revised Gaussian fitter conditions its likelihood on the selected range."""
     w = _window(qtbot, col="depth_pA", fit="gaussian-mixture", lo="40", hi="120")
     line = _fit_range_line(w)
-    assert "CROPPED" in line, line
-    assert "TRUNCATED to this window" not in line, line
+    assert "TRUNCATED to this window" in line, line
+    result = w.fit_result()
+    assert (result.meta['lower'], result.meta['upper']) == (40., 120.)
+    grid = np.linspace(40, 120, 2001)
+    assert np.trapz(result.predict(grid), grid) == pytest.approx(1., rel=1e-6)
 
 
 # ================================================================================================
@@ -170,7 +171,7 @@ def test_the_gaussian_mixture_says_cropped_because_it_does_not_truncate(qapp, qt
 # ================================================================================================
 
 def test_a_typed_floor_above_the_detectors_is_the_floor_the_fit_is_stamped_with(qapp, qtbot):
-    w = _window(qtbot, lo="0.001")
+    w = _window(qtbot, lo="1")
     result = w.fit_result()
     assert float(result.meta["t_min"]) == pytest.approx(0.001, rel=1e-12)
     assert result.meta["t_min_source"] == "explicit"
@@ -179,14 +180,14 @@ def test_a_typed_floor_above_the_detectors_is_the_floor_the_fit_is_stamped_with(
 
 def test_the_detectors_floor_is_still_named_when_it_is_the_one_that_survived(qapp, qtbot):
     """The provenance stamp is corrected only where it would be false."""
-    w = _window(qtbot, lo="1e-9")
+    w = _window(qtbot, lo="1e-6")
     result = w.fit_result()
     assert float(result.meta["t_min"]) == pytest.approx(DET_MIN_S, rel=1e-12)
     assert result.meta["t_min_source"] == "min_dwell_s"
 
 
 def test_a_typed_ceiling_below_the_detectors_is_the_ceiling_that_is_stamped(qapp, qtbot):
-    w = _window(qtbot, hi="0.002")
+    w = _window(qtbot, hi="2")
     result = w.fit_result()
     assert float(result.meta["t_max"]) == pytest.approx(0.002, rel=1e-12)
 

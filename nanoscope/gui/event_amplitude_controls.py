@@ -13,7 +13,10 @@ import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
-from ..analysis.baseline import BaselineConfig, characterisation_baseline, require_finite
+from ..analysis.baseline import (
+    BaselineConfig, characterisation_baseline, require_finite,
+    require_current_detrend_policy,
+)
 from ..analysis.event_amplitude import (
     amplitude_is_current, clear_event_amplitude, measure_event_amplitude,
     write_event_amplitude,
@@ -276,6 +279,10 @@ class EventAmplitudeControls(QtWidgets.QWidget):
         any manual amplitude write.
         """
         prov = self.owner._provenance or {}
+        # A missing reproducible config can mean an obsolete runtime kernel, not
+        # permission to fall back to the row's constant reference. Note-only
+        # refreshes must keep the same refusal as a full signal render.
+        require_current_detrend_policy(prov)
         config = BaselineConfig.reproducible_from(prov)
         if config is not None and config.open_pore_reference is not None:
             from ..analysis.reference_context import validate_open_pore_context

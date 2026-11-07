@@ -138,14 +138,14 @@ def test_a_restored_ranged_fit_is_not_filed_when_its_box_is_emptied(window, tmp_
     plots = _ranged_depth_fit(window)
     n_rows = len(window._analysis_panel.current_detection().payload.df)
 
-    window._analytical_workspace = window._capture_analytical_workspace()   # the saved project
-    plots.close()
-    QtWidgets.QApplication.processEvents()
-    window._workspace_pending.add(PLOTS_ARTIFACT_ID)                         # ...reopened
-    window._act_plots.trigger()
-    QtWidgets.QApplication.processEvents()
-    plots = window._plots_window
-    assert PLOTS_ARTIFACT_ID in window._workspace_frozen and plots._fits, "precondition"
+    owner = window._figure_workspace
+    key = owner.id_for_page(plots)
+    workspace = window._capture_analytical_workspace()
+    owner.install_workspace(workspace)
+    assert not owner.resident_ids()
+    assert owner.activate(key)
+    plots = owner.page(key)
+    assert plots._fits and "restored snapshot; not recomputed" in plots.details_text()
     restored = next(iter(plots._fits.values()))
     assert int(restored.n) < n_rows
 
@@ -204,6 +204,7 @@ def test_the_fit_range_line_says_afresh_when_the_report_would_refuse_the_saved_f
     plots.set_histogram_column("depth_pA")
     plots.set_fit("gaussian-mixture")
     QtWidgets.QApplication.processEvents()
+    plots._run_plot()
     plots.close()
     QtWidgets.QApplication.processEvents()
     assert window._session.results.get(doc, 0, "fit.depth").params["column"] == "depth_pA"

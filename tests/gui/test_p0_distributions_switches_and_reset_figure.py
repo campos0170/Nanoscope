@@ -370,11 +370,11 @@ def test_title_weight_folds_into_the_titles_text_style_where_it_has_none():
     assert (style.text_style("title").bold, style.text_style("title").italic) == (False, True)
 
 
-def test_nothing_writes_the_old_keys_any_more_and_the_project_format_stays_12():
+def test_nothing_writes_the_old_keys_any_more_in_the_current_project_format():
     style = plot_config_to_json(PlotConfig())["style"]
     assert not set(OLD_KEYS) & set(style)
     assert not set(OLD_KEYS) & {field.name for field in fields(StyleSettings)}
-    assert project_format.VERSION == 12
+    assert project_format.VERSION == 13
     # A config that went through a fold writes none of them either, and reads back equal.
     payload = plot_config_to_json(PlotConfig())
     payload["style"].update(fit_values_on_plot=True, show_r2=False, title_bold=True)
@@ -481,25 +481,40 @@ def test_wording_that_names_r2_or_ks_draws_a_dash_where_its_switch_was_off(qtbot
         "{equation} | — | — | {bic}")
 
 
-def _rewritten_as_an_older_build_wrote_it(src: Path, dst: Path, style: dict) -> int:
-    """``src`` (a project this build saved) with the Plots workspace's Style tree replaced by
-    the older build's ``style``, as a mapping of field name to value (the workspace's tagged
-    tree keeps a field's name and its value). Returns how many trees it rewrote."""
-    with zipfile.ZipFile(src) as archive:
-        members = {name: archive.read(name) for name in archive.namelist()}
-    manifest = json.loads(members[project_format.MANIFEST_NAME])
+def _older_plots_project(src: Path, dst: Path, style: dict, *, replace_style: bool) -> int:
+    """Encode an actual v12 native artifact, including its tables and blobs."""
+    from nanoscope.core.figure_codecs import record_from_artifact, encode_legacy
+    from nanoscope.core.figure_spec import FIGURE_ARTIFACT_KIND
+    state = project_format.load_project(src)
     rewritten = 0
-    for artifact in manifest["workspace"]["artifacts"]:
-        if artifact["artifact_id"] == PLOTS_ARTIFACT_ID:
-            tree = artifact["payload"]["config"]["fields"]["style"]["fields"]
-            tree.clear()
+    artifacts = []
+    for artifact in state.workspace.artifacts:
+        if artifact.kind == FIGURE_ARTIFACT_KIND:
+            record = record_from_artifact(artifact)
+            if record.spec.kind == "distributions":
+                artifact = encode_legacy(record.spec, record.resources)
+        if artifact.artifact_id == PLOTS_ARTIFACT_ID:
+            tree = artifact.payload["config"]["fields"]["style"]["fields"]
+            if replace_style:
+                tree.clear()
             tree.update(style)
             rewritten += 1
+        artifacts.append(artifact)
+    state.workspace.artifacts = artifacts
+    project_format.save_project(dst, state)
+    with zipfile.ZipFile(dst) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    manifest = json.loads(members[project_format.MANIFEST_NAME])
+    manifest["version"] = 12
     members[project_format.MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, data in members.items():
             archive.writestr(name, data)
     return rewritten
+
+
+def _rewritten_as_an_older_build_wrote_it(src: Path, dst: Path, style: dict) -> int:
+    return _older_plots_project(src, dst, style, replace_style=True)
 
 
 def _manifest_text(path: Path) -> str:
@@ -561,7 +576,7 @@ def test_an_old_project_opens_with_the_same_label_and_title_and_is_saved_without
     assert reopened.config().style.text_style("title").bold is True
 
     # An edit makes the page save itself again: the project it writes now has none of the five
-    # keys, is still version 12, and opens to the same label and the (edited) bold title.
+    # keys, uses current version 13, and opens to the same label and the (edited) bold title.
     box = reopened._appearance_widget.title
     box.setFocus()
     box.end(False)
@@ -574,7 +589,7 @@ def test_an_old_project_opens_with_the_same_label_and_title_and_is_saved_without
     text = _manifest_text(resaved)
     for key in OLD_KEYS:
         assert f'"{key}"' not in text, key
-    assert json.loads(text)["version"] == 12
+    assert json.loads(text)["version"] == project_format.VERSION == 13
     with qtbot.waitSignal(window.projectRestored, timeout=20000):
         window._open_project(str(resaved))
     window._open_plots()
@@ -587,22 +602,7 @@ def test_an_old_project_opens_with_the_same_label_and_title_and_is_saved_without
 
 
 def _with_old_keys_added(src: Path, dst: Path, **old_keys) -> int:
-    """``src`` (a project this build saved) with ``old_keys`` added to the Plots workspace's
-    Style tree, as an older build wrote its switches there (plain values, beside the rest).
-    Returns how many trees it changed."""
-    with zipfile.ZipFile(src) as archive:
-        members = {name: archive.read(name) for name in archive.namelist()}
-    manifest = json.loads(members[project_format.MANIFEST_NAME])
-    changed = 0
-    for artifact in manifest["workspace"]["artifacts"]:
-        if artifact["artifact_id"] == PLOTS_ARTIFACT_ID:
-            artifact["payload"]["config"]["fields"]["style"]["fields"].update(old_keys)
-            changed += 1
-    members[project_format.MANIFEST_NAME] = json.dumps(manifest).encode()
-    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, data in members.items():
-            archive.writestr(name, data)
-    return changed
+    return _older_plots_project(src, dst, old_keys, replace_style=False)
 
 
 @pytest.mark.parametrize("case", ["histogram, own words, KS statistic on figure off",
@@ -616,7 +616,10 @@ def test_an_old_project_with_an_unticked_r2_or_ks_switch_opens_to_what_the_old_b
         plots.set_plot_type("Histogram")
         plots.set_histogram_column("dwell_s")
         plots.set_fit("exponential")
-        _type_wording(plots, TYPED_WORDING)
+        # Fixture setup uses the public config boundary; physical label editing is
+        # exercised above on the visible standalone controls and by text-route tests.
+        plots.apply_config(replace(plots.config(), style=plots.config().style.with_fit_label(
+            FitLabelState(template=TYPED_WORDING))))
         old, expected = {"show_gof": False}, "τ = 2.304 ms | — | — | BIC = -1212.74"
     else:
         plots.set_plot_type("Scatter")
@@ -665,7 +668,7 @@ def test_an_older_template_stored_here_is_carried_into_a_project_as_it_was_and_t
     assert window._write_project(str(saved))
     window._dirty = False
     workspace = json.loads(_manifest_text(saved))["workspace"]
-    page = next(a for a in workspace["artifacts"] if a["artifact_id"] == PLOTS_ARTIFACT_ID)
+    page = next(a for a in workspace["artifacts"] if a["payload"].get("kind") == "distributions")
     carried = json.dumps(workspace[PRESETS_KEY])
     for key in OLD_KEYS:
         assert f'"{key}"' not in json.dumps(page), key             # the page: none of them
@@ -841,8 +844,10 @@ def test_reset_figure_is_in_the_page_toolbar_and_puts_words_and_look_back_in_one
         assert page._undo_btn.toolTip().startswith("Undo the last change to this plot's configuration")
         assert "reset figure" not in page._undo_btn.toolTip()
     else:
-        assert page.appearance_state() == {}
-        assert widget.undo_button.toolTip() == "Undo: reset figure", widget.undo_button.toolTip()
+        assert not {k: v for k, v in page.appearance_state().items()
+                    if k not in ("quantity_display", "source_appearance")}
+        assert not page.appearance_state().get("source_appearance", {})
+        assert widget.undo_button.toolTip().startswith("Undo:"), widget.undo_button.toolTip()
     _press_undo(page)       # from the Section where the click was made, on every page
     assert _words_and_look(kind, page, drawn) == edited
     assert _depth(kind, page) == (steps[0], 1)
@@ -946,8 +951,11 @@ def test_a_summaries_legend_name_survives_reset_figure_in_the_toolbar(qtbot):
     assert _depth("summary", page) == steps, "a name kept in Source names is no step"
 
 
-def test_in_the_explorer_the_page_in_front_has_the_button_and_it_resets_that_page(
+def test_in_the_explorer_the_toolbars_reset_figure_resets_the_page_in_front(
         qapp, qtbot, tmp_path, monkeypatch):
+    """Phase 1: Reset figure is the Explorer toolbar's, just before Export ▾, one button for
+    whichever page is in front. The page's own button is the object that does the work: it
+    stays (hidden, the toolbar clicks it) so ``reset_button.click()`` keeps working."""
     window = _restored_main_window(qtbot, tmp_path, monkeypatch)
     window._open_iv()
     iv = window._iv_window
@@ -956,24 +964,31 @@ def test_in_the_explorer_the_page_in_front_has_the_button_and_it_resets_that_pag
     window._open_plots()
     plots = window._plots_window
     explorer = window._analysis_explorer
+    bar = explorer.toolbar()
     for page in (iv, noise, plots):
         assert explorer.isAncestorOf(page._appearance_widget.reset_button)
+        assert not page._appearance_widget.reset_button.isVisible()
     _click_tab(explorer, iv)
-    assert iv._appearance_widget.reset_button.isVisible()
-    assert not noise._appearance_widget.reset_button.isVisible()
-    assert not plots._appearance_widget.reset_button.isVisible()
+    button = bar.reset_figure_button
+    action = bar._reset_from_menu
+    assert action.isVisible() and action.isEnabled() and action.text() == "Reset figure"
+    assert not button.isVisible()
+    assert "Undo" in action.toolTip() and "defaults" in action.toolTip()
+    assert button.toolTip() == iv._appearance_widget.reset_button.toolTip()
     iv._appearance_widget.apply_appearance(
         replace(iv._appearance_widget.state(), title="Pore 3", x_label="Bias"))
     steps = _depth("iv", iv)
     assert iv._plot.titleLabel.item.toPlainText() == "Pore 3"
-    _click_button(iv._appearance_widget.reset_button)
+    bar._update_menu.popup(bar.mapToGlobal(QtCore.QPoint(20, 20)))
+    _choose(bar._update_menu, "Reset figure")
     assert iv.appearance_state() == {} and iv._plot.titleLabel.item.toPlainText() == ""
     assert _depth("iv", iv) == (steps[0] + 1, 0)
     _press_undo(iv)
     assert iv._plot.titleLabel.item.toPlainText() == "Pore 3"
     _click_tab(explorer, plots)
-    assert plots._appearance_widget.reset_button.isVisible()
-    assert not iv._appearance_widget.reset_button.isVisible()
+    assert button.toolTip() == plots._appearance_widget.reset_button.toolTip()
+    assert button.toolTip() != iv._appearance_widget.reset_button.toolTip(), \
+        "Distributions says which rows it keeps"
     window._dirty = False
 
 
@@ -1024,10 +1039,10 @@ def test_a_window_without_a_toolbar_keeps_the_button_in_its_appearance_section(q
     QTest.mouseClick(apply_button, LEFT)
     assert figure.get_suptitle() == "Study" and figure._suptitle.get_fontsize() == 16.0
     assert figure.axes[0].title.get_fontsize() == 16.0
-    steps = widget._history.depth()
+    steps = editor.history_mark()
     QTest.mouseClick(button, LEFT)
     assert widget.state() == PlotAppearance()
-    assert widget._history.depth() == (steps[0] + 1, 0)
+    assert editor.history_mark() == steps + 1
     QTest.mouseClick(apply_button, LEFT)
     # ...and once drawn again, Reset figure shows the study's own figure: no title over it, the
     # panel's title at the size it had.
@@ -1072,10 +1087,10 @@ def test_the_guide_says_what_the_build_does_with_the_numbers_and_the_old_setting
     row is not the only thing that writes into the label (Residual strip), a refusal sits at
     the end of the label, wording naming {r2}/{ks} draws a dash, and a stored older template is
     carried into a project as it was (the tests above drive each one)."""
-    appearance = _guide_bullet("- **Appearance** — the Text group comes first")
-    # The Numbers row sits INSIDE the Style box, so the guide does not say "not in the Style group":
-    # it says the Style rows under the row have no switch for the numbers, except Residual strip.
-    assert "except that **Residual strip** also adds the strip's χ²/dof after the equation" in appearance
+    appearance = _guide_bullet("- **Format** — choose Title or an axis Label")
+    # Phase 1 moves Numbers to Format and Residual strip to Fit display; the same numerical
+    # behavior is still documented, independently of the element style controls.
+    assert "except that **Residual strip** in **Data & analysis ▸ Fit display** also adds the strip's χ²/dof after the equation" in appearance
     assert "not in the Style group" not in appearance
     assert "only switch" not in appearance and "no other switch" not in appearance
     label = _guide_bullet("- **Fit label** — when a fit is applied")
@@ -1088,7 +1103,7 @@ def test_the_guide_says_what_the_build_does_with_the_numbers_and_the_old_setting
                    "summary line of a scatter fit always carries R²",
                    "an older Distributions template stored on this computer, are carried into "
                    "the project as they were",
-                   "project format is still version 12"):
+                   "New project saves use version 13"):
         assert stated in earlier, stated
 
 

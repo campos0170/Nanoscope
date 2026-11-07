@@ -1,34 +1,62 @@
 {
-  "edition": "2026-09-29",
-  "application_build": "40.15.59",
-  "scope": "Unified incubation entry, study metadata, shared main-workspace curation and staged recalculation",
-  "retained_prior_review": {
-    "date": "2026-09-11",
-    "source_revision": "703a96a",
-    "scope": "Other main-analysis chapters and dated illustrations; not all re-audited in this edition"
-  },
+  "edition": "2026-11-05",
+  "application_build": "45.37.98",
+  "build_id": "20261105T043813486839Z-nogit-5447ddda145a",
+  "source_sha256": "5447ddda145a83c1e898dab5d309da3a703739fd339745d340cb473f5c498813",
+  "executable_sha256": "d4c89fed8124f7726c1145bd0940a7e3191e25cdf394dc572dbb44de3b89c1c9",
+  "source_status": "Current plotting and analysis controls checked against the installed build; historical chapters retain their dated scope",
+  "usability_capture_manifest": "manual-usability-captures.json",
+  "scope": "Figures visibility and direct comparison entries; analytical draft and completed-result ownership; pinned Subpopulations source, curation update and Generate UMAP; Curve fit setup, constraints, diagnostics, application and completed-fit export; visible descriptive Noise summary; retained independent Figures, v13 projects, styles, composition and scientific chapters",
+  "retained_prior_review": [
+    {
+      "date": "2026-09-29",
+      "application_build": "40.15.59",
+      "scope": "Unified incubation entry, metadata, curation and staged recalculation"
+    },
+    {
+      "date": "2026-09-11",
+      "source_revision": "703a96a",
+      "scope": "Other main-analysis chapters and dated illustrations; not all re-audited in this edition"
+    }
+  ],
+  "phase1_capture_manifest": null,
+  "phase4_capture_manifest": "manual-phase4-captures.json",
+  "phase4_capture_plan": "manual-phase4-capture-plan.json",
+  "design_connections_capture_manifest": "manual-design-connections-captures.json",
+  "design_connections_capture_plan": "manual-design-connections-capture-plan.json",
   "pdf_rebuilt": true,
   "pdf_engine": "reportlab",
+  "markdown_backend": "bundled Node marked compatibility backend",
   "checks": [
-    "55 internal links, all resolve to ids on the page",
-    "48 <img> tags, all data: URIs",
-    "23 top-level sections, all in the contents rail (32 rail entries)"
+    "57 internal links, all resolve to ids on the page",
+    "75 <img> tags, all data: URIs",
+    "23 top-level sections, all in the contents rail (34 rail entries)"
   ],
   "sha256": {
-    "manual-markdown/manual.md": "902853d0c4045c026200058d223b7582d1240554dd5f9e7721779a5da7e2b554",
-    "inventory.json": "738743fbd53a2bb55c98f134402f15ce4944ae73d51be49cba36552c24c1dab8",
-    "USER_GUIDE.md": "a93009da671bde122f7851d49a69d26116a3bff559ad57b68482ad68a47de2e0",
-    "INCUBATION_STUDIES.md": "5a7385f3f3bc45727823883cdac009db47c102e9aa98c405a7bbc281eed1ae91",
-    "MANUAL_ZN_WORKFLOW.md": "c088ff29689fccb432ef0cef842833c247865553f08a8028b9ebcb89a61f61c8",
+    "manual-markdown/manual.md": "00615a8548696a1dc21a9336ddb344f957c8bd075584475ca763b469f35117ed",
+    "inventory.json": "40c87e5a4221e1a2d673dbdd1a259d93e96515a576ee1e38963898dd73c04080",
+    "USER_GUIDE.md": "670994b1abbacbadfe1f370752a2e5a71cf40e70ea98f85f93b8138aa14e51c9",
+    "INCUBATION_STUDIES.md": "ed70d7fc73b7b7070362846845fc8794d7fc4676febc59933e9f9024efb053f4",
+    "MANUAL_ZN_WORKFLOW.md": "92c4a219941ba5044d7f58dfce29af4c512d4521916eec899104f8312f7cb2de",
     "MANUAL_CU_WORKFLOW.md": "76c5c07cce1ddbf2f807067a42fea71a9adcff0b26bb435d0da6e39b1730cc8c",
-    "MANUAL_ACID_WORKFLOW.md": "c19559a5fe163f271417d59eaf6f5d3d9771e986601e4c4d3d14ff9a0e92da84",
+    "MANUAL_ACID_WORKFLOW.md": "211e3bf1139c4e312e48086563ce051279acf05decad6531951e44d2b1a8c8e1",
     "MANUAL_REVISION_2026-09-29.md": "8620a238b4344f9cde25cee82a16d30c4bcaa323159ab3cd02a4710ac8c5b6da",
     "manual-incubation-captures.json": "1e2b0e6cc936e7f2944335d80b68f7b8a72baa7076ca56267fafb30ee502aba3",
-    "gen_page.py": "ffd1d6c52a68a0af106285f834b2580facd698249fbefee75c52131171d6061c",
-    "gen_manual.py": "6497784729af9ed2d278571a41350ba380e62d279d498170338a265502a8b224",
-    "render_manual_pdf.py": "e4394b1a2334b311d0f2fc53f5cd52a22c3a2ed29c34f14dcc2c5d5a69c36270",
-    "manual.html": "b2108e38d6dc31577828d3df6ad9e95416c400f6bec42a7cfbcd514a28b21d2a",
-    "manual-markdown/manual.html": "b2108e38d6dc31577828d3df6ad9e95416c400f6bec42a7cfbcd514a28b21d2a",
-    "nanoscope-manual.pdf": "739513105fe672cb3f496da7f6c9c0e9285adb6cdf5d816caf41d48c7c3f2eb4"
+    "MANUAL_REVISION_2026-11-03.md": "15b435d5b2c38c8bbee52800bad6835cecba8d7047a50ee61a5da02968bce536",
+    "MANUAL_REVISION_2026-11-05.md": "aa9cc922846c97f84c5226a6b63e417f5f7348e8586f29d49bb9f4fd9a38a57a",
+    "manual-usability-captures.json": "b6f75c8f2a6a7c52241131ca8220c5e6802f65aa94fc1b87c37c77717daea396",
+    "BUILDING-THE-MANUAL.md": "ba1faeb323d2b8c7836c1dbefd6480b408a833b3846c0b33506510ad18a92fd1",
+    "manual-phase4-captures.json": "eae20ce74dbf89712e27e980f8ea3e82fe2ddd4612abecfafdff1ee61caa7b60",
+    "manual-phase4-capture-plan.json": "3fee20c000614805ab92b4469dbbd3245a48fd289d98f51626eaf9ecd144c794",
+    "manual-design-connections-captures.json": "7f21226ae77fce177aca111c66373e0822c8ceb8972685f1c763c7dff1bce663",
+    "manual-design-connections-capture-plan.json": "f0f23a7a3c5acbea607d045d3bf6cc199b075d3678571ab75bade5ec1f3ccda9",
+    "gen_page.py": "2f724fd58964f6b70ba5ca8df3debf44b68de43b437705023806eee15d984196",
+    "gen_manual.py": "e21db7ec9db8b5c222fd6683299a65c75eaeaf4032bedf9f37b97fd3cb43813b",
+    "render_manual_pdf.py": "153f43ed5f72bd99ccf22349aa5baa7072915b3b2d0b3cf816bd3797ec734624",
+    "markdown_backend.py": "491503e1fb6893012d9ec174b1fdc6176fe3ff4f5f360f8b76645e661749ffbf",
+    "render_markdown.mjs": "35789406770e1a220782db6324d8d60321529c45c0d54261e0971f41f51b37c2",
+    "manual.html": "a491395860129def797d2136493ae144b8318ed421543b3c552079510c6a1099",
+    "manual-markdown/manual.html": "a491395860129def797d2136493ae144b8318ed421543b3c552079510c6a1099",
+    "nanoscope-manual.pdf": "42745f01266096c599b7ec948f44a25692830d464dd10d3545d366fc2fe4cada"
   }
 }

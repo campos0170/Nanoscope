@@ -74,7 +74,7 @@ rather than leaving the reader to notice.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -106,6 +106,7 @@ __all__ = [
     "polarity_for_features",
     "scope_embeddings",
     "run_subpopulations",
+    "add_umap_to_report",
     "subpopulation_waveforms",
     "report_paths",
     "write_report",
@@ -989,6 +990,51 @@ def scope_embeddings(
     return pd.DataFrame(cols, index=res.index), tuple(notes)
 
 
+def add_umap_to_report(
+    report: SubpopReport, *, cancel: CancelFlag | None = None,
+    progress: Callable[[float, str], None] | None = None,
+) -> SubpopReport:
+    """Add UMAP from this report's stored PCA, without rerunning its analysis.
+
+    Existing UMAP coordinates are a cache: requesting them again never moves
+    the points. The input report and every other result remain unchanged. A
+    refusal or failed fit raises, so callers can keep displaying the old report.
+    Cancellation is checked around UMAP's non-interruptible estimator call.
+    """
+    check_cancelled(cancel)
+    if report.embeddings is not None and {"umap_x", "umap_y"}.issubset(
+            report.embeddings.columns):
+        return report
+    if report.clustering is None:
+        raise ValueError("This report has no stored PCA scores. Generate Subpopulations first.")
+    configuration = dict(report.meta.get("config") or {})
+    configuration["with_umap"] = True
+    seed = int(configuration.get("random_state", SC.RANDOM_STATE))
+    if progress is not None:
+        progress(0.0, "Generating UMAP from the stored report's PCA scores…")
+    coordinates, notes = scope_embeddings(
+        report.clustering, tsne=False, umap=configuration["with_umap"], random_state=seed)
+    check_cancelled(cancel)
+    if coordinates is None or not {"umap_x", "umap_y"}.issubset(coordinates.columns):
+        raise ValueError("\n".join(notes) or "UMAP could not be generated for this report.")
+    if not coordinates.index.is_unique or not np.isfinite(
+            coordinates[["umap_x", "umap_y"]].to_numpy()).all():
+        raise ValueError("UMAP returned invalid coordinates; the stored report was not changed.")
+    embeddings = (report.embeddings.copy(deep=True) if report.embeddings is not None
+                  else pd.DataFrame(index=coordinates.index))
+    if not embeddings.index.equals(coordinates.index):
+        raise ValueError("UMAP event identities do not match the stored embeddings.")
+    embeddings[["umap_x", "umap_y"]] = coordinates[["umap_x", "umap_y"]]
+    meta = dict(report.meta)
+    meta["config"] = configuration
+    meta["umap_source"] = "stored pooled-scope PCA"
+    warnings = tuple(note for note in report.warnings if not note.startswith("NO UMAP:"))
+    result = replace(report, embeddings=embeddings, meta=meta, warnings=warnings + notes)
+    if progress is not None:
+        progress(1.0, "UMAP generated; stored analysis results preserved.")
+    return result
+
+
 # ===========================================================================
 # the report
 # ===========================================================================
@@ -1858,8 +1904,9 @@ def _embedding_text(rep: SubpopReport) -> list[str]:
             "UMAP is OFF by default, and not because it is slow: `random_state`",
             "forces it single-threaded but the result is still not bit-reproducible",
             "across umap-learn / numba / platform versions, so a run and a re-run of",
-            "this report can disagree about a column that looks like data. Turn it on",
-            "deliberately (SubpopConfig(with_umap=True)) when you want the figure.",
+            "this report can disagree about a column that looks like data. In the",
+            "Analysis Explorer, select this report and choose Data & analysis > View >",
+            "Generate UMAP to add it from the stored PCA scores.",
             "",
         ]
     return out

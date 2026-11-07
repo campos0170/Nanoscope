@@ -5,6 +5,8 @@ Draft controls never silently replace the settings of a completed scientific sta
 """
 from __future__ import annotations
 
+from ..core.atomic_write import write_staged
+
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -66,6 +68,7 @@ LABELS = {
     'MATCH_MIN_ROLLOFF_HZ': 'Match when roll-off exceeds (Hz)', 'BESSEL_ORDER': 'Causal matching filter order',
     'DETECT_RESISTIVE': 'Also detect upward / resistive events', 'CUSUM_DUAL_SCALE': 'Combine pulse and level scales',
     'CUSUM_FA_BUDGET_PER_S': 'Accepted false-alarm budget (/s)', 'CUSUM_RAW_FA_MAX_PER_S': 'Raw false-alarm cap (/s)',
+    'CUSUM_MAX_EVENT_S': 'Maximum event duration (ms)',
     'CUSUM_CAL_TOTAL_S': 'Quiet calibration exposure (s)', 'CUSUM_PULSE_BLOCK_MS': 'Pulse baseline block (ms)',
     'CUSUM_BLOCK_MS': 'Level baseline block (ms)', 'CUSUM_PULSE_DELTA_GRID': 'Pulse drift grid',
     'CUSUM_PULSE_H_GRID': 'Pulse evidence grid', 'CUSUM_LEVEL_DELTA_GRID': 'Level drift grid',
@@ -736,17 +739,19 @@ class AcidStudyWindow(QtWidgets.QMainWindow):
         path = self._figure_selector.currentData()
         if not path: raise ValueError('Generate and select a figure first.')
         path = Path(path); expected = [self._revision,path]; state = deepcopy(self.state)
+        figure_folder = self.folder
         style_key = _engine().figure_style_key(state, path)
         def compute(progress,cancel): return _engine().reconstruct_figure(state,path,progress=progress,cancel=cancel,apply_style=False)
         def install(result):
             from .study_figure_window import StudyFigureWindow
             figure,data,resources = result
             def save_style(style,snapshot,editor):
-                if self._revision != expected[0] or self.is_busy(): raise ValueError('The study changed or is busy. Reopen the figure editor after it finishes.')
+                if self.folder != figure_folder or self._revision != expected[0] or self.is_busy():
+                    raise ValueError('The study changed or is busy. Reopen the figure editor after it finishes.')
                 saved = []
                 def operation(current,folder,p,c):
-                    target = folder/path.name; target.write_bytes(snapshot.png_bytes)
-                    target.with_suffix('.svg').write_bytes(snapshot.svg_bytes)
+                    target = folder/path.name; write_staged(target, Path.write_bytes, snapshot.png_bytes)
+                    write_staged(target.with_suffix('.svg'), Path.write_bytes, snapshot.svg_bytes)
                     from ..plot.acid_figure_recipe import capture_figure
                     from ..plot.study_figure_style import StudyFigureStyle
                     fresh,data,_ = _engine().reconstruct_figure(current,expected[1],cancel=c,apply_style=False)

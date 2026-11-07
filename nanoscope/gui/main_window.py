@@ -81,7 +81,7 @@ from .analysis_explorer import (
 )
 from .analysis_panel import AnalysisPanel
 from .trace_keys import TraceKeyController
-from .analysis_catalog import ANALYSIS_LABELS, PAGE_HOME, PAGE_IDS
+from .analysis_catalog import ANALYSIS_LABELS, FIGURE_NAVIGATION_HELP, PAGE_HOME, PAGE_IDS
 from .analysis_worker import AnalysisController, BatchDetectController
 from ..core import clock
 from .calibration_panel import CalibrationPanel, sidecar_outcome_text
@@ -366,6 +366,8 @@ SURFACE_NEUTRAL_SIGNALS: dict[str, str] = {
     "analysis_panel.statusMessage": "status-bar text (protocol import/export, Copy as Python)",
     "analysis_panel.openSignalConditioningRequested": "opens the Signal Conditioning window — "
                                                       "a view move, never the numbers",
+    "analysis_panel.openPreprocessRequested": "opens one shared Preprocess workspace route; "
+                                               "navigation only, no scientific state changed",
     "analysis_panel.mergeFinished": "the OUTCOME of an off-thread 'Merge all', for the "
                                     "status line. When it installed a merged table it did "
                                     "so through Session.add_result, so the frame change "
@@ -1117,7 +1119,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # conflict check and write. Remembering the initiator keeps native macOS sheets in
         # front of the window where the user pressed Save.
         self._project_save_requester: QtWidgets.QWidget | None = None
-        self._plots_window = None   # the single, lazily-built PlotsWindow
+        self._plots_window = None   # compatibility alias for the most recently used figure
         self._distribution_summary_window = None
         self._comparison_figures_window = None
         self._incubation_study_window = None
@@ -1138,12 +1140,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._study_curation_sessions = {}
         self._study_curation_context = None
         self._study_curation_project_generation = 0
-        self._iv_window = None   # the single, lazily-built IVWindow
-        self._vdep_window = None   # the single, lazily-built VDepWindow
+        self._iv_window = None   # compatibility alias; FigureWorkspace owns all records
+        self._vdep_window = None   # compatibility alias
         # One top-level home for the analytical surfaces above/below.  The individual
         # attributes remain the authoritative page objects for compatibility and for
         # the v11 workspace adapters; the Explorer only organises their presentation.
         self._analysis_explorer: AnalysisExplorer | None = None
+        self._figure_workspace = None
+        self._subpop_figure_request = None
+        self._umap_figure_request = None
+        self._subpop_launch_figure_id = None
         self._first_analysis_guide = None
         #: Retained singleton, never WA_DeleteOnClose (see build_info_dialog.py's
         #: docstring): reused across Help > About presses instead of accumulating
@@ -1234,6 +1240,8 @@ class MainWindow(QtWidgets.QMainWindow):
         #: trace the owner's notebook actually draws. One extra full-length float array for
         #: the recording; dropped with the assignment.
         self._subpop_signal = None
+        self._subpop_assignment_figure_id = None
+        self._subpop_retired_figure_id = None
         #: The same array while the run is still in flight. Handed over on the terminal
         #: signal, never before: a run that is cancelled or fails must not leave a
         #: full-length copy of the recording alive behind it.
@@ -1320,8 +1328,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._level_fit_inputs = None
         self._level_fit_pending = None
         self._active_analysis_label: str | None = None
-        self._event_plot_window = None   # the single, lazily-built EventPlotWindow
-        self._psd_window = None   # the single, lazily-built PSDWindow
+        self._event_plot_window = None   # compatibility alias
+        self._psd_window = None   # compatibility alias
         # Stage 3 analytical state belongs to the PROJECT, not to whichever optional
         # top-level widget happens to be alive.  Widgets are deliberately lazy and may
         # blank themselves on close; this cache is therefore the durable in-memory copy.
@@ -1494,6 +1502,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._signal_conditioning_placed = False
         self._signal_conditioning_source = None
         self._analysis_panel.detection_panel.set_signal_chain_hosted(True)
+        self._analysis_panel.detection_panel.set_preprocess_workspace_hosted(True)
+        self._analysis_panel._sync_baseline_workspace()
         tabs = QtWidgets.QTabWidget()
         # INVARIANT for every Inspector tab: nothing in here may impose a width floor. A
         # child's minimum width propagates through the tab widget into
@@ -2012,7 +2022,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # After _act_plots (which must stay item 8). ALWAYS enabled: disabled, ⌘⇧F would
         # fall through to the event table, whose curation keys ignore modifiers.
-        self._act_signal_conditioning = analysis_menu.addAction("Signal c&onditioning…")
+        self._act_signal_conditioning = analysis_menu.addAction("&Preprocess workspace…")
         self._act_signal_conditioning.setShortcut(QtGui.QKeySequence("Ctrl+Shift+F"))
         self._act_signal_conditioning.setToolTip(
             "Edit the classical detectors' signal chain in execution order, with its "
@@ -2119,6 +2129,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "voltage series — batch-detect first, then open this.")
         self._act_vdep.setEnabled(False)
         self._act_vdep.triggered.connect(self._open_vdep)
+
+        for action in (self._act_plots, self._act_distribution_summaries,
+                       self._act_comparison_figures, self._act_event_plots, self._act_psd,
+                       self._act_iv, self._act_vdep, self._act_show_saved_subpop):
+            action.setToolTip(action.toolTip() + "\n\n" + FIGURE_NAVIGATION_HELP)
 
         self._act_incubation_study = analysis_menu.addAction("Incubation study…")
         self._act_incubation_study.setToolTip(
@@ -2237,6 +2252,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # Drop QAction.triggered's `checked` bool -- see _export_density's docstring.
         self._act_export_density.triggered.connect(lambda *_a: self._export_density())
 
+        self._act_edit_density = analysis_menu.addAction("Edit density figure…")
+        self._act_edit_density.setToolTip(
+            "Generate the density once, then edit its labels and shared style before exporting.")
+        self._act_edit_density.setEnabled(False)
+        self._act_edit_density.triggered.connect(lambda *_a: self._edit_density_figure())
+
         self._act_density_style = analysis_menu.addAction("Density figure st&yle…")
         self._act_density_style.setToolTip(
             "Contour levels, line width, font scale and the legend (size, position, "
@@ -2252,6 +2273,13 @@ class MainWindow(QtWidgets.QMainWindow):
             "use Export current figure in the Explorer for that.")
         self._act_export_figure.setEnabled(False)
         self._act_export_figure.triggered.connect(self._export_figures)
+
+        self._act_edit_report_figure = analysis_menu.addAction("Edit standard report figure…")
+        self._act_edit_report_figure.setToolTip(
+            "Choose a report figure from the current detection, then edit its text and "
+            "style before exporting. Existing fits are used when available.")
+        self._act_edit_report_figure.setEnabled(False)
+        self._act_edit_report_figure.triggered.connect(lambda: self._edit_report_figure())
 
         self._act_figure_library = analysis_menu.addAction("Figure &Library…")
         self._act_figure_library.setToolTip(
@@ -2568,6 +2596,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # terminal signals and gates itself on `_subpop_pending` + the payload type.
         # `_on_analysis_finished` still clears the progress chrome; this adds the window.
         self._analysis_controller.finished.connect(self._on_subpop_finished)
+        self._analysis_controller.finished.connect(self._on_umap_finished)
         self._analysis_controller.failed.connect(self._on_subpop_stopped)
         self._analysis_controller.cancelled.connect(self._on_subpop_stopped)
         # Sub-state fitting returns a distinct outcome, never an AnalysisResult,
@@ -2892,6 +2921,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # banner. Neither the knob path nor the calibration path reaches a surface refresh,
         # so this is the only door that catches them (see _push_stale_columns).
         self._analysis_panel.stalenessChanged.connect(self._push_stale_columns)
+        self._analysis_panel.stalenessChanged.connect(self._push_plot_staleness)
         # The Table selector and the detector combo swap the table ON SCREEN without writing a
         # result or moving the target: no ``resultsChanged``, no retarget. This is the door
         # that tells the two curation surfaces (S8-XS1; see _on_result_switched).
@@ -3072,7 +3102,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         meta = probe.meta
-        dur = f"{meta.duration_s:.1f} s" if meta.duration_s is not None else "unknown duration"
+        dur = f"{meta.duration_s * 1000:.1f} ms" if meta.duration_s is not None else "unknown duration"
         ratio = meta.n_samples / SOFT_SAMPLE_CEILING
         box = QtWidgets.QMessageBox(self)
         box.setIcon(QtWidgets.QMessageBox.Warning)
@@ -3241,6 +3271,7 @@ class MainWindow(QtWidgets.QMainWindow):
           the in-flight job is cleared here — abort() never reaches its cancelled slot.
         """
         jobs = self._active_job_descriptions()
+        self._analysis_panel.abort_background_previews()
         stopped = self._controller.abort_stopped()
         stopped &= self._analysis_controller.abort_stopped()
         stopped &= self._batch_controller.abort_stopped()
@@ -3252,7 +3283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._subpop_source_recipe_pending = None
         # ...and the same for the subpopulation run, for the same reason: ``abort()``
         # emits nothing, so a cancelled report would otherwise leave its claim standing.
-        self._subpop_pending = False
+        self._on_subpop_stopped()
         self._batch_skipped = 0
         self._set_progress_visible(False)
         # A multi-file open is ONE gesture to the user, so Cancel abandons ALL of it —
@@ -3859,14 +3890,16 @@ class MainWindow(QtWidgets.QMainWindow):
              lambda: self._refresh_event_gallery()
              if _on_screen(self._event_gallery) else None)
         step("Subpopulation views", self._refresh_subpop_views)  # ...which may now be stale
+        if self._figure_workspace is not None and not self._restoring:
+            step("Figure sources", lambda: self._figure_workspace.sources_changed(selection_only=True))
         step("Event plots",
              lambda: self._refresh_event_plots()                # ...as may density / ensemble
-             if (_on_screen(self._event_plot_window)
+             if (self._figure_workspace is None and _on_screen(self._event_plot_window)
                  and EVENT_PLOTS_ARTIFACT_ID not in self._workspace_frozen)
              else None)
         step("Noise spectrum",
              lambda: self._point_psd_at_selection()             # ...and the PSD window follows
-             if (_on_screen(self._psd_window)
+             if (self._figure_workspace is None and _on_screen(self._psd_window)
                  and PSD_ARTIFACT_ID not in self._workspace_frozen)
              else None)
         step("workflow", self._refresh_workflow_status)         # ...and the chip + strip track
@@ -4715,7 +4748,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_export_event_statistics.setEnabled(bool(
             self._analysis_panel.event_statistics_tables("shown")
             or self._analysis_panel.event_statistics_tables("manual")))
-        self._act_export_density.setEnabled(len(self._density_groups()) >= 1)
+        density_ready = len(self._density_groups()) >= 1
+        self._act_export_density.setEnabled(density_ready)
+        self._act_edit_density.setEnabled(density_ready)
         self._act_export_training.setEnabled(has_detection)
         self._act_event_inspector.setEnabled(has_detection)
         can_remeasure = has_detection and det.module_id != CONSENSUS_MODULE_ID
@@ -4883,6 +4918,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Evaluate ``sid``'s gate ONCE and push the result to both places it shows up."""
         available, reason = self._surface_gates()[sid]()
         self._surface_actions()[sid].setEnabled(available)
+        if sid == SURFACE_FIGURES:
+            self._act_edit_report_figure.setEnabled(available)
         self._analysis_launcher.set_gate(sid, available, reason)
 
     def _sync_analysis_surfaces(self) -> None:
@@ -5106,6 +5143,8 @@ class MainWindow(QtWidgets.QMainWindow):
         }.get(str(artifact_id))
 
     def _workspace_window_id(self, window) -> str | None:
+        if self._figure_workspace is not None:
+            return self._figure_workspace.id_for_page(window)
         for artifact_id, candidate in (
                 (PLOTS_ARTIFACT_ID, self._plots_window),
                 (DISTRIBUTION_SUMMARIES_ARTIFACT_ID, self._distribution_summary_window),
@@ -5120,6 +5159,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def _workspace_surface(self, artifact_id: str):
+        if self._figure_workspace is not None and self._figure_workspace.get(artifact_id) is not None:
+            return self._figure_workspace.page(artifact_id)
         return {
             PLOTS_ARTIFACT_ID: self._plots_window,
             DISTRIBUTION_SUMMARIES_ARTIFACT_ID: self._distribution_summary_window,
@@ -5133,6 +5174,16 @@ class MainWindow(QtWidgets.QMainWindow):
         }.get(str(artifact_id))
 
     def _workspace_artifact(self, artifact_id: str):
+        if self._figure_workspace is not None:
+            from ..core.figure_codecs import NATIVE_KINDS, encode_legacy, record_to_artifact
+            record = self._figure_workspace.get(artifact_id)
+            if record is not None:
+                return record_to_artifact(record)
+            if artifact_id in NATIVE_KINDS:
+                key = self._figure_workspace.most_recent(NATIVE_KINDS[artifact_id][1])
+                record = self._figure_workspace.get(key)
+                if record is not None:
+                    return encode_legacy(record.spec, record.resources)
         workspace = self._analytical_workspace
         return next((item for item in workspace.artifacts
                      if item.artifact_id == artifact_id), None)
@@ -5255,6 +5306,15 @@ class MainWindow(QtWidgets.QMainWindow):
         leaving it out prevents a changed live ResultStore from silently restamping an old
         snapshot merely because the user pressed Save while its window was visible.
         """
+        if self._figure_workspace is not None:
+            if self._figure_workspace.is_read_only():
+                raise ValueError("The analytical workspace was written by a newer NanoScope build. "
+                                 "Use that build to save it; the original project has not been changed.")
+            supplied = ({"analysis_panel": self._analysis_panel}
+                        if ANALYSIS_PANEL_ARTIFACT_ID not in self._workspace_pending else {})
+            base = capture_analysis_workspace(self._analytical_workspace, **supplied)
+            self._analytical_workspace = self._figure_workspace.capture_workspace(base)
+            return self._analytical_workspace
         supplied: dict[str, Any] = {}
         if ANALYSIS_PANEL_ARTIFACT_ID not in self._workspace_pending:
             supplied["analysis_panel"] = self._analysis_panel
@@ -5327,7 +5387,13 @@ class MainWindow(QtWidgets.QMainWindow):
         comparable blank-state contract.  The caller has already completed the outgoing
         project's Save/Discard decision, so none of this checkpoints or marks dirty.
         """
+        self._on_umap_stopped()
         self._figure_project_epoch += 1
+        if self._figure_workspace is not None:
+            self._figure_workspace.clear()
+            for name in self._figure_aliases().values():
+                setattr(self, name, None)
+        self._subpop_figure_request = None
         self._level_fit_pending = None
         self._workspace_installing = True
         try:
@@ -5342,6 +5408,12 @@ class MainWindow(QtWidgets.QMainWindow):
                         delattr(self._plots_window, sidecar)
             if self._subpop_window is not None:
                 self._subpop_window.set_report(None)
+                # The words typed on the outgoing project's figures, the ranges pinned on them
+                # and the look are that project's: the incoming project's first report starts
+                # from the defaults, as a restore with no saved appearance does
+                # (``_restore_appearance`` hands the window ``{}``).  ``set_report(None)`` ends
+                # the appearance HISTORY only; Distributions' ``reset_state`` does the rest.
+                self._subpop_window.set_appearance_state({})
                 # These are constructor defaults.  Splitter positions are durable view
                 # state, so an incoming project without a saved report must not inherit
                 # the outgoing project's arrangement.
@@ -5463,17 +5535,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_subpopulations_view(self) -> None:
         """Opening a destination is not permission to run a mixture analysis."""
-        if self._workspace_has_artifact(SUBPOPULATION_ARTIFACT_ID):
-            self._show_saved_subpop_report()
-        else:
-            self._show_analysis_page(PAGE_SUBPOPULATIONS, self._ensure_subpop_window(),
-                                     refresh=self._run_subpopulations)
+        return self._open_figure_kind(PAGE_SUBPOPULATIONS)
 
     def _open_analysis_home(self) -> None:
         self._ensure_analysis_explorer().show_home()
 
     def _first_analysis_context(self):
-        return self._workflow_target(), self._analysis_explorer_context()
+        return self._workflow_target(), self._analysis_explorer_context(for_figure=False)
 
     def _first_analysis_availability(self, route: str) -> tuple[bool, str]:
         if route in ("open_recording", "practice", "analysis_current", "save_project"):
@@ -5582,11 +5650,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         Pages remain lazy because several of their constructors perform real numerical
         work.  The Explorer is presentation only; every existing page attribute and
-        workspace adapter remains the source of truth.
+        figure record remains the source of truth.
         """
         if self._analysis_explorer is None:
             self._analysis_explorer = AnalysisExplorer(
                 self,
+                source_session=self._session, source_provider=self._plots_sources,
                 context_provider=self._analysis_explorer_context,
                 status_provider=self._analysis_explorer_status,
                 availability_provider=self._analysis_home_availability,
@@ -5597,13 +5666,734 @@ class MainWindow(QtWidgets.QMainWindow):
             self._analysis_explorer.saveBundleRequested.connect(self._export_analysis_bundle)
             self._analysis_explorer.figureLibraryRequested.connect(self._open_figure_library)
             self._analysis_explorer.launchRequested.connect(self._launch_analysis_route)
+            self._analysis_explorer.snapshotRequested.connect(self._save_analysis_figure)
+            self._analysis_explorer.savedFigureActivated.connect(self._show_saved_figure)
+            self._analysis_explorer.savedDeleteRequested.connect(self._delete_saved_figures)
+            self._analysis_explorer.compositionRequested.connect(self._compose_saved_figures)
+            self._analysis_explorer.recipeRequested.connect(self._new_figure_from_recipe)
+            self._analysis_explorer.saveRecipeRequested.connect(self._save_figure_recipe)
+            self._analysis_explorer.manageRecipesRequested.connect(self._manage_figure_recipes)
+            self._analysis_explorer.exportSelectedRequested.connect(self._export_selected_figures)
             self._adopt_child_window(self._analysis_explorer, "analysis_explorer")
+            self._analysis_explorer.bind_figure_workspace(self._ensure_figure_workspace())
+            self._analysis_explorer.set_saved_figure_provider(
+                self._figure_entries, status_provider=self._figure_status)
+            self._analysis_explorer._style.set_external_provider(self._retained_style_figures)
         return self._analysis_explorer
 
-    def _analysis_explorer_context(self) -> str:
-        """Short recording context shared by every Explorer page."""
+    def _retained_style_figures(self):
+        """Open retained Study/Report editors share deliberate project-wide styling."""
+        from .study_figure_window import StudyFigureWindow
+        for editor in self.findChildren(StudyFigureWindow):
+            if editor._figure is not None and editor._library_owner is self:
+                yield str(id(editor)), editor._name, editor
+
+    def _ensure_figure_workspace(self, *, install=True):
+        if self._figure_workspace is None:
+            from .figure_workspace import FigureWorkspace
+            self._figure_workspace = FigureWorkspace(
+                parent=self, factory=self._make_figure_surface, mount=self._mount_figure_surface,
+                unmount=self._unmount_figure_surface, initialize=self._initialize_figure_surface,
+                bind_sources=self._bind_figure_sources, current_binding=self._figure_current_binding,
+                table_staleness=self._figure_table_staleness,
+                dirty=self._mark_dirty, commit_focus=lambda: self._analysis_explorer.toolbar().commit_focus()
+                if self._analysis_explorer is not None else None)
+            self._figure_workspace.currentChanged.connect(self._sync_figure_aliases)
+            self._figure_workspace.recordsChanged.connect(self._on_figure_records_changed)
+            self._figure_workspace.requestFailed.connect(
+                lambda _key, reason: self.statusBar().showMessage(reason, 12000))
+            if install:
+                self._figure_workspace.install_workspace(self._analytical_workspace)
+        return self._figure_workspace
+
+    def _on_figure_records_changed(self):
+        owner = self._figure_workspace
+        key = getattr(self, "_subpop_assignment_figure_id", None)
+        if key is not None and owner.get(key) is None:
+            self._drop_subpop_assignment()
+        self._sync_saved_subpop_action()
+
+    @staticmethod
+    def _figure_aliases():
+        return {PAGE_DISTRIBUTIONS: "_plots_window", PAGE_DISTRIBUTION_SUMMARIES: "_distribution_summary_window",
+                PAGE_COMPARISON_FIGURES: "_comparison_figures_window", PAGE_EVENT_WAVEFORMS: "_event_plot_window",
+                PAGE_NOISE: "_psd_window", PAGE_IV: "_iv_window", PAGE_VOLTAGE_SERIES: "_vdep_window",
+                PAGE_SUBPOPULATIONS: "_subpop_window"}
+
+    def _sync_figure_aliases(self, _key=""):
+        owner = self._figure_workspace
+        if owner is None:
+            return
+        for kind, name in self._figure_aliases().items():
+            current = owner.current_id()
+            rec = owner.get(current)
+            key = current if rec is not None and rec.spec.kind == kind else owner.most_recent(kind)
+            setattr(self, name, owner.page(key))
+        self._sync_subpop_window()
+        owner.refresh_table_staleness()
+
+    def _figure_table_staleness(self, record, page):
+        if record.spec.kind != PAGE_DISTRIBUTIONS:
+            return False
+        if page is not None:
+            return page.drawn_table_is_stale()
+        from .figure_adapter_plots import record_table_is_stale
+        return record_table_is_stale(record, self, self._analysis_panel.table_staleness)
+
+    def _push_plot_staleness(self):
+        if self._figure_workspace is not None:
+            self._figure_workspace.refresh_table_staleness()
+        elif self._plots_window is not None:
+            self._plots_window.schedule_stale_redraw()
+
+    def _open_figure_kind(self, kind):
+        owner = self._ensure_figure_workspace()
+        explorer = self._ensure_analysis_explorer()
+        key = owner.most_recent(kind)
+        if key is None:
+            key = owner.create(kind)
+        else:
+            owner.activate(key)
+        # A resident figure does not remount; the Analysis menu still raises the
+        # hidden/background shell, just as its first creation does.
+        explorer.show()
+        explorer.raise_()
+        explorer.activateWindow()
+        return owner.page(key)
+
+    def _make_figure_surface(self, kind, figure_id):
+        if kind == PAGE_DISTRIBUTIONS:
+            from .plots_panel import PlotsWindow
+            page = PlotsWindow(self._session, self)
+            page.auto_plot = False
+            page._phase2_figure_managed = True
+            page.set_staleness_provider(self._analysis_panel.table_staleness)
+            page.refreshRequested.connect(lambda: self._refresh_figure(figure_id))
+            page.eventRowsSelected.connect(lambda source, rows, page=page:
+                self._on_plot_event_rows_selected(source, rows, figure_id=figure_id)
+                if self._figure_workspace.page(figure_id) is page else None)
+            page.figureResultsPublished.connect(self._record_figure_publication)
+        elif kind == PAGE_DISTRIBUTION_SUMMARIES:
+            from .distribution_summary_panel import DistributionSummaryWindow
+            page = DistributionSummaryWindow(self._session, self)
+            page.refreshRequested.connect(lambda: self._prepare_figure_sources(figure_id))
+        elif kind == PAGE_COMPARISON_FIGURES:
+            from .comparison_figures_panel import ComparisonFiguresWindow
+            page = ComparisonFiguresWindow(self._session, self)
+            page.refreshRequested.connect(lambda: self._prepare_figure_sources(figure_id))
+        elif kind == PAGE_EVENT_WAVEFORMS:
+            from .event_plot_panel import EventPlotWindow
+            page = EventPlotWindow(self._session, self)
+            page.refreshRequested.connect(lambda: self._refresh_figure(figure_id))
+        elif kind == PAGE_NOISE:
+            from .psd_panel import PSDWindow
+            page = PSDWindow(self._session, self, defer_initial_refresh=True)
+            page.sourceSelected.connect(lambda doc_id, channel, page=page:
+                self._pin_figure_source(figure_id, page, doc_id, channel))
+        elif kind == PAGE_IV:
+            from .iv_panel import IVWindow
+            page = IVWindow(self._session, self, defer_initial_refresh=True)
+        elif kind == PAGE_VOLTAGE_SERIES:
+            from .voltage_dep_panel import VDepWindow
+            page = VDepWindow(self._session, self, defer_initial_refresh=True)
+        elif kind == PAGE_SUBPOPULATIONS:
+            from .subpop_window import SubpopReportWindow
+            page = SubpopReportWindow(self)
+            page.analyzeRequested.connect(lambda: self._run_subpop_for_figure(figure_id))
+            page.umapRequested.connect(lambda: self._generate_umap_for_figure(figure_id))
+            page.exportRequested.connect(lambda: self._with_subpop_figure(figure_id, self._export_subpop_report))
+            page.galleryRequested.connect(lambda: self._with_subpop_figure(figure_id, self._open_gallery_on_subpops, assignment=True))
+            page.traceRequested.connect(lambda: self._with_subpop_figure(figure_id, self._colour_trace_by_subpops, assignment=True))
+        else:
+            raise ValueError("Unsupported analytical figure kind.")
+        page._nanoscope_figure_id = figure_id
+        page._nanoscope_figure_managed = True
+        adapter = page.inspector_adapter()
+        update = adapter.update
+        adapter.update = lambda: self._update_figure(figure_id, update)
+        return page
+
+    def _mount_figure_surface(self, figure_id, page):
+        owner = self._figure_workspace
+        record = owner.get(figure_id)
+        self._ensure_analysis_explorer().show_page(figure_id, page,
+            kind=record.spec.kind, name=record.spec.name,
+            refresh=lambda: self._refresh_figure(figure_id))
+
+    def _unmount_figure_surface(self, figure_id, page):
+        if self._analysis_explorer is not None:
+            self._analysis_explorer.remove_page(figure_id)
+        for name in self._figure_aliases().values():
+            if getattr(self, name, None) is page:
+                setattr(self, name, None)
+        # Suspension does not activate a different record. Refresh after dropping
+        # the aliases so the launcher cannot retain the retired page's open tint.
+        self._sync_analysis_open_state()
+
+    def _figure_current_binding(self, kind):
+        from ..core.analysis_workspace import _stable_source, result_recipe
+        if kind == PAGE_EVENT_WAVEFORMS:
+            result = self._analysis_panel.current_detection()
+            return {"follow": False, "source": result_recipe(self, result) if result is not None else None}
+        if kind == PAGE_NOISE and self._current_selection is not None:
+            doc_id, channel = self._current_selection
+            if self._session.has_document(doc_id):
+                meta = self._session.document(doc_id).meta
+                channel = next((info.index for info in meta.channels if not info.is_dead and
+                                effective_kind(self._session, doc_id, info.index) is ChannelKind.CURRENT), channel)
+                return {"follow": False, "source": _stable_source(self, doc_id, channel)}
+        return {"follow": False, "source": None}
+
+    def _pin_figure_source(self, figure_id, page, doc_id, channel):
+        """An explicit source choice owns the same binding used by Update/save."""
+        owner = self._figure_workspace
+        if owner is None or owner.page(figure_id) is not page or not self._session.has_document(doc_id):
+            return
+        from ..core.analysis_workspace import _stable_source
+        owner.set_binding(figure_id, {"follow": False,
+            "source": _stable_source(self, doc_id, int(channel))})
+        follow = getattr(page, "_figure_follow_check", None)
+        if follow is not None:
+            with QtCore.QSignalBlocker(follow):
+                follow.setChecked(False)
+
+    def _bind_figure_sources(self, page, record, binding, compute=False):
+        kind = record.spec.kind
+        if kind == PAGE_DISTRIBUTIONS:
+            page.set_active_detection(self.active_detection_key())
+            page.set_data(self._plots_sources(), catalog_only=True)
+        elif kind in (PAGE_DISTRIBUTION_SUMMARIES, PAGE_COMPARISON_FIGURES):
+            page.set_sources(self._plots_sources(), analyze=False)
+        elif kind in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE) and compute:
+            # Source notifications stage inputs. Only the explicit Update route
+            # below may replace a managed Noise/Event result.
+            page.stage_source(binding.get('source'))
+        return True
+
+    def _feed_figure_bound_source(self, page, record, binding, *, compute):
+        from ..core.analysis_workspace import _resolve_source, resolve_result_recipe
+        kind = record.spec.kind
+        selected = self._figure_current_binding(kind) if binding.get("follow") else binding
+        source = selected.get("source")
+        if not source:
+            self._figure_workspace._fail(record.spec.figure_id, "Choose a source recording before updating this figure.")
+            return False
+        if kind == PAGE_EVENT_WAVEFORMS:
+            result, reason = resolve_result_recipe(self, source)
+            if result is None:
+                self._figure_workspace._fail(record.spec.figure_id, reason or "The pinned detection is unavailable; the saved figure is retained.")
+                return False
+            page.set_source(result.doc_id, result.channel, result.payload, defer_analysis=not compute)
+        elif kind == PAGE_NOISE:
+            doc_id, channel, reason = _resolve_source(self, source)
+            if doc_id is None:
+                self._figure_workspace._fail(record.spec.figure_id, reason or "The pinned recording is unavailable; the saved spectrum is retained.")
+                return False
+            records = page._gather_recordings()
+            if not any(r["doc_id"] == doc_id and r["channel"] == channel for r in records):
+                self._figure_workspace._fail(record.spec.figure_id, "The pinned current channel or its sample rate is unavailable; the saved spectrum is retained.")
+                return False
+            if page.set_target(doc_id, channel, recompute=compute) is False:
+                return False
+        if compute and not page.has_data():
+            return False
+        return True
+
+    def _initialize_figure_surface(self, page, record, recipe, binding):
+        from .plot_appearance import PlotAppearance
+        from ..core.figure_codecs import encode_legacy
+        from ..core.figure_spec import thaw_json
+        kind = record.spec.kind
+        self._bind_figure_sources(page, record, binding, False)
+        if kind in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE):
+            self._feed_figure_bound_source(page, record, binding, compute=False)
+        if kind == PAGE_DISTRIBUTIONS:
+            page._updating = True
+            try:
+                if recipe.get("plot_type"):
+                    page.set_plot_type(recipe["plot_type"])
+            finally:
+                page._updating = False
+        elif (kind in (PAGE_DISTRIBUTION_SUMMARIES, PAGE_COMPARISON_FIGURES)
+              and recipe and "window_template" not in recipe):
+            page.set_config(recipe)
+        native_settings = recipe.get("window_template")
+        if native_settings is None and kind in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE) and recipe.get("view"):
+            view = ("Ensemble" if recipe["view"] == "ensemble" else "Density") if kind == PAGE_EVENT_WAVEFORMS else recipe["view"]
+            native_settings = {"view": view}
+        if kind == PAGE_DISTRIBUTIONS and recipe.get("plot_template") is not None:
+            from .plots_panel import plot_config_from_json
+            from dataclasses import replace
+            template = plot_config_from_json(recipe["plot_template"])
+            template = replace(template, style=page.config().style,
+                               axes=replace(template.axes, x_min="", x_max="", y_min="", y_max="",
+                                            manual_x=None, manual_y=None))
+            page._set_config(page._installable(page.config().with_template(template)), draw=False)
+        elif native_settings is not None:
+            # The native snapshot installers block compute signals. A saved recipe is
+            # a draft on a fresh empty figure, never an implicit statistical run.
+            from copy import deepcopy
+            from dataclasses import replace
+            from .figure_adapter_pages import adapter_for
+            native_adapter = adapter_for(page, kind)
+            native = native_adapter.capture_native()
+            payload = deepcopy(native.payload)
+            path = "draft" if kind in (PAGE_DISTRIBUTION_SUMMARIES, PAGE_COMPARISON_FIGURES) else "config"
+            allowed = set(page.template_settings()[0]) - {"style", "source_keys"}
+            payload[path] = {**payload.get(path, {}), **{
+                key: value for key, value in native_settings.items() if key in allowed}}
+            report = native_adapter.restore_native(replace(native, payload=payload))
+            if report.skipped:
+                raise ValueError("The recipe could not be installed: " + "; ".join(report.warnings))
+        native = encode_legacy(record.spec, record.resources, materialize_defaults=True)
+        # The canonical New record already owns its look and shared style binding,
+        # including edits made while no resident slot was available.
+        if kind == PAGE_DISTRIBUTIONS:
+            from dataclasses import replace
+            from .figure_adapter_plots import _native_config
+            page._set_config(replace(page.config(), style=_native_config(native).style), draw=False)
+        else:
+            from .figure_adapter_pages import _native_appearance
+            page.set_appearance_state(_native_appearance(native, kind).to_dict())
+        page._appearance_widget.clear_history()
+
+    def _prepare_figure_sources(self, figure_id):
+        owner = self._figure_workspace
+        record, page = owner.get(figure_id), owner.page(figure_id)
+        if record is not None and page is not None:
+            self._bind_figure_sources(page, record, owner.binding(figure_id), False)
+
+    def _update_figure(self, figure_id, update):
+        owner = self._figure_workspace
+        record, page = owner.get(figure_id), owner.page(figure_id)
+        if record is None or page is None:
+            return
+        if record.spec.kind in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE) and not self._feed_figure_bound_source(
+                page, record, owner.binding(figure_id), compute=False):
+            return
+        from dataclasses import replace
+        entry = owner._entries[figure_id]
+        try:
+            result = update()
+        except Exception as exc:
+            owner._fail(figure_id, exc)
+            return
+        if result is False:
+            return
+        if entry.busy or getattr(page, "_gather_worker", None) is not None:
+            return  # The result callback commits freshness when its work finishes.
+        kind = record.spec.kind
+        if kind in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE, PAGE_DISTRIBUTION_SUMMARIES,
+                    PAGE_COMPARISON_FIGURES):
+            has_result = page.has_data()
+        elif kind in (PAGE_IV, PAGE_VOLTAGE_SERIES):
+            has_result = bool(page.points())
+        elif kind == PAGE_SUBPOPULATIONS:
+            has_result = page.report() is not None
+        else:
+            has_result = (bool(getattr(page, "_plot_armed", False))
+                          and getattr(page, "_message_item", None) is None)
+        if not has_result:
+            owner._set_metadata(entry, pending_result_base=None)
+            entry.record = replace(entry.record, spec=replace(entry.record.spec,
+                result=replace(entry.record.spec.result, status="empty")))
+            owner.checkpoint(figure_id, changed=True)
+            return
+        owner.mark_current(figure_id)
+        owner.checkpoint(figure_id, changed=True)
+
+    def _refresh_figure(self, figure_id):
+        owner = self._figure_workspace
+        record, page = owner.get(figure_id), owner.page(figure_id)
+        if record is None or page is None:
+            return
+        kind = record.spec.kind
+        if kind in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE):
+            self._update_figure(figure_id, lambda: self._feed_figure_bound_source(
+                page, record, owner.binding(figure_id), compute=True))
+        elif kind == PAGE_DISTRIBUTIONS:
+            self._prepare_figure_sources(figure_id)
+            self._update_figure(figure_id, page._run_plot)
+        elif kind in (PAGE_DISTRIBUTION_SUMMARIES, PAGE_COMPARISON_FIGURES):
+            self._prepare_figure_sources(figure_id)
+            self._update_figure(figure_id, page.analyze)
+        elif kind in (PAGE_IV, PAGE_VOLTAGE_SERIES):
+            self._update_figure(figure_id, page.refresh)
+        elif kind == PAGE_SUBPOPULATIONS:
+            self._run_subpop_for_figure(figure_id)
+
+    def _record_figure_publication(self, receipt):
+        if isinstance(receipt, dict) and self._figure_workspace.get(receipt.get("figure_id")) is not None:
+            self._analytical_workspace.extra["report_fit_publication"] = dict(receipt)
+            self._mark_dirty()
+
+    def _run_subpop_for_figure(self, figure_id):
+        owner = self._figure_workspace
+        page = owner.page(figure_id) if owner is not None else None
+        if page is None:
+            return False
+        source = None
+        if page.report() is not None:
+            source, reason = self._subpop_report_source(page)
+            if source is None:
+                owner._fail(figure_id, reason + " The stored report is unchanged. "
+                            "Create a new Subpopulations figure to analyse a different detection.")
+                return False
+        old = self._subpop_launch_figure_id
+        self._subpop_launch_figure_id = figure_id
+        try:
+            return self._run_subpopulations(source_result=source)
+        finally:
+            self._subpop_launch_figure_id = old
+
+    def _subpop_result_recipe(self, result):
+        """Durable detection identity, with an additional curation-independent stamp."""
+        from dataclasses import replace
+        from ..core.analysis_workspace import result_recipe
+
+        recipe = result_recipe(self, result)
+        frame = result.payload.df.copy()
+        # Review state and notes may change. A report update may use newly accepted
+        # rows, but never new boundaries, measurements or detector inputs.
+        frame["accepted"] = True
+        frame["flag"] = ""
+        frame = frame.drop(columns=["review", "note"], errors="ignore")
+        normalized = replace(result, payload=replace(result.payload, df=frame))
+        recipe["subpopulation_detection_fingerprint"] = result_recipe(
+            self, normalized)["result_fingerprint"]
+        return recipe
+
+    def _subpop_report_source(self, page):
+        """Resolve this report's own detection; selection never supplies a fallback."""
+        from ..core.analysis_workspace import resolve_result_recipe, _resolve_source
+        from ..analysis.events import EventSet
+
+        recipe = getattr(page, "_nanoscope_workspace_source", None)
+        original = getattr(page, "_nanoscope_workspace_source_result", None)
+        # Older live reports can still capture their original result. A restored report
+        # without a recipe has no provable source and remains view/export only.
+        if not recipe and original is not None and self._session.has_document(original.doc_id):
+            recipe = self._subpop_result_recipe(original)
+        if not recipe:
+            return None, "This report has no saved detection source."
+        result, reason = resolve_result_recipe(self, recipe)
+        if result is None and recipe.get("subpopulation_detection_fingerprint"):
+            doc_id, channel, _ = _resolve_source(self, recipe)
+            candidate = (self._session.results.get(doc_id, channel, recipe.get("module_id"))
+                         if doc_id is not None and channel is not None else None)
+            if candidate is not None and isinstance(candidate.payload, EventSet):
+                stamp = self._subpop_result_recipe(candidate)["subpopulation_detection_fingerprint"]
+                if stamp == recipe["subpopulation_detection_fingerprint"]:
+                    result = candidate
+        if result is None:
+            return None, "Cannot update the original detection: " + (reason or "source unavailable.")
+        if result.source_fingerprint is not None:
+            from ..core.identity import describe_source_change
+            from ..core.segment import SegmentDocument, persistent_key
+            doc = self._session.document(result.doc_id)
+            documents = {persistent_key(item): item for item in self._session.documents()}
+            while isinstance(doc, SegmentDocument):
+                doc = documents.get(doc.spec.parent_key)
+            if doc is None:
+                return None, "The report's original recording is not open."
+            self._remember_loaded_source(doc.doc_id)
+            change = describe_source_change(result.source_fingerprint,
+                self._loaded_source_fingerprints.get(doc.doc_id), loaded_n_samples=doc.meta.n_samples)
+            if change:
+                return None, "The recording changed since this detection was saved: " + change
+        if original is not None and result is not original:
+            key = (result.doc_id, result.channel, result.module_id)
+            replay = getattr(self, "_subpop_history_replays", {}).get(key)
+            # An old Curate undo/redo label is not evidence about this result: a
+            # byte-identical re-detection pushes no step and leaves that label intact.
+            # Only the actual payload installed by history may stand in for the
+            # report's original object; ordinary curation retains its payload.
+            known_payload = (result.payload is original.payload
+                             or (replay is not None and replay() is result.payload))
+            same_detection = (recipe.get("subpopulation_detection_fingerprint") ==
+                              self._subpop_result_recipe(result)["subpopulation_detection_fingerprint"])
+            if not (known_payload and same_detection):
+                return None, "The detection used for this report has been replaced."
+        stale = self._analysis_panel._statistics_staleness(result)
+        if stale is not None:
+            return None, "The report's source detection is stale: " + stale[1]
+        columns, stale_text = self._analysis_panel.table_staleness(
+            result.doc_id, result.channel, result.module_id)
+        if columns:
+            return None, "The report's source detection is stale: " + stale_text
+        return result, None
+
+    def _generate_umap_for_figure(self, figure_id):
+        """Add an embedding to the selected stored report, never the current detection."""
+        from ..analysis.subpop_report import add_umap_to_report
+
+        owner = self._figure_workspace
+        page = owner.page(figure_id) if owner is not None else None
+        if page is None or page.report() is None or self._umap_figure_request is not None:
+            return
+        if owner.is_read_only():
+            self.statusBar().showMessage(
+                "This newer analytical workspace is read-only; UMAP was not generated.", 10000)
+            return
+        original = page.report()
+        if "UMAP" in page.embedding_view().embeddings():
+            page.embedding_view().set_embedding("UMAP")
+            return
+        if original.clustering is None:
+            QtWidgets.QMessageBox.information(
+                self, "Generate UMAP",
+                "This report has no stored PCA scores. Generate Subpopulations first.")
+            return
+        token = owner.request_token(figure_id)
+
+        def job(progress):
+            result = add_umap_to_report(original, progress=progress)
+            result._nanoscope_umap_request = token
+            return result
+
+        self._analysis_panel.forget_pending_job()
+        if not self._analysis_controller.run_callable(job, label="UMAP", wants_progress=True):
+            owner.finish_request(token)
+            return
+        self._umap_figure_request = (token, original)
+        page.set_umap_busy(True)
+        self.statusBar().showMessage(
+            "Generating UMAP from the stored report. Existing analysis results remain available; "
+            "Cancel discards the pending embedding.", 0)
+
+    @QtCore.Slot(object)
+    def _on_umap_finished(self, payload):
+        claim = self._umap_figure_request
+        if claim is None or getattr(payload, "_nanoscope_umap_request", None) != claim[0]:
+            return
+        token, original = claim
+        del payload._nanoscope_umap_request
+        owner = self._figure_workspace
+        try:
+            if owner is None or not owner.accepts_result(token):
+                return
+            page = owner.page(token[1])
+            if page is None or page.report() is not original:
+                return  # Replaced or closed reports cannot receive a late embedding.
+            page.install_umap_report(payload)
+            # Preserve stale/curation state: generating a figure aid did not rerun analysis.
+            owner.checkpoint(token[1], changed=True)
+            self.statusBar().showMessage(
+                "UMAP generated from the stored report; t-SNE, classes and other results preserved.",
+                10000)
+        finally:
+            self._on_umap_stopped()
+
+    def _on_umap_stopped(self):
+        claim, self._umap_figure_request = self._umap_figure_request, None
+        owner = self._figure_workspace
+        if claim is not None and owner is not None:
+            token, _original = claim
+            page = owner.page(token[1])
+            if page is not None:
+                page.set_umap_busy(False)
+            owner.finish_request(token)
+
+    def _with_subpop_figure(self, figure_id, callback, *, assignment=False):
+        owner = self._figure_workspace
+        page = owner.page(figure_id)
+        if page is None:
+            return
+        old = self._subpop_window
+        self._subpop_window = page
+        try:
+            if assignment and page.report() is not None:
+                target, reason = self._subpop_report_source(page)
+                if target is None:
+                    reason = reason.replace("Cannot update", "Cannot use", 1)
+                    owner._fail(figure_id, reason)
+                    self.statusBar().showMessage(reason, 10000)
+                    return
+                if self._analysis_panel.current_detection() is not target:
+                    name = self._session.document(target.doc_id).display_name
+                    detector = self._detector_display_name(target.module_id)
+                    self.statusBar().showMessage(
+                        f"This report belongs to “{name}”, channel {target.channel}, {detector}. "
+                        "Select that original detection to show its events. "
+                        "The stored report and its colouring are unchanged.", 10000)
+                    return
+                key = (str(target.doc_id), int(target.channel), str(target.module_id))
+                held = (self._subpop_assignment_figure_id == figure_id
+                        and self._subpop_key == key
+                        and self._subpop_frame is target.payload.df
+                        and self._subpop_assignment is not None
+                        and self._subpop_signal is not None)
+                if not held:
+                    # A restored/different figure must rebuild only its validated
+                    # original detection's trace, never the current selection's.
+                    try:
+                        signal, _fs = self._analysis_panel._active_signal(
+                            dict(target.payload.provenance or {}), strict=True,
+                            key=(target.doc_id, target.channel))
+                        if signal is None:
+                            raise ValueError("the original detection trace is unavailable")
+                    except Exception as exc:  # noqa: BLE001 — leave held colouring intact
+                        reason = f"Cannot show this report's original detection trace: {exc}"
+                        owner._fail(figure_id, reason)
+                        self.statusBar().showMessage(reason, 10000)
+                        return
+                    pending_ids = self._subpop_accepted_ids_pending
+                    pending_signal = self._subpop_signal_pending
+                    self._subpop_accepted_ids_pending = getattr(
+                        page, "_nanoscope_workspace_accepted_event_ids", None)
+                    self._subpop_signal_pending = signal
+                    try:
+                        self._adopt_subpop_assignment(page.report(), target)
+                    finally:
+                        self._subpop_accepted_ids_pending = pending_ids
+                        self._subpop_signal_pending = pending_signal
+                    self._subpop_assignment_figure_id = figure_id
+                page._nanoscope_workspace_source_result = target
+                self._sync_subpop_window()
+            return callback()
+        finally:
+            self._subpop_window = old
+
+    def _install_subpop_figure_report(self, figure_id, report, *, source_result=None,
+                                     source_recipe=None, accepted_event_ids=None):
+        owner = self._figure_workspace
+        page = owner.page(figure_id)
+        if page is None or owner.get(figure_id) is None:
+            return
+        if source_result is not None and self._session.has_document(source_result.doc_id):
+            live_recipe = self._subpop_result_recipe(source_result)
+            if source_recipe is None:
+                source_recipe = live_recipe
+            elif source_recipe.get("result_fingerprint") == live_recipe["result_fingerprint"]:
+                source_recipe = {**source_recipe, "subpopulation_detection_fingerprint":
+                                 live_recipe["subpopulation_detection_fingerprint"]}
+        page._nanoscope_workspace_source_result = source_result
+        page._nanoscope_workspace_source = source_recipe
+        page._nanoscope_workspace_accepted_event_ids = accepted_event_ids
+        self._subpop_assignment_figure_id = figure_id
+        page.set_report(report, subtitle=str(report.meta.get("recording") or "(unnamed)"))
+        owner.mark_current(figure_id)
+        owner.checkpoint(figure_id, changed=True)
+        self._sync_subpop_window()
+
+    def _show_saved_figure(self, key):
+        explorer = self._ensure_analysis_explorer()
+        return explorer.show_saved_figure(key, self._ensure_saved_figure_view())
+
+    def _compose_saved_figures(self, ids):
+        return self._ensure_saved_figure_view().compose_entries(ids)
+
+    def _delete_saved_figures(self, ids):
+        """The Explorer already confirmed the exact selected project entries."""
+        allowed = {entry.artifact_id for entry in self._figure_entries()}
+        selected = set(ids) & allowed
+        if not selected:
+            return
+        self._analytical_workspace.artifacts[:] = [entry for entry in self._analytical_workspace.artifacts
+                                                   if entry.artifact_id not in selected]
+        self._mark_dirty()
+        if self._analysis_explorer is not None:
+            self._analysis_explorer.refresh_figures()
+
+    def _new_figure_from_recipe(self):
+        from .figure_recipes import RecipeDialog, initial_recipe
+        owner = self._ensure_figure_workspace()
+        token = (owner, owner._epoch)
+        dialog = RecipeDialog(self._analysis_explorer or self, choose=True)
+        try:
+            accepted = dialog.exec() == QtWidgets.QDialog.Accepted
+            entry, include_words = dialog.selected(), dialog.words.isChecked()
+        finally:
+            dialog.deleteLater()
+        if not accepted:
+            return
+        if token != (self._figure_workspace, owner._epoch):
+            self.statusBar().showMessage("The project changed; open New from recipe again.", 10000)
+            return
+        if entry is None:
+            return
+        try:
+            recipe = initial_recipe(entry, include_words=include_words)
+        except (TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self._analysis_explorer or self, "New figure from recipe",
+                                          f"{entry.name} could not be recalled.\n\n{exc}")
+            return
+        owner.create(entry.kind, initial_recipe=recipe)
+
+    def _save_figure_recipe(self, figure_id):
+        from .figure_recipes import save_page, entries, SUPPORTED, UNSUPPORTED
+        owner = self._figure_workspace
+        record = owner.get(figure_id) if owner is not None else None
+        page = owner.page(figure_id) if record is not None else None
+        if page is None:
+            return
+        kind = record.spec.kind
+        if kind not in SUPPORTED:
+            QtWidgets.QMessageBox.information(self, "Figure recipes", UNSUPPORTED[kind])
+            return
+        self._analysis_explorer.toolbar().commit_focus()
+        token = (owner, owner._epoch, page, owner.revision_token(figure_id))
+        def unchanged():
+            return (self._figure_workspace is owner and owner._epoch == token[1]
+                    and owner.page(figure_id) is page and owner.revision_token(figure_id) == token[3])
+        name, accepted = QtWidgets.QInputDialog.getText(self._analysis_explorer or self,
+            "Save figure recipe", "Recipe name (analysis settings and look; words optional when recalled):")
+        name = name.strip()
+        if not accepted or not name or not unchanged():
+            return
+        overwrite = any(entry.kind == kind and entry.name == name and not entry.builtin for entry in entries())
+        if overwrite and QtWidgets.QMessageBox.question(self._analysis_explorer or self,
+                "Replace recipe?", f"Replace the saved recipe “{name}”?") != QtWidgets.QMessageBox.Yes:
+            return
+        if not unchanged():
+            return
+        try:
+            save_page(page, kind, name, overwrite=overwrite)
+        except (TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Save figure recipe", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved recipe “{name}”. Recall it with New figure ▸ From recipe…", 10000)
+
+    def _manage_figure_recipes(self, kind):
+        from .figure_recipes import RecipeDialog
+        dialog = RecipeDialog(self._analysis_explorer or self, kind=kind)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    def _analysis_explorer_context(self, *, for_figure=True) -> str:
+        """Describe the figure's own sources, independently of main selection."""
         documents = list(self._session.documents())
         count = len(documents)
+        owner = self._figure_workspace if for_figure else None
+        key = owner.current_id() if owner is not None else None
+        record = owner.get(key) if owner is not None else None
+        if record is not None:
+            page = owner.page(key)
+            if record.spec.kind == PAGE_NOISE and page is not None and page.curves():
+                labels = [str(curve.label) for curve in page.curves()]
+                return "Displayed: " + ", ".join(labels)
+            if record.spec.kind == PAGE_EVENT_WAVEFORMS and page is not None:
+                doc_id = getattr(page, "_doc_id", None)
+                if doc_id is not None and self._session.has_document(doc_id):
+                    return f"{self._session.document(doc_id).display_name} · channel {int(page._channel)}"
+            if page is not None and callable(getattr(page, "selected_sources", None)):
+                sources = page.selected_sources()
+                labels = [str(source.label) for source in sources]
+                return "Selected sources: " + (", ".join(labels) if labels else "none")
+            binding = owner.binding(key)
+            source = (getattr(page, "_nanoscope_workspace_event_source", None)
+                      if record.spec.kind == PAGE_EVENT_WAVEFORMS else None) or binding.get("source")
+            if source:
+                from ..core.analysis_workspace import _resolve_source
+                doc_id, channel, _reason = _resolve_source(self, source)
+                if doc_id is not None:
+                    return f"{self._session.document(doc_id).display_name} · channel {int(channel)}"
+                return "Pinned source: " + Path(str(source.get("source_key") or "unavailable")).name
+            if record.spec.kind in (PAGE_IV, PAGE_VOLTAGE_SERIES):
+                return f"Project recordings · {count} recording{'s' if count != 1 else ''} open"
+            return f"{len(record.spec.sources)} figure source{'s' if len(record.spec.sources) != 1 else ''}"
         if (self._current_selection is not None
                 and self._session.has_document(self._current_selection[0])):
             doc_id, channel = self._current_selection
@@ -5615,7 +6405,123 @@ class MainWindow(QtWidgets.QMainWindow):
         return "No recordings open"
 
     # -- project Figure Library (not the Event Gallery) ------------------------------------
+    def _export_selected_figures(self, *, directory=None, formats=("pdf",), sizing="native",
+                                 dpi=300, selected_ids=None, saved_ids=None,
+                                 interactive=True, overwrite=False):
+        """Export a fixed selection of committed live figures and immutable snapshots."""
+        from copy import deepcopy
+        from .figure_batch_export import build_export_plan, run_export_plan
+        from .figure_batch_export_dialog import choose_batch_export_options, show_batch_export_results
+        from .figure_bundle import FigureSnapshot
+        from .export_paths import confirm_overwrite, existing_of
+
+        explorer = self._ensure_analysis_explorer()
+        owner = self._figure_workspace
+        epoch = self._figure_project_epoch
+        listing = explorer.figures_list()
+        selected = tuple(listing.selected_ids() if selected_ids is None else selected_ids)
+        saved = tuple(listing.selected_ids("saved") if saved_ids is None else saved_ids)
+        previous_rows = listing.selected_ids() + listing.selected_ids("saved")
+        previous_row = listing.current_id() or listing.current_id("snapshot") or listing.current_id("composition")
+        previous_page = explorer.current_page_id()
+        previous_current = owner.current_id()
+
+        def is_current():
+            return self._figure_project_epoch == epoch and self._figure_workspace is owner
+
+        try:
+            explorer.toolbar().commit_focus()
+            for key in selected:
+                if owner.export_ready(key)[0]:
+                    owner.checkpoint(key)
+            tokens = {key: owner.revision_token(key) for key in selected}
+            entries = {entry.artifact_id: entry for entry in self._figure_entries()}
+            snapshots, saved_values = {}, {}
+            for key in saved:
+                entry = entries.get(key)
+                if entry is None:
+                    raise ValueError("A selected snapshot is no longer available. Select it again.")
+                snapshots[key] = (entry.payload.get("name") or "Saved figure",
+                                  FigureSnapshot.from_storage(entry.payload["snapshot"], entry.blobs))
+                saved_values[key] = (deepcopy(entry.payload), dict(entry.blobs))
+
+            def saved_is_current(key):
+                current = next((entry for entry in self._figure_entries() if entry.artifact_id == key), None)
+                return current is not None and (current.payload, current.blobs) == saved_values[key]
+
+            names = [owner.get(key).spec.name if owner.get(key) is not None else "Unavailable figure"
+                     for key in selected] + [name for name, _snapshot in snapshots.values()]
+            if not names:
+                raise ValueError("Select live figures or saved snapshots in the Figures list first.")
+            if directory is None:
+                if not interactive:
+                    raise ValueError("An export folder is required.")
+                choice = choose_batch_export_options(explorer, names)
+                if choice is None:
+                    return ()
+                directory, formats, sizing, dpi = choice
+            if (not is_current()
+                    or any(owner.revision_token(key) != token for key, token in tokens.items())
+                    or any(not saved_is_current(key) for key in saved)):
+                raise ValueError("The project or selected figures changed while choosing export options. Select them again.")
+            plan = build_export_plan(owner, selected, directory, formats=formats, sizing=sizing,
+                                     dpi=dpi, snapshots=snapshots, ready=owner.export_ready)
+            if interactive:
+                if not confirm_overwrite(explorer, "Export selected figures", existing_of(plan.paths)):
+                    return ()
+                overwrite = True
+            if not is_current():
+                raise ValueError("The project changed before export started.")
+            progress = None
+            if interactive:
+                progress = QtWidgets.QProgressDialog("Preparing committed figures…", "Cancel", 0, len(plan.paths), explorer)
+                progress.setWindowTitle("Export selected figures")
+                progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+                progress.setMinimumDuration(0)
+                progress.show()
+
+            def advance(result, done, total):
+                if progress is not None:
+                    progress.setLabelText(f"{result.name}: {result.status}")
+                    progress.setValue(done)
+                    QtWidgets.QApplication.processEvents()
+
+            try:
+                results = run_export_plan(plan, owner=owner,
+                    capture=lambda key: self._capture_figure(key)[1], is_current=is_current,
+                    saved_is_current=saved_is_current, ready=owner.export_ready,
+                    cancelled=(lambda: progress.wasCanceled()) if progress is not None else None,
+                    progress=advance, overwrite=overwrite)
+            finally:
+                if progress is not None:
+                    progress.close()
+                    progress.deleteLater()
+                if is_current():
+                    if previous_current is None:
+                        owner.clear_current()
+                    if previous_page == PAGE_HOME or previous_page is None:
+                        explorer.show_home()
+                    else:
+                        explorer.raise_page(previous_page)
+                    explorer.refresh_figures()
+                    listing.restore_selection(previous_rows, current_id=previous_row)
+            counts = {state: sum(result.status == state for result in results)
+                      for state in ("written", "failed", "cancelled")}
+            self.statusBar().showMessage(
+                f"Figure export: {counts['written']} written, {counts['failed']} failed, "
+                f"{counts['cancelled']} cancelled.", 12000)
+            if interactive:
+                show_batch_export_results(explorer, results)
+            return results
+        except (ValueError, TypeError, OSError, RuntimeError) as exc:
+            if not interactive:
+                raise
+            QtWidgets.QMessageBox.warning(explorer, "Export selected figures", str(exc))
+            return ()
+
     def _figure_entries(self):
+        if self._figure_workspace is not None and self._figure_workspace.is_read_only():
+            return ()
         from ..core.figure_library import figures
         return figures(self._analytical_workspace)
 
@@ -5629,25 +6535,77 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _append_figure(self, entry) -> None:
         self._analytical_workspace.artifacts.append(entry)
+        if self._analysis_explorer is not None:
+            self._analysis_explorer.refresh_figures()
 
-    def _open_figure_library(self) -> None:
-        from .figure_library import FigureLibrary
+    def _ensure_saved_figure_view(self):
+        from .saved_figure_view import SavedFigureView
         if self._figure_library is None:
-            self._figure_library = FigureLibrary(
-                self, entries=self._figure_entries, status=self._figure_status,
+            self._figure_library = SavedFigureView(
+                self._ensure_analysis_explorer(), entries=self._figure_entries, status=self._figure_status,
                 append=self._append_figure, project_token=lambda: self._figure_project_epoch)
             self._figure_library.changed.connect(self._mark_dirty)
-            self._adopt_child_window(self._figure_library, "figure_library")
-        self._figure_library.show()
-        self._figure_library.raise_()
-        self._figure_library.activateWindow()
+            self._figure_library.changed.connect(lambda: self._analysis_explorer.refresh_figures()
+                if self._analysis_explorer is not None else None)
+            self._figure_library.entryCreated.connect(self._show_saved_figure)
+        return self._figure_library
+
+    def _open_figure_library(self) -> None:
+        """Compatibility entry point: saved figures now use the project's one list."""
+        explorer = self._ensure_analysis_explorer()
+        explorer.refresh_figures()
+        entries = self._figure_entries()
+        if entries:
+            current = self._figure_library.current_id() if self._figure_library is not None else None
+            self._show_saved_figure(current if current in {e.artifact_id for e in entries} else entries[0].artifact_id)
+        explorer.show()
+        explorer.raise_()
+        explorer.activateWindow()
 
     def _figure_page(self, page_id: str):
+        if self._figure_workspace is not None:
+            record = self._figure_workspace.get(page_id)
+            if record is not None:
+                page = self._figure_workspace.page(page_id)
+                if page is None:
+                    owner = self._figure_workspace
+                    failures = []
+                    def refused(key, reason):
+                        if key == page_id:
+                            failures.append(reason)
+                    owner.requestFailed.connect(refused)
+                    try:
+                        if not owner.activate(page_id):
+                            raise ValueError(failures[-1] if failures else "This figure could not be opened for capture.")
+                        page = owner.page(page_id)
+                    finally:
+                        owner.requestFailed.disconnect(refused)
+                return self._analysis_page_artifact(record.spec.kind), page
         artifact_id = self._analysis_page_artifact(page_id)
         page = self._workspace_surface(artifact_id) if artifact_id else None
         if page is None:
             raise ValueError("Open an analytical figure before saving it.")
         return artifact_id, page
+
+    def _figure_capture_identity(self, page_id: str):
+        """Materialize one frozen view and pin its owner across modal capture choices."""
+        _artifact_id, page = self._figure_page(page_id)
+        owner = self._figure_workspace
+        token = owner.revision_token(page_id) if owner is not None else None
+        return self._figure_project_epoch, owner, token[:2] if token is not None else page
+
+    def _check_figure_capture_identity(self, page_id: str, expected) -> None:
+        epoch, owner, identity = expected
+        if self._figure_project_epoch != epoch or self._figure_workspace is not owner:
+            raise ValueError("The project changed while choosing capture options; nothing was saved.")
+        token = owner.revision_token(page_id) if owner is not None else None
+        if isinstance(identity, tuple):
+            matches = token is not None and token[:2] == identity
+        else:
+            artifact_id = self._analysis_page_artifact(page_id)
+            matches = artifact_id is not None and self._workspace_surface(artifact_id) is identity
+        if not matches:
+            raise ValueError("The figure was deleted or replaced while choosing capture options; nothing was saved.")
 
     def _figure_capture_options(self, page_id: str, *, ask_name: bool):
         """Name/residual inclusion only: no analysis controls or live view mutation."""
@@ -5660,7 +6618,8 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = QtWidgets.QDialog(self._analysis_explorer or self)
         dialog.setWindowTitle("Save figure snapshot" if ask_name else "Figure bundle")
         layout = QtWidgets.QVBoxLayout(dialog)
-        name = QtWidgets.QLineEdit(default_figure_name(page_id, page))
+        record = self._figure_workspace.get(page_id) if self._figure_workspace is not None else None
+        name = QtWidgets.QLineEdit(record.spec.name if record is not None else default_figure_name(page_id, page))
         if ask_name:
             name.setMaxLength(200)
             layout.addWidget(QtWidgets.QLabel("Figure name:"))
@@ -5694,9 +6653,20 @@ class MainWindow(QtWidgets.QMainWindow):
         from .figure_bundle import capture_figure_snapshot, encode_figure_table
 
         artifact_id, page = self._figure_page(page_id)
-        keyword = self._workspace_kwarg(artifact_id)
-        captured = capture_analysis_workspace(**{keyword: page})
-        analysis = next(a for a in captured.artifacts if a.artifact_id == artifact_id)
+        applied_spec = None
+        record = self._figure_workspace.get(page_id) if self._figure_workspace is not None else None
+        if record is not None:
+            if not self._figure_workspace.checkpoint(page_id):
+                raise ValueError("The figure could not be preserved for capture.")
+            from .figure_adapter_pages import capture_applied_record
+            from ..core.figure_codecs import encode_legacy
+            applied_record = capture_applied_record(self._figure_workspace.get(page_id))
+            applied_spec = applied_record.spec
+            analysis = encode_legacy(applied_record.spec, applied_record.resources)
+        else:
+            keyword = self._workspace_kwarg(artifact_id)
+            captured = capture_analysis_workspace(**{keyword: page})
+            analysis = next(a for a in captured.artifacts if a.artifact_id == artifact_id)
         bindings = getattr(page, "figure_source_recipes", None)
         if callable(bindings):
             analysis.payload["figure_sources"] = bindings()
@@ -5775,7 +6745,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         "details": figure_details,
                         "analysis_recomputed": False, "source_state": live},
             residual_item=residual, include_residual=include_residual,
-            additional_resources=resources)
+            additional_resources=resources, applied_spec=applied_spec)
         if report_companion:
             # Reuse the two-canvas renderer, but never call a waveform a residual
             # in the durable manifest. Its true panel identities are in provenance.
@@ -5787,26 +6757,31 @@ class MainWindow(QtWidgets.QMainWindow):
                               include_residual: bool = False):
         from ..core.figure_library import make_figure
         try:
+            identity = self._figure_capture_identity(page_id)
             if name is None:
                 selected = self._figure_capture_options(page_id, ask_name=True)
                 if selected is None:
                     return None
                 name, include_residual = selected
+            self._check_figure_capture_identity(page_id, identity)
             analysis, snapshot, source_label, live, status = self._capture_figure(
                 page_id, include_residual=include_residual)
             metadata, blobs = snapshot.to_storage()
+            record = self._figure_workspace.get(page_id) if self._figure_workspace is not None else None
             entry = make_figure(
-                name=name, page_id=page_id, source_label=source_label, analysis=analysis,
+                name=name, page_id=record.spec.kind if record is not None else page_id,
+                source_label=source_label, analysis=analysis,
                 snapshot_metadata=metadata, snapshot_blobs=blobs, live_state=live,
-                capture_status=status)
+                capture_status=status, applied_spec=snapshot.figure_spec(),
+                origin_figure_id=page_id if record is not None else None)
+            self._check_figure_capture_identity(page_id, identity)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self._analysis_explorer or self,
                                           "Save figure snapshot", str(exc))
             return None
         self._append_figure(entry)
         self._mark_dirty()
-        self._open_figure_library()
-        self._figure_library.refresh(entry.artifact_id)
+        self._show_saved_figure(entry.artifact_id)
         self.statusBar().showMessage("Figure saved in this project. Save Project to persist it to disk.", 10000)
         return entry
 
@@ -5817,6 +6792,7 @@ class MainWindow(QtWidgets.QMainWindow):
         from ..core.atomic_write import take_identity_notes
         parent = self._analysis_explorer or self
         try:
+            identity = self._figure_capture_identity(page_id)
             if path is None:
                 selected = self._figure_capture_options(page_id, ask_name=False)
                 if selected is None:
@@ -5828,6 +6804,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     outputs=lambda chosen: [chosen if chosen.suffix else chosen.with_suffix(".zip")])
                 if path is None:
                     return None
+            self._check_figure_capture_identity(page_id, identity)
             out = Path(path)
             if not out.suffix:
                 out = out.with_suffix(".zip")
@@ -5835,6 +6812,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("Choose a .zip filename for the figure bundle.")
             _analysis, snapshot, _source, _live, _status = self._capture_figure(
                 page_id, include_residual=include_residual)
+            self._check_figure_capture_identity(page_id, identity)
             write_figure_bundle(out, snapshot)
             notes = take_identity_notes(out)
         except Exception as exc:
@@ -5861,14 +6839,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _analysis_explorer_status(
             self, page_id: str, page: QtWidgets.QWidget) -> tuple[str, str]:
         """Return the visible page's freshness label without recomputing anything."""
+        if self._figure_workspace is not None:
+            record = self._figure_workspace.get(page_id)
+            if record is not None:
+                if record.spec.result.status == "empty":
+                    return "NO DATA", "empty"
+                if record.spec.result.status == "frozen":
+                    return "SAVED RESULT", "snapshot"
+                if record.spec.result.status in ("stale", "missing"):
+                    return "STALE", "stale"
+                page_id = record.spec.kind
         if page_id in (PAGE_DISTRIBUTIONS, PAGE_DISTRIBUTION_SUMMARIES,
                        PAGE_COMPARISON_FIGURES) and bool(getattr(page, "_stale", False)):
             return "STALE", "stale"
         artifact_id = self._analysis_page_artifact(page_id)
         if artifact_id in self._workspace_frozen:
-            return "SAVED SNAPSHOT", "snapshot"
+            return "SAVED RESULT", "snapshot"
         if artifact_id in self._workspace_pending:
-            return "SAVED SNAPSHOT", "snapshot"
+            return "SAVED RESULT", "snapshot"
 
         if page_id == PAGE_DISTRIBUTIONS:
             has_data = bool(page.sources())
@@ -5888,6 +6876,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self, page_id: str, page: QtWidgets.QWidget, *, refresh=None) -> None:
         """Put an existing analytical widget in the one Explorer and focus it."""
         explorer = self._ensure_analysis_explorer()
+        if self._figure_workspace is not None:
+            figure_id = self._figure_workspace.id_for_page(page)
+            if figure_id is not None:
+                self._figure_workspace.activate(figure_id)
+                explorer.raise_page(figure_id)
+                return
         explorer.show_page(
             page_id, page, refresh=refresh,
             activate=lambda _id=page_id: self._activate_analysis_page(_id),
@@ -6054,6 +7048,16 @@ class MainWindow(QtWidgets.QMainWindow):
         re-fed: it is a derived table that describes spans, and a mask drag moves them.
         """
         self._reconcile_level_fit()         # ...and no DERIVED table outlives it either
+        if self._figure_workspace is not None:
+            if not self._restoring and not self._workspace_installing:
+                self._figure_workspace.sources_changed()
+            if _on_screen(self._event_gallery):
+                self._refresh_event_gallery()
+            if self.curation_surface_on_screen(_ROLE_INSPECTOR):
+                self._refresh_event_inspector()
+            self._refresh_subpop_views()
+            self._refresh_analysis_explorer_header()
+            return
         if (_on_screen(self._distribution_summary_window)
                 and DISTRIBUTION_SUMMARIES_ARTIFACT_ID not in self._workspace_frozen
                 and DISTRIBUTION_SUMMARIES_ARTIFACT_ID not in self._workspace_pending):
@@ -6523,24 +7527,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_distribution_summaries(self) -> None:
         """Optional new statistics are lazy and run only through explicit Generate."""
-        from .distribution_summary_panel import DistributionSummaryWindow
-
-        if self._distribution_summary_window is None:
-            page = self._distribution_summary_window = DistributionSummaryWindow(self._session, self)
-            page.refreshRequested.connect(self._prepare_distribution_summary)
-            self._watch_surface_window(page)
-            self._watch_workspace_surface(DISTRIBUTION_SUMMARIES_ARTIFACT_ID, page)
-        page = self._distribution_summary_window
-        if DISTRIBUTION_SUMMARIES_ARTIFACT_ID not in self._workspace_frozen:
-            self._offer_distribution_sources()
-        self._restore_workspace_surface(DISTRIBUTION_SUMMARIES_ARTIFACT_ID, page)
-        self._show_analysis_page(
-            PAGE_DISTRIBUTION_SUMMARIES, page, refresh=self._generate_distribution_summary)
+        return self._open_figure_kind(PAGE_DISTRIBUTION_SUMMARIES)
 
     def _generate_distribution_summary(self) -> None:
         page = self._distribution_summary_window
         if page is None:
             return
+        if self._figure_workspace is not None:
+            figure_id = self._figure_workspace.id_for_page(page)
+            if figure_id is not None:
+                return self._refresh_figure(figure_id)
         self._prepare_distribution_summary()
         try:
             page.analyze()
@@ -6573,24 +7569,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_comparison_figures(self) -> None:
         """Open the optional publication comparisons without regenerating a result."""
-        from .comparison_figures_panel import ComparisonFiguresWindow
-
-        if self._comparison_figures_window is None:
-            page = self._comparison_figures_window = ComparisonFiguresWindow(self._session, self)
-            page.refreshRequested.connect(self._prepare_comparison_figures)
-            self._watch_surface_window(page)
-            self._watch_workspace_surface(COMPARISON_FIGURES_ARTIFACT_ID, page)
-        page = self._comparison_figures_window
-        if COMPARISON_FIGURES_ARTIFACT_ID not in self._workspace_frozen:
-            self._offer_comparison_sources()
-        self._restore_workspace_surface(COMPARISON_FIGURES_ARTIFACT_ID, page)
-        self._show_analysis_page(
-            PAGE_COMPARISON_FIGURES, page, refresh=self._generate_comparison_figures)
+        return self._open_figure_kind(PAGE_COMPARISON_FIGURES)
 
     def _generate_comparison_figures(self) -> None:
         page = self._comparison_figures_window
         if page is None:
             return
+        if self._figure_workspace is not None:
+            figure_id = self._figure_workspace.id_for_page(page)
+            if figure_id is not None:
+                return self._refresh_figure(figure_id)
         self._prepare_comparison_figures()
         try:
             page.analyze()
@@ -6622,40 +7610,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_plots(self) -> None:
         """Open the Distributions page of the single Analysis Explorer."""
-        from .plots_panel import PlotsWindow
-
-        if _on_screen(self._plots_window):
-            self._show_analysis_page(
-                PAGE_DISTRIBUTIONS, self._plots_window,
-                refresh=lambda: self._replace_workspace_surface(
-                    PLOTS_ARTIFACT_ID, self._refresh_plots))
-            return
-        if self._plots_window is None:
-            self._plots_window = PlotsWindow(self._session, self)
-            # The window marks a stale column by the Results panel's OWN judge of each table
-            # it draws (a re-declared rate on any of them, a changed estimator on the one on
-            # screen), not by a second copy of the rules that checked the calibration alone.
-            self._plots_window.set_staleness_provider(self._analysis_panel.table_staleness)
-            # ...and re-reads it when the judge does: a Baseline-form edit re-feeds nothing,
-            # so the mark followed only the next draw (design 13.4 Q4). A saved snapshot is
-            # left as every re-feed leaves it.
-            self._analysis_panel.stalenessChanged.connect(
-                lambda: None if PLOTS_ARTIFACT_ID in (self._workspace_frozen
-                                                      | self._workspace_pending)
-                else self._plots_window.schedule_stale_redraw())
-            self._plots_window.refreshRequested.connect(
-                lambda: self._replace_workspace_surface(
-                    PLOTS_ARTIFACT_ID, self._refresh_plots))
-            self._plots_window.eventRowsSelected.connect(
-                self._on_plot_event_rows_selected)
-            self._watch_surface_window(self._plots_window)
-            self._watch_workspace_surface(PLOTS_ARTIFACT_ID, self._plots_window)
-        self._refresh_plots()
-        self._restore_workspace_surface(PLOTS_ARTIFACT_ID, self._plots_window)
-        self._show_analysis_page(
-            PAGE_DISTRIBUTIONS, self._plots_window,
-            refresh=lambda: self._replace_workspace_surface(
-                PLOTS_ARTIFACT_ID, self._refresh_plots))
+        return self._open_figure_kind(PAGE_DISTRIBUTIONS)
 
     def _refresh_plots(self) -> None:
         """(Re-)push the current snapshot into the open PlotsWindow — the target of
@@ -6674,7 +7629,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._plots_window.set_data(self._plots_sources())
 
     @QtCore.Slot(str, object)
-    def _on_plot_event_rows_selected(self, source_key: str, row_ids: object) -> None:
+    def _on_plot_event_rows_selected(self, source_key: str, row_ids: object, *, figure_id=None) -> None:
         """Link clicked Scatter/PCA points back to their event table and trace span.
 
         ``PlotsWindow`` emits detector ``event_id`` values (not dataframe labels or plot
@@ -6683,7 +7638,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         from ..analysis.events import EventSet
 
-        plots = self._plots_window
+        plots = self._figure_workspace.page(figure_id) if figure_id is not None else self._plots_window
         if plots is None:
             return
         source = next((item for item in plots.sources()
@@ -6817,38 +7772,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_event_plots(self) -> None:
         """Open the Event waveforms page of the single Analysis Explorer."""
-        from .event_plot_panel import EventPlotWindow
-
-        if _on_screen(self._event_plot_window):
-            self._show_analysis_page(
-                PAGE_EVENT_WAVEFORMS, self._event_plot_window,
-                refresh=lambda: self._replace_workspace_surface(
-                    EVENT_PLOTS_ARTIFACT_ID, self._refresh_event_plots))
-            return
-        pending = EVENT_PLOTS_ARTIFACT_ID in self._workspace_pending
-        if self._event_plot_window is None:
-            self._event_plot_window = EventPlotWindow(self._session, self)
-            self._event_plot_window.refreshRequested.connect(
-                lambda: self._replace_workspace_surface(
-                    EVENT_PLOTS_ARTIFACT_ID, self._refresh_event_plots))
-            self._watch_surface_window(self._event_plot_window)
-            self._watch_workspace_surface(
-                EVENT_PLOTS_ARTIFACT_ID, self._event_plot_window)
-        if pending:
-            self._bind_event_plots_for_restore()
-        else:
-            self._refresh_event_plots()
-        self._restore_workspace_surface(
-            EVENT_PLOTS_ARTIFACT_ID, self._event_plot_window)
-        if not pending and self._event_plot_window.has_data():
-            # Opening this surface performs the deterministic density/ensemble analysis.
-            # Its completed numerical view is now project work even before another knob
-            # is touched, so checkpoint it and advance recovery like every other result.
-            self._on_workspace_changed(EVENT_PLOTS_ARTIFACT_ID)
-        self._show_analysis_page(
-            PAGE_EVENT_WAVEFORMS, self._event_plot_window,
-            refresh=lambda: self._replace_workspace_surface(
-                EVENT_PLOTS_ARTIFACT_ID, self._refresh_event_plots))
+        return self._open_figure_kind(PAGE_EVENT_WAVEFORMS)
 
     def _refresh_event_plots(self) -> None:
         """(Re-)push the active detection (doc/channel + EventSet) into the open EventPlotWindow,
@@ -7073,34 +7997,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_iv(self) -> None:
         """Open the I-V page of the single Analysis Explorer."""
-        from .iv_panel import IVWindow
-
-        if _on_screen(self._iv_window):
-            self._show_analysis_page(
-                PAGE_IV, self._iv_window,
-                refresh=lambda: self._replace_workspace_surface(
-                    IV_ARTIFACT_ID, self._iv_window.refresh))
-            return
-        pending = IV_ARTIFACT_ID in self._workspace_pending
-        if self._iv_window is None:
-            self._iv_window = (
-                IVWindow(self._session, self, defer_initial_refresh=True)
-                if pending else IVWindow(self._session, self))
-            self._watch_surface_window(self._iv_window)
-            self._watch_workspace_surface(IV_ARTIFACT_ID, self._iv_window)
-            created = True
-        else:
-            created = False
-        if pending:
-            self._restore_workspace_surface(IV_ARTIFACT_ID, self._iv_window)
-        elif not created:
-            self._iv_window.refresh()
-        if not pending and self._iv_window.points():
-            self._on_workspace_changed(IV_ARTIFACT_ID)
-        self._show_analysis_page(
-            PAGE_IV, self._iv_window,
-            refresh=lambda: self._replace_workspace_surface(
-                IV_ARTIFACT_ID, self._iv_window.refresh))
+        return self._open_figure_kind(PAGE_IV)
 
     # -- voltage-dependence window ---------------------------------------------------------------
     def _vdep_ready_count(self) -> int:
@@ -7142,36 +8039,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_vdep(self) -> None:
         """Open the Voltage series page of the single Analysis Explorer."""
-        from .voltage_dep_panel import VDepWindow
-
-        if _on_screen(self._vdep_window):
-            self._show_analysis_page(
-                PAGE_VOLTAGE_SERIES, self._vdep_window,
-                refresh=lambda: self._replace_workspace_surface(
-                    VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window.refresh))
-            return
-        pending = VOLTAGE_DEPENDENCE_ARTIFACT_ID in self._workspace_pending
-        if self._vdep_window is None:
-            self._vdep_window = (
-                VDepWindow(self._session, self, defer_initial_refresh=True)
-                if pending else VDepWindow(self._session, self))
-            self._watch_surface_window(self._vdep_window)
-            self._watch_workspace_surface(
-                VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window)
-            created = True
-        else:
-            created = False
-        if pending:
-            self._restore_workspace_surface(
-                VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window)
-        elif not created:
-            self._vdep_window.refresh()
-        if not pending and self._vdep_window.points():
-            self._on_workspace_changed(VOLTAGE_DEPENDENCE_ARTIFACT_ID)
-        self._show_analysis_page(
-            PAGE_VOLTAGE_SERIES, self._vdep_window,
-            refresh=lambda: self._replace_workspace_surface(
-                VOLTAGE_DEPENDENCE_ARTIFACT_ID, self._vdep_window.refresh))
+        return self._open_figure_kind(PAGE_VOLTAGE_SERIES)
 
     # -- power-spectrum / noise window -----------------------------------------------------------
     def _has_psd_recording(self) -> bool:
@@ -7192,29 +8060,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_psd(self) -> None:
         """Open the Noise page of the single Analysis Explorer."""
-        from .psd_panel import PSDWindow
-
-        if _on_screen(self._psd_window):
-            self._show_analysis_page(
-                PAGE_NOISE, self._psd_window,
-                refresh=lambda: self._replace_workspace_surface(
-                    PSD_ARTIFACT_ID, self._point_psd_at_selection))
-            return
-        pending = PSD_ARTIFACT_ID in self._workspace_pending
-        if self._psd_window is None:
-            self._psd_window = PSDWindow(self._session, self, defer_initial_refresh=True)
-            self._watch_surface_window(self._psd_window)
-            self._watch_workspace_surface(PSD_ARTIFACT_ID, self._psd_window)
-        if pending:
-            self._restore_workspace_surface(PSD_ARTIFACT_ID, self._psd_window)
-        else:
-            self._point_psd_at_selection()
-            if self._psd_window.has_data():
-                self._on_workspace_changed(PSD_ARTIFACT_ID)
-        self._show_analysis_page(
-            PAGE_NOISE, self._psd_window,
-            refresh=lambda: self._replace_workspace_surface(
-                PSD_ARTIFACT_ID, self._point_psd_at_selection))
+        return self._open_figure_kind(PAGE_NOISE)
 
     def _open_psd_for_selection(self) -> None:
         """Analysis ▸ Power spectrum of the measured region — the CLOCK-SAFE transfer.
@@ -7275,13 +8121,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # is allowed to run and checkpoints the replacement below.
         self._workspace_pending.discard(PSD_ARTIFACT_ID)
         self._workspace_frozen.discard(PSD_ARTIFACT_ID)
-        if self._psd_window is None:
-            self._psd_window = PSDWindow(self._session, self, defer_initial_refresh=True)
-            self._watch_surface_window(self._psd_window)
-            self._watch_workspace_surface(PSD_ARTIFACT_ID, self._psd_window)
-        self._psd_window.set_target(doc_id, channel, recompute=False)
-        self._psd_window.set_segment(start_s, end_s)
-        self._on_workspace_changed(PSD_ARTIFACT_ID)
+        from ..core.analysis_workspace import _stable_source
+        owner = self._ensure_figure_workspace()
+        self._open_figure_kind(PAGE_NOISE)
+        key = owner.current_id()
+        page = owner.page(key)
+        if page is None or owner.get(key).spec.kind != PAGE_NOISE:
+            return
+        owner.set_binding(key, {"follow": False, "source": _stable_source(self, doc_id, channel)})
+        page.set_target(doc_id, channel, recompute=False)
+        self._update_figure(key, lambda: page.set_segment(start_s, end_s))
         self._show_analysis_page(
             PAGE_NOISE, self._psd_window,
             refresh=lambda: self._replace_workspace_surface(
@@ -7902,9 +8751,9 @@ class MainWindow(QtWidgets.QMainWindow):
         entry("figure_library", "Figure Library",
               "Open this project's Figure Library or bring it forward — the same as "
               "Analysis ▸ Figure Library….", self._open_figure_library)
-        entry("signal_conditioning", "Signal Conditioning",
-              "Open the Signal Conditioning window or bring it forward — the same as "
-              "Analysis ▸ Signal conditioning… (⇧⌘F).", self._open_signal_conditioning)
+        entry("signal_conditioning", "Preprocess workspace",
+              "Open the Preprocess workspace or bring it forward — the same as "
+              "Analysis ▸ Preprocess workspace… (⇧⌘F).", self._open_signal_conditioning)
         menu.addSeparator()
         for key, label in _CHILD_WINDOW_LABELS.items():
             act = entry(key, label, f"Bring the {label} window forward.",
@@ -8411,6 +9260,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ap = self._analysis_panel
         det = ap.detection_panel
         ap.openSignalConditioningRequested.connect(self._open_signal_conditioning)
+        ap.openPreprocessRequested.connect(self._open_preprocess_workspace)
         ap.statusMessage.connect(lambda msg: self.statusBar().showMessage(msg, 8000))
         ap.conditioningStateChanged.connect(self._push_conditioning_status)
         det.paramsChanged.connect(lambda *_: self._push_conditioning_chain())
@@ -8436,6 +9286,9 @@ class MainWindow(QtWidgets.QMainWindow):
         det = ap.detection_panel
         ws = SignalConditioningWindow(self)
         ws.install_editor(det.signal_chain_editor_parts())
+        ws.install_preprocess_pages(ap.baseline_panel, ap.baseline_workspace, det.filter_preview,
+                                    det.preview_error_label)
+        ws.workspaceSectionChanged.connect(det.select_preprocess_section)
         det.set_stage_focus_partner(ws.stage_list)
         ws.stageSelected.connect(det.select_stage)
         ws.stageEnableRequested.connect(det.set_stage_enabled)
@@ -8465,25 +9318,30 @@ class MainWindow(QtWidgets.QMainWindow):
         return ws
 
     def _open_signal_conditioning(self, stage_key: str = "") -> None:
-        """Analysis ▸ Signal conditioning… (⌘⇧F), the card's Open button, the Filter chip
-        and the baseline workspace's Advanced signal-chain settings: show the one window,
-        on ``stage_key`` if given."""
+        """Existing filter shortcuts enter the shared workspace's Filters & drift route."""
+        self._open_preprocess_workspace("filters", stage_key=stage_key)
+
+    def _open_preprocess_workspace(self, section: str = "filters", *, stage_key: str = "") -> None:
+        if section not in {"filters", "reference", "comparison"}:
+            raise ValueError("Unknown Preprocess section: " + str(section))
         ws = self._ensure_signal_conditioning()
         det = self._analysis_panel.detection_panel
         if not self._signal_conditioning_placed:
             self._place_signal_conditioning(ws)
             self._signal_conditioning_placed = True
         elif not ws.property("nanoscopeGeometryShown"):
-            # Window > Reset Window Layout forgot it while it was hidden.
             self._place_signal_conditioning_window(ws, QtCore.QSettings(), [])
         if stage_key:
             det.select_stage(stage_key)
         ws.show_stage(det.current_stage_key())
+        ws.show_workspace_section(section)
+        det.select_preprocess_section(section)
         self._push_conditioning_source()
         ws.show()
         ws.raise_()
         ws.activateWindow()
-        ws.focus_stage_list()
+        if section == "filters":
+            ws.focus_stage_list()
 
     def _place_signal_conditioning(self, ws) -> None:
         """First open: the saved geometry (validated, clamped to the screen), else the
@@ -9667,8 +10525,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._subpop_target = (
             self._analysis_panel.current_detection() if pending else None)
 
-    def _run_subpopulations(self) -> None:
-        """Run the whole subpopulation pipeline on the current detection, off-thread.
+    def _run_subpopulations(self, *, source_result=None) -> None:
+        """Run on an explicit report source, or the current detection for a new analysis.
 
         Everything the worker needs is resolved HERE, on the main thread, and handed
         over as plain arrays — the same seam :class:`AnalysisController` keeps for a
@@ -9694,6 +10552,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ``events.accepted`` is what goes in, so the report and the screen are about the
         same rows. The gate then removes more of them, and says how many.
         """
+        launch_epoch = self._figure_project_epoch
         import numpy as np
 
         from ..analysis.events import EventSet
@@ -9706,7 +10565,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         title = ANALYSIS_LABELS[PAGE_SUBPOPULATIONS]
-        res = self._analysis_panel.current_detection()
+        res = source_result if source_result is not None else self._analysis_panel.current_detection()
         if res is None or not isinstance(res.payload, EventSet):
             QtWidgets.QMessageBox.information(
                 self, title,
@@ -9737,7 +10596,7 @@ class MainWindow(QtWidgets.QMainWindow):
         raw = np.asarray(chan.data)
         try:
             signal = detection_signal(raw, float(fs), prov)
-            source_recipe = result_recipe(self, res)
+            source_recipe = self._subpop_result_recipe(res)
         except Exception as exc:  # noqa: BLE001 — reported, never crashes
             QtWidgets.QMessageBox.warning(
                 self, title,
@@ -9768,14 +10627,28 @@ class MainWindow(QtWidgets.QMainWindow):
         ) is not QtWidgets.QMessageBox.StandardButton.Yes:
             return
 
+        if launch_epoch != self._figure_project_epoch:
+            self.statusBar().showMessage("The project changed; the subpopulation run was not started.", 10000)
+            return
+        owner = self._ensure_figure_workspace()
+        key = self._subpop_launch_figure_id or owner.most_recent(PAGE_SUBPOPULATIONS)
+        if key is None:
+            key = owner.create(PAGE_SUBPOPULATIONS)
+        if not owner.activate(key):
+            return
+        report_at_launch = owner.page(key).report()
+        token = owner.request_token(key)
+
         def job(report):
-            return run_subpopulations(
+            result = run_subpopulations(
                 signal, raw, float(fs), accepted,
                 recording=str(name),
                 duration_s=duration,
                 config=config,
                 progress=report,
             )
+            result._nanoscope_figure_request = token
+            return result
 
         # A pending job the panel is still holding would otherwise consume THIS result:
         # its ``_on_controller_finished`` clears ``_pending`` on the first thing that
@@ -9784,7 +10657,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_panel.forget_pending_job()
         if not self._analysis_controller.run_callable(
                 job, label="subpopulations", wants_progress=True):
+            owner.finish_request(token)
             return          # refused by the run gate; it said so itself
+        self._subpop_figure_request = token
+        self._subpop_report_pending = (key, report_at_launch)
         # THE DETECTION THE RUN WAS LAUNCHED ON — and, by writing it, the declaration that
         # a report is on its way (``_subpop_pending`` is derived from it; they are one
         # fact). A mixture takes a minute or many, the status line invites the user to keep
@@ -9811,7 +10687,7 @@ class MainWindow(QtWidgets.QMainWindow):
             + ("a cross-validated mixture search takes about a minute."
                if not slow else
                "the cross-validated mixture search will take many minutes at this "
-               "event count; Stop is safe."), 0)
+               "event count; Cancel is safe."), 0)
 
     @QtCore.Slot(object)
     def _on_subpop_finished(self, payload: object) -> None:
@@ -9837,6 +10713,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if not self._subpop_pending or not isinstance(payload, SubpopReport):
             return
+        token = getattr(payload, "_nanoscope_figure_request", None)
+        if token is not None:
+            if token != self._subpop_figure_request:
+                return  # A cancelled/replaced job cannot consume a newer launch.
+            del payload._nanoscope_figure_request
+            if self._figure_workspace is None or not self._figure_workspace.accepts_result(token):
+                self._on_subpop_stopped()
+                return
+            pending_report = getattr(self, "_subpop_report_pending", None)
+            page = self._figure_workspace.page(token[1])
+            if pending_report is not None and (page is None or page.report() is not pending_report[1]):
+                self._on_subpop_stopped()
+                return
+            self._subpop_figure_request = token
+        self._subpop_report_pending = None
         # Consume the claim AND the target in one move: everything below is about the
         # detection this run was launched on, and nothing may re-derive it from the
         # selection (see :meth:`_adopt_subpop_assignment`).
@@ -9860,6 +10751,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # accepted-id set indefinitely; the report has now captured the durable part.
             self._subpop_signal_pending = None
             self._subpop_accepted_ids_pending = None
+            if token is not None:
+                self._figure_workspace.finish_request(token)
+                self._subpop_figure_request = None
         # The headline is still the SINGLE author of what the run found (above). ``note`` is
         # a different fact — whether the report's per-event colouring reached the trace and
         # the gallery at all — and it is said HERE because this is where the run's one
@@ -9875,32 +10769,31 @@ class MainWindow(QtWidgets.QMainWindow):
         The failure BOX is MainWindow's existing ``_on_analysis_failed``; this only
         drops the claim that a report is on its way, so the next job's answer cannot
         be adopted by :meth:`_on_subpop_finished`."""
+        self._on_umap_stopped()
+        if self._subpop_figure_request is not None and self._figure_workspace is not None:
+            self._figure_workspace.finish_request(self._subpop_figure_request)
+            self._subpop_figure_request = None
         self._subpop_pending = False
+        self._subpop_report_pending = None
         self._subpop_source_recipe_pending = None
         self._subpop_signal_pending = None    # a full-length array; do not outlive the run
         self._subpop_accepted_ids_pending = None   # ...and neither may the run's own set
 
     def _ensure_subpop_window(self):
         """Build the report view without installing a report or showing a window."""
-        from .subpop_window import SubpopReportWindow
-
-        if self._subpop_window is None:
-            win = SubpopReportWindow(self)
-            win.exportRequested.connect(self._export_subpop_report)
-            win.analyzeRequested.connect(self._run_subpopulations)
-            # The report window announces "show me these events"; the routing is here,
-            # because it is the only object holding the report AND both surfaces.
-            win.galleryRequested.connect(self._open_gallery_on_subpops)
-            win.traceRequested.connect(self._colour_trace_by_subpops)
-            self._subpop_window = win
-            self._watch_surface_window(win)
-            self._watch_workspace_surface(SUBPOPULATION_ARTIFACT_ID, win)
-        return self._subpop_window
+        return self._open_figure_kind(PAGE_SUBPOPULATIONS)
 
     def _open_subpop_window(
             self, report, *, source_result=None, source_recipe=None,
             accepted_event_ids=None) -> None:
         """Open a newly completed report and checkpoint it as a durable result."""
+        if self._figure_workspace is not None:
+            token = self._subpop_figure_request
+            key = token[1] if token is not None else self._figure_workspace.most_recent(PAGE_SUBPOPULATIONS)
+            if key is None:
+                key = self._figure_workspace.create(PAGE_SUBPOPULATIONS)
+            return self._install_subpop_figure_report(key, report, source_result=source_result,
+                source_recipe=source_recipe, accepted_event_ids=accepted_event_ids)
         self._workspace_pending.discard(SUBPOPULATION_ARTIFACT_ID)
         self._workspace_frozen.discard(SUBPOPULATION_ARTIFACT_ID)
         self._ensure_subpop_window()
@@ -9911,6 +10804,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._subpop_window._nanoscope_workspace_source = source_recipe
         self._subpop_window._nanoscope_workspace_accepted_event_ids = (
             accepted_event_ids)
+        self._subpop_assignment_figure_id = self._figure_workspace.id_for_page(
+            self._subpop_window)
         self._subpop_window.set_report(
             report, subtitle=f"{report.meta.get('recording') or '(unnamed)'}")
         # ``set_report`` resets the window's live state (a new document, no claim about
@@ -9925,53 +10820,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_saved_subpop_report(self) -> None:
         """Show the project-owned report snapshot without dispatching an analysis job."""
-        if not self._workspace_has_artifact(SUBPOPULATION_ARTIFACT_ID):
-            self.statusBar().showMessage(
-                "This project does not contain a saved subpopulation report.", 8000)
-            return
-        if _on_screen(self._subpop_window):
-            self._show_analysis_page(
-                PAGE_SUBPOPULATIONS, self._subpop_window,
-                refresh=self._run_subpopulations)
-            return
-        win = self._ensure_subpop_window()
-        # A window destroyed/reset during a session transition must install from the cache;
-        # a hidden one is marked pending by eventFilter.  The explicit add here also covers
-        # tests/support callers which adopted a workspace without driving a Hide event.
-        self._workspace_pending.add(SUBPOPULATION_ARTIFACT_ID)
-        restored = self._restore_workspace_surface(SUBPOPULATION_ARTIFACT_ID, win)
-        if restored and win.report() is not None:
-            artifact = self._workspace_artifact(SUBPOPULATION_ARTIFACT_ID)
-            recipe = artifact_source_recipe(artifact) if artifact is not None else None
-            target, warning = resolve_result_recipe(self, recipe or {})
-            if target is None:
-                self._retire_subpop_assignment(
-                    "This saved report remains viewable, but its event colouring was "
-                    f"not attached: {warning or 'its source-result lineage is unavailable'}. "
-                    "Re-run Analysis ▸ Generate Subpopulations to create a current assignment.")
-            else:
-                # The adapter keeps the accepted ids beside the report.  Feed them through
-                # the existing one-writer adoption path so the live curation note compares
-                # against the exact rows the saved run received, not today's accepted count.
-                saved_ids = getattr(
-                    win, "_nanoscope_workspace_accepted_event_ids", None)
-                self._subpop_accepted_ids_pending = (
-                    None if saved_ids is None
-                    else frozenset(int(value) for value in saved_ids))
-                self._subpop_signal_pending = None  # raw/detrended recordings are not embedded
-                win._nanoscope_workspace_source_result = target
-                note = self._adopt_subpop_assignment(
-                    win.report(), target, require_current_selection=False)
-                self._subpop_accepted_ids_pending = None
-                if note:
-                    self.statusBar().showMessage(note, 10000)
-                elif warning:
-                    self.statusBar().showMessage(
-                        f"Saved subpopulation assignment restored with a caveat: {warning}",
-                        12000)
-                self._sync_subpop_window()
-        self._show_analysis_page(
-            PAGE_SUBPOPULATIONS, win, refresh=self._run_subpopulations)
+        return self._open_figure_kind(PAGE_SUBPOPULATIONS)
 
     # -- item 13: the report's events, on the trace and in the gallery --------------------------
     def _adopt_subpop_assignment(
@@ -10204,6 +11053,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _drop_subpop_assignment(self) -> None:
         """Forget the assignment everywhere. Idempotent."""
         self._subpop_assignment = None
+        self._subpop_assignment_figure_id = None
+        self._subpop_retired_figure_id = None
         self._subpop_frame = None
         self._subpop_key = None
         self._subpop_n_fired = None
@@ -10221,7 +11072,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Drop the assignment because the detection it describes is gone, and SAY SO —
         on the status bar now, and in the report window for as long as that report
         stands (its two buttons then repeat this reason; see :meth:`_subpop_state`)."""
+        figure_id = self._subpop_assignment_figure_id
         self._drop_subpop_assignment()
+        self._subpop_retired_figure_id = figure_id
         self._subpop_absent_reason = why
         self._sync_subpop_window()
         self.statusBar().showMessage(why, 10000)
@@ -10355,6 +11208,7 @@ class MainWindow(QtWidgets.QMainWindow):
     #: spellings equal) because this file imports that window lazily, on first use.
     _SUBPOP_NONE, _SUBPOP_INSTALLED, _SUBPOP_AWAY, _SUBPOP_RETIRED = (
         "none", "installed", "away", "retired")
+    _SUBPOP_READY = "ready"
 
     def _subpop_state(self) -> tuple[str, str]:
         """``(state, reason)`` — the ONE resolver of what the report's assignment is doing,
@@ -10435,15 +11289,18 @@ class MainWindow(QtWidgets.QMainWindow):
         line compared the current set with itself — measured: the report says 110 accepted,
         109 are, and this returned "" (C2 close).
         """
-        frame = self._subpop_frame
-        n_run = self._subpop_n_fired
-        run_ids = self._subpop_accepted_ids
+        return self._subpop_curation_description(
+            self._subpop_frame, self._subpop_n_fired, self._subpop_accepted_ids)
+
+    @staticmethod
+    def _subpop_curation_description(frame, n_run, run_ids) -> str:
+        """Describe the current accepted set against this specific report's run."""
         if frame is None or n_run is None or "accepted" not in frame.columns:
             return ""
         acc = frame["accepted"].to_numpy().astype(bool)
         if "event_id" in frame.columns and run_ids is not None:
             now_ids = frozenset(int(e) for e in frame.loc[acc, "event_id"])
-            n_now, unchanged = len(now_ids), now_ids == run_ids
+            n_now, unchanged = len(now_ids), now_ids == frozenset(int(e) for e in run_ids)
         else:
             n_now = int(acc.sum())
             unchanged = n_now == n_run
@@ -10458,6 +11315,44 @@ class MainWindow(QtWidgets.QMainWindow):
         win = self._subpop_window
         if win is None:
             return
+        figure_id = getattr(win, "_nanoscope_figure_id", None)
+        report = win.report()
+        if figure_id is not None and report is not None:
+            target, reason = self._subpop_report_source(win)
+            if target is None:
+                if figure_id == getattr(self, "_subpop_retired_figure_id", None):
+                    reason = self._subpop_absent_reason or reason
+                win.set_assignment_state(self._SUBPOP_RETIRED, reason)
+                win.set_curation_note("")
+                return
+            # Bind a restored report to this validated live object before a later
+            # byte-identical re-detection can masquerade as its original source.
+            win._nanoscope_workspace_source_result = target
+            win.set_curation_note(self._subpop_curation_description(
+                target.payload.df, report.n_fired,
+                getattr(win, "_nanoscope_workspace_accepted_event_ids", None)))
+            if report.quantification is None:
+                win.set_assignment_state(
+                    self._SUBPOP_NONE, "This report fitted no mixture, so it has no classes to show.")
+                return
+            key = (str(target.doc_id), int(target.channel), str(target.module_id))
+            held = (self._subpop_assignment_figure_id == figure_id
+                    and self._subpop_key == key
+                    and self._subpop_frame is target.payload.df
+                    and self._subpop_assignment is not None)
+            if not held:
+                name = self._session.document(target.doc_id).display_name
+                detector = self._detector_display_name(target.module_id)
+                if self._analysis_panel.current_detection() is target:
+                    state = self._SUBPOP_READY
+                    reason = ("This report's original detection is selected. Use Event gallery… "
+                              "or Colour the trace to apply its stored classes.")
+                else:
+                    state = self._SUBPOP_AWAY
+                    reason = (f"This report belongs to “{name}”, channel {target.channel}, {detector}. "
+                              "Select that original detection to show its events.")
+                win.set_assignment_state(state, reason)
+                return
         state, reason = self._subpop_state()
         win.set_assignment_state(state, reason)
         win.set_curation_note(self._subpop_curation_note())
@@ -10537,7 +11432,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, title, "There is no subpopulation report to export yet.")
             return
-        curation_note = self._subpop_curation_note()
+        self._sync_subpop_window()
+        curation_note = self._subpop_window.curation_note()
         if curation_note:
             report = dataclasses.replace(
                 report,
@@ -10649,6 +11545,20 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Wrote {len(result.payload)} level row(s) to {out['data'].name} "
             f"(+ provenance {out['meta'].name}).", 8000)
 
+    def _density_results(self):
+        """Exact shown detection owners eligible for the multi-recording density."""
+        from ..analysis.events import EventSet
+        results = []
+        for result in self._session.results.all():
+            if not isinstance(result.payload, EventSet) or int(result.payload.df["accepted"].sum()) < 5:
+                continue
+            if self._session.has_document(result.doc_id):
+                shown = self._analysis_panel.stored_to_show(result.doc_id, result.channel)
+                if shown is not None and shown.module_id != result.module_id:
+                    continue
+            results.append(result)
+        return tuple(results)
+
     def _density_groups(self) -> "dict[str, object]":
         """Every open recording that HAS a detection, label -> accepted EventSet.
 
@@ -10672,19 +11582,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return n
 
         out = []
-        for res in self._session.results.all():
-            if not isinstance(res.payload, EventSet):
-                continue
-            # ONE table per recording and channel: the one the panel shows. With a Schmitt
-            # run, a CUSUM run and a Manual table on one channel the figure used to draw all
-            # of them as separate populations under colliding labels.
-            if self._session.has_document(res.doc_id):
-                shown = self._analysis_panel.stored_to_show(res.doc_id, res.channel)
-                if shown is not None and shown.module_id != res.module_id:
-                    continue
+        for res in self._density_results():
             acc = res.payload.accepted
-            if len(acc.df) < 5:      # a KDE of four points is a decoration
-                continue
             stem = (Path(self._session.document(res.doc_id).meta.path).stem
                     if self._session.has_document(res.doc_id) else source_of(res.doc_id))
             # The SHARED resolver, not a local copy. This block used to look only for a
@@ -10796,25 +11695,8 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         return True
 
-    def _export_density(self, *, ycol: str | None = None) -> None:
-        """Analysis ▸ Export density figure… — overlaid KDE contours, one per recording.
-
-        ``ycol`` is KEYWORD-ONLY, and that is load-bearing rather than tidiness.
-        ``QAction.triggered`` carries a ``checked`` bool, which Qt passes as the first
-        POSITIONAL argument to whatever it is connected to -- so as a positional parameter
-        ``ycol`` arrived as ``False`` from the menu, the amplitude prompt was skipped, and
-        the export died on "events frame has no column False". Keyword-only makes that
-        mis-binding impossible to write; the connection below also drops the bool.
-        """
-        from ..plot.figures import figure_output_paths, joint_density, save_figure
-
-        groups = self._density_groups()
-        if not groups:
-            QtWidgets.QMessageBox.information(
-                self, "Export density figure",
-                "Run detection on at least one recording first — a density plot needs "
-                "detected events.")
-            return
+    def _choose_density_amplitude(self, ycol=None):
+        """The same explicit amplitude choice for retained editing and direct export."""
         ylabel = "Amplitude (pA)"
         if ycol is None:
             box = QtWidgets.QMessageBox(self)
@@ -10841,6 +11723,126 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             ylabel = next((lab for col, lab in self._DENSITY_Y.values() if col == ycol),
                           "Amplitude (pA)")
+        return ycol, ylabel
+
+    def _density_source_token(self):
+        from ..core.analysis_workspace import result_recipe
+        return (self._figure_project_epoch, self._session, tuple(
+            (result, {**result_recipe(self, result), "live_sample_rate_hz":
+                self._session.document(result.doc_id).meta.sample_rate_hz})
+            for result in self._density_results()))
+
+    def _density_sources_unchanged(self, token):
+        epoch, session, previous = token
+        if epoch != self._figure_project_epoch or session is not self._session:
+            return False
+        try:
+            current = self._density_source_token()[2]
+        except (ValueError, KeyError):
+            return False
+        return len(current) == len(previous) and all(
+            old is now and saved == actual
+            for (old, saved), (now, actual) in zip(previous, current))
+
+    def _edit_density_figure(self, *, ycol=None):
+        """Generate once and transfer retained artists to the shared report editor."""
+        from copy import deepcopy
+        from ..core.figure_style import style_binding
+        from ..core.figure_style_mapping import project_legacy_style
+        from ..plot.figures import joint_density
+        from ..plot.matplotlib_targets import bind_panel
+        from .report_figure_window import open_report_figure
+
+        try:
+            for result in self._density_results():
+                if self._session.has_document(result.doc_id) and self._refuse_stale_export(result):
+                    return None
+            token = self._density_source_token()
+            groups = self._density_groups()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Edit density figure", f"Could not preserve the density sources:\n{exc}")
+            return None
+        if not groups:
+            QtWidgets.QMessageBox.information(self, "Edit density figure",
+                "Run detection on at least one recording first — a density plot needs detected events.")
+            return None
+        choice = self._choose_density_amplitude(ycol)
+        if choice is None:
+            return None
+        if not self._density_sources_unchanged(token):
+            self.statusBar().showMessage("The project or density sources changed; open the density editor again.", 8000)
+            return None
+        ycol, ylabel = choice
+        figure = None
+        try:
+            if ycol not in {value[0] for value in self._DENSITY_Y.values()}:
+                raise ValueError("Choose depth in pA or fractional blockade for the density axis.")
+            owner = self._ensure_figure_workspace()
+            initial_style = None
+            if owner.style_registry() is not None:
+                binding = style_binding(owner.default_style())
+                initial_style = project_legacy_style(binding, "study_figure_style", {})
+            settings = deepcopy(self._DENSITY_STYLE)
+            figure, axis = joint_density(groups, ycol=ycol, ylabel=ylabel,
+                title=f"Event density — {len(groups)} recording(s)", **settings)
+            # The editor becomes the sole owner; release pyplot's manager reference.
+            from matplotlib import pyplot as plt
+            plt.close(figure)
+            if not self._density_sources_unchanged(token):
+                figure.clear()
+                self.statusBar().showMessage("The project or density sources changed; the generated figure was not opened.", 8000)
+                return None
+            identities = (("density.joint", "Density"), ("density.dwell_marginal", "Dwell marginal"),
+                          ("density.amplitude_marginal", "Amplitude marginal"))
+            for plot, (identity, label) in zip(figure.axes, identities):
+                bind_panel(plot, identity, label=label)
+            # Raw scientific columns stay canonical; additive display columns name
+            # the values shown on the declared quantity axes.
+            data = figure._nanoscope_source_data.copy(deep=True)
+            display_columns = data.attrs["display_columns"]
+            provenance = {
+                "kind": "event-density", "builder": "joint_density",
+                "source_catalog": [deepcopy(recipe) for _result, recipe in token[2]],
+                "groups": {str(label): {"rows": len(value.df),
+                    "provenance": deepcopy(value.provenance)} for label, value in groups.items()},
+                "x_source_column": "dwell_s", "x_display_column": display_columns["display_x"], "x_scale": 1000.,
+                "quantity_display": data.attrs["quantity_display"],
+                "column_units": {"dwell_s": "s", display_columns["display_x"]: "ms",
+                                 ycol: "1" if ycol == "frac_depth" else "pA"},
+                "y_column": ycol, "log_x": True, "generation": settings,
+                "analysis_recomputed_by_style": False,
+            }
+            return open_report_figure(self, figure, data, name="Event density", provenance=provenance,
+                                      style=initial_style)
+        except Exception as exc:
+            if figure is not None:
+                figure.clear()
+            QtWidgets.QMessageBox.warning(self, "Edit density figure", f"Could not open the density editor:\n{exc}")
+            return None
+
+    def _export_density(self, *, ycol: str | None = None) -> None:
+        """Analysis ▸ Export density figure… — overlaid KDE contours, one per recording.
+
+        ``ycol`` is KEYWORD-ONLY, and that is load-bearing rather than tidiness.
+        ``QAction.triggered`` carries a ``checked`` bool, which Qt passes as the first
+        POSITIONAL argument to whatever it is connected to -- so as a positional parameter
+        ``ycol`` arrived as ``False`` from the menu, the amplitude prompt was skipped, and
+        the export died on "events frame has no column False". Keyword-only makes that
+        mis-binding impossible to write; the connection below also drops the bool.
+        """
+        from ..plot.figures import figure_output_paths, joint_density, save_figure
+
+        groups = self._density_groups()
+        if not groups:
+            QtWidgets.QMessageBox.information(
+                self, "Export density figure",
+                "Run detection on at least one recording first — a density plot needs "
+                "detected events.")
+            return
+        choice = self._choose_density_amplitude(ycol)
+        if choice is None:
+            return
+        ycol, ylabel = choice
         path = ask_export_path(
             self, title="Export density figure", suggestion="density.pdf",
             filters="PDF (*.pdf);;PNG (*.png);;All files (*)",
@@ -11070,6 +12072,106 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Wrote {n_sel} {selection_label}{'' if n_sel == 1 else 's'} to "
             f"{out['data'].name} "
             f"(+ provenance {out['meta'].name}).", 8000)
+
+    def _edit_report_figure(self, *, kind=None):
+        """Build one chosen report once, then transfer its retained artists to an editor."""
+        import pandas as pd
+        from ..analysis.events import EventSet
+        from ..core.analysis_workspace import result_recipe
+        from ..core.figure_style import style_binding
+        from ..core.figure_style_mapping import project_legacy_style
+        from ..plot import figures
+        from .report_figure_window import open_report_figure
+
+        title = "Edit standard report figure"
+        result = self._analysis_panel.current_detection()
+        if result is None or not isinstance(result.payload, EventSet):
+            QtWidgets.QMessageBox.information(
+                self, title, "Run detection on a current channel first.")
+            return None
+        if self._refuse_stale_export(result):
+            return None
+        epoch = self._figure_project_epoch
+        try:
+            recipe = result_recipe(self, result)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, title, str(exc))
+            return None
+        choices = {"Dwell histogram": "dwell", "Depth histogram": "depth",
+                   "Dwell versus depth": "scatter"}
+        channel = axis = None
+        try:
+            channel = self._session.calibrated(result.doc_id, result.channel)
+            axis = self._session.x_axis(result.doc_id)
+            if axis.is_time:
+                choices["Trace preview"] = "trace"
+        except Exception:
+            pass
+        if kind is None:
+            selected, accepted = QtWidgets.QInputDialog.getItem(
+                self, title, "Figure", list(choices), 0, False)
+            if not accepted:
+                return None
+            kind = choices[selected]
+        if kind not in choices.values():
+            raise ValueError(f"Unavailable report figure: {kind}")
+
+        def source_is_current():
+            if (self._figure_project_epoch != epoch
+                    or not self._session.has_document(result.doc_id)
+                    or self._analysis_panel.current_detection() is not result):
+                return False
+            try:
+                return result_recipe(self, result) == recipe
+            except ValueError:
+                return False
+
+        if not source_is_current() or self._refuse_stale_export(result):
+            QtWidgets.QMessageBox.warning(
+                self, title, "The source changed while choosing the figure. Choose it again.")
+            return None
+        figure = None
+        try:
+            events = result.payload
+            if kind in ("dwell", "depth"):
+                fit, _ = self._stored_fit(result, f"fit.{kind}")
+                builder = figures.dwell_histogram if kind == "dwell" else figures.depth_histogram
+                figure, _ = builder(events, fit=fit if fit is not None else False)
+            elif kind == "scatter":
+                figure, _ = figures.scatter_dwell_depth(events)
+            else:
+                # The chooser runs an event loop. Use the channel's current calibration
+                # and time axis, not the preview capability probe captured before it.
+                channel = self._session.calibrated(result.doc_id, result.channel)
+                axis = self._session.x_axis(result.doc_id)
+                if not axis.is_time:
+                    raise ValueError("The recording no longer has a time axis.")
+                figure, _ = figures.trace_preview(channel, axis, events=events)
+            if not source_is_current():
+                raise ValueError("The source changed while generating the figure. Choose it again.")
+            data = getattr(figure, "_nanoscope_source_data", None)
+            if not isinstance(data, pd.DataFrame):
+                raise ValueError("The report did not provide its plotted source table.")
+            workspace = self._ensure_figure_workspace()
+            style = None
+            if workspace.style_registry() is not None:
+                style = project_legacy_style(style_binding(workspace.default_style()),
+                                             "study_figure_style", {})
+            provenance = {"kind": f"report.{kind}", "source": recipe,
+                          "details": figures.figure_details(figure)}
+            editor = open_report_figure(self, figure, data, name=f"Report — {kind}",
+                                        provenance=provenance, style=style)
+            figure = None  # Ownership transferred; editing/export never calls a builder.
+            self.statusBar().showMessage("Report figure ready to edit and export.", 6000)
+            return editor
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, title, f"Could not open this report figure: {exc}")
+            return None
+        finally:
+            if figure is not None:
+                from matplotlib import pyplot as plt
+                plt.close(figure)
+                figure.clear()
 
     def _export_figures(self) -> None:
         """Analysis ▸ Export figure… — write the current detection's publication figures
@@ -11659,15 +12761,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cursor_label.setText("")
             return
         xax = self._session.x_axis(layer.doc_id, layer.time_offset_s)
+        display_factor = 1000. if xax.is_time else 1.
+        display_unit = "ms" if xax.is_time else xax.unit
         idx = self._session.time_to_index(layer.doc_id, layer.channel, x, layer.time_offset_s)
         if idx is None:
-            self._cursor_label.setText(f"t = {x:.6g} {xax.unit}")
+            self._cursor_label.setText(f"t = {x * display_factor:.6g} {display_unit}")
             return
         chan = self._session.calibrated(layer.doc_id, layer.channel)
         units = f" {chan.units}" if chan.units else ""
         whose = f"  ({chan.info.name})" if borrowed else ""
         self._cursor_label.setText(
-            f"t = {xax.values[idx]:.6g} {xax.unit}     "
+            f"t = {xax.values[idx] * display_factor:.6g} {display_unit}     "
             f"y = {float(chan.data[idx]):.6g}{units}{whose}")
 
     def _update_rate_label(self, doc_id: str | None = None) -> None:
@@ -12601,6 +13705,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _save_project_as(self) -> bool:
         """File ▸ Save Project As… — always prompts for a .nanoscope path. Returns True when
         a file was written, False if the dialog was cancelled or the save failed."""
+        save_epoch = self._figure_project_epoch
         recovery_target = self._recovery_suggested_project_path
         start = (str(Path(self._project_path).parent) if self._project_path else
                  str(Path(recovery_target).parent) if recovery_target else
@@ -12618,7 +13723,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._project_save_parent(), title="Save Project", suggestion=suggestion,
             filters="NanoScope project (*.nanoscope);;All files (*)",
             outputs=lambda p: (Path(_with_project_suffix(str(p))),))
-        if chosen is None:
+        if chosen is None or self._figure_project_epoch != save_epoch:
             return False
         return self._write_project(_with_project_suffix(str(chosen)))
 
@@ -12744,6 +13849,24 @@ class MainWindow(QtWidgets.QMainWindow):
         box.exec()
         return box.clickedButton() is overwrite
 
+    def _confirm_figure_project_conversion(self, path: str) -> str:
+        """The first in-place v13 conversion is an explicit product decision."""
+        box = QtWidgets.QMessageBox(self._project_save_parent())
+        box.setWindowTitle("Save and convert project")
+        box.setIcon(QtWidgets.QMessageBox.Information)
+        box.setText(f"Convert {Path(path).name} to the new figure workspace?")
+        box.setInformativeText(
+            "Older NanoScope builds cannot open a version 13 project. "
+            "Save and convert keeps a verified copy of the original beside this file "
+            "before replacing it. Save a copy keeps the original project unchanged.")
+        convert = box.addButton("Save and convert", QtWidgets.QMessageBox.AcceptRole)
+        copy = box.addButton("Save a copy", QtWidgets.QMessageBox.ActionRole)
+        cancel = box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        box.setDefaultButton(copy)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return "convert" if box.clickedButton() is convert else "copy" if box.clickedButton() is copy else "cancel"
+
     def _write_project(self, path: str) -> bool:
         """Serialize the session to ``path`` and adopt it as the current project. Returns
         True when a file was written; on failure the error is reported and False returned
@@ -12763,7 +13886,8 @@ class MainWindow(QtWidgets.QMainWindow):
         comparison and atomic replacement share one inter-process lock. Confirmation
         approves one exact conflicting revision; a third write while the question is open
         raises the question again rather than becoming a lost update."""
-        from ..core.project import save_project
+        from ..core.project import VERSION, read_project_container_version, save_project
+        from ..core.project_guard import retain_verified_project_backup
 
         # Approval is local to this save attempt and NEVER changes the window's remembered
         # revision. Only a successful commit below may do that. The stamp names the exact
@@ -12785,7 +13909,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         approved_stamp: ProjectDiskStamp | None = None
         approved_dropped: tuple[tuple[str, ...], int] | None = None
+        approved_conversion: ProjectDiskStamp | None = None
+        conversion_backup = None
+        save_epoch = self._figure_project_epoch
         while True:
+            if self._figure_project_epoch != save_epoch:
+                self.statusBar().showMessage("The project changed; this save was cancelled.", 10000)
+                return False
             # Preserve the old user-visible order: if a conflict already exists, ask before
             # checkpointing or presenting any unrelated "save without segments" question.
             # This is only a preflight; correctness comes from the second comparison inside
@@ -12793,6 +13923,8 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 with project_save_lock(path):
                     current_stamp = self._disk_stamp_of(path)
+                    target_version = (read_project_container_version(path)
+                                      if VERSION >= 13 and current_stamp is not None else None)
             except Exception as exc:  # noqa: BLE001 — a save failure is reported, never crashes
                 QtWidgets.QMessageBox.warning(
                     self._project_save_parent(), "Save Project",
@@ -12804,6 +13936,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not confirm_conflict(path):
                     return False
                 approved_stamp = current_stamp
+                continue
+            if target_version is not None and target_version <= 12 and current_stamp != approved_conversion:
+                decision = self._confirm_figure_project_conversion(path)
+                if self._figure_project_epoch != save_epoch:
+                    return False
+                if decision == "copy":
+                    return self._save_project_as()
+                if decision != "convert":
+                    return False
+                approved_conversion = current_stamp
+                # Dialogs run a nested event loop; re-check target bytes and re-gather.
                 continue
 
             # Commit anything edited in place that never announced itself, BEFORE the state
@@ -12841,6 +13984,8 @@ class MainWindow(QtWidgets.QMainWindow):
                             len(dropped), n_dropped_results):
                         return False
                     approved_dropped = dropped_signature
+            if self._figure_project_epoch != save_epoch:
+                return False
 
             # `notes` collects what the write changed about the FILE ITSELF — a symlink
             # followed to its destination, or other hard-linked names that now hold the
@@ -12848,12 +13993,18 @@ class MainWindow(QtWidgets.QMainWindow):
             # thing it cannot preserve; the alternative is writing in place, which is the
             # destructive path this save exists to avoid. Empty on an ordinary save.
             file_notes: list[str] = []
+            def write_verified_project():
+                nonlocal conversion_backup
+                if VERSION >= 13:
+                    conversion_backup = retain_verified_project_backup(path, max_version=12)
+                    return save_project(path, state, file_notes, verify_workspace=True)
+                return save_project(path, state, file_notes)
             try:
                 _, committed_stamp = guarded_project_write(
                     path,
                     expected_stamp,
                     approved_stamp,
-                    lambda: save_project(path, state, file_notes),
+                    write_verified_project,
                     expected_absent=expected_absent,
                 )
             except ProjectSaveConflict as conflict:
@@ -12930,7 +14081,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if dropped:
             msg += (f" {len(dropped)} segment(s) and {n_dropped_results} result(s) were NOT "
                     f"saved — their parent recording is closed.")
-        self.statusBar().showMessage(msg, 12000 if dropped else 8000)
+        if conversion_backup is not None:
+            self._last_project_conversion_backup = str(conversion_backup)
+            msg += f" Original project retained at {conversion_backup}."
+        self.statusBar().showMessage(msg, 12000 if dropped or conversion_backup else 8000)
         fresh = [n for n in file_notes
                  if (str(path), n) not in self._disclosed_file_notes]
         self._disclosed_file_notes.update((str(path), n) for n in file_notes)
@@ -13073,6 +14227,7 @@ class MainWindow(QtWidgets.QMainWindow):
             reset = getattr(recovery_controller, "reset_session", None)
             if callable(reset):
                 reset()
+        self._analysis_panel.abort_background_previews()
         # All three emit nothing; we reset the UI ourselves — and we use what they
         # report. A run that did NOT stop is detached: its answer is discarded, but its
         # thread is still burning cores behind the project the user is about to open,
@@ -13102,6 +14257,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # for any of its entries to be applied to, and an entry that outlived its recording
         # would be an undo the user could see offered and never see happen.
         self._history.clear()
+        self._subpop_history_replays = {}
         self._measure_history.clear()
         self._form_pause.stop()
         self._settings_history.clear()
@@ -13161,6 +14317,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analytical_workspace = (
             workspace if isinstance(workspace, AnalyticalWorkspace)
             else AnalyticalWorkspace())
+        migrated = self._ensure_figure_workspace(install=False).install_workspace(self._analytical_workspace)
+        self._analytical_workspace = migrated.workspace
         self._workspace_pending = {
             item.artifact_id for item in self._analytical_workspace.artifacts
             if item.artifact_id in OWNED_ARTIFACT_IDS
@@ -13182,7 +14340,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restore_bad_calibrations = []
         from ..core.acquisition_state import prepare_acquisition_workspace
         from ..core.sample_rate_state import prepare_sample_rate_workspace
-        self._restore_notes = list(prepare_acquisition_workspace(self._analytical_workspace.extra))
+        self._restore_notes = [f"A saved figure remains unsupported and was preserved: {failure.reason}"
+                               for failure in migrated.failures]
+        self._restore_notes.extend(prepare_acquisition_workspace(self._analytical_workspace.extra))
         self._restore_notes.extend(prepare_sample_rate_workspace(self._analytical_workspace.extra))
         # The project's copies of plot presets and templates: added to this computer where it
         # lacks them, never over its own, and said in the banner. A preference is never worth
@@ -13794,6 +14954,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restoring = False
         if self._figure_library is not None:
             self._figure_library.schedule_refresh()
+        if self._analysis_explorer is not None:
+            self._analysis_explorer.schedule_figures_refresh()
         # A restore rebuilds every table from disk. Those are reconstructions, not edits:
         # an undo stack that offered to walk back through them would offer to destroy the
         # project the user just opened. The suspension is lifted here, with the restored
@@ -15171,6 +16333,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for res in self._session.results.for_doc(doc_id):
             if res.module_id == module_id and isinstance(res.payload, EventSet):
                 key = (res.doc_id, int(res.channel), res.module_id)
+                if self._history.is_applying() and self._session.announcing == key:
+                    import weakref
+                    if not hasattr(self, "_subpop_history_replays"):
+                        self._subpop_history_replays = {}
+                    self._subpop_history_replays[key] = weakref.ref(res.payload)
+                    # Surface slots can run before this authoritative replay stamp.
+                    # Refresh the report once Undo/Redo identity is known, without
+                    # treating a later byte-identical re-detection as that replay.
+                    self._sync_subpop_window()
                 # A Re-measure says what it was: one with the estimator unchanged moves no
                 # fingerprint, and the diff alone named it a re-run that lost the curation.
                 self._history.checkpoint(
@@ -16065,6 +17236,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._dirty = True
         if self._figure_library is not None:
             self._figure_library.schedule_refresh()
+        if self._analysis_explorer is not None:
+            self._analysis_explorer.schedule_figures_refresh()
         self._update_title()
         controller = self._recovery_controller
         if controller is not None:
@@ -16124,6 +17297,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # session (for example a carried self-contained subpopulation or PSD snapshot whose
         # source drive is currently absent).  Workspace-only edits therefore receive the
         # same Save / Discard / Cancel close guard as event tables and measurements.
+        if self._figure_workspace is not None and (self._figure_workspace.records()
+                                                   or self._figure_workspace.unsupported_records()):
+            return True
         return bool(self._analytical_workspace.artifacts)
 
     def _visible_project_dirty(self) -> bool:
@@ -16224,6 +17400,7 @@ class MainWindow(QtWidgets.QMainWindow):
         :func:`~nanoscope.gui.worker_thread.drain_worker_threads` waits on the union of
         every unstopped thread and parks whatever survives, which is what keeps
         ``gui.app.main``'s final ``drain_detached()`` able to see it."""
+        self._analysis_panel.abort_background_previews()
         self._stop_owned_background_work()
         # The recovery writer was stopped above; this session no longer claims its
         # lineage as live (the kernel does the same on a crash).

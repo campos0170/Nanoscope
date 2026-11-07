@@ -20,6 +20,30 @@ from ..plot.style import BASELINE_TRACK_INK
 from .axes import ReadableLinearAxis
 from .display_residual import DisplayResidualCache
 
+
+def _trace_clock_text(unit, offset):
+    """Compact clock identity plus the existing complete scientific explanation."""
+    full = clock.axis_label(unit, clock.INSTRUMENT, offset, display_unit="ms")
+    if unit != "s" or offset is None:
+        return full, full  # Samples/unknown origins must not invent an instrument clock.
+    origin = clock.rebased_origin_s(offset)
+    rebased = origin is not None and not clock.clocks_agree(clock.ClockOffset(0., origin))
+    if rebased:
+        short = "ms · cut clock (rebased)"
+        if not clock.clocks_agree(float(offset)):
+            short += " · aligned"
+    else:
+        short = "ms · instrument clock"
+    return short, full
+
+
+def _set_trace_clock_text(axis, short, full):
+    axis._nanoscope_clock_description = full
+    axis.setLabel(short)
+    axis.setToolTip(full)
+    axis.label.setToolTip(full)
+
+
 __all__ = ["PaneSpec", "plan_panes", "effective_kind", "ChannelPane", "TraceView", "Crosshair", "TraceViewBox",
            "PREVIEW_CHANNEL_NOT_SHOWN", "MAX_X_SPAN_FACTOR", "MEASURE_MAX_VIEW_FRACTION",
            "MEASURE_HANDLE_SIZE_PX", "WHEEL_Y_PAN_FRACTION", "WHEEL_X_PAN_FRACTION",
@@ -1567,6 +1591,7 @@ class TraceView(pg.GraphicsLayoutWidget):
             is_bottom = row == len(specs) - 1
             axis = plot.getAxis("bottom")
             axis.setStyle(showValues=is_bottom)
+            axis.setScale(1000. if x_unit == "s" else 1.)
             # THE TICKS ARE IN THE UNIT THE LABEL CLAIMS. pyqtgraph's automatic SI
             # prefix multiplies every tick VALUE and appends "(x0.001)" to the label the
             # moment the visible span drops below 1 -- so zooming into a blockade turned
@@ -1579,9 +1604,10 @@ class TraceView(pg.GraphicsLayoutWidget):
             # ...and it says WHICH CLOCK it is on. See nanoscope.core.clock: this axis is
             # the ONLY surface in the app drawn on the instrument clock, and it used to be
             # labelled "s" exactly like the recording-clock numbers everywhere else.
-            plot.setLabel(
-                "bottom",
-                clock.axis_label(x_unit, clock.INSTRUMENT, x_offset) if is_bottom else "")
+            if is_bottom:
+                _set_trace_clock_text(axis, *_trace_clock_text(x_unit, x_offset))
+            else:
+                plot.setLabel("bottom", "")
 
         # The zoom-out ceiling needs the panes in place (full_x_extent walks them) and must
         # be up BEFORE the framing below, so even a restored range is under the same rule.
@@ -1850,10 +1876,11 @@ class TraceView(pg.GraphicsLayoutWidget):
                                     self.layer_time_offset(doc_id, channel))
 
     def x_axis_label(self) -> str:
-        """The text currently on the bottom axis of the bottom pane ("" when empty).
+        """The full bottom-axis clock description ("" when empty).
 
-        The clock note lives IN that label, so this is how a caller (or a test) reads
-        back what the axis is telling the user about its own clock.
+        The drawn label is compact so it fits a narrow desktop trace. This complete
+        description is also its tooltip and retains the original numeric origin,
+        rebase and alignment provenance for callers quoting the clock statement.
         """
         if not self._panes:
             return ""
@@ -1861,7 +1888,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         carrier = self._confidence_plot if self._confidence_plot is not None \
             else self._panes[-1].plot
         item = carrier.getAxis("bottom")
-        return str(item.labelText or "")
+        return str(getattr(item, "_nanoscope_clock_description", item.labelText) or "")
 
     def sample_dx(self, doc_id: str, channel: int = 0) -> float:
         """The x-axis step between two adjacent samples of (doc_id, channel), or 0.0 when the
@@ -2571,7 +2598,8 @@ class TraceView(pg.GraphicsLayoutWidget):
         if source is not None and any(pane.plot is source for pane in self._panes):
             try:
                 source.getAxis("bottom").setStyle(showValues=True)
-                source.setLabel("bottom", label)
+                axis = source.getAxis("bottom")
+                _set_trace_clock_text(axis, label, getattr(axis, "_nanoscope_clock_description", label))
             except RuntimeError:
                 pass
 
@@ -2617,10 +2645,14 @@ class TraceView(pg.GraphicsLayoutWidget):
         self._confidence_axis_label = str(source_axis.labelText or "")
         source_axis.setStyle(showValues=False)
         source.setLabel("bottom", "")
+        source_axis.setToolTip("")
+        source_axis.label.setToolTip("")
         axis = plot.getAxis("bottom")
         axis.enableAutoSIPrefix(False)           # same reason as the channel panes' axis
         axis.setStyle(showValues=True)
-        plot.setLabel("bottom", self._confidence_axis_label)
+        axis.setScale(source_axis.scale)
+        _set_trace_clock_text(axis, self._confidence_axis_label,
+                              getattr(source_axis, "_nanoscope_clock_description", self._confidence_axis_label))
 
         self._confidence_plot = plot
         if track is None:
@@ -2687,7 +2719,7 @@ class TraceView(pg.GraphicsLayoutWidget):
         if track.covered < track.n:
             dur = track.uncovered_s
             bits.append(f"last {dur * 1e3:.3g} ms not reached by a model window" if dur < 1
-                        else f"last {dur:.3g} s not reached by a model window")
+                        else f"last {dur * 1000:.3g} ms not reached by a model window")
         if track.n_out_of_range:
             bits.append(f"{track.n_out_of_range:,} values outside 0–1 clipped")
         return " · ".join(bits)
@@ -3957,13 +3989,13 @@ class Crosshair(QtCore.QObject):
         offset = clock.clock_offset_s(
             self._session.document(layer.doc_id).meta, layer.time_offset_s)
         if clock.clocks_agree(offset) or offset is None:
-            return f"{x:.6g} {xax.unit}"
+            return f"{x * 1000.:.6g} ms"
         # The axis is drawn at recording seconds + the NUMERIC offset (t0 + the layer's
         # nudge), and that offset is 0 on a rebased cut, whose axis is the cut's own clock,
         # not the instrument's. So recover the recording instant from the axis and let
         # ``both_clocks`` add the rebase origin back: calling x itself "instrument" here
         # turned a segment's 0.2010 s into "-0.1990 s in".
-        return clock.both_clocks(offset, recording_s=x - float(offset))
+        return clock.both_clocks(offset, recording_s=x - float(offset), display_unit="ms", decimals=1)
 
     def _index_text(self, layer: Layer, idx: int) -> str:
         """The snapped sample's INDEX, in the numbering the event table's ``start_idx`` /

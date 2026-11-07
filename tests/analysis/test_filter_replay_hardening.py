@@ -78,10 +78,13 @@ def test_unrequested_filter_keeps_legacy_unconditioned_identity(trace, fs, prov)
 
 
 def test_valid_preprocessing_plus_lowpass_replays_in_unchanged_order(trace):
+    from nanoscope.analysis.baseline import BLOCK_ENDPOINT_POLICY, SAMPLE_COUNT_POLICY
     params = {"detrend_enabled": True, "detrend_method": "percentile", "polarity": -1,
               "detrend_window_s": .05, "detrend_percentile": 90.}
     provenance = dict(params, percentile=params["detrend_percentile"], filter_cutoff_hz=2000.,
-                      filter_kind="butter", filter_order=4)
+                      filter_kind="butter", filter_order=4,
+                      detrend_endpoint_policy=BLOCK_ENDPOINT_POLICY,
+                      detrend_sample_count_policy=SAMPLE_COUNT_POLICY)
     expected = lowpass(preprocess_for_detection(trace, FS, params), FS, 2000., kind="butter", order=4)
     np.testing.assert_array_equal(detection_signal(trace, FS, provenance), expected)
 

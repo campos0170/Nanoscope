@@ -189,11 +189,28 @@ def _press(widget, sequence):
 
 
 @pytest.mark.parametrize("sequence", ["QT5", "QT6", "Platform"])
-def test_a_double_click_on_each_text_element_opens_exactly_one_editor(window, sequence):
+def test_a_double_click_on_each_text_element_opens_exactly_one_editor(window, sequence, qtbot):
     opened = []
     window.controller.opened.connect(lambda kind, key: opened.append((kind, key)))
     expected_kind = {"axis.bottom.ticks": "axis", "annotation.provenance": "inline"}
-    for key, point in _targets(window).items():
+    for key in tuple(_targets(window)):
+        # Opening/closing an editor lets Qt finish measuring axis text. That can
+        # move the ViewBox and its anchored annotations; each gesture must aim at
+        # the element's current position, as a person looking at the plot would.
+        previous = None
+        stable = 0
+        def settled():
+            nonlocal previous, stable
+            point = _targets(window)[key]
+            stable = stable + 1 if point == previous else 0
+            previous = point
+            return stable >= 2
+        qtbot.waitUntil(settled, timeout=2000)
+        point = _targets(window)[key]
+        target = window.controller.target(key)
+        assert target is not None and target.item.isVisible(), key
+        assert target.item.sceneBoundingRect().contains(point), (key, point)
+        assert window.view.viewport().rect().contains(window.view.mapFromScene(point)), key
         opened.clear()
         figure_text.GATE.reset()
         if sequence == "Platform":

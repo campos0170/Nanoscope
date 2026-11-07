@@ -96,6 +96,12 @@ def _apply_treat_as_current(win: MainWindow, qtbot, did: str) -> None:
     assert win._session.effective_kind(did, 0) is ChannelKind.CURRENT
 
 
+def _update(win):
+    button = win._analysis_explorer.toolbar().update_button
+    assert button.isVisible() and button.isEnabled()
+    button.click()
+
+
 def test_the_psd_window_lists_a_channel_corrected_to_current_in_the_calibration_panel(
         window, qtbot, tmp_path):
     did = _install(window, _undeclared(tmp_path))
@@ -112,6 +118,8 @@ def test_the_psd_window_lists_a_channel_corrected_to_current_in_the_calibration_
     sources = [ps._rec_combo.itemText(i) for i in range(ps._rec_combo.count())]
     assert sources == ["undeclared.csv"], sources
     assert ps._current_target() == (did, 0)
+    assert not ps.has_data(), "Opening a figure must not start a spectrum calculation"
+    _update(window)
     assert ps.has_data()
     assert "No recording with a current channel" not in ps.details_text()
     # The spectrum is of the CALIBRATED channel: pA at the applied gain.
@@ -121,27 +129,39 @@ def test_the_psd_window_lists_a_channel_corrected_to_current_in_the_calibration_
 
 def test_an_already_open_psd_window_lists_the_recording_once_the_override_is_applied(
         window, qtbot, tmp_path):
-    """The window open on another recording while the user corrects this one: the
-    session's calibrationChanged re-points it, and the resolver it re-gathers through
-    now agrees with the panel that did the correcting."""
+    """A pinned figure keeps its source; explicit Update re-gathers eligibility,
+    and a new figure can use the channel corrected through the Calibration panel."""
     id_declared = _install(window, _declared(tmp_path))
     id_undeclared = _install(window, _undeclared(tmp_path))
     window._on_selection(id_declared, 1)
     window._open_psd()
     ps = window._psd_window
+    _update(window)
+    before = tuple(a.copy() for a in ps.psd_result())
     assert [ps._rec_combo.itemText(i) for i in range(ps._rec_combo.count())] == ["declared.abf"]
 
     _apply_treat_as_current(window, qtbot, id_undeclared)
     qtbot.wait(50)
+    assert ps._current_target() == (id_declared, 1)
+    for actual, expected in zip(ps.psd_result(), before):
+        np.testing.assert_array_equal(actual, expected)
+    _update(window)
     sources = [ps._rec_combo.itemText(i) for i in range(ps._rec_combo.count())]
     assert sorted(sources) == ["declared.abf", "undeclared.csv"], sources
-    assert ps._current_target() == (id_undeclared, 0)
+    assert ps._current_target() == (id_declared, 1)
+    owner = window._figure_workspace
+    key = owner.create("noise")
+    corrected = owner.page(key)
+    assert corrected is not ps and corrected._current_target() == (id_undeclared, 0)
+    _update(window)
+    assert corrected.units() == "pA"
+    assert corrected.summary()["total_rms"] == pytest.approx(GAIN * SIGMA, rel=.05)
 
 
 def test_a_header_current_channel_re_declared_as_voltage_leaves_the_window_and_menu_agreeing(
         window, qtbot, tmp_path):
-    """The reverse override: IN15 (header current) treated as voltage. The menu item goes
-    dead AND the window lists nothing — the same answer from the same resolver."""
+    """The reverse override makes the source ineligible. The existing figure remains
+    accessible and a refused Update preserves its spectrum with an explicit reason."""
     did = _install(window, _declared(tmp_path))
     window._on_selection(did, 1)
     window._sync_psd_action()
@@ -149,16 +169,23 @@ def test_a_header_current_channel_re_declared_as_voltage_leaves_the_window_and_m
     window._open_psd()
     ps = window._psd_window
     assert ps._rec_combo.count() == 1
+    _update(window)
+    before = tuple(a.copy() for a in ps.psd_result())
 
     window._session.set_calibration(
         did, 1, ChannelCalibration(1.0, 0.0, "pA", kind=ChannelKind.VOLTAGE),
         write_sidecar=False)
     qtbot.wait(50)
     window._sync_psd_action()
-    assert not window._act_psd.isEnabled()
-    ps.refresh()
-    assert ps._rec_combo.count() == 0
-    assert "No recording with a current channel" in ps.details_text()
+    assert window._act_psd.isEnabled(), "The existing figure must remain accessible"
+    assert not window._has_psd_recording() and ps._gather_recordings() == []
+    _update(window)
+    notice = window._analysis_explorer._pending_notice
+    assert notice.isVisible() and "selected recording unavailable" in notice.text().lower()
+    owner = window._figure_workspace
+    assert owner.get(owner.current_id()).spec.result.status != "current"
+    for actual, expected in zip(ps.psd_result(), before):
+        np.testing.assert_array_equal(actual, expected)
 
 
 def test_gather_recordings_is_the_session_resolver_not_the_header(qapp, qtbot, tmp_path):

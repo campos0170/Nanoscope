@@ -202,23 +202,36 @@ def figure_status(artifact: WorkspaceArtifact, live_state: dict | None) -> tuple
 def make_figure(*, name: str, page_id: str, source_label: str,
                 analysis: WorkspaceArtifact, snapshot_blobs: Mapping[str, bytes],
                 snapshot_metadata: Mapping[str, Any], live_state: dict | None,
-                capture_status: str = "current") -> WorkspaceArtifact:
+                capture_status: str = "current", applied_spec=None,
+                origin_figure_id: str | None = None) -> WorkspaceArtifact:
     """Detach all resources before the caller can mutate a live plot or source."""
     name = str(name).strip()
     if not name or len(name) > 200:
         raise ValueError("Figure name must contain 1–200 characters.")
+    captured = datetime.now(timezone.utc).isoformat()
+    additions = {}
+    if applied_spec is not None:
+        raw = applied_spec.to_dict() if callable(getattr(applied_spec, "to_dict", None)) else applied_spec
+        if not isinstance(raw, Mapping):
+            raise TypeError("An applied figure specification must be a mapping.")
+        additions["figure_spec"] = json.loads(json.dumps(dict(raw), allow_nan=False))
+        origin_figure_id = origin_figure_id or raw.get("figure_id")
+    if origin_figure_id:
+        additions["origin_figure_id"] = str(origin_figure_id)
+        additions["lineage"] = {"origin_figure_id": str(origin_figure_id), "captured_at": captured}
     return WorkspaceArtifact(
         artifact_id=FIGURE_PREFIX + str(uuid4()), kind=FIGURE_KIND,
         schema_version=FIGURE_SCHEMA,
         payload={
             "name": name, "page_id": str(page_id),
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": captured,
             "source_label": str(source_label), "source_recipes": source_recipes(analysis),
             "source_state": deepcopy(live_state), "capture_status": str(capture_status),
             "snapshot": deepcopy(dict(snapshot_metadata)), "export_path": None,
             "analysis": {"artifact_id": analysis.artifact_id, "kind": analysis.kind,
                          "schema_version": analysis.schema_version,
                          "payload": deepcopy(analysis.payload), "extra": deepcopy(analysis.extra)},
+            **additions,
         },
         tables={name: frame.copy(deep=True) for name, frame in analysis.tables.items()},
         blobs={**{"analysis:" + key: bytes(value) for key, value in analysis.blobs.items()},

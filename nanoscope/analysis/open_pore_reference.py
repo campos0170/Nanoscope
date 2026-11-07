@@ -143,7 +143,7 @@ def build_reference(
         "user_assertion_not_verified": True,
         "event_polarity_used_for_construction": False,
         "interval_semantics": "recording-relative [start, end) seconds; samples at t=index/fs",
-        "noise_policy": "detector's existing whole-residual noise estimate; no noise override",
+        "noise_policy": "reference construction does not prescribe detector noise policy",
         "sample_intervals": [list(span) for span in spans],
     }
     assumptions = [

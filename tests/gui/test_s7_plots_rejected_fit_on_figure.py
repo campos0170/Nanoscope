@@ -103,10 +103,10 @@ def test_a_rejected_fit_says_so_in_the_title_and_the_legend_with_and_without_ks_
     widget.apply_appearance(replace(widget.state(), fit_label=FitLabelState(
         fields=("equation", "n", "bic", *(("ks",) if ks_ticked else ())))))
     rejected._redraw()
-    assert "KS REJECTED" not in _title(rejected)
-    assert "KS REJECTED" in rejected.details_text()
+    assert "CDF mismatch (descriptive)" not in _title(rejected)
+    assert "CDF mismatch (descriptive)" in rejected.details_text()
     fit_rows = _fit_rows(rejected)
-    assert fit_rows and "KS REJECTED" not in fit_rows[0]
+    assert fit_rows and "CDF mismatch (descriptive)" not in fit_rows[0]
     # The fit label took the values box's place: its numbers, never the verdict.
     assert "τ =" in _fit_text(rejected) and "REJECTED" not in _fit_text(rejected)
     assert ("KS =" in _fit_text(rejected)) is ks_ticked
@@ -117,8 +117,8 @@ def test_the_shipped_defaults_are_the_case_that_used_to_ship_a_bare_tau(rejected
     numbers (no BIC, no KS). That is the cell the figure was silent in."""
     assert StyleSettings().fit_label_state().fields == ("equation", "r2", "n")
     rejected._redraw()
-    assert "τ =" in _fit_text(rejected) and "KS REJECTED" not in _fit_text(rejected)
-    assert "KS REJECTED" not in _title(rejected)
+    assert "τ =" in _fit_text(rejected) and "CDF mismatch (descriptive)" not in _fit_text(rejected)
+    assert "CDF mismatch (descriptive)" not in _title(rejected)
     assert "DOES NOT DESCRIBE THESE DATA" in rejected.details_text()
     assert "KS =" not in _fit_text(rejected), "the verdict did not need the extra numbers"
 
@@ -129,8 +129,8 @@ def test_the_verdict_survives_save_image(rejected, tmp_path):
     svg = tmp_path / "rejected.svg"
     rejected.save_image(svg)
     text = svg.read_text(errors="ignore")
-    assert "KS REJECTED" not in text
-    assert "KS REJECTED" in rejected.details_text()
+    assert "CDF mismatch (descriptive)" not in text
+    assert "CDF mismatch (descriptive)" in rejected.details_text()
 
 
 def test_the_tag_survives_the_legends_middle_elision(rejected):

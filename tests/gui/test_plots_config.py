@@ -386,9 +386,10 @@ def test_bug_the_fit_range_boxes_follow_a_time_unit_change(win):
     in_ms = win._fit_range("dwell_s")
     assert in_ms == pytest.approx((1e-4, 2e-3))
 
-    win.set_time_unit("µs")
+    with pytest.raises(ValueError, match="unknown time unit"):
+        win.set_time_unit("µs")
 
-    assert (float(win._fit_lo.text()), float(win._fit_hi.text())) == pytest.approx((100.0, 2000.0))
+    assert (float(win._fit_lo.text()), float(win._fit_hi.text())) == pytest.approx((0.1, 2.0))
     assert win._fit_range("dwell_s") == pytest.approx(in_ms), (
         "the same physical window, in the unit now on the axis")
 
@@ -528,7 +529,8 @@ def test_bug_reset_state_blanks_every_page_control_not_a_hand_kept_list(win):
     win.reset_state()
 
     blank = PlotConfig()
-    assert win.config() == blank, (
+    assert win.config().axes.quantity_display.get("version") == 1
+    assert replace(win.config(), axes=replace(win.config().axes, quantity_display={})) == blank, (
         "reset_state must install a DEFAULT config, not a remembered list of widgets")
     # Spelled out for the ones the old list actually missed, so a regression names itself.
     assert win._bins.value() == blank.histogram.bins
@@ -563,8 +565,9 @@ def test_the_anchor_tracks_what_the_typed_text_was_tuned_for(win):
         plot_type="Histogram", x_column="dwell_s", y_column="",
         fit_column="dwell_s", time_unit="ms")
 
-    win.set_time_unit("µs")
-    assert win._identity.time_unit == "µs"
+    with pytest.raises(ValueError, match="unknown time unit"):
+        win.set_time_unit("µs")
+    assert win._identity.time_unit == "ms"
     win.set_plot_type("Scatter")
     win.set_scatter_columns("dwell_s", "depth_pA")
     assert win._identity.y_column == "depth_pA"

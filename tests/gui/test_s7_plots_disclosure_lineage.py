@@ -129,7 +129,7 @@ def test_a_time_unit_change_keeps_both_disclosures(win, tmp_path, unit):
     tells the user to make this exact move."""
     _imported(win, tmp_path)
     win._time_unit.setCurrentText(unit)
-    assert win._time_unit.currentText() == unit
+    assert win._time_unit.currentText() == "ms"
     assert _both(win) == (True, True), f"Time unit = {unit} erased the disclosure"
 
 

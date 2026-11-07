@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from nanoscope.analysis.baseline import DEFAULT_BASELINE
+from nanoscope.analysis.baseline import DEFAULT_BASELINE, BaselinePolicyChangedError
 from nanoscope.analysis.detect import detect_events
 from nanoscope.analysis.event_amplitude import AMPLITUDE_COLUMNS
 from nanoscope.analysis.events import SCHEMA, EventSet
@@ -82,14 +82,32 @@ def test_remeasure_invalidates_previous_amplitude_without_altering_schema_result
 
 def test_baseline_definition_change_invalidates_even_when_measured_scalars_coincide():
     events, signal = _events()
-    measured = remeasure_events(events, signal, FS, config=DEFAULT_BASELINE).events
+    # A genuine, replayable prior definition must be distinguished from corrupt
+    # provenance. window_s belongs to the identity but is inactive for the
+    # masked-median method, so the measured scalars intentionally stay identical.
+    previous_config = DEFAULT_BASELINE.replace(window_s=.75)
+    measured = remeasure_events(events, signal, FS, config=previous_config).events
     expected = remeasure_events(measured, signal, FS, config=DEFAULT_BASELINE).events
+    assert_frame_equal(measured.df[list(SCHEMA)], expected.df[list(SCHEMA)])
+    assert measured.provenance["baseline_fingerprint"] != expected.provenance["baseline_fingerprint"]
     _curate(measured.df)
-    measured.provenance["baseline_fingerprint"] = "different-historical-definition"
     out = remeasure_events(measured, signal, FS, config=DEFAULT_BASELINE).events
     assert_frame_equal(out.df[list(SCHEMA)], expected.df[list(SCHEMA)])
     assert out.df.iloc[0]["amplitude_status"] == "stale"
     assert pd.isna(out.df.iloc[0]["amplitude_pA"])
+
+
+def test_corrupt_baseline_definition_refuses_remeasure_and_preserves_amplitude():
+    events, signal = _events()
+    measured = remeasure_events(events, signal, FS, config=DEFAULT_BASELINE).events
+    _curate(measured.df)
+    measured.provenance["baseline_fingerprint"] = "different-historical-definition"
+    before = measured.df.copy(deep=True)
+    old_provenance = dict(measured.provenance)
+    with pytest.raises(BaselinePolicyChangedError, match="fingerprint"):
+        remeasure_events(measured, signal, FS, config=DEFAULT_BASELINE)
+    assert_frame_equal(measured.df, before)
+    assert measured.provenance == old_provenance
 
 
 @pytest.mark.parametrize("already_curated", [False, True])

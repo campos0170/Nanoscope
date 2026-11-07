@@ -814,11 +814,11 @@ def test_only_columns_every_drawn_source_carries_are_offered(window):
     window.set_data([a, b])
 
     window.set_sources(["pore-b"])
-    cols = [window._hist_col.itemText(i) for i in range(window._hist_col.count())]
+    cols = [window._hist_col.itemData(i) for i in range(window._hist_col.count())]
     assert "custom_metric" in cols
 
     window.set_sources(["pore-a", "pore-b"])
-    cols = [window._hist_col.itemText(i) for i in range(window._hist_col.count())]
+    cols = [window._hist_col.itemData(i) for i in range(window._hist_col.count())]
     assert "custom_metric" not in cols
     assert "dwell_s" in cols
 

@@ -169,7 +169,7 @@ def test_the_dialog_offers_a_unit_for_a_refused_column_but_not_for_a_header_decl
     assert info._fields["t₀"].text() == "0.05 as written (unit undeclared)", (
         "a refused time base's first value is never labelled seconds")
     session.set_sample_rate_declaration(h5, SampleRateDeclaration("time_unit", time_unit="us"))
-    assert info._fields["t₀"].text() == "5e-08 s"
+    assert info._fields["t₀"].text() == "5e-05 ms"
 
     abf = session.add_document(_doc(tmp_path / "a.abf", rate=FS, prov=Provenance.FILE_META))
     other = SampleRateDialog(session, abf)
@@ -234,7 +234,7 @@ def test_file_info_and_the_status_bar_show_the_override_with_the_file_reading(wi
     window._session.set_sample_rate_declaration(key, SampleRateDeclaration("time_unit", time_unit="ms"))
     assert window._dirty, "a declaration is project state"
     assert panel._fields["Sample rate"].text() == "100,000 Hz  ·  user  (file: 100 Hz · measured)"
-    assert panel._fields["Duration"].text() == f"{N / FS:.6g} s"
+    assert panel._fields["Duration"].text() == f"{1000 * N / FS:.6g} ms"
     assert window._rate_label.text() == "100,000 Hz · user"
     assert window._session.x_axis(key).values[1] == pytest.approx(5e-5 + 1 / FS)
 

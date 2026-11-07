@@ -292,7 +292,7 @@ def test_the_sidecar_is_version_3_and_round_trips_both_settings():
                                         log_y=True, bins=17),
                   style=replace(PlotConfig().style, heatmap_colormap="magma"))
     payload = plot_config_to_json(cfg)
-    assert payload["version"] == pp.PLOT_CONFIG_VERSION == 3
+    assert payload["version"] == pp.PLOT_CONFIG_VERSION == 4
     assert payload["histogram"]["kde_overlay"] is True
     assert payload["heatmap"] == {"x": "dwell_s", "y": "depth_pA", "log_x": False,
                                   "log_y": True, "bins": 17}

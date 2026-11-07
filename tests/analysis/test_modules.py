@@ -622,10 +622,13 @@ def test_detection_signal_key_changes_with_every_field_it_reads():
     """The cache key the GUI panels use: if it misses a field, a re-detection with new
     filtering would keep serving the old conditioned trace."""
     from nanoscope.analysis.modules import detection_signal_key
+    from nanoscope.analysis.baseline import BLOCK_ENDPOINT_POLICY, baseline_sample_count_policy
 
     base = {"filter_cutoff_hz": 1e4, "filter_kind": "bessel", "filter_order": 8,
             "polarity": -1, "detrend_enabled": True, "detrend_method": "percentile",
-            "detrend_window_s": 0.3, "percentile": 95.0, "notch_enabled": False}
+            "detrend_window_s": 0.3, "percentile": 95.0, "notch_enabled": False,
+            "detrend_endpoint_policy": BLOCK_ENDPOINT_POLICY,
+            "detrend_sample_count_policy": baseline_sample_count_policy('percentile')}
     for field, value in (("filter_cutoff_hz", 2e3), ("filter_kind", "butter"),
                          ("filter_order", 4), ("polarity", 1),
                          ("detrend_enabled", False), ("detrend_window_s", 0.1),

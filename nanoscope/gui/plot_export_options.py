@@ -128,7 +128,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, native_size=(800, 600), initial_format="png",
                  initial_width=0, initial_height=0, *, preview_image=None,
                  residual_preview_image=None, residual_native_size=None,
-                 preview_svg=None, residual_preview_svg=None) -> None:
+                 preview_svg=None, residual_preview_svg=None, figure_style=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export current figure")
         self.setMinimumWidth(420)
@@ -147,14 +147,20 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         self._updating = False
         self._units = "mm"
         self._selected_options: ExportOptions | None = None
-        self._width_mm = 85.0
+        from .figure_export_style import column_presets, canvas_dimensions
+        style_presets, style_note = column_presets(figure_style)
+        self._width_mm = style_presets[0][1] if style_presets else self._native_size[0] * 25.4 / 96
         self._height_mm = self._width_mm / self._aspect
+        style_canvas = canvas_dimensions(figure_style, self._native_size)
+        if style_canvas is not None:
+            self._width_mm, self._height_mm = style_canvas
         extension = _format_extension(initial_format)
 
         layout = QtWidgets.QVBoxLayout(self)
         explanation = QtWidgets.QLabel(
             "Export the current plot with its visible styling and view. "
-            "These choices do not change the analysis or its numerical results.")
+            "Resizing scales all artwork, including fonts. Reference column widths do not "
+            "guarantee publication requirements. The analysis and numerical results stay unchanged.")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
 
@@ -190,11 +196,9 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
         self.preset_combo = QtWidgets.QComboBox()
         self.preset_combo.addItem("Custom", None)
-        self.preset_combo.addItem("Single column · 85 mm", 85.0)
-        self.preset_combo.addItem("Double column · 180 mm", 180.0)
-        self.preset_combo.setToolTip(
-            "Convenient starting widths, not journal requirements. "
-            "Check the target publication's figure specifications.")
+        for label, width_mm in style_presets:
+            self.preset_combo.addItem(label, width_mm)
+        self.preset_combo.setToolTip(style_note)
         form.addRow("Width preset", self.preset_combo)
         self.units_combo = QtWidgets.QComboBox()
         self.units_combo.addItem("Millimetres (mm)", "mm")
@@ -299,6 +303,9 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
+        if style_canvas is not None:
+            self.aspect_check.setChecked(math.isclose(self._width_mm / self._height_mm, self._aspect, rel_tol=0.001))
+            self.size_combo.setCurrentIndex(1)
         initial_width, initial_height = float(initial_width), float(initial_height)
         if not all(math.isfinite(value) and value >= 0
                    for value in (initial_width, initial_height)):
@@ -593,13 +600,14 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 def choose_export_options(parent, native_size, initial_format="png",
                           initial_width=0, initial_height=0, *, preview_image=None,
                           residual_preview_image=None, residual_native_size=None,
-                          preview_svg=None, residual_preview_svg=None) -> ExportOptions | None:
+                          preview_svg=None, residual_preview_svg=None, figure_style=None) -> ExportOptions | None:
     """Ask for figure presentation options, or return ``None`` when cancelled."""
     dialog = ExportOptionsDialog(parent, native_size, initial_format,
                                  initial_width, initial_height, preview_image=preview_image,
                                  residual_preview_image=residual_preview_image,
                                  residual_native_size=residual_native_size,
-                                 preview_svg=preview_svg, residual_preview_svg=residual_preview_svg)
+                                 preview_svg=preview_svg, residual_preview_svg=residual_preview_svg,
+                                 figure_style=figure_style)
     if dialog.exec() != QtWidgets.QDialog.Accepted:
         return None
     return dialog._selected_options

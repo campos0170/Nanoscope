@@ -133,10 +133,11 @@ def test_plots_action_opens_populated_window_with_detected_events(window, qtbot,
     assert w.current_source_name() == "pore_p1.dat"
     assert w.source_labels() == ["pore_p1.dat"]
     # ...whose dwell_s column is plottable as a histogram.
-    hist_cols = [w._hist_col.itemText(i) for i in range(w._hist_col.count())]
+    hist_cols = [w._hist_col.itemData(i) for i in range(w._hist_col.count())]
     assert "dwell_s" in hist_cols
     w.set_plot_type("Histogram")
     w.set_histogram_column("dwell_s")
+    w._run_plot()
     assert w._hist_item is not None
     assert f"n = {len(_EVENTS)}" in w.details_text()
 
@@ -183,7 +184,7 @@ def test_manual_measurement_source_appears_on_refresh(window, qtbot, tmp_path):
     # The manual source is plottable on its own numeric columns (e.g. dwell_s).
     w.set_source("Manual measurements")
     assert w.current_source_name() == "Manual measurements"
-    meas_cols = [w._hist_col.itemText(i) for i in range(w._hist_col.count())]
+    meas_cols = [w._hist_col.itemData(i) for i in range(w._hist_col.count())]
     assert "dwell_s" in meas_cols
 
 

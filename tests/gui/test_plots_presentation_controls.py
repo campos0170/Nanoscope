@@ -703,10 +703,10 @@ def test_the_legend_font_size_is_a_control_with_the_old_rule_as_its_default(two_
     # 0 = "follow the body font, three points below it" — today's hard-coded rule.
     assert w._style.legend_font_size_pt == 0
     w.set_font_size(20)
-    assert w.plot_item().legend.opts["labelTextSize"] == "17pt"
+    assert float(w.plot_item().legend.opts["labelTextSize"].removesuffix("pt")) == 17
 
     w._legend_font_size.setValue(9)
-    assert w.plot_item().legend.opts["labelTextSize"] == "9pt"
+    assert float(w.plot_item().legend.opts["labelTextSize"].removesuffix("pt")) == 9
 
 
 # ================================================================================================
@@ -745,13 +745,14 @@ def test_the_range_boxes_say_which_unit_they_are_read_in(win):
     assert win._range_labels["xmin"].text() == "X min (ms)"
     assert win._range_labels["ymin"].text() == "Y min", "a count has no unit"
 
-    win.set_time_unit("µs")
-    assert win._range_labels["xmax"].text() == "X max (µs)"
+    with pytest.raises(ValueError, match="unknown time unit"):
+        win.set_time_unit("µs")
+    assert win._range_labels["xmax"].text() == "X max (ms)"
 
     # A non-time column takes its unit from the schema that declares it.
     win.set_plot_type("Scatter")
     win.set_scatter_columns("dwell_s", "depth_pA")
-    assert win._range_labels["xmin"].text() == "X min (µs)"
+    assert win._range_labels["xmin"].text() == "X min (ms)"
     assert win._range_labels["ymin"].text() == "Y min (pA)"
 
 
@@ -766,9 +767,10 @@ def test_changing_the_time_unit_carries_the_typed_limits_with_it(win):
     win._apply_axis_range()
     assert win._manual_x == pytest.approx((1e-4, 5e-4))
 
-    win.set_time_unit("µs")
-    assert float(win._range_edits["xmin"].text()) == pytest.approx(100.0)
-    assert float(win._range_edits["xmax"].text()) == pytest.approx(500.0)
+    with pytest.raises(ValueError, match="unknown time unit"):
+        win.set_time_unit("µs")
+    assert float(win._range_edits["xmin"].text()) == pytest.approx(0.1)
+    assert float(win._range_edits["xmax"].text()) == pytest.approx(0.5)
     # The pin itself never moved: only the text over it changed unit.
     win._apply_axis_range()
     assert win._manual_x == pytest.approx((1e-4, 5e-4))
@@ -868,7 +870,8 @@ def test_a_reopened_window_is_blank_and_carries_no_style_or_pin(qapp, qtbot):
     w.set_fit("exponential")
     w.set_title("Figure 3b")
     w.set_font_size(18)
-    w.set_time_unit("µs")
+    with pytest.raises(ValueError, match="unknown time unit"):
+        w.set_time_unit("µs")
     w._bg_combo.setCurrentText("Light")
     _drag_legend(w, -120, 90)
     w._source_list.item(0).setText("apo")

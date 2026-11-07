@@ -14,6 +14,7 @@ from ..analysis.baseline import STUDY_EXPORT_BASELINE, characterisation_baseline
 from ..analysis.cancel import check_cancelled, propagate_cancel, resolve_cancel
 from ..analysis.characterize import characterize
 from ..analysis.events import (EventSet, REVIEW_NONE, analysed_span,
+                               ANALYSED_START_KEY, ANALYSED_STOP_KEY,
                                span_provenance, stamp_original_bounds, stamp_source_status,
                                AUTOMATIC_REJECTION_FLAGS, DERIVED_FLAGS, FLAG_MAX_DWELL,
                                flag_tokens, inherited_curation,
@@ -201,7 +202,7 @@ def _assert_full_exposure(prov, n, fs):
                "study rates need full exposure.")
     # analysed_span is deliberately forgiving for legacy display, but an import
     # must not turn malformed explicitly stored ranges into full exposure.
-    for left, right in (("analysed_start_idx", "analysed_stop_idx"), ("range_start", "range_stop")):
+    for left, right in ((ANALYSED_START_KEY, ANALYSED_STOP_KEY), ("range_start", "range_stop")):
         if left in prov or right in prov:
             if left not in prov or right not in prov:
                 raise ValueError(message)

@@ -269,5 +269,5 @@ def test_submillisecond_comparison_tick_labels_do_not_overlap(recorded_pair):
         boxes = [label.get_window_extent(renderer) for label in labels]
         assert len(boxes) >= 3
         assert all(a.x1 + 1 <= b.x0 for a, b in zip(boxes, boxes[1:])), [label.get_text() for label in labels]
-        assert axis.get_xlabel() == "Dwell (s)"
+        assert axis.get_xlabel() == "Dwell (ms)"
     pd.testing.assert_frame_equal(page._tables["plotted"], original, check_exact=True)

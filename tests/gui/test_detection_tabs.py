@@ -77,6 +77,7 @@ ML_ATTRS = [
 # parameters. Every one defaults to the value that was previously frozen, so the panel's
 # behaviour is unchanged; only the key set grew.
 PARAMS_KEYS = {
+    "noise_policy", "noise_window_s",
     "polarity", "k_in", "k_out", "min_dwell_s", "max_dwell_s", "filter_cutoff_hz",
     "filter_order", "filter_kind",
     "merge_gap_s", "detrend_enabled", "detrend_method", "detrend_window_s",

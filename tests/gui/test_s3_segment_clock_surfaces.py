@@ -110,7 +110,7 @@ def test_no_clock_surface_on_a_segment_claims_its_t0_is_zero(window, tmp_path):
         assert "both clocks read alike here" not in text
         assert "This recording's t₀ is 0" not in text
     # ...and the number every OTHER surface of this window already prints is in them.
-    assert "1158.9909" in axis_label and "1158.9909" in note
+    assert "1158990.9 ms" in axis_label and "1158.9909" in note
     assert "1158.99" in seg.meta.notes[0]
     assert seg.origin.t0_abs_s == pytest.approx(CUT_ORIGIN)
 
@@ -128,7 +128,7 @@ def test_the_segment_axis_label_and_its_name_tell_one_story(window, tmp_path):
     label_says_zero = "t₀ = 0, so both clocks read alike" in label
     assert not (named_late and label_says_zero), (
         f"the name says {name!r} and the axis label says {label!r}")
-    assert "1158.9909" in label
+    assert "1158990.9 ms" in label
 
 
 def test_the_event_table_header_on_a_segment_names_its_clock(window, tmp_path):
@@ -143,14 +143,15 @@ def test_the_event_table_header_on_a_segment_names_its_clock(window, tmp_path):
     model = panels._EventTableModel()
     model.set_clock_offset(window._trace_view.clock_offset_for(seg_id, 0))
     col = [i for i in range(model.columnCount())
-           if str(model.headerData(i, Qt.Horizontal, Qt.DisplayRole)).startswith("t_start_s")]
-    assert col, "no t_start_s column"
+           if str(model.headerData(i, Qt.Horizontal, Qt.DisplayRole)).startswith("Start time (ms)")]
+    assert col, "no Start time (ms) column"
+    assert model._columns[col[0]] == "t_start_s"
     header = str(model.headerData(col[0], Qt.Horizontal, Qt.DisplayRole))
     tip = str(model.headerData(col[0], Qt.Horizontal, Qt.ToolTipRole))
 
     assert "t₀" in header, f"the header says nothing about a clock: {header!r}"
     assert "This recording's t₀ is 0" not in tip
-    assert "1158.9909" in tip
+    assert "1158990.9 ms" in tip
 
 
 def test_switching_from_a_genuine_t0_zero_file_to_a_segment_repaints_the_header(
@@ -167,14 +168,15 @@ def test_switching_from_a_genuine_t0_zero_file_to_a_segment_repaints_the_header(
     model = panels._EventTableModel()
     model.set_clock_offset(window._trace_view.clock_offset_for(zero_id, 0))
     col = [i for i in range(model.columnCount())
-           if str(model.headerData(i, Qt.Horizontal, Qt.DisplayRole)).startswith("t_start_s")][0]
+           if str(model.headerData(i, Qt.Horizontal, Qt.DisplayRole)).startswith("Start time (ms)")][0]
+    assert model._columns[col] == "t_start_s"
     before = str(model.headerData(col, Qt.Horizontal, Qt.ToolTipRole))
 
     model.set_clock_offset(window._trace_view.clock_offset_for(seg_id, 0))
     after = str(model.headerData(col, Qt.Horizontal, Qt.ToolTipRole))
 
     assert before != after, "the header kept the previous recording's clock note"
-    assert "1158.9909" in after
+    assert "1158990.9 ms" in after
 
 
 # ================================================================================================
@@ -251,7 +253,7 @@ def test_a_segment_of_a_segment_is_stamped_at_its_own_depth(window, tmp_path):
     inner = window._session.document(inner_id)
     assert inner.origin.t0_abs_s == pytest.approx(expected)
     assert clock.instrument_origin_s(inner.meta) == pytest.approx(expected)
-    assert f"{expected:.4f}"[:9] in window._trace_view.x_axis_label()
+    assert f"{expected * 1000.:.1f} ms" in window._trace_view.x_axis_label()
 
     mp = _measure(window, inner_id, 10_000, 30_000)
     assert mp.add_current() is True

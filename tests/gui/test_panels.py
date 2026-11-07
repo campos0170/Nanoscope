@@ -158,9 +158,11 @@ def test_polarity_choice_mapping(qtbot):
     assert panel.polarity_choice() == 1
 
 
-def _rise_us(label_text: str) -> int | None:
-    m = re.search(r"rise time:\s*(\d+)", label_text)
-    return int(m.group(1)) if m else None
+def _rise_us(label_text: str) -> float | None:
+    # The displayed unit is part of the contract; an integer-only parser turns
+    # every sub-millisecond readout into zero and cannot test resolution.
+    m = re.search(r"rise time:\s*([\d.eE+-]+)\s*(ms|µs|μs|us)\b", label_text)
+    return float(m.group(1)) * (1000.0 if m.group(2) == 'ms' else 1.0) if m else None
 
 
 def test_rise_time_readout_monotonic_in_cutoff(qtbot):
@@ -220,7 +222,7 @@ def test_detect_requested_emits_params(qtbot):
     # ``normalize_clip_sigma`` is the model-input clip. Every one of them defaults to
     # the value that was previously frozen, so an untouched panel runs what it always
     # ran.
-    assert set(got[0]) == {"detector",
+    assert set(got[0]) == {"detector", "noise_policy", "noise_window_s",
                            "polarity", "k_in", "k_out", "cusum_k", "cusum_h",
                            "min_dwell_s",
                            "max_dwell_s", "filter_cutoff_hz", "merge_gap_s",

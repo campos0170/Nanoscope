@@ -950,6 +950,9 @@ class IVFit:
     n: int
     current_units: str = ""
     conductance_nS: float | None = None
+    slope_ci95: tuple[float, float] | None = None
+    intercept_ci95: tuple[float, float] | None = None
+    conductance_ci95_nS: tuple[float, float] | None = None
 
     def predict(self, v_volts: np.ndarray | float) -> np.ndarray:
         """Evaluate the fitted current over voltages (in volts), in current units."""
@@ -997,4 +1000,8 @@ def iv_fit(voltages_V, currents, *, current_units: str = "") -> IVFit:
         n=lf.n,
         current_units=current_units,
         conductance_nS=g_nS,
+        slope_ci95=lf.meta.get("ci95", {}).get("slope"),
+        intercept_ci95=lf.meta.get("ci95", {}).get("intercept"),
+        conductance_ci95_nS=(None if g_nS is None or "ci95" not in lf.meta else
+                            tuple(to_nS(v, current_units, "V") for v in lf.meta["ci95"]["slope"])),
     )

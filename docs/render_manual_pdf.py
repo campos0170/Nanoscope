@@ -121,14 +121,14 @@ def render(source:Path, output:Path):
     class ManualDoc(BaseDocTemplate):
         def __init__(self,path):
             super().__init__(str(path),pagesize=A4,leftMargin=15*mm,rightMargin=15*mm,
-                topMargin=16*mm,bottomMargin=17*mm,title='NanoScope User Manual - 29 September 2026',
-                author='NanoScope',subject='Unified incubation workflows and control reference; build 40.15.59')
+                topMargin=16*mm,bottomMargin=17*mm,title='NanoScope User Manual - 5 November 2026 - build 45.37.98',
+                author='NanoScope',subject='Plotting and analysis controls for build 45.37.98; retained scientific workflows and control reference')
             self.addPageTemplates(PageTemplate(id='manual',frames=[Frame(15*mm,17*mm,width,
                 A4[1]-33*mm,leftPadding=0,rightPadding=0,topPadding=0,bottomPadding=0)],
                 onPage=self.page_footer))
         def page_footer(self,canvas,doc):
             canvas.setFont('Manual',7.5); canvas.setFillColor(colors.HexColor('#61717d'))
-            canvas.drawString(15*mm,10*mm,'NanoScope build 40.15.59 | Manual edition 2026-09-29')
+            canvas.drawString(15*mm,10*mm,'NanoScope 45.37.98 | Manual edition 2026-11-05')
             canvas.drawRightString(A4[0]-15*mm,10*mm,str(doc.page))
         def afterFlowable(self,flow):
             if hasattr(flow,'_toc_title'):
@@ -141,10 +141,12 @@ def render(source:Path, output:Path):
     story=[Spacer(1,28*mm),Paragraph('NANOSCOPE',styles['h1']),
         Paragraph('Specialist user manual',styles['h2']),
         Paragraph('Analysis and plotting, step by step.<br/>Recording-specific references. Event characterization. Reproducible figures.',styles['body']),
-        Spacer(1,10*mm),Paragraph('Edition 29 September 2026<br/>NanoScope build 40.15.59',styles['body']),
-        Paragraph('This edition updates the unified incubation workflow and shared main-workspace curation. '
-                  'Other main-analysis chapters retain their 11 September source review unless dated otherwise; '
-                  'older figures have not all been recaptured. Scientific settings and historical results retain their scope.',styles['body']),
+        Spacer(1,10*mm),Paragraph('Edition 5 November 2026<br/>NanoScope build 45.37.98',styles['body']),
+        Paragraph('This edition documents current plotting and analysis controls in installed NanoScope 45.37.98: '
+                  'Figures navigation, source ownership, curve fitting, Generate UMAP and completed-result export. '
+                  'New control illustrations use synthetic validation data. The incubation chapter retains its '
+                  '29 September review; other historical chapters and figures retain their stated dates, '
+                  'scientific settings and original scope.',styles['body']),
         PageBreak(),Paragraph('Contents',styles['h2'])]
     toc=TableOfContents(); toc.levelStyles=[ParagraphStyle('toc',parent=styles['body'],
         fontSize=9,leading=13,spaceAfter=5,rightIndent=18)]
@@ -182,6 +184,8 @@ def render(source:Path, output:Path):
                 rgb=source_image.convert('RGB'); w,h=rgb.size
                 png=BytesIO(); rgb.save(png,format='PNG'); png.seek(0)
             scale=min(width/w,174*mm/h)
+            if 'compact' in node.attrs.get('class','').split():
+                scale=min(scale,1.0)  # Small menu captures need no page-wide enlargement.
             illustration=Image(png,width=w*scale,height=h*scale)
             illustration.hAlign='LEFT'; counts['figures']+=1
             cap=paragraph(caption,'caption') if caption else Spacer(1,1)

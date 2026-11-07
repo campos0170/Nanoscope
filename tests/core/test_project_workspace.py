@@ -195,7 +195,7 @@ def test_a_v11_manifest_missing_its_workspace_is_malformed(tmp_path):
     seed = save_project(tmp_path / "seed.nanoscope", ProjectState())
 
     def remove_workspace(manifest, _members):
-        assert manifest["version"] == 12      # v11 and every later version carry it
+        assert manifest["version"] == project.VERSION == 13  # v11 and later carry it
         manifest.pop("workspace")
 
     bad = _replace_manifest(seed, tmp_path / "missing.nanoscope", remove_workspace)

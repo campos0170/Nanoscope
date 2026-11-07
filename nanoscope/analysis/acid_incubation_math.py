@@ -7,6 +7,8 @@ shared namespace. They are not user Python code. Runtime never reads/executes a
 notebook. IO paths are assigned by the public engine within its workspace.
 """
 from __future__ import annotations
+
+from ..core.atomic_write import write_staged
 from pathlib import Path
 import hashlib, json, math, os, warnings
 import numpy as np
@@ -335,10 +337,10 @@ def stage_007():
         else:
             frame = pd.DataFrame({'current_raw_pA': current, 'current_detr_pA': detr})
             raw_storage = 'float32'
-        frame.to_parquet(pq_path, index=False, compression='zstd')
-        pd.DataFrame({'baseline_pA': base_dec}).to_parquet(base_path, index=False, compression='zstd')
+        write_staged(pq_path, frame.to_parquet, index=False, compression='zstd')
+        write_staged(base_path, pd.DataFrame({'baseline_pA': base_dec}).to_parquet, index=False, compression='zstd')
         meta = {'tag': tag, 'filename': abf_path.name, 'fs_hz': int(fs_abf), 'n_samples': int(n), 'duration_s': float(n / fs_abf), 'match_settings': [MATCH_TAU_MS, MATCH_MIN_ROLLOFF_HZ, BESSEL_ORDER, FAMILY_REFERENCE_TAG], 'abf_channel': int(ch), 'n_channels': int(n_ch), 'reader': fmt, 'abf_header': header, 'event_polarity': 1, 'raw_mean_pA': float(current.mean()), 'raw_std_pA': float(current.std()), 'detr_mean_pA': float(detr.mean()), 'detr_std_pA': float(detr.std()), 'adc_step_pA': step, 'raw_storage': raw_storage, 'line_noise_method': LINE_NOISE_METHOD, 'line_noise_note': line_note, 'notch_hz': list(NOTCH_FREQS), 'notch_bw_hz': NOTCH_BW_HZ if LINE_NOISE_METHOD == 'notch' else None, 'mains_frequency_hz': None if not np.isfinite(f_mains) else f_mains, 'mains_min_prominence': MAINS_MIN_PROMINENCE if LINE_NOISE_METHOD == 'sinusoid' else None, 'baseline_method': 'median', 'baseline_window_s': BASELINE_WINDOW_S, 'baseline_decim': BASELINE_DECIM, 'match_tau_ms': MATCH_TAU_MS if matched_hz is not None else None, 'matched_bandwidth_hz': matched_hz, 'raw_rolloff_hz': None if not np.isfinite(rolloff) else float(rolloff), 'qc_mad_noise_pA': mad, 'qc_psd_before': qc_before, 'qc_psd_after': qc_after, 'parquet_file': pq_path.name, 'baseline_file': base_path.name}
-        meta_path.write_text(json.dumps(meta, indent=2, default=str))
+        write_staged(meta_path, Path.write_text, json.dumps(meta, indent=2, default=str))
         print(f'[stage 0] wrote {pq_path.name} ({pq_path.stat().st_size / 1000000.0:.0f} MB), {base_path.name}, {meta_path.name}')
         return meta
 
@@ -656,10 +658,10 @@ def definitions_007():
         else:
             frame = pd.DataFrame({'current_raw_pA': current, 'current_detr_pA': detr})
             raw_storage = 'float32'
-        frame.to_parquet(pq_path, index=False, compression='zstd')
-        pd.DataFrame({'baseline_pA': base_dec}).to_parquet(base_path, index=False, compression='zstd')
+        write_staged(pq_path, frame.to_parquet, index=False, compression='zstd')
+        write_staged(base_path, pd.DataFrame({'baseline_pA': base_dec}).to_parquet, index=False, compression='zstd')
         meta = {'tag': tag, 'filename': abf_path.name, 'fs_hz': int(fs_abf), 'n_samples': int(n), 'duration_s': float(n / fs_abf), 'match_settings': [MATCH_TAU_MS, MATCH_MIN_ROLLOFF_HZ, BESSEL_ORDER, FAMILY_REFERENCE_TAG], 'abf_channel': int(ch), 'n_channels': int(n_ch), 'reader': fmt, 'abf_header': header, 'event_polarity': 1, 'raw_mean_pA': float(current.mean()), 'raw_std_pA': float(current.std()), 'detr_mean_pA': float(detr.mean()), 'detr_std_pA': float(detr.std()), 'adc_step_pA': step, 'raw_storage': raw_storage, 'line_noise_method': LINE_NOISE_METHOD, 'line_noise_note': line_note, 'notch_hz': list(NOTCH_FREQS), 'notch_bw_hz': NOTCH_BW_HZ if LINE_NOISE_METHOD == 'notch' else None, 'mains_frequency_hz': None if not np.isfinite(f_mains) else f_mains, 'mains_min_prominence': MAINS_MIN_PROMINENCE if LINE_NOISE_METHOD == 'sinusoid' else None, 'baseline_method': 'median', 'baseline_window_s': BASELINE_WINDOW_S, 'baseline_decim': BASELINE_DECIM, 'match_tau_ms': MATCH_TAU_MS if matched_hz is not None else None, 'matched_bandwidth_hz': matched_hz, 'raw_rolloff_hz': None if not np.isfinite(rolloff) else float(rolloff), 'qc_mad_noise_pA': mad, 'qc_psd_before': qc_before, 'qc_psd_after': qc_after, 'parquet_file': pq_path.name, 'baseline_file': base_path.name}
-        meta_path.write_text(json.dumps(meta, indent=2, default=str))
+        write_staged(meta_path, Path.write_text, json.dumps(meta, indent=2, default=str))
         print(f'[stage 0] wrote {pq_path.name} ({pq_path.stat().st_size / 1000000.0:.0f} MB), {base_path.name}, {meta_path.name}')
         return meta
 
@@ -1106,8 +1108,8 @@ def stage_012():
             print('✅ Loaded cached student probabilities:', prob_path)
         else:
             student_probability = student_predict(model_student, signal, step=step, batch_size=INFERENCE_BATCH_SIZE).astype(np.float32)
-            np.save(prob_path, student_probability)
-            prob_meta_path.write_text(json.dumps(prob_signature, indent=2))
+            write_staged(prob_path, np.save, student_probability)
+            write_staged(prob_meta_path, Path.write_text, json.dumps(prob_signature, indent=2))
             print('✅ Saved student probabilities:', prob_path)
         print('Student model:', model_student.name)
         print('Student window:', STUDENT_WINDOW, f'({1000 * STUDENT_WINDOW / fs:.2f} ms)')
@@ -2013,7 +2015,7 @@ def stage_017():
     noise_timescales = pd.DataFrame(noise_timescale_rows)
     noise_timescales['white_reference_pA'] = noise_timescales['sigma_m_pA'].iloc[0] / np.sqrt(noise_timescales['m_samples'])
     noise_timescales['excess_over_white'] = noise_timescales['sigma_m_pA'] / noise_timescales['white_reference_pA']
-    noise_timescales.to_csv(OUT_DIR / f'{TAG}_noise_timescales.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_noise_timescales.csv', noise_timescales.to_csv, index=False)
     print('Quiet-trace noise versus averaging time (excess_over_white = 1 for white noise):')
     display(noise_timescales.round(3))
     plt.figure(figsize=(7, 4.5))
@@ -2077,7 +2079,7 @@ def stage_017():
     peak_null_timescales = pd.DataFrame(peak_null_rows)
     if len(peak_null_timescales) < 2:
         raise RuntimeError('Too little quiet trace to measure the noise-only peak depth versus duration.')
-    peak_null_timescales.to_csv(OUT_DIR / f'{TAG}_peak_null_timescales.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_peak_null_timescales.csv', peak_null_timescales.to_csv, index=False)
     print(f'Noise-only peak depth versus window duration on the quiet trace (max of n_eff Gaussian draws, fitted; floor = quantile at tail probability {_gate_tail_p:.1e} = Phi(-{SUSTAINED_GATE_SIGMA:g}); model vs empirical 99.9% quantile checks the fit):')
     display(peak_null_timescales.round(3))
     plt.figure(figsize=(7, 4.5))
@@ -2285,7 +2287,7 @@ def stage_017():
                 cusum_grid_raw[scale, float(_delta), float(_h)] = _runs
     cusum_calibration = pd.DataFrame(cusum_grid_rows)
     cusum_calibration['admissible'] = (cusum_calibration['false_alarms_per_s_gated'] <= CUSUM_FA_BUDGET_PER_S * _share) & (cusum_calibration['false_alarms_per_s_clean'] <= CUSUM_RAW_FA_MAX_PER_S * _share)
-    cusum_calibration.to_csv(OUT_DIR / f'{TAG}_cusum_calibration_grid.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_cusum_calibration_grid.csv', cusum_calibration.to_csv, index=False)
     cusum_selected = {}
     cusum_selection_notes = {}
     cusum_scale_ok = {}
@@ -2343,7 +2345,7 @@ def stage_017():
     cusum_false_alarm_rate = _n_union_fa / calibration_seconds
     cusum_false_alarm_rate_gated = _n_union_fa_gated / calibration_seconds
     cusum_recall_map, _ = _recall_table(_union_regions_injected)
-    cusum_recall_map.to_csv(OUT_DIR / f'{TAG}_cusum_recall_map.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_cusum_recall_map.csv', cusum_recall_map.to_csv, index=False)
     CUSUM_DELTA, CUSUM_H = cusum_selected['level']
     CUSUM_PULSE_DELTA, CUSUM_PULSE_H = cusum_selected.get('pulse', (np.nan, np.nan))
     cusum_selection_note = '; '.join((f'{k}: delta={v[0]}, h={v[1]} ({cusum_selection_notes[k]})' for k, v in cusum_selected.items()))
@@ -3733,17 +3735,17 @@ def definitions_025():
 # Original notebook cell 26
 def stage_026():
     check_cancelled(_acid_cancel)
-    cusum_catalog.to_parquet(OUT_DIR / f'{TAG}_cusum_catalog.parquet', index=False)
-    threshold_catalog.to_parquet(OUT_DIR / f'{TAG}_threshold_catalog.parquet', index=False)
-    match_table.to_parquet(OUT_DIR / f'{TAG}_cusum_threshold_matches.parquet', index=False)
+    write_staged(OUT_DIR / f'{TAG}_cusum_catalog.parquet', cusum_catalog.to_parquet, index=False)
+    write_staged(OUT_DIR / f'{TAG}_threshold_catalog.parquet', threshold_catalog.to_parquet, index=False)
+    write_staged(OUT_DIR / f'{TAG}_cusum_threshold_matches.parquet', match_table.to_parquet, index=False)
     if DETECT_RESISTIVE and 'cusum_resistive' in detector_catalogs:
-        detector_catalogs['cusum_resistive'].to_parquet(OUT_DIR / f'{TAG}_cusum_resistive_catalog.parquet', index=False)
-        detector_catalogs['threshold_resistive'].to_parquet(OUT_DIR / f'{TAG}_threshold_resistive_catalog.parquet', index=False)
-        resistive_match_table.to_parquet(OUT_DIR / f'{TAG}_cusum_resistive_threshold_matches.parquet', index=False)
+        write_staged(OUT_DIR / f'{TAG}_cusum_resistive_catalog.parquet', detector_catalogs['cusum_resistive'].to_parquet, index=False)
+        write_staged(OUT_DIR / f'{TAG}_threshold_resistive_catalog.parquet', detector_catalogs['threshold_resistive'].to_parquet, index=False)
+        write_staged(OUT_DIR / f'{TAG}_cusum_resistive_threshold_matches.parquet', resistive_match_table.to_parquet, index=False)
     if RUN_STUDENT and len(student_catalog):
-        student_catalog.to_parquet(OUT_DIR / f'{TAG}_student_catalog.parquet', index=False)
-        student_match_table.to_parquet(OUT_DIR / f'{TAG}_student_threshold_matches.parquet', index=False)
-    primary_catalog.to_parquet(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_catalog_preclustering.parquet', index=False)
+        write_staged(OUT_DIR / f'{TAG}_student_catalog.parquet', student_catalog.to_parquet, index=False)
+        write_staged(OUT_DIR / f'{TAG}_student_threshold_matches.parquet', student_match_table.to_parquet, index=False)
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_catalog_preclustering.parquet', primary_catalog.to_parquet, index=False)
     print('✅ Saved immutable pre-clustering catalogs')
 
 
@@ -3774,7 +3776,7 @@ def stage_028():
             row[f'rho_{nuisance}'] = spearmanr(pair[feature], pair[nuisance])[0] if len(pair) >= 30 else np.nan
         coupling_rows.append(row)
     feature_coupling = pd.DataFrame(coupling_rows)
-    feature_coupling.to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_feature_nuisance_coupling.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_feature_nuisance_coupling.csv', feature_coupling.to_csv, index=False)
     print('Spearman correlation of each feature with the nuisance axes (|rho| > 0.7 with log_dwell or local noise = treat as a proxy, not a new axis):')
     display(feature_coupling.round(3))
     _corr = _qc[FEATURE_POOL].replace([np.inf, -np.inf], np.nan).corr(method='spearman', min_periods=30)
@@ -3812,7 +3814,7 @@ def stage_028():
         row['flag'] = bool(np.isfinite(row.get('dip_p_discovery', np.nan)) and np.isfinite(row.get('dip_p_validation', np.nan)) and (row['dip_p_discovery'] < 0.05) and (row['dip_p_validation'] < 0.05) and (n_unique >= 30))
         scan_rows.append(row)
     multimodality_scan = pd.DataFrame(scan_rows).sort_values(['flag', 'dip_p_validation'], ascending=[False, True])
-    multimodality_scan.to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_univariate_multimodality_scan.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_univariate_multimodality_scan.csv', multimodality_scan.to_csv, index=False)
     print('Per-feature dip test on discovery (even) and validation (odd) blocks. flag = p < 0.05 in both halves and >= 30 unique values. BC > 0.555 is the usual bimodality-coefficient threshold (skew-sensitive; use as a hint only).')
     display(multimodality_scan.round(4))
     flagged_features = multimodality_scan.loc[multimodality_scan['flag'], 'feature'].tolist()
@@ -3943,7 +3945,7 @@ def stage_030():
     else:
         ax.axis('off')
     finish_figure('12_spike_context_tests')
-    (OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_spike_context_tests.json').write_text(json.dumps(json_ready(spike_context_tests) if 'json_ready' in globals() else spike_context_tests, indent=2, default=str))
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_spike_context_tests.json', Path.write_text, json.dumps(json_ready(spike_context_tests) if 'json_ready' in globals() else spike_context_tests, indent=2, default=str))
 
 
 def definitions_030():
@@ -4106,7 +4108,7 @@ def stage_032():
         print(f"Family model: reusing the saved reference model (k = {family_model['k']}); set FAMILY_REFIT_REFERENCE = True to refit")
     else:
         family_model = _fit_reference_model(X_fam.loc[_fit_rows], _fam.loc[_fit_rows, 'time_block'].to_numpy())
-        FAMILY_MODEL_PATH.write_text(json.dumps(family_model, indent=2))
+        write_staged(FAMILY_MODEL_PATH, Path.write_text, json.dumps(family_model, indent=2))
         print(f"Family model: fitted on this tag as the reference (k = {family_model['k']}) and saved to {FAMILY_MODEL_PATH}")
         display(pd.DataFrame(family_model['model_selection']))
     post, hard = _apply_model(family_model, X_fam.loc[_ok])
@@ -4199,8 +4201,8 @@ def stage_032():
     plot_event_gallery(_fam.rename(columns={'family': 'event_family'}), 'event_family', 'Event family')
     family_model_fingerprint = hashlib.sha256(json.dumps({k: family_model[k] for k in ('features', 'k', 'weights', 'means', 'covariances', 'scaler_center', 'scaler_scale')}, sort_keys=True).encode()).hexdigest()[:12]
     event_families = {'tag': TAG, 'duration_s': duration_s, 'primary_set': PRIMARY_SET_NAME, 'primary_polarity': primary_polarity, 'family_model_fingerprint': family_model_fingerprint, 'instrument_tau_ms': _tau_instr, 'instrument_tau_measured_ms': _tau_measured, 'amplitude_statistic': AMPLITUDE_STATISTIC, 'gate_statistic': GATE_STATISTIC, 'matched_bandwidth_hz': meta.get('matched_bandwidth_hz'), 'raw_rolloff_hz': meta.get('raw_rolloff_hz'), 'n_events': int(len(_fam)), 'rate_per_s': len(_fam) / duration_s, 'global_i0_pA': float(global_i0) if np.isfinite(global_i0) else None, 'global_noise_pA': float(global_noise), 'reference_tag': family_model['reference_tag'], 'k': K, 'family_names': family_names, 'family_table': family_table.to_dict(orient='records'), 'family_by_block': family_by_block.round(4).to_dict(orient='index'), 'family_time_cramers_v': family_time_v, 'markers': marker_fractions, 'dwell_amplitude_crosstab': {str(r): {str(c): int(v) for c, v in row.items()} for r, row in dwell_amplitude_crosstab.iterrows()}, 'resistive_independent_events': int(len(analysis_sets['cusum_resistive'])) if 'cusum_resistive' in analysis_sets else None, 'detector': {'cusum_selected': {k: list(v) for k, v in cusum_selected.items()}, 'recall_map': cusum_recall_map.to_dict(orient='records'), 'gate_statistic': GATE_STATISTIC, 'acceptance_floor_pA': {str(d): float(acceptance_floor_pA(d)) for d in (0.1, 0.2, 0.5, 1.0, 5.0, 20.0)}}}
-    (OUT_DIR / f'{TAG}_event_families.json').write_text(json.dumps(json_ready(event_families) if 'json_ready' in globals() else event_families, indent=2, default=str))
-    _fam[['event_id', 'family', 'family_posterior', 'resolved', 'precursor', 'flat', 'sharp_onset', 'deep_long', 'in_burst', 'burst_id']].to_parquet(OUT_DIR / f'{TAG}_event_families.parquet', index=False)
+    write_staged(OUT_DIR / f'{TAG}_event_families.json', Path.write_text, json.dumps(json_ready(event_families) if 'json_ready' in globals() else event_families, indent=2, default=str))
+    write_staged(OUT_DIR / f'{TAG}_event_families.parquet', _fam[['event_id', 'family', 'family_posterior', 'resolved', 'precursor', 'flat', 'sharp_onset', 'deep_long', 'in_burst', 'burst_id']].to_parquet, index=False)
     _FAM_TAG = TAG
     print('Wrote', OUT_DIR / f'{TAG}_event_families.json')
 
@@ -4612,7 +4614,7 @@ def stage_036():
             g.ax_joint.legend(handles=[plt.Line2D([], [], color=pal[l], lw=2, label=f'{l} (n={int((D[arm_col] == l).sum())})') for l in order], fontsize=9)
             g.figure.suptitle(f'{name} — joint kernel density', y=1.02, fontsize=15, fontweight='bold')
             if SAVE_FIGURES:
-                g.figure.savefig(FIG_DIR / f'{save_prefix}_joint.png', dpi=FIG_DPI, bbox_inches='tight')
+                plt.save_figure(g.figure, FIG_DIR / f'{save_prefix}_joint.png', dpi=FIG_DPI, bbox_inches='tight')
             plt.show()
         else:
             print('seaborn not available: joint KDE skipped')
@@ -4691,8 +4693,8 @@ def stage_036():
         if len(tests):
             print("Pairwise tests (Cliff's delta: |0.15| small, |0.33| medium, |0.47| large):")
             display(tests.round(4))
-        summary.to_csv(OUT_DIR / f'{save_prefix}_summary.csv', index=False)
-        tests.to_csv(OUT_DIR / f'{save_prefix}_pairwise.csv', index=False)
+        write_staged(OUT_DIR / f'{save_prefix}_summary.csv', summary.to_csv, index=False)
+        write_staged(OUT_DIR / f'{save_prefix}_pairwise.csv', tests.to_csv, index=False)
         return {'summary': summary.to_dict(orient='records'), 'pairwise': tests.to_dict(orient='records')}
     figure_set_results = {}
     if len(_available) >= 2:
@@ -4717,7 +4719,7 @@ def stage_036():
         D_fam = D_fam.loc[~D_fam['in_burst']]
     D_fam['arm'] = D_fam['family'].map({k: family_names[k][:28] for k in range(K)})
     figure_set_results[f'{TAG} families'] = figure_set(f'{TAG} by event family', _fam_arms, f'figset_{TAG}_families', D_fam)
-    (OUT_DIR / f'{TAG}_figure_set_stats.json').write_text(json.dumps(figure_set_results, indent=2, default=str))
+    write_staged(OUT_DIR / f'{TAG}_figure_set_stats.json', Path.write_text, json.dumps(figure_set_results, indent=2, default=str))
     print(f'Amplitude variable = {AMP_VAR}; set AMP_VAR in the configuration cell for the pA version.')
 
 
@@ -4833,7 +4835,7 @@ def definitions_036():
             g.ax_joint.legend(handles=[plt.Line2D([], [], color=pal[l], lw=2, label=f'{l} (n={int((D[arm_col] == l).sum())})') for l in order], fontsize=9)
             g.figure.suptitle(f'{name} — joint kernel density', y=1.02, fontsize=15, fontweight='bold')
             if SAVE_FIGURES:
-                g.figure.savefig(FIG_DIR / f'{save_prefix}_joint.png', dpi=FIG_DPI, bbox_inches='tight')
+                plt.save_figure(g.figure, FIG_DIR / f'{save_prefix}_joint.png', dpi=FIG_DPI, bbox_inches='tight')
             plt.show()
         else:
             print('seaborn not available: joint KDE skipped')
@@ -4912,8 +4914,8 @@ def definitions_036():
         if len(tests):
             print("Pairwise tests (Cliff's delta: |0.15| small, |0.33| medium, |0.47| large):")
             display(tests.round(4))
-        summary.to_csv(OUT_DIR / f'{save_prefix}_summary.csv', index=False)
-        tests.to_csv(OUT_DIR / f'{save_prefix}_pairwise.csv', index=False)
+        write_staged(OUT_DIR / f'{save_prefix}_summary.csv', summary.to_csv, index=False)
+        write_staged(OUT_DIR / f'{save_prefix}_pairwise.csv', tests.to_csv, index=False)
         return {'summary': summary.to_dict(orient='records'), 'pairwise': tests.to_dict(orient='records')}
 
 
@@ -4946,7 +4948,7 @@ def stage_038():
                 row[f"F{f['family']}_soft"] = f['soft_share']
             rows.append(row)
         incubation_table = pd.DataFrame(rows).sort_values('hours').reset_index(drop=True)
-        incubation_table.to_csv(OUT_DIR / 'incubation_comparison.csv', index=False)
+        write_staged(OUT_DIR / 'incubation_comparison.csv', incubation_table.to_csv, index=False)
         if incubation_table['model_fingerprint'].nunique() > 1:
             print(f"!! tags were assigned with DIFFERENT versions of the family model (fingerprints {incubation_table['model_fingerprint'].unique().tolist()}); rerun the older tags so that all share one model before comparing family shares")
         _taus = incubation_table['instrument_tau_ms'].dropna()
@@ -5095,8 +5097,8 @@ def stage_044():
         return {'column': column, 'n_events': len(valid), 'n_blocks': len(block_medians), 'total_change': total_change, 'change_over_iqr': total_change / max(abs(iqr), 1e-12), 'spearman_rho': float(rho), 'spearman_p': float(p)}
     time_summary = summarize_time_blocks(primary_catalog)
     drift_table = pd.DataFrame([drift_metric(primary_catalog, col) for col in [AMP_FRAC_COL, AMP_SIGMA_COL, 'dwell_ms', 'local_I0_pA', 'local_noise_mad_pA', 'local_rate_hz']])
-    time_summary.to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_time_blocks.csv', index=False)
-    drift_table.to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_drift_metrics.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_time_blocks.csv', time_summary.to_csv, index=False)
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_drift_metrics.csv', drift_table.to_csv, index=False)
     display(time_summary.round(4))
     display(drift_table.round(4))
 
@@ -5561,7 +5563,7 @@ def stage_051():
         check_cancelled(_acid_cancel)
         scalar_comparison_rows.append({'set': name, 'n_events': len(result['work']), 'target': result['target'], 'best_bic_k': result['best_bic_k'], 'best_heldout_k': result['best_val_k'], 'delta_bic_vs_1': result['delta_bic_vs_1'], 'heldout_ll_gain_vs_1': result['heldout_ll_gain_vs_1'], 'minimum_weight': float(np.min(result['weights'])), 'minimum_separation': result['min_separation'], 'minimum_block_presence': result['min_block_presence'], 'dip_p': result['dip_p'], 'candidate': result['candidate']})
     scalar_comparison = pd.DataFrame(scalar_comparison_rows)
-    scalar_comparison.to_csv(OUT_DIR / f'{TAG}_scalar_detector_sensitivity.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_scalar_detector_sensitivity.csv', scalar_comparison.to_csv, index=False)
     display(scalar_comparison.round(5))
     available_candidates = scalar_comparison['candidate'].astype(bool)
     detector_consistent_scalar = bool(len(available_candidates) >= 2 and available_candidates.all())
@@ -5615,7 +5617,7 @@ def stage_053():
         except Exception as exc:
             print(f'Scalar screen skipped for baseline {_mode}: {exc}')
     baseline_screen_table = pd.DataFrame([{'baseline': m, 'target': r['target'], 'best_bic_k': r['best_bic_k'], 'best_heldout_k': r['best_val_k'], 'delta_bic_vs_1': r['delta_bic_vs_1'], 'heldout_ll_gain_vs_1': r['heldout_ll_gain_vs_1'], 'min_weight': float(np.min(r['weights'])), 'min_separation': r['min_separation'], 'min_block_presence': r['min_block_presence'], 'dip_p': r['dip_p'], 'candidate': r['candidate']} for m, r in baseline_screens.items()])
-    baseline_screen_table.to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_baseline_sensitivity.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_baseline_sensitivity.csv', baseline_screen_table.to_csv, index=False)
     print(f'Scalar screen on {AMP_FRAC_COL} under each baseline (canonical = {BASELINE_MODE}):')
     display(baseline_screen_table.round(4))
     _verdicts = {m: (r['best_bic_k'], r['candidate']) for m, r in baseline_screens.items()}
@@ -5711,7 +5713,7 @@ def stage_054():
     bootstrap_parameters = block_bootstrap_gmm(primary_residualized, primary_scalar['best_bic_k'], N_BLOCK_BOOTSTRAPS)
     if len(bootstrap_parameters):
         bootstrap_summary = bootstrap_parameters.groupby('component')[['mean', 'std', 'weight']].quantile([0.025, 0.5, 0.975]).rename_axis(index=['component', 'quantile']).reset_index()
-        bootstrap_parameters.to_parquet(OUT_DIR / f'{TAG}_scalar_block_bootstrap.parquet', index=False)
+        write_staged(OUT_DIR / f'{TAG}_scalar_block_bootstrap.parquet', bootstrap_parameters.to_parquet, index=False)
         display(bootstrap_summary.round(5))
     else:
         bootstrap_summary = pd.DataFrame()
@@ -5855,7 +5857,7 @@ def stage_057():
                 relative_validity = np.nan
             grid_rows.append({'min_cluster_fraction': frac, 'min_cluster_size': mcs, 'min_samples': min_samples, 'n_clusters': n_clusters, 'noise_fraction': noise_fraction, 'silhouette_nonnoise': silhouette, 'relative_validity': relative_validity, 'ARI_vs_default': adjusted_rand_score(reference_labels, labels)})
     hdbscan_grid = pd.DataFrame(grid_rows)
-    hdbscan_grid.to_csv(OUT_DIR / f'{TAG}_physical_hdbscan_grid.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_physical_hdbscan_grid.csv', hdbscan_grid.to_csv, index=False)
     display(hdbscan_grid.round(4))
     n_physical_clusters, physical_noise_fraction, physical_silhouette = hdbscan_metrics(physical_labels, X_phys)
     stability_median_ari = float(hdbscan_grid['ARI_vs_default'].median())
@@ -5913,7 +5915,7 @@ def stage_058():
         g = physical_work.loc[physical_work['physical_cluster'] == cluster_id]
         cluster_rows.append({'cluster': int(cluster_id), 'n_total': len(g), 'n_discovery': int(np.sum(g['split'] == 'discovery')), 'n_validation': int(np.sum(g['split'] == 'validation')), 'blocks_present': int(g['time_block'].nunique()), 'dwell_median_ms': g['dwell_ms'].median(), 'amplitude_resid_median': g['amplitude_residual'].median(), 'amplitude_fracchange_median': g[AMP_FRAC_COL].median(), 'peak_to_sustained_median': g['peak_to_sustained'].median(), 'shape_factor_median': g['shape_factor'].median()})
     physical_cluster_summary = pd.DataFrame(cluster_rows)
-    physical_cluster_summary.to_csv(OUT_DIR / f'{TAG}_physical_cluster_summary.csv', index=False)
+    write_staged(OUT_DIR / f'{TAG}_physical_cluster_summary.csv', physical_cluster_summary.to_csv, index=False)
     display(physical_cluster_summary.round(4))
     nonnoise = physical_work['physical_cluster'] != -1
     time_table = pd.crosstab(physical_work.loc[nonnoise, 'physical_cluster'], physical_work.loc[nonnoise, 'time_block'])
@@ -6194,11 +6196,11 @@ def stage_062():
         check_cancelled(_acid_cancel)
         label_cols = [c for c in result['work'].columns if c.startswith(f'{name}_')]
         try:
-            result['work'][['event_id'] + label_cols].to_parquet(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_{name}_labels.parquet', index=False)
+            write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_{name}_labels.parquet', result['work'][['event_id'] + label_cols].to_parquet, index=False)
         except ImportError:
-            result['work'][['event_id'] + label_cols].to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_{name}_labels.csv', index=False)
-        result['grid'].to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_{name}_hdbscan_grid.csv', index=False)
-        result['gmm_summary'].to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_{name}_gmm_components.csv', index=False)
+            write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_{name}_labels.csv', result['work'][['event_id'] + label_cols].to_csv, index=False)
+        write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_{name}_hdbscan_grid.csv', result['grid'].to_csv, index=False)
+        write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_{name}_gmm_components.csv', result['gmm_summary'].to_csv, index=False)
     print('Saved extended-tier labels, grids, and component tables to', OUT_DIR)
 
 
@@ -6803,7 +6805,7 @@ def stage_069():
             ax.set_title(title)
             plt.colorbar(sc, ax=ax, label=label_col)
         finish_figure('10_latent_corroboration')
-        np.savez_compressed(OUT_DIR / f'{TAG}_duration_normalized_latents.npz', event_id=np.asarray(latent_event_ids), latents=Z_latent)
+        write_staged(OUT_DIR / f'{TAG}_duration_normalized_latents.npz', np.savez_compressed, event_id=np.asarray(latent_event_ids), latents=Z_latent)
         latent_summary = {'n_events': len(Z_latent), 'latent_dimensions': Z_latent.shape[1]}
         print('Latent corroboration complete:', latent_summary)
     else:
@@ -6843,13 +6845,13 @@ def stage_071():
     if len(morphology):
         morph_export_cols = [c for c in ['event_id', 'rise_fraction', 'fall_fraction', 'edge_asymmetry', 'center_of_mass_asymmetry', 'plateau_fraction', 'intra_variability', 'two_level_candidate', 'two_level_delta_bic', 'two_level_separation', 'morphology_cluster', 'morphology_cluster_strength'] if c in morphology]
         final_catalog = final_catalog.merge(morphology[morph_export_cols], on='event_id', how='left')
-        morphology.to_parquet(OUT_DIR / f'{TAG}_long_event_morphology.parquet', index=False)
-        np.savez_compressed(OUT_DIR / f'{TAG}_long_event_waveforms.npz', event_id=morphology['event_id'].to_numpy(str), waveforms=morphology_waveforms)
+        write_staged(OUT_DIR / f'{TAG}_long_event_morphology.parquet', morphology.to_parquet, index=False)
+        write_staged(OUT_DIR / f'{TAG}_long_event_waveforms.npz', np.savez_compressed, event_id=morphology['event_id'].to_numpy(str), waveforms=morphology_waveforms)
         if len(morphology_cluster_summary):
-            morphology_cluster_summary.to_csv(OUT_DIR / f'{TAG}_morphology_cluster_summary.csv', index=False)
-    final_catalog.to_parquet(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_final_catalog.parquet', index=False)
-    primary_scalar['scores'].to_csv(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_scalar_gmm_scores.csv', index=False)
-    phys_gmm_scores.to_csv(OUT_DIR / f'{TAG}_physical_gmm_scores.csv', index=False)
+            write_staged(OUT_DIR / f'{TAG}_morphology_cluster_summary.csv', morphology_cluster_summary.to_csv, index=False)
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_final_catalog.parquet', final_catalog.to_parquet, index=False)
+    write_staged(OUT_DIR / f'{TAG}_{PRIMARY_SET_NAME}_scalar_gmm_scores.csv', primary_scalar['scores'].to_csv, index=False)
+    write_staged(OUT_DIR / f'{TAG}_physical_gmm_scores.csv', phys_gmm_scores.to_csv, index=False)
 
     def json_ready(value):
         if isinstance(value, dict):
@@ -6880,9 +6882,9 @@ def stage_071():
         screening_outcome = 'At least one candidate structure was found, but evidence is method- or detector-dependent.'
     report = {'tag': TAG, 'primary_set': PRIMARY_SET_NAME, 'input_fingerprints': INPUT_FINGERPRINTS, 'recording': {'n_samples': n_samples, 'fs_hz': fs, 'duration_s': duration_s, 'event_polarity': polarity, 'raw_source': raw_source}, 'detection': {'primary_detector': PRIMARY_DETECTOR, 'cusum': {'dual_scale': CUSUM_DUAL_SCALE, 'scales': {name: {'delta_sigma': d, 'h_sigma': h, 'block_ms': CUSUM_SCALES[name]['block_ms'], 'selection': cusum_selection_notes[name], 'budget_met': cusum_scale_ok[name], 'n_regions': len(cusum_scale_results[name]['regions'])} for name, (d, h) in cusum_selected.items()}, 'regions_by_scale': cusum_level_table['cusum_scale'].value_counts().to_dict(), 'delta_sigma': CUSUM_DELTA, 'h_sigma': CUSUM_H, 'selection': cusum_selection_note, 'false_alarms_per_s_quiet': cusum_false_alarm_rate, 'false_alarms_per_s_gate_surviving': cusum_false_alarm_rate_gated, 'expected_false_alarms_full_recording': cusum_false_alarm_rate * duration_s, 'expected_gate_surviving_false_alarms_full_recording': cusum_false_alarm_rate_gated * duration_s, 'budget_met': cusum_calibration_ok, 'noise_timescales': noise_timescales.to_dict(orient='records'), 'calibration_quiet_seconds': calibration_seconds, 'n_injections': len(injection_plan), 'recall_map': cusum_recall_map.to_dict(orient='records'), 'candidates': len(cusum_candidate_regions), 'accepted': int(cusum_catalog['accepted'].sum()), 'multi_level_candidates': int((cusum_level_table['cusum_n_levels'] >= 2).sum())}, 'acceptance_gate': {'statistic': GATE_STATISTIC, 'mode': SUSTAINED_GATE_MODE, 'sigma': SUSTAINED_GATE_SIGMA, 'absolute_pA': SUSTAINED_GATE_PA, 'floor_pA_by_dwell_ms': {str(d): float(acceptance_floor_pA(d)) for d in (0.1, 0.2, 0.5, 1.0, 5.0, 20.0, 100.0)}}, 'threshold_candidates': len(threshold_candidate_regions), 'threshold_accepted': int(threshold_catalog['accepted'].sum()), 'cusum_threshold_matches': len(match_table), 'resistive_detected': DETECT_RESISTIVE, 'resistive_cusum_candidates': len(cusum_candidate_regions_res), 'resistive_cusum_accepted': int(detector_catalogs['cusum_resistive']['accepted'].sum()) if 'cusum_resistive' in detector_catalogs else 0, 'resistive_threshold_candidates': len(threshold_candidate_regions_res), 'resistive_cusum_threshold_matches': len(resistive_match_table), 'resistive_precursors_of_conductive': int((detector_catalogs['cusum_resistive']['accepted'] & detector_catalogs['cusum_resistive']['precursor_of_conductive']).sum()) if 'cusum_resistive' in detector_catalogs else 0, 'primary_polarity': primary_polarity, 'stage0': {k: meta.get(k) for k in ('line_noise_method', 'line_noise_note', 'mains_frequency_hz', 'baseline_window_s', 'baseline_decim', 'adc_step_pA', 'raw_storage', 'qc_mad_noise_pA', 'qc_psd_before', 'qc_psd_after', 'abf_header')}, 'student_run': RUN_STUDENT, 'student_candidates': len(student_candidate_regions), 'student_accepted': int(student_catalog['accepted'].sum()) if len(student_catalog) else 0, 'student_threshold_matches': len(student_match_table), 'primary_events': len(primary_catalog)}, 'scalar_screen': {'target': primary_scalar['target'], 'best_bic_k': primary_scalar['best_bic_k'], 'best_heldout_k': primary_scalar['best_val_k'], 'delta_bic_vs_1': primary_scalar['delta_bic_vs_1'], 'heldout_ll_gain_vs_1': primary_scalar['heldout_ll_gain_vs_1'], 'means': primary_scalar['means'], 'stds': primary_scalar['stds'], 'weights': primary_scalar['weights'], 'min_separation': primary_scalar['min_separation'], 'min_block_presence': primary_scalar['min_block_presence'], 'dip_p': primary_scalar['dip_p'], 'candidate': scalar_candidate, 'detector_consistent': detector_consistent_scalar}, 'physical_clustering': {'n_clusters': n_physical_clusters, 'noise_fraction': physical_noise_fraction, 'validation_assigned_fraction': validation_assigned_fraction, 'parameter_grid_median_ari': stability_median_ari, 'all_clusters_recur_in_validation': all_clusters_recur, 'time_cramers_v': physical_time_cramers_v, 'candidate': physical_cluster_candidate, 'gmm_best_bic_k': phys_gmm_best_bic, 'gmm_best_heldout_k': phys_gmm_best_val, 'gmm_hdbscan_ari': phys_gmm_hdbscan_ari}, 'morphology': {'enabled': RUN_MORPHOLOGY, 'usable_long_events': len(morphology), 'time_cramers_v': morph_time_cramers_v, 'physical_ari': morph_physical_ari, 'candidate': morphology_cluster_candidate}, 'latent_corroboration': latent_summary, 'screening_outcome': screening_outcome, 'caution': 'Any positive result requires confirmation in an independent 30 h recording before molecular interpretation.'}
     report_path = OUT_DIR / f'{TAG}_subpopulation_report.json'
-    report_path.write_text(json.dumps(json_ready(report), indent=2))
+    write_staged(report_path, Path.write_text, json.dumps(json_ready(report), indent=2))
     config_export = {name: value for name, value in globals().copy().items() if name in {'TAG', 'STUDENT_ENTER_THRESHOLD', 'STUDENT_EXIT_THRESHOLD', 'SMOOTHING_KERNEL', 'MERGE_GAP_MS', 'MIN_EVENT_MS', 'SUSTAINED_GATE_SIGMA', 'THRESHOLD_ENTER_SIGMA', 'THRESHOLD_EXIT_SIGMA', 'LOCAL_CONTEXT_MS', 'MAX_LOCAL_CONTEXT_MS', 'MATCH_TOLERANCE_MS', 'PRIMARY_SET_NAME', 'N_TIME_BLOCKS', 'PHYSICAL_FEATURES', 'MORPH_MIN_DWELL_MS', 'MORPH_POINTS', 'RUN_STUDENT', 'PRIMARY_DETECTOR', 'AMPLITUDE_STATISTIC', 'BASELINE_MODE', 'SUSTAINED_GATE_MODE', 'SUSTAINED_GATE_NOISE_QUANTILE', 'CUSUM_DUAL_SCALE', 'CUSUM_DELTA', 'CUSUM_H', 'CUSUM_PULSE_DELTA', 'CUSUM_PULSE_H', 'CUSUM_BLOCK_MS', 'CUSUM_PULSE_BLOCK_MS', 'CUSUM_PASS1_BLOCK_MS', 'CUSUM_END_TOL_SIGMA', 'CUSUM_PRE_BASELINE_MS', 'CUSUM_LEVEL_EST_MS', 'CUSUM_MAX_EVENT_S', 'CUSUM_FA_BUDGET_PER_S', 'CUSUM_RAW_FA_MAX_PER_S', 'CUSUM_RECALL_TOLERANCE', 'CUSUM_FALLBACK_TO_MATCHED', 'CUSUM_TARGET_MIN_DEPTH_PA', 'CUSUM_TARGET_MIN_DWELL_MS', 'CUSUM_INJECT_DEPTHS_PA', 'CUSUM_INJECT_DWELLS_MS', 'CUSUM_INJECT_EDGE_TAU_MS', 'PREPROCESS', 'LINE_NOISE_METHOD', 'NOTCH_FREQS', 'NOTCH_BW_HZ', 'LINE_FIT_WINDOW_S', 'LINE_FIT_MASK_SIGMA', 'BASELINE_WINDOW_S', 'BASELINE_DECIM', 'STORE_RAW_AS_CODES', 'DETECT_RESISTIVE'}}
-    (OUT_DIR / f'{TAG}_analysis_config.json').write_text(json.dumps(json_ready(config_export), indent=2))
+    write_staged(OUT_DIR / f'{TAG}_analysis_config.json', Path.write_text, json.dumps(json_ready(config_export), indent=2))
     print('=' * 88)
     print('SCREENING OUTCOME')
     print(screening_outcome)
@@ -6936,7 +6938,7 @@ def stage_073():
     _report['spike_context_tests'] = spike_context_tests
     _report['amplitude_baseline_comparison'] = {'canonical': BASELINE_MODE, 'amplitudes': baseline_amplitude_table.to_dict(orient='records'), 'scalar_screen': baseline_screen_table.to_dict(orient='records'), 'gate_overlap': _ov.to_dict()}
     _report['extended_feature_tiers'] = {'gates': {'moment_min_samples': EXT_MOMENT_MIN_SAMPLES, 'spectral_min_samples': EXT_SPECTRAL_MIN_SAMPLES, 'context_ms': EXT_CONTEXT_MS}, 'univariate_multimodal_in_both_halves': flagged_features, 'tiers': _tiers, 'extended_outcome': extended_outcome}
-    report_path.write_text(json.dumps(json_ready(_report), indent=2))
+    write_staged(report_path, Path.write_text, json.dumps(json_ready(_report), indent=2))
     print('=' * 88)
     print('INCUBATION READING (add-on H): reference-model families in this tag')
     for _row in event_families['family_table']:

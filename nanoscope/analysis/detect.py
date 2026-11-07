@@ -59,6 +59,7 @@ from .cancel import CancelFlag, check_cancelled, propagate_cancel
 from .characterize import characterize
 from .events import empty_df, n_clipped_boundary, span_provenance
 from .filters import lowpass, measure_rise_time, noise_rms
+from .detection_noise import detection_noise_profile
 from .measurement_quality import build_measurement_quality
 
 try:  # pragma: no cover - packaging detail
@@ -657,6 +658,8 @@ def detect_events(
     polarity: int | None = None,
     k_in: float = 5.0,
     k_out: float = 2.0,
+    noise_policy: str = "auto",
+    noise_window_s: float = 0.25,
     min_dwell_s: float = 2e-5,
     max_dwell_s: float | None = None,
     baseline: np.ndarray | float | None = None,
@@ -689,6 +692,16 @@ def detect_events(
         k_out: Exit threshold, in units of the noise RMS. Must be < `k_in`;
             the gap between them is what stops noise chatter at the crossing
             from shattering one event into many.
+        noise_policy: ``'auto'`` keeps the historical global MAD threshold for
+            stationary noise, switching to robust local thresholds when local
+            noise scales differ by at least 3x. ``'global'`` explicitly reproduces
+            the legacy behavior; ``'local'`` requests local thresholds. This only
+            changes detection: row SNR still uses the global noise reference.
+        noise_window_s: Local noise window in seconds (default 0.25). Actual
+            windows contain at least 128 samples and at most 4096 windows are
+            used. Neighboring-window maxima protect noise-change boundaries.
+            The requested/effective policy, recipe and profile digest are saved
+            in provenance; old provenance without these keys is replayed global.
         min_dwell_s: Events shorter than this are dropped as sub-resolution.
         max_dwell_s: Events longer than this are kept but marked
             `accepted=False` with `flag='dwell>max_dwell_s'` -- a clog is real
@@ -958,7 +971,17 @@ def detect_events(
     # -- Schmitt trigger, vectorised ----------------------------------------
     check_cancelled(cancel)
     thr_in, thr_out = k_in * noise, k_out * noise
-    starts, ends, n_candidates = _hysteresis_runs(dev_padded, n, thr_in, thr_out)
+    local_noise, noise_prov = detection_noise_profile(
+        resid, fs, policy=noise_policy, window_s=noise_window_s,
+        global_noise=noise, cancel=cancel,
+    )
+    if local_noise is None:
+        starts, ends, n_candidates = _hysteresis_runs(dev_padded, n, thr_in, thr_out)
+    else:
+        # Normalize once, then use the exact same vectorized Schmitt kernel and
+        # audit counters. Only thresholds change; characterization keeps pA.
+        np.divide(dev, local_noise, out=dev)
+        starts, ends, n_candidates = _hysteresis_runs(dev_padded, n, k_in, k_out)
     # The BIGGEST rejection the detector makes, and until now the only one with no
     # counter: every run that crossed the EXIT threshold (k_out·noise) but whose peak
     # never reached the ENTER threshold (k_in·noise) is noise, and is dropped here.
@@ -1072,8 +1095,13 @@ def detect_events(
         "merge_gap_s": None if merge_gap_s is None else float(merge_gap_s),
         "noise_rms_pA": noise,
         "noise_method": "MAD (filters.noise_rms)",
-        "threshold_in_pA": float(thr_in),
-        "threshold_out_pA": float(thr_out),
+        **noise_prov,
+        "threshold_in_pA": float(thr_in) if local_noise is None else None,
+        "threshold_out_pA": float(thr_out) if local_noise is None else None,
+        "threshold_in_range_pA": [k_in * noise_prov["noise_local_scale_min_pA"],
+                                  k_in * noise_prov["noise_local_scale_max_pA"]],
+        "threshold_out_range_pA": [k_out * noise_prov["noise_local_scale_min_pA"],
+                                   k_out * noise_prov["noise_local_scale_max_pA"]],
         "polarity": polarity,
         "polarity_requested": polarity_requested,
         "polarity_source": polarity_source,
@@ -1249,11 +1277,15 @@ def detect_events(
 # the 20 frozen EventSet columns changes; the kernels only decide WHICH spans get
 # measured.
 #
-# [MEASURED] AGAINST THE APP'S OWN ANSWER, on the owner's 15 s apo-ferritin recording
+# [HISTORICAL CONTROL] AGAINST A FIXED REFERENCE, on the owner's 15 s apo-ferritin recording
 # (``..._0004_process _ -1000 mV_ 385-400 s time trace.abf``, 749,651 samples,
-# 50 kHz). Reference = `detect_events` at ITS defaults: 115 events, median dwell
+# 50 kHz). Reference = `detect_events` with global thresholds and an explicitly
+# supplied notebook baseline (rough .5 s, base .1 s, decim 66, mask 3.5, dilation 1 ms,
+# legacy sample counts and endpoint gap fills): 115 events, median dwell
 # 20.1 ms (max 33.9), median depth 90.3 pA, median SNR 15.8, and a median rise time
 # of 1.01 ms over the 88 of the 115 events where `rise_s` is defined at all.
+# These historical counts are not predictions for current automatic baseline/noise
+# policies. This reference is detector output, not manually labelled event truth.
 # Recall = reference events overlapped; precision = returned spans overlapping a
 # reference event; each kernel run from the SAME `DetectionBasis`:
 #
@@ -1308,7 +1340,8 @@ def noise_level(x: np.ndarray, method: str = "mad") -> float:
       a cross-check: when the two disagree by more than a few percent, the trace is not
       the symmetric-noise-plus-sparse-events you think it is.
 
-    [MEASURED] on the owner's 15 s apo recording (``..._0004_process _ -1000 mV_
+    [HISTORICAL CONTROL] with the fixed notebook baseline above, on the owner's
+    15 s apo recording (``..._0004_process _ -1000 mV_
     385-400 s time trace.abf``, 749,651 samples, channel IN15, real events in it):
     MAD 5.7311 pA, IQR 5.7891 pA, std 32.5321 pA. The std is 5.7x the MAD because the
     events are in the trace, so a 5-sigma threshold taken from it sits at 163 pA --
@@ -1559,8 +1592,8 @@ def detect_fixed_threshold(
     such a trace at all: the other three go through `detection_basis`, whose noise
     estimate is 0 on a noiseless trace, and it refuses rather than divide by it.
 
-    [MEASURED] ON THE OWNER'S OWN RECORDING (15 s apo, 749,651 samples; reference =
-    `detect_events` at its defaults, 115 events, median dwell 20.1 ms), with the
+    [HISTORICAL CONTROL] ON THE OWNER'S OWN RECORDING (15 s apo, 749,651 samples; reference =
+    `detect_events` on the fixed historical baseline/global-noise benchmark, 115 events, median dwell 20.1 ms), with the
     level set to the app's own bar expressed absolutely -- baseline median plus
     5 sigma to enter, 2 sigma to exit: 158 spans, recall 0.896, PRECISION 0.627,
     median span 15.5 ms. The precision is where the absolute level costs you: with
@@ -1682,8 +1715,8 @@ def detect_peaks(
     threshold to set. `detect_fixed_threshold` is the one that runs on a literally
     noiseless trace.)
 
-    [MEASURED] ON THE OWNER'S OWN RECORDING -- READ THIS BEFORE COMPARING DWELLS.
-    15 s apo, 749,651 samples; reference = `detect_events` at its defaults, 115
+    [HISTORICAL CONTROL] ON THE OWNER'S OWN RECORDING -- READ THIS BEFORE COMPARING DWELLS.
+    15 s apo, 749,651 samples; reference = `detect_events` on the fixed historical baseline/global-noise benchmark, 115
     events, median dwell 20.1 ms. At the defaults: 278 spans, recall 0.852,
     precision 1.000 -- correct about WHERE, and 2.42 spans per reference event,
     with a median span of 0.44 ms against the app's 20.1 ms. That 46x is not an
@@ -1838,9 +1871,9 @@ def detect_derivative(
     `detection_basis` refuses a trace whose MAD is exactly 0 before this kernel ever
     gets to measure one.)
 
-    [MEASURED] ON THE OWNER'S OWN RECORDING -- THIS KERNEL NEEDS TUNING AND MAY NOT
-    REACH A USABLE POINT. 15 s apo, 749,651 samples; reference = `detect_events` at
-    its defaults, 115 events, median dwell 20.1 ms, median depth 90.3 pA, and a
+    [HISTORICAL CONTROL] ON THE OWNER'S OWN RECORDING -- THIS KERNEL NEEDS TUNING AND MAY NOT
+    REACH A USABLE POINT. 15 s apo, 749,651 samples; reference = `detect_events` on the fixed historical
+    baseline/global-noise benchmark, 115 events, median dwell 20.1 ms, median depth 90.3 pA, and a
     MEDIAN RISE TIME OF 1.01 ms (over the 88 events where `rise_s` is defined). At the shipped defaults: 146 spans, recall 0.678, precision
     1.000, median span 4.49 ms -- and one span of 412.9 ms starting at t = 12.725 s,
     a rising edge that found no falling edge for 20,643 samples. The cause is the
@@ -2019,10 +2052,10 @@ def detect_tkeo(
     Gaussian noise. Everything from k = 20 to k = 200 gives 1.000 / 1.000 there, so
     20 is the loose end of a wide plateau rather than a tuned number.
 
-    [MEASURED] ON THE OWNER'S OWN RECORDING, and it is the flat-topped warning above
+    [HISTORICAL CONTROL] ON THE OWNER'S OWN RECORDING, and it is the flat-topped warning above
     playing out on real data. 15 s apo, 749,651 samples; reference = `detect_events`
-    at its defaults, 115 events, median dwell 20.1 ms. At the defaults: 14,006 spans
-    -- 149 per reference event -- recall 0.817, precision 0.998, median span 0.02 ms
+    on the fixed historical baseline/global-noise benchmark, 115 events, median dwell 20.1 ms. At the defaults: 14,006 spans
+    -- about 122 per reference event -- recall 0.817, precision 0.998, median span 0.02 ms
     (one sample). Every one of those is a real edge; none of them is an event. With
     ``link_gap_s=2e-3``: 108 spans, recall 0.826, precision 0.796, median span
     19.6 ms against the app's 20.1 ms, which IS dwell-comparable. SET `link_gap_s`
@@ -2110,7 +2143,8 @@ def detect_tkeo(
         # drops interior bounds), which is what reduceat requires; `dev` is padded by
         # one slot so a final ``end == n`` is a legal index. Even elements are the
         # in-run sums, odd elements the gaps between them, so [::2] is the answer.
-        # [MEASURED] at the default k on the owner's 15 s apo recording (749,651
+        # [HISTORICAL CONTROL] at default k and the fixed baseline above, on the
+        # owner's 15 s apo recording (749,651
         # samples) the gate faces 14,006 runs: the list comprehension this replaced
         # took 25.8 ms, the reduceat takes 0.51 ms, and the whole `detect_tkeo` call
         # goes 58.2 ms -> 33.2 ms (best of 5). The spans returned are bit-identical.

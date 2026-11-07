@@ -175,13 +175,15 @@ def test_log_toggles_apply(window):
     w.set_view(DENSITY)
     w.set_density_log(True, False)                        # dwell on a log axis
     assert w.density_counts().sum() == 24                 # all dwell values positive -> kept
-    assert "log10" in w._density_main.getAxis("bottom").labelText
-    # log10 of a sub-millisecond dwell is negative, so the binned x-range is < 0
+    axis = w._density_main.getAxis("bottom")
+    assert axis.labelText == 'Dwell (ms) (log)' and axis.logMode
+    # Raw coordinates remain log10(seconds); displayed ticks and labels use ms.
     xr = w._density_main.viewRange()[0]
     assert xr[1] < 0
 
     w.set_density_log(False, False)
-    assert "log10" not in w._density_main.getAxis("bottom").labelText
+    assert w.density_counts().sum() == 24
+    assert axis.labelText == 'Dwell (ms)' and not axis.logMode
 
 
 def test_colormap_choice_changes_the_lut(window):
@@ -295,6 +297,8 @@ def test_event_plots_action_gated_and_opens_single_window(qapp, qtbot, tmp_path)
     win._open_event_plots()
     first = win._event_plot_window
     assert first is not None
+    assert not first.has_data()
+    first.inspector_adapter().update()
     assert first.has_data()
     assert first.density_counts().sum() == len(ev.df)
     # re-opening focuses the SAME instance (never a second window)

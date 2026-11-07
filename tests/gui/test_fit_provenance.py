@@ -49,7 +49,7 @@ MIN_DWELL_S = 5e-5
 # ================================================================================================
 
 def _planted_trace(seconds: float = 12.0, *, seed: int = 0, tau: float = 3e-4,
-                   cutoff_limited: bool = False) -> np.ndarray:
+                   cutoff_limited: bool = False, depth_mixture: bool = False) -> np.ndarray:
     """A current trace with exponentially-distributed planted blockades."""
     rng = np.random.default_rng(seed)
     n = int(FS * seconds)
@@ -59,7 +59,8 @@ def _planted_trace(seconds: float = 12.0, *, seed: int = 0, tau: float = 3e-4,
         d = max(6 if cutoff_limited else 20, int(rng.exponential(tau) * FS))
         if pos + d + 3000 >= n:
             break
-        x[pos:pos + d] -= abs(rng.normal(60.0, 12.0))
+        depth = rng.normal(rng.choice([45., 90.]), 4.) if depth_mixture else rng.normal(60., 12.)
+        x[pos:pos + d] -= abs(depth)
         pos += d + int(rng.integers(2000, 5000))
     return np.ascontiguousarray(x, dtype=np.float32)
 
@@ -83,7 +84,20 @@ def _synth_doc(tmp_path, name: str = "pore_p1.dat", **trace_kwargs) -> TraceDocu
 
 
 @pytest.fixture
-def window(qapp, qtbot):
+def window(qapp, qtbot, monkeypatch):
+    # These tests establish that the exact fitted object survives GUI/export
+    # routes, not bootstrap coverage. Keep the real maximum-likelihood point
+    # estimates; full-budget uncertainty and persistence are tested separately.
+    from nanoscope.gui import analysis_panel
+    original_dwell, original_depth = analysis_panel.fit_dwell, analysis_panel.fit_depth
+    def bounded_dwell(*args, **kwargs):
+        kwargs['n_boot'] = 0
+        return original_dwell(*args, **kwargs)
+    def bounded_depth(*args, **kwargs):
+        kwargs['n_boot'] = 0
+        return original_depth(*args, **kwargs)
+    monkeypatch.setattr(analysis_panel, 'fit_dwell', bounded_dwell)
+    monkeypatch.setattr(analysis_panel, 'fit_depth', bounded_depth)
     w = MainWindow()
     qtbot.addWidget(w)
     yield w
@@ -312,6 +326,8 @@ def test_fits_panel_toggle_reaches_the_fit_and_the_count_is_shown(window, qtbot,
 
     assert stats.use_filter_limited.isChecked() is False, "exclusion is the default"
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     excluded = window._session.results.get(doc_id, channel, "fit.dwell").payload
     assert excluded.meta["use_filter_limited"] is False
     assert excluded.meta["n_excluded_filter_limited"] == n_limited
@@ -319,6 +335,8 @@ def test_fits_panel_toggle_reaches_the_fit_and_the_count_is_shown(window, qtbot,
     stats.use_filter_limited.setChecked(True)
     assert "INCLUDED in the fits" in stats.filter_limited_label.text()
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     kept = window._session.results.get(doc_id, channel, "fit.dwell").payload
     assert kept.meta["use_filter_limited"] is True
     assert kept.meta["n_excluded_filter_limited"] == 0
@@ -349,6 +367,8 @@ def test_exported_dwell_figure_uses_the_two_component_fit_the_panel_displayed(
     stats = window._analysis_panel._stats
     stats.n_components_dwell.setValue(2)
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     stored = window._session.results.get(doc_id, channel, "fit.dwell")
     assert stored is not None and stored.payload.meta["n_components"] == 2
     panel_taus = [v for k, v in stored.payload.params.items() if k.startswith("tau")]
@@ -376,12 +396,17 @@ def test_exported_dwell_figure_uses_the_two_component_fit_the_panel_displayed(
 
 
 def test_exported_depth_figure_uses_the_stored_fit_too(window, qtbot, tmp_path, monkeypatch):
-    doc_id, channel = _install_and_detect(window, qtbot, tmp_path)
+    # Two planted depth populations make the requested k=2 model identifiable.
+    # This tests exporting the exact stored fit, not overfitting one population.
+    doc_id, channel = _install_and_detect(window, qtbot, tmp_path, depth_mixture=True)
     stats = window._analysis_panel._stats
     stats.n_components_depth.setValue(2)
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     stored = window._session.results.get(doc_id, channel, "fit.depth")
     assert stored is not None and stored.payload.meta["n_components"] == 2
+    assert stored.payload.params["mu_2"] - stored.payload.params["mu_1"] > .025
 
     stem = _export_to(window, tmp_path, monkeypatch)
     exported = pd.read_csv(f"{stem}_depth.csv")
@@ -409,6 +434,8 @@ def test_a_fit_from_before_a_curation_edit_is_not_stamped_on_the_figure(
     doc_id, channel = _install_and_detect(window, qtbot, tmp_path)
     stats = window._analysis_panel._stats
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     assert window._session.results.get(doc_id, channel, "fit.dwell") is not None
 
     # The user then rejects some events; the stored fit now describes a different sample.
@@ -426,6 +453,8 @@ def test_export_status_names_the_fit_it_used(window, qtbot, tmp_path, monkeypatc
     stats = window._analysis_panel._stats
     stats.n_components_dwell.setValue(2)
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
 
     _export_to(window, tmp_path, monkeypatch)
 
@@ -458,6 +487,8 @@ def test_all_three_readouts_annotate_the_same_tau(window, qtbot, tmp_path, monke
 
     stats = window._analysis_panel._stats
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     panel = window._session.results.get(doc_id, channel, "fit.dwell").payload
 
     window._act_plots.trigger()
@@ -478,8 +509,9 @@ def test_all_three_readouts_annotate_the_same_tau(window, qtbot, tmp_path, monke
 
     assert plotted.params["tau_1"] == panel.params["tau_1"]          # (a) == (b), exactly
     assert stored.params["tau_1"] == panel.params["tau_1"]           # (c) is that same object
-    assert rf"$\tau$ = {panel.params['tau_1'] * 1e6:.1f} " in text   # ...and it is what is drawn
-    assert rf"$t_{{min}}$ = {MIN_DWELL_S * 1e6:.1f} $\mu$s" in text
+    assert rf"$\tau$ = {panel.params['tau_1'] * 1e3:.3g} " in text   # ...and it is what is drawn
+    assert rf"$t_{{min}}$ = {MIN_DWELL_S * 1e3:.3g} ms" in text
+    assert next(line for line in text.splitlines() if r'$\tau$' in line).endswith(' ms')
     assert panel.meta["t_min"] == MIN_DWELL_S == plotted.meta["t_min"]
 
 
@@ -494,6 +526,8 @@ def test_exported_two_component_figure_annotates_BOTH_taus(
     stats = window._analysis_panel._stats
     stats.n_components_dwell.setValue(2)
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     stored = window._session.results.get(doc_id, channel, "fit.dwell").payload
     assert stored.meta["n_components"] == 2
 
@@ -507,10 +541,11 @@ def test_exported_two_component_figure_annotates_BOTH_taus(
         plt.close(refit)
 
     assert text.count(r"$\tau$ = ") == 2
+    assert all(line.endswith(' ms') for line in text.splitlines() if r'$\tau$' in line)
     assert refit_text.count(r"$\tau$ = ") == 1     # the bug's output, for contrast
     for _, val, _ in sorted(
             ((k, v, None) for k, v in stored.params.items() if k.startswith("tau"))):
-        assert rf"$\tau$ = {val * 1e6:.1f} " in text
+        assert rf"$\tau$ = {val * 1e3:.3g} " in text
 
 
 def test_figure_shades_at_the_floor_the_fit_actually_used(qapp, tmp_path):

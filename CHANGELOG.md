@@ -5,7 +5,144 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ## Unreleased
 
+### Added
+
+- Schmitt detection offers Automatic, Local and Global noise thresholds with a visible noise
+  window, versioned bounded local profiles, matching threshold overlays, and export metadata.
+  Legacy saved runs retain their global policy; local thresholds do not masquerade as one
+  scalar distribution-fit floor or change the event table's global SNR definition.
+
+- Background comparison sources now include editable time/current anchors, separate
+  regions for genuine baseline jumps, existing open-pore references, and an independent
+  reference recording with explicit shift, scale, offset and optional linear resampling.
+  Custom recipes are inspection/export only, persist with source/calibration/unit bindings,
+  and export all samples with an atomic CSV and provenance JSON pair.
+- Nonlinear X–Y fitting for Gaussian peaks, exponentials, 4PL/5PL, Hill, Boltzmann,
+  stretched exponential, Lorentzian, Voigt, straight line, power law and safe custom
+  equations. Scatter and Voltage dependence expose parameter starts/bounds/fixed values,
+  sigma weights, robust losses, cancellable workers, residuals, uncertainty and JSON/CSV
+  export with saved project results.
+
+### Fixed
+
+- Automatic masked baselines use local noise-aware masks and robust flank anchors, preventing
+  noisy intervals from becoming one-sided interpolation bias and isolated endpoint samples
+  from biasing event depths. Stationary automatic gap filling uses the same robust anchors;
+  versioned replay distinguishes this from fixed legacy ML preprocessing.
+  Noise masking checks original and rough-residual signals together so dense events and
+  accelerating drift do not inflate their own mask threshold. Manual ML preparation retains
+  exact training arithmetic; historical baseline descriptions distinguish settings from replay.
+- Signal Conditioning invalidates obsolete layout items when moving live controls, preserving
+  widget ownership and callbacks. Baseline health prominently distinguishes numerical checks
+  from an unverified physical open-pore reference.
+- Baseline health and window ranking assess moderate-SNR long states separately from the
+  stronger-event median, preventing a damaged event from excluding itself from the assessment.
+  Unavailable median evidence remains unavailable and cannot win a ranking as zero intrusion.
+
+- Baseline sample/window counts are stable for round-off-sized changes at integer boundaries.
+  Numerical policy stamps guard exact replay; fixed ML training recipes retain legacy arithmetic.
+
+- Runtime baseline correction reports event-attenuation and occupancy risks from the
+  same fitted baseline used for correction. PCHIP bounds edge estimates by local data
+  to prevent unsupported excursions while retaining observed drift. Invalid AsLS domains
+  are refused, and changed endpoint algorithms invalidate exact replay of older results.
+- Background comparisons reject results after source, sample-rate, calibration or recipe
+  changes. Main-trace baseline drawings run in cancellable workers. Comparison output
+  choices no longer silently change the main-trace display; other enabled processing
+  stages are disclosed separately.
+- macOS builds keep TensorFlow's Python extension and native dependents on one
+  library image, preventing duplicate operation registration during ML startup.
+  Unavailable-runtime messages now distinguish packaged-app repair from source
+  environment dependency setup.
+- Nonlinear fitting now verifies local numerical sensitivities before reporting uncertainty,
+  withholds unrepresentable intervals, and reports ambiguous observation-noise prediction
+  bands instead of letting duplicate X values change them with row order.
+- Fit JSON/CSV exports and research exports stage complete replacements so write failures
+  preserve earlier files. Invalid saved fit metadata and failed overlay replacement leave
+  the prior applied fit intact; interval captions follow the requested confidence level.
+- Baseline edits update current and dormant figure warnings without recomputing retained
+  results. Empty updates retain their empty status, and managed comparison generation uses
+  the same explicit update path as the figure toolbar.
+- CUSUM open-pore autocorrelation now measures gaps outside the union of padded events.
+- Packaged builds reject incompatible dependency sets. The validated macOS environment
+  uses Qt 6.9.3 after native widget-lifecycle and rendering checks, with compatible
+  TensorFlow/Keras dependencies and recorded reproducible package constraints.
+
+- Nonlinear parameter uncertainty and curve bands respect parameter domains and local
+  scales, including logistic midpoints far smaller than the full dose range. Invalid
+  uncertainty is withheld with a warning instead of producing an unreadable saved fit.
+- Nonlinear R² uses resolved response variation, preserving the statistic when a large
+  constant baseline is added while continuing to identify constant responses.
+- Histogram confidence bands and residual graphics now round-trip through project and
+  figure snapshots without refitting. Distribution-fit bootstrap samples are persisted.
+- CDF diagnostics use declared support instead of normalizing to the observed range;
+  reference thresholds are explicitly descriptive. Truncated exponential component
+  support and selected-range Gaussian-mixture likelihoods follow the observation window.
+- Inspector fits run off the GUI thread, respect cancellation and reject stale inputs.
+  Centred/scaled linear regression preserves slopes at large X offsets; I-V gains OLS
+  intervals. Constant exponential responses are refused and log-response objectives
+  are identified in Voltage dependence.
+
 ### Changed
+
+- **Plotting redesign, Phases 3–4 and full reference workflow (2026-11-03 development source).**
+  Project Figures now expose New/Duplicate, multiple figures per type, freshness/dormant states,
+  recipe input requirements and optional wording recall. Shared styles are pinned by revision and
+  portable snapshot, with explicit project/local scopes and a default for plain New figures.
+  - Format supports per-series ink/visibility and shared source-name/color defaults, inherited
+    property markers and supported matplotlib text/series selection. Frame, palette, fractional
+    metrics, synthetic preview and optional physical canvas/column widths share the style model.
+    Existing scientific source/category identity colors and frozen Snapshots remain preserved.
+  - Declared time quantities display in ms across inputs, axes, tables, readouts, Study and report
+    figures. Inverse entry conversion and versioned saved-figure presentation preserve raw data,
+    fit parameters and CSV keys in their scientific basis. Unknown-rate samples, normalized time,
+    frequency/rates and charge keep their own units. Density conversion includes its inverse factor.
+  - Snapshot/composition workflows preserve lineage and panel-letter overrides. Serial selected-
+    figure export uses saved results and each pinned style's explicit sizing; missing named widths
+    and per-file failures are reported without silent recomputation or guessed journal requirements.
+  - Manual source covers the full workflow. Generated HTML/PDF/ZIP and final screenshot provenance
+    are rebuilt only after the Phase 4 validation/capture gate, not by this source-only change.
+
+
+- **Plotting redesign, Phase 2: independent named figures and project format v13 (2026-11-03).**
+  Analysis Explorer retains multiple figures of each analytical type, with separate sources,
+  pending/applied recipes, saved results, wording, appearance and session history. Create,
+  duplicate, rename, delete and restore figures without replacing another figure of that type;
+  inactive figures remain saved when their editor is unloaded. Snapshots and compositions retain
+  their own data and lineage. Historical v11/v12 files retain their native fields/resources, with
+  frozen compatibility defaults and named unsupported records instead of empty replacements.
+  - Every new project save is v13. Earlier projects still open here; older NanoScope builds cannot
+    open v13 projects. The first in-place conversion offers Save and convert / Save a copy / Cancel,
+    retains a SHA-verified original backup without overwriting unrelated backups, and verifies the
+    staged workspace before replacing the project. Recovery keeps its existing envelope.
+  - Writer version/build identity is diagnostic and separate from the format gate. Unknown fields,
+    foreign artifacts and unavailable-source state remain preserved. Generated manuals are deferred
+    until the remaining plotting phases are complete.
+
+- **Plotting redesign, Phase 1: one toolbar and a right inspector (2026-11-03).**
+  All eight Analysis Explorer pages now use **Data & analysis** and **Format**. Source and recipe
+  groups replace Section bands; the first two groups start open, later groups collapsed. The
+  common toolbar holds **Undo**, **Redo**, **Update plot ▾**, **Style ▾**, **Reset figure** and
+  **Export ▾**. Inspector width, visibility, tab and group states are remembered per user.
+  - **Update plot** commits the page's pending operation, with its pending count beside it;
+    Distributions commits sources, plot and fit choices together, while summaries/comparisons
+    generate explicitly. **Refresh from recordings** is in its menu. Ctrl/⌘Return (including keypad
+    Enter) commits the focused field first; Ctrl/⌘1 and Ctrl/⌘2 select the inspector tabs.
+  - **Format** selects an element and shows its properties. Click editable figure text to select
+    it and use the floating mini toolbar; double-click editing and right-click menus remain.
+    Inheritance markers clear one override; **Reset element**, **Reset look**, **Copy format** and
+    **Paste format** operate on styles without replacing wording. Axis Reset element also clears
+    its pinned range and major tick in one Undo step. Reset look preserves ranges and positions.
+    The later Phase 4 section above supersedes the initial matplotlib selection limitation.
+  - **Style ▾** applies built-in or locally saved looks to this page or every open page, preserving
+    hand-set text styles by default. Each page owns its Undo; **Undo style on N pages** can undo an
+    undisturbed batch. Saving a look excludes typed words and numerical settings.
+  - **Save to Figure Library…**, **Save figure bundle…** and **Open Figure Library** move into
+    **Export ▾**. Home's read-only **Refresh availability** sits beside search. Distributions moves
+    Lasso select and Reset view to its status line, templates to Recipes, and axis pins to Format.
+  - Scientific calculations, Phase 0 quantity-change resets, template wording promises, figure
+    fonts and project/export formats are preserved. Generated manuals and retained screenshots
+    require a separate rebuild/capture before distribution.
 
 - **Words you typed, and ranges you pinned, go back to automatic when a figure's quantity changes
   (plotting redesign, Phase 0, 2026-11-02).**
@@ -36,7 +173,14 @@ tags identify tested development baselines and do not promise a stable file or A
     is typed any more, so that records no step) and then **Undo**; **Undo** first and the pick after
     is a new change, which clears the words again. Distributions is the exception: its
     **Configuration** Undo takes the plot type and the words back together, so press **Undo** alone
-    there.
+    there. On the pages that have an appearance Undo (Voltage dependence, Distribution summaries,
+    Comparison figures, Event waveforms, Noise and Subpopulations) the **Undo** and **Redo**
+    tooltips name the step by what it took back (*Undo: reset title and Y label*, *Undo: reset
+    title, Y label and Y range*, *Undo: reset X range and Y range*), so it does not pass for a
+    **Reset figure**, whose tooltip reads *Undo: reset figure* when it also takes the look back; a
+    figure whose only customisation is typed words and ranges has nothing else for Reset figure to
+    take, so there the two read alike. Distributions' **Configuration** Undo counts steps and names
+    none (*Undo the last change to this plot's configuration (3 to step back).*).
   - **What counts, window by window.**
     - **Voltage dependence:** the **Metric**, which is the Y axis (the X axis is voltage whatever the
       metric, so its range stays), and the applied fit when **Apply fit** replaces one trend with
@@ -55,54 +199,93 @@ tags identify tested development baselines and do not promise a stable file or A
       come back). A Comparison figure is a picture without Axis properties: it has no range to take.
     - **Event waveforms:** the heatmap's **X** (it takes the map's X range) and **Y** (the map's Y
       range), the switch between the Event-count heatmap and Ensemble tabs (each view keeps its own
-      range, so it takes none), and **Normalize time** (it takes the ensemble's X range). **Log x**
-      and **Log y** take the range of their own axis of the map and leave the words, because the map
-      draws log10 values on a linear axis while one is ticked (*X range reset: the plot now shows
-      median depth against log10 of dwell.*); changing **Log scale** in the map's Axis properties,
-      though, keeps the range typed in that dialog (unticking it there to type a range in seconds is
-      how the map's X axis, which opens on a log axis, is pinned).
+      range, so it takes none), **Normalize time** (it takes the ensemble's X range) and **Align**
+      (start, center, extremum), which is what t = 0 means on the ensemble's X axis once time is in
+      seconds, so another alignment takes the words and that range too (*Title, X label, Y label and
+      X range reset: the plot now shows the ensemble with t = 0 at each event's deepest sample.*);
+      while time is normalised no alignment is drawn, the combo is greyed out and setting it takes
+      nothing. **Log x** and **Log y** take the range of their own axis of the map and leave the
+      words, because the map draws log10 values on a linear axis while one is ticked (*X range
+      reset: the plot now shows median depth against log10 of dwell.*); changing **Log scale** in
+      the map's Axis properties, though, keeps the range typed in that dialog (unticking it there to
+      type a range in seconds is how the map's X axis, which opens on a log axis, is pinned). A
+      range left as the dialog opened with it is carried across to the new units instead, log10 of
+      it when Log scale is ticked and ten to the power when it is unticked, so the map keeps its
+      frame; the major tick spacing the dialog opened with, which does not carry across, goes, and
+      so does a range that cannot be logged (a minimum at or below zero); a spacing typed in the
+      same dialog stays.
     - **Noise:** the **Show** view takes the words and no range (each view keeps its own, so
       Spectrogram and back brings the PSD's range back), and **Amplitude spectral density** on or
       off takes the words and the PSD's Y range, and leaves its frequency range.
     - **Subpopulations:** the **Embedding** takes the words and both axes of the scatter, not the
       waveforms'.
     - **Distributions:** the plot type and a column, which already took back the title, the axis
-      labels and the typed range of an axis that moved (the axis of the column that changed; both
-      axes on a plot-type change), and now take the fit label's wording too (wording typed for an
-      exponential, *Single exponential: {equation}, {n}*, used to stay over a linear fit); and the
-      applied fit (another model, another fixed number of components for a mixture, or Auto (BIC)
-      switched on or off for one), which takes back only the wording, the first fit applied after
-      *none* keeping wording typed ahead of it. The status line now names a range that went, words
-      and ranges together (*Title, X range and Y range reset: the plot is now set to show the
-      scatter of ycol against xcol.*), and a change that clears only a range says so instead of
-      leaving the line empty. The reset is part of the same **Configuration** Undo step as the change
-      that caused it. A column also moves on its own when you tick a source that lacks it (the
-      column boxes offer only the columns every ticked source has; the manual-measurement table has
-      no `depth_pA`), and the rule then runs as for a pick.
+      labels and the typed range of an axis that moved (the axis of the column that changed, and the
+      Y axis too while Normalize is *density*, whose unit is the column's; both axes on a plot-type
+      change), and now take the fit label's wording too (wording typed for an exponential, *Single
+      exponential: {equation}, {n}*, used to stay over a linear fit); and the applied fit (another
+      model, another fixed number of components for a mixture, or Auto (BIC) switched on or off for
+      one), which takes back only the wording, the first fit applied after *none* keeping wording
+      typed ahead of it; and the **Normalize** you pick (count, density, probability per bin), which
+      is what the histogram's Y axis counts, so it takes the words and the Y range in the step of
+      the pick, and the status line says what the histogram is now set to show (*Title, X label, Y
+      label, fit label wording and Y range reset: the plot is now set to show the histogram of
+      dwell_s as density, fitted with exponential.*). The switch to density that ticking a second
+      source makes by itself, and back to count when you are down to one, takes nothing, and neither
+      does a Normalize set on a page that is not the histogram. While Normalize is *density* the Y
+      axis is per the column's unit (*density (1/s)* over a dwell time, plain *density* over a
+      fractional depth), so a new column takes the Y range too; with *count* or *probability per
+      bin* the Y axis does not depend on the column and keeps its range. On the PCA page the
+      **Features** you tick are what its two axes are made of, so another set takes the words and
+      both ranges (PC1 and PC2 are other combinations of other columns), in the Configuration step
+      of the tick that changed it; on any other plot type the same list is a clustering setting and
+      takes nothing. The status line now names a range that went, words and ranges together (*Title,
+      X range and Y range reset: the plot is now set to show the scatter of ycol against xcol.*),
+      and a change that clears only a range says so instead of leaving the line empty. The reset is
+      part of the same **Configuration** Undo step as the change that caused it. A column also moves
+      on its own when you tick a source that lacks it (the column boxes offer only the columns every
+      ticked source has; the manual-measurement table has no `depth_pA`), and the rule then runs as
+      for a pick.
     - **I-V** has no such control and is unchanged; the study figure editor has none that changes
       what an axis shows.
+  - **Normalize and Align are a choice made beyond the owner's explicit list** (plot type, column,
+    metric, measurement and view), for the owner to veto. Neither is one of those, but each changes
+    what an axis shows (what the histogram's Y axis counts; what t = 0 means on the ensemble's X
+    axis), so the rule is built to run on both; a veto of either takes it out again and leaves the
+    other.
   - **What does not run the rule.** Choosing another recording or ticking another source that has
     the plotted column, applying a preset, a refresh of the same quantity, a figure's first draw, a
     log axis, |V|, bin counts, a colormap, a colour-by choice, the band, a subset of events,
-    Accepted only and the Welch settings keep the words, and so do Distributions' Time unit and a
-    change of its histogram normalization. None of them takes a range off either, except that |V|
-    (Voltage dependence's X range) and Log x and Log y (the Event-count heatmap's range on that
-    axis) change the numbers on the axis the range was typed in, so they take it and leave the
-    words. Opening a project shows the words and ranges it was saved with (the rule acts on the next
-    change), and recalling a template installs the title, labels and wording it was saved with
-    (none, if it was saved without), and the ranges it was saved with, in place of the ones typed
-    and pinned. A template recalled in Distribution summaries or Comparison figures brings its words
-    with its measurement, so the Generate that commits it keeps them; in Voltage dependence the
-    template's fit arrives selected, and the **Apply fit** that commits it keeps the wording that
-    came with it. Restoring a Subpopulations figure shows its saved words and no reset sentence.
+    Accepted only and the Welch settings keep the words, and so do Distributions' Time unit and the
+    switch to density that ticking a second source makes by itself (a Normalize you pick takes them,
+    above). None of them takes a range off either, except that |V| (Voltage dependence's X range)
+    and Log x and Log y (the Event-count heatmap's range on that axis) change the numbers on the
+    axis the range was typed in, so they take it and leave the words. Opening a project shows the
+    words and ranges it was saved with (the rule acts on the next change), and recalling a template
+    installs the title, labels and wording it was saved with (none, if it was saved without), and
+    the ranges it was saved with, in place of the ones typed and pinned. A template recalled in
+    Distribution summaries or Comparison figures brings its words with its measurement, so the
+    Generate that commits it keeps them; in Voltage dependence the template's fit arrives selected,
+    and the **Apply fit** that commits it keeps the wording that came with it. They are kept only
+    while the words (and, in Distribution summaries, the ranges) are still the template's: **Undo**
+    on the recall, a word or range typed or pinned after it, another quantity picked after it, or
+    saving the project and opening it again before the Generate or **Apply fit** makes that an
+    ordinary change of quantity, and they go back to automatic (one Undo step and the sentence, as
+    for any change). Restoring a Subpopulations figure shows its saved words and no reset sentence.
   - **A project saved by an older build** whose appearance holds a range with no view (a bare *X* or
     *Y* range) takes it with the primary view's axis it belongs to (the PSD's in Noise, the
     Event-count map's in Event waveforms, the scatter's in Subpopulations, the ECDF's and Survival's
     in Distribution summaries), and no other view's.
-  - **Where the sentence is read.** On the page's status line inside the Analysis Explorer: the status
-    bar at the bottom of Voltage dependence, Distribution summaries, Event waveforms, Noise and
-    Distributions (ten seconds), the status line at the top of Comparison figures, and the standing
-    line under the report text in Subpopulations.
+  - **Where the sentence is read.** On the page's status line inside the Analysis Explorer: the
+    status bar at the bottom of Voltage dependence, Distribution summaries, Event waveforms, Noise
+    and Distributions (ten seconds), the status line at the top of Comparison figures, and the
+    standing line under the report text in Subpopulations. It stands only while it is true: it says
+    that what it names is automatic, so it comes off (the status bar, or in Comparison figures and
+    Subpopulations the line it stands on) as soon as one of those words or ranges is typed or pinned
+    again, as by the **Undo** that brings them back, a title or label typed since, or a range pinned
+    again. A change of look, **Reset figure** and its **Undo** and **Redo** leave it, since nothing
+    it names is typed or pinned then, and **Redo** takes the words and ranges away again without
+    bringing the sentence back.
   - **The Appearance boxes show the automatic text they would draw** in Voltage dependence and
     Distribution summaries. The X label placeholder follows |V| (*Applied |voltage| (mV)*), the Y
     label's names the metric and Log y (*Median depth (pA) (log)*), and Distribution summaries'
@@ -162,7 +345,10 @@ tags identify tested development baselines and do not promise a stable file or A
     labels (on a Mac, where the application font is a private face, the list has no row for it;
     where it is an ordinary family such as Segoe UI, Other font… lists it, so it can be picked to
     match): generate it again in its Analysis tool and save it again to get Arial panels. A
-    composition keeps the family it was saved with.
+    composition keeps the family it was saved with: one an earlier Mac build saved in the
+    application font shows it on a row of its own, *Application font (older figure)*, so its letters
+    keep matching its panels in the PNG and the PDF, and its SVG writes Arial for those letters;
+    choosing Arial changes the letters everywhere.
   - **Nothing in a saved project changes:** an older project's font (`Menlo`, `Times New Roman`, or
     none) opens exactly as saved, and one that names none is now drawn in Arial. An older build draws
     a figure with no font chosen in its application font, and opens a project that names a font as
@@ -202,40 +388,48 @@ tags identify tested development baselines and do not promise a stable file or A
     this computer, are carried as they were and open the same way), and the project format is
     still 12. An older build opens a project saved by this one and draws the same figure, because
     the label's numbers and the title's weight are kept in fields it already reads.
-  - **Reset appearance is Reset figure, a button in the page toolbar,** just before **Export ▾**,
-    on every Analysis Explorer page, so it is there from every Section. It puts the title, axis
-    labels, fit-label wording, any caption or other annotation text you typed (Voltage dependence's
-    caption, the words on Distributions' detection-limit line) and the look back to their defaults
-    in one Undo step; ⌘Z brings it all back (on the other pages the Appearance section's Undo
-    button names the step from what it took back: *Undo: reset figure* when a title, a label and
-    a look went back together, *Undo: title ‘Capture vs voltage’ → automatic* when only the title
-    did; Distributions' Undo counts steps and names none). A source
-    you renamed on its legend row (Distributions, Distribution summaries) keeps its name. The study
-    figure editor, which has no such toolbar, keeps it in its Appearance section. The Undo and Redo
-    buttons stay in the Appearance section, side by side. In Distributions it now also returns the
-    label's numbers to Equation, R² and n and the title's bold and italic to plain, and its tool
-    tip says what it leaves as it is: the **Axis range** boxes, **Font size (body)**, the legend's
-    position, entries and (n = …) switch, source names, **Confidence band**, **Residual strip**,
-    **Provenance caption** and **Heatmap colormap**. On the other pages that have Axis properties, a range or tick spacing
-    typed there goes with the look; Event waveforms leaves its **Event-count heatmap colormap** and
-    Noise its **Spectrogram colormap** and **colour limits**, and their tool tips say so. It puts
-    the font back to *Arial (default)* along with the rest of the look.
+  - **Reset appearance is Reset figure, a button in the page toolbar,** just before **Export ▾**, on
+    every Analysis Explorer page, so it is there from every Section. It puts the title, axis labels,
+    fit-label wording, any caption or other annotation text you typed (Voltage dependence's caption,
+    the words on Distributions' detection-limit line) and the look back to their defaults in one
+    Undo step; ⌘Z brings it all back (on the other pages the Appearance section's Undo button names
+    the step from what it took back: *Undo: reset figure* when a title, a label and a look went back
+    together, *Undo: title ‘Capture vs voltage’ → automatic* when only the title did, and for a
+    figure whose only customisation is typed words and ranges the words of the reset a change of
+    quantity makes, *Undo: reset title and Y label*; Distributions' Undo counts steps and names
+    none). A fit label whose wording a change of quantity took back is the untouched label again
+    unless its numbers, position, size or colour were set, so Reset figure pressed straight after
+    such a change, on a figure with nothing else customised, finds nothing to take back and records
+    no step. A source you renamed on its legend row (Distributions, Distribution summaries) keeps
+    its name. The study figure editor, which has no such toolbar, keeps it in its Appearance
+    section. The Undo and Redo buttons stay in the Appearance section, side by side. In
+    Distributions it now also returns the label's numbers to Equation, R² and n and the title's bold
+    and italic to plain, and its tool tip says what it leaves as it is: the **Axis range** boxes,
+    **Font size (body)**, the legend's position, entries and (n = …) switch, source names,
+    **Confidence band**, **Residual strip**, **Provenance caption** and **Heatmap colormap**. On the
+    other pages that have Axis properties, a range or tick spacing typed there goes with the look,
+    and the button's tool tip says so; Event waveforms leaves its **Event-count heatmap colormap**
+    and Noise its **Spectrogram colormap** and **colour limits**, and their tool tips say so too. It
+    puts the font back to *Arial (default)* along with the rest of the look.
 
 - **Exports name the figure's font with a fallback list, and report PDFs hold TrueType (plotting
   redesign, Phase 0, export fonts, 2026-11-02).**
-  - **SVG exports name a fallback list for every font, and never the private system face.** Qt
-    wrote one font-family on each text element, even for a font that is not installed and with
-    nothing behind it, and a figure that was never given a font was written in the application's own
-    face, which on macOS is the private `.AppleSystemUIFont`. Every text element now names the font
-    the figure is drawn in, followed by its stand-ins (Arial, then Helvetica, Liberation Sans,
-    Arimo, TeX Gyre Heros, Nimbus Sans and sans-serif; Times New Roman and Courier New have lists of
-    their own, and any other family is followed by Arial's). A font this computer lacks is written
-    as the substitute the figure was drawn in, so an SVG exported here for a Calibri figure names
-    Arial first. Text that has no font of its own, such as the grey message a plot shows instead of
-    data, is written as Arial when the application's own font is a private system face (a name
-    starting with a dot, as on a Mac); a family someone picked is named first, the application's own
-    font included. The font-family Qt also put on the groups around the text, which named the
-    private face too, is dropped. Text stays text and no font is embedded. This covers **Export current figure…** (also at a physical size),
+  - **SVG exports name a fallback list for every font, and never the private system face.** Qt wrote
+    one font-family on each text element, even for a font that is not installed and with nothing
+    behind it, and a figure that was never given a font was written in the application's own face,
+    which on macOS is the private `.AppleSystemUIFont`. Every text element now names the font the
+    figure is drawn in, followed by its stand-ins (Arial, then Helvetica, Liberation Sans, Arimo,
+    TeX Gyre Heros, Nimbus Sans and sans-serif; Times New Roman and Courier New have lists of their
+    own that end in serif and monospace, and so does the stand-in that a computer without them draws
+    them in (Liberation Serif, Liberation Mono, Tinos…): it is named first and followed by its
+    family's list, so a viewer without it still gets a serif or a fixed-width face; any other family
+    is followed by Arial's). A font this computer lacks is written as the substitute the figure was
+    drawn in, so an SVG exported here for a Calibri figure names Arial first. Text that has no font
+    of its own, such as the grey message a plot shows instead of data, is written as Arial when the
+    application's own font is a private system face (a name starting with a dot, as on a Mac); a
+    family someone picked is named first, the application's own font included. The font-family Qt
+    also put on the groups around the text, which named the private face too, is dropped. Text stays
+    text and no font is embedded. This covers **Export current figure…** (also at a physical size),
     **Save figure bundle…**, Figure Library snapshots taken from now on and pyqtgraph's own
     right-click Export. A figure saved to the Figure Library, or into a project, by an earlier
     version keeps the SVG it was captured with, so its SVG export still has the single font family
@@ -889,6 +1083,13 @@ tags identify tested development baselines and do not promise a stable file or A
   reset when **Generate** commits another figure is made from whichever Section is showing, but the
   Undo keys answered only while Appearance was on screen. They now answer from every Section, as on
   the other plot pages (the study figure editor, which has no Sections, is unchanged).
+- **Subpopulations: opening a project no longer carries the last project's title, labels and ranges
+  into its first report.** The page is kept when a project is opened and was blanked without its
+  appearance, so a project saved with no subpopulation report drew its first report under the title
+  and the embedding range typed on the previous project's scatter, and a project saved while that
+  empty page was open stored them in its own file. The page now starts from the defaults, as it does
+  for a project saved without any; a project that holds a report still opens with its own words and
+  ranges.
 - **Distributions: a reopened project draws a histogram fit's label with every number it was saved
   with** (all parameters, n, BIC, the KS statistic and verdict), a typed fit-label template keeps its
   `{n}`, the legend's fit row stays "fit (…)" without numbers, and with **In legend instead** the

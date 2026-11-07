@@ -1,6 +1,8 @@
 """Saved trace/galleries for incubation studies; source indices accompany every panel."""
 from __future__ import annotations
 
+from ..core.atomic_write import write_staged
+
 import json
 import math
 from pathlib import Path
@@ -12,6 +14,7 @@ from matplotlib.figure import Figure
 
 from ..analysis import event_features as EF
 from ..analysis.cancel import check_cancelled
+from .quantity_axes import time_axis, figure_quantity_metadata
 
 
 def _figure(rows=1, cols=1, *, width=12, height=4):
@@ -28,14 +31,14 @@ def _save(fig, folder, name, *, cancel=None):
     if capture_saved_figure(fig, name):
         check_cancelled(cancel)
         return path
-    fig.savefig(path, dpi=150, facecolor=fig.get_facecolor())
+    write_staged(path, fig.savefig, dpi=150, facecolor=fig.get_facecolor())
     fig.clear()
     check_cancelled(cancel)
     return path
 
 
 def _json(path, content):
-    Path(path).write_text(json.dumps(content, indent=2, allow_nan=False, default=str) + "\n", encoding="utf-8")
+    write_staged(Path(path), Path.write_text, json.dumps(content, indent=2, allow_nan=False, default=str) + "\n", encoding="utf-8")
 
 
 def _ordered_picks(frame, order, count, separation_s):
@@ -189,6 +192,7 @@ def _gallery(analysis, picks, stats, folder, name, title, *, cols=5, local_basel
         bind_event_panel(axis, tag=analysis.tag, event_id=row.get('event_id', info['event_id']),
                          start_idx=info['start_idx'], end_idx=info['end_idx'])
         axis.set_xlabel("ms from onset", fontsize=8)
+        time_axis(axis, "bottom", "time_from_onset_ms", stored_unit="ms", clock_basis="relative")
         axis.set_ylabel("pA relative to local baseline" if local_baseline else "Prepared detrended (pA)", fontsize=8)
         axis.tick_params(labelsize=7)
     for axis in axes[len(picks):]:
@@ -197,10 +201,10 @@ def _gallery(analysis, picks, stats, folder, name, title, *, cols=5, local_basel
         axes[0].text(.5, .5, "No accepted events available", ha="center", va="center", transform=axes[0].transAxes)
     fig.suptitle(title, fontsize=13)
     map_path = Path(folder) / f"{name}_panels.csv"
-    pd.DataFrame(maps, columns=None if maps else ["panel", "event_id", "start_idx", "end_idx"]).to_csv(map_path, index=False)
-    (pd.concat(point_tables, ignore_index=True) if point_tables else pd.DataFrame(
+    write_staged(map_path, pd.DataFrame(maps, columns=None if maps else ["panel", "event_id", "start_idx", "end_idx"]).to_csv, index=False)
+    write_staged(Path(folder) / f"{name}_points.csv", (pd.concat(point_tables, ignore_index=True) if point_tables else pd.DataFrame(
         columns=["panel", "event_id", "sample_idx", "time_from_onset_ms", "prepared_detrended_pA", "display_current_pA"])
-     ).to_csv(Path(folder) / f"{name}_points.csv", index=False)
+     ).to_csv, index=False)
     check_cancelled(cancel)
     return _save(fig, folder, name, cancel=cancel)
 
@@ -215,12 +219,13 @@ def _trace_context(analysis, stats, folder, *, cancel=None):
         check_cancelled(cancel)
         indices = _overview_indices(array)
         axes[panel].plot(indices / fs, array[indices], color="0.25", lw=.4)
-        axes[panel].set(title=f"{analysis.tag} — {label}", xlabel="Recording time (s)", ylabel="Current (pA)")
+        axes[panel].set(title=f"{analysis.tag} — {label}", xlabel="Recording time (ms)", ylabel="Current (pA)")
+        time_axis(axes[panel], "bottom", "time_s", clock_basis="recording")
         frames.append(pd.DataFrame({"panel": panel + 1, "sample_idx": indices, "time_s": indices / fs,
-                                    "display_time": indices / fs, "current_pA": array[indices]}))
+                                    "display_time": indices / fs, "display_time_ms": indices / fs * 1000, "current_pA": array[indices]}))
         maps.append(dict(panel=panel + 1, source="raw" if panel == 0 else "oriented_detrended",
                          start_idx=0, end_exclusive=n, display_method="minmax_envelope",
-                         display_time_units="s"))
+                         display_time_units="s", axis_display_units="ms"))
     for panel, duration in ((2, 2.), (3, .1)):
         half = max(1, int(duration * fs / 2))
         lo, hi = max(0, peak - half), min(n, peak + half)
@@ -231,17 +236,19 @@ def _trace_context(analysis, stats, folder, *, cancel=None):
         for sigma, color in ((3, "#E69F00"), (5, "#D55E00")):
             axes[panel].axhline(stats.baseline_pA - sigma * stats.noise_pA, color=color, ls="--", lw=.8,
                               label=f"{sigma} × quiet MAD")
-        axes[panel].set(title=f"{duration:g} s context at deepest excursion ({peak / fs:.5g} s)",
+        axes[panel].set(title=f"{duration * 1000:g} ms context at deepest excursion ({peak * 1000 / fs:.5g} ms)",
                         xlabel="Time from deepest excursion (ms)", ylabel="Prepared detrended (pA)")
+        time_axis(axes[panel], "bottom", "time_from_deepest_ms", stored_unit="ms", clock_basis="relative")
         axes[panel].legend(fontsize=8)
         frames.append(pd.DataFrame({"panel": panel + 1, "sample_idx": indices, "time_s": indices / fs,
-                                    "display_time": relative, "current_pA": analysis.detrended[indices]}))
+                                    "display_time": relative, "display_time_ms": relative, "current_pA": analysis.detrended[indices]}))
         maps.append(dict(panel=panel + 1, source="oriented_detrended", start_idx=lo, end_exclusive=hi,
-                         display_method="every_source_sample", display_time_units="ms from deepest excursion"))
+                         display_method="every_source_sample", display_time_units="ms from deepest excursion", axis_display_units="ms"))
     name = f"trace_context_{analysis.tag}"
-    pd.concat(frames, ignore_index=True).to_csv(Path(folder) / f"{name}_points.csv", index=False)
-    pd.DataFrame(maps).to_csv(Path(folder) / f"{name}_panels.csv", index=False)
+    write_staged(Path(folder) / f"{name}_points.csv", pd.concat(frames, ignore_index=True).to_csv, index=False)
+    write_staged(Path(folder) / f"{name}_panels.csv", pd.DataFrame(maps).to_csv, index=False)
     _json(Path(folder) / f"{name}_methods.json", dict(
+        quantity_display=figure_quantity_metadata(fig),
         deepest_sample_idx=peak, overview_method="minmax_envelope", overview_max_bins=100_000,
         overview_rule="Both extrema of each contiguous source block, in temporal order; include tail and recording endpoints. Traces with <=200000 samples use every sample.",
         quiet_baseline_pA=stats.baseline_pA,
@@ -323,13 +330,14 @@ def population_galleries(assignments, analysis, folder: Path, *, cancel=None) ->
     axes[0].set(ylabel="Prepared detrended (pA)",
                 title=f"{analysis.tag}: assigned event minima across the full recording")
     axes[0].legend(fontsize=8, ncols=min(6, sub.subpop.nunique()))
-    axes[1].set(xlabel="Recording time (s)", ylabel="GMM component", xlim=(0, analysis.duration_s),
+    axes[1].set(xlabel="Recording time (ms)", ylabel="GMM component", xlim=(0, analysis.duration_s),
                 title="Event onsets (same assignments; one marker per event)")
+    for axis in axes:
+        time_axis(axis, "bottom", "time_s", clock_basis="recording")
     axes[1].set_yticks(sorted(sub.subpop.astype(int).unique()+1))
     name = f"population_onsets_{analysis.tag}"
-    sub.to_csv(folder / f"{name}_events.csv", index=False)
-    pd.DataFrame({"sample_idx": indices, "time_s": indices / fs, "prepared_detrended_pA": analysis.detrended[indices]}).to_csv(
-        folder / f"{name}_trace_points.csv", index=False)
+    write_staged(folder / f"{name}_events.csv", sub.to_csv, index=False)
+    write_staged(folder / f"{name}_trace_points.csv", pd.DataFrame({"sample_idx": indices, "time_s": indices / fs, "prepared_detrended_pA": analysis.detrended[indices]}).to_csv, index=False)
     _json(folder / f"{name}_methods.json", dict(
         event_end="inclusive; source slice start_idx:end_idx+1",
         top_markers="First minimum of prepared detrended current inside each assigned event; actual sample time and current, without baseline recentering.",
@@ -338,6 +346,7 @@ def population_galleries(assignments, analysis, folder: Path, *, cancel=None) ->
         onset_columns=["onset_time_s", "onset_current_pA"],
         overview_method="minmax_envelope", overview_max_bins=100_000,
         overview_rule="Both extrema of each contiguous source block, in temporal order; include tail and recording endpoints. Traces with <=200000 samples use every sample.",
+        quantity_display=figure_quantity_metadata(fig),
         fs_hz=fs, samples=n, shared_time_limits_s=[0., float(analysis.duration_s)],
         population_labels={f"P{int(k)+1}": int(k) for k in sorted(sub.subpop.unique())},
         assigned_events=len(sub),

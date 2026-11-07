@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterable, Sequence
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
+from shiboken6 import isValid
 
 __all__ = ["SETTLE_MS", "PlotNavigation", "PlotReadout", "app_menu_for", "axis_name",
            "install_plot_interaction", "keep_plot_history", "navigation_for", "readout_text",
@@ -389,6 +390,12 @@ def axis_value_text(axis: pg.AxisItem, v: float, *, log: bool | None = None,
         name = _category(axis, v)
         if name is not None:
             return name
+    basis = getattr(axis, "_nanoscope_quantity_basis", None)
+    if basis is not None:
+        from ..core.quantity_display import view_to_display
+        shown = view_to_display(v, basis)
+        units = str(axis.labelUnits or "")
+        return f"{_number(shown)} {units}" if units else _number(shown)
     is_log = bool(axis.logMode) if log is None else bool(log)
     try:
         real = 10.0 ** v if is_log else float(v)
@@ -723,6 +730,10 @@ def view_button(resolve: Callable[[], PlotNavigation | None],
     button.setMenu(menu)
 
     def sync() -> None:
+        # Menus/actions can retire before the owning button or plot during close.
+        # A previously queued/direct Python callback must not resolve that page.
+        if not all(isValid(control) for control in (button, back, forward)):
+            return
         nav = resolve()
         back.setEnabled(nav is not None and nav.can_go_back())
         forward.setEnabled(nav is not None and nav.can_go_forward())
@@ -739,7 +750,9 @@ def view_button(resolve: Callable[[], PlotNavigation | None],
     forward.triggered.connect(lambda _checked=False: run("view_forward"))
     menu.aboutToShow.connect(sync)
     for nav in navigations:
-        nav.historyChanged.connect(sync)
+        # The menu owns both actions and dies with the button. Qt disconnects
+        # this receiver context before its actions can outlive their menu.
+        QtCore.QObject.connect(nav, QtCore.SIGNAL("historyChanged()"), menu, sync)
     button._nanoscope_sync = sync
     button._nanoscope_back = back
     button._nanoscope_forward = forward

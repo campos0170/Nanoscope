@@ -26,6 +26,7 @@ about a recording that is not open, or a channel that did not come back as itsel
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -37,7 +38,7 @@ _FIELDS = {"doc_id", "channel", "channel_name", "module_id", "state"}
 #: The parts of a form state this build can put back (``AnalysisPanel.form_state``). A state
 #: naming any other part was written by a build that knows more than this one, so its draft
 #: is kept for that build and never half-applied by this one.
-_PARTS = frozenset({"detection", "intents", "ml", "baseline"})
+_PARTS = frozenset({"detection", "intents", "ml", "baseline", "background"})
 #: What the forms' restores cast each value of a part to (``DetectionPanel.set_params``,
 #: ``BaselinePanel.restore_form_state``): a value they would refuse, or read as something
 #: else (``bool("no")``), makes the draft one this build cannot apply (S10-FORM1). A key
@@ -76,9 +77,76 @@ def _kind_ok(kind: str, value: Any) -> bool:
 
 def _values_readable(state: dict) -> bool:
     """Does every value :data:`_VALUE_KINDS` names hold what its form's restore takes?"""
-    return all(_kind_ok(kind, state[part][key])
+    return (all(_kind_ok(kind, state[part][key])
                for part, kinds in _VALUE_KINDS.items() if part in state
                for key, kind in kinds.items() if key in state[part])
+            and ("background" not in state or background_state_readable(state["background"])))
+
+
+def background_state_readable(state: Any) -> bool:
+    """Validate a background editor draft without interpreting unfinished numeric text.
+
+    A future schema is preserved by the project layer rather than partially restored.
+    Source bindings are checked structurally here; the editor checks them against the
+    active recording and calibration before calculating anything.
+    """
+    if not isinstance(state, dict) or set(state) != {"output_mode", "draft"}:
+        return False
+    if state["output_mode"] not in ("zero_centered_display", "retained_offset_runtime"):
+        return False
+    draft = state["draft"]
+    fields = {"version", "source", "units", "binding", "regions", "anchors",
+              "interpolation", "edge_policy", "segment_policy", "reference",
+              "shift", "scale", "offset", "resampling"}
+    if not isinstance(draft, dict) or set(draft) != fields:
+        return False
+    if type(draft["version"]) is not int or draft["version"] != 1:
+        return False
+    for key, choices in {
+        "source": ("automatic", "anchors", "intervals", "recording"),
+        "interpolation": ("constant", "linear", "pchip"),
+        "edge_policy": ("refuse", "hold"),
+        "segment_policy": ("separate", "continuous"),
+        "resampling": ("none", "linear"),
+    }.items():
+        if draft[key] not in choices:
+            return False
+    if not all(isinstance(draft[key], str) for key in ("units", "shift", "scale", "offset")):
+        return False
+    for key in ("regions", "anchors"):
+        rows = draft[key]
+        if (not isinstance(rows, list) or len(rows) > 10_000
+                or any(not isinstance(row, list) or len(row) != 3
+                       or not all(isinstance(cell, str) for cell in row) for row in rows)):
+            return False
+
+    def source_key(value: Any, fields: set[str]) -> bool:
+        return (isinstance(value, dict) and set(value) == fields
+                and isinstance(value["doc_key"], str) and bool(value["doc_key"])
+                and type(value["channel"]) is int and 0 <= value["channel"] <= 2**31 - 1)
+
+    reference = draft["reference"]
+    if reference is not None and not source_key(reference, {"doc_key", "channel"}):
+        return False
+    binding = draft["binding"]
+    if binding is not None:
+        if not source_key(binding, {"doc_key", "channel", "units", "calibration", "sample_rate_hz"}):
+            return False
+        if not isinstance(binding["units"], str) or binding["units"] != draft["units"]:
+            return False
+        def finite(value: Any) -> bool:
+            try:
+                return type(value) in (int, float) and math.isfinite(value)
+            except OverflowError:
+                return False
+        calibration = binding["calibration"]
+        if (not isinstance(calibration, list) or len(calibration) != 2
+                or not all(finite(value) for value in calibration)):
+            return False
+        rate = binding["sample_rate_hz"]
+        if rate is not None and (not finite(rate) or rate <= 0):
+            return False
+    return True
 
 
 def prepare_form_draft_workspace(extra: dict) -> tuple[str, ...]:

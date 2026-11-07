@@ -112,8 +112,13 @@ class FigureLibrary(QtWidgets.QMainWindow):
     changed = QtCore.Signal()
 
     def __init__(self, parent=None, *, entries: Callable,
-                 status: Callable, append: Callable, project_token: Callable | None = None):
+                 status: Callable, append: Callable, project_token: Callable | None = None,
+                 embedded: bool = False):
         super().__init__(parent)
+        self._embedded = bool(embedded)
+        self._selected_id = None
+        if self._embedded:
+            self.setWindowFlags(QtCore.Qt.WindowType.Widget)
         self._entries = entries
         self._status = status
         self._append = append
@@ -131,7 +136,10 @@ class FigureLibrary(QtWidgets.QMainWindow):
             "Figures are frozen: opening or exporting one never runs analysis.")
         intro.setWordWrap(True)
         root.addWidget(intro)
-        actions = QtWidgets.QHBoxLayout()
+        intro.setVisible(not self._embedded)
+        actions_widget = QtWidgets.QWidget()
+        actions = QtWidgets.QHBoxLayout(actions_widget)
+        actions.setContentsMargins(0, 0, 0, 0)
         self._rename_btn = QtWidgets.QPushButton("Rename…")
         self._duplicate_btn = QtWidgets.QPushButton("Duplicate")
         self._export_btn = QtWidgets.QPushButton("Export saved figure…")
@@ -142,14 +150,18 @@ class FigureLibrary(QtWidgets.QMainWindow):
                        self._bundle_btn, self._reveal_btn, self._refresh_btn):
             actions.addWidget(button)
         actions.addStretch(1)
-        root.addLayout(actions)
-        composition_row = QtWidgets.QHBoxLayout()
+        root.addWidget(actions_widget)
+        actions_widget.setVisible(not self._embedded)
+        composition_widget = QtWidgets.QWidget()
+        composition_row = QtWidgets.QHBoxLayout(composition_widget)
+        composition_row.setContentsMargins(0, 0, 0, 0)
         self._compose_btn = QtWidgets.QPushButton("Compose multi-panel figure…")
         self._compose_btn.setToolTip(
             "Arrange saved figures with panel labels and optional compatible shared axes. "
             "Saves a new snapshot without changing the originals.")
         self._compose_btn.clicked.connect(lambda: self.compose_current())
         composition_row.addWidget(self._compose_btn)
+        self._compose_btn.setVisible(not self._embedded)
         self._revise_btn = QtWidgets.QPushButton("Revise composition…")
         self._revise_btn.setToolTip(
             "Reopen embedded original panels, revise their layout and save a new figure. "
@@ -157,7 +169,7 @@ class FigureLibrary(QtWidgets.QMainWindow):
         self._revise_btn.clicked.connect(lambda: self.revise_current())
         composition_row.addWidget(self._revise_btn)
         composition_row.addStretch(1)
-        root.addLayout(composition_row)
+        root.addWidget(composition_widget)
         self._rename_btn.clicked.connect(self.rename_current)
         self._duplicate_btn.clicked.connect(self.duplicate_current)
         self._export_btn.clicked.connect(lambda: self.export_current())
@@ -166,13 +178,15 @@ class FigureLibrary(QtWidgets.QMainWindow):
         self._refresh_btn.clicked.connect(self.refresh)
 
         split = QtWidgets.QSplitter()
-        self._list = QtWidgets.QListWidget()
-        self._list.setObjectName("figureLibraryList")
-        self._list.setIconSize(QtCore.QSize(170, 110))
-        self._list.setMinimumWidth(275)
-        self._list.setWordWrap(True)
-        self._list.currentItemChanged.connect(self._show_current)
-        split.addWidget(self._list)
+        self._list = None
+        if not self._embedded:
+            self._list = QtWidgets.QListWidget()
+            self._list.setObjectName("figureLibraryList")
+            self._list.setIconSize(QtCore.QSize(170, 110))
+            self._list.setMinimumWidth(275)
+            self._list.setWordWrap(True)
+            self._list.currentItemChanged.connect(self._show_current)
+            split.addWidget(self._list)
         right = QtWidgets.QWidget()
         details = QtWidgets.QVBoxLayout(right)
         self._summary = QtWidgets.QLabel()
@@ -197,14 +211,17 @@ class FigureLibrary(QtWidgets.QMainWindow):
         details.addWidget(self._metadata)
         self._metadata.hide()
         split.addWidget(right)
-        split.setStretchFactor(1, 1)
-        split.setSizes([330, 760])
+        split.setStretchFactor(0 if self._embedded else 1, 1)
+        if not self._embedded:
+            split.setSizes([330, 760])
         root.addWidget(split, 1)
         self.setCentralWidget(central)
         self._pixmap = QtGui.QPixmap()
         self.refresh()
 
     def current_entry(self) -> WorkspaceArtifact | None:
+        if self._embedded:
+            return self._entry_by_id(self._selected_id)
         selected = self._list.currentItem()
         key = selected.data(QtCore.Qt.ItemDataRole.UserRole) if selected else None
         return self._entry_by_id(key)
@@ -212,9 +229,24 @@ class FigureLibrary(QtWidgets.QMainWindow):
     def _entry_by_id(self, key) -> WorkspaceArtifact | None:
         return next((entry for entry in self._entries() if entry.artifact_id == key), None)
 
+    def show_entry(self, key: str) -> bool:
+        """Open the exact Snapshot/Composition selected in the Explorer's Figures list."""
+        if self._entry_by_id(key) is None:
+            return False
+        self.refresh(key)
+        if not self._embedded:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        return True
+
     def refresh(self, select_id: str | None = None) -> None:
         old = self.current_entry()
         selected = select_id or (old.artifact_id if old is not None else None)
+        if self._embedded:
+            self._selected_id = selected if self._entry_by_id(selected) is not None else None
+            self._show_current()
+            return
         self._list.clear()
         for entry in self._entries():
             status, reason = self._status(entry)
@@ -263,6 +295,9 @@ class FigureLibrary(QtWidgets.QMainWindow):
             "analysis": payload.get("analysis"),
             "source_recipes": payload.get("source_recipes"),
             "snapshot": payload.get("snapshot"),
+            "origin_figure_id": payload.get("origin_figure_id"),
+            "lineage": payload.get("lineage"),
+            "figure_spec": payload.get("figure_spec"),
         }, indent=2, ensure_ascii=False))
 
     def schedule_refresh(self) -> None:
@@ -320,10 +355,20 @@ class FigureLibrary(QtWidgets.QMainWindow):
         self.refresh(duplicate.artifact_id)
         return duplicate
 
-    def compose_current(self) -> WorkspaceArtifact | None:
+    def compose_entries(self, ids) -> WorkspaceArtifact | None:
+        """Compose the snapshots selected in Figures through the existing composer."""
+        return self.compose_current(selected_ids=tuple(ids))
+
+    def compose_current(self, *, selected_ids=None) -> WorkspaceArtifact | None:
         from .figure_composer import FigureComposerDialog
 
         entries = list(self._entries())
+        if selected_ids is not None:
+            by_id = {entry.artifact_id: entry for entry in entries}
+            if len(set(selected_ids)) != len(selected_ids) or any(key not in by_id for key in selected_ids):
+                self.statusBar().showMessage("The selected snapshots are no longer available.", 10000)
+                return None
+            entries = [by_id[key] for key in selected_ids]
         if len(entries) < 2:
             return None
         project = self._project_token()
@@ -463,8 +508,9 @@ class FigureLibrary(QtWidgets.QMainWindow):
         suffix = ".zip" if bundle else ".svg"
         if path is None:
             if not bundle:
+                from .figure_export_style import snapshot_export_style
                 options = choose_export_options(
-                    self, (snapshot.width, snapshot.height), initial_format=".svg",
+                    self, (snapshot.width, snapshot.height), figure_style=snapshot_export_style(snapshot), initial_format=".svg",
                     preview_image=_scaled_image(snapshot.png_bytes, QtCore.QSize(1200, 900)),
                     preview_svg=snapshot.svg_bytes)
                 if options is None:

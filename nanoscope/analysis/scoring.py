@@ -110,6 +110,8 @@ BASELINE_CONTRACT_KEYS: tuple[str, ...] = (
     "baseline_estimator_bypassed",
     "baseline_polarity_role",
     "baseline_fingerprint",
+    "baseline_sample_count_policy",
+    "baseline_mask_noise_policy",
     "baseline_param_source",
     "baseline_polarity",
     "baseline_mask_fraction",
@@ -821,6 +823,15 @@ def training_provenance(
     contract_keys = (
         "min_dwell_s", "max_dwell_s", "merge_gap_s", "filter_cutoff_hz", "filter_rise_s",
         "noise_rms_pA", "baseline_median_pA",
+        "noise_policy", "noise_policy_effective", "noise_window_s",
+        "noise_algorithm_version", "noise_warnings", "noise_window_samples", "noise_window_max_samples",
+        "noise_local_scale_min_pA", "noise_local_scale_median_pA", "noise_local_scale_max_pA",
+        "noise_local_variation_ratio", "noise_local_calibration", "noise_local_calibration_range", "noise_local_tiles",
+        "noise_profile_sha256", "noise_profile_tile_ends", "noise_profile_scales_pA",
+        "noise_policy_reason",
+        "threshold_in_pA", "threshold_out_pA",
+        "threshold_in_range_pA", "threshold_out_range_pA",
+        "detrend_sample_count_policy", "detrend_mask_noise_policy",
         # WHICH OPEN-PORE ESTIMATOR MEASURED THESE DEPTHS. Without these an exported
         # table is unreadable a year later: on a recording with the owner's event
         # statistics the same events yield depths 4.7x apart depending on the

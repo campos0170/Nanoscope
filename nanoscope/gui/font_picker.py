@@ -24,13 +24,21 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..plot import figure_fonts as ff
 
-__all__ = ["DEFAULT_ROW_LABEL", "FontListDialog", "FontPicker", "drawn_in_note", "figure_family",
-           "figure_qfont", "html_font_family", "installed_families", "is_installed",
-           "listable_families"]
+__all__ = ["DEFAULT_ROW_LABEL", "FontListDialog", "FontPicker", "PRIVATE_ROW_LABEL",
+           "drawn_in_note", "figure_family", "figure_qfont", "html_font_family",
+           "installed_families", "is_installed", "listable_families"]
 
 #: The first row's words. It stores the UNSET value (``""``), so a project keeps saying
 #: "default" and a later change of the default (the proposal's styles) reaches it.
 DEFAULT_ROW_LABEL = f"{ff.DEFAULT_FAMILY} (default)"
+
+#: The extra row's words for a private system face (a leading dot: the application font of a Mac),
+#: which only an older composition can still hold. Its name tells a reader nothing, so the row says
+#: what it is; the row still stores the exact family, so a revision keeps it as it was saved.
+PRIVATE_ROW_LABEL = "Application font (older figure)"
+_PRIVATE_ROW_TIP = ("This figure was saved in the application's own font, a private system face. "
+                    "It is kept so the labels still match the saved panels; choose Arial to "
+                    "change it.")
 
 #: Marks the ``Other font…`` row, so it is found by what it is and not by where it sits.
 _OTHER_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
@@ -275,6 +283,17 @@ class FontPicker(QtWidgets.QComboBox):
     (default)" storing ``""``; the Text style… popover, where "unset" is the Custom font box
     being off and not Arial, passes ``("Arial", "Arial")``.
 
+    A private system face (a leading dot, the application font of a Mac) is held in practice
+    only by a composition saved before the figure default moved to Arial; its row reads
+    ``Application font (older figure)`` and still stores the exact name, so the composition keeps
+    the family it was saved with and its letters keep matching its panels.
+
+    ``inherit_label`` adds ONE leading row (default: none, and every row, index and test above is
+    untouched). It stores ``""``, "follow whatever the figure's font is", and the Arial row
+    below it is then an explicit Arial: a live control on one text of a figure set in Times
+    needs both ("Figure font" and Arial), which ``first_row`` alone cannot give (it replaces
+    Arial's row). The Format tab's text fields and the mini toolbar use it.
+
     A main-list family this computer lacks is still a row (a figure styled on a Mac opens
     unchanged elsewhere), and the row says what it is drawn in here: ``Helvetica (drawn in
     Arial on this computer)`` on Windows. :func:`drawn_in_note` writes that.
@@ -285,15 +304,21 @@ class FontPicker(QtWidgets.QComboBox):
     _other_requested = QtCore.Signal()
 
     def __init__(self, parent=None, *,
-                 first_row: tuple[str, str] = (DEFAULT_ROW_LABEL, "")) -> None:
+                 first_row: tuple[str, str] = (DEFAULT_ROW_LABEL, ""),
+                 inherit_label: str | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("figureFontPicker")
         self.setAccessibleName("Font")
         self.setMaxVisibleItems(12)
         self.setMinimumContentsLength(12)
         self.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        for index, family in enumerate(ff.FIGURE_FAMILIES):
-            words, stored = first_row if index == 0 else (family, family)
+        self._lead = 1 if inherit_label else 0
+        if self._lead:
+            self.addItem(str(inherit_label), "")      # "" = follow the figure's font
+            first_row = (ff.DEFAULT_FAMILY, ff.DEFAULT_FAMILY)
+        for position, family in enumerate(ff.FIGURE_FAMILIES):
+            index = self._lead + position
+            words, stored = first_row if position == 0 else (family, family)
             text = drawn_in_note(words, family)       # a family this computer lacks says so
             self.addItem(text, stored)
             self.setItemData(index, QtGui.QFont(family), QtCore.Qt.ItemDataRole.FontRole)
@@ -302,13 +327,20 @@ class FontPicker(QtWidgets.QComboBox):
         self.insertSeparator(self.count())
         self.addItem(ff.OTHER_FONT_LABEL, "")
         self.setItemData(self.count() - 1, True, _OTHER_ROLE)
-        self.setToolTip(
-            f"Font for the figure's text. The first row is the figure default, "
-            f"{ff.DEFAULT_FAMILY}. {ff.OTHER_FONT_LABEL} lists every font installed on this "
-            f"computer except the system's private fonts and symbol fonts such as Wingdings.")
+        if self._lead:
+            self.setToolTip(
+                f"Font for this text. The first row follows the figure's font; the others set "
+                f"this text's own. {ff.OTHER_FONT_LABEL} lists every font installed on this "
+                f"computer except the system's private fonts and symbol fonts such as Wingdings.")
+        else:
+            self.setToolTip(
+                f"Font for the figure's text. The first row is the figure default, "
+                f"{ff.DEFAULT_FAMILY}. {ff.OTHER_FONT_LABEL} lists every font installed on this "
+                "computer except the system's private fonts and symbol fonts such as Wingdings.")
+        self._extra_row = self._lead + len(ff.FIGURE_FAMILIES)   # where an off-list family sits
         self._has_extra = False
         self._asking = False
-        self._unset = first_row[1]         # what the first row stores, and "no value" means
+        self._unset = "" if self._lead else first_row[1]         # what the first row stores, and "no value" means
         self._value = self._unset          # the value last SET or picked, as written...
         self._value_row = 0                # ...and the row it was shown on
         self.currentIndexChanged.connect(self._on_index_changed)
@@ -334,7 +366,7 @@ class FontPicker(QtWidgets.QComboBox):
             if row is None:
                 stored = str(value).strip()
                 self._show_extra(stored)
-                row = len(ff.FIGURE_FAMILIES)
+                row = self._extra_row
             else:
                 stored = self._unset if ff.is_default(value) else str(value).strip()
                 self._retire_extra()
@@ -343,18 +375,21 @@ class FontPicker(QtWidgets.QComboBox):
             self.blockSignals(was_blocked)
         self._value, self._value_row = stored, row
 
-    @staticmethod
-    def _main_row(value: str | None) -> int | None:
-        """The index among the four main rows, or None for a family the list does not have."""
+    def _main_row(self, value: str | None) -> int | None:
+        """The index among the main rows, or None for a family the list does not have."""
         if ff.is_default(value):
             return 0
         if not ff.is_listed(value):
             return None
-        return ff.FIGURE_FAMILIES.index(ff.canonical_family(value))
+        return self._lead + ff.FIGURE_FAMILIES.index(ff.canonical_family(value))
 
     def _show_extra(self, family: str) -> None:
-        row = len(ff.FIGURE_FAMILIES)
-        text = family if is_installed(family) else f"{family} — not on this computer"
+        row = self._extra_row
+        private = family.startswith(".")    # a Mac's own application font, in an old composition
+        if private:
+            text = PRIVATE_ROW_LABEL
+        else:
+            text = family if is_installed(family) else f"{family} — not on this computer"
         if not self._has_extra:
             self.insertItem(row, text, family)
             self._has_extra = True
@@ -362,12 +397,14 @@ class FontPicker(QtWidgets.QComboBox):
             self.setItemText(row, text)
             self.setItemData(row, family)
         self.setItemData(row, QtGui.QFont(family), QtCore.Qt.ItemDataRole.FontRole)
+        self.setItemData(row, _PRIVATE_ROW_TIP if private else None,
+                         QtCore.Qt.ItemDataRole.ToolTipRole)
 
     def _retire_extra(self) -> None:
         """Take the extra row down if it names a family this computer lacks. An installed
         family's row stays: it was chosen on purpose, and can be chosen again."""
-        if self._has_extra and not is_installed(self.itemData(len(ff.FIGURE_FAMILIES))):
-            self.removeItem(len(ff.FIGURE_FAMILIES))
+        if self._has_extra and not is_installed(self.itemData(self._extra_row)):
+            self.removeItem(self._extra_row)
             self._has_extra = False
 
     def has_extra_row(self) -> bool:
@@ -381,7 +418,7 @@ class FontPicker(QtWidgets.QComboBox):
         if self.itemData(index, _OTHER_ROLE):
             self._other_requested.emit()
             return
-        if self._has_extra and index != len(ff.FIGURE_FAMILIES):
+        if self._has_extra and index != self._extra_row:
             # A pick of a listed row ends the extra row of a missing family. That row sits
             # BELOW the four, so taking it out moves no row above it, and the combo's own
             # signals stay quiet for the removal (it would renumber the current row and say so).
@@ -403,7 +440,7 @@ class FontPicker(QtWidgets.QComboBox):
             picked = self._ask(before)
         finally:
             self._asking = False
-        if picked is not None and ff.is_listed(picked) and (
+        if picked is not None and not self._lead and ff.is_listed(picked) and (
                 ff.canonical_family(picked) == ff.DEFAULT_FAMILY):
             picked = self._unset              # Arial from the long list is the first row's value
         self.set_value(before if picked is None else picked)       # silent; Cancel = before

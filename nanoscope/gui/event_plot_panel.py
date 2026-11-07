@@ -31,7 +31,8 @@ The ECD, density and ensemble are computed purely in
 around them.
 
 The title and both axis labels are typed once for both views, so they go back to automatic
-(``gui.quantity_reset``) when the heatmap's X or Y, the view shown, or Normalize time changes.
+(``gui.quantity_reset``) when the heatmap's X or Y, the view shown, Normalize time, or the
+alignment (what t = 0 is on the ensemble's x axis, once time is in seconds) changes.
 The change goes through the control's own signal: a pick and a setter do it, a project restore
 and a template (which set ``_updating`` or block the signal) do not. A range pinned in Axis
 properties belongs to one view's axis (``map.<side>``, ``ensemble.<side>``), and goes with the
@@ -39,7 +40,9 @@ words only when that axis's quantity moved: the heatmap's X takes the map's x pi
 y pin, Normalize time the ensemble's x pin; the view shown takes none. Log x and Log y take the
 pin of their axis of the map and not the words: the map draws log10 values on a linear axis, so a
 range pinned over the other state frames nothing. A Log scale changed in Axis properties takes no
-pin, since that dialog commits the range typed beside it (:meth:`EventPlotWindow._log_from_figure`).
+pin, since that dialog commits the range typed beside it (:meth:`EventPlotWindow._log_from_figure`);
+a range it hands back as it opened is carried across to the units the axis is about to have
+(:class:`_MapTextHost`) instead of being left to frame nothing.
 """
 
 from __future__ import annotations
@@ -63,15 +66,18 @@ from ..core.sources import amplitude_comparability, amplitude_units_label
 from ..plot.style import OKABE_ITO
 from .analysis_catalog import ANALYSIS_LABELS
 from .export_paths import ask_export_path
-from .figure_text import (SHARED_LABELS_REASON, TextTarget, appearance_text_host,
-                          apply_text_style, figure_text_for, plain_text)
+from .figure_text import (SHARED_LABELS_REASON, AppearanceTextHost, TextTarget,
+                          appearance_text_host, apply_text_style, figure_text_for, plain_text)
 from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
-                              apply_tick_family, reframe_axis_pins)
+                              apply_colorbar_appearance, reframe_axis_pins)
 from .plot_interaction import (axis_name, image_value, install_plot_interaction,
                                reset_plot_history, view_button, window_readout)
 from .plot_templates import WindowTemplateControls
-from .plot_workflow import (WarningSummary, bounded_controls, control_group,
-                            ensure_item_legend, install_plot_workflow)
+from .pending_analysis import (PendingAnalysis, committed_analysis, combo_value,
+                               spin_value, check_value)
+from .plot_workflow import (DEFAULT_REVEAL, ExportEntry, FormatSpec, InspectorGroup,
+                            PageAdapter, WarningSummary, bounded_controls, control_group,
+                            ensure_item_legend, form_rows, install_plot_workflow)
 from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
                           data_write_failure_text, require_csv_row_budget,
                           write_live_plot_image, write_plot_csv)
@@ -93,7 +99,7 @@ _M_FRAC = "frac_depth"
 _M_ECD = "ecd"
 _M_AMPLITUDE = "amplitude_pA"
 _METRICS: tuple[tuple[str, str], ...] = (
-    (_M_DWELL, "Dwell (s)"),
+    (_M_DWELL, "Dwell (ms)"),
     (_M_DEPTH, "Median depth"),
     (_M_FRAC, "dI/I₀"),
     (_M_ECD, "ECD (charge deficit)"),
@@ -109,6 +115,9 @@ MAX_ENSEMBLE_CSV_ROWS = 250_000
 #: What the status line calls a metric after a change (quantity_reset): the name without its unit.
 _METRIC_PHRASE = {_M_DWELL: "dwell", _M_DEPTH: "median depth", _M_FRAC: "dI/I₀",
                   _M_ECD: "ECD", _M_AMPLITUDE: "selected amplitude"}
+
+#: What the status line says t = 0 is on the ensemble's x axis after the alignment changed.
+_ALIGN_PHRASE = {"start": "start", "center": "center", "extremum": "deepest sample"}
 
 _COLORMAPS = ("viridis", "magma", "plasma", "inferno", "cividis")
 
@@ -135,6 +144,62 @@ _MEDIAN_HEX = OKABE_ITO[2]      # bluish green -- the ensemble median
 _BAR_HEX = OKABE_ITO[0]         # blue -- the marginal histograms
 
 
+def _dialog_number(value: float) -> float:
+    """``value`` as Axis properties shows it, six significant figures, and reads it back."""
+    return float(f"{value:.6g}")
+
+
+def _across_log(rng: tuple[float, float], to_log: bool) -> tuple[float, float] | None:
+    """A range carried across a change of the map's Log box: log10 of it when the axis is about to
+    hold log10 values, ten to the power when it is about to hold the plain ones. None when it has
+    no image: a minimum at or below zero cannot be logged (nan or -inf), a power can overflow."""
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        out = np.log10(rng) if to_log else np.power(10.0, rng)
+    return (float(out[0]), float(out[1])) if np.isfinite(out).all() and out[0] < out[1] else None
+
+
+class _MapTextHost(AppearanceTextHost):
+    """Axis properties of the Event-count map. Its Log x and Log y draw log10 values on a linear
+    axis, so a range left as the dialog opened with it, with Log scale changed beside it, is in
+    the units the axis is leaving, and would frame nothing over the new numbers (a blank map).
+    That range, or the shown one when Auto was unticked on it, is carried across to the units the
+    axis is about to have; the major tick it opened with, which does not carry, goes. A range or a
+    major tick typed beside the change is for the axis as it is about to be drawn and is kept as
+    typed."""
+
+    def apply_axis(self, side: str, values) -> None:
+        if getattr(self.plot.getAxis(side), "_nanoscope_quantity_basis", None) is not None:
+            # Physical displayed ranges keep their meaning across log modes. A major
+            # interval does not: unedited decades must not become milliseconds.
+            before = self.axis_state(side)
+            if values.log != before.log and values.tick_major == before.tick_major:
+                values = replace(values, tick_major=None)
+            return super().apply_axis(side, values)
+        before = self.axis_state(side)
+        opened = before.range if before.range is not None else before.shown_range
+        if (values.log != before.log and values.range is not None
+                and values.range == tuple(_dialog_number(v) for v in opened)):
+            # The dialog shows a tick to six decimals: that is how it is told from a typed one.
+            opened_tick = None if before.tick_major is None else round(before.tick_major, 6)
+            tick = None if values.tick_major == opened_tick else values.tick_major
+            values = replace(values, range=_across_log(values.range, values.log), tick_major=tick)
+        super().apply_axis(side, values)
+
+
+class _ViewReveal(dict):
+    """``adapter.reveal_map`` for this page: the old Analysis Section means the plot controls
+    of the view on screen, whichever tab that is."""
+
+    def __init__(self, page: "EventPlotWindow") -> None:
+        super().__init__(DEFAULT_REVEAL)
+        self._page = page
+
+    def get(self, key, default=None):
+        if key == "Analysis":
+            return "plot_map" if self._page.current_view() == DENSITY else "plot_ensemble"
+        return super().get(key, default)
+
+
 class EventPlotWindow(QtWidgets.QMainWindow):
     """Density heatmap + event ensemble for the active detection's accepted events.
 
@@ -152,6 +217,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     #: A recipe control changed.  The owner persists it in the v11 analytical
     #: workspace; this window remains deliberately ignorant of project files.
     workspaceChanged = Signal()
+    pendingChanged = Signal()
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -209,11 +275,27 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         #: axis, so a range pinned over the other state frames nothing.
         self._density_logs: tuple[bool, bool] | None = None
         self._normalize_shown: bool | None = None
+        #: The alignment the real-time ensemble on screen has: None while it is normalised (the
+        #: alignment is immaterial then), empty, or not drawn.
+        self._align_shown: str | None = None
         self._view_shown = DENSITY
 
         self._updating = False
         self._figure_log = False        # up while Axis properties changes Log scale
+        self._pending_source_recipe = {}
         self._build_ui()
+        self._pending_analysis = PendingAnalysis(self, {
+            'source': (self, lambda: self._pending_source_recipe, self._set_pending_source_recipe),
+            'x_metric': combo_value(self._x_combo, data=True),
+            'y_metric': combo_value(self._y_combo, data=True),
+            'log_x': check_value(self._logx), 'log_y': check_value(self._logy),
+            'bins': spin_value(self._bins),
+            'normalize_time': check_value(self._normalize),
+            'align': combo_value(self._align_combo), 'n_points': spin_value(self._npoints),
+            'pad_percent': spin_value(self._pad),
+            'ensemble_subset': combo_value(self._subset_combo, data=True),
+            'ensemble_band': combo_value(self._band_combo, data=True),
+        }, has_result=lambda: self._density_counts is not None or self._ensemble is not None)
         self._redraw()
 
     # -- construction ----------------------------------------------------------------------------
@@ -235,7 +317,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         layout.addWidget(self._appearance_section)
         self._data_section = control_group(
             "Data", "Uses the active detection’s accepted events. Analyze / refresh updates "
-            "this snapshot. The Event-count heatmap bins actual event counts; it is not a "
+            "this result. The Event-count heatmap bins actual event counts; it is not a "
             "smoothed kernel-density estimate (KDE). Ensemble displays aligned event traces.")
         layout.addWidget(self._data_section)
         layout.addWidget(self._tabs, 1)
@@ -264,7 +346,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             exports=(("Export current figure…", lambda: self.save_image()),
                      ("Export data (CSV)…", lambda: self.export_data())))
         self._workflow.adopt_reset_figure(
-            self._appearance_widget, keeps="the Event-count heatmap colormap")
+            self._appearance_widget, keeps="the Event-count heatmap colormap", takes_ranges=True)
         bar.hide()  # legacy programmatic toggle remains available; workflow owns visible chrome
         # One template for both views: the heatmap's metrics, bins and colormap with the
         # ensemble's alignment, and the shared appearance -- never the bound detection.
@@ -291,8 +373,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         the readout uses too (the marginals have no titles of their own). The marginals are
         linked to the map and share its history, so their menu means the same view.
         """
-        exports = (("Export current figure…", lambda: self.save_image()),
-                   ("Export data (CSV)…", lambda: self.export_data()))
+        # One list for the right-click menu and the Explorer's Export ▾: they cannot disagree.
+        exports = self._exports = (("Export current figure…", lambda: self.save_image()),
+                                   ("Export data (CSV)…", lambda: self.export_data()))
         self._readout = window_readout(self)
 
         def drawn_name(side: str, combo: QtWidgets.QComboBox):
@@ -304,7 +387,12 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             return name
 
         x_name, y_name = drawn_name("bottom", self._x_combo), drawn_name("left", self._y_combo)
-        x_log, y_log = self._logx.isChecked, self._logy.isChecked
+        # Pointer coordinates describe the map on screen even while its log
+        # controls contain a pending choice for the next Update.
+        x_log = lambda: (self._density_logs[0] if self._density_logs is not None
+                         else self._logx.isChecked())
+        y_log = lambda: (self._density_logs[1] if self._density_logs is not None
+                         else self._logy.isChecked())
 
         def density_count(vx: float, vy: float) -> str:
             value = image_value(self._density_image, vx, vy)
@@ -317,7 +405,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         def log_box(side: str) -> QtWidgets.QCheckBox:
             return self._logx if side == "bottom" else self._logy
 
-        self._density_text_host = appearance_text_host(
+        self._density_text_host = _MapTextHost(
             self._density_main, self._appearance_widget,
             axis_hooks={"log": self._log_from_figure,
                         "log_state": lambda side: log_box(side).isChecked()},
@@ -348,6 +436,101 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             lambda: self._density_nav if self.current_view() == DENSITY else self._ensemble_nav,
             navigations))
 
+    def configure_figure_binding(self, follow: bool, on_changed) -> None:
+        """Expose this live figure's source policy without gathering or computing data."""
+        from .figure_adapter_pages import configure_source_binding
+        configure_source_binding(self, self._data_section, follow, on_changed)
+
+    def inspector_adapter(self) -> PageAdapter:
+        """How the Analysis Explorer hosts this page (Phase 1, "Pages B").
+
+        Built once and cached; nothing but ``AnalysisExplorer.add_page`` (through
+        ``InspectorHost.adopt``) and the hosting test helpers call it. Building it is the
+        move's first half: the two control rows become vertical forms, the subset combo
+        gets a row of its own, and the groups name the page's EXISTING widgets. It computes
+        nothing: ``update`` is the Refresh signal; managed analytical controls wait
+        for it. Groups follow the Density / Ensemble tab through ``visible_when``."""
+        if getattr(self, "_inspector_adapter", None) is None:
+            if self._pending_analysis.managed:
+                self._band_combo.setToolTip(
+                    'Shade mean ± 1 sample SD or the median’s 25th–75th percentile band. '
+                    'Update plot applies this choice with the pending analytical settings. '
+                    'Details gives how many events each point uses.')
+            # A check box in a form is only as wide as its text (as it was in the strip): its
+            # click area is the indicator and the text, not the whole row.
+            for box in (self._logx, self._logy, self._normalize):
+                box.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
+                                  QtWidgets.QSizePolicy.Policy.Fixed)
+            self._subset_row = form_rows([("Events", self._subset_combo)])
+            map_form = form_rows([("X", self._x_combo), ("Y", self._y_combo),
+                                  ("", self._logx), ("", self._logy), ("Bins", self._bins)])
+            ensemble_form = form_rows([("", self._normalize), ("Align", self._align_combo),
+                                       ("Points", self._npoints), ("Pad %", self._pad),
+                                       ("Band", self._band_combo)])
+            # Format keeps this control mounted, but lists it only for its own view.
+            self._density_palette._nanoscope_format_visible = lambda: self.current_view() == DENSITY
+            self._inspector_adapter = PageAdapter.from_widget(
+                self, "event_waveforms", self._appearance_widget,
+                groups=[
+                    InspectorGroup("sources", "Sources", [self._data_section, self._subset_row]),
+                    InspectorGroup("plot_map", "Plot · Event-count map", [map_form],
+                                   visible_when=lambda: self.current_view() == DENSITY),
+                    InspectorGroup("plot_ensemble", "Plot · Ensemble", [ensemble_form],
+                                   visible_when=lambda: self.current_view() == ENSEMBLE),
+                    InspectorGroup("recipes", "Recipes", [self._templates], expanded=False)],
+                format=FormatSpec(
+                    self._appearance_widget, controllers=self._text_controllers,
+                    extras={"colour_map": [self._density_palette]},
+                    views_changed=self._tabs.currentChanged,
+                    axis_log_target=lambda plot, side:
+                    ("plot_map", self._logx if side == "bottom" else self._logy)
+                    if plot == PIN_MAP else None),
+                update=self.refreshRequested.emit,
+                pending=self._pending_analysis.state,
+                pending_changed=self.pendingChanged,
+                update_tooltip="Re-snapshot the active detection's accepted events and redraw "
+                               "both views.",
+                exports=lambda: [ExportEntry(text, run, kind=kind) for (text, run), kind
+                                 in zip(self._exports, ("figure", "data"))],
+                navigation=self._current_navigation,
+                navigations=lambda: (self._density_nav, self._ensemble_nav),
+                status_bar=self.statusBar,
+                reveal_map=_ViewReveal(self),
+                chrome=[self._workflow],
+                on_adopt=self._on_adopt)
+        return self._inspector_adapter
+
+    def _text_controllers(self) -> list:
+        """The in-figure editing controllers of the view on screen (Format lists those)."""
+        plot = self._density_main if self.current_view() == DENSITY else self._ensemble_plot
+        controller = figure_text_for(plot)
+        return [controller] if controller is not None else []
+
+    def _current_navigation(self):
+        return self._density_nav if self.current_view() == DENSITY else self._ensemble_nav
+
+    def _on_adopt(self) -> None:
+        """Hosting steps: the controls the toolbar and the inspector replace stay
+        constructed and hidden, and the two plots may shrink to the room the page area has
+        beside a 320 px inspector."""
+        for hidden in (self._legacy_toolbar, self._d_save, self._d_data, self._e_save,
+                       self._e_data, self._density_export_controls,
+                       self._ensemble_export_controls, self._density_analysis_controls,
+                       self._ensemble_analysis_controls, self._appearance_section):
+            hidden.hide()
+        self._hosted = True
+        for widget, floor in ((self._density_glw, 300), (self._ensemble_widget, 300)):
+            widget.setMinimumSize(280, floor)
+        self.setMinimumSize(min(self.minimumWidth(), 280), min(self.minimumHeight(), 360))
+        self._sync_subset_row()
+
+    def _sync_subset_row(self) -> None:
+        """The Events subset feeds the ensemble only (the heatmap always uses every
+        accepted event), so its row shows with the Ensemble tab."""
+        row = getattr(self, "_subset_row", None)
+        if row is not None:
+            row.setVisible(self.current_view() == ENSEMBLE)
+
     def _density_label_targets(self) -> dict:
         """The map's own labels outside its PlotItem: the colour bar's and the marginals'."""
         return {key: TextTarget(axis, auto, noun="label")
@@ -371,8 +554,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._workflow.set_section("Appearance" if visible else "Data")
         # The Explorer can be shorter than this standalone window's preferred
         # size. Keep the axes visible when the optional controls are expanded.
+        hosted = getattr(self, "_hosted", False)
         for widget, original in ((self._density_glw, 460), (self._ensemble_widget, 420)):
-            widget.setMinimumHeight(240 if visible else original)
+            widget.setMinimumHeight(240 if visible or hosted else original)
 
     def _on_appearance_changed(self, state: PlotAppearance) -> None:
         self._appearance = state
@@ -399,9 +583,41 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         reframe_axis_pins(plot)
         self._apply_appearance()
 
+    @committed_analysis
     def _apply_appearance(self) -> None:
+        from ..core.quantity_display import quantity_for
+        from .quantity_axis import present_page_axes, configure_quantity_axis
+        if self._density_shown is not None:
+            quantities = {side: quantity_for(key) for side, key in
+                          zip(("bottom", "left"), self._density_shown)}
+            frames = {side: "log10" if log else "linear" for side, log in
+                      zip(("bottom", "left"), self._density_logs)}
+            for side in quantities:
+                self._density_main.getAxis(side).setLogMode(frames[side] == "log10")
+            legacy_logs = tuple(key for side, frame in frames.items() if frame == "log10"
+                                for key in (side, PIN_MAP + "." + side))
+            present_page_axes(self, self._density_main, quantities, view=PIN_MAP,
+                              primary=PIN_MAP, frames=frames, legacy_view_pins=legacy_logs)
+            for marginal, side in ((self._density_top, "bottom"), (self._density_right, "left")):
+                axis = marginal.getAxis(side)
+                axis.setLogMode(frames[side] == "log10")
+                configure_quantity_axis(axis, self._density_main.getAxis(side)._nanoscope_quantity_basis)
+        if self._normalize_shown is not None:
+            time = (quantity_for("normalized_time", declared_unit="-", quantity="dimensionless")
+                    if self._normalize_shown else quantity_for("time_s", clock_basis="relative"))
+            present_page_axes(self, self._ensemble_plot, {"bottom": time},
+                              view=PIN_ENSEMBLE, primary=PIN_MAP)
         # Each view draws only the pins typed on it (figures2-1): a time range pinned on the
         # ensemble blanked the map, whose x is log10 dwell.
+        from .figure_series import tag_pg_series
+        for item,view,role,identity,label in (
+                (self._top_marginal_item,PIN_MAP,"data","dwell_marginal","Dwell marginal counts"),
+                (self._right_marginal_item,PIN_MAP,"data","depth_marginal","Depth marginal counts"),
+                (self._events_item,PIN_ENSEMBLE,"data","events","Individual events"),
+                (self._mean_item,PIN_ENSEMBLE,"summary","mean","Mean waveform"),
+                (self._median_item,PIN_ENSEMBLE,"summary","median","Median waveform")):
+            if item is not None and not hasattr(item,"_nanoscope_series_descriptor"):
+                tag_pg_series(item,view=view,role=role,identity=identity,label=label)
         apply_plot_appearance(self._density_main,
                               self._appearance.for_view(PIN_MAP, primary=PIN_MAP),
                               plot_widget=self._density_glw)
@@ -412,14 +628,16 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         for plot, item in ((self._density_top, self._top_marginal_item),
                            (self._density_right, self._right_marginal_item)):
             apply_plot_appearance(plot, marginal, data_items=(item,))
+        apply_colorbar_appearance(self._colorbar, self._appearance,
+                                  self._density_main.getAxis("left"))
         for key, (axis, auto) in self._density_labels().items():
             original = getattr(axis, "_nanoscope_label_style", None)
             if original is None:
                 original = axis._nanoscope_label_style = dict(axis.labelStyle)
             axis.labelStyle = dict(original)  # a style taken off must go, not linger
-            apply_text_style(axis, self._appearance.text_style(key), auto,
+            axis.labelStyle["color"] = axis.pen().color().name()
+            apply_text_style(axis, self._appearance.effective_text_style(key), auto,
                              self._appearance.font_family)
-        apply_tick_family(self._colorbar.axis, self._appearance.font_family)
         # Mean and median are summaries, not fits: preserve their individual
         # colors and solid/dashed identities while sharing typography/line width.
         ensure_item_legend(self._ensemble_plot, ((self._events_item, "Events"),
@@ -528,17 +746,24 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._amplitude_warning_label = self._amplitude_warning_summary
         root.addWidget(self._amplitude_warning_summary)
 
-        # The density scene: top marginal + main image + right marginal + colour bar.
+        # Keep the count scale below both columns: a third, fixed-width colour-bar
+        # column clips its numeric ticks in the Explorer's narrow page area.
+        # The full heatmap and both marginals retain their labels and font sizes.
         self._density_glw = pg.GraphicsLayoutWidget()
         self._density_glw.setMinimumSize(560, 460)
-        self._density_top = self._density_glw.addPlot(row=0, col=0)
-        self._density_main = self._density_glw.addPlot(row=1, col=0)
-        self._density_right = self._density_glw.addPlot(row=1, col=1)
+        from .axes import ReadableLogAxis
+        def axes():
+            return {side: ReadableLogAxis(side) for side in ("bottom", "left")}
+        self._density_top = self._density_glw.addPlot(row=0, col=0, axisItems=axes())
+        self._density_main = self._density_glw.addPlot(row=1, col=0, axisItems=axes())
+        self._density_right = self._density_glw.addPlot(row=1, col=1, axisItems=axes())
         # No colour-map menu on the bar: its pick would recolour the map behind the
         # Colormap control, which is the one the page saves (plot_interaction's rule).
         self._colorbar = pg.ColorBarItem(values=(0, 1), colorMap=_get_colormap("viridis"),
-                                         label="Event count", colorMapMenu=False)
-        self._density_glw.addItem(self._colorbar, row=1, col=2)
+                                         label="Event count", orientation="horizontal",
+                                         colorMapMenu=False)
+        self._density_glw.addItem(self._colorbar, row=2, col=0, colspan=2)
+        self._colorbar.setMaximumHeight(75)
 
         self._density_main.showGrid(x=True, y=True, alpha=0.15)
         self._density_top.setXLink(self._density_main)
@@ -666,7 +891,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._d_xlabel.textChanged.connect(self._on_density_labels_changed)
         self._d_ylabel.textChanged.connect(self._on_density_labels_changed)
         self._normalize.toggled.connect(self._on_normalize_toggled)
-        self._align_combo.currentTextChanged.connect(self._on_ensemble_changed)
+        self._align_combo.currentTextChanged.connect(self._on_align_changed)
         self._npoints.valueChanged.connect(self._on_ensemble_changed)
         self._pad.valueChanged.connect(self._on_ensemble_changed)
         self._subset_combo.currentIndexChanged.connect(self._on_ensemble_changed)
@@ -719,6 +944,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                             "interval scopes and review stale-value warnings before pooling."
                             if available else "Apply an amplitude measurement in Curate to enable this metric.")
         self._refresh_subset_options()
+        from ..core.analysis_workspace import _event_window_source_recipe
+        self._set_pending_source_recipe(_event_window_source_recipe(self) or {})
         if defer_analysis:
             # Never leave another project's result available behind a newly bound
             # source if the artifact later proves malformed.  Clearing Qt items and
@@ -746,6 +973,24 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             self._median_item = None
             return
         self._redraw()
+
+    def _set_pending_source_recipe(self, recipe):
+        from copy import deepcopy
+        if not isinstance(recipe, dict):
+            raise ValueError('The pending Event source must be a durable source recipe.')
+        self._pending_source_recipe = deepcopy(recipe)
+
+    def stage_source(self, recipe):
+        """Follow a selection as a draft, retaining the displayed detection and trace."""
+        self._set_pending_source_recipe(recipe or {})
+        self._pending_analysis.defer()
+
+    def _pending_analysis_warnings(self):
+        if not self._pending_source_recipe:
+            return ()
+        from ..core.analysis_workspace import _resolve_source
+        doc_id, _channel, _reason = _resolve_source(self, self._pending_source_recipe)
+        return ('selected recording unavailable',) if doc_id is None else ()
 
     def _accepted(self) -> EventSet | None:
         """The accepted-only EventSet, or ``None`` when there is nothing to plot."""
@@ -833,6 +1078,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
     # -- redraw dispatch -------------------------------------------------------------------------
     def _on_density_changed(self, *_a) -> None:
         if not self._updating:
+            if self._pending_analysis.defer():
+                return
             shown, logs = self._density_shown, self._density_logs
             moved = shown not in (None, self._density_quantity())
             logged = logs not in (None, self._density_log_state()) and not self._figure_log
@@ -886,8 +1133,20 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     def _on_ensemble_changed(self, *_a) -> None:
         if not self._updating:
+            if self._pending_analysis.defer():
+                return
             self._redraw_ensemble()
             self.workspaceChanged.emit()
+
+    def _on_align_changed(self, *_a) -> None:
+        shown = self._align_shown
+        self._on_ensemble_changed()
+        align = self._align_shown
+        if shown is not None and align not in (None, shown):
+            # t = 0 is what the ensemble's x axis counts from: another alignment is another axis
+            # (and nothing moves while time is normalised, when no alignment is drawn).
+            self._reset_words(f"the ensemble with t = 0 at each event's {_ALIGN_PHRASE[align]}",
+                              ((PIN_ENSEMBLE, "bottom"),))
 
     def _on_density_labels_changed(self, *_a) -> None:
         if not self._updating:
@@ -909,15 +1168,16 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             self._apply_ensemble_title()
             self.workspaceChanged.emit()
 
+    @committed_analysis
     def _apply_density_labels(self) -> None:
         """Update the existing populated plot; leave empty/error messages intact."""
         if self._density_image is None:
             return
         x_id, y_id = self._x_combo.currentData(), self._y_combo.currentData()
         xlabel = self._d_xlabel.text().strip() or (
-            self._metric_label(x_id) + (" (log10)" if self._logx.isChecked() else ""))
+            self._metric_label(x_id) + (" (log)" if self._logx.isChecked() else ""))
         ylabel = self._d_ylabel.text().strip() or (
-            self._metric_label(y_id) + (" (log10)" if self._logy.isChecked() else ""))
+            self._metric_label(y_id) + (" (log)" if self._logy.isChecked() else ""))
         self._density_main.setLabel("bottom", xlabel)
         self._density_main.setLabel("left", ylabel)
         title = self._d_title.text().strip() or self._density_auto_title
@@ -937,6 +1197,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             self._apply_appearance()
 
     def _on_view_changed(self, *_a) -> None:
+        self._sync_subset_row()
         shown, self._view_shown = self._view_shown, self.current_view()
         if not self._updating:
             self._apply_appearance()
@@ -947,16 +1208,48 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     def _on_normalize_toggled(self, on: bool) -> None:
         self._align_combo.setEnabled(not on)   # align only bites in real-time mode
+        if not self._updating and self._pending_analysis.defer():
+            return
         moved = not self._updating and self._normalize_shown not in (None, bool(on))
         self._on_ensemble_changed()
         if moved:       # normalised or real time is the ensemble's x axis; current stays current
             self._reset_words("the ensemble against " + (
-                "time normalised to each dwell" if on else "time in seconds"),
+                "time normalised to each dwell" if on else "time in milliseconds"),
                 ((PIN_ENSEMBLE, "bottom"),))
 
+    def _sync_pending_analysis_controls(self):
+        self._align_combo.setEnabled(not self._normalize.isChecked())
+
     def _redraw(self) -> None:
-        self._redraw_density()
-        self._redraw_ensemble()
+        pending = getattr(self, '_pending_analysis', None)
+        if pending is None:
+            self._redraw_density()
+            self._redraw_ensemble()
+            return
+        shown, logs = self._density_shown, self._density_logs
+        normalized, aligned = self._normalize_shown, self._align_shown
+        with pending.applying():
+            self._redraw_density()
+            self._redraw_ensemble()
+            pending.commit()
+        if not pending.managed:
+            return
+        axes = []
+        words = False
+        if shown is not None and self._density_shown is not None:
+            axes += [(PIN_MAP, side) for side, old, new in
+                     zip(('bottom', 'left'), shown, self._density_shown) if old != new]
+            words = bool(axes)
+            if logs is not None:
+                axes += [(PIN_MAP, side) for side, old, new in
+                         zip(('bottom', 'left'), logs, self._density_logs) if old != new]
+        if (normalized not in (None, self._normalize_shown)
+                or aligned not in (None, self._align_shown)):
+            axes.append((PIN_ENSEMBLE, 'bottom'))
+            words = True
+        if axes:
+            self._reset_words('the updated event-count map and ensemble', tuple(dict.fromkeys(axes)),
+                              only=None if words else ())
 
     # -- density ---------------------------------------------------------------------------------
     def _redraw_density(self) -> None:
@@ -1062,7 +1355,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     # -- ensemble --------------------------------------------------------------------------------
     def _redraw_ensemble(self) -> None:
-        self._normalize_shown = None
+        self._normalize_shown = self._align_shown = None
         self._ensemble_plot.clear()
         reset_plot_history(self._ensemble_plot)  # new geometry: old ranges mean nothing now
         self._events_item = None
@@ -1126,7 +1419,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
         skipped = len(acc.df) - matrix.shape[0]
         self._normalize_shown = normalize
-        xlabel = "Normalized time (dwell)" if normalize else "Time (s)"
+        self._align_shown = None if normalize else align
+        xlabel = "Normalized time (dwell)" if normalize else "Time (ms)"
         self._ensemble_plot.setLabel("bottom", xlabel)
         self._ensemble_plot.setLabel("left", f"Current ({self._units})")
         self._ensemble_auto_title = self._ensemble_title(matrix.shape[0], skipped)
@@ -1203,6 +1497,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
     def _on_band_changed(self, *_a) -> None:
         if self._updating:
+            return
+        if self._pending_analysis.defer():
             return
         # A reduction of the traces on screen: no kernel, no trace read, and the user's
         # zoom is put back exactly (adding items to an auto-ranging view would refit it).
@@ -1343,6 +1639,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         item.setPos(0.5, 0.5)
 
     # -- public accessors (owner + tests) --------------------------------------------------------
+    @committed_analysis
     def details_text(self) -> str:
         """Retained view diagnostics and source provenance for figure bundles."""
         density = self.current_view() == DENSITY
@@ -1391,9 +1688,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         """A recalled template, as one gesture: every control set, then each view redrawn
         at most once, and only if one of ITS settings moved.
 
-        This window has no draft -- each of these controls redraws its view from the bound
-        events as it moves -- so the recall does what setting them by hand would, once
-        instead of a dozen times. A heatmap or ensemble setting that did not change does not
+        Managed analytical controls remain pending until Update. In a standalone window,
+        recall redraws from the bound events once instead of a dozen times. A heatmap or
+        ensemble setting that did not change does not
         redraw: that would re-bin over the zoom, and on a snapshot restored from a project
         whose recording is missing it would erase the saved count grid
         (``_render_workspace_snapshot``). The colormap, the view shown and the appearance are
@@ -1438,6 +1735,11 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         # edit (the connections after _build_ui).
         after, _appearance = self.template_settings()
         moved = {key for key in after if after[key] != current[key]}
+        if self._pending_analysis.managed:
+            analytical = moved & self._pending_analysis.controls.keys()
+            if analytical:
+                self._pending_analysis.defer()
+                moved -= analytical
         if moved & {"x_metric", "y_metric", "log_x", "log_y", "bins"}:
             self._redraw_density()                  # _on_density_changed
         elif "colormap" in moved and self._density_image is not None:
@@ -1609,7 +1911,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         self._frame(self._density_main)
 
     def _render_ensemble_snapshot(self) -> None:
-        self._normalize_shown = None
+        self._normalize_shown = self._align_shown = None
         self._ensemble_plot.clear()
         reset_plot_history(self._ensemble_plot)  # new geometry: old ranges mean nothing now
         self._events_item = None
@@ -1665,8 +1967,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 
         normalize = self._normalize.isChecked()
         self._normalize_shown = normalize
+        self._align_shown = None if normalize else self._align_combo.currentText()
         self._ensemble_plot.setLabel(
-            "bottom", "Normalized time (dwell)" if normalize else "Time (s)")
+            "bottom", "Normalized time (dwell)" if normalize else "Time (ms)")
         self._ensemble_plot.setLabel("left", f"Current ({self._units})")
         self._ensemble_auto_title = self._ensemble_title(*self._ensemble_kept_and_skipped())
         self._apply_ensemble_title()
@@ -1677,7 +1980,8 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         return self._ensemble
 
     def has_data(self) -> bool:
-        return self._accepted() is not None
+        """A committed plot exists, including a frozen plot with no live source."""
+        return self._density_counts is not None or self._ensemble is not None
 
     # -- export ----------------------------------------------------------------------------------
     def save_image(self, path: str | None = None) -> Path | None:
@@ -1945,10 +2249,20 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                 })
         return pd.DataFrame(rows)
 
+    @committed_analysis
     def _plot_data(self) -> pd.DataFrame:
         """The exact numeric values behind the currently visible event-plot view."""
-        return (self._density_plot_data() if self.current_view() == DENSITY
-                else self._ensemble_plot_data())
+        from .quantity_axis import export_display_columns
+        density = self.current_view() == DENSITY
+        frame = self._density_plot_data() if density else self._ensemble_plot_data()
+        plot = self._density_main if density else self._ensemble_plot
+        columns = {}
+        for side, fields in (("bottom", ("x_left", "x_right", "x_center", "x_value") if density else ("time",)),
+                             ("left", ("y_left", "y_right", "y_center", "y_value") if density else ())):
+            basis = getattr(plot.getAxis(side), "_nanoscope_quantity_basis", None)
+            if basis is not None:
+                columns.update({name: basis.quantity for name in fields})
+        return export_display_columns(frame, columns)
 
     def export_data(self, path: str | None = None) -> Path | None:
         """Export the current density or ensemble view and provenance as staged CSV."""

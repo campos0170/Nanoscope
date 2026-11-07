@@ -195,6 +195,9 @@ def test_the_action_opens_a_window_that_discloses_the_loss(qapp, qtbot, tmp_path
     win._act_vdep.trigger()                      # the gesture itself
     w = win._vdep_window
     assert w is not None, WHERE
+    # Opening an independent figure creates a draft. The common user action
+    # computes the series and must still disclose every refused recording.
+    win._analysis_explorer.toolbar().update_action.trigger()
     assert "mystery.h5" in w.warning_text(), f"{w.warning_text()} {WHERE}"
     assert "mystery.h5" in w.details_text(), WHERE
 
@@ -287,7 +290,7 @@ def test_the_event_count_trend_states_the_durations_it_pooled(qapp, qtbot, tmp_p
     for span in ("250.000", "60.000", "180.000"):
         assert span in details, f"{span} missing {WHERE}"
     # ...and beside every count, in the row that produced it.
-    assert sorted(_column(w, "Duration (s)")) == ["180.000", "250.000", "60.000"], WHERE
+    assert sorted(_column(w, "Duration (ms)")) == ["180000.000", "250000.000", "60000.000"], WHERE
 
 
 def test_a_rate_over_the_same_recordings_shows_the_durations_and_does_not_warn(
@@ -298,7 +301,7 @@ def test_a_rate_over_the_same_recordings_shows_the_durations_and_does_not_warn(
     assert "COUNTS ACROSS UNEQUAL" not in w.details_text(), WHERE
     # The spans are still SHOWN -- marked as unread by this metric, like Baseline/Gain.
     assert "not read by this metric" in w.details_text().split("Duration:")[1][:60], WHERE
-    assert sorted(_column(w, "Duration (s)")) == ["180.000", "250.000", "60.000"], WHERE
+    assert sorted(_column(w, "Duration (ms)")) == ["180000.000", "250000.000", "60000.000"], WHERE
 
 
 def test_equal_durations_are_stated_positively_not_warned(qapp, qtbot, tmp_path):
@@ -310,7 +313,7 @@ def test_equal_durations_are_stated_positively_not_warned(qapp, qtbot, tmp_path)
         _detect(session, doc_id, 40, duration_s=40.0)
     w = _window(qtbot, session, metric="n_events", fit="linear")
     assert "UNEQUAL" not in _title(w), f"{_title(w)} {WHERE}"
-    assert "over 40.000 s each" in _title(w), f"{_title(w)} {WHERE}"
+    assert "over 40000 ms each" in _title(w), f"{_title(w)} {WHERE}"
 
 
 def test_duration_disclosure_stays_in_details_not_exported_plot(qapp, qtbot, tmp_path):

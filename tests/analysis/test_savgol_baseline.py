@@ -217,12 +217,20 @@ def test_it_tracks_through_a_baseline_unstable_stretch_that_a_mask_would_bridge(
     x = _cu_trace(unstable=True, drift=0.0)
     head = slice(0, x.size // 10)
 
-    def _false_event_fraction(method, **kw):
+    def _false_event_fraction(method, *, legacy=False, **kw):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            d = np.asarray(
-                remove_baseline_wander(x, FS, method=method, polarity=1, **kw),
-                dtype=np.float64)
+            if legacy:
+                from nanoscope.analysis.ml_preprocess import baseline_masked_median
+                legacy_kw = {k: v for k, v in kw.items() if k != "window_s"}
+                detrended, _ = baseline_masked_median(
+                    -x, FS, _legacy_sample_counts=True,
+                    _legacy_mask_noise=True, **legacy_kw)
+                d = np.asarray(-detrended, dtype=np.float64)
+            else:
+                d = np.asarray(
+                    remove_baseline_wander(x, FS, method=method, polarity=1, **kw),
+                    dtype=np.float64)
         d = d - np.median(d)
         # sigma from the QUIET middle, which both estimators handle
         mid = d[x.size // 3: 2 * x.size // 3]
@@ -233,7 +241,14 @@ def test_it_tracks_through_a_baseline_unstable_stretch_that_a_mask_would_bridge(
                                sg_poly=3, sg_decim=50)
     mm = _false_event_fraction("masked_median", window_s=0.5, rough_s=0.5, base_s=0.2,
                                decim=10, mask_sigma=3.0, dilate_ms=2.0)
-    assert sg < mm, f"savgol {sg:.4f} should beat masked_median {mm:.4f} here"
+    legacy = _false_event_fraction(
+        "masked_median", legacy=True, window_s=0.5, rough_s=0.5, base_s=0.2,
+        decim=10, mask_sigma=3.0, dilate_ms=2.0)
+    # The historical comparison still holds against the explicit training
+    # algorithm. The new automatic mask fixes that bridging defect too; it is
+    # allowed to improve beyond SavGol, but may not regress to the old bias.
+    assert sg < legacy, (sg, legacy)
+    assert mm < legacy, (mm, legacy)
 
 
 # ---------------------------------------------------------------------------

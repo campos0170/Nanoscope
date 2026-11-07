@@ -6,6 +6,8 @@ its historical results retain their existing scaling.
 """
 from __future__ import annotations
 
+from ..core.atomic_write import write_staged
+
 from dataclasses import dataclass
 import json
 import os
@@ -206,13 +208,15 @@ def prepare_raw(path, channel: int, tag: str, config: MLPreprocessConfig, *,
     elif method == "masked_median":
         detr, base = baseline_masked_median(oriented, fs, rough_s=config.masked_rough_s,
                     base_s=config.masked_base_s, decim=config.baseline_decim,
-                    mask_sigma=config.masked_mask_sigma, dilate_ms=config.masked_dilate_ms)
+                    mask_sigma=config.masked_mask_sigma, dilate_ms=config.masked_dilate_ms,
+                    _legacy_sample_counts=True, _legacy_mask_noise=True)
     elif method == "robust_median":
         detr, base = baseline_robust_median(oriented, fs,
-                    window_s=config.baseline_window_s, decim=config.baseline_decim)
+                    window_s=config.baseline_window_s, decim=config.baseline_decim,
+                    _legacy_sample_counts=True)
     elif method == "savgol":
         detr, base = baseline_savgol(oriented, fs, window_s=config.baseline_window_s,
-                                    poly=config.baseline_poly)
+                                    poly=config.baseline_poly, _legacy_sample_counts=True)
     else:
         detr, base = oriented.astype(np.float32), np.zeros(len(oriented), np.float32)
     check_cancelled(cancel)
@@ -312,7 +316,7 @@ def export_prepared(recording: PreparedRecording, folder, *,
                                 columns["baseline_pA"] = np.asarray(baseline[start:stop], np.float32)
                             pd.DataFrame(columns).to_csv(text, index=False, header=start == 0)
                             _progress(progress, 0.95 * stop / len(raw), f"Saved {stop:,} of {len(raw):,} prepared samples")
-            (stage / metadata_path.name).write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
+            write_staged(stage / metadata_path.name, Path.write_text, json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
             check_cancelled(cancel)
             for staged, target in ((staged_trace, trace), (stage / metadata_path.name, metadata_path)):
                 # Hard-link publication is atomic and fails if a racing writer already

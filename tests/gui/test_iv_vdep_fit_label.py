@@ -118,7 +118,7 @@ def test_vdep_numbers_go_to_the_fit_label_and_the_provenance_to_the_caption(vdep
     title = vdep.plot_item().titleLabel.text
     assert title == "" and "R²" not in title and "V₀" not in title
     label = vdep.fit_label_text()
-    assert "V₀ = " in label and "R² = " in label
+    assert "V₀ = " in label and "R² (log response) = " in label
     assert vdep._caption_segments, "the ladder has a pooled method to state"
     assert vdep.caption_text() == "   ·   ".join(vdep._caption_segments)
     widget = vdep._appearance_widget

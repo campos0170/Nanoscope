@@ -116,6 +116,7 @@ import math
 import threading
 import weakref
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields as _dc_fields, replace as _dc_replace
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
@@ -158,8 +159,9 @@ from .axes import ReadableLogAxis
 from .categorical import category_brushes, category_colour, category_counts, legend_swatch
 from .combos import choose_combo_item
 from .column_checklist import ColumnChecklist
+from .quantity_selectors import ScientificColumnCombo
 from .export_paths import ask_export_path
-from .figure_text import (GATE, HIDDEN_TEXT, AxisState, TextStyle, TextTarget, css_args,
+from .figure_text import (label_args, GATE, HIDDEN_TEXT, AxisState, TextStyle, TextTarget, css_args,
                           figure_text_for, plain_text, rich_text, shown_text,
                           valid_element_key)
 from .fit_label import (FIT_FIELDS, FitLabelItem, FitLabelState, FitReadout, automatic_template,
@@ -172,10 +174,12 @@ from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_legend
 from .plot_interaction import (image_value, install_plot_interaction, keep_plot_history,
                                reset_plot_history, view_button, window_readout)
 from .plot_lasso import PlotLasso, RowIdentityIndex, toggled_rows, unique_rows
+from .plot_workflow import (DEFAULT_REVEAL, ExportEntry, FormatSpec, HistoryState,
+                            InspectorGroup, PageAdapter, PendingState)
 from .plot_export import (
     apply_png_resolution, apply_svg_physical_size, choose_live_plot_export,
 )
-from .quantity_reset import announce, reset_sentence, words_cleared
+from .quantity_reset import announce, reset_sentence, stands, typed_words, words_cleared
 from .worker_thread import (
     DEFAULT_JOIN_MS,
     JOB_NONE,
@@ -386,6 +390,8 @@ _NORM_COUNT = "count"
 _NORM_DENSITY = "density"
 _NORM_PROB = "probability per bin"
 _NORMS = (_NORM_COUNT, _NORM_DENSITY, _NORM_PROB)
+#: What the status line says the histogram's y axis is after a Normalize pick (quantity_reset).
+_NORM_PHRASE = {_NORM_COUNT: "counts", _NORM_DENSITY: "density", _NORM_PROB: "probability per bin"}
 
 #: Normalization names written by builds BEFORE the rename above, mapped to the current
 #: spelling. THIS TABLE IS NOT OPTIONAL AND THE RENAME MUST NOT SHIP WITHOUT IT.
@@ -982,7 +988,7 @@ _COMBO_CHARS = 14
 #: point: an empty plot with no words on it reads as a bug, and this window's empty
 #: states have always said what to do next ("No data yet — run detection…", "Tick a
 #: source on the left…") rather than merely being empty.
-_PLOT_PROMPT = ("Choose your data and plot type, then press Plot.")
+_PLOT_PROMPT = ("Choose your data and plot type, then update the plot.")
 
 #: Free parameters in EITHER scatter best fit: (slope, intercept) for the straight
 #: line, (coefficient, exponent) for the log-log one. What
@@ -1209,12 +1215,13 @@ class StyleSettings:
                                     # row's first entry names it (see _FONT_DEFAULT_LABEL).
                                     # NOT a missing value -- it round-trips through JSON,
                                     # undo and templates as itself.
-    font_size_pt: int = 10
+    font_size_pt: float = 10.
     data_color: str = _DATA_HEX
     fit_color: str = _FIT_HEX
-    point_size: int = 7
-    line_width: int = 1
+    point_size: float = 7.
+    line_width: float = 1.
     background: str = "dark"         # "dark" | "light"
+    frame: bool | None = None        # None preserves the original native frame
     export_w: int = 0               # 0 => native width
     export_h: int = 0               # 0 => native height
     #: Owner note #15: "the legend is not editable". A source's legend text, per
@@ -1239,7 +1246,7 @@ class StyleSettings:
     #: Legend text size in pt. ``0`` means "follow the body font, three points below
     #: it" — the historical hard-coded rule, kept as the default so the untouched
     #: window still shrinks its index when the title font grows.
-    legend_font_size_pt: int = 0
+    legend_font_size_pt: float = 0.
     #: Whether an automatic ``(n = N)`` is appended to a legend entry. On by default
     #: (that is today's look), but it has to be defeatable: an entry the user has
     #: RETYPED must not be silently extended with a count they did not ask for.
@@ -1271,9 +1278,9 @@ class StyleSettings:
     #: The legend keeps its own older field (``legend_font_size_pt``, whose 0 means
     #: "body - 3") rather than being folded in here: its automatic rule is not "follow
     #: the body", and collapsing the two would silently enlarge every existing legend.
-    title_font_size_pt: int = 0
-    axis_label_font_size_pt: int = 0
-    tick_font_size_pt: int = 0
+    title_font_size_pt: float = 0.
+    axis_label_font_size_pt: float = 0.
+    tick_font_size_pt: float = 0.
     #: The bootstrap's confidence BAND around the fitted curve. Off: it is a second
     #: object on the figure and, unlike the parameters' intervals, it does not exist for
     #: every fit (see :func:`nanoscope.analysis.stats.ci_band` for the four ways a fit can
@@ -1314,8 +1321,31 @@ class StyleSettings:
     #: Empty means "never set": the label is shown with its default fields
     #: (:meth:`fit_label_state`).
     fit_label: FrozenMap = _NO_ENTRIES
+    #: Shared style identity is part of the same undoable native configuration.
+    style_binding: FrozenMap = _NO_ENTRIES
+    series_styles: FrozenMap = _NO_ENTRIES
 
     def __post_init__(self) -> None:
+        if self.frame is not None and type(self.frame) is not bool:
+            raise ValueError("Style frame must be true, false or inherited")
+        from ..core.figure_series import validate_series_styles
+        object.__setattr__(self, "series_styles", _deep_frozen(validate_series_styles(self.series_styles)))
+        if self.style_binding:
+            from ..core.figure_style import normalize_style_binding
+            from ..core.figure_spec import thaw_json
+            object.__setattr__(self, "style_binding", _deep_frozen(thaw_json(
+                normalize_style_binding(self.style_binding))))
+        for name, low, high in (("font_size_pt", 6, 48), ("point_size", 1, 30),
+                               ("line_width", .25, 10), ("legend_font_size_pt", 0, 48),
+                               ("title_font_size_pt", 0, 72),
+                               ("axis_label_font_size_pt", 0, 72),
+                               ("tick_font_size_pt", 0, 72)):
+            value = getattr(self, name)
+            if self.style_binding:
+                low, high = (0 if low == 0 else .000001), float("inf")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
+                raise ValueError(f"Invalid style {name}: expected {low}–{high}")
+            object.__setattr__(self, name, float(value))
         # The two maps arrive from JSON, templates and replace() alike; one validation
         # here keeps a malformed entry out of every door, and the deep freeze keeps the
         # style hashable (FrozenMap hashes its items).
@@ -1343,6 +1373,15 @@ class StyleSettings:
             return _dc_replace(style, text=label.template or None, size_pt=label.size_pt,
                                color=label.color)
         return style
+
+    def effective_text_style(self, key: str) -> TextStyle:
+        """A draw-only resolved style; native text history stores explicit values."""
+        explicit = self.text_style(key)
+        if not self.style_binding:
+            return explicit
+        from ..core.figure_style import resolve_bound_text
+        values, _origins = resolve_bound_text(self.style_binding, key, explicit.to_dict())
+        return _dc_replace(explicit, **values)
 
     def with_text_style(self, key: str, style: TextStyle) -> "StyleSettings":
         """This style, with ``key``'s WHOLE style replaced (text included). The title's
@@ -1451,6 +1490,11 @@ class AnalysisIdentity:
     wording describes it, so a move of the model clears the wording
     (:meth:`PlotConfig.rebased`). A mixture's component count is part of it unless the
     count is automatic, which the draw itself writes back.
+
+    ``features`` is the PCA's feature set (sorted; ``()`` on every other plot type). PCA has
+    no axis column, but its two axes are combinations of exactly these columns, so another
+    set is other scores: the words and the pins typed for the old ones go with it, as they
+    do with a column.
     """
     plot_type: str = HISTOGRAM
     x_column: str = ""
@@ -1458,12 +1502,14 @@ class AnalysisIdentity:
     fit_column: str = ""
     time_unit: str = _DEFAULT_TIME_UNIT
     fit_model: str = ""
+    features: tuple[str, ...] = ()
+    density_y: bool = False
 
     @property
     def axis_factors(self) -> tuple[float, float]:
         """(x, y) factors converting the DISPLAYED axis unit back to data units."""
-        return (_display_factor(self.x_column, self.time_unit),
-                _display_factor(self.y_column, self.time_unit))
+        fx = _display_factor(self.x_column, self.time_unit)
+        return (fx, 1. / fx if self.density_y else _display_factor(self.y_column, self.time_unit))
 
     @property
     def fit_factor(self) -> float:
@@ -1472,10 +1518,11 @@ class AnalysisIdentity:
 
     def wording_stale_from(self, was: "AnalysisIdentity") -> bool:
         """Whether the fit label's wording, typed for ``was``, no longer describes this
-        analysis: the plot type or a column moved, or the applied fit went from one model to
-        another or to none. A first fit (none -> a model) keeps wording typed ahead of it."""
-        return ((self.plot_type, self.x_column, self.y_column)
-                != (was.plot_type, was.x_column, was.y_column)
+        analysis: the plot type, a column or the PCA's feature set moved, or the applied fit
+        went from one model to another or to none. A first fit (none -> a model) keeps
+        wording typed ahead of it."""
+        return ((self.plot_type, self.x_column, self.y_column, self.features)
+                != (was.plot_type, was.x_column, was.y_column, was.features)
                 or bool(was.fit_model and self.fit_model != was.fit_model))
 
 
@@ -1712,6 +1759,10 @@ class AxesConfig:
     y_max: str = ""
     manual_x: tuple[float, float] | None = None
     manual_y: tuple[float, float] | None = None
+    quantity_display: FrozenMap = _NO_ENTRIES
+
+    def __post_init__(self):
+        object.__setattr__(self, "quantity_display", _deep_frozen(self.quantity_display))
 
     def ranges(self) -> tuple[str, ...]:
         """The axes holding a typed limit or a pin, as the status line names them
@@ -1778,9 +1829,14 @@ class PlotConfig:
             model = fit.applied_scatter
         else:
             model = ""
+        # PCA has no axis column; the feature set is what its axes are made of. Sorted, so
+        # the order a template or a file lists them in is not a move.
+        features = tuple(sorted(set(self.cluster.features))) if self.plot_type == PCA else ()
         return AnalysisIdentity(plot_type=self.plot_type, x_column=x, y_column=y,
                                 fit_column=self.histogram.column,
-                                time_unit=self.axes.time_unit, fit_model=model)
+                                time_unit=self.axes.time_unit, fit_model=model,
+                                features=features, density_y=(self.plot_type == HISTOGRAM and
+                                    self.histogram.normalization == _NORM_DENSITY))
 
     @property
     def log_state(self) -> tuple[bool, bool]:
@@ -1833,7 +1889,7 @@ class PlotConfig:
             return _dc_replace(self, heatmap=_dc_replace(self.heatmap, log_x=x, log_y=y))
         return self
 
-    def rebased(self, was: AnalysisIdentity) -> "PlotConfig":
+    def rebased(self, was: AnalysisIdentity, *, y_moved: bool = False) -> "PlotConfig":
         """THE ONE RULE: this config, corrected for having moved off identity ``was``.
 
         Every stale-state bug this refactor exists to kill is a clause here, and each is
@@ -1873,9 +1929,20 @@ class PlotConfig:
         A plot-type change counts as a move on BOTH axes even when a column name survives
         it (Histogram dwell_s -> Scatter dwell_s vs depth_pA): the y axis stopped being a
         count, and a range typed against one pair of axes is not a range against another.
+
+        A histogram's y is a count, which no column changes -- unless the Normalize is DENSITY,
+        which is per the unit of its column (``density (1/s)`` over dwell_s, plain ``density``
+        over frac_depth): there a new column moves the y axis as well, so its range goes too.
+
+        ``y_moved`` says that the histogram's y QUANTITY moved -- its Normalize, count, density
+        or probability per bin -- which the identity does not carry (a normalization name this
+        build cannot offer must not leave a phantom anchor: see :meth:`PlotsWindow._installable`).
+        The caller says it, for a person's pick of the combo only, and the y axis then moves as
+        for a column: its typed limits and pin go (2), with the words (4) and the fit
+        label's wording (5).
         """
         now = self.identity
-        if now == was:
+        if now == was and not y_moved:
             return self
         axes, fit, style = self.axes, self.fit, self.style
 
@@ -1893,10 +1960,20 @@ class PlotConfig:
                               range_hi=_rescaled(fit.range_hi, off, nff),
                               range_unit=now.time_unit)
 
-        # (2) THE QUANTITY ON AN AXIS MOVED: text and pin go together.
-        if now.plot_type != was.plot_type or now.x_column != was.x_column:
+        # (2) THE QUANTITY ON AN AXIS MOVED: text and pin go together. A moved PCA feature
+        # set moves both axes: PC1 and PC2 are other combinations of other columns.
+        features_moved = now.features != was.features
+        if now.plot_type != was.plot_type or now.x_column != was.x_column or features_moved:
             axes = _dc_replace(axes, x_min="", x_max="", manual_x=None)
-        if now.plot_type != was.plot_type or now.y_column != was.y_column:
+        # A histogram's y has no column of its own (a count), except as a DENSITY: that is per
+        # the unit of the column it is a density of (1/s over dwell_s, no unit over frac_depth),
+        # so a new column is a new y quantity there and a range pinned for the old one frames
+        # nothing (measured: 90.4-378 over data topping out at 6.88).
+        density_of_a_new_column = (self.plot_type == HISTOGRAM
+                                   and self.histogram.normalization == _NORM_DENSITY
+                                   and now.x_column != was.x_column)
+        if (now.plot_type != was.plot_type or now.y_column != was.y_column or y_moved
+                or features_moved or density_of_a_new_column):
             axes = _dc_replace(axes, y_min="", y_max="", manual_y=None)
 
         # (3) THE FITTED COLUMN MOVED: the truncation window is not transferable.
@@ -1904,19 +1981,24 @@ class PlotConfig:
             fit = _dc_replace(fit, range_lo="", range_hi="", range_unit=now.time_unit)
 
         # (4) THE ANALYSIS MOVED: the caption goes with it (owner note Q6).
-        analysis_moved = (now.plot_type, now.x_column, now.y_column) != (
-            was.plot_type, was.x_column, was.y_column)
+        analysis_moved = y_moved or features_moved or (
+            (now.plot_type, now.x_column, now.y_column)
+            != (was.plot_type, was.x_column, was.y_column))
         if analysis_moved:
             style = _dc_replace(style, title="", x_label="", y_label="")
 
         # (5) THE FIT LABEL'S WORDS describe one fit of one analysis: they go back to
         # automatic when either moves (probe: "Single exponential: {equation}" over a
         # linear fit). A first fit (none -> a model) keeps words typed ahead of it. The
-        # label's numbers, place, size and colour are the look, and stay.
-        if now.wording_stale_from(was):
+        # label's numbers, place, size and colour are the look, and stay. A label left with no
+        # words, numbers, place, size or colour of its own is the label nobody touched (an empty
+        # ``fit_label``), so Reset figure pressed next has nothing to do.
+        if now.wording_stale_from(was) or y_moved:
             label = style.fit_label_state()
             if label.template:
-                style = style.with_fit_label(_dc_replace(label, template=""))
+                cleared = _dc_replace(label, template="")
+                style = (_dc_replace(style, fit_label=_NO_ENTRIES) if cleared == FitLabelState()
+                         else style.with_fit_label(cleared))
 
         return _dc_replace(self, axes=axes, fit=fit, style=style)
 
@@ -2042,7 +2124,7 @@ class PlotConfig:
             fit=_dc_replace(self.fit, applied=_FIT_NONE, applied_k=1,
                             applied_k_auto=False, applied_scatter=_SFIT_NONE),
             style=_dc_replace(self.style, label_overrides=_NO_ENTRIES,
-                              legend_include=_NO_ENTRIES,
+                              legend_include=_NO_ENTRIES, series_styles=_NO_ENTRIES,
                               text_styles=_legend_styles(self.style.text_styles, False)))
 
     def with_template(self, template: "PlotConfig") -> "PlotConfig":
@@ -2080,10 +2162,81 @@ class PlotConfig:
             style=_dc_replace(tpl.style,
                               label_overrides=self.style.label_overrides,
                               legend_include=self.style.legend_include,
+                              series_styles=self.style.series_styles,
                               text_styles=FrozenMap({
                                   **_legend_styles(tpl.style.text_styles, False),
                                   **_legend_styles(self.style.text_styles, True)})))
 
+
+
+def _plot_column_quantity(column, display_unit="ms"):
+    from ..core.quantity_display import quantity_for
+    # This finite native classification predates this presentation migration; unknown
+    # columns are deliberately not assigned seconds from spelling or magnitude.
+    return quantity_for(column or "unselected", schema=events.SCHEMA,
+        declared_unit="s" if column in _TIME_COLUMNS else None, display_unit=display_unit)
+
+
+def _plot_density_quantity(column, display_unit="ms"):
+    from ..core.quantity_display import density_quantity, QuantityPresentation
+    quantity = _plot_column_quantity(column, display_unit)
+    key = "histogram.density:" + (column or "unselected")
+    if quantity.known and quantity.quantity not in ("categorical", "count", "sample"):
+        return density_quantity([quantity], key=key)
+    # Existing histograms also accept integer measurements and explicitly undeclared
+    # numeric columns. Their units stay unchanged; never infer time or refuse their data.
+    unit = quantity.stored_unit
+    per = "" if unit in ("", "-") else (f"1/({unit})" if any(c in unit for c in "·*/ ") else "1/" + unit)
+    return QuantityPresentation(key, "Density", "density", per, per, known=quantity.known)
+
+
+def _plot_quantity_bases(cfg, *, legacy=False):
+    from ..core.quantity_display import AxisDisplayBasis, quantity_for, density_quantity
+    ident = cfg.identity
+    x = _plot_column_quantity(ident.x_column, cfg.axes.time_unit)
+    if ident.density_y:
+        # Histograms normalize by LINEAR raw bin width even with log-spaced bins.
+        # The log axis does not change the statistical reference measure.
+        y = _plot_density_quantity(ident.x_column, cfg.axes.time_unit)
+        if legacy:
+            y = _dc_replace(y, display_unit=y.stored_unit, factor=1.)
+    elif cfg.plot_type == HISTOGRAM:
+        y = quantity_for("histogram." + cfg.histogram.normalization, declared_unit="-",
+            quantity="count" if cfg.histogram.normalization == _NORM_COUNT else "dimensionless")
+    else:
+        y = _plot_column_quantity(ident.y_column, cfg.axes.time_unit)
+    return {side: AxisDisplayBasis(quantity, "log10" if log else "linear")
+            for side, quantity, log in zip(("bottom", "left"), (x, y), cfg.log_state)}
+
+
+def migrate_plot_quantity(cfg):
+    """Re-express legacy display drafts once; raw applied ranges/results never move.
+
+    Incomplete legacy numerical text is refused at this boundary, retaining the
+    original artifact. Existing witnessed drafts remain legal and verbatim.
+    """
+    from ..core.figure_quantity_basis import quantity_witness, read_quantity_bases
+    from ..core.quantity_display import convert_pin, QuantityError
+    old = read_quantity_bases(cfg.axes.quantity_display)
+    target = _dc_replace(cfg, axes=_dc_replace(cfg.axes, time_unit="ms"))
+    desired = _plot_quantity_bases(target)
+    legacy = _plot_quantity_bases(cfg, legacy=True)
+    changes = {}
+    for side, prefix in (("bottom", "x"), ("left", "y")):
+        previous, new = old.get(side, legacy[side]), desired[side]
+        values = {"min": getattr(cfg.axes, prefix + "_min"), "max": getattr(cfg.axes, prefix + "_max")}
+        if previous.quantity != new.quantity and any(values.values()):
+            values = convert_pin(values, previous.quantity, new.quantity)
+        changes[prefix + "_min"], changes[prefix + "_max"] = values["min"], values["max"]
+    fit = cfg.fit
+    if fit.range_unit != "ms" and cfg.histogram.column in _TIME_COLUMNS:
+        values = convert_pin({"min": fit.range_lo, "max": fit.range_hi},
+            _plot_column_quantity(cfg.histogram.column, fit.range_unit),
+            _plot_column_quantity(cfg.histogram.column, "ms"))
+        fit = _dc_replace(fit, range_lo=values["min"], range_hi=values["max"], range_unit="ms")
+    axes = _dc_replace(target.axes, **changes, quantity_display=_deep_frozen(
+        quantity_witness(desired, original=cfg.axes.quantity_display)))
+    return _dc_replace(target, axes=axes, fit=fit)
 
 
 # ================================================================================================
@@ -2170,7 +2323,7 @@ PLOT_CONFIG_FORMAT: str = "nanoscope-plot-config"
 # type it has not got) over the sender's KDE overlay and heatmap, with nothing said -- the
 # silent strip this constant converts into a refusal. Every v1 and v2 file still opens:
 # the four keys read as their defaults (overlay off, heatmap defaults, viridis).
-PLOT_CONFIG_VERSION: int = 3
+PLOT_CONFIG_VERSION: int = 4
 #: The oldest sidecar this build can still read. v1 is the first, so this is 1 and stays
 #: 1 until a change is genuinely un-migratable -- raising it is a promise to the user that
 #: their older files are unopenable, which no additive key ever justifies.
@@ -2242,13 +2395,17 @@ def _decoded(default, raw):
     if isinstance(default, tuple):
         return tuple(raw)
     if default is None:
-        # The three optional pairs -- `legend_pos`, `manual_x`, `manual_y` -- are the only
-        # fields whose default is None, and all three are a 2-tuple of floats or nothing.
+        # Optional pairs (`legend_pos`, `manual_x`, `manual_y`). Other optional types
+        # are dispatched explicitly by field in _decode_dc before reaching this path.
         return None if raw is None else tuple(float(x) for x in raw)
     if isinstance(default, bool):
         return bool(raw)        # BEFORE int: bool is a subclass of it
     if isinstance(default, int):
         return int(raw)
+    if isinstance(default, float):
+        if isinstance(raw, bool):
+            raise ValueError("A style size must be a finite number")
+        return float(raw)
     if isinstance(default, str):
         return str(raw)
     return raw
@@ -2270,9 +2427,30 @@ def _decode_dc(cls, payload: dict):
         raise TypeError(f"{cls.__name__.lower()} section is "
                         f"{type(payload).__name__}, not an object")
     blank = cls()
-    kw = {f.name: _decoded(getattr(blank, f.name), payload[f.name])
-          for f in _dc_fields(blank) if f.name in payload}
+    kw = {}
+    for field in _dc_fields(blank):
+        if field.name not in payload:
+            continue
+        raw = payload[field.name]
+        if cls is StyleSettings and field.name == "frame":
+            if raw is not None and type(raw) is not bool:
+                raise ValueError("Style frame must be true, false or inherited")
+            kw[field.name] = raw
+        else:
+            kw[field.name] = _decoded(getattr(blank, field.name), raw)
     return _dc_replace(blank, **kw) if kw else blank
+
+
+def _project_style_settings(style: StyleSettings, *, edit=False) -> StyleSettings:
+    """The shared binding owns its native renderer projection, including body size."""
+    if not style.style_binding:
+        return style
+    from .figure_style_binding import project_native, reconcile_native_edit
+    raw = _encode_dc(style)
+    projected = project_native(raw, "style_settings")
+    if edit:
+        projected = reconcile_native_edit(projected, raw, "style_settings")
+    return _decode_dc(StyleSettings, projected)
 
 
 #: The Style keys older builds wrote that this one has no field for (the duplicate fit-number
@@ -2787,7 +2965,7 @@ def _param_symbol(key: str) -> str:
 
 
 #: Concise rejection tag for Details and saved diagnostic context, not artwork.
-_KS_REJECTED_TAG = "KS REJECTED (1%)"
+_KS_REJECTED_TAG = "CDF mismatch (descriptive)"
 
 
 class _FitSummary(str):
@@ -2854,6 +3032,10 @@ class _LimitLabel(pg.InfLineLabel):
 
     editRequested = QtCore.Signal()
     menuRequested = QtCore.Signal(object)
+    #: A left or right click landed on the words: the Format tab's selection (Phase 1). It
+    #: is raised before the click is dispatched and changes nothing here; the figure-text
+    #: controller connects any target item that has it.
+    selectRequested = QtCore.Signal()
     #: The window's rich text, "" when hidden; None until the window first draws it.
     rich: str | None = None
 
@@ -2875,6 +3057,8 @@ class _LimitLabel(pg.InfLineLabel):
             ev.acceptClicks(QtCore.Qt.MouseButton.RightButton)
 
     def mouseClickEvent(self, ev):  # noqa: N802 - pyqtgraph API
+        if ev.button() in (QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton):
+            self.selectRequested.emit()
         if ev.button() == QtCore.Qt.MouseButton.LeftButton and GATE(ev, ("limit", id(self))):
             ev.accept()
             self.editRequested.emit()
@@ -2910,6 +3094,29 @@ class _PlotsTextHost:
 
     def apply_text(self, key: str, style: TextStyle) -> None:
         self._live()._apply_figure_text(key, style)
+
+    def apply_text_run(self, key: str, style: TextStyle) -> None:
+        """One write of a RUN (a size spin's arrow clicks): the same edit as
+        :meth:`apply_text`, but the Undo step is held open by the window's text grain
+        (:meth:`PlotsWindow._history_touch_text`: closed by focus-out or a 700 ms pause)
+        instead of being closed at once, so five clicks are one step."""
+        self._live()._apply_figure_text(key, style, run=True)
+
+    def commit_text_run(self) -> None:
+        """Finish a Format spin edit when focus leaves the control."""
+        self._live()._history_commit()
+
+    def apply_format_styles(self, styles: Mapping[str, TextStyle], *,
+                            auto_range_of: str = "") -> None:
+        """Reset or paste several element styles as one configuration-history step."""
+        window = self._live()
+        if auto_range_of not in ("", "bottom", "left"):
+            raise ValueError(f"Unknown axis: {auto_range_of}")
+        with window._format_transaction():
+            for key, style in styles.items():
+                window._apply_figure_text(key, style)
+            if auto_range_of:
+                window._reset_axis_range(axis="x" if auto_range_of == "bottom" else "y")
 
     def axis_state(self, side: str) -> AxisState:
         return self._live()._figure_axis_state(side)
@@ -3234,6 +3441,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
     #: MainWindow uses it to take one synchronous, clean checkpoint before
     #: :meth:`reset_state` blanks the reusable window.
     workspaceCheckpointRequested = Signal()
+    #: What Update plot would commit changed: the count or the reasons behind it (the
+    #: stale selection, a proposed fit, the first plot). Emitted at the end of
+    #: :meth:`_sync_run_state`, which every site that moves the gate already calls. Read by
+    #: the Analysis Explorer's toolbar through :meth:`inspector_adapter`.
+    pendingChanged = Signal()
+    #: Undo or Redo became available or unavailable, or the stack moved (a step taken, an
+    #: undo, a redo, a reset). Emitted at the end of :meth:`_sync_config_buttons`, so the
+    #: toolbar's buttons and the Format tab re-read after ``undo_config`` / ``redo_config``
+    #: too, which emitted nothing before.
+    historyChanged = Signal()
+    # Explicit managed Update/Apply publication receipts; never emitted by close/eviction.
+    figureResultsPublished = Signal(object)
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3314,6 +3533,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         #: the end of `_set_config` would note an undo's own result as a fresh change and
         #: Undo would become a two-entry toggle.
         self._history_suspended = False
+        self._format_text_run_key: str | None = None
         #: Holds a run of KEYSTROKES open. See `_history_touch_text` for the grain rule.
         self._history_timer = QtCore.QTimer(self)
         self._history_timer.setSingleShot(True)
@@ -3363,6 +3583,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._plot_armed = False
         self._stale = False
         self._stale_reason = ""
+        #: EVERY reason the plot on screen is out of date, in the order they arose and
+        #: without repeats ("the plot type", "an axis column", ...): ``_stale_reason`` holds
+        #: only the last one, and Update plot's count is the number of independent reasons.
+        #: Not part of ``PlotConfig``, the history or the saved workspace.
+        self._stale_reasons: list[str] = []
+        #: True once the Analysis Explorer's inspector holds this window's controls (set
+        #: by the adapter's ``on_adopt``): the verb is then Update plot, not the Plot button.
+        self._hosted = False
         #: The source keys that were checked at the last :meth:`_on_sources_changed`.
         #: ``QListWidget.itemChanged`` fires for a TICK and for a RENAME with no way to
         #: tell them apart from the item alone, and the two must be gated differently:
@@ -3385,6 +3613,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         #: The DISPLAY unit factors the four axis-range boxes' text is currently
         #: written in. Derived from :attr:`_identity` and kept in step by
         #: :meth:`_set_config`; the identity is the authority.
+        self._quantity_display = _NO_ENTRIES
         self._range_factors: tuple[float, float] = (1.0, 1.0)
         #: THE ANCHOR EVERY CLEARING RULE MEASURES FROM: the analysis identity the typed
         #: text and pins currently in the widgets were tuned FOR. Qt has no "about to
@@ -3394,6 +3623,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._identity = AnalysisIdentity()
         #: The sentence the last reset left on the status bar ("" for none): see ``_rebase``.
         self._reset_said = ""
+        #: The words and ranges that sentence says went back to automatic, until one of them is
+        #: typed or pinned again (:meth:`_lapse_reset_sentence`).
+        self._reset_took: tuple[str, ...] = ()
         #: The Time unit the Fit-range boxes' text is written in -- stored WITH the
         #: bounds so :meth:`_fit_range` converts them by what they were typed under
         #: rather than by whatever the combo says now. See :class:`FitConfig`.
@@ -3719,8 +3951,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         point's source and event_id -- the identity a click on it would select. Over the
         Event-count heatmap it adds the count of the cell under the pointer.
         """
-        exports = (("Export current figure…", lambda: self.save_image()),
-                   ("Export plot data…", lambda: self.export_data()))
+        # Defined ONCE: the right-click menu and the Explorer's Export ▾ (``inspector_adapter``)
+        # both list these, so they cannot disagree.
+        exports = self._exports = (
+            ("Export current figure…", lambda: self.save_image()),
+            ("Export plot data…", lambda: self.export_data()),
+            ("Export configuration JSON…", lambda: self.export_config_json()))
         self._readout = window_readout(self)
 
         def heatmap_count(vx: float, vy: float) -> str:
@@ -3821,14 +4057,25 @@ class PlotsWindow(QtWidgets.QMainWindow):
         return [("Show detection-limit label",
                  lambda: self._apply_figure_text(LIMIT_LABEL_KEY, _dc_replace(style, text=None)))]
 
-    def _apply_figure_text(self, key: str, style: TextStyle) -> None:
+    def _apply_figure_text(self, key: str, style: TextStyle, *, run: bool = False) -> None:
         """One in-figure text edit: written into the style, the picture restyled (never
         recomputed), and ONE step of this window's Undo.
+
+        ``run=True`` is one write of a RUN of edits (a size spin's arrow clicks in the
+        Format tab or the mini toolbar): the step is held open by the text grain
+        (:meth:`_history_touch_text`, closed by focus-out or a 700 ms pause) instead of
+        being closed at once, so the run is one step. A single edit is still one step.
 
         A legend row's text is never stored as typed: Hide entry writes ``legend_include``
         for that row, and a rename (from a source's row or its fit's) writes the source's
         one name, ``label_overrides``. Its font, size, weight and colour are the row's own
         (``text_styles["legend.entry.…"]``)."""
+        if self._history_live():
+            # A different element or a discrete edit ends the preceding spin/typing run.
+            if not run or self._format_text_run_key != key:
+                self._history_commit()
+            if run:
+                self._format_text_run_key = key
         if key.startswith("legend.entry."):
             entry_id = _legend_entry_id(key, self._sources)
             kind, _, src_key = entry_id.partition(":")
@@ -3842,17 +4089,29 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._style = self._style.with_text_style(key, _dc_replace(style, text=None))
         else:
             self._style = self._style.with_text_style(key, style)
+        updating = self._updating
         self._updating = True
         try:
             self._apply_style_widgets(self._style)
             self._sync_source_row_labels()
         finally:
-            self._updating = False
+            self._updating = updating
         if key.startswith("legend.entry."):
             self._restyle_committed_legend()
             self._sync_legend_entry_list()
-        self._presentation_changed()
-        self._history_touch()
+        if run:
+            # The restyle ends in `_history_settle`, which closes a step for anything that
+            # is not typed text; held, so the run stays ONE step the text grain closes.
+            suspended = self._history_suspended
+            self._history_suspended = True
+            try:
+                self._presentation_changed()
+            finally:
+                self._history_suspended = suspended
+            self._history_touch_text()
+        else:
+            self._presentation_changed()
+            self._history_touch()
 
     def _on_fit_label_moved(self, offset) -> None:
         """A drag of the fit label: its place is saved (``fit_label.offset``), as one
@@ -3869,7 +4128,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """The current page's (Log x, Log y) boxes, or None where the view has none."""
         for pair in ((self._hist_logx, self._hist_logy), (self._scatter_logx, self._scatter_logy),
                      (self._kde_logx, self._kde_logy), (self._heatmap_logx, self._heatmap_logy)):
-            if pair[0].isVisibleTo(self):
+            # Visible TO THE STACK that holds the plot-type pages, not to the window: the
+            # boxes are not individually hidden, and in the Explorer they sit in an
+            # inspector group that may be collapsed (or hidden by a Section, standalone),
+            # which says nothing about which plot type is showing.
+            if pair[0].isVisibleTo(self._pages):
                 return pair
         return None
 
@@ -3905,6 +4168,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         to the Axis range boxes and their pin (exactly what Apply / Auto do), as one step.
         Log goes through the page's own Log box, so it is gated, redrawn and undone
         exactly as a tick in the panel is."""
+        if self._history_live():
+            self._history_commit()
         before = self._figure_axis_state(side)
         # The popover shows a range to 6 significant figures: OK on the same text is no
         # change, so it neither rounds the pin nor records a step.
@@ -4068,11 +4333,27 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._show_control_section("Data")
 
     def _show_control_section(self, section: int | str) -> None:
-        """Show one purposeful controls section and suppress unrelated advanced rows."""
+        """Show one purposeful controls section and suppress unrelated advanced rows.
+
+        Hosted in the Analysis Explorer the controls live in its inspector and a Section
+        name is only a request to look at a part of it: the host's reveal (set at adoption
+        as ``_inspector_reveal``) selects the tab and group, and no widget is shown or
+        hidden here."""
         if isinstance(section, str):
             name = section
         else:
             name = self._section_combo.itemText(int(section))
+        reveal = getattr(self, "_inspector_reveal", None)
+        if reveal is not None and self._hosted:
+            if name not in DEFAULT_REVEAL:
+                return      # an unknown name asked for nothing before, and asks for nothing now
+            if self._section_combo.currentText() != name:
+                self._section_combo.setCurrentText(name)
+            try:
+                reveal(name)
+                return
+            except RuntimeError:
+                pass        # the inspector is gone (a closed Explorer): the old behaviour
         visible = {
             # The first-run path: pick rows, choose the figure, press the persistent
             # Plot / Apply verb. No styling or clustering wall precedes that action.
@@ -4096,6 +4377,170 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # Each section begins at the top. Direct scrollbar arithmetic is deliberate:
         # it happens only after an explicit navigator gesture and avoids focus-follow.
         self._section_area.verticalScrollBar().setValue(0)
+
+    # -- the Analysis Explorer's inspector (Phase 1) -----------------------------------------------
+    def inspector_adapter(self) -> PageAdapter:
+        """How the Analysis Explorer hosts this window: its controls MOVE into the
+        inspector's groups, once, for as long as the window is hosted.
+
+        Built once and cached; nothing but ``AnalysisExplorer.add_page`` (through
+        ``InspectorHost.adopt``) and the hosting test helpers call it. It computes nothing:
+        ``update`` is :meth:`_run_plot`, ``pending`` reads the gate's own flags, history
+        is :meth:`undo_config` / :meth:`redo_config` (the whole ``PlotConfig``, analysis
+        and look), and every widget keeps its attribute name, its signals and its history
+        hook (``_wire_history`` connected them on the widgets, so a moved widget keeps
+        them). It builds no widget: the groups hold the page's own group boxes and
+        controls, and the Format tab's extras are the page's own widgets, named, not
+        moved until the Format tab shows them.
+
+        Fit stays INSIDE Plot in Phase 1: the fit rows live in each plot type's own page
+        layout. "Fit display" and "Recipes" are the only regroupings."""
+        if getattr(self, "_inspector_adapter", None) is not None:
+            return self._inspector_adapter
+        appearance = self._appearance_widget
+        # The labels of the Style group's rows travel with the widgets the Format tab moves
+        # (PlotAppearanceWidget's convention): taken from the form, never from its layout items.
+        form = self._style_group.layout()
+        for control in (self._font_size, self._legend_entries, self._heatmap_cmap):
+            label = form.labelForField(control) if hasattr(form, "labelForField") else None
+            if label is not None and label.text():
+                control._nanoscope_row_label = label
+        groups = [
+            InspectorGroup("sources", "Sources", [self._source_group],
+                           tooltip="Which recordings are plotted, and their legend names."),
+            InspectorGroup("plot", "Plot", [self._plot_group],
+                           tooltip="Plot type, columns, bins, normalization, log axes and "
+                                   "the fit rows."),
+            InspectorGroup("fit_display", "Fit display",
+                           [self._ci_band_check, self._residual_check], expanded=False),
+            InspectorGroup("groups", "Groups", [self._features_group, self._cluster_group],
+                           expanded=False),
+            # The template rows only: Undo/Redo are the toolbar's and "Export JSON…" is in
+            # Export ▾; "Import JSON…" has no place in an export menu, so it stays here.
+            InspectorGroup("recipes", "Recipes",
+                           [self._template_combo, self._template_save_btn,
+                            self._template_rename_btn, self._template_delete_btn,
+                            self._template_split_note, self._import_cfg_btn,
+                            self._history_note], expanded=False)]
+
+        def pending() -> PendingState:
+            if not self._plot_armed:
+                return PendingState(1, ("not plotted yet",))
+            reasons = list(self._stale_reasons)
+            if self._stale and not reasons:
+                reasons.append(self._stale_reason or "the selection")
+            if self._pending_fit_change():
+                reasons.append("fit model")
+            return PendingState(len(reasons), tuple(reasons))
+
+        def history() -> HistoryState:
+            # The tooltips already carry the 200-step ceiling clause (``_sync_config_buttons``).
+            return HistoryState(
+                self._undo_btn.isEnabled(), self._redo_btn.isEnabled(),
+                self._undo_btn.toolTip(), self._redo_btn.toolTip(), self.history_mark())
+
+        def controllers() -> list[object]:
+            found = figure_text_for(self._plot)
+            return [found] if found is not None else []
+
+        def axis_log_target(_plot: str, side: str):
+            pair = self._log_pair()
+            return ("plot", pair[0 if side == "bottom" else 1]) if pair else None
+
+        self._heatmap_cmap._nanoscope_format_visible = lambda: self._plot_type() == HEATMAP
+
+        # Only population-specific controls are extras. Passing the entire Style group
+        # (an ancestor of `appearance`) would select Format's legacy fallback and hide the
+        # element inspector. The shared appearance widget supplies the common controls.
+        spec = FormatSpec(
+            appearance, controllers,
+            extras={"figure": [self._font_size],
+                    "legend": [self._legend_hint, self._legend_reset_btn,
+                               self._legend_counts, self._legend_entries],
+                    "caption": [self._prov_check],
+                    "colour_map": [self._heatmap_cmap]},
+            # Distributions reports seven concrete values at their defaults (grid on,
+            # dark background, colours, line 1, marker 7, legend on): "set here" is
+            # measured against these, not against ``PlotAppearance()``.
+            defaults=lambda: PlotAppearance.from_mapping(
+                PlotsWindow._appearance_of(StyleSettings())),
+            views_changed=self._plot_type_combo.currentTextChanged,
+            series_provider=self.figure_series,
+            axis_log_target=axis_log_target)
+        self._inspector_adapter = PageAdapter(
+            key="distributions", page=self, groups=groups, format=spec,
+            update=self._run_plot,
+            update_tooltip="Draw the plot with the data, plot type and fit chosen in the "
+                           "inspector, and apply any pending fit choice (⌘Return).",
+            pending=pending, pending_changed=self.pendingChanged,
+            undo=self.undo_config, redo=self.redo_config, history=history,
+            history_changed=self.historyChanged,
+            apply_look=self._apply_inspector_look,
+            reset_figure=self._reset_inspector_figure,
+            exports=lambda: [ExportEntry(text, run, kind=kind) for (text, run), kind
+                             in zip(self._exports, ("figure", "data", "recipe"))],
+            navigation=lambda: self._plot_nav, navigations=lambda: (self._plot_nav,),
+            status_bar=self.statusBar, canvas_actions=(self._lasso_action,),
+            chrome=[self._workflow_toolbar],
+            on_adopt=self._on_adopt, on_retire=self._on_retire)
+        return self._inspector_adapter
+
+    def _on_adopt(self) -> None:
+        """Hosting steps: what the Explorer's toolbar and inspector replace stays
+        constructed and hidden (the compatibility facade behind the attribute names the
+        workspace capture, the tests and the old Section API read)."""
+        self._hosted = True
+        # The shell owns Ctrl+Return from here on: Qt fires neither of two shortcuts on
+        # one key in a window, and one on a hidden toolbar fires nothing.
+        self._run_action.setShortcut(QtGui.QKeySequence())
+        # The controls column is empty now: the central splitter holds the plot alone.
+        self._section_area.hide()
+        self._plot_widget.setMinimumWidth(280)
+        self._plot_widget.setToolTip(
+            "Scatter and PCA: click a point to inspect its event. "
+            "Ctrl/Cmd/Shift-click adds or removes points from the selection. "
+            "Enable Lasso select on the status line to select an outlined region.")
+        for hidden in (self._plot_btn, self._fit_apply_btn, self._scatter_fit_apply_btn,
+                       self._undo_btn, self._redo_btn, self._export_cfg_btn,
+                       self._save_btn, self._save_data_btn, self._axis_range_group):
+            hidden.hide()
+        # The group boxes now sit inside the inspector's own group frames: no second frame
+        # and no second set of side margins (the Plot group is 295 px wide with them, 5 over
+        # the column's 290 px budget; 277 without). Their titles stay as sub-headings.
+        for box in (self._source_group, self._plot_group, self._features_group,
+                    self._cluster_group):
+            box.setFlat(True)
+            box.layout().setContentsMargins(0, 2, 0, 0)
+        # The host made every moved root visible; the ceiling sentence is hidden until a
+        # step has been dropped (``_sync_config_buttons`` owns that).
+        self._history_note.setVisible(bool(self._history_note.text()))
+        self._sync_run_state()          # the amber sentence names the verb that is on screen
+
+    def _on_retire(self) -> None:
+        self._inspector_reveal = None
+        self._hosted = False
+
+    @contextmanager
+    def _format_transaction(self):
+        """One inspector gesture, separated from any preceding open text edit."""
+        suspended = self._history_suspended
+        if not suspended:
+            self._history_commit()
+        self._history_suspended = True
+        try:
+            yield
+        finally:
+            self._history_suspended = suspended
+            if not suspended:
+                self._history_touch()
+
+    def _apply_inspector_look(self, look: PlotAppearance, keep_hand: bool) -> bool:
+        with self._format_transaction():
+            return self._appearance_widget.apply_look(look, keep_hand=keep_hand)
+
+    def _reset_inspector_figure(self) -> None:
+        with self._format_transaction():
+            self._appearance_widget.reset_figure()
 
     def _set_details_expanded(self, expanded: bool) -> None:
         """Collapse the audit trail to its title row while keeping the result visible."""
@@ -4252,16 +4697,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         unit_row = QtWidgets.QHBoxLayout()
         unit_row.addWidget(QtWidgets.QLabel("Time unit"))
         self._time_unit = QtWidgets.QComboBox()
-        self._time_unit.addItems(list(_TIME_UNITS))
-        self._time_unit.setCurrentText(_DEFAULT_TIME_UNIT)
-        # THE TOOLTIP LISTS THE REAL LIST. Spelled out by hand it said "dwell_s, rise_s,
-        # fall_s, t_start_s" -- the same four names `_TIME_COLUMNS` used to hold, and it
-        # went stale for the same reason: `t_end_s` is a time column this combo governs
-        # and the sentence denied it. Two surfaces, one fact.
+        self._time_unit.addItem("ms")
+        self._time_unit.setEnabled(False)
         self._time_unit.setToolTip(
-            f"Unit for time columns ({', '.join(_TIME_COLUMNS)}).\n"
-            "This rescales the AXIS only — the data, and every fit computed on it, "
-            "stay in seconds, so the dwell fit keeps the detector's own min_dwell_s.")
+            "Time values display in milliseconds. Stored coordinates, scientific fits "
+            "and original CSV columns retain their declared units.")
         self._time_unit.currentTextChanged.connect(self._on_time_unit_changed)
         unit_row.addWidget(self._time_unit, 1)
         lay.addLayout(unit_row)
@@ -4299,7 +4739,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         form = QtWidgets.QFormLayout(page)
         form.setContentsMargins(0, 4, 0, 0)
 
-        self._hist_col = QtWidgets.QComboBox()
+        self._hist_col = ScientificColumnCombo()
         self._hist_col.currentTextChanged.connect(
             lambda t, w=self._hist_col: self._on_axis_column_changed(t, w))
         form.addRow("Column", self._hist_col)
@@ -4307,8 +4747,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._bins = QtWidgets.QSpinBox()
         self._bins.setRange(2, 500)
         self._bins.setValue(30)
+        self._bins.setToolTip('Live preview: changing bins immediately redraws the current histogram. Pending source, column and fit selections still require Update plot.')
         self._bins.valueChanged.connect(self._changed)
-        form.addRow("Bins", self._bins)
+        form.addRow("Bins (live preview)", self._bins)
 
         self._norm_combo = QtWidgets.QComboBox()
         self._norm_combo.addItems(list(_NORMS))
@@ -4367,7 +4808,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             "dotted, scaled to the y quantity the bars show — count: n × bin width × f; "
             "density: f per the column's stored unit; probability per bin: bin width × f.\n"
             "On a log x axis the KDE is estimated on log10 of the column, matching the "
-            "log-spaced bins.\nAn analysis setting: press Plot / Apply to draw it. "
+            "log-spaced bins.\nAn analysis setting: update the plot to draw it. "
             "Details names each series' bandwidth.")
         self._hist_kde.toggled.connect(self._on_kde_overlay_toggled)
         form.addRow(self._hist_kde)
@@ -4378,8 +4819,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._fit_combo.setToolTip(
             "exponential: the classic escape model — monotonic, cannot peak.\n"
             "gamma / inverse-gaussian: densities WITH a mode, for a dwell histogram\n"
-            "that peaks away from zero. All three are truncated at the detector's\n"
-            "min_dwell_s, so their BIC values compare directly.")
+            "that peaks away from zero. Dwell models condition on the detector's\n"
+            "min_dwell_s and explicit fit range. Gaussian mixtures condition on an\n"
+            "explicit fit range; an inferred detector depth floor is warned about\n"
+            "but is not silently treated as a hard truncation.")
         self._fit_combo.currentTextChanged.connect(self._on_fit_changed)
         # THE CONFIRMATION STEP (owner note #12). Choosing a model from the dropdown
         # used to fit it, draw it and start its advisory batch on the spot -- so
@@ -4445,6 +4888,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             e.editingFinished.connect(self._changed)
             fit_range.addWidget(e)
         form.addRow("Fit range", fit_range)
+        self._fit_lo.textChanged.connect(self._validate_fit_range_fields)
+        self._fit_hi.textChanged.connect(self._validate_fit_range_fields)
 
         # Filter-limited events are EXCLUDED by default, matching the Fits panel
         # and analysis.modules. Their dwell is within ~2x the filter rise time, so
@@ -4467,12 +4912,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         form = QtWidgets.QFormLayout(page)
         form.setContentsMargins(0, 4, 0, 0)
 
-        self._scatter_x = QtWidgets.QComboBox()
+        self._scatter_x = ScientificColumnCombo()
         self._scatter_x.currentTextChanged.connect(
             lambda t, w=self._scatter_x: self._on_axis_column_changed(t, w))
         form.addRow("X", self._scatter_x)
 
-        self._scatter_y = QtWidgets.QComboBox()
+        self._scatter_y = ScientificColumnCombo()
         self._scatter_y.currentTextChanged.connect(
             lambda t, w=self._scatter_y: self._on_axis_column_changed(t, w))
         form.addRow("Y", self._scatter_y)
@@ -4492,17 +4937,27 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._scatter_fit = QtWidgets.QComboBox()
         self._scatter_fit.addItems([_SFIT_NONE, _SFIT_LINEAR, _SFIT_POWER])
         self._scatter_fit.setToolTip(
-            "Overlay a least-squares best-fit line; power law fits in log-log space.")
+            "Quick regression: straight line uses raw response; power law fits in log-log space. "
+            "Use Update plot (or Apply fit) to apply a selection. Curve fit… offers raw-response "
+            "models, including a straight line, with constraints and diagnostics.")
         self._scatter_fit.currentTextChanged.connect(self._on_scatter_fit_changed)
         # Same confirmation step as the histogram's (owner note #12): the selection is
         # a proposal, this button draws it. Cheaper per fit than the histogram's, but a
         # regression line that appears the instant the combo is opened is the same
         # surprise, and one gate that behaves the same way on both pages is one rule.
         _narrow_combo(self._scatter_fit)
-        form.addRow("Fit", self._scatter_fit)
+        form.addRow("Quick fit", self._scatter_fit)
         self._scatter_fit_apply_btn = QtWidgets.QPushButton("Apply fit")
         self._scatter_fit_apply_btn.clicked.connect(self._run_plot)   # the same one gate
         form.addRow("", self._scatter_fit_apply_btn)
+        self._scatter_fit_status = QtWidgets.QLabel("Quick fit applied: none.")
+        self._scatter_fit_status.setWordWrap(True);form.addRow(self._scatter_fit_status)
+        self._nonlinear_fit_btn = QtWidgets.QPushButton("Curve fit…")
+        self._nonlinear_fit_btn.setToolTip("Straight line, Gaussian peaks, exponential decay, logistic / Hill and custom X–Y models in raw-response space; parameter constraints, uncertainty and residuals.")
+        self._nonlinear_fit_btn.clicked.connect(self.open_nonlinear_fit)
+        form.addRow("", self._nonlinear_fit_btn)
+        self._nonlinear_fit_status = QtWidgets.QLabel("No curve fit applied.")
+        self._nonlinear_fit_status.setWordWrap(True);form.addRow(self._nonlinear_fit_status)
         self._sync_fit_apply_buttons()
         return page
 
@@ -4519,12 +4974,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._kde_quantity_note.setWordWrap(True)
         form.addRow(self._kde_quantity_note)
 
-        self._kde_x = QtWidgets.QComboBox()
+        self._kde_x = ScientificColumnCombo()
         self._kde_x.currentTextChanged.connect(
             lambda t, w=self._kde_x: self._on_axis_column_changed(t, w))
         form.addRow("X", self._kde_x)
 
-        self._kde_y = QtWidgets.QComboBox()
+        self._kde_y = ScientificColumnCombo()
         self._kde_y.currentTextChanged.connect(
             lambda t, w=self._kde_y: self._on_axis_column_changed(t, w))
         form.addRow("Y", self._kde_y)
@@ -4575,12 +5030,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._heatmap_note.setWordWrap(True)
         form.addRow(self._heatmap_note)
 
-        self._heatmap_x = QtWidgets.QComboBox()
+        self._heatmap_x = ScientificColumnCombo()
         self._heatmap_x.currentTextChanged.connect(
             lambda t, w=self._heatmap_x: self._on_axis_column_changed(t, w))
         form.addRow("X", self._heatmap_x)
 
-        self._heatmap_y = QtWidgets.QComboBox()
+        self._heatmap_y = ScientificColumnCombo()
         self._heatmap_y.currentTextChanged.connect(
             lambda t, w=self._heatmap_y: self._on_axis_column_changed(t, w))
         form.addRow("Y", self._heatmap_y)
@@ -4672,10 +5127,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
 
     def _build_axis_range_group(self) -> QtWidgets.QGroupBox:
         """Explicit axis-range control. Blank fields = auto (fit the data); typed limits pin that
-        axis and persist across redraws until Auto is pressed. Values are read in the unit the
-        axis DISPLAYS (a time axis follows the Time-unit combo — type the number you read off the
-        ticks), converted to data units and to log10 internally as needed. (The plot is also
-        mouse zoom/pan-able.)"""
+        axis and persist across redraws until Auto is pressed or the axis comes to show another
+        quantity (a new plot type, or a new column on that axis: ``PlotConfig.rebased``, clause
+        2); Reset figure leaves them. Values are read in the unit the axis DISPLAYS (a time axis
+        follows the Time-unit combo — type the number you read off the ticks), converted to data
+        units and to log10 internally as needed. (The plot is also mouse zoom/pan-able.)"""
         box = QtWidgets.QGroupBox("Axis range")
         box.setToolTip(
             "Type the numbers as the axis shows them: a time axis follows the Time "
@@ -4816,7 +5272,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # LegendItem always was draggable; the combo's per-draw ``setOffset`` is what
         # broke it. What is left is a hint that says the legend can be dragged, and a
         # button to undo a drag that went somewhere useless.
-        legend_move = QtWidgets.QLabel("Drag the legend on the plot to place it.")
+        legend_move = self._legend_hint = QtWidgets.QLabel("Drag the legend on the plot to place it.")
         legend_move.setWordWrap(True)
         legend_move.setStyleSheet(f"color:{_MSG_HEX};")
         form.addRow("", legend_move)
@@ -4825,7 +5281,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         form.addRow("", self._legend_reset_btn)
         self._sync_legend_reset_button()
 
-        self._legend_font_size = QtWidgets.QSpinBox()
+        self._legend_font_size = QtWidgets.QDoubleSpinBox()
+        self._legend_font_size.setDecimals(3)
+        self._legend_font_size.setSingleStep(.25)
         self._legend_font_size.setRange(0, 48)
         self._legend_font_size.setSpecialValueText("auto (body − 3)")
         self._legend_font_size.setValue(self._style.legend_font_size_pt)
@@ -4873,7 +5331,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._font_combo.changed.connect(self._on_style_font_family)
         form.addRow("Font", self._font_combo)
 
-        self._font_size = QtWidgets.QSpinBox()
+        self._font_size = QtWidgets.QDoubleSpinBox()
+        self._font_size.setDecimals(3)
+        self._font_size.setSingleStep(.25)
         self._font_size.setRange(6, 48)
         self._font_size.setValue(self._style.font_size_pt)
         self._font_size.setToolTip(
@@ -4946,10 +5406,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._ci_band_check.setToolTip(
             "A 95% POINTWISE band from the bootstrap replicates of the whole parameter "
             "vector — not the curve redrawn at the ends of each parameter's interval, "
-            "which is a corner of a box the data rule out.\nUnavailable, and silently "
-            "absent, for a fit restored from a saved project (the replicates are not "
-            "stored), for the exponential+gamma family (which offers no bootstrap), and "
-            "wherever the bootstrap produced fewer than 20 usable replicates.")
+            "which is a corner of a box the data rule out.\nSaved projects retain the "
+            "computed band and bootstrap replicates. A band is unavailable when the "
+            "chosen family has no bootstrap or fewer than 20 usable replicates.")
         self._ci_band_check.setChecked(self._style.show_ci_band)
         self._ci_band_check.toggled.connect(self._on_style_ci_band)
         form.addRow("", self._ci_band_check)
@@ -4977,15 +5436,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._prov_check.toggled.connect(self._on_style_provenance)
         form.addRow("", self._prov_check)
 
-        self._point_size = QtWidgets.QSpinBox()
+        self._point_size = QtWidgets.QDoubleSpinBox()
+        self._point_size.setDecimals(3)
+        self._point_size.setSingleStep(.25)
         self._point_size.setRange(1, 30)
         self._point_size.setValue(self._style.point_size)
         self._point_size.setToolTip("Marker size for scatter / PCA points.")
         self._point_size.valueChanged.connect(self._on_style_point_size)
         form.addRow("Point size", self._point_size)
 
-        self._line_width = QtWidgets.QSpinBox()
-        self._line_width.setRange(1, 10)
+        self._line_width = QtWidgets.QDoubleSpinBox()
+        self._line_width.setDecimals(3)
+        self._line_width.setSingleStep(.25)
+        self._line_width.setRange(.25, 10)
         self._line_width.setValue(self._style.line_width)
         self._line_width.setToolTip("Width of the histogram outline and the fit curve.")
         self._line_width.valueChanged.connect(self._on_style_line_width)
@@ -5030,16 +5493,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
         return box
 
     @staticmethod
-    def _pt_override_spin(value: int, tip: str) -> QtWidgets.QSpinBox:
+    def _pt_override_spin(value: float, tip: str) -> QtWidgets.QDoubleSpinBox:
         """A point-size spin whose 0 reads "follow the body font", spelled out on itself.
 
         The same shape (and the same 0-means-automatic rule) as the legend's own size
         spin, so the four text controls in this group behave alike rather than each
         having its own idea of what "unset" looks like."""
-        spin = QtWidgets.QSpinBox()
+        spin = QtWidgets.QDoubleSpinBox()
+        spin.setDecimals(3)
+        spin.setSingleStep(.25)
         spin.setRange(0, 72)
         spin.setSpecialValueText("auto (body)")
-        spin.setValue(int(value))
+        spin.setValue(float(value))
         spin.setToolTip(tip)
         return spin
 
@@ -5078,16 +5543,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._style = _dc_replace(self._style, font_family=str(family))
         self._presentation_changed()
 
-    def _on_style_font_size(self, value: int) -> None:
-        self._style = _dc_replace(self._style, font_size_pt=int(value))
+    def _on_style_font_size(self, value: float) -> None:
+        self._style = _dc_replace(self._style, font_size_pt=float(value))
         self._presentation_changed()
 
-    def _on_style_point_size(self, value: int) -> None:
-        self._style = _dc_replace(self._style, point_size=int(value))
+    def _on_style_point_size(self, value: float) -> None:
+        self._style = _dc_replace(self._style, point_size=float(value))
         self._presentation_changed()
 
-    def _on_style_line_width(self, value: int) -> None:
-        self._style = _dc_replace(self._style, line_width=int(value))
+    def _on_style_line_width(self, value: float) -> None:
+        self._style = _dc_replace(self._style, line_width=float(value))
         self._presentation_changed()
 
     def _on_style_background(self, text: str) -> None:
@@ -5119,16 +5584,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._style = _dc_replace(self._style, show_legend=bool(on))
         self._presentation_changed()
 
-    def _on_style_title_size(self, value: int) -> None:
-        self._style = _dc_replace(self._style, title_font_size_pt=int(value))
+    def _on_style_title_size(self, value: float) -> None:
+        self._style = _dc_replace(self._style, title_font_size_pt=float(value))
         self._presentation_changed()
 
-    def _on_style_axis_label_size(self, value: int) -> None:
-        self._style = _dc_replace(self._style, axis_label_font_size_pt=int(value))
+    def _on_style_axis_label_size(self, value: float) -> None:
+        self._style = _dc_replace(self._style, axis_label_font_size_pt=float(value))
         self._presentation_changed()
 
-    def _on_style_tick_size(self, value: int) -> None:
-        self._style = _dc_replace(self._style, tick_font_size_pt=int(value))
+    def _on_style_tick_size(self, value: float) -> None:
+        self._style = _dc_replace(self._style, tick_font_size_pt=float(value))
         self._presentation_changed()
 
     def _on_style_grid(self, on: bool) -> None:
@@ -5275,8 +5740,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         while widget.count():
             self._retire_row(widget.takeItem(widget.count() - 1))
 
-    def _on_style_legend_font_size(self, value: int) -> None:
-        self._style = _dc_replace(self._style, legend_font_size_pt=int(value))
+    def _on_style_legend_font_size(self, value: float) -> None:
+        self._style = _dc_replace(self._style, legend_font_size_pt=float(value))
         self._presentation_changed()
 
     def _on_style_legend_counts(self, on: bool) -> None:
@@ -5315,20 +5780,20 @@ class PlotsWindow(QtWidgets.QMainWindow):
         each of those sizes falls back to the body size when its own override is 0, so
         an untouched style still produces one number in four places."""
         qf = figure_qfont(self._style.font_family)         # unset: Arial; missing: a substitute
-        qf.setPointSize(int(self._style.font_size_pt if pt is None else pt))
+        qf.setPointSizeF(float(self._style.font_size_pt if pt is None else pt))
         return qf
 
-    def _title_pt(self) -> int:
+    def _title_pt(self) -> float:
         """Title size in pt: its own override, or the body size."""
-        return int(self._style.title_font_size_pt or self._style.font_size_pt)
+        return float(self._style.title_font_size_pt or self._style.font_size_pt)
 
-    def _axis_label_pt(self) -> int:
+    def _axis_label_pt(self) -> float:
         """Axis-caption size in pt: its own override, or the body size."""
-        return int(self._style.axis_label_font_size_pt or self._style.font_size_pt)
+        return float(self._style.axis_label_font_size_pt or self._style.font_size_pt)
 
-    def _tick_pt(self) -> int:
+    def _tick_pt(self) -> float:
         """Tick-number size in pt: its own override, or the body size."""
-        return int(self._style.tick_font_size_pt or self._style.font_size_pt)
+        return float(self._style.tick_font_size_pt or self._style.font_size_pt)
 
     def _fg_hex(self) -> str:
         return _FG_LIGHT if self._style.background == "light" else _FG_DARK
@@ -5339,27 +5804,34 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def _msg_hex(self) -> str:
         return _MSG_LIGHT_HEX if self._style.background == "light" else _MSG_HEX
 
+    def _series_colour(self, role="data", *, index=0, identity=None, explicit=None):
+        """Shared palette affects unassigned ink; source/category identity stays owned."""
+        from ..core.figure_style import resolve_series_color
+        native = self._style.fit_color if role == "fit" else self._style.data_color
+        return resolve_series_color(self._style.style_binding, role=role, index=index,
+            native_color=native, identity_color=identity, explicit_color=explicit)
+
     def _hist_brush(self) -> QtGui.QBrush:
-        c = QtGui.QColor(self._style.data_color)
+        c = QtGui.QColor(self._series_colour())
         c.setAlpha(_HIST_FILL_ALPHA)
         return pg.mkBrush(c)
 
     def _point_brush(self) -> QtGui.QBrush:
-        c = QtGui.QColor(self._style.data_color)
+        c = QtGui.QColor(self._series_colour())
         c.setAlpha(_POINT_ALPHA)
         return pg.mkBrush(c)
 
     def _data_pen(self) -> QtGui.QPen:
-        return pg.mkPen(self._style.data_color, width=self._style.line_width)
+        return pg.mkPen(self._series_colour(), width=self._style.line_width)
 
     def _fit_pen(self) -> QtGui.QPen:
         # The fit curve reads one px heavier than the bar outline (default 2 px, as before).
-        return pg.mkPen(self._style.fit_color, width=self._style.line_width + 1)
+        return pg.mkPen(self._series_colour("fit"), width=self._style.line_width + 1)
 
     def _scatter_fit_pen(self) -> QtGui.QPen:
         # The scatter best-fit line uses the fit colour at (at least) the chosen line width,
         # so it reads clearly over the marker cloud.
-        return pg.mkPen(self._style.fit_color, width=max(self._style.line_width, 1))
+        return pg.mkPen(self._series_colour("fit"), width=max(self._style.line_width, 1))
 
     def _label_style(self) -> dict:
         """CSS-ish kwargs for an axis label: theme-aware colour + the chosen font.
@@ -5391,6 +5863,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         draw for the same reason the ink does, and every render site in this file
         already calls this one (owner note Q7)."""
         self._apply_grid()
+        from .plot_appearance import apply_plot_frame
+        apply_plot_frame(self._plot, self._style.frame, foreground=self._fg_hex())
         self._plot_widget.setBackground(self._bg_spec())
         pen = pg.mkPen(self._fg_hex())
         for name in ("bottom", "left"):
@@ -5404,6 +5878,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         qf = self._qfont(self._tick_pt())
         for name in ("bottom", "left"):
             self._plot.getAxis(name).setStyle(tickFont=qf)
+        message = getattr(self, "_message_item", None)
+        if message is not None:
+            message.setFont(self._qfont(self._style.font_size_pt))
         self._apply_element_styles()
 
     def _apply_element_styles(self) -> None:
@@ -5412,14 +5889,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
         installs is the figure-wide one, and an element override sits on top of it."""
         for side in ("bottom", "left"):
             axis = self._plot.getAxis(side)
-            label = self._style.text_style(f"axis.{side}.label")
+            label = self._style.effective_text_style(f"axis.{side}.label")
             if not _dc_replace(label, text=None).is_default():
                 axis.labelStyle = {**axis.labelStyle, **css_args(label)}
                 axis._updateLabel()
-            ticks = self._style.text_style(f"axis.{side}.ticks")
+            ticks = self._style.effective_text_style(f"axis.{side}.ticks")
             if _dc_replace(ticks, text=None).is_default():
                 continue
-            qf = self._qfont(int(round(ticks.size_pt or self._tick_pt())))
+            qf = self._qfont(ticks.size_pt or self._tick_pt())
             if ticks.size_pt:
                 qf.setPointSizeF(float(ticks.size_pt))
             if ticks.family:
@@ -5460,6 +5937,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
         disagree.
         """
         axis = self._plot.getAxis(side)
+        from ..core.quantity_display import AxisDisplayBasis
+        from .quantity_axis import configure_quantity_axis
+        configure_quantity_axis(axis, AxisDisplayBasis(
+            _plot_column_quantity(col, self._time_unit.currentText()), "log10" if log else "linear"))
         factor, name = _TIME_UNITS.get(self._time_unit.currentText(), (1.0, "s"))
         is_time = col in _TIME_COLUMNS
         setter = getattr(axis, "set_display_factor", None)
@@ -5557,7 +6038,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._plot.setTitle(None)
             self._plot.titleLabel.setText("")
             return
-        style = self._style.text_style("title")
+        style = self._style.effective_text_style("title")
         shown = rich_text(text) if self._style.title else text
         size = style.size_pt or self._title_pt()
         self._plot.setTitle(shown, color=style.color or self._fg_hex(), size=f"{size:g}pt",
@@ -5639,10 +6120,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         read off the axis (owner: "Axis range defaults to microseconds. The user
         needs control"). A non-time column's factor is 1.0: its axis shows data units.
         """
-        factor = _TIME_UNITS.get(self._time_unit.currentText(), (1.0, "s"))[0]
-        xcol, ycol = self._range_axis_columns()
-        return (factor if xcol in _TIME_COLUMNS else 1.0,
-                factor if ycol in _TIME_COLUMNS else 1.0)
+        return self.config().identity.axis_factors
 
     def _axis_unit_names(self) -> tuple[str, str]:
         """The unit each range box is read in, as text for its row label.
@@ -5660,6 +6138,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 out.append(unit)
             else:
                 out.append(_SCHEMA_UNITS.get(col, ""))
+        if self._plot_type_combo.currentText() == HISTOGRAM and self._norm_combo.currentText() == _NORM_DENSITY:
+            from ..core.quantity_display import density_quantity
+            out[1] = _plot_density_quantity(self._hist_col.currentText(), unit).display_unit
         return out[0], out[1]
 
     def _sync_range_unit_labels(self) -> None:
@@ -5883,8 +6364,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         (``w._set_config(c); assert w.config() == c``).
         """
         if not self._ui_ready:
-            return PlotConfig()
-        return PlotConfig(
+            return migrate_plot_quantity(PlotConfig())
+        cfg = PlotConfig(
             plot_type=self._plot_type_combo.currentText(),
             selection=SelectionConfig(
                 source_keys=tuple(self.selected_source_keys()),
@@ -5939,6 +6420,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 manual_x=self._manual_x, manual_y=self._manual_y),
             style=self._style,
             norm_user_set=bool(self._norm_user_set))
+        from ..core.figure_quantity_basis import quantity_witness
+        return _dc_replace(cfg, axes=_dc_replace(cfg.axes, quantity_display=_deep_frozen(
+            quantity_witness(_plot_quantity_bases(cfg), original=self._quantity_display))))
 
     def _set_config(self, cfg: PlotConfig, *, draw: bool = True,
                     own: bool = False) -> None:
@@ -5973,6 +6457,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         if not self._ui_ready:
             return
+        cfg = migrate_plot_quantity(_dc_replace(cfg, style=_project_style_settings(cfg.style)))
         importing = self._incoming_config_file is not None
         # WHICH INSTALL THE RESULTING STATE DESCENDS FROM. Opened before the widgets are
         # written so the draw at the foot of this method -- the one the user is looking
@@ -5987,6 +6472,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 self._plot_type_combo.setCurrentText(cfg.plot_type)
                 self._pages.setCurrentIndex(_PLOT_TYPES.index(cfg.plot_type))
             self._time_unit.setCurrentText(cfg.axes.time_unit)
+            self._quantity_display = cfg.axes.quantity_display
 
             self._accepted_check.setChecked(cfg.selection.accepted_only)
             self._apply_checked_keys(cfg.selection.source_keys)
@@ -6135,6 +6621,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._norm_user_set = bool(cfg.norm_user_set)
 
             self._identity = cfg.identity
+            if cfg.plot_type == PCA:
+                # `set_checked` ignores a feature the list does not offer (a template or an
+                # old undo entry from another table), so the anchor takes the set from the
+                # list: the stale-anchor hazard `_installable` closes for the columns.
+                self._identity = _dc_replace(
+                    self._identity, features=tuple(sorted(set(self.feature_selection()))))
             # Kept in step for any reader of the old memo; the identity is the authority.
             self._range_factors = self._identity.axis_factors
         finally:
@@ -6172,6 +6664,108 @@ class PlotsWindow(QtWidgets.QMainWindow):
         ``set_plot_type`` and ``set_fit`` are."""
         self._set_config(cfg, draw=True)
 
+    def capture_history_capsule(self):
+        """Commit typing and preserve the full configuration/origin history as JSON values."""
+        from nanoscope.core.figure_history_state import HistoryCapsule
+
+        self._history_commit()
+        history = self._history
+        if history._pending_origin is not None or history.base != self.config():
+            raise RuntimeError("Cannot checkpoint an uncommitted plot configuration")
+        return HistoryCapsule(
+            "nanoscope.plot-config-history/1", plot_config_to_json(history.base),
+            tuple(plot_config_to_json(cfg) for cfg in history._past),
+            tuple(plot_config_to_json(cfg) for cfg in history._future), history.dropped,
+            extra={"depth": history._depth, "origin": history._origin,
+                   "past_origins": history._past_origins,
+                   "future_origins": history._future_origins, "opened": history._opened,
+                   "norm_refusal_records": [[key, value] for key, value
+                                            in self._norm_refusal._records.items()],
+                   "config_loss_records": [[key, [value[0], list(value[1])]] for key, value
+                                           in self._config_losses._records.items()]})
+
+    def restore_history_capsule(self, capsule) -> None:
+        """Install session history only after the same frozen configuration was restored."""
+        from nanoscope.core.figure_history_state import HistoryCapsule
+        from nanoscope.core.figure_spec import FigureValidationError, thaw_json
+
+        if not isinstance(capsule, HistoryCapsule):
+            capsule = HistoryCapsule.from_dict(capsule)
+        if capsule.codec != "nanoscope.plot-config-history/1":
+            raise FigureValidationError("Incompatible plot configuration history codec")
+        extra = thaw_json(capsule.extra)
+        depth = extra.get("depth")
+        if type(depth) is not int or not 1 <= depth <= _HISTORY_DEPTH:
+            raise FigureValidationError("Invalid plot history depth")
+        if len(capsule.past) + len(capsule.future) > depth:
+            raise FigureValidationError("Plot history exceeds its depth bound")
+
+        def decode(value):
+            raw = thaw_json(value)
+            config = plot_config_from_json(raw)
+            expected = dict(raw)
+            expected["version"] = PLOT_CONFIG_VERSION
+            expected["axes"] = {"quantity_display": {}, **dict(expected.get("axes", {}))}
+            if plot_config_to_json(config) != expected:
+                raise FigureValidationError("Plot history cannot be restored losslessly")
+            return migrate_plot_quantity(config)
+
+        base = decode(capsule.base)
+        past = [decode(value) for value in capsule.past]
+        future = [decode(value) for value in capsule.future]
+        if base != self.config():
+            raise FigureValidationError("Plot history does not match the restored figure")
+        opened, origin = extra.get("opened"), extra.get("origin")
+        if type(opened) is not int or opened < 0:
+            raise FigureValidationError("Invalid plot history origin counter")
+
+        def valid_origin(value):
+            return type(value) is int and 0 <= value <= opened
+
+        past_origins, future_origins = extra.get("past_origins"), extra.get("future_origins")
+        if (not valid_origin(origin) or not isinstance(past_origins, list)
+                or not isinstance(future_origins, list)
+                or len(past_origins) != len(past) or len(future_origins) != len(future)
+                or not all(valid_origin(value) for value in past_origins + future_origins)):
+            raise FigureValidationError("Plot history origin arrays do not match its states")
+
+        def records(name, losses=False):
+            values = extra.get(name)
+            if not isinstance(values, list) or len(values) > _ORIGINS_KEPT:
+                raise FigureValidationError("Invalid plot import disclosure records")
+            out = {}
+            for row in values:
+                if not isinstance(row, list) or len(row) != 2 or not valid_origin(row[0]):
+                    raise FigureValidationError("Invalid plot import disclosure origin")
+                key, value = row
+                if key in out:
+                    raise FigureValidationError("Duplicate plot import disclosure origin")
+                if losses:
+                    if (not isinstance(value, list) or len(value) != 2
+                            or not isinstance(value[0], str) or not isinstance(value[1], list)
+                            or not all(isinstance(name, str) for name in value[1])):
+                        raise FigureValidationError("Invalid plot import loss disclosure")
+                    value = (value[0], tuple(value[1]))
+                elif not isinstance(value, str):
+                    raise FigureValidationError("Invalid plot normalization disclosure")
+                out[key] = value
+            return out
+
+        refusals = records("norm_refusal_records")
+        losses = records("config_loss_records", losses=True)
+        history = self._history
+        self._history_timer.stop()
+        self._format_text_run_key = None
+        history._base, history._past, history._future = base, past, future
+        history._depth, history.dropped = depth, capsule.dropped
+        history._origin, history._opened = origin, opened
+        history._past_origins, history._future_origins = past_origins, future_origins
+        history._pending_origin = None
+        self._norm_refusal._records = refusals
+        self._config_losses._records = losses
+        self._sync_config_buttons()
+        self._sync_template_selection()
+
     def adopt_restored_state(self) -> None:
         """A saved project has been restored into this window: its history starts here.
 
@@ -6188,18 +6782,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._sync_template_selection()
 
     @staticmethod
-    def _rebased(cfg: PlotConfig, was: AnalysisIdentity) -> PlotConfig:
+    def _rebased(cfg: PlotConfig, was: AnalysisIdentity, y_moved: bool = False) -> PlotConfig:
         """``cfg``, corrected for having moved off analysis identity ``was``.
 
         A pure function and the ONLY statement of what a change to the analysis
         invalidates; see :meth:`PlotConfig.rebased` for the four clauses and the measured
         bug behind each. Exposed here because this is where its callers live.
         """
-        return cfg.rebased(was)
+        return cfg.rebased(was, y_moved=y_moved)
 
-    def _rebase(self) -> None:
+    def _rebase(self, *, y_moved: bool = False) -> None:
         """Apply :meth:`_rebased` to the live window: the ONE call every identity-moving
-        handler makes.
+        handler makes. ``y_moved`` is the histogram's Normalize, which the identity does not
+        carry (:meth:`PlotConfig.rebased`): :meth:`_on_norm_moved` says it for a pick.
 
         The handler has already let the widget move -- Qt has no "about to change" -- so
         the previous identity comes from ``_identity``, the anchor the last
@@ -6221,8 +6816,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if not self._ui_ready or self._installing:
             return
         cfg = self.config()
-        acted = cfg.identity.wording_stale_from(self._identity)    # the words had a say
-        rebased = self._rebased(cfg, self._identity)
+        acted = y_moved or cfg.identity.wording_stale_from(self._identity)   # the words had a say
+        rebased = self._rebased(cfg, self._identity, y_moved)
         if self._updating:
             rebased = _dc_replace(rebased, style=_dc_replace(
                 rebased.style, title=cfg.style.title,
@@ -6239,21 +6834,38 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._set_config(rebased, draw=False, own=True)
         went = tuple(name for name in cfg.axes.ranges() if name not in rebased.axes.ranges())
         self._announce_reset(words_cleared(cfg.style, rebased.style) + went, rebased.identity,
-                             acted)
+                             acted, cfg.histogram.normalization if y_moved else "")
 
     def _announce_reset(self, cleared: tuple[str, ...], ident: AnalysisIdentity,
-                        acted: bool) -> None:
+                        acted: bool, norm: str = "") -> None:
         """Say which of the typed words and ranges went (quantity_reset). The picture follows
-        the control only at Plot, so it says what the plot is set to show. When the rule acted
+        the control only at Plot, so it says what the plot is set to show (``norm``: the
+        Normalize the histogram was just set to, when that is what moved). When the rule acted
         and nothing was typed, the sentence an earlier change left on the bar goes instead."""
         said = ""
         if cleared:
             shows = _SHOWS_PLOT[ident.plot_type].format(x=ident.x_column, y=ident.y_column)
+            if norm:
+                shows += f" as {_NORM_PHRASE.get(norm, norm)}"
             if ident.fit_model:
                 shows += f", fitted with {ident.fit_model.partition(':')[0]}"
             said = reset_sentence(cleared, shows, lead="the plot is now set to show")
         if acted:
             self._reset_said = announce(self.statusBar(), said, self._reset_said)
+            self._reset_took = tuple(cleared) if said else ()
+
+    def _lapse_reset_sentence(self) -> None:
+        """Take the sentence of the last reset off the status bar once what it names is typed or
+        pinned again (the Undo of the reset, a title typed since, a range pinned again). A change
+        of look, and Reset figure with its Undo, leave it: nothing it names is typed then. Only
+        if the bar still shows it, as :func:`~nanoscope.gui.quantity_reset.announce` has it."""
+        if not self._reset_took:
+            return
+        cfg = self.config()
+        if stands(self._reset_took, typed_words(cfg.style) + cfg.axes.ranges()):
+            return
+        self._reset_took = ()
+        self._reset_said = announce(self.statusBar(), "", self._reset_said)
 
     def _apply_checked_keys(self, keys: Sequence[str]) -> None:
         """Tick exactly ``keys`` in the source list. Silent about keys that are not on
@@ -6326,22 +6938,23 @@ class PlotsWindow(QtWidgets.QMainWindow):
         :meth:`_select_font_family`, which says nothing, and the style installed by the
         caller stands.
         """
+        from .plot_appearance import set_projected_spin_value
         self._title_edit.setText(style.title)
         self._x_label_edit.setText(style.x_label)
         self._y_label_edit.setText(style.y_label)
         self._legend_check.setChecked(bool(style.show_legend))
-        self._legend_font_size.setValue(int(style.legend_font_size_pt))
+        set_projected_spin_value(self._legend_font_size, float(style.legend_font_size_pt))
         self._legend_counts.setChecked(bool(style.legend_counts))
         self._ci_band_check.setChecked(bool(style.show_ci_band))
         self._residual_check.setChecked(bool(style.show_residuals))
         self._prov_check.setChecked(bool(style.show_provenance))
-        self._font_size.setValue(int(style.font_size_pt))
-        self._title_size.setValue(int(style.title_font_size_pt))
-        self._axis_label_size.setValue(int(style.axis_label_font_size_pt))
-        self._tick_size.setValue(int(style.tick_font_size_pt))
+        set_projected_spin_value(self._font_size, float(style.font_size_pt))
+        set_projected_spin_value(self._title_size, float(style.title_font_size_pt))
+        set_projected_spin_value(self._axis_label_size, float(style.axis_label_font_size_pt))
+        set_projected_spin_value(self._tick_size, float(style.tick_font_size_pt))
         self._grid_check.setChecked(bool(style.show_grid))
-        self._point_size.setValue(int(style.point_size))
-        self._line_width.setValue(int(style.line_width))
+        set_projected_spin_value(self._point_size, float(style.point_size))
+        set_projected_spin_value(self._line_width, float(style.line_width))
         self._bg_combo.setCurrentText("Light" if style.background == "light" else "Dark")
         self._export_w.setValue(int(style.export_w))
         self._export_h.setValue(int(style.export_h))
@@ -6603,7 +7216,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # THE SPLIT, ON SCREEN. A template that quietly did or did not move the tick
         # boxes would be found out by experiment, once, on somebody's real figure; the
         # rule is short enough to simply state where it is used.
-        split = QtWidgets.QLabel(
+        split = self._template_split_note = QtWidgets.QLabel(
             "A template carries the plot type, columns, fit recipe, axis limits and the "
             "whole style. It never carries which sources are ticked, your retyped or "
             "restyled legend entries, or an applied fit — the fit arrives selected, and you "
@@ -6802,6 +7415,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         PLUS anything else is not deferred at all, so a mixed gesture is never held open
         by its typed half.
         """
+        if not self._history_live():
+            return
         if self._typed_text_only(self._history.base, self.config()):
             self._history_timer.start(_HISTORY_COALESCE_MS)
             self._sync_config_buttons()
@@ -6822,6 +7437,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._history_timer.stop()
         if not self._ui_ready or self._installing or self._history_suspended:
             return
+        self._format_text_run_key = None
         if self._history.note(self.config()):
             self.workspaceChanged.emit()
         self._sync_config_buttons()
@@ -6885,6 +7501,19 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """Step the whole configuration forward one change. True if anything moved."""
         self._history_commit()
         return self._install_history(self._history.redo())
+
+    def history_mark(self) -> int:
+        """How deep the Undo stack is, as one number that only a step taken, undone or
+        redone can move: the steps back, the steps the 200-step ceiling dropped (so it
+        keeps growing past the ceiling), and one for a run of typing still open.
+
+        The Analysis Explorer's Style menu compares it before and after a look to know
+        whether a page still stands where the look left it. Read-only. This is depth,
+        not a unique revision: the Style service also watches `historyChanged`, so an
+        Undo followed by a different edit cannot revive an earlier batch."""
+        back, _forward = self._history.depth()
+        pending = self._ui_ready and self._history.base != self.config()
+        return back + int(self._history.dropped) + int(bool(pending))
 
     def _install_history(self, cfg: PlotConfig | None) -> bool:
         """Put a config from the stack back on the widgets, without recording it.
@@ -6977,6 +7606,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         if not hasattr(self, "_undo_btn"):
             return   # fires during construction, before this group exists
+        # Every change of the configuration, whichever door it came through, ends here: the
+        # sentence of the last reset stops standing once what it names is typed or pinned again.
+        self._lapse_reset_sentence()
         pending = self._ui_ready and self._history.base != self.config()
         back, forward = self._history.depth()
         lost = int(self._history.dropped)
@@ -7103,6 +7735,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
                f"its {lost} oldest steps have been dropped and cannot be undone.")
             if lost else "")
         self._history_note.setVisible(bool(lost))
+        if not self._history_suspended:
+            self.historyChanged.emit()
 
     # -- A3: named plot templates ----------------------------------------------------------------
     #: Sentinel entry: the settings are whatever the controls say, with no template's
@@ -7261,7 +7895,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         to "— manual —" the instant the template was recalled, which is the one moment it
         is certainly still accurate.
         """
-        return self._installable(self.config().with_template(tpl))
+        # Installation materializes the derived quantity witness. Compare the same
+        # canonical value here, otherwise the first cosmetic edit drops a valid name.
+        return migrate_plot_quantity(self._installable(self.config().with_template(tpl)))
 
     def _sync_template_selection(self) -> None:
         """Drop the combo to "— manual —" once the controls stop matching the named
@@ -7618,6 +8254,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if self.isVisible():
             self._stale_redraw_timer.start()
 
+    def drawn_table_is_stale(self) -> bool:
+        """Judge the committed columns, including a figure with pending control edits."""
+        cfg=getattr(self, '_figure_applied_config', None) or self.config()
+        from .figure_adapter_plots import plotted_staleness_columns
+        columns=plotted_staleness_columns(cfg)
+        keys=tuple(self._figure_sources) or cfg.selection.source_keys
+        sources=[self._sources[key] for key in keys if key in self._sources]
+        return any(set(columns).intersection(self._superseded_columns(source))
+                   for source in sources)
+
     def _redraw_stale_marks(self) -> None:
         """Redraw once if a drawn source's mark moved since the last draw.
 
@@ -7729,6 +8375,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self,
         sources,
         provenance: dict[str, dict] | None = None,
+        *,
+        catalog_only: bool = False,
     ) -> None:
         """Install the per-event tables to explore, with their detection provenance.
 
@@ -7754,7 +8402,22 @@ class PlotsWindow(QtWidgets.QMainWindow):
         re-pulling data doesn't yank the user off their view. Any previously
         computed clustering/PCA is dropped -- the row set may have changed
         underneath it.
+
+        ``catalog_only`` prepares sources without drawing. An already drawn figure
+        keeps its exact inputs, caches and controls until the next explicit Plot
+        consumes the prepared catalog. This also leaves the old result intact if
+        the owner stops between preparing sources and requesting that Plot. A fresh
+        page installs the catalog immediately so a frozen snapshot can resolve it.
         """
+        normalized = _normalize_sources(sources, provenance)
+        if catalog_only and self._plot_armed:
+            self._figure_pending_sources = normalized
+            return
+        self._figure_pending_sources = None
+        self._install_source_catalog(normalized, draw=not catalog_only)
+
+    def _install_source_catalog(self, sources: dict[str, PlotSource], *, draw: bool) -> None:
+        """Install normalized sources; the explicit run owns the optional draw."""
         # NEW ROWS SUPERSEDE ANY ADVISORY WORK IN FLIGHT, IMMEDIATELY.
         #
         # This is the entry point a curation click reaches, and every deferred note is
@@ -7776,7 +8439,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         prev_checked = self.selected_source_keys()
         prev_primary = self._primary_key()
 
-        self._sources = _normalize_sources(sources, provenance)
+        self._sources = dict(sources)
         self._cluster_result = None
         self._pca_result = None
 
@@ -7836,8 +8499,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # only the base moves.
         was, self._history_suspended = self._history_suspended, True
         try:
-            self._on_sources_changed(draw=self.auto_plot or self._plot_armed)
-            if not self._plot_armed:
+            self._on_sources_changed(draw=draw and (self.auto_plot or self._plot_armed))
+            if draw and not self._plot_armed:
                 self._show_plot_prompt()
         finally:
             self._history_suspended = was
@@ -7857,7 +8520,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             bits.append(f"{src.detector_label} ({src.module_id})")
         md = src.provenance.get("min_dwell_s") if src.provenance else None
         if md:
-            bits.append(f"min_dwell_s = {float(md):g} s")
+            bits.append(f"Minimum dwell time = {float(md) * 1000:g} ms")
         elif src.kind == "manual":
             bits.append("no detector provenance (hand measurements)")
         # ...and the edit hint on the row itself, not only in the group's label: the
@@ -8074,9 +8737,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
         which is deliberate: nobody re-decided anything when the window swung to density
         because a second source was ticked, and the refusal is still the true account of
         why the requested quantity is not on screen. See :class:`_NormRefusal`.
+
+        A PICK is a change of what the y axis counts, though, so on the histogram it is a
+        move of the y quantity (owner's reset rule, beyond his list): the typed words and the
+        y range go back to automatic through :meth:`_rebase`, in the step of the change itself
+        (this slot runs ahead of ``_changed``, which draws and records it), and the sentence says
+        what the histogram is now set to show. The automatic swing runs under ``_updating`` and
+        takes nothing; neither does a Normalize set on a page that does not draw a histogram.
         """
         if not self._updating:
             self._norm_refusal.clear()
+            if self._plot_type_combo.currentText() == HISTOGRAM:
+                self._rebase(y_moved=True)
 
     def _sync_cluster_split_toggle(self) -> None:
         """One owner for the colour channel: SOURCE while an overlay is up, CLUSTER
@@ -8143,9 +8815,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 for i, name in enumerate(cols):
                     if name in {"depth_pA", "amplitude_pA"}:
                         combo.setItemData(i, (
-                            "Original whole-event median depth; unchanged by Curate amplitude choices."
+                            name + " — Original whole-event median depth; unchanged by Curate amplitude choices."
                             if name == "depth_pA" else
-                            "Selected amplitude applied in Curate. Recorded units: "
+                            name + " — Selected amplitude applied in Curate. Recorded units: "
                             + amplitude_units_label(src.df for src in selected)
                             + ". Review method, interval scope and stale-value warnings before pooling."),
                             QtCore.Qt.ToolTipRole)
@@ -8154,8 +8826,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
             identifiers = [c for c in _IDENTIFIER_FEATURES if c in cols]
             self._features.set_separator_before(
                 identifiers[0] if identifiers else _IDENTIFIER_FEATURES[0], "Identifiers")
+            from ..core.quantity_display import column_entry
             self._features.set_entries(
-                [(c, c, "") for c in measured + identifiers], (),
+                [column_entry(c, _plot_column_quantity(c)) for c in measured + identifiers], (),
                 [c for c in _PREFER_FEATURES if c in cols])
 
             if not cols:
@@ -8201,7 +8874,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         "title": "title", "x_label": "x_label", "y_label": "y_label",
         "font_family": "font_family", "title_size": "title_font_size_pt",
         "axis_size": "axis_label_font_size_pt", "tick_size": "tick_font_size_pt",
-        "grid": "show_grid", "background": "background", "data_color": "data_color",
+        "grid": "show_grid", "background": "background", "frame": "frame", "data_color": "data_color",
         "fit_color": "fit_color", "line_width": "line_width", "marker_size": "point_size",
         "legend_visible": "show_legend", "legend_size": "legend_font_size_pt",
     }
@@ -8221,6 +8894,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
             out["text"] = _thawed(style.text_styles)
         if style.fit_label:
             out["fit_label"] = _thawed(style.fit_label)
+        if style.style_binding:
+            out["style_binding"] = _thawed(style.style_binding)
+        if style.series_styles:
+            out["series_styles"] = _thawed(style.series_styles)
         return out
 
     def set_appearance_state(self, mapping) -> None:
@@ -8248,10 +8925,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
              for key, style in (state.text or ())})
         values["fit_label"] = (FrozenMap(state.fit_label.to_dict()) if state.fit_label is not None
                                else _NO_ENTRIES)
+        values["style_binding"] = _deep_frozen(state.to_dict().get("style_binding", {}))
+        values["series_styles"] = _deep_frozen(state.to_dict().get("series_styles", {}))
         prior = self._updating
         self._updating = True
         try:
-            self._style = _dc_replace(self._style, **values)
+            from .figure_style_binding import preserve_legacy_baseline
+            native = preserve_legacy_baseline(
+                _encode_dc(_dc_replace(self._style, **values)), _encode_dc(self._style), "style_settings")
+            self._style = _project_style_settings(_decode_dc(StyleSettings, native))
             self._apply_style_widgets(self._style)
             self._appearance_widget.set_state(state)
         finally:
@@ -8320,6 +9002,21 @@ class PlotsWindow(QtWidgets.QMainWindow):
             from ..core.analysis_workspace import _plot_source_recipe
             self._figure_sources[source.key] = _plot_source_recipe(self, source)
 
+    def figure_series(self):
+        from .plots_series import descriptors
+        return descriptors(self)
+
+    def _tag_series(self, item, role, key, label, *, identity_kind="source", colour=None):
+        from .plots_series import tag_series
+        tag_series(item, self._plot_type(), role, key, label,
+                   identity_kind=identity_kind, colour=colour)
+
+    def _apply_series_styles(self):
+        from .plots_series import apply_series_styles
+        apply_series_styles(self)
+        if hasattr(self, "_nonlinear_fitter"):
+            self._nonlinear_fitter.set_band_visible(self._style.show_ci_band)
+
     def _restyle_committed_items(self) -> None:
         """Style graphical objects, preserving category colors and selected rings."""
         objects = [*self._plot.items, *self._resid.items,
@@ -8328,8 +9025,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             role = getattr(item, "_presentation_role", None)
             if role is None:
                 continue
-            colour = (self._style.data_color if role == "data" else
-                      self._style.fit_color if role == "fit" else None)
+            colour = (self._series_colour(role, index=getattr(item, "_presentation_series_index", 0))
+                      if role in ("data", "fit") else None)
             if isinstance(item, pg.ScatterPlotItem):
                 item.setSize(self._style.point_size)
                 if colour:
@@ -8358,6 +9055,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     item.setSymbolSize(max(4, self._style.point_size - 2))
                     if colour:
                         item.setSymbolBrush(pg.mkBrush(colour))
+        self._apply_series_styles()
         self._paint_event_point_selection()
 
     def _committed_legend_names(self) -> dict:
@@ -8439,10 +9137,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
                         offset=(8, -6) if bottom else (10, 8))
             item.setZValue(30)
             setattr(self, attribute, item)
-        item.setText(text, color=colour, size=f"{size}pt",
-                     family=html_font_family(self._style.font_family))
+        options = {"color": colour, "size": f"{size:g}pt",
+                   "family": html_font_family(self._style.font_family)}
+        if bottom:
+            options.update(label_args(self._style.effective_text_style("annotation.provenance")))
+        item.setText(text, **options)
 
     def _restyle_committed_decorations(self) -> None:
+        if hasattr(self, "_nonlinear_fitter"):
+            self._nonlinear_fitter.set_band_visible(self._style.show_ci_band)
         names = self._committed_legend_names()
         # The fit's numbers: reformatted from the cached readouts, never refitted, and
         # never written into the title.
@@ -8457,8 +9160,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._set_presentation_annotation("_prov_item", provenance,
                                           self._style.show_provenance, bottom=True)
         if self._style.show_ci_band and not self._band_items:
-            for grid, lo, hi, colour, _note, role in getattr(self, "_presentation_bands", []):
-                self._add_cached_band(grid, lo, hi, colour, role)
+            for grid, lo, hi, colour, _note, role, *metadata in getattr(self, "_presentation_bands", []):
+                self._add_cached_band(grid, lo, hi, colour, role, metadata[0] if metadata else None)
         for item in self._band_items:
             item.setVisible(self._style.show_ci_band)
         residual = getattr(self, "_presentation_residual", None)
@@ -8480,6 +9183,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
     def _presentation_changed(self) -> None:
         if self._updating:
             return
+        self._style = _project_style_settings(self._style, edit=True)
         view = self._plot.getViewBox()
         ranges = [list(pair) for pair in view.viewRange()]
         auto = list(view.autoRangeEnabled())
@@ -8537,26 +9241,16 @@ class PlotsWindow(QtWidgets.QMainWindow):
             legend.setLabelTextColor(fg)
             legend.setBrush(pg.mkBrush(backing))
             legend.setPen(pg.mkPen(border))
-            pt = int(self._style.legend_font_size_pt) or max(6, self._style.font_size_pt - 3)
+            pt = float(self._style.legend_font_size_pt) or max(6, self._style.font_size_pt - 3)
             legend.setLabelTextSize(f"{max(1, pt)}pt")
         for item, size, colour in (
                 (getattr(self, "_prov_item", None), max(6, self._style.font_size_pt - 2),
                  self._msg_hex()),):
             if item is not None:
-                item.setText(item.text, size=f"{size}pt", color=colour)
+                item.setText(item.text, **{"size": f"{size:g}pt", "color": colour,
+                    **label_args(self._style.effective_text_style("annotation.provenance"))})
         if hasattr(self, "_resid"):
-            self._resid_widget.setBackground(self._bg_spec())
-            for side in ("bottom", "left"):
-                axis = self._resid.getAxis(side)
-                axis.setPen(pg.mkPen(self._fg_hex()))
-                axis.setTextPen(pg.mkPen(self._fg_hex()))
-                axis.setStyle(tickFont=self._qfont(self._tick_pt()))
-                axis.setLabel(axis.labelText, **self._label_style())
-            for item in self._resid.items:
-                if isinstance(item, pg.InfiniteLine):
-                    pen = QtGui.QPen(item.pen)
-                    pen.setColor(QtGui.QColor(self._msg_hex()))
-                    item.setPen(pen)
+            self._style_residual_axes()
         # The original history/coalescing hook also records public setter calls
         # and preserves workspaceChanged without creating a new run gesture.
         self._history_settle()
@@ -8597,9 +9291,26 @@ class PlotsWindow(QtWidgets.QMainWindow):
         exponential -- the exact failure owner note #12 was written about, re-created
         one level up.
         """
+        errors = self._fit_range_input_notes() if self._plot_type() == HISTOGRAM else []
+        if errors and self._fit_combo.currentText() != _FIT_NONE:
+            self._validate_fit_range_fields()
+            self.statusBar().showMessage(" ".join(errors), 15000)
+            self._set_details(self.details_text() + "\n\nFit not run: " + " ".join(errors))
+            return
+        pending = getattr(self, "_figure_pending_sources", None)
+        if pending is not None:
+            self._install_source_catalog(pending, draw=False)
+            self._figure_pending_sources = None
         self._commit_fit_selection()
         self._commit_scatter_fit_selection()
         self._armed_redraw()
+        if getattr(self, "_phase2_figure_managed", False):
+            # An explicit Update/Apply is the publication boundary. Closing or evicting
+            # one of several figures must never publish whichever fit happened to close last.
+            published = self._persist_results()
+            self.figureResultsPublished.emit({
+                "figure_id": str(getattr(self, "_nanoscope_figure_id", "")),
+                "results": published, "sources": self.figure_source_recipes()})
 
     def _armed_redraw(self) -> None:
         """Draw, and record that what is on screen now matches the controls.
@@ -8611,6 +9322,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._plot_armed = True
         self._stale = False
         self._stale_reason = ""
+        self._stale_reasons = []
         # ...which, for the KDE overlay, is the moment the proposal becomes the picture:
         # here rather than in `_run_plot` because every run gesture -- Plot, a setter,
         # `apply_config`, an undo -- ends here, and one that cleared the ● without
@@ -8637,6 +9349,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         else:
             self._stale = True
             self._stale_reason = reason
+            if reason not in self._stale_reasons:
+                self._stale_reasons.append(reason)
             self._sync_run_state()
         self._history_settle()  # see `_changed`; free, because the hook ends in a diff
 
@@ -8644,6 +9358,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """The empty canvas a never-run window carries, with the instruction on it."""
         self._stale = False
         self._stale_reason = ""
+        self._stale_reasons = []
         self._sync_run_state()
         self._message(_PLOT_PROMPT)
         # `_message` bypasses `_redraw`, so the legend checklist has to be emptied here
@@ -8671,10 +9386,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._run_action.setToolTip(self._plot_btn.toolTip())
         self._plot_state.setVisible(bool(self._stale))
         if self._stale:
+            # Hosted in the Explorer the Plot button is hidden and the verb is the
+            # toolbar's Update plot (⌘Return); the sentence names the one the user sees.
+            verb = "Update plot (⌘Return)" if self._hosted else "Plot"
             self._plot_state.setText(
                 f"⚠ {self._stale_reason} changed — the plot below is the PREVIOUS "
-                f"selection. Press Plot to redraw.")
+                f"selection. Press {verb} to redraw.")
             self._plot_state.setStyleSheet(f"color:{_WARN_HEX};")
+        self.pendingChanged.emit()
 
     def _on_plot_type_changed(self, name: str) -> None:
         if name in _PLOT_TYPES:
@@ -8797,6 +9516,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
             f"Draw “{self._scatter_fit.currentText()}” — the plot still shows "
             f"“{self._applied_scatter_fit}”." if s_pending else
             f"“{self._applied_scatter_fit}” is the line on the plot.")
+        self._scatter_fit_status.setText(
+            f"Quick fit applied: {self._applied_scatter_fit}." +
+            (f" Pending: {self._scatter_fit.currentText()} — Update plot to apply." if s_pending else ""))
         # The Plot button badges the SAME pending state, because it is the same gate.
         self._sync_run_state()
 
@@ -8868,6 +9590,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # PCA axes are defined by the feature set; a change makes any run stale.
         self._pca_result = None
         if self._plot_type() == PCA:
+            # THE FEATURE SET IS THE PCA'S QUANTITY (AnalysisIdentity.features): other
+            # features are other scores, so the words and pins typed for the old ones go
+            # now, as a column's do, and Run PCA then draws the new scores over automatic
+            # text. On any other plot type the set is a clustering setting, not a quantity.
+            self._rebase()
             # Through `_changed`, not `_redraw`, so an un-run window stays on its prompt
             # instead of being drawn into by a control it has not been told to plot yet.
             # The PCA view is gated by its own Run button either way.
@@ -9164,7 +9891,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._title_edit.setText(str(title))
 
     def set_font_size(self, pt: int) -> None:
-        self._font_size.setValue(int(pt))
+        self._font_size.setValue(float(pt))
 
     def set_font_family(self, family: str) -> None:
         """Font family for the plot's text. ``""`` restores the default, Arial.
@@ -9188,11 +9915,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._paint_swatch(self._fit_swatch, str(hex_color))
         self._presentation_changed()
 
-    def set_point_size(self, n: int) -> None:
-        self._point_size.setValue(int(n))
+    def set_point_size(self, n: float) -> None:
+        self._point_size.setValue(float(n))
 
-    def set_line_width(self, n: int) -> None:
-        self._line_width.setValue(int(n))
+    def set_line_width(self, n: float) -> None:
+        self._line_width.setValue(float(n))
 
     def set_background(self, mode: str) -> None:
         """``"dark"`` or ``"light"`` (light = white canvas + dark ink, for publication)."""
@@ -9393,17 +10120,20 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._plot_armed = self._message_item is None
             self._stale = False
             self._stale_reason = ""
+            self._stale_reasons = []
             if self._plot_armed and self._kde_pending_after_snapshot:
                 # ...EXCEPT a KDE overlay, which the draw declined to estimate: the
                 # controls ask for a curve the picture does not have, and that is
                 # exactly what the gate's ● is for.
                 self._stale = True
                 self._stale_reason = "the KDE overlay"   # Details says it was not recomputed
+                self._stale_reasons = [self._stale_reason]
             elif self._plot_armed and self._scatter_fit_pending_after_snapshot:
                 # ...and an applied scatter fit, for the same reason: the saved figure
                 # had its line and its fit label, and this picture has neither.
                 self._stale = True
                 self._stale_reason = "the scatter fit"
+                self._stale_reasons = [self._stale_reason]
             self._sync_fit_apply_buttons()
             self._sync_run_state()
         finally:
@@ -9474,6 +10204,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # The live draw's roles, so a Fit colour or Line width change after a reopen
         # restyles this curve as it would a fresh one.
         item._presentation_role = "category" if who else "fit"
+        self._tag_series(item, "fit", src.key if src is not None else "fit",
+                         f"{src.label if src is not None else 'Data'} fit", colour=colour if who else None)
         item._presentation_width_extra = 1
         if self._fit_item is None:
             self._fit_item = item
@@ -9529,12 +10261,31 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if gof and gof.get("note"):
             notes.append(f"{gof['note']} (as saved with the fit)")
         notes.extend(str(note) for note in getattr(fit, "meta", {}).get("warnings", ()))
+        band_note = self._draw_ci_band(
+            fit, grid, at, int(fit.n) * width * self._fit_scale(edges, width, int(v.size)),
+            colour or self._style.fit_color, "category" if who else "fit")
+        if band_note:
+            notes.append(band_note)
+        residual = getattr(fit, "meta", {}).get("saved_residual_geometry")
+        if residual and not self._presentation_residual_ready:
+            res = dict(residual["result"])
+            self._presentation_residual = (res, bool(residual.get("log_x", log_x)))
+            self._presentation_residual_note = str(res.get("note", ""))
+            self._presentation_residual_ready = True
+            if self._style.show_residuals:
+                self._render_cached_residual(*self._presentation_residual)
+                notes.append(self._presentation_residual_note)
         result = _FitSummary(summary, full, rejected=rejected, plain=plain_summary)
         result.parts = self._fit_parts(fit, col, gof, headline=f"{label} = {shown}{unit_text}",
                                        headline_keys=keys)
         return result, notes
 
     def _clear_plot(self) -> None:
+        self._nonlinear_drawn_datasets = []
+        if hasattr(self, "_nonlinear_fitter"):
+            self._nonlinear_fitter.clear_graphics()
+            if self._plot_type() != SCATTER:
+                self._nonlinear_fitter.state = None
         self._lasso_generation += 1
         if hasattr(self, "_lasso"):
             self._lasso.cancel("Lasso cancelled because the plotted result changed.")
@@ -9631,10 +10382,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     for key, readout in readouts_in
                     # In legend instead: a fit whose row is drawn carries its numbers there.
                     if key not in drawn_rows]
+        resolved = self._style.effective_text_style(FIT_LABEL_KEY)
         draw_state = _dc_replace(state, in_legend=False,
-                                 size_pt=state.size_pt or float(self._style.font_size_pt))
-        style = _dc_replace(self._style.text_style(FIT_LABEL_KEY), text=None, size_pt=None,
-                            color=None)
+                                 size_pt=resolved.size_pt or float(self._style.font_size_pt),
+                                 color=resolved.color)
+        style = _dc_replace(resolved, text=None, size_pt=None, color=None)
         item.apply_state(draw_state, readouts, style, self._style.font_family)
 
     def _shown_readout(self, key: str, readout: FitReadout, names: dict) -> FitReadout:
@@ -9834,14 +10586,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
             return ""
         lo = np.asarray(band["lo"], dtype=np.float64) * scale
         hi = np.asarray(band["hi"], dtype=np.float64) * scale
+        metadata = getattr(self._fit_items[-1], "_figure_series_meta", None) if self._fit_items else None
         self._presentation_bands.append((grid.copy(), lo.copy(), hi.copy(), colour,
-                                         str(band["note"]), role))
+                                         str(band["note"]), role, metadata))
         if not self._style.show_ci_band:
             return ""
-        self._add_cached_band(grid, lo, hi, colour, role)
+        self._add_cached_band(grid, lo, hi, colour, role, metadata)
         return str(band["note"])
 
-    def _add_cached_band(self, grid, lo, hi, colour, role="fit") -> None:
+    def _add_cached_band(self, grid, lo, hi, colour, role="fit", metadata=None) -> None:
         """Materialize graphical ornaments from an already computed interval."""
         pen = pg.mkPen(QtGui.QColor(colour), width=1, style=Qt.DotLine)
         c = QtGui.QColor(colour)
@@ -9852,6 +10605,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         for it in (top, bot, fill):
             it._presentation_role = role
             it._presentation_band = True
+            if metadata is not None:
+                it._figure_series_meta = dict(metadata)
             self._plot.addItem(it, ignoreBounds=True)
         # NOT a legend row. The band is an attribute of the fit curve that is already
         # legended, and a second entry for one object is the note-Q2 complaint the legend
@@ -9881,6 +10636,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 FloatingPointError):
             return "", ""
         self._presentation_residual = (res, bool(log_x))
+        fit.meta["saved_residual_geometry"] = {
+            "result": {key: value.tolist() if isinstance(value, np.ndarray) else value
+                       for key, value in res.items()}, "log_x": bool(log_x)}
         self._presentation_residual_note = str(res["note"])
         self._presentation_residual_ready = True
         short = ("" if res["reduced_chi2"] is None
@@ -9897,11 +10655,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         colour = QtGui.QColor(self._style.fit_color)
         # Stems, not a connected line: each residual belongs to ONE bin and joining them
         # draws a curve through numbers that have no order beyond their bins.
-        for xi, ri in zip(x, r):
-            stem = pg.PlotDataItem(x=[xi, xi], y=[0.0, float(ri)],
-                                  pen=pg.mkPen(colour, width=self._style.line_width))
-            stem._presentation_role = "fit"
-            self._resid.addItem(stem)
+        raw = res.get("mode") == "raw"
+        if not raw:
+            for xi, ri in zip(x, r):
+                stem = pg.PlotDataItem(x=[xi, xi], y=[0.0, float(ri)],
+                                      pen=pg.mkPen(colour, width=self._style.line_width))
+                stem._presentation_role = "fit"
+                self._resid.addItem(stem)
         points = pg.PlotDataItem(
             x=x, y=r, pen=None, symbol="o", symbolSize=max(4, self._style.point_size - 2),
             symbolBrush=pg.mkBrush(colour), symbolPen=None)
@@ -9909,22 +10669,43 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._resid.addItem(points)
         # ±2 is where a standardised residual stops being ordinary counting noise; the
         # guides are what turn "a tall bar" into "a tall bar for this many counts".
-        for level, style in ((0.0, Qt.SolidLine), (2.0, Qt.DashLine), (-2.0, Qt.DashLine)):
+        guides = ((0.0, Qt.SolidLine),) if raw else ((0.0, Qt.SolidLine), (2.0, Qt.DashLine), (-2.0, Qt.DashLine))
+        for level, style in guides:
             self._resid.addItem(pg.InfiniteLine(
                 pos=level, angle=0,
                 pen=pg.mkPen(self._msg_hex(), width=1, style=style)))
         self._resid.setLogMode(x=bool(log_x), y=False)
-        self._resid.setLabel("left", "(obs−exp)/√exp", **self._label_style())
+        residual_label = (f"y−fit ({res.get('unit') or 'unitless'})" if raw else "(obs−exp)/√exp")
+        self._resid.setLabel("left", residual_label, **self._label_style())
         self._resid.getAxis("bottom").setStyle(showValues=False)   # the plot above labels it
-        self._resid_widget.setBackground(self._bg_spec())
+        self._style_residual_axes()
         # Symmetric about zero and never tighter than ±3, so the guides are always in
         # frame and two strips of the same data are comparable by eye.
-        span = max(3.0, float(np.max(np.abs(r))) * 1.15) if r.size else 3.0
+        span = max(1e-12 if raw else 3.0, float(np.max(np.abs(r))) * 1.15) if r.size else 3.0
         self._resid_view_span = span
         self._resid.setYRange(-span, span, padding=0)
         self._resid_widget.setVisible(True)
         # "approx." is not decoration: the dof came from an unbinned MLE, and a bare
         # "χ²/dof = 1.3" on an exported figure is read as the textbook quantity.
+
+    def _style_residual_axes(self) -> None:
+        """Apply the saved appearance whenever cached residuals are displayed.
+
+        Native restoration does not replay a Style gesture. Keep axis ink/fonts
+        and guide colors identical there, without refitting or resetting views.
+        """
+        self._resid_widget.setBackground(self._bg_spec())
+        for side in ("bottom", "left"):
+            axis = self._resid.getAxis(side)
+            axis.setPen(pg.mkPen(self._fg_hex()))
+            axis.setTextPen(pg.mkPen(self._fg_hex()))
+            axis.setStyle(tickFont=self._qfont(self._tick_pt()))
+            axis.setLabel(axis.labelText, **self._label_style())
+        for item in self._resid.items:
+            if isinstance(item, pg.InfiniteLine):
+                pen = QtGui.QPen(item.pen)
+                pen.setColor(QtGui.QColor(self._msg_hex()))
+                item.setPen(pen)
 
     def _drop_legend(self) -> None:
         """Empty the legend and hide it.
@@ -9977,7 +10758,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # is the data it names. That rule is the DEFAULT (legend_font_size_pt = 0), not
         # a law: a figure going into a talk needs a legend that reads from the back of
         # the room, and one going into a dense multi-panel needs it smaller still.
-        pt = (int(self._style.legend_font_size_pt) or
+        pt = (float(self._style.legend_font_size_pt) or
               max(6, self._style.font_size_pt - 3))
         legend.setLabelTextSize(f"{max(1, pt)}pt")
         try:
@@ -10256,7 +11037,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             text = f"{rich_text(self._elide_legend(label.head))}<br>{rich_text(label.numbers)}"
         else:
             text = rich_text(self._elide_legend(str(label)))
-        css = css_args(self._style.text_style(element)) if element else {}
+        css = css_args(self._style.effective_text_style(element)) if element else {}
         if not css:
             return text
         return "<span style='{}'>{}</span>".format(
@@ -10307,7 +11088,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         label = getattr(line, "label", None) if line is not None else None
         if not isinstance(label, _LimitLabel):
             return
-        style = self._style.text_style(LIMIT_LABEL_KEY)
+        style = self._style.effective_text_style(LIMIT_LABEL_KEY)
         text = shown_text(style, _LIMIT_LABEL_AUTO)
         css = {"color": _EXCLUDED_HEX, "font-family": html_font_family(self._style.font_family),
                **css_args(style)}
@@ -10351,6 +11132,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._plot.setYRange(0, 1, padding=0)
         item.setPos(0.5, 0.5)
         self._message_item = item
+        self._apply_fonts()
         self._set_details("\n".join([text, *self._incoming_notes()]))
 
     def _set_details(self, text: str) -> None:
@@ -10486,7 +11268,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 if not item.isVisible():
                     continue
                 for point in item.points():
-                    if not point.isVisible():
+                    if not point.isVisible() or point.size() <= 0:
                         continue
                     position = item.mapToScene(point.pos())
                     if (math.isfinite(position.x()) and math.isfinite(position.y())
@@ -10547,16 +11329,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
             selected = RowIdentityIndex(self._selected_event_rows.get(source_key, ()),
                                          self._same_row_identity)
             for item in items:
-                for point in item.points():
-                    on = selected.contains(point.data())
+                sizes = getattr(item, "_presentation_series_sizes", None)
+                for number, point in enumerate(item.points()):
+                    size = base_size if sizes is None else float(sizes[number])
+                    on = size > 0 and selected.contains(point.data())
                     # Order matters: pyqtgraph's symbol atlas retains its largest
                     # footprint. Never transiently grow it when toggling a ring.
                     if on:
-                        point.setSize(selected_size)
+                        point.setSize(max(0., size - (max(math.ceil(ring_width), 1) - 1)))
                         point.setPen(ring)
                     else:
                         point.setPen(pg.mkPen(None))
-                        point.setSize(base_size)
+                        point.setSize(size)
 
     def _redraw(self) -> None:
         """Draw the current view, then re-offer its legend rows to the Style group.
@@ -10572,6 +11356,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._stale_drawn = self._stale_signature()
             if self._message_item is None:
                 self._figure_applied_config = self._drawn_config()
+                self._apply_series_styles()
         finally:
             # THE DRAW IS WHAT SETTLES WHICH ENTRIES EXIST, so it is where decisions
             # about entries that no longer exist are dropped -- a cluster row unticked
@@ -10612,7 +11397,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._draw_scatter(drawn)
         elif kind == KDE:
             if self._workspace_snapshot_rendering:
-                # KDE currently stores its recipe, not the sampled density grid.
+                from .figure_adapter_plots import restore_sampled_contours
+                if restore_sampled_contours(self):
+                    self._draw_provenance_caption()
+                    return
+                # Legacy projects store the recipe, not the sampled density grid.
                 # Calling scipy's estimator here would make project-open an implicit
                 # analysis run, so leave an explicit pending picture instead.
                 self._message(
@@ -10735,70 +11524,20 @@ class PlotsWindow(QtWidgets.QMainWindow):
         return {_NORM_COUNT: "count", _NORM_DENSITY: "density", _NORM_PROB: "probability"}[mode]
 
     def _y_axis_label(self, col: str, log_y: bool) -> str:
-        """The y label FOR THE PICTURE: the quantity, and the unit it is actually in.
-
-        THIS IS THE HALF AN EXPORTED IMAGE KEEPS, which is the whole argument for putting
-        the unit here and not only in Details. ``save_image`` renders this very PlotItem,
-        so the SVG/PDF/PNG carries this string verbatim -- measured, the exported file
-        contains ``dwell (ms)`` and, with this method in place, ``density (1/s)``, with no
-        change to ``save_image`` at all. Details is screen-only and never leaves the app,
-        and a figure that goes into a paper has to be checkable from itself.
-
-        THE UNIT IS THE STORED ONE AND IT DOES NOT FOLLOW THE TIME-UNIT COMBO. The heights
-        are ``counts / (n * bin_width)`` with the width in seconds, always, because
-        ``_axis_label_for`` scales the TICKS and never the data (it must not: see its
-        docstring on ``min_dwell_s``). So ``dwell_s`` reads ``density (1/s)`` whether the
-        ticks say s, ms or us -- measured, all three. A label that tracked the ticks would
-        be a second, subtler lie: it would say 1/ms over numbers that are per second.
-
-        WHY THE NUMBERS ARE NOT RESCALED TO MATCH THE TICKS INSTEAD, which is the obvious
-        alternative and was prototyped and measured before being rejected. (a) It cannot
-        work on a log axis: the drawn abscissa is log10(seconds), the drawn area is
-        23.3011485 in every time unit, and dividing the heights by the display factor moves
-        it to 0.0233 (ms) / 2.33e-05 (us) -- further from 1, not closer -- while the app's
-        own shipped log-x dwell template is exactly that case. (b) It makes one time unit
-        unusable: the us y ticks render 0.00000 / 0.00005 / 0.00010 / 0.00015, and
-        ``ReadableLogAxis`` has ``enableAutoSIPrefix(False)`` precisely so pyqtgraph cannot
-        "help" with a ``(x1e-06)`` multiplier (report High-7). (c) It would make a DISPLAY
-        control change a drawn number, contradicting ``AnalysisIdentity``'s own rule, and
-        would force the y axis-range pin, ``_axis_unit_factors``, ``_apply_stored_ranges``
-        and ``PlotConfig.rebased`` to carry the RECIPROCAL of the x factor -- six new places
-        that must agree, to close a defect whose whole shape is one place that silently
-        disagreed. Measured baseline this design preserves untouched: pin y at 0-200, switch
-        ms -> us, and the box, ``_manual_y`` and the view all stay at 200.
-
-        ONE RESOLVER FOR THE UNIT. :func:`_column_quantity` is the module's schema-first
-        answer to "what is this column in" (``events.SCHEMA``, then the ``*_pA_s`` /
-        ``*_pA`` / ``*_s`` suffix rules for the merged, hand-measured and derived tables
-        this window also plots). Asking it rather than a second table here is what stops the
-        two drifting -- the argument its own docstring makes. Surveyed over all 15
-        histogrammable columns of the owner's table: nothing produced an empty or a doubled
-        bracket.
-
-        ``1/(pA·s)`` IS PARENTHESISED AND ``1/s`` IS NOT: ``ecd_pA_s`` is the schema's one
-        compound unit, and ``1/pA·s`` reads as ``(1/pA)·s`` to precisely the reader this
-        label exists for. A dimensionless column (``frac_depth``, ``snr``, ``n_levels``)
-        gets no suffix at all -- ``1/`` there would be arithmetic nonsense dressed as rigour.
-
-        ``log_y`` joins the SAME parenthesis instead of trailing a second one, so this reads
-        ``density (1/s, log)`` exactly as the x axis reads ``dwell (ms, log)``. The caller
-        used to concatenate ``" (log)"`` and would otherwise produce ``density (1/s) (log)``.
-
-        BOTH PARAMETERS ARE REQUIRED AND POSITIONAL, deliberately. A default is what would
-        let a future caller quietly put the unit-free label back on the picture -- which is
-        this defect, re-introduced with no diagnostic. Missing one is a TypeError at
-        import-test time instead.
-        """
-        base = self._y_label()
-        parts: list[str] = []
+        """Tick-only Jacobian: raw bars, fits and KDE samples share one density unit."""
+        from ..core.quantity_display import AxisDisplayBasis, density_quantity, quantity_for
+        from .quantity_axis import configure_quantity_axis
         if self._norm_combo.currentText() == _NORM_DENSITY:
-            unit = _column_quantity(col)[1]
-            if unit:
-                parts.append(f"1/({unit})" if any(c in unit for c in "·*/ ")
-                             else f"1/{unit}")
+            quantity = _plot_density_quantity(col, self._time_unit.currentText())
+        else:
+            quantity = quantity_for("histogram." + self._norm_combo.currentText(),
+                declared_unit="-", quantity="count" if self._norm_combo.currentText() == _NORM_COUNT else "dimensionless")
+        configure_quantity_axis(self._plot.getAxis("left"),
+                                AxisDisplayBasis(quantity, "log10" if log_y else "linear"))
+        parts = [quantity.display_unit] if self._norm_combo.currentText() == _NORM_DENSITY and quantity.display_unit not in ("", "-") else []
         if log_y:
             parts.append("log")
-        return f"{base} ({', '.join(parts)})" if parts else base
+        return self._y_label() + (f" ({', '.join(parts)})" if parts else "")
 
     def _norm_refusal_notes(self) -> list[str]:
         """The refused-y-quantity sentence for the page being drawn, or ``[]``.
@@ -10976,11 +11715,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 f"  x is log10 here, so the AREA UNDER THE DRAWN CURVE is not the integral "
                 f"of the density at all. ∫ y dx = 1 holds over {col} in "
                 f"{unit or 'its own unit'}, not over the log axis on screen.")
-        elif col in _TIME_COLUMNS and factor != 1.0:
-            out.append(
-                f"  the x ticks read {name}; the heights are per s. Integrating the curve "
-                f"over the ticks as drawn gives {factor:g}, not 1. Set Time unit = s to "
-                f"read area = 1 straight off the picture.")
+        if col in _TIME_COLUMNS and factor != 1.0:
+            out.append(f"  x ticks read {name}; density ticks apply the inverse Jacobian "
+                       f"1/{factor:g} and read per {name}. Raw curves and CSV values stay per s. "
+                       "The integral over linear displayed coordinates is 1; log-axis visual area is not probability.")
         return out
 
     def _hist_sample(self, df: pd.DataFrame, col: str, log_x: bool,
@@ -11116,7 +11854,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         for i, (label, colour, v, src, norm_n) in enumerate(groups):
             counts, _ = np.histogram(v, bins=edges)
             y = self._normalized(counts, edges, norm_n)
-            pen_colour = colour if multi else self._style.data_color
+            pen_colour = self._series_colour(index=i, identity=colour if multi else None)
             fill = QtGui.QColor(pen_colour)
             fill.setAlpha(_HIST_FILL_ALPHA if not multi else 70)
             # Log-count axis: a fill-to-zero baseline is log10(0) = -inf, so drop the fill and
@@ -11130,6 +11868,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._hist_items.append(item)
             self._cache_figure_source(src)
             item._presentation_role = "category" if multi else "data"
+            self._tag_series(item, "data", label if split else (src.key if src else "data"),
+                             label, identity_kind="category" if split else "source",
+                             colour=colour if multi or split else None)
             if i == 0:
                 self._hist_item = item
             # A cluster group's `label` is "cluster 1", not a source name; only a
@@ -11399,7 +12140,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                  * self._fit_scale(edges, width, int(norm_n)))
             if log_y:
                 y = np.where(y > 0, y, np.nan)   # log10(0) has no place on the axis
-            pen_colour = colour if multi else self._style.data_color
+            pen_colour = self._series_colour(index=i, identity=colour if multi else None)
             pen = pg.mkPen(pen_colour, width=self._style.line_width + 1, style=Qt.DotLine)
             item = pg.PlotDataItem(x=x, y=y, pen=pen, connect="finite")
             item._presentation_role = "category" if multi else "data"
@@ -11408,6 +12149,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # and `_plot_data` names the row by the series index it carries.
             item._plot_data_part = "kde"
             item._kde_series = i
+            self._tag_series(item, "kde", label if split else (src.key if src else "data"),
+                             f"{label} KDE", identity_kind="category" if split else "source",
+                             colour=colour if multi or split else None)
             self._plot.addItem(item)
             proxy = proxy or item
             if curve.log:
@@ -11873,6 +12617,9 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # see part of -- and the fix is the same: tell the likelihood, so it renormalises to
         # the observable window instead of pretending the missing mass was never there.
         # Subsetting the array and saying nothing would bias every estimate, silently.
+        range_errors = self._fit_range_input_notes()
+        if range_errors:
+            raise ValueError(" ".join(range_errors))
         fit_lo, fit_hi = self._fit_range(col)
         # The exact array each branch handed the fitter, plus the censoring it was told
         # about: the goodness-of-fit test and any rival family MUST see the same sample
@@ -12114,8 +12861,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # pass; the synchronous call could not have this defect because it built a
             # fresh FitResult every draw.
             fit = copy.deepcopy(payload)
+            ci_jobs = list(getattr(payload, "_gui_deferred_ci_jobs", ()))
+            if hasattr(fit, "_gui_deferred_ci_jobs"):
+                del fit._gui_deferred_ci_jobs
+            ci_key = ("ci-expgamma", *fit_key[1:], 200)
             _refit = lambda kk, _s=sample, _lo=lo, _hi=hi, _kw=dict(dwell_kw): (   # noqa: E731
-                fit_dwell_exp_gamma(_s, t_min=_lo, t_max=_hi, **_kw))
+                fit_dwell_exp_gamma(_s, t_min=_lo, t_max=_hi, n_boot=200, **_kw))
             names = ("k", "k")
             sample_for_gof, lo_for_gof, hi_for_gof = sample, lo, hi
         elif kind in (_FIT_GAMMA, _FIT_INVGAUSS):
@@ -12305,6 +13056,15 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     f"values on the x axis — and the drawn curve covers only the "
                     f"positive half of that axis.")
             _floor = None if inp is None else inp.depth_floor
+            # Condition the Gaussian magnitude likelihood on the selected range.
+            # An asymmetric crop across both signs has no single magnitude-selection
+            # law; require a magnitude column instead of inventing one.
+            _glo, _ghi = _crop_lo, _crop_hi
+            if _neg and not _all_neg and (_crop_lo is not None or _crop_hi is not None):
+                raise ValueError("A ranged Gaussian fit of mixed-sign values needs an explicit magnitude column; the signed crop is not a single truncation of |x|.")
+            if _all_neg:
+                _glo = None if _crop_hi is None else -float(_crop_hi)
+                _ghi = None if _crop_lo is None else -float(_crop_lo)
             # WHAT WAS FITTED TRAVELS WITH THE FIT. Without it the FitResult comes back
             # labelled "Gaussian mixture on dI/I0" whatever column it was handed, so
             # fitting depth_pA printed picoamp means under a dimensionless caption
@@ -12332,7 +13092,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
             _refit = lambda kk, _s=np.abs(source), _f=_floor, _q=_quantity, _u=_unit, \
                     _d=_display: (
                 populations.fit_gaussian_mixture(_s, k=kk, depth_floor=_f,
-                                                 quantity=_q, unit=_u, display=_d))
+                                                 quantity=_q, unit=_u, display=_d,
+                                                 lower=_glo, upper=_ghi))
             # The 400-replicate EM bootstrap is not on the click path either. See
             # `_point_fit_now`; here it also carries the identifiability warnings,
             # which are statements about the intervals it produces.
@@ -12348,7 +13109,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             fit_key_of = lambda kk, _d=self._sample_digest(np.abs(source)), \
                     _f=_floor, _q=_quantity, _u=_unit, _dsp=_display: (
                 ("fullfit", _FIT_GMM, _d, None if _f is None else float(_f),
-                 int(kk), _q, _u, _dsp))
+                 int(kk), _q, _u, _dsp, _glo, _ghi))
             fit = _point_fit_now(lambda _kk=k: _refit(_kk), fit_key_of(k))
             # The TITLE is the only thing `Save image` keeps (see the module header),
             # so the magnitude bars go in it, not only in Details.
@@ -12359,16 +13120,14 @@ class PlotsWindow(QtWidgets.QMainWindow):
             if _all_neg:
                 grid_of = np.abs
             gof_frame = f"|{col}|" if _neg else ""
-            sample_for_gof, lo_for_gof, hi_for_gof = np.abs(source), None, None
-            # The mixture is fitted to the cropped values with no censoring model, so
-            # the window is recorded for the note and the note says "cropped".
-            trunc_lo, trunc_hi, trunc_modelled = _crop_lo, _crop_hi, False
+            sample_for_gof, lo_for_gof, hi_for_gof = np.abs(source), _glo, _ghi
+            trunc_lo, trunc_hi, trunc_modelled = _crop_lo, _crop_hi, True
 
         # THE TRUNCATION THE LIKELIHOOD ACTUALLY GOT. For every censored family that is
         # exactly the pair handed to the fitter -- the same pair the goodness-of-fit test
         # and the rival ladder are given, which is what keeps all three describing one
         # fit. Recorded here, once, rather than re-derived by the note that prints it.
-        if trunc_modelled:
+        if trunc_modelled and kind != _FIT_GMM:
             trunc_lo, trunc_hi = lo_for_gof, hi_for_gof
 
         # AUTO (BIC): the chosen k replaces the fit, and is written back into the spin
@@ -12515,6 +13274,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._plot.addItem(item)
         self._fit_items.append(item)
         item._presentation_role = "category" if who else "fit"
+        self._tag_series(item, "fit", src.key if src is not None else "fit",
+                         f"{src.label if src is not None else 'Data'} fit", colour=colour if who else None)
         item._presentation_width_extra = 1
 
         # -- the two optional pictures of the fit's own quality ------------------------
@@ -12882,8 +13643,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
             # No `quiet_runtime_warnings` here: the synchronous call this replaces had
             # none, and this move is meant to change WHEN the fit runs, not what it says.
             try:
-                return stats.fit_dwell_exp_gamma(sample, t_min=lo, t_max=hi,
-                                                 quantity=quantity, unit=unit)
+                with stats.deferred_ci() as jobs:
+                    fit = stats.fit_dwell_exp_gamma(sample, t_min=lo, t_max=hi,
+                        quantity=quantity, unit=unit, n_boot=200)
+                # Transient callables stay outside serialized metadata. The point fit
+                # is published first; its expensive bootstrap is another cancellable job.
+                fit._gui_deferred_ci_jobs = tuple(jobs)
+                return fit
             except OperationCancelled:
                 raise
             except Exception as exc:            # noqa: BLE001 - reported, not swallowed
@@ -13171,6 +13937,18 @@ class PlotsWindow(QtWidgets.QMainWindow):
         panel survived. Saving it puts the two on the same footing and makes it
         available to the figure export, which reads exactly these keys.
         """
+        if getattr(self, "_phase2_figure_managed", False):
+            from .figure_adapter_plots import PlotsFigureAdapter
+            adapter = PlotsFigureAdapter(self)
+            allowed, reason = adapter.can_suspend()
+            if not allowed:
+                self.statusBar().showMessage(reason, 10000)
+                event.ignore()
+                return
+            self.workspaceCheckpointRequested.emit()
+            adapter.suspend()
+            super().closeEvent(event)
+            return
         # Synchronous by Qt contract.  MainWindow snapshots the live recipe/results
         # into its project-owned v11 workspace before ``reset_state`` deliberately
         # blanks this widget, preserving the long-standing blank-on-reopen behavior
@@ -13219,7 +13997,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         except Exception:       # pragma: no cover - a caveat must never break a plot
             return False
 
-    def _persist_results(self) -> None:
+    def _persist_results(self) -> tuple:
         """Push what this window computed back into the session, before it is cleared.
 
         One :class:`~nanoscope.core.analysis.AnalysisResult` per fitted SOURCE, keyed
@@ -13232,6 +14010,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         result could not be stored is worse than one that closes without storing it,
         and the user is told nothing either way at this point in the interaction.
         """
+        published = []
         try:
             for key, fit in dict(self._fits).items():
                 src = self._sources.get(key)
@@ -13263,6 +14042,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                              "aic": float(fit.aic), "bic": float(fit.bic),
                              "n": float(fit.n)},
                     warnings=tuple(str(w) for w in fit.meta.get("warnings", ()))))
+                published.append((str(src.doc_id), int(src.channel), module_id))
 
             # The clustering and the PCA belong to the PRIMARY source (that is the one
             # they were computed on; see `run_clustering`), and they travel with the
@@ -13279,8 +14059,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
                     self._session.results.put(self._as_result(
                         mid, primary, payload=res,
                         params={"details": details}, scalars={}, warnings=()))
+                    published.append((str(primary.doc_id), int(primary.channel), mid))
         except Exception:      # pragma: no cover - a save must never block a close
             pass
+        return tuple(published)
 
     def _as_result(self, module_id: str, src: PlotSource, *, payload,
                    params: dict, scalars: dict, warnings: tuple[str, ...]):
@@ -13329,6 +14111,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
         """
         was, self._updating = self._updating, True
         try:
+            self._figure_pending_sources = None
             self._sources = {}
             self._fits = {}
             self._fit_columns = {}
@@ -13352,6 +14135,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._plot_armed = False
             self._stale = False
             self._stale_reason = ""
+            self._stale_reasons = []
             self._checked_snapshot = ()
             self._legend_offered = {}
         finally:
@@ -13579,38 +14363,32 @@ class PlotsWindow(QtWidgets.QMainWindow):
         return lo, hi
 
     def _fit_range_input_notes(self) -> list[str]:
-        """What the Fit range boxes CONTAIN but did not do. No silent no-ops.
-
-        :meth:`_fit_range` drops a bound it cannot use -- unparseable text, ``nan``,
-        ``inf`` -- and drops BOTH when they are inverted, and it did all of that in
-        silence: the boxes went on showing the numbers while the fit behaved as if they
-        were empty. Every one of those is a typed instruction the window declined to
-        follow, so every one of them is said here.
-        """
-        out: list[str] = []
+        """Validate requested bounds before fitting; invalid limits never broaden a fit."""
+        out = []
         for edit, side in ((self._fit_lo, "min"), (self._fit_hi, "max")):
             txt = edit.text().strip()
             if not txt:
                 continue
             try:
-                ok = np.isfinite(float(txt))
+                valid = np.isfinite(float(txt))
             except ValueError:
-                ok = False
-            if not ok:
-                out.append(
-                    f"Fit range {side} “{txt}” is not a usable bound and was IGNORED — "
-                    f"the fit below is not restricted on that side. Type a finite "
-                    f"number, or clear the box.")
-        lo_txt, hi_txt = self._fit_lo.text().strip(), self._fit_hi.text().strip()
-        if lo_txt and hi_txt and not out:
-            try:
-                if float(lo_txt) >= float(hi_txt):
-                    out.append(
-                        f"Fit range [{lo_txt}, {hi_txt}] is empty (min ≥ max), so BOTH "
-                        f"bounds were IGNORED and the fit below covers the whole column.")
-            except ValueError:      # pragma: no cover - handled above
-                pass
+                valid = False
+            if not valid:
+                out.append(f"Fit range {side} must be a finite number; correct or clear “{txt}”.")
+        lo, hi = self._fit_lo.text().strip(), self._fit_hi.text().strip()
+        if lo and hi and not out and float(lo) >= float(hi):
+            out.append("Fit range minimum must be smaller than maximum.")
         return out
+
+    def _validate_fit_range_fields(self, *_):
+        errors = self._fit_range_input_notes()
+        for edit in (self._fit_lo, self._fit_hi):
+            edit.setStyleSheet(f"border: 1px solid {PALETTE['fit']};" if errors else "")
+            edit.setAccessibleDescription(" ".join(errors))
+        if errors and hasattr(self, "_fit_apply_btn"):
+            self._fit_apply_btn.setEnabled(False)
+        elif hasattr(self, "_scatter_fit_apply_btn"):
+            self._sync_fit_apply_buttons()
 
     def _fit_range_blame(self, col: str, v) -> str:
         """Why a refusal may be the FIT RANGE's fault, said beside the refusal. ``""``
@@ -13626,6 +14404,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         way to guess. The success path has said this all along (the FIT RANGE line);
         only the refusal path was silent.
         """
+        if self._fit_range_input_notes():
+            return "No new fit was run because the requested fit range is invalid."
         lo, hi = self._fit_range(col)
         if lo is None and hi is None:
             return ""
@@ -13819,6 +14599,65 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # censoring alone and a redraw that changes neither never refits it.
         return note
 
+    def _nonlinear_controller(self):
+        from .nonlinear_fit_dialog import NonlinearFitController
+        if not hasattr(self, "_nonlinear_fitter"):
+            self._nonlinear_fitter = NonlinearFitController(
+                self, lambda: getattr(self, "_nonlinear_drawn_datasets", []), self._plot,
+                self._nonlinear_applied, "scatter")
+        return self._nonlinear_fitter
+
+    def _nonlinear_applied(self):
+        from .nonlinear_fit_dialog import result_summary
+        state = self.nonlinear_fit_state()
+        base = self.details_text().split("\n\nNonlinear fit:", 1)[0]
+        self._set_details(base + ("\n\n" + result_summary(state) if state else ""))
+        self._nonlinear_controller().sync_controls()
+        self._install_nonlinear_diagnostics()
+        self._apply_series_styles()
+        self.workspaceChanged.emit()
+
+    def _install_nonlinear_diagnostics(self):
+        state = self.nonlinear_fit_state()
+        if not state:
+            residual = getattr(self, "_presentation_residual", None)
+            if residual and residual[0].get("mode") == "raw":
+                self._clear_residual_strip()
+                self._presentation_residual = None
+                self._presentation_residual_note = ""
+                self._presentation_residual_ready = False
+            return
+        source, result = state["source"], state["result"]
+        factor, unit = self._display_unit(source["y_name"], source.get("y_unit", ""))
+        residual = {"centers": list(result["x"]),
+                    "residual": (np.asarray(result["residuals"]) * factor).tolist(),
+                    "mode": "raw", "unit": unit,
+                    "note": f"Raw response residuals for {source['label']} ({unit or 'unitless'}); residual = observed minus fitted response.",
+                    "reduced_chi2": None}
+        self._clear_residual_strip()
+        self._presentation_residual = (residual, self._scatter_logx.isChecked())
+        self._presentation_residual_note = residual["note"]
+        self._presentation_residual_ready = True
+        if self._style.show_residuals:
+            self._render_cached_residual(*self._presentation_residual)
+
+    def open_nonlinear_fit(self):
+        self._nonlinear_controller().open()
+
+    def nonlinear_fit_state(self):
+        return self._nonlinear_fitter.snapshot() if hasattr(self, "_nonlinear_fitter") else None
+
+    def restore_nonlinear_fit_state(self, state):
+        self._nonlinear_controller().restore(state)
+        self._nonlinear_controller().sync_controls()
+        if state:
+            from .nonlinear_fit_dialog import result_summary
+            summary = result_summary(state)
+            if summary not in self.details_text():
+                self._set_details(self.details_text() + "\n\n" + summary)
+            self._install_nonlinear_diagnostics()
+            self._apply_series_styles()
+
     # -- scatter ---------------------------------------------------------------------------------
     def _draw_scatter(self, drawn: list[tuple[PlotSource, pd.DataFrame]]) -> None:
         xcol, ycol = self._scatter_x.currentText(), self._scatter_y.currentText()
@@ -13838,6 +14677,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         # 2000-row table, beside a clustering pane saying "1960 kept, 40 dropped
         # (non-finite features)" about the identical rows.
         drops: list[str] = []
+        from .nonlinear_fit_dialog import CurveDataset
+        nonlinear_datasets = []
         for src, df in drawn:
             if xcol not in df.columns or ycol not in df.columns:
                 continue
@@ -13864,6 +14705,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 continue
             series.append((src, x[mask], y[mask], df.index[mask],
                            self._point_identities(src, df, mask)))
+            sigma_columns = {str(name): pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=float)[mask]
+                             for name in df.select_dtypes(include="number").columns
+                             if name not in (xcol, ycol)}
+            nonlinear_datasets.append(CurveDataset(
+                src.key, src.label, x[mask].copy(), y[mask].copy(), xcol, ycol,
+                _column_quantity(xcol)[1], _column_quantity(ycol)[1], sigma_columns,
+                dict(src.provenance)))
         if not series:
             self._message("No points to plot for this pair (check the log-axis toggles).")
             return
@@ -13891,6 +14739,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 "means SOURCE here. Untick all but one source to colour by cluster.")
 
         self._clear_plot()
+        self._nonlinear_drawn_datasets = nonlinear_datasets
         for i, (src, x, y, index, identities) in enumerate(series):
             cluster_labels = None
             if by_cluster:
@@ -13923,6 +14772,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
             self._scatter_items.append(item)
             self._cache_figure_source(src)
             item._presentation_role = "category" if (multi or by_cluster) else "data"
+            if cluster_labels is not None:
+                item._presentation_cluster_labels = cluster_labels.copy()
+                item._presentation_cluster_source = src.key
+            else:
+                self._tag_series(item, "data", src.key, src.label, colour=src.colour if multi else None)
             self._make_event_points_clickable(item, src.key, identities)
             if i == 0:
                 self._scatter_item = item
@@ -13962,6 +14816,13 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._apply_fonts()
         self._finalize_view(log_x, log_y)
         self._set_details("\n".join(details))
+        if hasattr(self, "_nonlinear_fitter"):
+            self._nonlinear_fitter.redraw()
+            state = self.nonlinear_fit_state()
+            if state:
+                from .nonlinear_fit_dialog import result_summary
+                self._set_details(self.details_text() + "\n\n" + result_summary(state))
+                self._install_nonlinear_diagnostics()
 
     def _overlay_scatter_fit(
         self, x: np.ndarray, y: np.ndarray, xcol: str, ycol: str, details: list[str],
@@ -13987,7 +14848,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             if self._applied_scatter_fit != _SFIT_NONE:
                 self._scatter_fit_pending_after_snapshot = True
                 details.append(
-                    "Scatter-fit configuration restored; press Plot to recompute the "
+                    "Scatter-fit configuration restored; update the plot to recompute the "
                     "regression. No fit was run while opening the project.")
             return None
         # The APPLIED selection, never the combo's (owner note #12) — see _apply_fit.
@@ -14032,6 +14893,8 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._plot.addItem(item)
         self._scatter_fit_items.append(item)
         item._presentation_role = "category" if src is not None else "fit"
+        self._tag_series(item, "fit", key or "fit", f"{src.label if src else 'Data'} fit",
+                         colour=src.colour if src is not None else None)
         item._presentation_width_extra = 1
         if self._scatter_fit_item is None:
             self._scatter_fit_item = item
@@ -14240,7 +15103,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 details.append(f"{src.label}: KDE unavailable — the points are "
                                "degenerate (zero variance along an axis).")
                 continue
-            colour = QtGui.QColor(src.colour if multi else self._style.data_color)
+            colour = QtGui.QColor(self._series_colour(identity=src.colour if multi else None))
             self._cache_figure_source(src)
             pen = pg.mkPen(colour, width=self._style.line_width)
             zmax = float(z.max())
@@ -14248,6 +15111,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
             for lv in np.linspace(0.05 * zmax, 0.95 * zmax, n_levels):
                 curve = pg.IsocurveItem(data=z, level=float(lv), pen=pen)
                 curve._presentation_role = "category" if multi else "data"
+                self._tag_series(curve, "data", src.key, src.label, colour=src.colour if multi else None)
                 curve.setTransform(tr)
                 self._plot.addItem(curve, ignoreBounds=False)
                 proxy = proxy or curve
@@ -14257,6 +15121,7 @@ class PlotsWindow(QtWidgets.QMainWindow):
                 # The legend needs an item with a pen; the first contour serves.
                 sample = pg.PlotDataItem(pen=pen)
                 sample._presentation_role = "category"
+                self._tag_series(sample, "data", src.key, src.label, colour=src.colour)
                 self._legend_add(sample, self._legend_name(src),
                                  kind="series", key=src.key)
 
@@ -14519,6 +15384,12 @@ class PlotsWindow(QtWidgets.QMainWindow):
         self._scatter_items.append(self._scatter_item)
         self._scatter_item._presentation_role = "category" if self._cluster_result is not None else "data"
         primary = self.primary_source()
+        if self._cluster_result is not None:
+            self._scatter_item._presentation_cluster_labels = labels.copy()
+            self._scatter_item._presentation_cluster_source = primary.key if primary else "pca"
+        else:
+            self._tag_series(self._scatter_item, "data", primary.key if primary else "pca",
+                             primary.label if primary else "PCA")
         if primary is not None:
             self._cache_figure_source(primary)
             identities: list[object] = list(res.kept_index)
@@ -14583,6 +15454,11 @@ class PlotsWindow(QtWidgets.QMainWindow):
             swatch = legend_swatch(cid, size=self._style.point_size)
             swatch._presentation_role = "category"
             name = "dropped (non-finite features)" if cid < 0 else f"cluster {cid}"
+            source = next((getattr(item, "_presentation_cluster_source", "")
+                           for item in self._scatter_items
+                           if hasattr(item, "_presentation_cluster_labels")), "")
+            self._tag_series(swatch, "data", f"{source}:cluster:{int(cid)}", name,
+                             identity_kind="category", colour=QtGui.QColor(category_colour(cid)).name())
             self._legend_add(swatch, self._legend_entry(name, n),
                              kind="cluster", key=str(name))
 
@@ -15001,6 +15877,10 @@ class PlotsWindow(QtWidgets.QMainWindow):
             by_rgb[QtGui.QColor(category_colour(int(cid))).rgb()] = int(cid)
         out: list[float] = []
         for item in self._scatter_items:
+            captured = getattr(item, "_presentation_cluster_labels", None)
+            if captured is not None:
+                out.extend(float(cid) for cid in captured)
+                continue
             brushes = item.data["brush"]
             for brush in brushes:
                 cid = by_rgb.get(QtGui.QColor(brush.color()).rgb())
@@ -15100,6 +15980,24 @@ class PlotsWindow(QtWidgets.QMainWindow):
         if kind == PCA and len(df) and self._pca_result is not None:
             df = pd.concat([df, self._pca_loading_rows(x_name, y_name)],
                            ignore_index=True)
+        if kind != PCA and len(df):
+            from .quantity_axis import export_display_columns
+            bases = _plot_quantity_bases(applied)
+            xq, yq = bases["bottom"].quantity, bases["left"].quantity
+            columns = {x_name: xq, y_name: yq}
+            if kind == HISTOGRAM:
+                columns.update(bin_left=xq, bin_right=xq)
+            elif kind == KDE and "density" in df:
+                from ..core.quantity_display import density_quantity
+                if all(q.known and q.quantity not in ("unknown", "sample", "count", "categorical")
+                       for q in (xq, yq)):
+                    columns["density"] = density_quantity([xq, yq],
+                        measures=["log10" if log_x else "linear", "log10" if log_y else "linear"])
+            df = export_display_columns(df, columns)
+        if hasattr(self, "_nonlinear_fitter"):
+            extra = self._nonlinear_fitter.export_rows()
+            if extra:
+                df = pd.concat([df, pd.DataFrame(extra)], ignore_index=True, sort=False)
         return df
 
     def _with_cluster_column(self, df: pd.DataFrame) -> pd.DataFrame:

@@ -92,6 +92,8 @@ from scipy.ndimage import binary_dilation, median_filter
 from scipy.signal import filtfilt, iirnotch, medfilt, savgol_filter
 
 from .acid_incubation_numerics import median_filter_1d
+from .sample_count import floor_sample_count
+from .baseline_mask import baseline_mask_noise_scale, fill_masked_background
 from .filters import MODEL_INPUT_CLIP_SIGMA, robust_normalize
 
 __all__ = [
@@ -136,6 +138,11 @@ NOTCH_Q: float = 30.0
 
 #: Baseline estimators :func:`apply_ml_preprocess` accepts, in preset order.
 BASELINE_METHODS: tuple[str, ...] = ("robust_median", "masked_median", "savgol", "none")
+
+# Model inputs retain the notebook's truncation rule, including historical
+# fractional-rate behavior. Automatic analysis baselines use stable boundaries.
+ML_SAMPLE_COUNT_POLICY = "legacy-truncate-v1"
+ML_MASK_NOISE_POLICY = "global-mad-v1"
 
 #: Where ``max|x|`` for the global-raw normalization is measured.
 #:
@@ -236,7 +243,7 @@ def notch_sequential(
 # Baseline estimators (dataLoader.ipynb Block 2)
 # ---------------------------------------------------------------------------
 def _decimated_median(
-    x: np.ndarray, fs: float, win_s: float, decim: int
+    x: np.ndarray, fs: float, win_s: float, decim: int, *, _legacy_sample_counts: bool = False
 ) -> np.ndarray:
     """The decimated rolling median both estimators are built from.
 
@@ -256,7 +263,11 @@ def _decimated_median(
     At 50 kHz: 0.5 s / decim 50 -> 500 -> **501** taps; 0.1 s / decim 50 -> 100 ->
     **101**; 0.03 s / decim 10 -> 150 -> **151**; 0.01 s / decim 10 -> 50 -> **51**.
 
-    TWO deliberate deviations from the notebook text, both for reproducibility:
+    Integer sample boundaries tolerate up to 16 ULPs of floating-point round-off
+    (capped at 1e-9 sample); a genuinely fractional window still truncates. This
+    prevents a CSV-inferred rate infinitesimally below 2 kHz from losing two taps.
+
+    Two further deliberate deviations from the notebook text ensure reproducibility:
 
     1. The decimated view is materialised as a **contiguous** copy before filtering
        (a strided view is not something to hand a C loop that assumes otherwise),
@@ -302,7 +313,8 @@ def _decimated_median(
         raise ValueError(f"decim must be >= 1, got {decim}")
     n = len(x)
     xs = np.ascontiguousarray(x[::decim], dtype=np.float64)
-    w = int(float(win_s) * float(fs) / decim)
+    count = float(win_s) * float(fs) / decim
+    w = int(count) if _legacy_sample_counts else floor_sample_count(count)
     if w % 2 == 0:
         w += 1
     if len(xs) >= w and np.isfinite(xs).all():
@@ -320,7 +332,8 @@ def _decimated_median(
 
 
 def baseline_robust_median(
-    sig: np.ndarray, fs: float, *, window_s: float = 0.5, decim: int = 50
+    sig: np.ndarray, fs: float, *, window_s: float = 0.5, decim: int = 50,
+    _legacy_sample_counts: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """``baseline_remove_robust_median`` -- the **notebook 1** baseline.
 
@@ -335,7 +348,8 @@ def baseline_robust_median(
     Returns ``(detrended, baseline)``, both float32.
     """
     x = np.asarray(sig)
-    baseline = _decimated_median(x, fs, window_s, decim)
+    baseline = _decimated_median(x, fs, window_s, decim,
+                                 _legacy_sample_counts=_legacy_sample_counts)
     return (x - baseline).astype(np.float32), baseline
 
 
@@ -348,6 +362,8 @@ def baseline_masked_median(
     decim: int = 50,
     mask_sigma: float = 3.5,
     dilate_ms: float = 1.0,
+    _legacy_sample_counts: bool = False,
+    _legacy_mask_noise: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """``baseline_remove_masked_median`` -- the **notebook 2 / 3** baseline.
 
@@ -361,11 +377,16 @@ def baseline_masked_median(
     4. SHORT-window median (``base_s``) of the gap-filled signal -> a baseline that
        tracks drift without being pulled by events.
 
-    The noise estimate and the mask threshold are GLOBAL (one MAD over the whole
-    input), which is why ``dataLoader.ipynb`` truncates a recording *before*
-    filtering rather than slicing the finished trace -- and why this app measures
-    the baseline over the whole channel when the normalization scope is
-    ``"recording"``.
+    The fixed model-input path explicitly keeps GLOBAL noise (one MAD over the
+    whole input), matching the notebooks. Automatic analysis baselines retain
+    that exact mask for stationary noise, but raise the threshold magnitude in
+    strongly nonstationary noise when both original-signal and rough-residual
+    local scales support it. This prevents noisy
+    negative excursions being filled from positive samples and biasing the rail.
+    Both paths still estimate over the requested full input, never a plot slice.
+    Automatic gap fills use adjacent unmasked flank medians with linear time
+    interpolation and step guards; fixed model inputs retain their immediate
+    endpoint interpolation.
 
     Dilation is ``iterations=max(1, int(dilate_ms * 1e-3 * fs))`` -- 50 iterations
     at 50 kHz for the 1.0 ms default.
@@ -373,17 +394,21 @@ def baseline_masked_median(
     Returns ``(detrended, baseline)``, both float32.
     """
     x = np.asarray(sig)
-    rough = x - _decimated_median(x, fs, rough_s, decim)
+    rough = x - _decimated_median(x, fs, rough_s, decim,
+                                 _legacy_sample_counts=_legacy_sample_counts)
     noise = 1.4826 * np.median(np.abs(rough - np.median(rough)))
+    scale = noise if _legacy_mask_noise else baseline_mask_noise_scale(rough, fs, noise, signal=x)
+    count = float(dilate_ms) * 1e-3 * float(fs)
+    iterations = int(count) if _legacy_sample_counts else floor_sample_count(count)
     evm = binary_dilation(
-        rough < np.median(rough) - float(mask_sigma) * noise,
-        iterations=max(1, int(float(dilate_ms) * 1e-3 * float(fs))),
+        rough < np.median(rough) - float(mask_sigma) * scale,
+        iterations=max(1, iterations),
     )
-    idx = np.arange(len(x))
-    filled = x.copy()
-    if evm.any() and (~evm).sum() > 2:
-        filled[evm] = np.interp(idx[evm], idx[~evm], x[~evm])
-    baseline = _decimated_median(filled, fs, base_s, decim)
+    del scale
+    filled = fill_masked_background(x, evm, fs, base_s,
+                                    robust_flanks=not _legacy_mask_noise)
+    baseline = _decimated_median(filled, fs, base_s, decim,
+                                 _legacy_sample_counts=_legacy_sample_counts)
     return (x - baseline).astype(np.float32), baseline
 
 
@@ -394,6 +419,7 @@ def baseline_savgol(
     window_s: float = 0.5,
     poly: int = 3,
     mode: str = "interp",
+    _legacy_sample_counts: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Savitzky-Golay polynomial baseline -- the APO chains ONLY.
 
@@ -423,7 +449,8 @@ def baseline_savgol(
     """
     x = np.asarray(sig)
     poly = int(poly)
-    w = int(float(window_s) * float(fs))
+    count = float(window_s) * float(fs)
+    w = int(count) if _legacy_sample_counts else floor_sample_count(count)
     if w % 2 == 0:
         w += 1
     max_w = len(x) - 1 if len(x) % 2 == 0 else len(x)
@@ -633,6 +660,9 @@ class MLPreprocessConfig:
         """A JSON-safe dict (``notch_freqs`` becomes a list) for params/provenance."""
         d = asdict(self)
         d["notch_freqs"] = [float(f) for f in self.notch_freqs]
+        d["baseline_sample_count_policy"] = ML_SAMPLE_COUNT_POLICY
+        if self.baseline_method == "masked_median":
+            d["baseline_mask_noise_policy"] = ML_MASK_NOISE_POLICY
         return d
 
     @classmethod
@@ -643,6 +673,14 @@ class MLPreprocessConfig:
             return None
         if isinstance(data, cls):
             return data
+        policy = data.get("baseline_sample_count_policy", ML_SAMPLE_COUNT_POLICY)
+        if policy != ML_SAMPLE_COUNT_POLICY:
+            raise ValueError(f"unsupported ML baseline sample-count policy {policy!r}; "
+                             "the fixed notebook model-input contract cannot be replayed")
+        policy = data.get("baseline_mask_noise_policy", ML_MASK_NOISE_POLICY)
+        if policy != ML_MASK_NOISE_POLICY:
+            raise ValueError(f"unsupported ML baseline mask-noise policy {policy!r}; "
+                             "the fixed notebook model-input contract cannot be replayed")
         known = {f.name for f in fields(cls)}
         kwargs = {k: v for k, v in data.items() if k in known}
         if "notch_freqs" in kwargs:
@@ -1509,7 +1547,8 @@ def apply_ml_preprocess(
     method = config.baseline_method
     if method == "robust_median":
         out, _ = baseline_robust_median(
-            out, fs, window_s=config.baseline_window_s, decim=config.baseline_decim
+            out, fs, window_s=config.baseline_window_s, decim=config.baseline_decim,
+            _legacy_sample_counts=True,
         )
     elif method == "masked_median":
         out, _ = baseline_masked_median(
@@ -1520,10 +1559,13 @@ def apply_ml_preprocess(
             decim=config.baseline_decim,
             mask_sigma=config.masked_mask_sigma,
             dilate_ms=config.masked_dilate_ms,
+            _legacy_sample_counts=True,
+            _legacy_mask_noise=True,
         )
     elif method == "savgol":
         out, _ = baseline_savgol(
-            out, fs, window_s=config.baseline_window_s, poly=config.baseline_poly
+            out, fs, window_s=config.baseline_window_s, poly=config.baseline_poly,
+            _legacy_sample_counts=True,
         )
     # "none": leave the notched signal alone.
     require_finite(f"{method} baseline stage", np.asarray(out))

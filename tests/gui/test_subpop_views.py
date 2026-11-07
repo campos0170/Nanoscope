@@ -325,9 +325,9 @@ def test_umap_is_off_in_the_default_config():
 def test_with_no_umap_the_view_still_explains_that_it_exists_and_why_it_is_off(scatter):
     """Otherwise a reader concludes this pipeline has one embedding."""
     note = scatter._umap_note.text()
-    assert "UMAP is OFF" in note
-    assert "not bit-reproducible" in note
-    assert "SubpopConfig(with_umap=True)" in note, "the note names the opt-in"
+    assert "UMAP has not been generated" in note
+    assert "change across software and platform versions" in note
+    assert "Generate UMAP" in note, "the note names the explicit GUI opt-in"
 
 
 def test_when_umap_is_present_it_is_offered_but_is_not_the_default(report, qtbot):
@@ -345,7 +345,7 @@ def test_drawing_umap_says_in_the_view_that_the_coordinates_are_not_stable(repor
     rep = _with_umap(report)
     view.set_report(rep)
     view.set_embedding("UMAP")
-    assert "NOT STABLE" in view._umap_note.text()
+    assert "coordinates can change across software and platform versions" in view._umap_note.text()
     assert view._umap_note.isVisible() or view._umap_note.text()
     x, y, _l = view.drawn()
     np.testing.assert_array_equal(x, rep.embeddings["umap_x"].to_numpy(float))

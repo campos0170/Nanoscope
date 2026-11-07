@@ -428,7 +428,11 @@ def test_a_table_merged_while_the_re_measure_runs_drops_the_answer_and_says_so(
     not the merge's: any edit that collapses the measured rows must make the answer be
     dropped out loud.
     """
-    win, _ = _window(qtbot, tmp_path, _signal())
+    # Two adjacent 250-sample events 700 samples apart occupy 500/950 > 50%
+    # of their combined span, so this is a scientifically eligible merge. The
+    # generic 2000-sample train is mostly open pore and must be refused instead.
+    win, _ = _window(qtbot, tmp_path, _signal(period=700),
+                     config=BaselineConfig(method="constant"))
     panel = win._analysis_panel
     said = []
     panel.baselineJobStatus.connect(lambda t, m: said.append((t, m)))

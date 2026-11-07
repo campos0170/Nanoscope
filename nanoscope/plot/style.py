@@ -83,7 +83,7 @@ BASELINE_TRACK_INK = "#FFFFFF"
 #: Perceptually-uniform sequential map for 2-D density / counts.
 SEQUENTIAL_CMAP = "viridis"
 
-# Journal column widths in inches. Nature/Science single ~3.35", double ~6.9".
+# Historical unbound canvas widths. Selected styles supply explicit reference columns.
 SINGLE_COLUMN_IN = 3.35
 DOUBLE_COLUMN_IN = 6.9
 
@@ -93,19 +93,25 @@ def color(i: int) -> str:
     return OKABE_ITO[int(i) % len(OKABE_ITO)]
 
 
-def figure_size(width: str | float = "single", aspect: float = 0.72) -> tuple[float, float]:
+def figure_size(width: str | float = "single", aspect: float = 0.72, *, figure_style=None) -> tuple[float, float]:
     """Figure size in inches.
 
     Args:
         width: 'single' (3.35"), 'double' (6.9"), or an explicit width in inches.
         aspect: height / width.
+        figure_style: optional pinned FigureStyle; named widths use its column metadata.
 
     Returns:
         (width_in, height_in).
     """
     if isinstance(width, str):
         try:
-            w = {"single": SINGLE_COLUMN_IN, "double": DOUBLE_COLUMN_IN}[width]
+            if figure_style is None:
+                w = {"single": SINGLE_COLUMN_IN, "double": DOUBLE_COLUMN_IN}[width]
+            else:
+                from ..core.figure_style import FigureStyle
+                style = figure_style if isinstance(figure_style, FigureStyle) else FigureStyle.from_dict(figure_style)
+                w = float(style.columns[{"single": "single_mm", "double": "double_mm"}[width]]) / 25.4
         except KeyError:
             raise ValueError(f"width must be 'single', 'double' or a number in inches, got {width!r}") from None
     else:

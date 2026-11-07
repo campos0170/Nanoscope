@@ -131,6 +131,27 @@ def environment_manifest(root=ROOT, *, distribution=metadata.distribution):
             "reproduction_scope": "Captured installed versions for this platform/Python; compatibility notes must be resolved before claiming a clean solver-reproducible environment. No upgrades were performed."}
 
 
+def require_build_environment(root=ROOT, *, distribution=metadata.distribution):
+    """Refuse a release build with missing ML support or incompatible dependencies.
+
+    TensorFlow is optional for a source-only installation, but both release specs
+    ship the ML detector. A successful import of the UI must not conceal a missing
+    detector backend or an incompatible TensorFlow/Keras pair.
+    """
+    manifest = environment_manifest(root, distribution=distribution)
+    issues = list(manifest["compatibility_issues"])
+    packages = manifest["packages"]
+    if not {"tensorflow", "tensorflow-macos"}.intersection(packages):
+        issues.append("release builds require TensorFlow (tensorflow or tensorflow-macos)")
+    if "keras" not in packages:
+        issues.append("release builds require keras")
+    if issues:
+        raise ValueError("Refusing to build an incompatible runtime:\n  - "
+                         + "\n  - ".join(sorted(set(issues)))
+                         + "\nUse an isolated environment matching the validated release constraints.")
+    return manifest
+
+
 def bundle_version(now):
     """A UTC-minute ordinal within Apple's conservative 4/2/2 digit limits.
 
@@ -206,9 +227,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--capture-environment", type=Path)
+    parser.add_argument("--check-environment", action="store_true")
     args = parser.parse_args()
     if args.version:
         print(marketing_version())
+    elif args.check_environment:
+        try:
+            result = require_build_environment()
+        except ValueError as exc:
+            parser.exit(2, str(exc) + "\n")
+        print(json.dumps({"packages": len(result["packages"]), "compatibility_issues": []}))
     elif args.capture_environment:
         result = write_environment_capture(args.capture_environment)
         print(json.dumps({"packages": len(result["packages"]), "compatibility_issues": result["compatibility_issues"]}, indent=2))

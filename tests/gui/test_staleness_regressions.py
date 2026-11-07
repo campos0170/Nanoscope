@@ -667,7 +667,8 @@ def test_a_dwell_fit_uses_this_recordings_recovery_map_not_the_previous_ones(
     _detect(win, qtbot, min_dwell_s=_DEFAULT_MIN_DWELL_S)
     panel._on_fit_requested({"n_components_dwell": 1, "n_components_depth": 1,
                              "use_efficiency": True, "use_filter_limited": False})
-    qtbot.wait(10)
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(panel._stats)
 
     summary = panel._stats.results.toPlainText()
     assert "measured eta(t)" not in summary, (
@@ -687,7 +688,8 @@ def test_a_dwell_fit_still_uses_the_recovery_map_measured_on_its_own_recording(
 
     panel._on_fit_requested({"n_components_dwell": 1, "n_components_depth": 1,
                              "use_efficiency": True, "use_filter_limited": False})
-    qtbot.wait(10)
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(panel._stats)
     assert "measured eta(t)" in panel._stats.results.toPlainText()
     win._analysis_controller.abort()
 

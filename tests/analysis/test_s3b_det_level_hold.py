@@ -130,6 +130,13 @@ def probed(x, fs=FS):
     return proposal, result
 
 
+def fixed_hold_result(x, fs=FS):
+    """Keep the original 500 ms hold criterion independent of new ranking costs."""
+    polarity = P.probe_timescales(x, fs).polarity
+    return B.characterisation_baseline(x, fs, config=cfg(2., .5),
+                                       health=True, polarity=polarity)
+
+
 # ===========================================================================
 # 1. THE BAR -- the certificate stops
 # ===========================================================================
@@ -138,8 +145,7 @@ def test_the_mostly_blocked_pore_is_no_longer_certified():
     the row that fails must say WHY in the reader's own units."""
     x, duty = clogged()
     assert duty > 0.75, f"fixture drifted: blocked {duty:.0%}"
-    proposal, result = probed(x)
-    assert (proposal.config.rough_s, proposal.config.base_s) == (2.0, 0.5)
+    result = fixed_hold_result(x)
     # The estimate itself is unchanged: this stops the CERTIFICATE, it does not move
     # the baseline. Nothing in these samples says which level is the open pore.
     assert abs(result.median_pA - BLOCKED_PA) < 5.0, result.median_pA
@@ -170,7 +176,7 @@ def test_the_eight_blind_checks_still_certify_this_estimate():
     read through a canonical frame this trace itself chose. ``overshoot`` -- whose own
     message names 'occupancy past 50%' -- reads ~0 and passes."""
     x, _ = clogged()
-    _, result = probed(x)
+    result = fixed_hold_result(x)
     h = result.health
     for name in ("length_tracking", "length_rough", "mask_fraction", "mask_reference",
                  "base_vs_state", "baseline_intrusion", "rough_sigma_ratio",
@@ -187,19 +193,30 @@ def test_the_eight_blind_checks_still_certify_this_estimate():
 # 2. THE BOUND -- what must not start failing
 # ===========================================================================
 @pytest.mark.parametrize("rough, base, want_hold", [(2.0, 0.5, 1.056), (0.5, 0.125, 4.197)])
-def test_the_valid_renewal_estimates_stay_certified(rough, base, want_hold):
+def test_renewal_health_covers_the_worst_event_as_well_as_level_hold(rough, base, want_hold):
     """The two correctly-measured estimates that ``test_baseline_occupancy_reference``
     and ``test_s3_detcore_level_occupancy`` require to stay certified. Both sit BELOW
     `LEVEL_OCCUPANCY_MIN`, so the reason they survive is the hold, and it is asserted as
     a number rather than left implicit -- the 2.0/0.5 row clears the line by only 6%
     and a reader changing either constant has to see that."""
-    x, _ = renewal(8, dwell_s=0.040)
-    h = B.estimate_baseline_result(x, FS, config=cfg(rough, base), polarity=-1).health
+    x, spans = renewal(8, dwell_s=0.040)
+    result = B.estimate_baseline_result(x, FS, config=cfg(rough, base), polarity=-1)
+    h = result.health
     assert h.level_occupancy < B.LEVEL_OCCUPANCY_MIN, h.level_occupancy
     assert h.level_hold_windows == pytest.approx(want_hold, rel=0.02), (
         h.level_hold_windows)
     assert h.level_hold_windows >= B.LEVEL_HOLD_MIN_WINDOWS
-    assert h.ok, [c.name for c in h.checks if not c.ok]
+    ratios = [np.median(result.baseline[a:b] - x[a:b]) /
+              np.median(-34.8 - x[a:b]) for a, b in spans]
+    # The old median-only oracle called BOTH configurations correct. At .5/.125
+    # a planted 110 pA state actually retains <1 pA; the long-state check must
+    # expose that even though the hold criterion itself passes.
+    if min(ratios) < .5:
+        assert not h.ok
+        assert h.check('baseline_long_state').level == 'warn'
+    else:
+        assert min(ratios) >= .95
+        assert h.ok, [c.name for c in h.checks if not c.ok]
 
 
 def test_an_ordinary_good_recording_is_untouched():
@@ -227,12 +244,21 @@ def test_the_owners_apo_recording_still_certifies_at_every_window_in_evidence():
     fs = float(doc.meta.sample_rate_hz)
 
     proposal = P.probe_and_propose(x, fs, polarity=-1)
-    assert (proposal.config.rough_s, proposal.config.base_s) == (2.0, 0.5)
+    proposed_health = B.estimate_baseline_result(x, fs, config=proposal.config,
+                                                polarity=-1).health
+    assert proposed_health.ok, proposed_health.warnings
 
     for rough, base in ((2.0, 0.5), (1.0, 0.3), (0.5, 0.1)):
         h = B.estimate_baseline_result(x, fs, config=B.DEFAULT_BASELINE.replace(
             rough_s=rough, base_s=base), polarity=-1).health
-        assert h.ok and not h.warnings, (rough, base, h.warnings)
+        if (rough, base) == (2., .5):
+            assert h.ok and not h.warnings, (rough, base, h.warnings)
+        else:
+            # Short historical windows can erase the independently verified
+            # 521 ms clog. They must not be certified merely because most of the
+            # other events are measured correctly.
+            assert not h.ok
+            assert h.check('baseline_long_state').level == 'warn'
         assert h.level_occupancy > B.LEVEL_OCCUPANCY_MIN, (rough, h.level_occupancy)
 
     h = B.estimate_baseline_result(x, fs, config=B.DEFAULT_BASELINE.replace(
@@ -249,7 +275,7 @@ def test_the_line_is_a_conjunction_and_neither_half_would_do():
     """Both halves, measured against each other on the two fixtures. This is the test
     that fails on the day someone simplifies the condition to one of them."""
     bad, _ = clogged()
-    _, bad_res = probed(bad)
+    bad_res = fixed_hold_result(bad)
     good, _ = renewal(8, dwell_s=0.040)
     good_res = B.estimate_baseline_result(good, FS, config=cfg(2.0, 0.5), polarity=-1)
 
@@ -294,7 +320,7 @@ def test_the_reach_is_one_rung_of_the_clogged_family():
     caught, missed = [], []
     for mean_open_ms, mean_blocked_ms in ((20.0, 80.0), (20.0, 200.0), (20.0, 400.0)):
         x, duty = clogged(mean_open_ms, mean_blocked_ms)
-        _, res = probed(x)
+        res = fixed_hold_result(x)
         assert abs(res.median_pA - BLOCKED_PA) < 5.0, (
             f"blocked {duty:.0%}: the tracker is not on the blockade "
             f"({res.median_pA:.1f} pA); this test is about the case where it is")
@@ -316,7 +342,7 @@ def test_the_hold_reaches_provenance_and_a_restored_block_is_safe():
     project written before this field existed carries None, and nothing may raise on
     it."""
     x, _ = clogged()
-    _, res = probed(x)
+    res = fixed_hold_result(x)
     d = res.health.to_dict()
     assert d["level_hold_windows"] == pytest.approx(res.health.level_hold_windows)
     assert d["ok"] is False
@@ -329,3 +355,19 @@ def test_the_hold_reaches_provenance_and_a_restored_block_is_safe():
     # The advisory is keyed to the occupancies, not to the hold, so it still fires.
     assert [w for w in stale.warnings if "NOT CERTIFIED" in w]
     assert old.to_dict()["level_hold_windows"] is None
+
+
+def test_automatic_shorter_windows_do_not_claim_the_open_level_is_verified():
+    """The window check may pass; physical open-pore identity remains unverified."""
+    x, _ = clogged()
+    _, res = probed(x)
+    assert abs(res.median_pA - BLOCKED_PA) < 5.
+    assert any('NOT CERTIFIED' in w for w in res.warnings)
+    health = res.health.to_dict()
+    assert health['alt_level_occupancy'] >= B.ALT_LEVEL_OCCUPANCY_MIN
+    assert health['level_occupancy'] < B.LEVEL_OCCUPANCY_MIN
+    # The provenance includes the independent ambiguity measurements, even when
+    # every numerical window check passes at the newly selected shorter window.
+    assert any('NOT a verification' in c['message']
+               or 'not certified either way' in c['message']
+               for c in health['checks'] if c['name'] == 'level_occupancy')

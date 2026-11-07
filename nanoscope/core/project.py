@@ -14,7 +14,7 @@ A ``.nanoscope`` file is a ZIP archive containing:
 
       {
         "format": "nanoscope-project",
-        "version": 12,
+        "version": 13,
         "app_version": "0.1.0",
         "documents":    [{"path": "<abspath>", "loaded_range": [start, stop] | null,
                           "source": {"n_samples", "size", "digest", "mtime_ns"} | null}],
@@ -126,7 +126,9 @@ __all__ = [
     "AnalyticalWorkspace",
     "ProjectState",
     "save_project",
+    "verify_workspace_equal",
     "load_project",
+    "read_project_container_version",
 ]
 
 FORMAT: str = "nanoscope-project"
@@ -237,7 +239,11 @@ FORMAT: str = "nanoscope-project"
 # heatmap sections. (The project's appearance presets and Distributions templates live in
 # ``workspace.extra``, which a v11 build keeps byte for byte; they did not need the bump,
 # and are refused with the rest by it.)
-VERSION: int = 12
+# v13 replaces the eight singleton analytical pages with independent, named live
+# FigureSpec artifacts. Old builds cannot interpret their ownership, pending/applied
+# recipes and frozen resources, so every new save is v13 even with one figure.
+# Reading v1-v12 remains supported; conversion itself does not rewrite the source.
+VERSION: int = 13
 MIN_READ_VERSION: int = 1   # oldest project this build can still read (v1 predates segments)
 MANIFEST_NAME: str = "manifest.json"
 WORKSPACE_VERSION: int = 1
@@ -1062,6 +1068,19 @@ def _default_app_version() -> str:
         return ""
 
 
+def _writer_identity() -> dict[str, Any]:
+    """Current writer identity is diagnostic; it never changes the version gate."""
+    try:
+        from ..build_info import build_info
+        info = build_info()
+    except (OSError, ValueError, TypeError):
+        info = {}
+    return {"version": str(info.get("version") or _default_app_version()),
+            "build_id": str(info.get("build_id") or "unavailable"),
+            **{key: info[key] for key in ("git_commit", "source_sha256", "bundle_version")
+               if info.get(key) is not None}}
+
+
 @contextmanager
 def _staged_write(target: Path, notes: list[str] | None = None) -> Iterator[BinaryIO]:
     """Yield a writable handle whose bytes land at ``target`` ONLY if the block succeeds.
@@ -1088,12 +1107,47 @@ def _staged_write(target: Path, notes: list[str] | None = None) -> Iterator[Bina
         yield fh
 
 
+def verify_workspace_equal(expected: AnalyticalWorkspace, actual: AnalyticalWorkspace) -> None:
+    """Compare logical artifact witnesses, independent of ZIP members or ordering of keys."""
+    def equal_json(left, right, where):
+        # The ordinary serializer owns numpy/path coercion for opaque plugin values.
+        # FigureSpec itself already enforces stricter finite JSON before this boundary.
+        if json.dumps(_json_safe(left), sort_keys=True, separators=(",", ":")) != json.dumps(
+                _json_safe(right), sort_keys=True, separators=(",", ":")):
+            raise ProjectError(f"Staged project verification failed at {where}.")
+
+    if expected.version != actual.version:
+        raise ProjectError("Staged project verification failed at workspace.version.")
+    equal_json(expected.extra, actual.extra, "workspace.extra")
+    if [a.artifact_id for a in expected.artifacts] != [a.artifact_id for a in actual.artifacts]:
+        raise ProjectError("Staged project verification failed at workspace artifact order/identity.")
+    for before, after in zip(expected.artifacts, actual.artifacts):
+        where = f"figure/artifact {before.artifact_id!r}"
+        if (before.kind, before.schema_version) != (after.kind, after.schema_version):
+            raise ProjectError(f"Staged project verification failed at {where} kind/schema.")
+        equal_json(before.payload, after.payload, where + ".payload")
+        equal_json(before.extra, after.extra, where + ".extra")
+        if set(before.tables) != set(after.tables) or set(before.blobs) != set(after.blobs):
+            raise ProjectError(f"Staged project verification failed at {where} resource names.")
+        for key, table in before.tables.items():
+            try:
+                pd.testing.assert_frame_equal(table, after.tables[key], check_exact=True,
+                                              check_dtype=True, check_names=True, check_freq=False)
+            except AssertionError as exc:
+                raise ProjectError(f"Staged project verification failed at {where} table {key!r}: {exc}") from exc
+        for key, blob in before.blobs.items():
+            if bytes(blob) != after.blobs[key]:
+                raise ProjectError(f"Staged project verification failed at {where} blob {key!r}.")
+
+
 def save_project(path: str | Path, state: ProjectState,
-                 notes: list[str] | None = None) -> Path:
+                 notes: list[str] | None = None, *, verify_workspace: bool = False) -> Path:
     """Write ``state`` to a ``.nanoscope`` ZIP at ``path``; return the path written.
 
     Event tables and the measurements table go to parquet members; everything else
-    (including JSON-coerced provenance) goes to ``manifest.json``.
+    (including JSON-coerced provenance) goes to ``manifest.json``. Every v13 write
+    rereads the staged project and verifies its full logical workspace before replace;
+    ``verify_workspace`` additionally enables that check for historical-format tests.
 
     ATOMIC. The file at ``path`` is REPLACED, never edited in place: everything is
     written to a temporary sibling first and moved over the target with
@@ -1129,6 +1183,7 @@ def save_project(path: str | Path, state: ProjectState,
     manifest: dict[str, Any] = {
         "format": FORMAT,
         "version": VERSION,
+        "writer": _writer_identity(),
         "app_version": state.app_version or _default_app_version(),
         "documents": [
             {
@@ -1280,6 +1335,13 @@ def save_project(path: str | Path, state: ProjectState,
 
             zf.writestr(MANIFEST_NAME, json.dumps(manifest, indent=2))
 
+        if verify_workspace or VERSION >= 13:
+            # ZIP's central directory is closed before the reader sees the stage.
+            # Any mismatch raises inside the atomic-write scope, before replacement.
+            fh.flush()
+            restored = load_project(Path(fh.name))
+            verify_workspace_equal(state.workspace, restored.workspace)
+
     return path
 
 
@@ -1316,6 +1378,20 @@ def _check_version(manifest: dict[str, Any], name: str) -> None:
         raise ProjectVersionError(
             f"{name} needs a newer NanoScope (project version {version} > {VERSION})."
         )
+
+
+def read_project_container_version(path: str | Path) -> int:
+    """Read and validate only the container header for conversion-save UI."""
+    path = Path(path)
+    try:
+        with zipfile.ZipFile(path) as archive:
+            manifest = json.loads(archive.read(MANIFEST_NAME))
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, zlib.error) as exc:
+        raise ProjectError(f"{path.name}: cannot read the project header ({exc}).") from exc
+    if not isinstance(manifest, dict):
+        raise ProjectError(f"{path.name}: {MANIFEST_NAME} is not a JSON object.")
+    _check_version(manifest, path.name)
+    return manifest["version"]
 
 
 def _looks_like_zip(path: Path) -> bool:

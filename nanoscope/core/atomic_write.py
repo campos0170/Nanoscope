@@ -99,6 +99,7 @@ __all__ = [
     "peek_identity_notes",
     "staged_write",
     "staged_path",
+    "write_staged",
     "StagedSet",
     "staged_write_set",
 ]
@@ -753,6 +754,21 @@ def staged_path(target: str | Path, *, notes: list[str] | None = None) -> Iterat
             raise
         raise restated from exc
     _deliver_identity(real, swept + pending, notes)
+
+
+def write_staged(target: str | Path, writer, /, *args, **kwargs):
+    """Call a path-based serializer without exposing the destination to truncation.
+
+    ``writer`` receives the temporary path as its first argument; remaining arguments
+    are forwarded unchanged. Examples are ``write_staged(path, frame.to_csv,
+    index=False)`` and ``write_staged(path, Path.write_text, text, encoding="utf-8")``.
+    The path retains its suffix for serializers that infer their output format.
+    This is also safe inside a staged directory: an interrupted retry cannot damage
+    an already completed member. A directory-level transaction still owns publication
+    of the whole bundle.
+    """
+    with staged_path(target) as staged:
+        return writer(staged, *args, **kwargs)
 
 
 def _discard(tmp: Path) -> None:

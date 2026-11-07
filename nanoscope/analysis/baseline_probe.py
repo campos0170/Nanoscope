@@ -188,6 +188,7 @@ from .baseline import (
     REFERENCE_ROUGH_S,
     REFERENCE_WINDOWS_MIN,
     GATING_BLOCKS_MIN,
+    LONG_STATE_INTRUSION_MAX,
     ROUGH_BASE_RATIO,
     SIGMA_STRIDE,
     SIGMA_STRIDE_MIN_N,
@@ -384,7 +385,7 @@ RANK_MAX_CANDIDATES = 4
 #: configuration measured (`baseline.BaselineHealth`, "reports never objectives"),
 #: while this is the objective the proposer chooses BY -- the same layering that
 #: keeps `BASELINE_INTRUSION_MAX` a tolerance there and `intrusion_cost` a cost here.
-WORST_STATE_INTRUSION_MAX = 0.5
+WORST_STATE_INTRUSION_MAX = LONG_STATE_INTRUSION_MAX
 
 #: Stride for the two robust-sigma statistics on a long trace. A median of every 4th
 #: sample of a 3 M-sample recording is the same number to ~0.1% and four times
@@ -550,8 +551,9 @@ class BaselineCandidate:
         fraction: `baseline.config_intrusion`'s fraction -- the share of each state's
             own excursion this window's baseline followed, SIGNED, and bit-identical
             to what `baseline.baseline_health` will report for the same window.
-            ``None`` when no state had a measurable depth.
-        n_states: How many states that median came from; ``None`` with ``fraction``.
+            ``None`` when no state qualified for the headline median.
+        n_states: Number of headline states; zero for worst-state-only evidence,
+            or ``None`` when no intrusion reading was available.
         cost: `intrusion_cost` of ``fraction`` -- the MEDIAN half of what is ranked
             on. ``None`` when ``fraction`` is.
         chosen: This is the window the proposal now carries.
@@ -562,8 +564,9 @@ class BaselineCandidate:
             move a median over hundreds (see `WORST_STATE_INTRUSION_MAX` for the
             -600 mV numbers, and `baseline.tracked_intrusion` for why the short
             states are excluded -- their per-state ratio is noise, measured within
-            1% of the threshold on ferritin_data2). ``None`` when ``fraction`` is,
-            AND when no visited state is that long -- a recording with no state a
+            1% of the threshold on ferritin_data2). It may be measured even when
+            ``fraction`` is unavailable, using the separate long-state depth gate.
+            ``None`` when no visited state qualifies -- a recording with no state a
             tracking median could dwell inside has nothing for the criterion to
             read.
         worst_dwell_s: How long that worst state is, seconds. ``None`` with
@@ -587,7 +590,11 @@ class BaselineCandidate:
 
     @property
     def measured(self) -> bool:
-        """True when this candidate produced a number the ranking could use."""
+        """True when a comparable median intrusion was measured for ranking.
+
+        A separate long-state reading may still diagnose a riding baseline when
+        the median is unmeasurable; it must not become an invented zero cost.
+        """
         return self.cost is not None
 
     @property
@@ -1570,7 +1577,8 @@ def rank_windows(
         # produce (measured on a 30 ms/20% synthetic at 1.0 / 0.3 s). It compares
         # equal to 0.0 everywhere it is used and is still noise in a rendered row and
         # in anything built from ``to_dict``.
-        frac = None if intr is None else float(intr["fraction"]) + 0.0
+        frac = (None if intr is None or intr["fraction"] is None
+                else float(intr["fraction"]) + 0.0)
         # ``worst_*`` can be None INSIDE a measured dict: no state on this recording
         # is longer than this candidate's tracking window, so there is nothing its
         # median could dwell inside and nothing for the criterion to read. That is
@@ -1630,6 +1638,16 @@ def rank_windows(
     ordered = [measured[i] for i in sorted(measured)]
     scored = [c for c in ordered if c.measured]
     if not scored:
+        worst_only = [c for c in ordered if c.worst_fraction is not None]
+        if worst_only:
+            riders = sum(c.rides for c in worst_only)
+            return _unranked(
+                proposal,
+                "no candidate had a measurable median intrusion at the headline "
+                "depth threshold; long-state evidence was measured separately "
+                f"for {len(worst_only)} candidate(s), of which {riders} rode into "
+                "a state. Missing median measurements are not zero intrusion. "
+                "Review Baseline health or supply a known open-pore reference")
         return _unranked(
             proposal,
             "no candidate window had a state deep enough to measure an intrusion "
@@ -1644,6 +1662,14 @@ def rank_windows(
     # nothing rides the ranking is bit-for-bit what it was.
     winner = min(scored,
                  key=lambda c: (c.rides, float(c.cost), float(c.rough_s)))
+    if winner.rides and any(c.worst_fraction is not None and not c.rides
+                            for c in ordered if not c.measured):
+        return _unranked(
+            proposal,
+            "every candidate with a measurable median rides into a state, while "
+            "another candidate has non-riding long-state evidence but no measurable "
+            "median. These incomplete measurements do not justify an automatic "
+            "choice; review Baseline health or supply a known open-pore reference")
     ranking = tuple(
         BaselineCandidate(rough_s=c.rough_s, base_s=c.base_s, fraction=c.fraction,
                           n_states=c.n_states, cost=c.cost, chosen=c is winner,
@@ -1707,6 +1733,15 @@ def _candidate_phrase(c: BaselineCandidate) -> str:
     """
     w = _fmt_window(c.rough_s, c.base_s)
     if c.fraction is None:
+        if c.worst_fraction is not None:
+            if c.worst_fraction <= 0:
+                return (f"{w} median intrusion was not measurable; its baseline "
+                        f"sits at or outside the measured long state "
+                        f"({c.worst_fraction * 100:.1f}% intrusion)")
+            state = ("RIDES INTO" if c.rides else "follows")
+            return (f"{w} median intrusion was not measurable; it {state} a "
+                    f"{c.worst_dwell_s * 1e3:.0f} ms state at t = {c.worst_t_s:.1f} s, "
+                    f"following {c.worst_fraction * 100:.1f}% of its excursion")
         return f"{w} could not be measured"
     if c.rides:
         # NOT the "sits at or just outside them" gloss: that gloss is a claim about
@@ -1978,9 +2013,9 @@ def _ranking_reason(
                 f"It RIDES INTO its worst single state "
                 f"({best.worst_fraction * 100:.1f}% of a "
                 f"{best.worst_dwell_s * 1e3:.0f} ms state's own excursion followed): "
-                "every window estimated here does, so this is the least-ridden of "
-                "them, and depths inside that state cannot be trusted at any of "
-                "these windows. ")
+                "every candidate with a measurable median does. This selection "
+                "compares their median intrusion; it does not minimize the worst-state "
+                "fraction. Depths inside that state cannot be trusted at these windows. ")
         out += ("This is the best window ESTIMATED under this ranking's objective "
                 "(no state ridden into where possible, then median intrusion), NOT "
                 "a clean one")
@@ -2122,7 +2157,8 @@ def proposal_summary(
             worst_note = (f"; worst single state NONE "
                           f"({c.worst_fraction * 100:.1f}%)")
         if c.fraction is None:
-            value = f"not measurable here{mark}"
+            value = (f"{_candidate_phrase(c)}{mark}" if c.worst_fraction is not None
+                     else f"not measurable here{mark}")
         elif c.rides:
             med = (f"{c.fraction * 100:.3f}%" if c.fraction > 0
                    else f"NONE ({c.fraction * 100:.3f}%)")

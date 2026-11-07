@@ -403,11 +403,19 @@ def open_pore_autocorr_time(
     # is noise and would drag the median around.
     need = max(64, 4 * int(n_scale))
     taus: list[float] = []
-    edges = [0, *((int(x) for pair in zip(b + pad, a[1:] - pad) for x in pair)), n]
-    for lo, hi in zip(edges[0::2], edges[1::2]):
-        lo, hi = max(int(lo), 0), min(int(hi), n)
-        if hi - lo >= need:
-            taus.append(integrated_autocorr_time(r[lo:hi], n_scale=n_scale))
+    # Complement the union of padded events. Advancing a cursor also handles
+    # overlapping/nested events without ever counting an event as open pore.
+    cursor = 0
+    for start, end in zip(a, b):
+        if end <= start:
+            continue
+        lo = max(0, min(int(start)-pad, n))
+        hi = max(0, min(int(end)+pad, n))
+        if lo-cursor >= need:
+            taus.append(integrated_autocorr_time(r[cursor:lo], n_scale=n_scale))
+        cursor = max(cursor, hi)
+    if n-cursor >= need:
+        taus.append(integrated_autocorr_time(r[cursor:n], n_scale=n_scale))
     if not taus:
         return integrated_autocorr_time(r, n_scale=n_scale)
     return float(np.median(taus))

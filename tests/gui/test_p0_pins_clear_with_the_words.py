@@ -1493,9 +1493,10 @@ def test_event_waveforms_switching_the_view_takes_the_words_and_no_pin(events):
 
 
 def test_event_waveforms_routes_that_are_not_a_new_metric_keep_every_pin(events, tmp_path):
-    """Bins, the colormap, the band, the alignment, the number of points, another recording, a
-    template that carries another metric, and a workspace restore are not the axes changing
-    quantity. (Log x and Log y change the numbers on the map's axes and have their own tests.)"""
+    """Bins, the colormap, the band, the alignment while time is normalised, the number of points,
+    another recording, a template that carries another metric, and a workspace restore are not the
+    axes changing quantity. (Log x and Log y change the numbers on the map's axes, and the alignment
+    of a real-time ensemble what t = 0 is: they have their own tests.)"""
     from nanoscope.core import analysis_workspace as workspace
 
     from .test_event_plot import _doc_and_events, _install_detection
@@ -1946,8 +1947,8 @@ def test_the_guide_and_the_inventory_say_what_the_rule_does_with_the_pins():
             "Changing **Log scale** in the map's Axis properties takes no range: that dialog "
             "commits the range typed beside it, and unticking Log scale there to type a range in "
             "seconds is how the map's X axis, which opens on a log axis, is pinned",
-            "Bins, the colormap, the band, the subset and the alignment keep both the words and "
-            "the ranges"):
+            "Bins, the colormap, the band, the subset and the number of points keep both the "
+            "words and the ranges"):
         assert sentence in flat, sentence
     # What the guide said before: pinned ranges stay through a change of quantity.
     for gone in ("text styles, axis ranges typed in Axis properties, the legend",

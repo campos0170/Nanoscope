@@ -48,6 +48,7 @@ BUNDLE_ID = "org.nanoscope.NanoScope"
 # ships conda's Qt5 plugins inside this Qt6 app, which fails at launch. See qt_prefix_fix.py.
 sys.path.insert(0, str(HERE))
 from build_identity import write_build_record  # noqa: E402
+from tensorflow_runtime import deduplicate_tensorflow_runtime  # noqa: E402
 
 BUILD_RECORD, BUILD_RECORD_PATH = write_build_record(ROOT)
 APP_VERSION = BUILD_RECORD["version"]
@@ -298,6 +299,7 @@ def _prune_toc(toc, fragments=_PRUNE_FRAGMENTS):
 
 
 a.binaries, _dropped_bin = _prune_toc(a.binaries)
+a.binaries = deduplicate_tensorflow_runtime(a.binaries)
 a.datas, _dropped_data = _prune_toc(a.datas)
 print(f"[nanoscope.spec] pruned {len(_dropped_bin)} binaries + {len(_dropped_data)} data files")
 
@@ -345,11 +347,9 @@ app = BUNDLE(
         "NanoScopeBuildID": BUILD_RECORD["build_id"],
         "NanoScopeSourceSHA256": BUILD_RECORD["source_sha256"],
         "CFBundlePackageType": "APPL",
-        # NOT the arm64 floor (11.0) — the floor of what this env's wheels were COMPILED against.
-        # PySide6 6.11.1 and shiboken6 ship binaries built for 15.0, and below that dyld
-        # refuses them while macOS still permits the launch, so the app dies with no dialog
-        # (its dialog is PySide6). verify_bundle.check_deployment_target derives the real
-        # number from the Mach-O load commands and fails the build if this one understates it.
+        # Conservative release deployment floor, retained across the Qt version mitigation.
+        # verify_bundle.check_deployment_target reads every bundled Mach-O load command
+        # and fails if this value understates any native library's actual requirement.
         "LSMinimumSystemVersion": "15.0",
         "LSApplicationCategoryType": "public.app-category.education",
         # Retina. Without this Qt renders into a 1x backing store and the trace view looks soft

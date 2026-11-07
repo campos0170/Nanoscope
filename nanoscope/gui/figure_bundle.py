@@ -311,6 +311,15 @@ class FigureSnapshot:
     def provenance(self):
         return json.loads(self.provenance_json_bytes)
 
+    def figure_spec(self):
+        """The applied live FigureSpec captured with this picture, if it has one.
+
+        An additive, checksummed resource keeps old snapshot and bundle schemas readable.
+        The returned value is detached; snapshots never share a live record's mutable state.
+        """
+        raw = dict(self.additional_resources).get("figure-spec.json")
+        return json.loads(raw) if raw is not None else None
+
     def to_storage(self) -> tuple[dict, dict[str, bytes]]:
         blobs = {name: getattr(self, field) for name, field in _BLOB_FIELDS.items()}
         resources = {}
@@ -395,9 +404,34 @@ class FigureSnapshot:
         return result
 
 
+def _capture_rendering_metadata(item, svg, *, residual_item=None, include_residual=False):
+    """Describe only renderers/devices and font declarations actually available at capture."""
+    import pyqtgraph
+    picture = QtGui.QPicture()
+    targets = [item, residual_item] if include_residual else [item]
+    renderers = []
+    for target in targets:
+        provider = getattr(target, "capture_rendering_metadata", None)
+        facts = provider() if callable(provider) else {
+            "renderer": "Qt graphics scene", "item_type": type(target).__name__,
+            "item_module": type(target).__module__,
+            "picture_logical_dpi": [picture.logicalDpiX(), picture.logicalDpiY()],
+        }
+        renderers.append(facts)
+    document = ET.fromstring(svg)
+    text = [node for node in document.iter() if node.tag.rsplit("}", 1)[-1] in ("text", "tspan")]
+    families = sorted({node.get("font-family") for node in text if node.get("font-family")})
+    return {"version": 1, "qt_version": QtCore.qVersion(),
+            "pyqtgraph_version": pyqtgraph.__version__, "renderers": renderers,
+            "svg_text_elements": len(text), "svg_declared_font_families": families,
+            "font_note": "SVG font declarations name requested/fallback families; they do not embed fonts. "
+                         "Per-glyph installed face selection is not recorded."}
+
+
 def capture_figure_snapshot(item, *, data: pd.DataFrame, config=None, provenance=None,
                             residual_item=None, include_residual=False,
-                            additional_resources: Mapping[str, bytes] | None = None) -> FigureSnapshot:
+                            additional_resources: Mapping[str, bytes] | None = None,
+                            applied_spec=None) -> FigureSnapshot:
     """Freeze the picture plus the EXACT table the caller says it represents.
 
     CSV is human-readable (17-digit floats). Parquet retains numerical columns
@@ -407,8 +441,16 @@ def capture_figure_snapshot(item, *, data: pd.DataFrame, config=None, provenance
     if not isinstance(data, pd.DataFrame):
         raise TypeError("A figure snapshot requires its exact plotted DataFrame.")
     config_json = _json_bytes({} if config is None else config)
-    provenance_json = _json_bytes({} if provenance is None else provenance)
+    provenance_values = {} if provenance is None else dict(provenance)
+    _json_bytes(provenance_values)  # Refuse invalid source metadata before rendering.
     resources = tuple((name, value) for name, value in (additional_resources or {}).items())
+    if applied_spec is not None:
+        if any(name.casefold() == "figure-spec.json" for name, _value in resources):
+            raise ValueError("The applied figure specification resource is reserved.")
+        raw = applied_spec.to_dict() if callable(getattr(applied_spec, "to_dict", None)) else applied_spec
+        if not isinstance(raw, Mapping):
+            raise TypeError("An applied figure specification must be a mapping.")
+        resources += (("figure-spec.json", _json_bytes(dict(raw))),)
     for name, value in resources:
         _resource_name(name)
         if not isinstance(value, bytes):
@@ -420,6 +462,9 @@ def capture_figure_snapshot(item, *, data: pd.DataFrame, config=None, provenance
     csv = table.to_csv(index=False, float_format="%.17g").encode("utf-8")
     png, svg, width, height = capture_figure_render(
         item, residual_item=residual_item, include_residual=include_residual)
+    provenance_values["nanoscope_capture_rendering"] = _capture_rendering_metadata(
+        item, svg, residual_item=residual_item, include_residual=include_residual)
+    provenance_json = _json_bytes(provenance_values)
     resources += ((_PICTURE_RESOURCE, capture_figure_picture(
         item, residual_item=residual_item, include_residual=include_residual)),)
     snapshot = FigureSnapshot(png, svg, csv, parquet, config_json,
@@ -446,6 +491,31 @@ def write_figure_bundle(path: str | Path, snapshot: FigureSnapshot) -> Path:
                 archive.writestr(filename, blobs[name])
             archive.writestr("manifest.json", _json_bytes(manifest))
     return out
+
+
+def restore_snapshot_fonts(snapshot):
+    """Prepare recorded literal-text faces, including those in nested compositions."""
+    pending = [(snapshot.provenance(), 0)]
+    visited = 0
+    while pending:
+        provenance, depth = pending.pop()
+        visited += 1
+        if depth > 32 or visited > 4096:
+            raise ValueError('The saved font metadata exceeds the composition replay budget.')
+        if not isinstance(provenance, Mapping):
+            continue
+        capture = provenance.get('nanoscope_capture_rendering', {})
+        if isinstance(capture, Mapping):
+            for renderer in capture.get('renderers', ()):
+                if not isinstance(renderer, Mapping):
+                    continue
+                faces = renderer.get('retained_text_faces', ())
+                if faces:
+                    from .matplotlib_figure_item import restore_retained_font_faces
+                    restore_retained_font_faces(faces)
+        panels = provenance.get('panels', ())
+        if isinstance(panels, list):
+            pending.extend((panel, depth + 1) for panel in panels)
 
 
 def render_frozen_picture(payload: bytes, target: str | Path, *, width=0, height=0,
@@ -540,6 +610,7 @@ def write_frozen_figure_image(path: str | Path, snapshot: FigureSnapshot,
             if picture is None:
                 raise ValueError("This saved figure lacks a faithful vector rendering. "
                                  "Export its native PNG/SVG, or capture a new snapshot.")
+            restore_snapshot_fonts(snapshot)
             render_frozen_picture(picture, staged, width=options.width,
                                   height=options.height,
                                   native_size=(snapshot.width, snapshot.height))

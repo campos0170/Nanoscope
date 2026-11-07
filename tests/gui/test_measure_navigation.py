@@ -934,6 +934,10 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           # three defines a widget another window owns or imports
                           # anything from gui/ itself.
                           "analysis_catalog", "plot_appearance", "plot_workflow",
+                          # Phase 1: moves an existing control by explicitly releasing its
+                          # detached layout item. Functions only; no GUI sibling or widget
+                          # definition (both checked below, without a widget exemption).
+                          "widget_transfer",
                           # 2026-09-13: plots_panel reaches these too, discovered by
                           # this same test going stale as the module grew (Figure
                           # Library, publication export, lasso selection). Verified
@@ -942,6 +946,20 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           # a private _LassoOverlay(QWidget) and a QObject helper,
                           # used solely by plots_panel, nowhere near a real panel.
                           "figure_bundle", "plot_lasso",
+                          # Existing presentation/export leaves: no QWidget or panel
+                          # discovery. Their exact sibling reach is pinned below.
+                          "figure_export_style", "figure_style_binding",
+                          "figure_series", "matplotlib_figure_item",
+                          # Series geometry/decoration and value-only point styling.
+                          # The sole new widget here is the named private outline below.
+                          "matplotlib_series", "plots_series", "series_points",
+                          # Quantity presentation and pending edits operate on supplied
+                          # values/controls, without discovering another page.
+                          "quantity_axis", "quantity_selectors", "time_controls",
+                          "numeric_text", "pending_analysis", "figure_quantity_native",
+                          # Reusable fit dialog over a supplied immutable CurveDataset;
+                          # its only GUI dependencies are series tags and worker lifetime.
+                          "nonlinear_fit_dialog",
                           # plot_export's own transitive reach: the shared
                           # "Export current figure" dialog (ExportOptionsDialog) and
                           # its print-preflight check. Both terminate with no further
@@ -998,6 +1016,47 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           "font_picker"}
 
 
+# These serializers/adapters operate on the explicitly supplied page or saved values.
+# They are NOT general non-panel helpers: their reviewed import of plots_panel must
+# never admit that panel globally, or let unrelated helpers acquire a two-hop route.
+_OWNER_BOUND_ADAPTER_REACH = {
+    "figure_adapter_plots": {"figure_adapter_pages", "figure_style_binding", "fit_label",
+                             "plot_appearance", "plots_panel", "quantity_reset"},
+    "figure_adapter_pages": {"figure_adapter_plots", "figure_quantity_native", "figure_text",
+                             "plot_appearance", "plot_workflow", "plots_panel", "quantity_reset"},
+}
+_ADAPTER_PANEL_SYMBOLS = {
+    "figure_adapter_plots": {"AnalysisIdentity", "FrozenMap", "HEATMAP", "HISTOGRAM", "KDE",
+        "PCA", "PlotConfig", "PlotsWindow", "SCATTER", "StyleSettings", "_COLOUR_CLUSTER",
+        "_NO_ENTRIES", "_decode_dc", "_deep_frozen", "_encode_dc", "_plot_quantity_bases",
+        "_project_style_settings", "_text_kept_in_styles", "migrate_plot_quantity",
+        "plot_config_from_json", "plot_config_to_json"},
+    "figure_adapter_pages": {"_HISTORY_DEPTH", "plot_config_from_json", "plot_config_to_json"},
+}
+_OVERLAY_ADAPTER_SYMBOLS = {
+    "plots_panel": {"figure_adapter_plots": {
+        "PlotsFigureAdapter", "plotted_staleness_columns", "restore_sampled_contours"}},
+    "psd_panel": {"figure_adapter_pages": {"configure_source_binding"}},
+    "subpop_window": {},
+}
+
+
+def _explicit_gui_symbols(module, sibling):
+    """Pin named imports at an exceptional edge; whole-module/aliased imports fail."""
+    tree = ast.parse(pathlib.Path(module.__file__).read_text())
+    result = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if sibling not in _canonical_gui_imports(ast.unparse(node)):
+            continue
+        assert isinstance(node, ast.ImportFrom) and node.module, (
+            f"{module.__name__}: whole-module import of exceptional sibling {sibling}")
+        assert all(alias.asname is None for alias in node.names)
+        result.update(alias.name for alias in node.names)
+    return result
+
+
 def test_the_non_panel_allowlist_holds_no_panel():
     """The allowlist above may only ever contain modules that define NO widget.
 
@@ -1044,13 +1103,27 @@ def test_the_non_panel_allowlist_holds_no_panel():
         # 2026-09-13: the publication-export consolidation. Full transitive closure
         # verified by hand to terminate at export_paths/plot_print_preflight (both
         # reach nothing further) without ever touching a real panel name.
-        "figure_bundle": {"plot_export", "plot_export_options"},
-        "plot_export": {"export_paths", "figure_bundle", "plot_export_options"},
-        "plot_export_options": {"plot_print_preflight"},
+        "figure_bundle": {"plot_export", "plot_export_options", "matplotlib_figure_item"},
+        "plot_export": {"export_paths", "figure_bundle", "plot_export_options", "figure_export_style"},
+        "plot_export_options": {"plot_print_preflight", "figure_export_style"},
+        # Existing frozen-artwork export and native style projection. None defines
+        # a QWidget; only the per-series QObject adapter reaches figure_text.
+        "figure_export_style": set(), "figure_style_binding": set(),
+        "matplotlib_figure_item": {"matplotlib_series"},
+        "matplotlib_series": {"figure_text", "matplotlib_figure_item"},
+        "figure_series": {"figure_text"},
+        "plots_series": {"categorical", "figure_series", "series_points"},
+        "nonlinear_fit_dialog": {"figure_series", "worker_thread"},
+        "pending_analysis": {"plot_workflow"}, "time_controls": {"numeric_text"},
+        "quantity_axis": set(), "quantity_selectors": set(), "numeric_text": set(),
+        "series_points": set(), "figure_quantity_native": set(),
         # 2026-10-30: each plot window's own appearance Undo/Redo (design §4.2) binds
         # the platform's keys through the shared dedupe rule rather than a private copy
         # of it. key_sequences reaches nothing further and defines no widget.
         "plot_appearance": {"key_sequences",
+                            # Retire the reset button's old layout item before reparenting;
+                            # the shared ownership helper remains a pinned GUI leaf.
+                            "widget_transfer",
                             # 2026-11-02: the one method that puts a figure's typed words
                             # back to automatic when its quantity changes (a leaf).
                             "quantity_reset",
@@ -1058,18 +1131,23 @@ def test_the_non_panel_allowlist_holds_no_panel():
                             # label section and the major-tick hook.
                             "axes", "figure_text", "fit_label",
                             # 2026-11-02 (Phase 0, G2): the Font row is the shared picker.
-                            "font_picker"},
+                            "font_picker", "figure_series", "figure_style_binding"},
         # 2026-11-01 (plotux G2): install_plot_interaction(..., text=host) attaches the
         # in-figure text controller; the controller knows the fit label and the
         # appearance model it edits, and the fit label its text helpers.
         "plot_interaction": {"figure_text"},
         # 2026-11-02 (Phase 0, G2): Text style…'s family box is the shared picker, and the
         # fit label draws in the figure family through its CSS helper.
-        "figure_text": {"fit_label", "plot_appearance", "font_picker"},
+        # Phase 1 text tools move existing controls through the shared ownership helper.
+        "figure_text": {"fit_label", "plot_appearance", "font_picker", "widget_transfer"},
         "fit_label": {"figure_text", "font_picker"},
         # Plot Studio step 6: a template's appearance is recalled through the appearance
         # widget's own one-step apply, so the control knows PlotAppearance and nothing else.
         "plot_templates": {"plot_appearance"},
+        # Phase 1 form_rows shares the narrow layout-item ownership transfer helper.
+        # Pin the leaf itself too: it may not acquire a route to another GUI module.
+        "plot_workflow": {"widget_transfer"},
+        "widget_transfer": set(),
     }
 
     for name in _NON_PANEL_GUI_MODULES:
@@ -1086,6 +1164,17 @@ def test_the_non_panel_allowlist_holds_no_panel():
         widgets = [n for n, obj in vars(mod).items()
                    if inspect.isclass(obj) and issubclass(obj, QtWidgets.QWidget)
                    and obj.__module__ == mod.__name__]
+        # Exact reusable classes, not a blanket exemption for these modules. They
+        # receive their dataset/parent/control values and never locate sibling panels.
+        named_controls = {
+            "matplotlib_series": {"_SeriesOutline"},
+            "nonlinear_fit_dialog": {"NonlinearFitDialog"},
+            "quantity_selectors": {"ScientificColumnCombo"},
+            "time_controls": {"SecondsSpinBox", "HoursSpinBox"},
+        }
+        if name in named_controls:
+            assert set(widgets) == named_controls[name]
+            continue
         # WIDGET-DEFINING, NOT PANEL-WIRING. A "panel" in the sense this guard cares
         # about is something MainWindow wires as its own top-level page (like
         # DetectionPanel or MeasurePanel); a reusable CONTROL embedded inside several
@@ -1118,6 +1207,22 @@ def test_the_non_panel_allowlist_holds_no_panel():
             # Export sections, never a page of its own.
             continue
         assert widgets == [], f"nanoscope.gui.{name} defines widget(s) {widgets} — it is a panel"
+
+    # The adapter exception is deliberately separate from the reusable-helper set.
+    # Its only panel dependency is the owner module's explicitly listed value codecs,
+    # constants and static appearance transforms, never a constructed/discovered page.
+    for name, reached in _OWNER_BOUND_ADAPTER_REACH.items():
+        assert name not in _NON_PANEL_GUI_MODULES
+        mod = importlib.import_module(f"nanoscope.gui.{name}")
+        assert _gui_modules_reached(mod) == reached
+        assert reached <= _NON_PANEL_GUI_MODULES | set(_OWNER_BOUND_ADAPTER_REACH) | {"plots_panel"}
+        assert _explicit_gui_symbols(mod, "plots_panel") == _ADAPTER_PANEL_SYMBOLS[name]
+        assert not [obj for obj in vars(mod).values()
+                    if inspect.isclass(obj) and issubclass(obj, QtWidgets.QWidget)
+                    and obj.__module__ == mod.__name__]
+        tree = ast.parse(pathlib.Path(mod.__file__).read_text())
+        assert not [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "PlotsWindow"]
 
 
 def test_measure_panel_imports_no_sibling_gui_panel():
@@ -1209,9 +1314,11 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
     assert _gui_modules_reached(plots_mod) == {
         "export_paths", "combos", "axes", "categorical", "worker_thread",
         "analysis_catalog", "plot_export", "plot_appearance", "figure_bundle", "plot_lasso",
+        "figure_style_binding", "quantity_axis", "quantity_selectors", "plots_series",
+        "nonlinear_fit_dialog", "figure_adapter_plots",
         # 2026-11-02: the reset rule's status sentence for a plot-type, column or fit change.
         "quantity_reset",
-        "key_sequences", "plot_interaction",
+        "key_sequences", "plot_interaction", "plot_workflow",
         # 2026-11-01 (plotux G3): the fit label, the in-figure text host and the
         # Features checklist -- all on the allowlist, proven by the guard above.
         "figure_text", "fit_label", "column_checklist",
@@ -1225,6 +1332,7 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
         "export_paths", "combos", "axes", "plot_export",
         "analysis_catalog", "plot_appearance", "plot_workflow", "plot_interaction",
         "plot_templates", "figure_text", "fit_label",
+        "figure_adapter_pages", "figure_series", "pending_analysis", "quantity_axis", "time_controls",
         # 2026-11-02 (Phase 0, G2): the spectrogram colour bar's label CSS.
         "font_picker"}
     # The report window is the third standalone window and is held to the same rule.
@@ -1233,9 +1341,15 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
     # one only catches the relative form.
     assert _gui_modules_reached(subpop_mod) == {
         "categorical", "analysis_catalog", "plot_appearance", "plot_workflow",
-        "plot_interaction", "figure_text"}
+        "plot_interaction", "figure_text",
+        "figure_series", "series_points",
+        # Phase 1 moves the existing readout to the status line through the same leaf.
+        "widget_transfer"}
     for mod in (plots_mod, psd_mod, subpop_mod):
-        assert _gui_modules_reached(mod) <= _NON_PANEL_GUI_MODULES
+        adapter_edges = _OVERLAY_ADAPTER_SYMBOLS[mod.__name__.rsplit(".", 1)[-1]]
+        assert _gui_modules_reached(mod) <= _NON_PANEL_GUI_MODULES | set(adapter_edges)
+        for adapter, symbols in adapter_edges.items():
+            assert _explicit_gui_symbols(mod, adapter) == symbols
         # specifically: no PANEL, by any spelling
         assert not [m for m in _gui_modules_reached(mod) if m.endswith("_panel")]
 

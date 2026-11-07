@@ -915,7 +915,10 @@ def test_a_memoised_direction_never_answers_a_trace_that_should_be_refused():
 #      byte-identical over 400 000 samples.
 # Harness: scratchpad/BUILD/seam/{extract_oracle,verify_oracle_detect}.py
 #
-# NEVER RE-BASELINE THESE. A failure here means a stored project's numbers moved.
+# NEVER RE-BASELINE THESE. The bounded-endpoint correction is a versioned change:
+# replay the historical extrapolator/policy to retain the archived full digests,
+# then verify the current algorithm carries a different fingerprint. Stored rows
+# remain untouched and may not claim exact replay under the changed algorithm.
 
 _ORACLE_TRACE_SHA = "29027606946beba95a7f02c48f7b0baeff37c4283046b224a89492c9507093f4"
 _ORACLE_COLUMNS = {
@@ -947,7 +950,14 @@ def _oracle_trace():
     return x
 
 
-def test_a_stored_result_re_measured_under_its_own_fingerprint_is_unchanged():
+def _historical_block_expansion(centres, knots, n, **_kwargs):
+    if knots.size < 2:
+        return np.full(n, float(knots[0]), dtype=np.float64)
+    return B.PchipInterpolator(centres, knots, extrapolate=True)(
+        np.arange(n, dtype=np.float64))
+
+
+def test_a_stored_result_re_measured_under_its_own_fingerprint_is_unchanged(monkeypatch):
     """All 20 columns, against the pre-batch bundle. The migration promise in one
     test: opening an old project and re-measuring it under the estimator it RECORDS
     reproduces the numbers it already has, to the byte."""
@@ -956,15 +966,31 @@ def test_a_stored_result_re_measured_under_its_own_fingerprint_is_unchanged():
     x = _oracle_trace()
     cfg = B.BaselineConfig.from_provenance({"baseline_method": "block_median",
                                             "baseline_window_s": 0.01})
-    df, prov = detect_events(x, FS, polarity=-1, min_dwell_s=2e-5,
-                             baseline_config=cfg)
-    assert len(df) == 197
-    assert prov["baseline_fingerprint"] == "sha256:236cdc0579e4"
+    # The known historical algorithm is still pinned, without rebasing a digest.
+    with monkeypatch.context() as historical:
+        historical.setattr(B, "_expand", _historical_block_expansion)
+        historical.setattr(B, "BLOCK_ENDPOINT_POLICY", None)
+        historical.setattr(B, "SAMPLE_COUNT_POLICY", None)
+        B.clear_baseline_cache()
+        df, prov = detect_events(x, FS, polarity=-1, min_dwell_s=2e-5,
+                                 baseline_config=cfg)
+    B.clear_baseline_cache()
+    assert len(df) == 197 and prov["baseline_fingerprint"] == "sha256:236cdc0579e4"
     for col, want in _ORACLE_COLUMNS.items():
         v = df[col].to_numpy()
         raw = (v.tobytes() if v.dtype.kind not in "OU"
                else "\x1f".join(map(str, v)).encode())
         assert hashlib.sha256(raw).hexdigest()[:16] == want, col
+    current, now = detect_events(x, FS, polarity=-1, min_dwell_s=2e-5, baseline_config=cfg)
+    assert now["baseline_endpoint_policy"] == B.BLOCK_ENDPOINT_POLICY
+    assert now["baseline_fingerprint"] != prov["baseline_fingerprint"]
+    with pytest.raises(B.BaselinePolicyChangedError, match="Re-run detection"):
+        B.BaselineConfig.reproducible_from(prov)
+    assert B.BaselineConfig.reproducible_from(now) == cfg
+    # This oracle's edge drift is supported by local data, so the corrected
+    # policy preserves every scientific column as well as the interior knots.
+    for col in _ORACLE_COLUMNS:
+        np.testing.assert_array_equal(current[col].to_numpy(), df[col].to_numpy())
 
 
 def test_a_provided_baseline_array_still_bypasses_the_estimator_entirely():
@@ -978,17 +1004,29 @@ def test_a_provided_baseline_array_still_bypasses_the_estimator_entirely():
     assert float(prov["baseline_median_pA"]) == -1000.0
 
 
-def test_the_old_ml_characterisation_window_still_reproduces_its_own_numbers():
+def test_the_old_ml_characterisation_window_still_reproduces_its_own_numbers(monkeypatch):
     """Claim C: `block_median` at 0.20 s -- what `_CHAR_BASELINE_WINDOW_S` selected --
     is byte-identical through the new door."""
     import hashlib
 
     x = _oracle_trace()
     cfg = B.BaselineConfig(method="block_median", window_s=0.20)
+    with monkeypatch.context() as historical:
+        historical.setattr(B, "_expand", _historical_block_expansion)
+        historical.setattr(B, "BLOCK_ENDPOINT_POLICY", None)
+        historical.setattr(B, "SAMPLE_COUNT_POLICY", None)
+        B.clear_baseline_cache()
+        old = B.characterisation_baseline(
+            np.asarray(x, np.float64), FS, config=cfg, polarity=None, health=False)
+        historical_fingerprint = old.fingerprint
+    B.clear_baseline_cache()
+    assert hashlib.sha256(old.baseline.tobytes()).hexdigest()[:16] == \
+        "a05df4fa8c2bf355"
     got = B.characterisation_baseline(
         np.asarray(x, np.float64), FS, config=cfg, polarity=None, health=False)
-    assert hashlib.sha256(got.baseline.tobytes()).hexdigest()[:16] == \
-        "a05df4fa8c2bf355"
+    pad = int(.20 * FS / 2)
+    np.testing.assert_array_equal(got.baseline[pad:-pad], old.baseline[pad:-pad])
+    assert got.fingerprint != historical_fingerprint
 
 
 # ===========================================================================

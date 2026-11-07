@@ -80,7 +80,7 @@ def test_the_tree_under_test_is_named_out_loud():
     """
     root = Path(nanoscope.__file__).resolve().parent.parent
     expected = Path(os.environ.get(
-        "NANOSCOPE_EXPECT_ROOT", "/Users/abrahamcampos/Desktop/nanoscope")).resolve()
+        "NANOSCOPE_EXPECT_ROOT", str(Path(__file__).resolve().parents[2]))).resolve()
     assert root == expected, (
         f"the `nanoscope` under test resolved from {root}, not {expected}. Every "
         f"assertion below is about a tree, and this one says which.")

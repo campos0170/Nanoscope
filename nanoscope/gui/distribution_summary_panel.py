@@ -7,11 +7,12 @@ computes ECDF/quartiles/KDE. Restoring a project paints stored draw coordinates.
 The typed title and axis labels belong to the measurement and summary the committed figure
 shows (``gui.quantity_reset``): the controls only edit a draft, so :meth:`analyze` puts them
 back to automatic when it commits another pair, not on a first draw, a repeat, a restore, or
-the Generate that commits a recalled template's own pair. So does a range pinned on the value
-axis, when the MEASUREMENT is what changed: the value is x in ECDF and Survival and y in Box
-and Violin, so the pins of both pairs' value axes go together. A summary type moves no axis
-(each pair keeps its own pins, as it always has), and the axis of a pair that is not the value
-never does.
+the Generate that commits a recalled template's own pair while the words and pins are still the
+template's (Undo of the recall, or a word or pin changed after it, makes that Generate an
+ordinary change of pair). So does a range pinned on the value axis, when the MEASUREMENT is
+what changed: the value is x in ECDF and Survival and y in Box and Violin, so the pins of both
+pairs' value axes go together. A summary type moves no axis (each pair keeps its own pins, as
+it always has), and the axis of a pair that is not the value never does.
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ from .analysis_catalog import ANALYSIS_LABELS
 from .axes import ReadableLinearAxis
 from .export_paths import ask_export_path
 from .figure_text import (AppearanceTextHost, TextStyle, TextTarget, figure_text_for,
-                          plain_text, valid_element_key)
+                          plain_text)
 from .plot_appearance import (PlotAppearance, PlotAppearanceWidget, apply_plot_appearance,
                               reframe_axis_pins)
 from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
@@ -45,14 +46,16 @@ from .plot_export import (DATA_FILTERS, IMAGE_FORMATS, choose_live_plot_export,
 from .plot_interaction import (install_plot_interaction, reset_plot_history, view_button,
                                window_readout)
 from .plot_templates import WindowTemplateControls
-from .plot_workflow import (WarningSummary, bounded_controls, control_group,
-                            ensure_item_legend, install_plot_workflow)
-from .source_appearance import SourceAppearanceEditor
+from .plot_workflow import (ExportEntry, FormatSpec, InspectorGroup, PageAdapter, PendingState,
+                            WarningSummary, bounded_controls, control_group, ensure_item_legend,
+                            form_rows, install_plot_workflow)
+from .quantity_reset import promise, promise_stands
+from .source_appearance import SourceAppearanceEditor, with_source_appearance_edit
 
 
 VIEWS = (("ecdf", "ECDF"), ("survival", "Empirical survival (uncensored)"),
          ("box", "Box (linear quartiles)"), ("violin", "Violin (Scott KDE)"))
-METRICS = (("dwell_s", "Dwell (s)"), ("depth_pA", "Median depth (source units)"),
+METRICS = (("dwell_s", "Dwell (ms)"), ("depth_pA", "Median depth (source units)"),
            ("frac_depth", "Fractional depth ΔI/I₀"),
            ("amplitude_pA", "Selected amplitude (recorded units)"))
 METHODS = {
@@ -91,9 +94,8 @@ def _pins_for(snapshot) -> str:
 
 class _SummaryTextHost(AppearanceTextHost):
     """In-figure editing for Distribution summaries. A legend name IS the Source names
-    editor's display label (one store): a rename typed in the figure is written there, as
-    "Apply to figure" would, and no second legend-entry style is kept beside it. The
-    rename is one appearance Undo step (``_rename_source_from_figure`` says how)."""
+    editor's display label (one store): both routes edit the same appearance history
+    value, with no second legend-entry wording store."""
 
     def __init__(self, panel, plot, widget) -> None:
         panel_ref = weakref.ref(panel)
@@ -128,6 +130,21 @@ class _SummaryTextHost(AppearanceTextHost):
             return
         super().apply_text(key, style)
 
+    def apply_text_run(self, key: str, style: TextStyle) -> None:
+        """Format typing uses the same source-name store as inline rename."""
+        if key.startswith("legend.entry."):
+            panel = self._panel_ref()
+            if panel is not None:
+                panel._rename_source_from_figure(key[len("legend.entry."):], style.text, run=True)
+            return
+        super().apply_text_run(key, style)
+
+
+#: What the Update plot tooltip calls a draft control that differs from the figure on screen.
+_PENDING_REASON = {"source_keys": "the ticked sources", "accepted_only": "accepted-only",
+                   "metric": "the measurement", "kind": "the summary type",
+                   "violin_points": "the violin grid"}
+
 
 def _display_source_label(label, number):
     """Keep plot labels bounded; full names stay in tables, provenance and notes."""
@@ -139,6 +156,9 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
     # The host may synchronously update sources before the explicit Generate action.
     # Its handler must not call analyze again.
     refreshRequested = QtCore.Signal()
+    #: The pending state of the figure moved (a draft control, the sources, a Generate or a
+    #: restore). Carries nothing; the Explorer's Update plot reads ``pending()`` of the adapter.
+    pendingChanged = QtCore.Signal()
 
     def __init__(self, session=None, parent=None):
         super().__init__(parent)
@@ -150,17 +170,20 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._source_stamps = {}
         self._selected_keys = []
         self._loading = False
+        self._hosted = False
         self._stale = False
         self._applied_config = {}
         self._source_recipes = []
         self._snapshot = {}
         self._tables = {}
         self._data_items = []
-        self._appearance = PlotAppearance()
+        self._appearance = PlotAppearance(source_appearance={})
         self._pins_drawn = PIN_CURVES      # whose pins the plot holds (``_pins_for``)
         self._source_appearance = {}
-        #: The (measurement, summary) a recalled template's words came with: its first
-        #: Generate commits them, so those words are not stale (quantity_reset).
+        #: What a recalled template promised (``quantity_reset.promise``): the (measurement,
+        #: summary) its words and value-axis pins came with. Its first Generate commits that
+        #: pair, so those words are not stale -- while they and the pins are still the
+        #: template's (``promise_stands``).
         self._words_for = None
 
         central = QtWidgets.QWidget()
@@ -189,7 +212,8 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         data_layout.addWidget(QtWidgets.QLabel("Measurement"), 0, 1)
         data_layout.addWidget(self._metric_combo, 0, 2)
         data_layout.addWidget(self._accepted_only, 1, 1, 1, 2)
-        note = QtWidgets.QLabel("Stored values are used as recorded. Missing/non-finite values are disclosed; no imputation or pooling.")
+        note = self._data_note = QtWidgets.QLabel(
+            "Stored values are used as recorded. Missing/non-finite values are disclosed; no imputation or pooling.")
         note.setWordWrap(True)
         data_layout.addWidget(note, 2, 1, 1, 2)
 
@@ -232,8 +256,10 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         appearance_layout.setContentsMargins(0, 0, 0, 0)
         appearance_layout.addWidget(self._appearance_widget)
         self._source_appearance_editor = SourceAppearanceEditor(session=session)
-        self._source_appearance_editor.changed.connect(self._source_appearance_from_user)
+        self._source_appearance_editor.changed.connect(lambda state: self._source_appearance_from_user(
+            state, source_key=self._source_appearance_editor.source.currentData()))
         appearance_layout.addWidget(self._source_appearance_editor)
+        self._source_appearance_editor.hide()  # Compatibility API; shared Format owns visible series edits.
         appearance = bounded_controls(appearance_host, maximum_height=235)
         export = control_group("Export the committed figure", "Export preserves the last generated figure, "
                                "including its notes and exact visible coordinates; unapplied controls do not change it. "
@@ -248,6 +274,10 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
                  "or the generated figure. Recalling one changes the controls only: press "
                  "Generate to use them.")
         export.layout().addWidget(self._templates)
+        # The four Section boxes keep their names: the Explorer's inspector takes their
+        # controls out and leaves them behind, hidden (``inspector_adapter``).
+        self._data_section, self._analysis_section = data, analysis
+        self._appearance_section, self._export_section = appearance, export
         for widget in (data, analysis, appearance, export):
             layout.addWidget(widget)
         self._plot_widget = pg.PlotWidget(background="#111316", axisItems={
@@ -256,6 +286,11 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._plot = self._plot_widget.getPlotItem()
         self._plot.setTitle("Distribution summaries · Generate to begin")
         layout.addWidget(self._plot_widget, 1)
+        # One list for the right-click menu and the Explorer's Export ▾: they cannot disagree.
+        # Greyed out until a figure has been generated.
+        exports = self._exports = (
+            ("Export current figure…", lambda: self.save_image(), self.has_data),
+            ("Export plotted coordinates CSV…", lambda: self.save_csv(), self.has_data))
         self._workflow = install_plot_workflow(
             self, sections={"Data": (data,), "Analysis": (analysis,),
                             "Appearance": (appearance,), "Export": (export,)},
@@ -263,7 +298,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             exports=(("Export current figure…", self.save_image),
                      ("Export plotted coordinates CSV…", self.save_csv)))
         self._workflow.export_button.setEnabled(False)
-        self._workflow.adopt_reset_figure(self._appearance_widget)
+        self._workflow.adopt_reset_figure(self._appearance_widget, takes_ranges=True)
         # View only (plot_interaction). Reset view is this page's own framing, not a bare
         # auto-range: a box/violin keeps its full category slots. The menu's exports are
         # greyed out with the Export button, until a figure has been generated.
@@ -271,8 +306,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._legend_sources: dict[str, tuple[str, str]] = {}
         self._plot_nav = install_plot_interaction(
             self._plot, readout=self._readout, reset=self._frame_view,
-            exports=(("Export current figure…", lambda: self.save_image(), self.has_data),
-                     ("Export plotted coordinates CSV…", lambda: self.save_csv(), self.has_data)),
+            exports=exports,
             text=_SummaryTextHost(self, self._plot, self._appearance_widget))
         self._workflow.add_view_control(view_button(lambda: self._plot_nav, (self._plot_nav,)))
         self._source_list.itemChanged.connect(self._source_selection_changed)
@@ -282,6 +316,74 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._violin_points.valueChanged.connect(self._draft_changed)
         self._appearance_widget.changed.connect(self._appearance_from_user)
         self._update_method_note()
+
+    def inspector_adapter(self) -> PageAdapter:
+        """How the Analysis Explorer hosts this page (Phase 1, "one layout for every page").
+
+        Built once and cached; nothing but ``AnalysisExplorer.add_page`` (through
+        ``InspectorHost.adopt``) and the hosting test helpers call it. Building it is the
+        move's first half: the Measurement, Summary and Violin rows leave the two grids for
+        one form (the SAME widget instances), and the boxes stay behind as hidden husks. It
+        computes nothing: ``update`` is the existing Generate handler and ``pending`` only
+        compares the draft controls with the figure on screen."""
+        if getattr(self, "_inspector_adapter", None) is None:
+            # as wide as its words, as in the grid: a click in the middle of the row's empty
+            # space would otherwise miss a check box that fills the column
+            self._accepted_only.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            plot = form_rows([("Measurement", self._metric_combo), ("Summary", self._view_combo),
+                              ("Violin grid points", self._violin_points)])
+            self._inspector_adapter = PageAdapter.from_widget(
+                self, "distribution_summaries", self._appearance_widget,
+                groups=[InspectorGroup("sources", "Sources", [
+                            self._source_list, self._accepted_only, self._data_note]),
+                        InspectorGroup("plot", "Plot", [plot, self._method_note]),
+                        InspectorGroup("recipes", "Recipes", [self._templates], expanded=False)],
+                format=FormatSpec(
+                    self._appearance_widget,
+                    controllers=lambda: [c for c in (figure_text_for(self._plot),) if c]),
+                update=self._generate_from_user,
+                update_tooltip="Compute the summary of the ticked sources and draw it. "
+                               "Nothing is computed before this.",
+                pending=self._pending,
+                pending_changed=self.pendingChanged,
+                exports=lambda: [ExportEntry(text, run, enabled, kind) for (text, run, enabled), kind
+                                 in zip(self._exports, ("figure", "data"))],
+                navigation=lambda: self._plot_nav,
+                navigations=lambda: (self._plot_nav,),
+                status_bar=self.statusBar,
+                chrome=[self._workflow],        # hidden when hosted; its objects stay alive
+                on_adopt=self._on_adopt)
+        return self._inspector_adapter
+
+    def _on_adopt(self):
+        """Hosting steps: the boxes whose controls moved out, and the Appearance and Export
+        sections the inspector and the toolbar replace, stay constructed and hidden. The page
+        was budgeted for a page with its controls on it (650x480)."""
+        self._hosted = True
+        self._templates.note.setText(self._templates.note.text().replace("Generate to use", "Update plot to use"))
+        for hidden in (self._data_section, self._analysis_section, self._appearance_section,
+                       self._export_section):
+            hidden.hide()
+        self.setMinimumSize(min(self.minimumWidth(), 280), min(self.minimumHeight(), 360))
+        self._update_status()
+        if not self._snapshot:
+            self._plot.setTitle("Distribution summaries · Update plot to begin")
+
+    def _update_verb(self) -> str:
+        return "Update plot" if self._hosted else "Generate"
+
+    def _pending(self) -> PendingState:
+        """How many independent changes wait for Generate: the draft controls that differ
+        from the figure on screen, never fewer than 1 while the figure is marked stale (a
+        control moved and moved back leaves the mark), 1 before the first Generate."""
+        if not self._snapshot:
+            return PendingState(1, ("not generated yet",)) if self._selected_keys else PendingState()
+        config, applied = self.config(), self._applied_config
+        moved = [_PENDING_REASON[name] for name, value in config.items()
+                 if value != applied.get(name)]
+        if not moved and self._stale:
+            moved = ["an earlier change to the controls or sources"]
+        return PendingState(max(len(moved), int(self._stale)), tuple(moved))
 
     def config(self):
         """Current draft controls, not the recipe of an already generated figure."""
@@ -335,7 +437,9 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             self._draft_changed()
         self._appearance_widget.apply_appearance(appearance)
         config = self.config()
-        self._words_for = (config["metric"], config["kind"])
+        self._words_for = promise((config["metric"], config["kind"]),
+                                  self._appearance_widget.state(),
+                                  axes=_VALUE_AXES, primary=PIN_CURVES)
 
     def selected_sources(self):
         return [self._sources[key] for key in self._selected_keys if key in self._sources]
@@ -412,24 +516,27 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
 
     def _update_status(self):
         if not self._snapshot:
-            text = "Select event sources, then Generate. No analysis runs on opening this page."
+            text = f"Select event sources, then {self._update_verb()}. No analysis runs on opening this page."
         else:
             counts = ", ".join(f"{series['label']}: n={series['n']}"
                                for series in self._snapshot["series"])
-            text = ("Unapplied data/analysis changes · showing the last generated snapshot. "
-                    if self._stale else "Generated snapshot · ") + counts
+            text = ("Unapplied data/analysis changes: " + "; ".join(self._pending().reasons)
+                    + f". Use {self._update_verb()}; showing the last generated result. "
+                    if self._stale else "Generated result · ") + counts
         self._status.setToolTip(text)
         self._status.setAccessibleDescription(text)
         self._status.setText(text if len(text) <= 220 else text[:217] + "…")
         self._workflow.primary_actions[0].setText("Generate ●" if self._stale else "Generate")
         self._workflow.export_button.setEnabled(self.has_data())
+        self.pendingChanged.emit()
 
     def _generate_from_user(self):
         self.refreshRequested.emit()
         try:
-            self.analyze()
+            return self.analyze()
         except (TypeError, ValueError, OverflowError) as exc:
-            QtWidgets.QMessageBox.warning(self, "Generate distribution summary", str(exc))
+            QtWidgets.QMessageBox.warning(self, self._update_verb() + " — distribution summary", str(exc))
+            return False
 
     def refresh(self):
         """Explicit programmatic generation; the host should offer current sources first."""
@@ -441,7 +548,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         if not config["source_keys"]:
             raise ValueError("Select at least one event source.")
         if any(key not in self._sources for key in config["source_keys"]):
-            raise ValueError("A selected source is unavailable. Rebind it or uncheck it before Generate.")
+            raise ValueError(f"A selected source is unavailable. Rebind it or uncheck it before {self._update_verb()}.")
         sources = self.selected_sources()
         metric, kind = config["metric"], config["kind"]
         tables, series, primitives, warnings, frames, recipes = {}, [], [], [], [], []
@@ -511,7 +618,8 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         # words typed on it go back to automatic when the new ones replace it.
         previous, words_for, self._words_for = self._applied_config, self._words_for, None
         moved = (bool(previous) and (previous["metric"], previous["kind"]) != (metric, kind)
-                 and words_for != (metric, kind))
+                 and not promise_stands(words_for, (metric, kind), self._appearance_widget.state(),
+                                        axes=_VALUE_AXES, primary=PIN_CURVES))
         self._applied_config = deepcopy(config)
         self._source_recipes = recipes
         self._snapshot, self._tables = snapshot, tables
@@ -528,7 +636,7 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
     @staticmethod
     def _metric_label(metric, sources, frames):
         if metric == "dwell_s":
-            return "Dwell (s)"
+            return "Dwell (ms)"
         if metric == "amplitude_pA":
             return f"Selected amplitude ({amplitude_units_label(frames)})"
         if metric == "frac_depth":
@@ -588,6 +696,9 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
                 color.setAlpha(60)
                 options.update(fillLevel="enclosed", fillBrush=pg.mkBrush(color))
             item = self._plot.plot(points["x"].to_numpy(copy=True), points["y"].to_numpy(copy=True), **options)
+            from .figure_series import tag_pg_series
+            tag_pg_series(item, view="summary", role="data", identity=primitive["source_key"],
+                          identity_kind="source", label=primitive["legend"], color=primitive["color"])
             self._data_items.append(item)
             if primitive["source_key"] not in seen:
                 entries.append((item, primitive["legend"]))
@@ -595,14 +706,20 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         # Older editable snapshots stored a generated warning prefix in this
         # internal title. Suppress only that prefix for rendering; retain the
         # snapshot and its warnings, and never filter user appearance titles.
-        title = self._snapshot.get("title", "Distribution summaries · Generate to begin")
+        title = self._snapshot.get("title", f"Distribution summaries · {self._update_verb()} to begin")
         self._plot.setTitle(title.removeprefix("⚠ Distribution notes · "))
-        self._plot.setLabel("bottom", self._snapshot.get("x_label", ""))
-        self._plot.setLabel("left", self._snapshot.get("y_label", ""))
+        x_label, y_label = self._snapshot.get("x_label", ""), self._snapshot.get("y_label", "")
+        if self._applied_config.get("metric") == "dwell_s":
+            if self._snapshot.get("categorical"):
+                y_label = "Dwell (ms)"
+            else:
+                x_label = "Dwell (ms)"
+        self._plot.setLabel("bottom", x_label)
+        self._plot.setLabel("left", y_label)
         # The Appearance boxes name the automatic text of the figure on screen.
         for field, text in (("title", title.removeprefix("⚠ Distribution notes · ")),
-                            ("x_label", self._snapshot.get("x_label", "")),
-                            ("y_label", self._snapshot.get("y_label", ""))):
+                            ("x_label", x_label),
+                            ("y_label", y_label)):
             self._appearance_widget.set_automatic_text(field, text)
         ticks = ([(i, _display_source_label(s["label"], i)) for i, s in enumerate(self._snapshot.get("series", []))]
                  if self._snapshot.get("categorical") else None)
@@ -647,7 +764,9 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             text = (f"{series['label']}: {series['n']} finite of {series['n_total']} selected observations; "
                     f"{series['n_excluded']} non-finite excluded.")
             if series["stats"]:
-                text += "\n" + "; ".join(f"{key}={value:.10g}" for key, value in series["stats"].items())
+                text += "\n" + "; ".join(f"{key}={value * (1000. if self._applied_config.get('metric') == 'dwell_s' and key in ('q1', 'median', 'q3', 'lower_whisker', 'upper_whisker', 'iqr', 'lower_fence', 'upper_fence', 'bandwidth') else 1.):.10g}" +
+                    (" ms" if self._applied_config.get('metric') == 'dwell_s' and key in ('q1', 'median', 'q3', 'lower_whisker', 'upper_whisker', 'iqr', 'lower_fence', 'upper_fence', 'bandwidth') else "")
+                    for key, value in series["stats"].items())
             blocks.append(text)
         blocks.extend(self._snapshot["warnings"])
         if self._source_appearance:
@@ -659,20 +778,36 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         return "\n\n".join(self._snapshot.get("warnings", []))
 
     def _appearance_from_user(self, state):
-        renamed = self._renamed_sources(self._appearance, state)
-        self._appearance = state
-        if renamed is not None:
-            self.set_source_appearance_state(renamed)     # draws with the names
-        else:
-            self._apply_appearance()
+        overrides = validate_source_appearance(self._source_appearance if state.source_appearance is None
+                                               else state.source_appearance)
+        self._appearance = replace(state, source_appearance=overrides)
+        self._source_appearance = overrides
+        self._source_appearance_editor.set_state(overrides)
+        if state != self._appearance:
+            self._appearance_widget.set_state(self._appearance)
+        self._apply_appearance()
         self.workspaceChanged.emit()
 
     def _apply_appearance(self):
         pins = _pins_for(self._snapshot)
-        apply_plot_appearance(self._plot, self._appearance.for_view(pins, primary=PIN_CURVES),
+        if self._applied_config:
+            from ..core.quantity_display import quantity_for
+            from .quantity_axis import present_page_axes
+            metric = self._applied_config.get("metric", "")
+            side = "left" if self._snapshot.get("categorical") else "bottom"
+            quantities = {side: quantity_for(metric)}
+            other = "bottom" if side == "left" else "left"
+            quantities[other] = quantity_for("source" if other == "bottom" else "probability",
+                declared_unit="-", quantity="categorical" if other == "bottom" else "dimensionless")
+            present_page_axes(self, self._plot, quantities, view=pins, primary=PIN_CURVES)
+        apply_plot_appearance(self._plot, replace(self._appearance.for_view(pins, primary=PIN_CURVES), series_styles=None),
                               plot_widget=self._plot_widget, data_items=self._data_items)
         self._pins_drawn = pins
         self._apply_source_appearance()
+        from .figure_series import apply_pg_series_styles
+        apply_pg_series_styles(self._plot,self._appearance,data_items=self._data_items)
+        from .figure_series import sync_series_legend
+        sync_series_legend(self._plot)
 
     def _sync_source_appearance_editor(self):
         if self._snapshot:
@@ -684,16 +819,22 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         self._source_appearance_editor.set_sources(sources)
         self._source_appearance_editor.set_state(self._source_appearance)
 
-    def _source_appearance_from_user(self, state):
-        self.set_source_appearance_state(state)
-        self._sync_name_carriers()
-        self.workspaceChanged.emit()
+    def _source_appearance_from_user(self, state, *, run=False, source_key=None):
+        updated = with_source_appearance_edit(self._appearance_widget.state(), state,
+            view='summary', source_key=source_key)
+        if run:
+            self._appearance_widget._edit("source_appearance", updated.source_appearance)
+        else:
+            self._appearance_widget.apply_appearance(updated)
 
     def source_appearance_state(self):
         return deepcopy(self._source_appearance)
 
     def set_source_appearance_state(self, state):
+        """Restore the compatibility source map into the one appearance/history value."""
         self._source_appearance = validate_source_appearance(state)
+        self._appearance = replace(self._appearance, source_appearance=self._source_appearance)
+        self._appearance_widget.set_state(self._appearance)
         self._source_appearance_editor.set_state(self._source_appearance)
         self._apply_appearance()
         self._warnings.set_warnings(self._snapshot.get("warnings", []), full_text=self.details_text())
@@ -706,12 +847,22 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
         entries, seen = [], set()
         ranges = deepcopy(self._plot.viewRange())
         auto = list(self._plot.getViewBox().autoRangeEnabled())
+        # A shared style's data color is the default for an unclassified series.
+        # These primitives already carry source identity colors. Preserve those,
+        # while retaining deliberate figure overrides and legacy unbound looks.
+        global_color = self._appearance.data_color
+        binding = self._appearance.style_binding
+        if binding and "data_color" not in binding.get("overrides", {}):
+            global_color = None
         self._plot.disableAutoRange()
         try:
             for item, primitive in zip(self._data_items, self._snapshot.get("primitives", [])):
                 key = primitive["source_key"]
+                descriptor = getattr(item, '_nanoscope_series_descriptor', None)
+                if descriptor is not None:
+                    item._nanoscope_series_descriptor = replace(descriptor, label=names[key])
                 color = (self._source_appearance.get(key, {}).get("color") or
-                         self._appearance.data_color or primitive["color"])
+                         global_color or primitive["color"])
                 for option, setter in (("pen", item.setPen), ("symbolPen", item.setSymbolPen)):
                     if option == "symbolPen" and not primitive["symbols"]:
                         continue
@@ -752,31 +903,11 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
                 if enabled:
                     self._plot.enableAutoRange(axis=axis, enable=enabled)
 
-    def _rename_source_from_figure(self, source_key: str, text: str | None) -> None:
-        """A legend rename typed in the figure: the Source names editor's display label
-        for that source (empty or Reset name restores the captured one), as ONE appearance
-        Undo step, as a rename is in every other plot window.
-
-        The name stays in the Source names store (one store). The step only CARRIES it, as
-        the text of the appearance's ``legend.entry.<captured name>`` (:meth:`_name_carrier`):
-        the name the legend shows now is put there silently (the step's "before"), the
-        typed one is the step, and :meth:`_appearance_from_user` writes whatever the carrier
-        becomes -- the rename, its Undo, its Redo -- back to the store. The carrier draws
-        nothing and is not saved (:meth:`appearance_state`).
-        """
+    def _rename_source_from_figure(self, source_key: str, text: str | None, *,
+                                   run: bool = False) -> None:
+        """Canvas and source-table renames use the same source map and Undo step."""
         new = text.strip() if text and text.strip() else None
-        carrier = self._name_carrier(source_key)
-        if carrier is None:          # not a source of the figure on show: the store only
-            self._source_appearance_from_user(self._with_label(source_key, new))
-            return
-        captured = self._captured_label(source_key)
-        widget = self._appearance_widget
-        shown = self._source_appearance.get(source_key, {}).get("label") or captured
-        if widget.state().text_style(carrier).text != shown:
-            self._appearance = widget.state().with_text_style(carrier, TextStyle(text=shown))
-            widget.set_state(self._appearance)
-        widget.apply_appearance(widget.state().with_text_style(
-            carrier, TextStyle(text=new or captured)))
+        self._source_appearance_from_user(self._with_label(source_key, new), run=run)
 
     def _with_label(self, source_key: str, label: str | None, names=None) -> dict:
         """The Source names store (or ``names``) with ``source_key``'s display label set
@@ -793,72 +924,16 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             state.pop(source_key, None)
         return state
 
-    def _captured_label(self, source_key: str) -> str:
-        return next((str(series["label"]) for series in self._snapshot.get("series", [])
-                     if series["key"] == source_key), "")
-
-    def _name_carrier(self, source_key: str) -> str | None:
-        """The appearance key that carries a figure rename of ``source_key`` through Undo:
-        ``legend.entry.<its captured name>``, numbered as the legend numbers two sources
-        that share one, so the step reads "legend ‘Apo’ ‘Apo-ferritin’". None for a key
-        that is not a source of the figure on show."""
-        series = self._snapshot.get("series", [])
-        labels = [" ".join(str(source["label"]).split())[:150] for source in series]
-        for number, (source, label) in enumerate(zip(series, labels)):
-            if source["key"] == source_key:
-                name = label if label and labels.count(label) == 1 else f"{number + 1} · {label}"
-                key = f"legend.entry.{name}"
-                return key if valid_element_key(key) else None
-        return None
-
-    def _renamed_sources(self, before: PlotAppearance, after: PlotAppearance) -> dict | None:
-        """The Source names store once an appearance step from ``before`` to ``after`` has
-        moved a name carrier, or None when it moved none. A carrier the step took away (a
-        template) or brought back (its Undo) leaves the name alone: only a carrier moved
-        from one name to another is written."""
-        names = self._source_appearance
-        for source in self._snapshot.get("series", []):
-            carrier = self._name_carrier(source["key"])
-            if carrier is None:
-                continue
-            name, was = after.text_style(carrier).text, before.text_style(carrier).text
-            # A rename always goes from name to name (the current one is put on the carrier
-            # silently first). A carrier a step brings back -- the Undo of a template or of
-            # Reset figure -- is no rename: a name set since in Source names stays.
-            if name is None or was is None or name == was:
-                continue
-            label = None if name == str(source["label"]) else name
-            if label != names.get(source["key"], {}).get("label"):
-                names = self._with_label(source["key"], label, names)
-        return None if names is self._source_appearance else names
-
-    def _sync_name_carriers(self) -> None:
-        """After a name set in Source names and colors (not a step): the carriers the
-        appearance holds follow it, silently, so an Undo or Redo next to it lands on the
-        names as they were then rather than on one this editor replaced."""
-        state = widget_state = self._appearance_widget.state()
-        for source in self._snapshot.get("series", []):
-            carrier = self._name_carrier(source["key"])
-            if carrier is None or state.text_style(carrier).text is None:
-                continue
-            shown = (self._source_appearance.get(source["key"], {}).get("label")
-                     or str(source["label"]))
-            state = state.with_text_style(carrier, TextStyle(text=shown))
-        if state != widget_state:
-            self._appearance = state
-            self._appearance_widget.set_state(state)
-
     def appearance_state(self):
-        # Without the legend-name carriers: the names are saved once, in the Source names
-        # store (``source_appearance``), which is what draws them.
-        kept = tuple((key, style) for key, style in (self._appearance.text or ())
-                     if not key.startswith("legend.entry."))
-        return replace(self._appearance, text=kept or None).to_dict()
+        return self._appearance.to_dict()
 
     def set_appearance_state(self, state):
-        self._appearance = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
+        appearance = state if isinstance(state, PlotAppearance) else PlotAppearance.from_mapping(state)
+        source = self._source_appearance if appearance.source_appearance is None else appearance.source_appearance
+        self._source_appearance = validate_source_appearance(source)
+        self._appearance = replace(appearance, source_appearance=self._source_appearance)
+        self._source_appearance_editor.set_state(self._source_appearance)
         self._appearance_widget.set_state(self._appearance)
-        # A restored figure starts its appearance history over (design §4.2).
         self._appearance_widget.clear_history()
         self._apply_appearance()
 
@@ -885,7 +960,11 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             frame.insert(0, "source_label", primitive["source_label"])
             frame.insert(0, "source_key", primitive["source_key"])
             parts.append(frame)
-        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=_PLOT_COLUMNS)
+        frame = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=_PLOT_COLUMNS)
+        from .quantity_axis import export_display_columns
+        return export_display_columns(frame, {name: basis.quantity for name, side in
+            (("x", "bottom"), ("y", "left")) if
+            (basis := getattr(self._plot.getAxis(side), "_nanoscope_quantity_basis", None)) is not None})
 
     def snapshot_state(self):
         payload = {"schema_version": 1, "draft": self.config(),
@@ -971,6 +1050,9 @@ class DistributionSummaryWindow(QtWidgets.QMainWindow):
             raise ValueError("Invalid saved distribution presentation state.")
         appearance = PlotAppearance.from_mapping(payload.get("appearance", {}))
         source_appearance = validate_source_appearance(payload.get("source_appearance", {}))
+        appearance = replace(appearance, source_appearance=(source_appearance
+            if appearance.source_appearance is None else appearance.source_appearance))
+        source_appearance = validate_source_appearance(appearance.source_appearance)
         ranges = payload.get("view_range")
         if ranges is not None:
             try:

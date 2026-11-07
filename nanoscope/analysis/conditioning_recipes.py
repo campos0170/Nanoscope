@@ -134,7 +134,7 @@ CHAIN_DEFAULTS: Mapping[str, Any] = MappingProxyType({
 #: ``detect_events`` reads it whatever the chain holds (the owner's decision, design 13.4).
 #: One definition, read by this module's judge and by ``analysis.lineage``.
 THRESHOLD_KEYS_BY_MODULE: Mapping[str, tuple[str, ...]] = MappingProxyType({
-    "detect.schmitt": ("k_in", "k_out", "min_dwell_s", "max_dwell_s", "merge_gap_s"),
+    "detect.schmitt": ("k_in", "k_out", "noise_policy", "noise_window_s", "min_dwell_s", "max_dwell_s", "merge_gap_s"),
     "detect.cusum": ("cusum_k", "cusum_h", "min_dwell_s", "max_dwell_s", "merge_gap_s"),
 })
 
@@ -477,6 +477,7 @@ _DETREND_KNOB_TEXT: dict[str, tuple[str, Any]] = {
 #: Each detection threshold's words in a difference; CUSUM's k and h say whose they are.
 _THRESHOLD_TEXT: dict[str, tuple[str, Any]] = {
     "k_in": ("k_in", _g), "k_out": ("k_out", _g),
+    "noise_policy": ("noise thresholds", str), "noise_window_s": ("noise window", _seconds),
     "cusum_k": ("CUSUM k", _g), "cusum_h": ("CUSUM h", _g),
     "min_dwell_s": ("min dwell", _seconds), "max_dwell_s": ("max dwell", _seconds),
     "merge_gap_s": ("merge gap", _seconds),

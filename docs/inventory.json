@@ -741,14 +741,14 @@
         "kind": "menu-action",
         "group": "Analysis > Explore this recording",
         "what_it_does": "Open optional ECDF, empirical-survival, box and violin controls.",
-        "notes": "Choose sources and Generate; opening does not generate analysis. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
+        "notes": "Choose sources and Update plot; opening does not generate analysis. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
       },
       {
         "label": "Comparison figures…",
         "kind": "menu-action",
         "group": "Analysis > Explore this recording",
         "what_it_does": "Open facets, pair matrices and individual-observation plots.",
-        "notes": "Choose sources/metrics and Generate explicitly. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
+        "notes": "Choose sources/metrics and Update plot explicitly. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
       },
       {
         "label": "Reconcile detector results…",
@@ -803,8 +803,8 @@
         "label": "Figure Library…",
         "kind": "menu-action",
         "group": "Analysis > Export",
-        "what_it_does": "Open named frozen figures in this project.",
-        "notes": "Separate from Event gallery. Save Project to persist newly added snapshots. Source: nanoscope/gui/main_window.py; build_info_dialog.py."
+        "what_it_does": "Select a named frozen Snapshot/composition in the Analysis Explorer Figures list.",
+        "notes": "Compatibility menu name: opens the same embedded saved-figure view, not another inventory. Save Project persists new snapshots. Source: nanoscope/gui/main_window.py; saved_figure_view.py."
       },
       {
         "label": "Analysis home…",
@@ -821,11 +821,11 @@
         "notes": "No shortcut (⌘M is Add measurement to list)."
       },
       {
-        "label": "Event inspector / Event gallery / Analysis Explorer / Figure Library",
+        "label": "Event inspector / Event gallery / Analysis Explorer",
         "kind": "menu-action",
         "group": "Window",
         "what_it_does": "One entry per window NanoScope opens, checked while it is on screen. Choosing one opens it or brings it forward through its own opener (the same as Analysis ▸ Event inspector… / Event gallery…), so it is re-fed exactly as the menu item would. The inspector's entry reads 'Event inspector — docked' while it is docked; the main window is listed by its title.",
-        "notes": "Under Analysis Explorer, one indented entry per page the Explorer has open brings it forward on that page. Guided first analysis, About NanoScope, the Incubation study launcher and the Original Zn reference recipe are listed once they have been opened this session."
+        "notes": "Under Analysis Explorer, one indented entry per page the Explorer has open brings it forward on that page. Guided first analysis, About NanoScope, the Incubation study launcher and the Original Zn reference recipe are listed once they have been opened this session. Saved Snapshots/compositions are displayed inside Analysis Explorer rather than a separate Library window."
       },
       {
         "label": "Dock Event inspector beside the trace",
@@ -996,11 +996,11 @@
         "notes": "The chip is HIDDEN entirely until the channel is ticked — an untick makes it disappear rather than grey out. Opens a colour picker titled \"Layer colour\". This is how you tell overlaid comparison traces apart."
       },
       {
-        "label": "Δt (s)",
+        "label": "Δt (ms)",
         "kind": "spinbox",
         "group": "File Manager — channel tree",
         "what_it_does": "Slides this trace left or right along the time axis so it lines up with the others. Tooltip: \"Shift this layer along the time axis to align it with others\".",
-        "notes": "Six decimal places, range −1,000,000 to 1,000,000 s, arrow step 0.001 s, suffix \" s\". Value is only committed when you press Enter or leave the box, not on every keystroke. DISABLED until the channel is ticked. Also permanently disabled for files with no declared sample rate, where the tooltip changes to \"This file declares no sample rate; alignment is unavailable.\""
+        "notes": "Displayed milliseconds; stored layer offset remains seconds. Commit with Enter or focus loss. Disabled until the channel is visible, and unavailable without a declared sample rate."
       },
       {
         "label": "Unknown voltage",
@@ -1849,14 +1849,14 @@
         "kind": "spinbox",
         "group": "Detection ▸ Detection",
         "what_it_does": "Events shorter than this are dropped outright as sub-resolution. Raise it to suppress noise spikes and filter-limited blips; lower it to keep the fastest translocations — along with more false positives.",
-        "notes": "Range 0.0000000–1.0000000 s, step 0.00001, default 0.0000200 s (20 µs). Compare it with the rise-time readout on the Preprocess tab: anything below about twice the rise time is filter-limited anyway."
+        "notes": "Range 0.0000000–1.0000000 s, step 0.00001, default 0.0000200 s (20 µs). Compare it with the rise-time readout on the Preprocess tab: anything below about twice the rise time is filter-limited anyway. Current duration controls display ms and convert to stored seconds; historical scientific values in s above are equivalent quantities, not the current widget suffix."
       },
       {
         "label": "max dwell",
         "kind": "spinbox",
         "group": "Detection ▸ Detection",
         "what_it_does": "Tooltip: \"Events longer than this are KEPT but marked rejected (a clog is real signal you must see, not something to disappear). It also truncates the dwell sample on the right: the fits read this limit from provenance and condition the likelihood on it, because a left-truncation-only fit of a right-cut sample biases tau SHORT (-24% when the limit sits at 2.5 tau).\" Lower it to flag clogs and stuck events; leave it at 0 to impose no upper limit.",
-        "notes": "Range 0.000000–100.000000 s, step 0.001, default 0.000000 s, and the suffix says it: \" s  (0 = off)\". Must exceed min dwell or the run is rejected. Events over the limit stay in the table with flag 'dwell>max_dwell_s' and accepted = false."
+        "notes": "Range 0.000000–100.000000 s, step 0.001, default 0.000000 s, and the suffix says it: \" s  (0 = off)\". Must exceed min dwell or the run is rejected. Events over the limit stay in the table with flag 'dwell>max_dwell_s' and accepted = false. Current duration controls display ms and convert to stored seconds; historical scientific values in s above are equivalent quantities, not the current widget suffix."
       },
       {
         "label": "merge gap",
@@ -2158,14 +2158,16 @@
         "kind": "spinbox",
         "group": "ML tab > Model preprocessing",
         "what_it_does": "Masked-median only: the rough window that exposes events before they are masked. Visible only when the baseline is 'event-masked median'.",
-        "from_crosscheck": true
+        "from_crosscheck": true,
+        "notes": " Current duration controls display ms and convert to stored seconds; historical scientific values in s above are equivalent quantities, not the current widget suffix."
       },
       {
         "label": "base window",
         "kind": "spinbox",
         "group": "ML tab > Model preprocessing",
         "what_it_does": "Masked-median only: the short window that tracks drift after events have been masked and interpolated over. Visible only when the baseline is 'event-masked median'.",
-        "from_crosscheck": true
+        "from_crosscheck": true,
+        "notes": " Current duration controls display ms and convert to stored seconds; historical scientific values in s above are equivalent quantities, not the current widget suffix."
       },
       {
         "label": "mask sigma",
@@ -2529,7 +2531,7 @@
         "kind": "control",
         "group": "Signal Conditioning ▸ Baseline drift",
         "what_it_does": "Set the event-masked estimator’s rough and tracking windows.",
-        "notes": "Recording-dependent seconds; they are distinct from the event-duration threshold. Source: nanoscope/gui/panels.py."
+        "notes": "Recording-dependent seconds; they are distinct from the event-duration threshold. Source: nanoscope/gui/panels.py. Current duration controls display ms and convert to stored seconds; historical scientific values in s above are equivalent quantities, not the current widget suffix."
       },
       {
         "label": "mask threshold / mask dilation",
@@ -2728,7 +2730,7 @@
         "kind": "table",
         "group": "Manual measurement — readout",
         "what_it_does": "Read-only live readout of everything about the current cursor selection, recomputed as you drag. Eighteen rows in order: \"n samples\", \"dwell\", \"amplitude\", \"dI/I₀ (frac)\", \"level\", \"baseline I₀\", \"mean\", \"median\", \"std\", \"variance\", \"min\", \"max\", \"peak-to-peak\", \"rms\", \"skewness\", \"kurtosis (excess)\", \"area / ECD\", \"SNR\".",
-        "notes": "Not selectable, not editable, takes no focus. Dwell auto-scales its unit (µs / ms / s); signal rows carry the channel's units, area/ECD carries units·s, variance units². \"baseline I₀\" is a LOCAL open-pore reference read from a window just outside your selection (capped at ~3 ms), not a global baseline. \"kurtosis (excess)\" is 0 for a Gaussian. A row showing \"—\" during a preview has a tooltip explaining it was withheld, not missing. The readout does not update on every drag frame — it settles ~60 ms after the cursors stop, and instantly on mouse-release."
+        "notes": "Not selectable, not editable, takes no focus. Dwell displays ms; signal rows carry the channel's units, area/ECD carries units·s, variance units². \"baseline I₀\" is a LOCAL open-pore reference read from a window just outside your selection (capped at ~3 ms), not a global baseline. \"kurtosis (excess)\" is 0 for a Gaussian. A row showing \"—\" during a preview has a tooltip explaining it was withheld, not missing. The readout does not update on every drag frame — it settles ~60 ms after the cursors stop, and instantly on mouse-release."
       },
       {
         "label": "≈ preview: 1:N sampling (M of T samples). Saving re-measures every sample.",
@@ -3008,17 +3010,18 @@
         "notes": "Half-open, so end_idx − start_idx is the event length in samples. Rewritten by an Event Inspector region drag."
       },
       {
-        "label": "t_start_s",
+        "label": "Start time (ms)",
         "kind": "table",
         "group": "Event table — columns",
-        "what_it_does": "When the event starts, in seconds from the start of the recording."
+        "what_it_does": "Recording-relative event start displayed in ms.",
+        "notes": "Stable stored/export key t_start_s remains seconds from the first loaded sample; sample bounds remain unchanged."
       },
       {
-        "label": "dwell_s",
+        "label": "Dwell time (ms)",
         "kind": "table",
         "group": "Event table — columns",
-        "what_it_does": "How long the event lasted, in seconds ((end_idx − start_idx)/sample rate).",
-        "notes": "Shown to 6 significant figures, unlike most float columns which show 4."
+        "what_it_does": "Event duration displayed in ms.",
+        "notes": "Stored/export key dwell_s remains seconds, computed from (end_idx − start_idx)/sample rate."
       },
       {
         "label": "baseline_pA",
@@ -3384,7 +3387,7 @@
         "label": "dwell:",
         "kind": "table",
         "group": "Event Inspector — readout",
-        "what_it_does": "How long the event lasted, in microseconds, with the seconds value in brackets after it."
+        "what_it_does": "Event duration in milliseconds; stored dwell remains seconds."
       },
       {
         "label": "depth:",
@@ -3543,8 +3546,8 @@
       {
         "group": "Event Inspector",
         "kind": "table",
-        "label": "Event 12   ·   dwell 250 µs   ·   depth 45.2 pA   ·   dI/I0 0.153   ·   filter-limited",
-        "what_it_does": "The one-line title drawn above the waveform (separate from the \"Event\" readout box below it): event id, dwell in µs, depth in the channel's own units and dI/I0, joined by \"   ·   \". The trailing \"filter-limited\" appears only when that event is filter-limited. The title is cleared in the empty states. Source: _event_title(), event_inspector.py:851-862.",
+        "label": "Event title: dwell (ms), depth and fractional depth",
+        "what_it_does": "One-line event identity and measurement summary. Duration uses ms; depth retains the declared signal unit. Scientific quality qualifications remain available in persistent readouts/details.",
         "from_crosscheck": true
       },
       {
@@ -4167,15 +4170,227 @@
     ]
   },
   {
+    "key": "project-figures",
+    "area": "Project Figures, styles, recipes, millisecond presentation and batch export",
+    "summary": "Build 45.37.98. These common controls work with independent figure records and retained numerical results. Opening Format, editing a style, creating an empty figure or exporting a saved result does not run scientific analysis.",
+    "opened_by": "Analysis Explorer; sources: figure_list.py, figure_workspace.py, figure_recipes.py, plot_styles.py, format_inspector.py, project_sources.py, project_style_editor.py, figure_composition.py and figure_batch_export_dialog.py.",
+    "gotchas": [
+      "A current lineage check does not validate the scientific method. Dormant describes editor residency, not lost results.",
+      "A style, a recipe, an editable live figure and a frozen Snapshot are different objects. Style batches exclude Snapshots and compositions.",
+      "Time display is ms only when the quantity basis is declared. Unknown-rate traces remain samples; normalized time, frequency/rates and charge keep their own units. Raw CSV keys retain their canonical meaning.",
+      "Older screenshots keep their capture dates. The approved Phase 4 images, exact source revision and unchanged input hashes are recorded in manual-phase4-captures.json.",
+      "Pending analytical settings do not describe the displayed completed result until Update plot succeeds. A failed summary update preserves the previous result and pending/stale state. Export does not silently rerun analysis. Reset view changes the viewport; Reset figure resets appearance."
+    ],
+    "controls": [
+      {
+        "label": "Figures / State",
+        "kind": "control",
+        "group": "Analysis Explorer",
+        "what_it_does": "Lists live figures, Snapshots and compositions with Current, Stale, Saved result, No data and optional Dormant state.",
+        "notes": "Selecting a saved row displays its frozen preview/provenance in the same canvas without regeneration. The header uses that figure’s sources. No-data figures remain No data after reopening; draft changes remain Stale."
+      },
+      {
+        "label": "Figures",
+        "kind": "toggle",
+        "group": "Common toolbar",
+        "shortcut": "Ctrl/⌘Shift+L",
+        "what_it_does": "Shows or hides the project Figures list to change available canvas space.",
+        "notes": "Remembered view preference. Does not delete figures, change the selected figure or recalculate data. Inspector is a separate right-panel toggle."
+      },
+      {
+        "label": "New ▾",
+        "kind": "control",
+        "group": "Figures / common toolbar",
+        "what_it_does": "Creates another independent figure, even of a type already present.",
+        "notes": "Each entry describes its inputs. Direct entries include Pair-plot matrix, Faceted comparisons and Individual-event overlays. Plain New uses the project default style and waits for Update plot; it does not calculate a result."
+      },
+      {
+        "label": "Duplicate / Rename / Delete / Restore deleted",
+        "kind": "control",
+        "group": "Figures",
+        "what_it_does": "Manage selected live figures and saved Snapshots/compositions by identity.",
+        "notes": "Duplicate preserves the selected entry’s editable/frozen kind and selects the new copy. Rename changes its list name. Delete removes only selected entries; Restore deleted restores live figures until the project closes. Save Project persists the set."
+      },
+      {
+        "label": "From recipe…",
+        "kind": "control",
+        "group": "New ▾",
+        "what_it_does": "Starts a new figure from saved analytical settings and look.",
+        "notes": "Does not copy sources or computed results."
+      },
+      {
+        "label": "Include typed title, axis labels, fit wording and captions",
+        "kind": "control",
+        "group": "From recipe…",
+        "what_it_does": "Opt into copying literal wording from the recipe.",
+        "notes": "Off by default; the recipe look is included either way."
+      },
+      {
+        "label": "Save as recipe… / Manage recipes…",
+        "kind": "control",
+        "group": "Export ▾",
+        "what_it_does": "Use the existing recipe stores for Distributions, summaries, comparisons, events, noise and voltage dependence.",
+        "notes": "I-V/Subpopulations explain their different workflow; no inactive save control claims unsupported recipe behavior."
+      },
+      {
+        "label": "This figure / Selected figures / All live figures",
+        "kind": "control",
+        "group": "Style ▾",
+        "what_it_does": "Apply a pinned look to this figure, selected live rows, or all live figures including dormant records and open retained Study/Report editors.",
+        "notes": "One Undo step per affected editor. Frozen Snapshots/compositions are excluded. Selecting a saved entry disables live styling; new figures use the project default."
+      },
+      {
+        "label": "Built in / Project styles / On this computer",
+        "kind": "control",
+        "group": "Style scope submenu",
+        "what_it_does": "Choose a pinned reusable style from the explicit storage scope.",
+        "notes": "All three stores are offered in Explorer and retained Study/Report/composer style menus. Existing figures retain their pinned revision after a definition changes."
+      },
+      {
+        "label": "Project default for new figures",
+        "kind": "control",
+        "group": "Style ▾",
+        "what_it_does": "Sets the style used by a plain New figure.",
+        "notes": "Does not restyle existing figures; Duplicate and From recipe retain their respective look."
+      },
+      {
+        "label": "Save this figure’s look as… / Manage saved looks…",
+        "kind": "control",
+        "group": "Style ▾",
+        "what_it_does": "Save and manage project style definitions.",
+        "notes": "Editing creates a new revision; already-bound figures stay pinned."
+      },
+      {
+        "label": "Save this figure’s look on this computer… / Manage styles on this computer…",
+        "kind": "control",
+        "group": "Style ▾",
+        "what_it_does": "Save and manage local reusable definitions.",
+        "notes": "Applied snapshots travel with figures; local catalog edits do not silently rewrite them."
+      },
+      {
+        "label": "Style name · revision · ●",
+        "kind": "control",
+        "group": "Common toolbar",
+        "what_it_does": "Shows the current pinned style identity and local look-override marker.",
+        "notes": "Custom/unavailable states are explicit; the app does not infer a named style from similar pixels."
+      },
+      {
+        "label": "Font / text roles / line width / marker size",
+        "kind": "control",
+        "group": "Style editor",
+        "what_it_does": "Edits physical-point typography and fractional stroke/marker sizes.",
+        "notes": "Panel-letter typography is a shared role; renderer conversion preserves physical units."
+      },
+      {
+        "label": "Frame / Grid / Palette",
+        "kind": "control",
+        "group": "Style editor / Format Figure",
+        "what_it_does": "Controls supported frame/grid appearance and default series colors.",
+        "notes": "Source/class identity colors and explicit series overrides retain precedence; heatmap color maps remain separate."
+      },
+      {
+        "label": "Default canvas width / height",
+        "kind": "control",
+        "group": "Style editor",
+        "what_it_does": "Optional physical export defaults in mm.",
+        "notes": "One dimension keeps captured aspect; neither means Native. Bounds 0.1–2000 mm. No analytical redraw or panel rearrangement."
+      },
+      {
+        "label": "Single-column width / Double-column width",
+        "kind": "control",
+        "group": "Style editor",
+        "what_it_does": "Names reusable export widths for this style.",
+        "notes": "Generic/reference presets do not certify journal requirements; missing widths are not invented."
+      },
+      {
+        "label": "Style preview — synthetic points",
+        "kind": "control",
+        "group": "Style editor",
+        "what_it_does": "Shows typography, lines, symbols, palette and frame on illustrative data.",
+        "notes": "Does not use or recalculate the current recording."
+      },
+      {
+        "label": "Series / Selected series",
+        "kind": "control",
+        "group": "Format",
+        "what_it_does": "Selects an existing scientific series by stable identity.",
+        "notes": "Supported color, width, size and visibility are independent figure-owned overrides. Hiding a series is not rejecting events."
+      },
+      {
+        "label": "Project Sources…",
+        "kind": "control",
+        "group": "Format ▸ Series",
+        "what_it_does": "Edits project display names/colors for exact existing PlotSource IDs.",
+        "notes": "Reads cached sources without recomputation. Local figure overrides win; frozen Snapshots are unchanged."
+      },
+      {
+        "label": "set here / from style / from figure / default",
+        "kind": "control",
+        "group": "Format",
+        "what_it_does": "Shows property inheritance and clears one explicit override.",
+        "notes": "Copy/paste compatible appearance without words or scientific identities; series copying transfers ink rather than visibility."
+      },
+      {
+        "label": "Snapshot to Figures… / Snapshot details…",
+        "kind": "control",
+        "group": "Export ▾",
+        "what_it_does": "Freeze the displayed picture/result/lineage, or inspect saved entries.",
+        "notes": "Selects the new or chosen saved row and shows it in the Explorer canvas. Saved selection offers Figure/Data/Bundle exports and disables live Update/Undo/Style. A duplicated Snapshot remains frozen."
+      },
+      {
+        "label": "Shared style / Panel labels",
+        "kind": "control",
+        "group": "Composition editor",
+        "what_it_does": "Use a pinned shared look for panel-letter typography in a frozen composition.",
+        "notes": "Built-in, project and computer style definitions are available. Literal letters, positions and explicit typography remain. The captured composition style also supplies export canvas and named-column sizing."
+      },
+      {
+        "label": "Export selected figures…",
+        "kind": "control",
+        "group": "Export ▾",
+        "what_it_does": "Plan and serially export selected live figures, Snapshots and compositions.",
+        "notes": "No Update plot/detection/fit. Review filenames, failures and unavailable outputs; dormant capture uses the saved result."
+      },
+      {
+        "label": "Style canvas (Native if unset)",
+        "kind": "control",
+        "group": "Batch export ▸ Size",
+        "what_it_does": "Uses each pinned style’s optional canvas dimensions.",
+        "notes": "Explicit Native or column choices remain. A requested missing named width fails explicitly instead of guessing."
+      },
+      {
+        "label": "Display time (ms) / stable stored keys",
+        "kind": "control",
+        "group": "Time widgets, axes, tables and readouts",
+        "what_it_does": "Displays declared durations/clocks in ms and inversely converts typed entries.",
+        "notes": "Stored seconds, historical µs/hour bases and sample indices retain their canonical units. Clock origins remain distinct. Density gets an inverse unit factor; raw and display-valued export columns are distinguished."
+      },
+      {
+        "label": "Save and convert / Save a copy / Cancel",
+        "kind": "control",
+        "group": "Save an older project",
+        "what_it_does": "Convert a v11/v12 project to current v13 with a verified original backup and staged readback.",
+        "notes": "Older applications cannot open v13. Unknown records remain carried and raw recordings remain references."
+      },
+      {
+        "label": "Figure… / Data… / Bundle…",
+        "kind": "menu item",
+        "group": "Export ▾ while Snapshot/composition selected",
+        "what_it_does": "Export the exact selected frozen picture, numerical CSV or complete bundle.",
+        "notes": "No hidden live editor is targeted. Select a live row to resume Update, Undo or Format styling."
+      }
+    ]
+  },
+  {
     "key": "plots",
     "area": "Distributions, descriptive comparisons, appearance and publication figures",
-    "summary": "The Analysis Explorer hosts Distributions, Distribution summaries and Comparison figures alongside recording-level pages. Distributions offers histograms, scatter, KDE, PCA and clustering from stored event or manual-measurement sources; sources are separately identified, not silently pooled. Optional descriptive pages provide ECDF, uncensored empirical survival, box/violin, facets, pair matrices and strip/swarm comparisons. The common Data → Analysis → Appearance → Export structure separates numerical actions from styling. Figure Library stores named frozen numerical/appearance snapshots, supports multi-panel composition, and exports images or reproducible bundles. Current describes source/settings agreement, not scientific validity.",
+    "summary": "Distributions and descriptive comparisons share the project Figures list, Data & analysis / Format, pinned styles, recipes, Snapshots and publication export. The current controls use milliseconds for declared times while preserving stored scientific units. Historical numerical examples retain their original analytical meaning.",
     "opened_by": "Analysis → Distributions… / Distribution summaries… / Comparison figures…, or the corresponding Analysis home entry. Save to Figure Library… and Save figure bundle… are on the Explorer; Figure Library… is also in Analysis. Sources: nanoscope/gui/analysis_explorer.py, plots_panel.py, distribution_summary_panel.py, comparison_figures_panel.py, plot_appearance.py, source_appearance.py, plot_export_options.py, figure_library.py and figure_composer.py.",
     "gotchas": [
       "A generated plot is a captured result, not a live mirror. Refresh current or the page Refresh re-gathers the relevant live sources; saved snapshots remain frozen. Opening or exporting a stored snapshot does not run scientific analysis.",
       "Ticking or unticking a source silently discards any clustering and PCA result you had computed, but keeps a pinned Axis range and the words you typed (another source is not another quantity) unless the new row set no longer carries the plotted column; toggling 'Use accepted events only' discards the clustering and PCA result and leaves the Axis range pinned. Either way you must press Run clustering / Run PCA again.",
       "'Axis range' only moves the camera; 'Fit range' changes which data the fit actually sees. Using the wrong one is the easiest mistake in this window.",
-      "Fit range numbers are typed in the unit the axis is showing: whatever the Time unit combo shows for a time column (ms by default), and the column's own unit otherwise — pA for depth_pA, dimensionless for frac_depth. Never raw seconds unless Time unit is \"s\".",
+      "Fit range numbers are typed in the unit the axis is showing: ms for a declared time column, and the column's own unit otherwise — pA for depth_pA, dimensionless for frac_depth. Stored seconds are converted inversely from the displayed ms entry.",
       "Time unit rescales displayed coordinates and axis text for time-valued quantities; source data and fitted scientific quantities remain stored in seconds. Custom axis labels must retain the correct displayed unit and log convention.",
       "With two or more sources ticked, colour means SOURCE: the histogram 'Colour by' is disabled and the scatter 'Colour by = Cluster' is ignored. Untick all but one source to colour by cluster.",
       "Clustering and PCA always run on the PRIMARY (first ticked) source only, never on the overlay as a whole.",
@@ -4192,8 +4407,10 @@
       "Appearance edits (titles, fonts, colors, lines, legends) do not rerun fits, detection or clustering and do not reset the view range. Data/analysis controls remain distinct; Apply fit and Generate are explicit scientific actions.",
       "Warnings and scientific caveats belong in the persistent summary, expandable Details and provenance, not alongside the exported plotting artwork. Keep details with the figure bundle when sharing a clean figure.",
       "An unapplied draft and the visible generated result can differ. Save/export captures the visible committed result, not a promise to run the draft. Verify status and Details before final export.",
-      "Single/double-column dimensions are convenient 85/180 mm presets, not certification of a journal standard. Print-readability targets are user preferences and cannot certify unmeasured graphical elements.",
-      "Changing what a figure shows puts the words you typed back to automatic, and the range pinned on each axis whose quantity moved. In Distributions that is the plot type or a column (the Title, X label, Y label and the fit label's wording, and the typed range of an axis whose column moved) and an applied fit that changes (the fit label's wording only); in Distribution summaries and Comparison figures the measurement or figure type, when Generate commits it (a new measurement takes the range pinned on the value axis in both Type pairs, a Type takes none, and Comparison figures have no Axis properties). It is one Undo step and the status line names what went, words and ranges. The look stays (fonts, sizes, colours, text styles, the legend, the fit label's numbers, the ranges of axes that did not move), Undo brings the words and ranges back over the quantity on screen, and opening a project or recalling a template does not run the rule."
+      "Single/double-column dimensions come from the figure’s pinned style; figures without a style use the built-in reference widths. These are starting sizes, not certification of a journal standard. Print-readability targets are user preferences and cannot certify unmeasured graphical elements.",
+      "Changing what a figure shows puts the words you typed back to automatic, and the range pinned on each axis whose quantity moved. In Distributions that is the plot type or a column (the Title, X label, Y label and the fit label's wording, and the typed range of an axis whose column moved, the Y axis included while Normalize is density), the Features ticked on the PCA page (the same words and both ranges), the Normalize you pick (the same words and the Y range, not the automatic switch to density that a second source brings) and an applied fit that changes (the fit label's wording only); in Distribution summaries and Comparison figures the measurement or figure type, when Generate commits it (a new measurement takes the range pinned on the value axis in both Type pairs, a Type takes none, with each renderer retaining its supported axis properties). It is one Undo step and the status line names what went, words and ranges. The sentence comes off the status line when a word or range it names is typed or pinned again (the Undo of the reset does that), and on the pages with an appearance Undo the Undo and Redo tooltips name the step ('reset title and Y label'; Distributions' Configuration Undo only counts its steps). The look stays (fonts, sizes, colours, text styles, the legend, the fit label's numbers, the ranges of axes that did not move), Undo brings the words and ranges back over the quantity on screen, and opening a project or recalling a template does not run the rule.",
+      "Phases 1–4 retain the established scientific reset rules while adding independent figures, pinned styles and versioned ms presentation. Generate, Plot / Apply and Apply fit in earlier descriptions name operations reached through Update plot on hosted pages. Standalone legacy windows retain their local controls. Retained screenshots may show earlier locations.",
+      "Curve fit… fits one plotted X–Y source in labelled storage units, with starts/bounds/fixed parameters, sigma weights and robust losses. Save projects retains exact diagnostics; JSON/CSV export is in the fitting dialog. CDF distribution checks are descriptive, not calibrated p-values. Three voltage summaries cannot identify an unconstrained 4PL/5PL."
     ],
     "controls": [
       {
@@ -4201,21 +4418,21 @@
         "kind": "list",
         "group": "Data sources",
         "what_it_does": "A checkable list of everything you can plot: \"Every open recording (segments included) that has a stored detection, plus the manual-measurement table.\" Tick one to plot it; tick two or more to overlay them.",
-        "notes": "Each row is inked in that source's own overlay colour, so the list doubles as the legend key. Hovering a row shows its row count, whether it is a derived segment, its module id and its detector's min_dwell_s (or \"no detector provenance (hand measurements)\" for the manual table). Merely HIGHLIGHTING a row does nothing — you must tick the checkbox. The hint above the list reads: \"Tick two or more to overlay them. Colour then means SOURCE, and the histogram normalizes so unequal-n recordings stay comparable.\" Changing the ticks throws away any clustering/PCA result, because the row set changed underneath it; a pinned Axis range and the words you typed stay (another source is not another quantity) unless the new row set no longer carries the plotted column. With an overlay the column pickers show only the columns ALL ticked sources share (the intersection). The FIRST ticked source is the \"primary\" one — clustering and PCA operate on it alone. Each row is also EDITABLE: double-click one and type to rename that series everywhere it is named — the legend, the fit lines, the Details pane and the plot title. The source's real label is kept underneath, so clearing the edit back to empty removes the override and the true name comes back rather than the legend going blank. The rename is a display override only; it changes nothing about the data or the fits."
+        "notes": "Hosted location: Data & analysis ▸ Sources. Each row is inked in that source's own overlay colour, so the list doubles as the legend key. Hovering a row shows its row count, whether it is a derived segment, its module id and its detector's min_dwell_s (or \"no detector provenance (hand measurements)\" for the manual table). Merely HIGHLIGHTING a row does nothing — you must tick the checkbox. The hint above the list reads: \"Tick two or more to overlay them. Colour then means SOURCE, and the histogram normalizes so unequal-n recordings stay comparable.\" Changing the ticks throws away any clustering/PCA result, because the row set changed underneath it; a pinned Axis range and the words you typed stay (another source is not another quantity) unless the new row set no longer carries the plotted column. With an overlay the column pickers show only the columns ALL ticked sources share (the intersection). The FIRST ticked source is the \"primary\" one — clustering and PCA operate on it alone. Each row is also EDITABLE: double-click one and type to rename that series everywhere it is named — the legend, the fit lines, the Details pane and the plot title. The source's real label is kept underneath, so clearing the edit back to empty removes the override and the true name comes back rather than the legend going blank. The rename is a display override only; it changes nothing about the data or the fits."
       },
       {
         "label": "Use accepted events only",
         "kind": "checkbox",
         "group": "Data sources",
         "what_it_does": "Plots only the events you kept during curation, dropping the rejected ones from every histogram, scatter, fit, clustering and PCA.",
-        "notes": "On by default. Disabled (greyed) unless at least one ticked source actually carries an 'accepted' column — the manual-measurement table typically does not. Toggling it discards any existing clustering/PCA result, since the row set changed."
+        "notes": "Hosted location: Data & analysis ▸ Sources. On by default. Disabled (greyed) unless at least one ticked source actually carries an 'accepted' column — the manual-measurement table typically does not. Toggling it discards any existing clustering/PCA result, since the row set changed."
       },
       {
         "label": "Refresh",
         "kind": "button",
         "group": "Data sources",
         "what_it_does": "\"Re-pull the current measurements and events.\" Takes a fresh snapshot of the app's tables so newly detected events or newly saved measurements appear here.",
-        "notes": "The window is a deliberate snapshot, not a live view — nothing you do in the main window shows up here until you press this. Sources still present after a refresh keep their ticked state, but any clustering/PCA you had run is dropped."
+        "notes": "Hosted location: Data & analysis ▸ Sources. The window is a deliberate snapshot, not a live view — nothing you do in the main window shows up here until you press this. Sources still present after a refresh keep their ticked state, but any clustering/PCA you had run is dropped."
       },
       {
         "label": "Histogram",
@@ -4243,17 +4460,17 @@
       },
       {
         "label": "Time unit",
-        "kind": "combo",
+        "kind": "indicator",
         "group": "Plot",
-        "what_it_does": "Choose seconds, milliseconds or microseconds for displayed time coordinates and labels.",
-        "notes": "Stored data and fitted scientific values remain in seconds. Fit range and Axis range entries follow the displayed axis units; changing Time unit is not changing event duration."
+        "what_it_does": "Fixed ms presentation for declared time quantities.",
+        "notes": "Fit/range fields use displayed ms. Stored scientific values, raw data and stable keys remain in their canonical units; legacy saved display bases migrate exactly once."
       },
       {
         "label": "Column",
         "kind": "combo",
         "group": "Plot ▸ Histogram",
         "what_it_does": "Which numeric column to histogram.",
-        "notes": "Only numeric, non-boolean columns that have at least one finite value are offered — flags like accepted / filter_limited never appear. Seeds itself to a dwell-like column (dwell_s, dwell, rise_s, fall_s) when one exists. With several sources ticked, only columns they all share are listed."
+        "notes": "Only numeric, non-boolean columns that have at least one finite value are offered — flags like accepted / filter_limited never appear. Seeds itself to a dwell-like column (dwell_s, dwell, rise_s, fall_s) when one exists. With several sources ticked, only columns they all share are listed. A new column also takes the words you typed and the range typed or pinned on the X axis; while Normalize is density the Y range goes too (density is per the column's unit), with count or probability per bin it stays."
       },
       {
         "label": "Bins",
@@ -4267,7 +4484,7 @@
         "kind": "combo",
         "group": "Plot ▸ Histogram",
         "what_it_does": "\"What the y axis counts. count: raw events per bin — only comparable at equal n. density: counts / (n × bin width) — the shape, independent of how long each recording ran. THE one to use when overlaying. The heights are per unit of the column IN ITS STORED UNIT (per second for a dwell, per pA for a depth), which is what the y axis says; they integrate to 1 over that unit — not over a ms/µs tick scale, and not over a log axis. probability per bin: counts / n — bin heights sum to 1.\" The three entries are literally \"count\", \"density\" and \"probability per bin\".",
-        "notes": "Auto-switches to \"density\" the moment you tick a second source (and back to \"count\" when you are down to one) — but only until you pick a value yourself; after that your choice is pinned and the automatic switch stops. The fitted curve is rescaled to match whichever quantity is shown. Renamed from \"density (area = 1)\" by report S6-03: the heights are per the column's STORED unit while the x ticks follow the Time-unit combo, so the area under the DRAWN curve was 1000 on the default ms axis and ~23 on a log-x one. The y axis now names the unit (\"density (1/s)\", \"density (1/pA)\") and the Details pane says where the drawn area is not 1. A sidecar or template written before the rename still opens and still selects density."
+        "notes": "Auto-switches to \"density\" the moment you tick a second source (and back to \"count\" when you are down to one) — but only until you pick a value yourself; after that your choice is pinned and the automatic switch stops. The fitted curve is rescaled to match whichever quantity is shown. Historical files keep the density choice. Current density ordinates receive the inverse display-unit factor (1/ms for dwell); a log-axis visual area is not a linear-measure probability integral. Picking another value yourself (not the automatic switch) is a change of what the Y axis counts: the typed Title, X label, Y label, fit label wording and the range pinned on the Y axis go back to automatic in the same Undo step, and the status line names them ('Title, X label, Y label, fit label wording and Y range reset: the plot is now set to show the histogram of dwell_s as density, fitted with exponential.'). The automatic switch to density keeps them."
       },
       {
         "label": "Colour by",
@@ -4281,7 +4498,7 @@
         "kind": "checkbox",
         "group": "Plot ▸ Histogram",
         "what_it_does": "Log-scale the value axis and use log-spaced bins — the usual way to look at a dwell-time distribution spanning decades.",
-        "notes": "Non-positive values cannot be drawn and are dropped, with the count reported in Details. The Time unit rescale applies on a log axis as well: the label reads e.g. \"dwell (ms, log)\" and the tick values are in that unit. Only decades get tick labels (minor ticks stay unlabelled) so the axis does not smear."
+        "notes": "Non-positive values cannot be drawn and are dropped, with the count reported in Details. The Time unit rescale applies on a log axis as well: the label reads e.g. \"dwell (ms, log)\" and the tick values are in that unit. Readable logarithmic ticks include appropriate minor labels at narrow spans."
       },
       {
         "label": "Log y (count)",
@@ -4302,7 +4519,7 @@
         "kind": "button",
         "group": "Plot ▸ Histogram",
         "what_it_does": "Draws the family chosen in the Fit combo beside it. Choosing a family is a PROPOSAL; this button is what makes it the drawn fit.",
-        "notes": "It exists because picking from the combo used to fit, draw and start the advisory batch on the spot, so walking down the list merely to READ the options ran five maximisations — one of them (exponential + gamma) a nine-second twelve-start optimisation. While a chosen family has not been applied the button reads \"Apply fit ●\", so a plot never silently disagrees with the combo above it. The same gate is on the Scatter page, and on the Voltage-dependence window's own Fit combo."
+        "notes": "Legacy standalone button, hidden in the Explorer. Use the common Update plot action to commit all pending source, plot, KDE and fit choices together, not just this fit. It exists because picking from the combo used to fit, draw and start the advisory batch on the spot, so walking down the list merely to READ the options ran five maximisations — one of them (exponential + gamma) a nine-second twelve-start optimisation. While a chosen family has not been applied the button reads \"Apply fit ●\", so a plot never silently disagrees with the combo above it. The same gate is on the Scatter page, and on the Voltage-dependence window's own Fit combo."
       },
       {
         "label": "Fit components",
@@ -4313,11 +4530,10 @@
       },
       {
         "label": "Fit range",
-        "kind": "list",
+        "kind": "numeric text fields",
         "group": "Plot ▸ Histogram",
         "what_it_does": "Two text boxes (placeholders \"min\" and \"max\") that restrict the fit to part of the distribution: \"Fit only this part of the distribution, in the AXIS unit shown. This is a TRUNCATION, not a crop: the likelihood is renormalised to the range, so restricting to a peak does not bias the estimates the way silently dropping data would. BIC is only comparable between fits over the SAME range.\"",
-        "notes": "This changes WHICH DATA THE FIT SEES — it is not the same thing as the Axis range box below, which only moves the camera. Values are typed in the unit the axis is currently showing (ms by default for a dwell column), and are converted back internally. Takes effect when you leave the field (editing finished). Leave both blank for the full range; a min ≥ max is ignored. The window's own detection floor and your range are intersected, and Details prints the INTERSECTION — not the pair you typed — to 12 significant figures, in the same unit as the fitted parameters above it: \"FIT RANGE [lo, hi] unit — n = … of the available events; the likelihood is TRUNCATED to this window, not merely cropped. BIC/AIC compare only against fits over the SAME range.\" When the intersection differs from what you typed the line adds \"Your typed range was [lo, hi] unit; it was intersected with what this source's detector could report, and the intersection above is what was fitted.\" Only the four dwell families condition their likelihood on the window; for \"gaussian-mixture\" the middle clause reads instead \"the sample is CROPPED to this window — this family does not renormalise its likelihood to it, so the estimates are those of a distribution fitted to the surviving values, not of one conditioned on the window.\"",
-        "correction": "Not a list. form.addRow(\"Fit range\", fit_range) where fit_range is a QHBoxLayout holding TWO QLineEdits, self._fit_lo (placeholder \"min\") and self._fit_hi (placeholder \"max\"). Both commit on editingFinished."
+        "notes": "Changes which observations the fit sees, unlike the Axis range viewport controls. Values use the displayed axis units (ms by default for dwell), converted internally. Leaving the field uses the Distributions geometry redraw path when a plot is active. Source, plot type, column and fit-family proposals use Update plot; inspect the pending indicator before export. Leave both fields blank for the full available range; correct invalid bounds before updating. Dwell fits intersect the requested range with the detector-supported range. Explicit Gaussian-mixture fit-range bounds also use a conditional likelihood. A detector depth-floor advisory alone does not establish a uniform amplitude selection threshold. Details identifies the support and retained observations. Compare BIC/AIC only on the same observations and support."
       },
       {
         "label": "include filter-limited events",
@@ -4364,18 +4580,18 @@
         "notes": "Entries: None, Cluster. Run clustering sets this to Cluster for you. Choosing Cluster before any clustering exists just prints \"Run clustering to colour these points.\" in Details. With more than one source ticked it is IGNORED — colour means source there — and Details says \"Colour by Cluster is ignored while several sources are overlaid — colour means SOURCE here. Untick all but one source to colour by cluster.\" Rows the clustering dropped draw grey and are labelled \"dropped (non-finite features)\"."
       },
       {
-        "label": "Fit",
+        "label": "Quick fit",
         "kind": "combo",
         "group": "Plot ▸ Scatter",
         "what_it_does": "\"Overlay a least-squares best-fit line; power law fits in log-log space.\" Entries: none / linear / power law (log-log).",
-        "notes": "SELECTING A FAMILY DOES NOT DRAW IT — press \"Apply fit\" beside the combo. Pick \"linear\" for a straight y = m·x + c relationship; pick \"power law (log-log)\" when you expect y ∝ x^n (the fit is done on the logs, so it needs positive values on both axes). The summary — slope/intercept or coefficient/exponent, the axis units, R² and n — goes into Details and becomes the plot title unless you typed your own. R² is qualified wherever it carries no information: a two-parameter line through two points prints \"R² = 1.000 (exact by construction)\" and a y that does not vary prints \"R² undefined (y does not vary)\", each with a full sentence under it in Details. A log-log fit that had to drop points with no logarithm says so — \"power-law fit: N of M point(s) have x ≤ 0, y ≤ 0, or a non-finite value …\" — and still draws the line over the points it did use. With an overlay each source gets its OWN dashed line in its own colour and its own legend entry; there is never one pooled regression through two clouds. If the fit cannot run (too few points, constant x, no positive values for log-log) Details shows \"Fit unavailable: …\" and the points still draw."
+        "notes": "Hosted Explorer: choose the trend, then press Update plot. The standalone legacy window uses Apply fit. Pick \"linear\" for a straight y = m·x + c relationship; pick \"power law (log-log)\" when you expect y ∝ x^n (the fit is done on the logs, so it needs positive values on both axes). The summary — slope/intercept or coefficient/exponent, the axis units, R² and n — goes into Details and becomes the plot title unless you typed your own. R² is qualified wherever it carries no information: a two-parameter line through two points prints \"R² = 1.000 (exact by construction)\" and a y that does not vary prints \"R² undefined (y does not vary)\", each with a full sentence under it in Details. A log-log fit that had to drop points with no logarithm says so — \"power-law fit: N of M point(s) have x ≤ 0, y ≤ 0, or a non-finite value …\" — and still draws the line over the points it did use. With an overlay each source gets its OWN dashed line in its own colour and its own legend entry; there is never one pooled regression through two clouds. If the fit cannot run (too few points, constant x, no positive values for log-log) Details shows \"Fit unavailable: …\" and the points still draw."
       },
       {
         "label": "Apply fit",
         "kind": "button",
         "group": "Plot ▸ Scatter",
-        "what_it_does": "Draws the best-fit line chosen in the Fit combo beside it. As on the histogram page, the combo is a proposal and this button is what draws it.",
-        "notes": "Cheaper per fit than the histogram's, but a regression line that appears the instant the combo is opened is the same surprise, and one gate that behaves the same way on both pages is one rule. Reads \"Apply fit ●\" while a chosen family is not yet drawn."
+        "what_it_does": "Draws the best-fit line chosen in the Quick fit combo beside it. As on the histogram page, the combo is a proposal and this button is what draws it.",
+        "notes": "Legacy standalone button, hidden in the Explorer. Use the common Update plot action to commit all pending source, plot, KDE and fit choices together, not just this fit. Cheaper per fit than the histogram's, but a regression line that appears the instant the combo is opened is the same surprise, and one gate that behaves the same way on both pages is one rule. Reads \"Apply fit ●\" while a chosen family is not yet drawn."
       },
       {
         "label": "Run PCA",
@@ -4389,67 +4605,67 @@
         "kind": "list",
         "group": "Axis range",
         "what_it_does": "Pins the left edge of the visible x axis, in DATA units. Blank means auto-fit.",
-        "notes": "Placeholder is \"auto\"; only numbers are accepted. Both X min AND X max must be filled for the pin to apply. Press Enter, or the Apply button, to take effect. This moves the camera only — it does not change what is fitted (use Fit range for that). On a log axis the value is still typed in data units; a non-positive bound is treated as auto. Pins are cleared automatically, with the words you typed, when you change the plot type or the column on an axis (a change of plot type moves both axes); ticking another source keeps them (another source is not another quantity) unless the new row set no longer carries the plotted column.",
-        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
+        "notes": "Legacy standalone Axis range control, hidden in the Explorer. Format ▸ X axis / Y axis and Axis properties edit this same pin store in displayed units. Placeholder is \"auto\"; only numbers are accepted. Both X min AND X max must be filled for the pin to apply. Press Enter, or the Apply button, to take effect. This moves the camera only — it does not change what is fitted (use Fit range for that). On a log axis the value is still typed in data units; a non-positive bound is treated as auto. Pins are cleared automatically, with the words you typed, when you change the plot type or the column on an axis (a change of plot type moves both axes); ticking another source keeps them (another source is not another quantity) unless the new row set no longer carries the plotted column.",
+        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range). The Explorer owns Ctrl/⌘Return for Update plot and Ctrl/⌘1 / 2 for inspector tabs."
       },
       {
         "label": "X max",
         "kind": "list",
         "group": "Axis range",
         "what_it_does": "Pins the right edge of the visible x axis, in DATA units. Blank means auto-fit.",
-        "notes": "Only takes effect together with X min. Same rules as X min.",
-        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
+        "notes": "Legacy standalone Axis range control, hidden in the Explorer. Format ▸ X axis / Y axis and Axis properties edit this same pin store in displayed units. Only takes effect together with X min. Same rules as X min.",
+        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range). The Explorer owns Ctrl/⌘Return for Update plot and Ctrl/⌘1 / 2 for inspector tabs."
       },
       {
         "label": "Y min",
         "kind": "list",
         "group": "Axis range",
         "what_it_does": "Pins the bottom of the visible y axis, in DATA units. Blank means auto-fit.",
-        "notes": "Both Y min and Y max must be filled for the pin to apply.",
-        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
+        "notes": "Legacy standalone Axis range control, hidden in the Explorer. Format ▸ X axis / Y axis and Axis properties edit this same pin store in displayed units. Both Y min and Y max must be filled for the pin to apply. While Normalize is density a new column clears the Y range as well (density is per the column's unit: density (1/s) over a dwell time, plain density over a fractional depth); with count or probability per bin the Y range stays.",
+        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range). The Explorer owns Ctrl/⌘Return for Update plot and Ctrl/⌘1 / 2 for inspector tabs."
       },
       {
         "label": "Y max",
         "kind": "list",
         "group": "Axis range",
         "what_it_does": "Pins the top of the visible y axis, in DATA units. Blank means auto-fit.",
-        "notes": "Only takes effect together with Y min.",
-        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
+        "notes": "Legacy standalone Axis range control, hidden in the Explorer. Format ▸ X axis / Y axis and Axis properties edit this same pin store in displayed units. Only takes effect together with Y min.",
+        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range). The Explorer owns Ctrl/⌘Return for Update plot and Ctrl/⌘1 / 2 for inspector tabs."
       },
       {
         "label": "Apply",
         "kind": "button",
         "group": "Axis range",
         "what_it_does": "Reads the four range boxes and pins those limits on the current plot; the pins survive redraws.",
-        "notes": "Pressing Enter in any of the four boxes does the same thing. The plot is also mouse zoom/pan-able, which does not update these boxes."
+        "notes": "Legacy standalone Axis range control, hidden in the Explorer. Format ▸ X axis / Y axis and Axis properties edit this same pin store in displayed units. Pressing Enter in any of the four boxes does the same thing. The plot is also mouse zoom/pan-able, which does not update these boxes."
       },
       {
         "label": "Auto",
         "kind": "button",
         "group": "Axis range",
         "what_it_does": "\"Clear the limits and auto-fit both axes to the data.\"",
-        "notes": "Blanks all four range boxes and re-enables automatic ranging on both axes."
+        "notes": "Legacy standalone Axis range control, hidden in the Explorer. Format ▸ X axis / Y axis and Axis properties edit this same pin store in displayed units. Blanks all four range boxes and re-enables automatic ranging on both axes."
       },
       {
         "label": "Features (clustering & PCA)",
         "kind": "list",
         "group": "Features (clustering & PCA)",
         "what_it_does": "Multi-select list of numeric columns used as the feature set for BOTH Run clustering and Run PCA. Click to toggle each column.",
-        "notes": "The note underneath reads: \"Pick ≥2 columns; they are z-scored before fitting.\" Seeded from the recognised event features (dwell_s, depth_pA, frac_depth, amplitude, frac_amplitude, max_dev_pA, ecd_pA_s, snr, rise_s, fall_s, kurtosis, skewness, rms) or the first four columns if none of those are present. Changing the selection invalidates an existing PCA result (you must re-run it). The list is rebuilt whenever the ticked sources change; selections that survive as valid columns are kept."
+        "notes": "Hosted location: Data & analysis ▸ Groups. The note underneath reads: \"Pick ≥2 columns; they are z-scored before fitting.\" Seeded from the recognised event features (dwell_s, depth_pA, frac_depth, amplitude, frac_amplitude, max_dev_pA, ecd_pA_s, snr, rise_s, fall_s, kurtosis, skewness, rms) or the first four columns if none of those are present. Changing the selection invalidates an existing PCA result (you must re-run it). The list is rebuilt whenever the ticked sources change; selections that survive as valid columns are kept. On the PCA page ticking or clearing a feature also puts the words you typed (Title, X label, Y label and the fit label's wording) and both pinned ranges back to automatic, because PC1 and PC2 are other combinations of other columns: it is part of the Configuration Undo step of the tick, and the status line says what went. On any other plot type the list is a clustering setting and takes nothing."
       },
       {
         "label": "Method",
         "kind": "combo",
         "group": "Clustering",
         "what_it_does": "Which clustering algorithm to use: GMM (Gaussian mixture, full covariance — allows elongated, differently shaped clusters) or k-means (spherical, equal-ish clusters, faster and simpler).",
-        "notes": "Entries are \"GMM\" and \"k-means\". Choosing k-means DISABLES the k mode combo and forces it to \"Fixed k\" — k-means cannot auto-select, so you must give it a number."
+        "notes": "Hosted location: Data & analysis ▸ Groups. Entries are \"GMM\" and \"k-means\". Choosing k-means DISABLES the k mode combo and forces it to \"Fixed k\" — k-means cannot auto-select, so you must give it a number."
       },
       {
         "label": "k",
         "kind": "combo",
         "group": "Clustering",
         "what_it_does": "How the number of clusters is chosen: \"Auto (BIC)\" lets a GMM try 1..8 clusters and keep the lowest-BIC one; \"Fixed k\" uses exactly the number in the spinbox beside it.",
-        "notes": "The combo and the spinbox share the form row labelled \"k\". Auto (BIC) is GMM-only — the combo is disabled and forced to Fixed k when Method is k-means. The upper bound of the BIC search is clamped to the number of rows.",
+        "notes": "Hosted location: Data & analysis ▸ Groups. The combo and the spinbox share the form row labelled \"k\". Auto (BIC) is GMM-only — the combo is disabled and forced to Fixed k when Method is k-means. The upper bound of the BIC search is clamped to the number of rows.",
         "correction": "\"k\" is the form row label; the combo on that row has no label of its own and its items are \"Auto (BIC)\" and \"Fixed k\". The spin box beside it ranges 1–20, defaults to 2 and starts DISABLED — it is enabled only when the k-mode combo reads \"Fixed k\" or Method is k-means."
       },
       {
@@ -4457,7 +4673,7 @@
         "kind": "spinbox",
         "group": "Clustering",
         "what_it_does": "The exact number of clusters to fit (1 to 20, default 2), used when the mode beside it is \"Fixed k\".",
-        "notes": "Disabled while the mode is \"Auto (BIC)\" — it re-enables when you choose \"Fixed k\" or switch Method to k-means. Asking for more clusters than you have valid rows fails with \"Clustering failed: …\" in Details.",
+        "notes": "Hosted location: Data & analysis ▸ Groups. Disabled while the mode is \"Auto (BIC)\" — it re-enables when you choose \"Fixed k\" or switch Method to k-means. Asking for more clusters than you have valid rows fails with \"Clustering failed: …\" in Details.",
         "correction": "\"k\" is the form row label; the combo on that row has no label of its own and its items are \"Auto (BIC)\" and \"Fixed k\". The spin box beside it ranges 1–20, defaults to 2 and starts DISABLED — it is enabled only when the k-mode combo reads \"Fixed k\" or Method is k-means."
       },
       {
@@ -4465,14 +4681,14 @@
         "kind": "button",
         "group": "Clustering",
         "what_it_does": "Clusters the currently drawn rows over the selected feature columns and recolours the views by cluster, printing the method, k, sizes and per-cluster feature means (in original units) in Details.",
-        "notes": "Needs at least 2 feature columns — otherwise Details says \"Clustering needs at least 2 feature columns selected.\" Runs on the PRIMARY (first ticked) source only, and on whatever the 'Use accepted events only' filter leaves. Features are z-scored first. It also FLIPS the Scatter \"Colour by\" to Cluster, and the Histogram \"Colour by\" to Cluster when that control is enabled — so the plot in front of you changes appearance. Rows with a non-finite feature are labelled -1, drawn grey and reported as \"…dropped (non-finite features)\". A degenerate result (e.g. a cluster of one event) is called out with a \"!\" warning line in Details. The result is thrown away whenever you change the ticked sources or the accepted-only filter, and it is NOT re-run automatically."
+        "notes": "Hosted location: Data & analysis ▸ Groups. Needs at least 2 feature columns — otherwise Details says \"Clustering needs at least 2 feature columns selected.\" Runs on the PRIMARY (first ticked) source only, and on whatever the 'Use accepted events only' filter leaves. Features are z-scored first. It also FLIPS the Scatter \"Colour by\" to Cluster, and the Histogram \"Colour by\" to Cluster when that control is enabled — so the plot in front of you changes appearance. Rows with a non-finite feature are labelled -1, drawn grey and reported as \"…dropped (non-finite features)\". A degenerate result (e.g. a cluster of one event) is called out with a \"!\" warning line in Details. The result is thrown away whenever you change the ticked sources or the accepted-only filter, and it is NOT re-run automatically."
       },
       {
         "label": "Title",
         "kind": "list",
         "group": "Style",
         "what_it_does": "\"Override the plot title; blank uses the automatic title.\"",
-        "notes": "Placeholder is \"auto\". While your own title is in force it renders in the plain foreground colour rather than the fit accent colour, and it also suppresses the automatic fit/regression summary that would otherwise be the title (that summary is always in Details anyway).",
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. Placeholder is \"auto\". While your own title is in force it renders in the plain foreground colour rather than the fit accent colour, and it also suppresses the automatic fit/regression summary that would otherwise be the title (that summary is always in Details anyway).",
         "correction": "Not a list. self._title_edit is a QLineEdit with placeholder \"auto\" in the \"Style\" group. Tooltip: \"Override the plot title; blank uses the automatic title.\" It applies live on every keystroke, and typing your own title also drops the automatic accent colour (an override renders in the neutral foreground)."
       },
       {
@@ -4480,21 +4696,21 @@
         "kind": "combo",
         "group": "Style",
         "what_it_does": "\"Font for the figure's text. The first row is the figure default, Arial. Other font… lists every font installed on this computer except the system's private fonts and symbol fonts such as Wingdings.\"",
-        "notes": "The short list: Arial (default), Helvetica, Times New Roman, Courier New, then Other font… (every installed font, with a filter box; Cancel keeps the font). Applies to the title, axis labels, tick labels, legend, fit label and captions. A row for a font this computer lacks says what it is drawn in (on Windows: Helvetica (drawn in Arial on this computer)). Other font… leaves out private fonts and the faces of symbols (Symbol, Webdings, Wingdings, Wingdings 2 and 3, Zapf Dingbats, Apple Symbols). A font outside the list, from an older project or picked in Other font…, is shown as one extra row under its own name."
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. The short list: Arial (default), Helvetica, Times New Roman, Courier New, then Other font… (every installed font, with a filter box; Cancel keeps the font). Applies to the title, axis labels, tick labels, legend, fit label and captions. A row for a font this computer lacks says what it is drawn in (on Windows: Helvetica (drawn in Arial on this computer)). Other font… leaves out private fonts and the faces of symbols (Symbol, Webdings, Wingdings, Wingdings 2 and 3, Zapf Dingbats, Apple Symbols). A font outside the list, from an older project or picked in Other font…, is shown as one extra row under its own name."
       },
       {
         "label": "Font size (body)",
         "kind": "spinbox",
         "group": "Style",
         "what_it_does": "Set the body-font size in points.",
-        "notes": "Range 6–48, default 10. Title, axis labels, ticks and legend also have individual overrides; zero/auto retains their documented body-derived default."
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. Range 6–48, default 10. Title, axis labels, ticks and legend also have individual overrides; zero/auto retains their documented body-derived default."
       },
       {
         "label": "Data colour",
         "kind": "button",
         "group": "Style",
         "what_it_does": "\"Colour of the histogram bars and the plain scatter/PCA points.\" Clicking opens a colour picker (\"Pick colour\").",
-        "notes": "The button shows the chosen colour and prints its hex as its own label; the default is #0072B2 (Okabe-Ito blue). It only applies in the single-colour cases — with an overlay the colours come from each source, and with cluster colouring they come from the Okabe-Ito cluster palette.",
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. The button shows the chosen colour and prints its hex as its own label; the default is #0072B2 (Okabe-Ito blue). It only applies in the single-colour cases — with an overlay the colours come from each source, and with cluster colouring they come from the Okabe-Ito cluster palette.",
         "correction": "\"Data colour\" and \"Fit colour\" are the FORM ROW labels; the buttons themselves are painted swatches whose visible text is the current hex code — btn.setText(hex_color) in _paint_swatch — so they read \"#0072B2\" and \"#D55E00\" by default (OKABE_ITO blue and vermillion). Clicking one opens a colour dialog titled \"Pick colour\"."
       },
       {
@@ -4502,7 +4718,7 @@
         "kind": "button",
         "group": "Style",
         "what_it_does": "\"Colour of the fitted overlay curve and its title.\" Clicking opens a colour picker.",
-        "notes": "Shows its hex as its label; default #D55E00 (Okabe-Ito vermillion). With an overlay each source's fit is drawn dashed in that source's colour instead.",
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. Shows its hex as its label; default #D55E00 (Okabe-Ito vermillion). With an overlay each source's fit is drawn dashed in that source's colour instead.",
         "correction": "\"Data colour\" and \"Fit colour\" are the FORM ROW labels; the buttons themselves are painted swatches whose visible text is the current hex code — btn.setText(hex_color) in _paint_swatch — so they read \"#0072B2\" and \"#D55E00\" by default (OKABE_ITO blue and vermillion). Clicking one opens a colour dialog titled \"Pick colour\"."
       },
       {
@@ -4510,33 +4726,33 @@
         "kind": "spinbox",
         "group": "Style",
         "what_it_does": "\"Marker size for scatter / PCA points.\" 1 to 30, default 7.",
-        "notes": "Also sets the size of the cluster swatches in the legend."
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. Also sets the size of the cluster swatches in the legend."
       },
       {
         "label": "Line width",
         "kind": "spinbox",
         "group": "Style",
         "what_it_does": "\"Width of the histogram outline and the fit curve.\" 1 to 10, default 1.",
-        "notes": "The fit curve deliberately draws one pixel heavier than the bar outline so it reads over the data."
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. The fit curve deliberately draws one pixel heavier than the bar outline so it reads over the data."
       },
       {
         "label": "Background",
         "kind": "combo",
         "group": "Style",
         "what_it_does": "Switches the plot canvas between the app's dark theme and a white publication canvas: \"Light gives a white canvas with dark ink for publication.\" Entries: Dark, Light.",
-        "notes": "Changes the canvas, axis lines, tick text, message text and legend ink together, and it is what the saved PNG uses — set it to Light before Save image… if the figure is going into a paper."
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. Changes the canvas, axis lines, tick text, message text and legend ink together, and it is what the saved PNG uses — set it to Light before Save image… if the figure is going into a paper."
       },
       {
         "label": "Export size",
         "kind": "spinbox",
         "group": "Style",
         "what_it_does": "Set the initial export geometry for the common publication export dialog.",
-        "notes": "The export dialog also offers physical dimensions, mm/inches, width presets, PNG DPI and a frozen preview; these do not alter analytical data."
+        "notes": "Hosted location: Format; choose the corresponding Figure, Title or Series element. The export dialog also offers physical dimensions, mm/inches, width presets, PNG DPI and a frozen preview; these do not alter analytical data."
       },
       {
         "label": "Export current figure…",
         "kind": "button",
-        "group": "(bottom of the control column)",
+        "group": "Export ▾",
         "what_it_does": "Export the visible committed figure through the publication export dialog.",
         "notes": "Choose PNG/PDF/SVG, native or physical size, and inspect the preview. Use Export plot data… for numbers or Save figure bundle… for image/data/configuration/provenance."
       },
@@ -4559,31 +4775,9 @@
         "label": "Plot area",
         "kind": "table",
         "group": "Plot canvas",
-        "what_it_does": "The plot itself. It is mouse zoom/pan-able (scroll to zoom, drag to pan), and it carries the legend for overlays, fits and clusters. Right-click gives NanoScope's own menu: Reset view, Zoom back, Zoom forward, Export current figure…, Export plot data…. The Reset view button in the toolbar beside Section does the same reset, and its drop-down arrow holds Zoom back / Zoom forward. The status line at the bottom of the window reads the values under the pointer.",
+        "what_it_does": "The plot itself. It is mouse zoom/pan-able (scroll to zoom, drag to pan), and it carries the legend for overlays, fits and clusters. Right-click gives NanoScope's own menu: Reset view, Zoom back, Zoom forward, Export current figure…, Export plot data…, Export configuration JSON…. The Reset view button on the status line does the same reset, and its drop-down arrow holds Zoom back / Zoom forward. The status line at the bottom of the window reads the values under the pointer.",
         "notes": "Mouse zooming does NOT fill in the Axis range boxes, and a redraw re-fits the view unless you pinned limits there. Legend labels longer than 34 characters are middle-elided with \"…\" — the full name is in Details. On a dwell histogram the region below the detector's shortest reportable event is shaded grey with a dashed line labelled \"below detection limit\"; that region is an artefact of the detector, not of the physics.",
-        "correction": "No such string exists anywhere in plots_panel.py. The plot is an unlabelled pyqtgraph PlotWidget (self._plot_widget, minimum 420×320) in the right-hand splitter; it has no title, no caption and is not a table. It is mouse zoom/pan-able. Its right-click menu is the app's own (nanoscope/gui/plot_interaction.py): Reset view, Zoom back, Zoom forward and the page's two exports. It replaced pyqtgraph's generic menu, whose log, FFT and invert transforms changed the picture outside the saved PlotConfig and whose Export… dialog bypassed the page's export. When there is nothing to draw it shows a centred grey message instead — the exact strings are \"No data yet — run detection or add measurements, then Refresh.\", \"Tick a source on the left — none of the checked ones has rows to plot.\", \"This source has no rows to plot.\", \"Pick a numeric column to histogram.\""
-      },
-      {
-        "label": "s",
-        "kind": "combo",
-        "group": "Plot ▸ Time unit",
-        "what_it_does": "Item of the \"Time unit\" combo (_TIME_UNITS). Shows time columns on the axis in seconds. Tooltip: \"Unit for time columns (dwell_s, rise_s, fall_s, t_start_s, t_end_s).\\nThis rescales the AXIS only — the data, and every fit computed on it, stay in seconds, so the dwell fit keeps the detector's own min_dwell_s.\"",
-        "from_crosscheck": true,
-        "correction": "These are the five ITEMS of ONE unlabelled QComboBox at the top of the \"Plot\" group: self._plot_type_combo.addItems(list(_PLOT_TYPES)) where _PLOT_TYPES = (\"Histogram\", \"Scatter\", \"KDE (density)\", \"Event-count heatmap\", \"PCA\"). Picking an item swaps the QStackedWidget of controls underneath it, and also clears any pinned Axis range (a different plot has different axes). A user hunting for five separate combos will not find them."
-      },
-      {
-        "label": "ms",
-        "kind": "combo",
-        "group": "Plot ▸ Time unit",
-        "what_it_does": "Item of the \"Time unit\" combo and the DEFAULT selection (_DEFAULT_TIME_UNIT = \"ms\"). Shows dwell/rise/fall/t_start/t_end axis ticks in milliseconds; the underlying data and all fits stay in seconds.",
-        "from_crosscheck": true
-      },
-      {
-        "label": "µs",
-        "kind": "combo",
-        "group": "Plot ▸ Time unit",
-        "what_it_does": "Item of the \"Time unit\" combo. Shows time axis ticks in microseconds, on a linear and a log axis alike — the label then reads e.g. \"dwell (µs, log)\".",
-        "from_crosscheck": true
+        "correction": "No such string exists anywhere in plots_panel.py. The plot is an unlabelled pyqtgraph PlotWidget (self._plot_widget, minimum 420×320) in the right-hand splitter; it has no title, no caption and is not a table. It is mouse zoom/pan-able. Its right-click menu is the app's own (nanoscope/gui/plot_interaction.py): Reset view, Zoom back, Zoom forward and the page's three exports. It replaced pyqtgraph's generic menu, whose log, FFT and invert transforms changed the picture outside the saved PlotConfig and whose Export… dialog bypassed the page's export. When there is nothing to draw it shows a centred grey message instead — the exact strings are \"No data yet — run detection or add measurements, then Refresh.\", \"Tick a source on the left — none of the checked ones has rows to plot.\", \"This source has no rows to plot.\", \"Pick a numeric column to histogram.\""
       },
       {
         "label": "count",
@@ -4596,8 +4790,9 @@
         "label": "density",
         "kind": "combo",
         "group": "Plot ▸ Histogram ▸ Normalize",
-        "what_it_does": "Item of \"Normalize\". Tooltip: \"density: counts / (n × bin width) — the shape, independent of how long each recording ran. THE one to use when overlaying. The heights are per unit of the column IN ITS STORED UNIT (per second for a dwell, per pA for a depth), which is what the y axis says; they integrate to 1 over that unit — not over a ms/µs tick scale, and not over a log axis.\" The window switches to this automatically the moment a second source is ticked, unless you have already picked a normalization yourself (picking one from the combo pins your choice permanently). Called \"density (area = 1)\" until report S6-03, which found that promise false on the drawn picture in every time unit but seconds and unfixable on a log axis.",
-        "from_crosscheck": true
+        "what_it_does": "Counts divided by sample count and bin width, displayed with the inverse unit factor. A dwell density in 1/ms is 1/1000 of its stored 1/s ordinate; its probability integral is preserved. A log-axis display does not turn a linear-measure density into density per log unit.",
+        "from_crosscheck": true,
+        "notes": "Counts and probability-per-bin are separate normalizations. Fit/sample arrays remain in their scientific basis. Overlay selection retains the established normalization policy."
       },
       {
         "label": "probability per bin",
@@ -4666,7 +4861,7 @@
         "label": "min",
         "kind": "text field",
         "group": "Plot ▸ Histogram ▸ Fit range",
-        "what_it_does": "Left text box of the \"Fit range\" row (placeholder text \"min\"). Tooltip: \"Fit only this part of the distribution, in the AXIS unit shown.\\n\\nThis is a TRUNCATION, not a crop: the likelihood is renormalised to the range, so restricting to a peak does not bias the estimates the way silently dropping data would. BIC is only comparable between fits over the SAME range.\" Takes effect when you leave the field or press Enter. Unlike the Axis range group, this changes which data the FIT sees, not just the camera.",
+        "what_it_does": "Left text box of the \"Fit range\" row (placeholder text \"min\"). Tooltip: \"Fit only this part of the distribution, in the AXIS unit shown.\\n\\nThis is a TRUNCATION, not a crop: the likelihood is renormalised to the range, so restricting to a peak does not bias the estimates the way silently dropping data would. BIC is only comparable between fits over the SAME range.\" Leaving the field stages the value; press Update plot in the Explorer to apply it. Unlike the Axis range group, this changes which data the FIT sees, not just the camera.",
         "from_crosscheck": true,
         "correction": "Not combos, and not the Axis range boxes. Two plain QLineEdits on the \"Fit range\" row — self._fit_lo (placeholder \"min\") and self._fit_hi (placeholder \"max\") — with no validator; both commit on editingFinished, i.e. when you leave the field or press Enter. Leave both blank for the full range; a min ≥ max is ignored entirely and the fit runs untruncated."
       },
@@ -4704,28 +4899,32 @@
         "kind": "combo",
         "group": "Clustering ▸ Method",
         "what_it_does": "Item of the \"Method\" combo and the default. Gaussian-mixture clustering; this is the only method for which the \"k\" mode combo is enabled (k-means greys it out and forces Fixed k).",
-        "from_crosscheck": true
+        "from_crosscheck": true,
+        "notes": "Hosted location: Data & analysis ▸ Groups. "
       },
       {
         "label": "k-means",
         "kind": "combo",
         "group": "Clustering ▸ Method",
         "what_it_does": "Item of the \"Method\" combo. Choosing it disables the k-mode combo, forces it to \"Fixed k\" and enables the k spin box, because k-means needs an explicit cluster count.",
-        "from_crosscheck": true
+        "from_crosscheck": true,
+        "notes": "Hosted location: Data & analysis ▸ Groups. "
       },
       {
         "label": "Auto (BIC)",
         "kind": "combo",
         "group": "Clustering ▸ k",
         "what_it_does": "Item of the k-mode combo on the \"k\" row (_K_AUTO) and its default. Lets the GMM choose the number of clusters by BIC; the k spin box next to it is greyed out while this is selected, and Details reports the chosen k with \"(auto by BIC)\".",
-        "from_crosscheck": true
+        "from_crosscheck": true,
+        "notes": "Hosted location: Data & analysis ▸ Groups. "
       },
       {
         "label": "Fixed k",
         "kind": "combo",
         "group": "Clustering ▸ k",
         "what_it_does": "Item of the k-mode combo on the \"k\" row (_K_FIXED). Enables the spin box beside it so you pin the cluster count yourself. Selected and locked automatically when Method is k-means.",
-        "from_crosscheck": true
+        "from_crosscheck": true,
+        "notes": "Hosted location: Data & analysis ▸ Groups. "
       },
       {
         "label": "Dark",
@@ -4779,22 +4978,22 @@
         "label": "Axis range (X min/X max/Y min/Y max)",
         "kind": "behaviour-note",
         "group": "Axis range",
-        "what_it_does": "The boxes now read in the unit the axis DISPLAYS: a time axis follows the Time-unit combo (ms by default), so you type the number you read off the ticks. Everything else stays in data units.",
-        "notes": "Previously the boxes were silently in seconds while the axis showed ms/µs — reading 20 off a ms axis and typing it pinned 20 seconds."
+        "what_it_does": "The boxes now read in the unit the axis DISPLAYS: a time axis follows the fixed ms display, so you type the number you read off the ticks. Everything else stays in data units.",
+        "notes": "Hosted location: Format ▸ X axis / Y axis. The old min/max boxes stay hidden; the units and pin store are unchanged. Previously the boxes were silently in seconds while the axis showed ms/µs — reading 20 off a ms axis and typing it pinned 20 seconds."
       },
       {
-        "label": "Data → Analysis → Appearance → Export",
+        "label": "Data & analysis / Format",
         "kind": "control",
         "group": "Analysis Explorer and Distributions workflow",
-        "what_it_does": "Choose which control section is visible.",
-        "notes": "Switching sections is presentation only. Primary run actions remain distinct from appearance/export. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
+        "what_it_does": "Select the right inspector tab for the active analytical tool.",
+        "notes": "Opening a tab or group does not run analysis. Ctrl/⌘1 / 2 select these tabs; Ctrl/⌘3 / 4 have no hosted action. Width, visibility, tab and group expansion persist per user. First two groups start open, later groups collapsed."
       },
       {
-        "label": "Refresh current",
-        "kind": "control",
-        "group": "Analysis Explorer and Distributions workflow",
+        "label": "Refresh from recordings",
+        "kind": "menu item",
+        "group": "Update plot ▾",
         "what_it_does": "Refresh the active Explorer page from applicable live source data.",
-        "notes": "Check staleness first; a frozen saved figure is not silently replaced. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
+        "notes": "The former Refresh current action; summaries and comparisons generate from current sources. Check staleness first; a frozen saved figure is not silently replaced. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
       },
       {
         "label": "CURRENT / STALE / SAVED SNAPSHOT / NO DATA",
@@ -4804,16 +5003,16 @@
         "notes": "Current is not a calibration or scientific-validity certificate. Stale means values remain as captured; inspect the change before refreshing. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
       },
       {
-        "label": "Save to Figure Library…",
-        "kind": "control",
-        "group": "Analysis Explorer and Distributions workflow",
+        "label": "Snapshot to Figures…",
+        "kind": "menu item",
+        "group": "Export ▾",
         "what_it_does": "Name and capture the visible committed numerical/appearance result.",
-        "notes": "Does not rerun analysis. Save Project to persist the library entry. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
+        "notes": "No analysis is run. The new Snapshot is selected in Figures and displayed in the same Explorer canvas; Save Project persists it. Source: nanoscope/gui/main_window.py; saved_figure_view.py."
       },
       {
         "label": "Save figure bundle…",
-        "kind": "control",
-        "group": "Analysis Explorer and Distributions workflow",
+        "kind": "menu item",
+        "group": "Export ▾",
         "what_it_does": "Save a frozen image plus plotted data, configuration and provenance.",
         "notes": "Residual data/panels are included when supported and explicitly selected. Source caveats remain in metadata rather than plot artwork. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
       },
@@ -4822,19 +5021,19 @@
         "kind": "control",
         "group": "Analysis Explorer and Distributions workflow",
         "what_it_does": "Outline plotted events for selection on supported Distributions views.",
-        "notes": "Selection only: no fit, clustering, curation or numerical change. Esc/right-click cancels; the temporary outline is not exported. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
+        "notes": "Hosted location: the status line beside Mode: Pan/zoom and Reset view. Selection only: no fit, clustering, curation or numerical change. Esc/right-click cancels; the temporary outline is not exported. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
       },
       {
         "label": "Export plot data…",
-        "kind": "control",
-        "group": "Analysis Explorer and Distributions workflow",
+        "kind": "menu item",
+        "group": "Export ▾",
         "what_it_does": "Write the numerical data underlying the committed plot.",
         "notes": "Distinct from exporting all raw input rows; inspect plot provenance and any filtering. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
       },
       {
         "label": "Export configuration JSON…",
-        "kind": "control",
-        "group": "Analysis Explorer and Distributions workflow",
+        "kind": "menu item",
+        "group": "Export ▾",
         "what_it_does": "Write the plot configuration for provenance/reuse.",
         "notes": "A configuration is not raw data or an independent proof of reproducibility. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
       },
@@ -4843,12 +5042,12 @@
         "kind": "control",
         "group": "Analysis Explorer and Distributions workflow",
         "what_it_does": "Put the text you typed on the figure (title, axis labels, fit-label wording, caption) and its look back to their defaults, as one Undo step.",
-        "notes": "In the page toolbar just before Export ▾, from every Section, on each Analysis Explorer page; the study figure editor keeps it in its Appearance section. Data, fits and analysis settings are kept. On every page that has Axis properties except Distributions, a range or tick spacing typed there goes with the look. Event waveforms keeps its Event-count heatmap colormap and Noise its Spectrogram colormap and colour limits (not part of the shared look; their tool tips say so). Distributions keeps its range in the Axis range boxes and also keeps Font size (body), the legend's position, entries and (n = …) switch, source names, Confidence band, Residual strip, Provenance caption and Heatmap colormap; there it returns the fit label's numbers to Equation, R² and n and the title's bold and italic to plain. Source: nanoscope/gui/plot_appearance.py; plot_workflow.py; plots_panel.py."
+        "notes": "In the project toolbar’s Update plot ▾ menu, regardless of the inspector tab, on each Analysis Explorer page; retained Study/Report editors offer Reset all figure styling in Study details or Figure details. Data, fits and analysis settings are kept. On every page that has Axis properties except Distributions, a range or tick spacing typed there goes with the look, and the button's tool tip says so. Event waveforms keeps its Event-count heatmap colormap and Noise its Spectrogram colormap and colour limits (not part of the shared look; their tool tips say so). Distributions keeps its range in its Axis range store (the standalone Axis range boxes; edited through Format ▸ X axis / Y axis when hosted) and also keeps Font size (body), the legend's position, entries and (n = …) switch, source names, Confidence band, Residual strip, Provenance caption and Heatmap colormap; there it returns the fit label's numbers to Equation, R² and n and the title's bold and italic to plain. Source: nanoscope/gui/plot_appearance.py; plot_workflow.py; plots_panel.py."
       },
       {
         "label": "Publication · light / Presentation · dark",
         "kind": "control",
-        "group": "Shared Appearance",
+        "group": "Style ▾ ▸ This figure / Selected figures / All live figures",
         "what_it_does": "Apply a built-in appearance-only preset.",
         "notes": "No source, fit, bin, scale or analytical setting changes. Source: nanoscope/gui/plot_appearance.py."
       },
@@ -4857,98 +5056,91 @@
         "kind": "control",
         "group": "Shared Appearance",
         "what_it_does": "Choose the figure font: Arial (default), Helvetica, Times New Roman, Courier New, or Other font… for any installed font.",
-        "notes": "Arial (default) saves no font name. A font this computer lacks is drawn in a substitute, and its row says which (on Windows: Helvetica (drawn in Arial on this computer)); export preview shows the captured appearance. Other font… leaves out the faces of symbols such as Wingdings. The same list is in Text style…, where the first row is an explicit Arial that counts only while Custom font is ticked, and in the composer's panel labels. Source: nanoscope/gui/plot_appearance.py; font_picker.py."
+        "notes": "Hosted location: Format; choose the corresponding element. Fit-label number switches are under Fit label; whole-figure font and sizes are under Figure. Arial (default) saves no font name. A font this computer lacks is drawn in a substitute, and its row says which (on Windows: Helvetica (drawn in Arial on this computer)); export preview shows the captured appearance. Other font… leaves out the faces of symbols such as Wingdings. The same list is in Text style…, where the first row is an explicit Arial that counts only while Custom font is ticked, and in the composer's panel labels. Source: nanoscope/gui/plot_appearance.py; font_picker.py."
       },
       {
         "label": "Title (pt) / Axis labels (pt) / Ticks (pt)",
         "kind": "control",
         "group": "Shared Appearance",
         "what_it_does": "Set typography for the corresponding text.",
-        "notes": "Default removes that override; print preflight evaluates the exported physical size. Source: nanoscope/gui/plot_appearance.py."
+        "notes": "Hosted location: Format; choose the corresponding element. Fit-label number switches are under Fit label; whole-figure font and sizes are under Figure. Default removes that override; print preflight evaluates the exported physical size. Source: nanoscope/gui/plot_appearance.py."
       },
       {
         "label": "Line width / Marker size",
         "kind": "control",
         "group": "Shared Appearance",
         "what_it_does": "Set supported graphical line/marker sizes.",
-        "notes": "Category-colored or mark-free hosts may hide controls they cannot apply. Source: nanoscope/gui/plot_appearance.py."
+        "notes": "Hosted location: Format; choose the corresponding element. Fit-label number switches are under Fit label; whole-figure font and sizes are under Figure. Category-colored or mark-free hosts may hide controls they cannot apply. Source: nanoscope/gui/plot_appearance.py."
       },
       {
         "label": "Data color / Fit color",
         "kind": "control",
         "group": "Shared Appearance",
         "what_it_does": "Choose single-source data and fitted-curve colors where supported.",
-        "notes": "Does not change category/source membership or analytical values. Source: nanoscope/gui/plot_appearance.py."
+        "notes": "Hosted location: Format; choose the corresponding element. Fit-label number switches are under Fit label; whole-figure font and sizes are under Figure. Does not change category/source membership or analytical values. Source: nanoscope/gui/plot_appearance.py."
       },
       {
         "label": "Fit label · Numbers",
         "kind": "control",
         "group": "Shared Appearance",
         "what_it_does": "Choose which numbers the fit label shows: Equation, R², n, CI, BIC and KS.",
-        "notes": "Distributions no longer has Fit values on plot, R² on figure or KS statistic on figure; its Residual strip box still adds the strip's χ²/dof after the equation. A new label shows Equation, R² and n; in the automatic text a number the fit does not have is left out, and where your own wording names it a dash is drawn. A ticked R² (or {r2} in your words) prints its refusal (undefined, or no residual degrees of freedom) instead of a bare number; unticked, with no {r2} in your words, the label makes no R² claim and Details still says. KS is the numerical statistic only: the verdict stays in Details and the figure bundle, not on the plot. Source: nanoscope/gui/plot_appearance.py; fit_label.py."
+        "notes": "Hosted location: Format; choose the corresponding element. Fit-label number switches are under Fit label; whole-figure font and sizes are under Figure. Distributions no longer has Fit values on plot, R² on figure or KS statistic on figure; its Residual strip box still adds the strip's χ²/dof after the equation. A new label shows Equation, R² and n; in the automatic text a number the fit does not have is left out, and where your own wording names it a dash is drawn. A ticked R² (or {r2} in your words) prints its refusal (undefined, or no residual degrees of freedom) instead of a bare number; unticked, with no {r2} in your words, the label makes no R² claim and Details still says. KS is the numerical statistic only: the verdict stays in Details and the figure bundle, not on the plot. Source: nanoscope/gui/plot_appearance.py; fit_label.py."
       },
       {
         "label": "Grid / Background",
         "kind": "control",
         "group": "Shared Appearance",
         "what_it_does": "Show/hide the grid and select light/dark/original background.",
-        "notes": "Appearance only; axis scales stay unchanged. Source: nanoscope/gui/plot_appearance.py."
+        "notes": "Hosted location: Format; choose the corresponding element. Fit-label number switches are under Fit label; whole-figure font and sizes are under Figure. Appearance only; axis scales stay unchanged. Source: nanoscope/gui/plot_appearance.py."
       },
       {
         "label": "Title / X label / Y label",
         "kind": "control",
         "group": "Shared Appearance",
         "what_it_does": "Override plot text.",
-        "notes": "Include units/log meaning in custom labels; changing wording does not transform data. Source: nanoscope/gui/plot_appearance.py."
+        "notes": "Hosted location: Format; choose the corresponding element. Fit-label number switches are under Fit label; whole-figure font and sizes are under Figure. Include units/log meaning in custom labels; changing wording does not transform data. Source: nanoscope/gui/plot_appearance.py."
       },
       {
         "label": "Legend / Legend text (pt)",
         "kind": "control",
         "group": "Shared Appearance",
         "what_it_does": "Show/hide the legend and adjust its text size.",
-        "notes": "Preserves scientific source/category identities. Source: nanoscope/gui/plot_appearance.py."
+        "notes": "Hosted location: Format; choose the corresponding element. Fit-label number switches are under Fit label; whole-figure font and sizes are under Figure. Preserves scientific source/category identities. Source: nanoscope/gui/plot_appearance.py."
       },
       {
-        "label": "Save appearance preset…",
+        "label": "Save this figure's look as…",
         "kind": "control",
-        "group": "Shared Appearance",
-        "what_it_does": "Save a reusable local appearance preset.",
-        "notes": "Contains no source, column, fit, bin or analysis settings. Source: nanoscope/gui/plot_appearance.py."
+        "group": "Style ▾",
+        "what_it_does": "Save the current figure look as a local named preference.",
+        "notes": "Keeps appearance, not typed wording, recordings, source selections, bins, fits or numerical settings. Choose This figure, Selected figures or All live figures when applying a saved look; All live includes dormant project figures and open retained Study/Report editors."
       },
       {
-        "label": "Delete selected preset",
+        "label": "Manage saved looks…",
         "kind": "control",
-        "group": "Shared Appearance",
-        "what_it_does": "Remove a saved appearance preset.",
-        "notes": "Does not erase a figure or analytical result. Source: nanoscope/gui/plot_appearance.py."
+        "group": "Style ▾",
+        "what_it_does": "Open the local saved-look manager.",
+        "notes": "Delete asks for confirmation. Deleting a saved look does not erase a figure or result."
       },
       {
         "label": "Source / Display label",
         "kind": "control",
-        "group": "Source names and colors",
-        "what_it_does": "Choose a source and edit its display alias.",
-        "notes": "Identity/provenance remains bound to the original source; aliases are not new samples. Source: nanoscope/gui/source_appearance.py."
+        "group": "Project Sources… ▸ Project source defaults",
+        "what_it_does": "Choose an exact source identity and edit its project display alias.",
+        "notes": "Save project source default commits it for new or explicitly refreshed figures. Figure-local legend names are edited in Format or on the canvas and take precedence. Aliases do not change provenance or create samples. Source: nanoscope/gui/source_appearance.py; project_sources.py."
       },
       {
-        "label": "Choose color… / Captured color",
+        "label": "Choose color… / Default palette color",
         "kind": "control",
-        "group": "Source names and colors",
-        "what_it_does": "Choose a source-specific figure color or restore its captured color.",
-        "notes": "Source/category identities remain unchanged. Source: nanoscope/gui/source_appearance.py."
+        "group": "Project Sources… ▸ Project source defaults",
+        "what_it_does": "Choose the source project color or restore its default palette color.",
+        "notes": "Save project source default commits the choice. Figure-local Series colours and frozen Snapshots remain unchanged. Source: nanoscope/gui/source_appearance.py; project_sources.py."
       },
       {
-        "label": "Apply to figure",
+        "label": "Save project source default",
         "kind": "control",
-        "group": "Source names and colors",
-        "what_it_does": "Commit source aliases/colors to the current figure.",
-        "notes": "Does not rerun scientific analysis. Source: nanoscope/gui/source_appearance.py."
-      },
-      {
-        "label": "Use as project source default",
-        "kind": "control",
-        "group": "Source names and colors",
-        "what_it_does": "Use the selected alias/color for future figures from that exact source.",
-        "notes": "Does not rewrite other frozen snapshots. Source: nanoscope/gui/source_appearance.py."
+        "group": "Project Sources… ▸ Project source defaults",
+        "what_it_does": "Save the displayed alias/color for future or explicitly refreshed figures from that exact source.",
+        "notes": "Does not overwrite figure-local overrides or frozen Snapshots. Format/on-canvas legend and Series controls are the local editing route and participate in the figure Undo history. Source: nanoscope/gui/source_appearance.py; project_sources.py."
       },
       {
         "label": "Format",
@@ -4968,8 +5160,8 @@
         "label": "Width preset",
         "kind": "control",
         "group": "Publication export dialog",
-        "what_it_does": "Choose Custom, Single column · 85 mm or Double column · 180 mm.",
-        "notes": "Confirm the actual venue requirements; presets are conveniences. Source: nanoscope/gui/plot_export_options.py."
+        "what_it_does": "Choose Custom or a single/double-column width from the figure’s pinned style. Each available preset names its actual width in mm and its style; figures without a style use the built-in reference columns.",
+        "notes": "Edit column widths in the style editor. Built-in reference columns currently use 89/183 mm; custom styles can differ. Confirm the actual venue requirements. Source: nanoscope/gui/plot_export_options.py and nanoscope/gui/figure_export_style.py."
       },
       {
         "label": "Units",
@@ -5158,7 +5350,7 @@
         "kind": "control",
         "group": "Compose publication figure / Revise publication figure",
         "what_it_does": "Choose label font, size, boldness and color.",
-        "notes": "Labels are visual annotations, not source identity changes. Source: nanoscope/gui/figure_composer.py."
+        "notes": "Labels are visual annotations, not source identity changes. Source: nanoscope/gui/figure_composer.py. A composition keeps the family it was saved with: one an earlier Mac build saved in the application font (a private face) shows it on a row of its own, Application font (older figure), so its letters keep matching its panels in the PNG and the PDF, and its SVG writes Arial for those letters."
       },
       {
         "label": "Update preview",
@@ -5231,11 +5423,11 @@
         "notes": "Range 32–2048, default 256; grid resolution is not bandwidth. Source: nanoscope/gui/distribution_summary_panel.py; nanoscope/analysis/distribution_summary.py."
       },
       {
-        "label": "Generate",
-        "kind": "control",
+        "label": "Update plot",
+        "kind": "toolbar action",
         "group": "Distribution summaries",
         "what_it_does": "Compute the chosen descriptive summary from the current draft.",
-        "notes": "Unapplied edits do not overwrite the visible committed result; check Details for exclusions. Source: nanoscope/gui/distribution_summary_panel.py; nanoscope/analysis/distribution_summary.py."
+        "notes": "Replaces the hosted Generate button. Count shows draft differences; stale/un-generated figures have at least one pending reason. Ctrl/⌘Return commits the focused field before generating. Unapplied edits do not overwrite the visible committed result; check Details for exclusions. Source: nanoscope/gui/distribution_summary_panel.py; nanoscope/analysis/distribution_summary.py."
       },
       {
         "label": "Figure",
@@ -5301,11 +5493,11 @@
         "notes": "Non-positive values are not plottable and are reported. Source: nanoscope/gui/comparison_figures_panel.py."
       },
       {
-        "label": "Generate",
-        "kind": "control",
+        "label": "Update plot",
+        "kind": "toolbar action",
         "group": "Comparison figures",
         "what_it_does": "Build the selected comparison from the explicit draft.",
-        "notes": "At most eight sources / 50,000 selected rows. Swarm is limited to 500 per source and 2,000 total; use Strip for larger supported sets. Source: nanoscope/gui/comparison_figures_panel.py."
+        "notes": "Replaces the hosted Generate button. Count shows draft differences; stale/un-generated figures have at least one pending reason. Ctrl/⌘Return commits the focused field before generating. At most eight sources / 50,000 selected rows. Swarm is limited to 500 per source and 2,000 total; use Strip for larger supported sets. Source: nanoscope/gui/comparison_figures_panel.py."
       },
       {
         "label": "Fit canvas / − / +",
@@ -5324,114 +5516,359 @@
       {
         "label": "Reset legend position",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Format ▸ Legend",
         "what_it_does": "Restore the default legend location.",
         "notes": "Direct legend dragging is appearance-only and does not reset the data view. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Legend font size",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Format ▸ Legend",
         "what_it_does": "Set legend text size independently.",
         "notes": "Zero uses auto (body − 3), with the supported minimum; default/body font settings remain separate. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Legend shows (n = …)",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Format ▸ Legend",
         "what_it_does": "Show source/group counts in legend entries.",
         "notes": "A displayed count is the captured plotted subset, not necessarily all acquired events. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Legend entries",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Format ▸ Legend",
         "what_it_does": "Include/exclude and edit individual captured legend entries.",
         "notes": "Does not remove points or change their source identity; full details remain available. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Title size",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Format ▸ Figure",
         "what_it_does": "Set the title font size.",
         "notes": "Appearance only; title wording is not a numerical model setting. The title's bold and italic are its Text style… (right-click the title). Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Axis label size / Tick label size",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Format ▸ Figure",
         "what_it_does": "Override axis-label and tick-label typography separately.",
         "notes": "Zero/auto keeps the body-derived rule. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Gridlines",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Format ▸ Figure",
         "what_it_does": "Toggle the plot grid.",
         "notes": "Does not change bins, fitted values or axis ranges. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Confidence band",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Data & analysis ▸ Fit display",
         "what_it_does": "Show the available 95% pointwise band from bootstrap parameter-vector replicates.",
         "notes": "Not a simultaneous band. Unavailable if replicates were not retained, fewer than 20 were usable, or the fitted family does not supply them. A saved frozen figure can retain its captured graphical band. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Residual strip",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Data & analysis ▸ Fit display",
         "what_it_does": "Show observed-minus-expected residuals divided by √expected per bin.",
         "notes": "Explicitly include this panel in Export current figure if required. The residual pattern is a diagnostic, not proof of model validity. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Provenance caption",
         "kind": "control",
-        "group": "Distributions → Appearance → Style",
+        "group": "Distributions ▸ Format ▸ Caption",
         "what_it_does": "Optionally print detector/model/preprocessing provenance on the figure.",
         "notes": "This is an explicit caption option; scientific warnings/verdicts stay in Details. Bundle metadata retains provenance whether or not it is printed. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Undo / Redo",
         "kind": "control",
-        "group": "Distributions → Export → Configuration",
+        "group": "Common toolbar",
         "what_it_does": "Move through plot-configuration history.",
-        "notes": "Distinct from the main window’s event/measurement curation history. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Distributions history covers the entire plot configuration, analysis and appearance, with 200 steps; Undo/Redo update both toolbar and Format. Distinct from the main window’s event/measurement curation history. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Template",
         "kind": "control",
-        "group": "Distributions → Export → Configuration",
+        "group": "Distributions ▸ Export ▾ / New ▾ > From recipe…",
         "what_it_does": "Apply a saved plot type, columns, fit recipe, axis limits and style.",
-        "notes": "Unlike an appearance preset, a full template contains analytical settings. It does not carry checked sources, edited legend entries or an applied fit; press Apply fit explicitly. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Unlike an appearance preset, a full template contains analytical settings. It does not carry checked sources, edited legend entries or an applied fit; use Update plot to commit pending settings explicitly. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Save as…",
         "kind": "control",
-        "group": "Distributions → Export → Configuration",
+        "group": "Distributions ▸ Export ▾ / New ▾ > From recipe…",
         "what_it_does": "Save the current plot recipe/style as a named template.",
         "notes": "Does not save the raw recording or a frozen Figure Library snapshot. Source: nanoscope/gui/plots_panel.py."
       },
       {
         "label": "Rename / Delete",
         "kind": "control",
-        "group": "Distributions → Export → Configuration",
+        "group": "Distributions ▸ Export ▾ / New ▾ > From recipe…",
         "what_it_does": "Rename or remove the selected reusable plot template.",
         "notes": "Rename preserves the saved settings; Delete removes the template, not a source analysis. Source: nanoscope/gui/plots_panel.py."
       },
       {
-        "label": "Export JSON… / Import JSON…",
+        "label": "Import JSON…",
         "kind": "control",
-        "group": "Distributions → Export → Configuration",
-        "what_it_does": "Export or import a complete plot configuration.",
-        "notes": "Includes checked source bindings. Unavailable sources are skipped; inspect source selection and applied/draft status after import. Source: nanoscope/gui/plots_panel.py."
+        "group": "Distributions ▸ Data & analysis ▸ Import plot settings",
+        "what_it_does": "Import a complete plot configuration.",
+        "notes": "Imports a file through the established validator; inspect source bindings and pending/applied status afterward. Export configuration JSON… remains in Export ▾. New > From recipe recalls a named stored recipe instead. Source: nanoscope/gui/plots_panel.py; analysis_explorer.py."
+      },
+      {
+        "label": "Update plot (n)",
+        "kind": "control",
+        "group": "Common toolbar",
+        "what_it_does": "Run the active page’s existing commit or refresh action.",
+        "notes": "Distributions commits its pending recipe; summaries/comparisons generate explicitly. Managed Noise/Event analytical controls stay pending until Update. Voltage dependence applies a waiting fit or refreshes; I-V is disabled while gathering. Frozen saved entries cannot Update. Hover for pending reasons.",
+        "shortcut": "Ctrl/⌘Return or keypad Enter"
+      },
+      {
+        "label": "Undo / Redo",
+        "kind": "control",
+        "group": "Common toolbar",
+        "what_it_does": "Undo/redo the active page’s history.",
+        "notes": "One history per page; Distributions owns configuration history, the others appearance history. A text field with typing keeps its own Undo. The toolbar works with either inspector tab or the inspector hidden.",
+        "shortcut": "Ctrl/⌘Z / Ctrl/⌘Shift+Z"
+      },
+      {
+        "label": "Inspector",
+        "kind": "control",
+        "group": "Common toolbar",
+        "what_it_does": "Show or hide the right inspector.",
+        "notes": "Tab, width, visibility and group expansion are per-user preferences."
+      },
+      {
+        "label": "Snapshot details…",
+        "kind": "menu item",
+        "group": "Export ▾",
+        "what_it_does": "Display a saved Snapshot/composition in the Explorer canvas without regeneration.",
+        "notes": "Uses the project’s Figures list; there is no second saved-figure inventory."
+      },
+      {
+        "label": "Refresh availability",
+        "kind": "control",
+        "group": "Analysis home",
+        "what_it_does": "Recheck available tools without constructing pages or running analyses.",
+        "notes": "Beside the home search box; distinct from Update plot or Refresh from recordings."
+      },
+      {
+        "label": "This figure / Selected figures / All live figures",
+        "kind": "control",
+        "group": "Style ▾",
+        "what_it_does": "Apply a pinned look to this figure, selected live rows, or all live figures including dormant records and open retained Study/Report editors.",
+        "notes": "One Undo step per affected editor. Frozen Snapshots/compositions are excluded. Selecting a saved entry disables live styling; new figures use the project default."
+      },
+      {
+        "label": "Keep text styles I set by hand",
+        "kind": "control",
+        "group": "Style ▾",
+        "what_it_does": "Preserve element style overrides while applying a look.",
+        "notes": "On by default. Off replaces hand-set text styling including fit-label size/colour while retaining typed words."
+      },
+      {
+        "label": "Undo style on N figures",
+        "kind": "control",
+        "group": "Style ▾",
+        "what_it_does": "Undo the last style batch on all affected pages.",
+        "notes": "Available only while every affected page remains at the state left by the batch; editing or undoing/redoing any affected page invalidates it."
+      },
+      {
+        "label": "Figure elements",
+        "kind": "control",
+        "group": "Format",
+        "what_it_does": "Choose Figure, Title, axes and Label/Numbers, Legend and entries, Series, Fit label, Caption or view-specific labels and Colour map.",
+        "notes": "Shows current-view capabilities. Shared native/matplotlib controllers support text, axes and per-series selection. Study/Report wording and colour edits use Format; Details retains save/export and study-specific actions."
+      },
+      {
+        "label": "Text format",
+        "kind": "control",
+        "group": "Figure selection mini toolbar",
+        "what_it_does": "Edit selected text font, size, bold, italic, colour, title alignment and wording.",
+        "notes": "Single-click editable text selects it and opens Format. Empty click deselects; pan keeps selection; double-click and right-click retain existing behavior. Selection outlines and mini toolbar never export."
+      },
+      {
+        "label": "Figure font",
+        "kind": "control",
+        "group": "Format text elements / Text format",
+        "what_it_does": "Inherit the whole figure’s font for this element.",
+        "notes": "Named fonts override inheritance. The figure’s default remains Arial; older private-font recovery and installed-family fallback behavior are unchanged."
+      },
+      {
+        "label": "● set here / from figure / default",
+        "kind": "control",
+        "group": "Format element properties",
+        "what_it_does": "Show a property’s inheritance; click set here to clear only that override.",
+        "notes": "The inherited marker links back to Figure; clearing a style preserves wording."
+      },
+      {
+        "label": "Reset element",
+        "kind": "control",
+        "group": "Format",
+        "what_it_does": "Clear the selected element’s style overrides while preserving words.",
+        "notes": "On an axis, also restore its range and major tick spacing to Auto in the same Undo step; preserve the other axis."
+      },
+      {
+        "label": "Reset look",
+        "kind": "control",
+        "group": "Format ▸ Figure",
+        "what_it_does": "Reset figure and element styles to defaults.",
+        "notes": "Preserve words, axis ranges, annotation positions and legend names. Different from Reset figure, which also resets wording and supported axis pins."
+      },
+      {
+        "label": "Copy format / Paste format",
+        "kind": "control",
+        "group": "Format",
+        "what_it_does": "Copy or paste a compatible element or figure look.",
+        "notes": "Never copies words or axis geometry. Figure paste keeps destination fit-label visibility, numbers and own style. A fit label’s text style can still be copied as a text element."
+      },
+      {
+        "label": "Auto / Range / Major tick / Units",
+        "kind": "control",
+        "group": "Format ▸ X axis / Y axis",
+        "what_it_does": "Edit the same axis pins used by Axis properties.",
+        "notes": "Type in displayed units. Auto releases the range; changing a plotted quantity still follows Phase 0 reset rules."
+      },
+      {
+        "label": "Log / Change Log in Data & analysis",
+        "kind": "control",
+        "group": "Format ▸ X axis / Y axis",
+        "what_it_does": "Show the analytical log setting read-only and reveal its owning control.",
+        "notes": "Log changes what is binned/fitted; it is an analysis setting, not a copied text style."
+      }
+    ]
+  },
+  {
+    "key": "curve-fitting-dialog",
+    "area": "Curve fitting",
+    "summary": "Current X–Y curve-fit controls and completed-result ownership in build 45.37.98.",
+    "opened_by": "Distributions > Scatter > Curve fit… or Voltage dependence > Data & analysis > Fit > Curve fit…. Source: nanoscope/gui/nonlinear_fit_dialog.py.",
+    "gotchas": [
+      "Curve models fit the original response space; Quick fit power-law (Scatter) and exponential (Voltage dependence) use transformed spaces. Compare objectives before comparing parameters or R².",
+      "Local intervals and pointwise bands are approximations. Robust, boundary-constrained or poorly identified fits may withhold conventional intervals. Three voltage summaries cannot identify an unconstrained 4PL/5PL; shared-parameter multi-source fitting is not offered."
+    ],
+    "controls": [
+      {
+        "label": "Curve fit…",
+        "kind": "button",
+        "group": "Entry",
+        "what_it_does": "Opens the X–Y curve-fitting dialog for a plotted source.",
+        "notes": "Distributions Scatter or Voltage dependence > Data & analysis > Fit. Quick fit remains a separate control."
+      },
+      {
+        "label": "Source / Model",
+        "kind": "selectors",
+        "group": "Draft",
+        "what_it_does": "Select the observations and model to fit.",
+        "notes": "Equation, parameter convention and X/Y storage units are displayed; a changed draft does not overwrite the last completed fit."
+      },
+      {
+        "label": "Fit x range",
+        "kind": "numeric fields",
+        "group": "Draft",
+        "what_it_does": "Restricts observations by X.",
+        "notes": "Uses the labelled storage units, including seconds when the parent axis displays milliseconds."
+      },
+      {
+        "label": "Advanced: starts, constraints and loss",
+        "kind": "expander",
+        "group": "Draft",
+        "what_it_does": "Shows parameter starts, bounds, fixed flags, error weights and loss.",
+        "notes": "Collapsed by default; expand before changing constraints."
+      },
+      {
+        "label": "Estimate starts",
+        "kind": "button",
+        "group": "Advanced",
+        "what_it_does": "Estimates free starting values within the current bounds.",
+        "notes": "Preserves fixed values and constraints."
+      },
+      {
+        "label": "Reset constraints",
+        "kind": "button",
+        "group": "Advanced",
+        "what_it_does": "Restores model bounds and releases fixed parameters.",
+        "notes": "Preserves current starting values."
+      },
+      {
+        "label": "Parameter / Start / Lower / Upper / Fixed / Unit",
+        "kind": "table",
+        "group": "Advanced",
+        "what_it_does": "Edits parameter starts, bounds and fixed values with their units.",
+        "notes": "Fixed parameters remain at the specified value; bounds and model-domain checks must remain valid."
+      },
+      {
+        "label": "Error weights",
+        "kind": "selector",
+        "group": "Advanced",
+        "what_it_does": "Chooses uniform errors or measurement sigma for 1/sigma² weights.",
+        "notes": "A sigma column is measurement uncertainty, not an arbitrary confidence score."
+      },
+      {
+        "label": "Loss / Robust scale",
+        "kind": "selectors and numeric field",
+        "group": "Advanced",
+        "what_it_does": "Selects Least squares, Robust soft L1 or Robust Huber; scale is automatic or positive.",
+        "notes": "Scale uses response units or sigma units when weighted. Robust intervals are qualified or withheld."
+      },
+      {
+        "label": "Draft data / Last completed fit",
+        "kind": "tabs",
+        "group": "Preview",
+        "what_it_does": "Separates proposed observations/settings from the last completed result.",
+        "notes": "Completed identity names source and model and reports whether it matches the draft."
+      },
+      {
+        "label": "Detailed diagnostics",
+        "kind": "expander",
+        "group": "Last completed fit",
+        "what_it_does": "Shows the full completed-fit report.",
+        "notes": "Curve, raw-response residuals, metrics and parameter estimate/interval/status table summarize the result."
+      },
+      {
+        "label": "Fit / Cancel fit",
+        "kind": "buttons",
+        "group": "Actions",
+        "what_it_does": "Starts or cancels a background optimization.",
+        "notes": "Cancellation preserves the previous completed result."
+      },
+      {
+        "label": "Apply to figure",
+        "kind": "button",
+        "group": "Actions",
+        "what_it_does": "Attaches a successful completed fit matching the current draft.",
+        "notes": "Draft changes disable Apply until a matching fit succeeds."
+      },
+      {
+        "label": "Export last completed fit…",
+        "kind": "button",
+        "group": "Actions",
+        "what_it_does": "Exports JSON fit record or CSV observations, predictions, residuals and sampled bands.",
+        "notes": "Uses that completed result’s original source/model/settings. Later draft edits are not exported; inspect the completed identity first."
+      },
+      {
+        "label": "Remove applied fit",
+        "kind": "button",
+        "group": "Actions",
+        "what_it_does": "Removes the applied fit overlay from the parent figure.",
+        "notes": "Does not alter original observations."
+      },
+      {
+        "label": "Close",
+        "kind": "button",
+        "group": "Actions",
+        "what_it_does": "Closes the dialog.",
+        "notes": "Save Project after applying to persist the fit and its evaluated outputs; reopen restores them without optimization."
       }
     ]
   },
   {
     "key": "noise-iv-vdep-eventplots",
     "area": "Noise spectrum, I-V, voltage dependence, event waveforms and Subpopulations",
-    "summary": "Analysis Explorer recording-level pages include Noise spectrum (Welch PSD, FFT, spectrogram and all-points histogram), I-V / conductance, Voltage dependence and Event waveforms (event-count heatmap and aligned ensemble). Noise uses a selected raw calibrated recording span, not the detector filter chain. I-V estimates conductance from current/voltage observations; voltage dependence summarizes stored event metrics. Subpopulations is an explicit exploratory waveform-feature/clustering/mixture report, not molecular identification. Open-pore reference controls live in Preprocess and are documented here together with their detailed automatic-estimator probe controls.",
+    "summary": "Analysis Explorer recording-level pages include Noise spectrum (Welch PSD, FFT, spectrogram and all-points histogram), I-V / conductance, Voltage dependence and Event waveforms (event-count heatmap and aligned ensemble). Noise uses a selected raw calibrated recording span, not the detector filter chain. I-V estimates conductance from current/voltage observations; voltage dependence summarizes stored event metrics. Subpopulations is an explicit exploratory waveform-feature/clustering/mixture report, not molecular identification. Open-pore reference controls live in Preprocess and are documented here together with their detailed automatic-estimator probe controls. In the Explorer these pages use the common toolbar and right inspector: I-V has Estimator; Voltage dependence Sources/Plot/Fit; Events Sources plus the visible Plot group; Noise Sources/View/Estimator; Subpopulations Sources/View/Report.",
     "opened_by": "Analysis → Noise spectrum… / I-V / conductance… / Voltage dependence… / Event waveforms… opens the corresponding Explorer page. Noise spectrum of the measured region transfers the trace selection by sample index. Generate Subpopulations… computes a report; Open saved Subpopulations… reopens it without analysis. Reference controls: Inspector → Analysis → Preprocess → Open-pore baseline. Sources: nanoscope/gui/psd_panel.py, iv_panel.py, voltage_dep_panel.py, event_plot_panel.py, subpop_window.py, baseline_panel.py and main_window.py.",
     "gotchas": [
       "The Noise spectrum page deliberately ignores your filter chain and your detection — it always transforms the RAW calibrated trace, so a spectrum will not match a filtered view of the same recording.",
@@ -5463,7 +5900,10 @@
       "Manual-reference Preview is noncommitting. To apply the reference press Detect: this can change residual-noise scale, automatic polarity, candidate boundaries and acceptance, not only reported amplitudes. Reviewed-table replacement is explicit and undoable.",
       "Known and interval references require calibrated pA and a supported classical detector. Incompatible high-pass, normalization or runtime baseline-subtraction settings are refused; the application does not silently turn them off.",
       "An automatic result and a known-current/specified-interval result answer different conditional questions. If intervals/current came from synthetic ground truth, disclose that as oracle assistance; it is not evidence available on a real recording.",
-      "Changing what a figure shows puts the words you typed back to automatic, and the range (and major tick) pinned in Axis properties on each axis whose quantity moved: in Voltage dependence the Metric (the Y axis; an applied fit that changes takes the fit label's wording only, no range), in Event waveforms the heatmap X (the map's X range), Y (the map's Y range) and Normalize time (the ensemble's X range), in Noise Amplitude spectral density (the PSD's Y range), in Subpopulations the Embedding (both axes of the scatter). Switching the Event waveforms tab or Noise's Show view takes the words and no range (each view keeps its own). The Title, X label, Y label and fit label's wording go back, with those ranges, as one Undo step and the status line names what went (a typed major tick is named apart from the range: Y range and Y major tick reset); the look stays. Two controls that leave the words still take the range of the axis whose numbers they change: |V| in Voltage dependence (the X range, signed voltage against its magnitude) and Log x / Log y on the Event-count map (log10 values on a linear axis), except that Log scale changed in Axis properties keeps the range typed beside it. I-V has no such control."
+      "Changing what a figure shows puts the words you typed back to automatic, and the range (and major tick) pinned in Axis properties on each axis whose quantity moved: in Voltage dependence the Metric (the Y axis; an applied fit that changes takes the fit label's wording only, no range), in Event waveforms the heatmap X (the map's X range), Y (the map's Y range), Normalize time and Align once time is in ms (the ensemble's X range), in Noise Amplitude spectral density (the PSD's Y range), in Subpopulations the Embedding (both axes of the scatter). Switching the Event waveforms tab or Noise's Show view takes the words and no range (each view keeps its own). The Title, X label, Y label and fit label's wording go back, with those ranges, as one Undo step and the status line names what went (a typed major tick is named apart from the range: Y range and Y major tick reset); the look stays. Two controls that leave the words still take the range of the axis whose numbers they change: |V| in Voltage dependence (the X range, signed voltage against its magnitude) and Log x / Log y on the Event-count map (log10 values on a linear axis), except that Log scale changed in Axis properties keeps the range typed beside it (and carries a range left as the dialog opened with it across to the new units). The sentence comes off the status line when a word or range it names is typed or pinned again, and the Undo and Redo tooltips name the step ('reset title, Y label and Y range'). I-V has no such control.",
+      "Voltage dependence Update plot applies a waiting fit without gathering again; otherwise it refreshes. Managed Noise and Event waveforms keep analytical control changes pending until Update; appearance controls restyle the committed result. Subpopulations reports curation changes; Update plot recomputes the original bound detection with model-search defaults, refusing a missing or mismatched source. It does not open an analysis-settings dialog. Recipes are reached through New > From recipe and Export; Distributions file import is under Data & analysis > Import plot settings.",
+      "In managed Noise/Event figures, Follow selection stages a changed main source without replacing the displayed result or applying other analytical drafts. Update plot commits the staged source and settings; turning Follow off pins that staged source. Source drafts survive project reopening.",
+      "Curve fit… fits one plotted X–Y source in labelled storage units, with starts/bounds/fixed parameters, sigma weights and robust losses. Save projects retains exact diagnostics; JSON/CSV export is in the fitting dialog. CDF distribution checks are descriptive, not calibrated p-values. Three voltage summaries cannot identify an unconstrained 4PL/5PL."
     ],
     "controls": [
       {
@@ -5541,7 +5981,7 @@
         "kind": "combo",
         "group": "Noise spectrum ▸ Recording",
         "what_it_does": "The PRIMARY recording: it sets the segment window, the RMS band range and the y units of the plot.",
-        "notes": "Lists every open recording (segments included) that has a live current channel and a known sample rate. Changing it re-ranges the Start/End and f low/f high spin boxes to the new recording's duration and Nyquist and resets them to full span. The recording you pick here is removed from the 'Compare with' list, and whichever recording it displaced re-joins that list."
+        "notes": "Lists every open recording (segments included) that has a live current channel and a known sample rate. Changing it re-ranges the Start/End and f low/f high spin boxes to the new recording's duration and Nyquist and resets them to full span. The recording you pick here is removed from the 'Compare with' list, and whichever recording it displaced re-joins that list. In managed Figures, the figure owns this source choice. With Follow selection off, moving the main-window selection does not replace it; Update plot commits the pending source."
       },
       {
         "label": "Compare with",
@@ -5561,22 +6001,22 @@
         "label": "Start",
         "kind": "spinbox",
         "group": "Noise spectrum ▸ Segment (quiet open-pore baseline)",
-        "what_it_does": "Start of the analysed segment, in seconds.",
-        "notes": "Ranges over 0 … the primary recording's duration, 4 decimal places, 0.1 s steps. The group title is the instruction: pick a QUIET open-pore stretch — a segment full of translocations measures the events, not the pore."
+        "what_it_does": "Start of the analysed segment, in milliseconds from the first loaded sample.",
+        "notes": "The displayed ms range follows the primary recording duration; values convert back to seconds. Select a quiet interval. The measured-region route transfers sample indices without confusing recording and instrument clocks. Fewer than two samples cannot form a spectrum."
       },
       {
         "label": "End",
         "kind": "spinbox",
         "group": "Noise spectrum ▸ Segment (quiet open-pore baseline)",
-        "what_it_does": "End of the analysed segment, in seconds.",
-        "notes": "Same range and step as Start. A window holding fewer than 2 samples draws a message instead of a spectrum, naming the sample count."
+        "what_it_does": "End of the analysed segment, in milliseconds from the first loaded sample.",
+        "notes": "The displayed ms range follows the primary recording duration; values convert back to seconds. Select a quiet interval. The measured-region route transfers sample indices without confusing recording and instrument clocks. Fewer than two samples cannot form a spectrum."
       },
       {
         "label": "Use full trace",
         "kind": "button",
         "group": "Noise spectrum ▸ Segment (quiet open-pore baseline)",
         "what_it_does": "Reset the segment to span the whole recording.",
-        "notes": "Sets Start to 0 and End to the recording's duration, then recomputes."
+        "notes": "Sets Start to 0 and End to the recording's duration. In managed Figures the change waits for Update plot; standalone legacy windows retain immediate recomputation."
       },
       {
         "label": "(segment read-out, e.g. '3,000,000 samples · 60 s')",
@@ -5625,7 +6065,7 @@
         "kind": "spinbox",
         "group": "Noise spectrum ▸ RMS noise band",
         "what_it_does": "Low edge of the RMS-noise integration band, in Hz.",
-        "notes": "Ranges 0 … the primary's Nyquist; defaults to 0 so the read-out starts as the TOTAL RMS. Changing it only re-integrates the stored spectrum — no recompute."
+        "notes": "Ranges 0 … the primary's Nyquist; defaults to 0 for total RMS. Managed Figures keep analytical band choices pending until Update plot; the standalone control re-integrates its stored spectrum."
       },
       {
         "label": "f high",
@@ -5646,7 +6086,7 @@
         "kind": "text field",
         "group": "Noise spectrum ▸ Style",
         "what_it_does": "Override the plot title; blank uses the automatic title.",
-        "notes": "The automatic title is 'PSD — <recording>' (or 'ASD — …'), and with several curves it names every recording, e.g. 'PSD — A vs B', counting the rest past three."
+        "notes": "Hosted location: Format, in the corresponding element panel (Colour map for a palette). The automatic title is 'PSD — <recording>' (or 'ASD — …'), and with several curves it names every recording, e.g. 'PSD — A vs B', counting the rest past three."
       },
       {
         "label": "Data colour",
@@ -5674,14 +6114,14 @@
         "kind": "spinbox",
         "group": "Noise spectrum ▸ Style",
         "what_it_does": "Saved-PNG size in px (0 = native / follow aspect). Two boxes, width × height.",
-        "notes": "0–20000 each. Setting only one keeps the aspect ratio; setting both forces exactly that size."
+        "notes": "Hosted location: Export ▾. 0–20000 each. Setting only one keeps the aspect ratio; setting both forces exactly that size."
       },
       {
         "label": "Export current figure…",
         "kind": "button",
         "group": "Noise spectrum",
         "what_it_does": "Export the visible committed figure through the shared publication export dialog.",
-        "notes": "Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
+        "notes": "Hosted location: Export ▾. Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
       },
       {
         "label": "Noise details",
@@ -5702,7 +6142,7 @@
         "kind": "button",
         "group": "I-V / conductance",
         "what_it_does": "Export the visible committed figure through the shared publication export dialog.",
-        "notes": "Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
+        "notes": "Hosted location: Export ▾. Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
       },
       {
         "label": "(conductance headline, e.g. 'G = 12.4 nS')",
@@ -5730,21 +6170,21 @@
         "kind": "combo",
         "group": "Voltage dependence ▸ controls row",
         "what_it_does": "Which per-recording event summary to plot against voltage.",
-        "notes": "Choices, in order: 'Capture rate (Hz)' (the default), 'Median dwell (s)', 'Median depth (pA)', 'Median dI/I₀', 'Event count'. Changing it re-gathers every point from the session and relabels the y axis and the table's third column."
+        "notes": "Choices, in order: 'Capture rate (Hz)' (the default), 'Median dwell (ms)', 'Median depth (pA)', 'Median dI/I₀', 'Event count'. Changing it re-gathers every point from the session and relabels the y axis and the table's third column."
       },
       {
-        "label": "Fit",
+        "label": "Quick fit",
         "kind": "combo",
         "group": "Voltage dependence ▸ controls row",
-        "what_it_does": "Overlay a trend: a straight line, or the A·exp(V/V0) capture-rate model. \"Press Apply fit to draw the one you have chosen.\" (Verbatim tooltip.)",
-        "notes": "SELECTING A TREND DOES NOT DRAW IT — press \"Apply fit\" beside the combo. Choices: none (default), linear, exponential. The fit runs on whatever x axis is currently drawn (|V| or signed V), so the curve always lands on the scatter. With fewer than 2 recordings the details box says 'Need >= 2 recordings at different voltages to fit a trend.'"
+        "what_it_does": "Chooses none, linear (raw response) or exponential A·exp(V/V0) (log response). The exponential R² describes log-response space. Curve fit… offers raw-response models.",
+        "notes": "Hosted Explorer: choose the trend, then press Update plot. The standalone legacy window uses Apply fit. Choices: none (default), linear, exponential. The fit runs on whatever x axis is currently drawn (|V| or signed V), so the curve always lands on the scatter. With fewer than 2 recordings the details box says 'Need >= 2 recordings at different voltages to fit a trend.'"
       },
       {
         "label": "Apply fit",
         "kind": "button",
         "group": "Voltage dependence ▸ controls row",
         "what_it_does": "Draws the trend chosen in the Fit combo beside it. The combo is a proposal; this is what puts the line on the plot.",
-        "notes": "Reads \"Apply fit ●\" while a chosen trend has not been drawn yet. The same gate the Plots window's histogram and scatter Fit combos carry, and it matters more here: every point is a whole recording, so a trend line that appeared the instant the dropdown opened would be a model asserted over the user's points before they asked for it."
+        "notes": "Legacy standalone button, hidden in the Explorer: use Update plot to apply the waiting fit without gathering observations again. Reads \"Apply fit ●\" while a chosen trend has not been drawn yet. The same gate the Plots window's histogram and scatter Fit combos carry, and it matters more here: every point is a whole recording, so a trend line that appeared the instant the dropdown opened would be a model asserted over the user's points before they asked for it."
       },
       {
         "label": "|V|",
@@ -5786,7 +6226,7 @@
         "kind": "button",
         "group": "Voltage dependence",
         "what_it_does": "Export the visible committed figure through the shared publication export dialog.",
-        "notes": "Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
+        "notes": "Hosted location: Export ▾. Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
       },
       {
         "label": "Fit details",
@@ -5828,7 +6268,7 @@
         "kind": "combo",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "The X-axis event metric for the density map.",
-        "notes": "Choices: 'Dwell (s)' (default X), 'Depth', 'dI/I₀', 'ECD (charge deficit)'. Depth and ECD pick up the channel's units on the axis label ('Depth (pA)', 'ECD (pA·s)'). ECD is computed on demand from the calibrated signal, not read from the event table."
+        "notes": "Choices: 'Dwell (ms)' (default X), 'Depth', 'dI/I₀', 'ECD (charge deficit)'. Depth and ECD pick up the channel's units on the axis label ('Depth (pA)', 'ECD (pA·s)'). ECD is computed on demand from the calibrated signal, not read from the event table."
       },
       {
         "label": "Y",
@@ -5842,14 +6282,14 @@
         "kind": "checkbox",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Bin the X metric in log space (drops non-positive values).",
-        "notes": "ON by default, because dwell reads on a log axis by convention. The axis label gains '(log10)' and the axis values ARE log10 values. If every event is dropped the plot says 'No events fall on these axes. Check the log toggles (non-positive values are dropped for a log axis).' Ticking or clearing it takes a range (and major tick) pinned on the map's X axis in Axis properties, because the numbers on the axis change: one Undo step and a status line; the typed words stay. Changing Log scale in Axis properties keeps the range typed in that dialog."
+        "notes": "ON by default, because dwell reads on a log axis by convention. The axis label gains '(log10)' and the axis values ARE log10 values. If every event is dropped the plot says 'No events fall on these axes. Check the log toggles (non-positive values are dropped for a log axis).' Ticking or clearing it takes a range (and major tick) pinned on the map's X axis in Axis properties, because the numbers on the axis change: one Undo step and a status line; the typed words stay. Changing Log scale in Axis properties keeps the range typed in that dialog. A range left as the dialog opened with it is carried across to the new units (log10 of it when Log scale is ticked, ten to the power when it is unticked); its major tick goes."
       },
       {
         "label": "Log y",
         "kind": "checkbox",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Bin the Y metric in log space (drops non-positive values).",
-        "notes": "Off by default. Watch this one with a signed depth metric — negative depths vanish silently apart from the empty-plot message. Ticking or clearing it takes a range (and major tick) pinned on the map's Y axis in Axis properties, because the numbers on the axis change: one Undo step and a status line; the typed words stay."
+        "notes": "Off by default. Watch this one with a signed depth metric — negative depths vanish silently apart from the empty-plot message. Ticking or clearing it takes a range (and major tick) pinned on the map's Y axis in Axis properties, because the numbers on the axis change: one Undo step and a status line; the typed words stay. In Axis properties a range left as the dialog opened with it is carried across to the new units (log10 of it when Log scale is ticked, ten to the power when it is unticked); its major tick goes."
       },
       {
         "label": "Bins",
@@ -5863,49 +6303,49 @@
         "kind": "combo",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Sequential colour map for the density (perceptually uniform).",
-        "notes": "Choices: viridis (default), magma, plasma, inferno, cividis. The colour bar re-inks with it."
+        "notes": "Build 45.37.98 limitation: the hosted Format > Colour map panel is empty, so this palette cannot currently be edited there. The stored/legacy control offers viridis (default), magma, plasma, inferno and cividis. This does not alter the count matrix. Distributions Heatmap colormap is a separate working control."
       },
       {
         "label": "Title",
         "kind": "text field",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Overrides the density map's title; empty uses the automatic one.",
-        "notes": "Placeholder reads 'title (auto)'. The automatic title is '<Y metric> vs <X metric>   ·   n = N events'."
+        "notes": "Hosted location: Format, in the corresponding element panel (Colour map for a palette). Placeholder reads 'title (auto)'. The automatic title is '<Y metric> vs <X metric>   ·   n = N events'."
       },
       {
         "label": "X label",
         "kind": "text field",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Overrides the x-axis label; empty uses the metric's own name.",
-        "notes": "Placeholder 'x label (auto)'. Overriding it also removes the '(log10)' hint the automatic label adds — if you rename a logged axis, say so yourself."
+        "notes": "Hosted location: Format, in the corresponding element panel (Colour map for a palette). Placeholder 'x label (auto)'. Overriding it also removes the '(log10)' hint the automatic label adds — if you rename a logged axis, say so yourself."
       },
       {
         "label": "Y label",
         "kind": "text field",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Overrides the y-axis label; empty uses the metric's own name.",
-        "notes": "Placeholder 'y label (auto)'. Same '(log10)' caveat as X label."
+        "notes": "Hosted location: Format, in the corresponding element panel (Colour map for a palette). Placeholder 'y label (auto)'. Same '(log10)' caveat as X label."
       },
       {
         "label": "Export current figure…",
         "kind": "button",
         "group": "Event waveforms ▸ Event-count heatmap",
         "what_it_does": "Export the visible committed figure through the shared publication export dialog.",
-        "notes": "Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
+        "notes": "Hosted location: Export ▾. Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
       },
       {
         "label": "Normalize time",
         "kind": "checkbox",
         "group": "Event waveforms ▸ Ensemble",
         "what_it_does": "Duration-normalize each event onto a common [0, 1] axis (align is then immaterial).",
-        "notes": "ON by default; the x axis reads 'Normalized time (dwell)'. Turning it off switches the x axis to real seconds AND enables the Align combo. With it on, a 0.2 ms event and a 5 ms event are drawn the same width — good for shape, useless for duration."
+        "notes": "ON by default; the x axis reads 'Normalized time (dwell)'. Turning it off switches the x axis to milliseconds AND enables the Align combo. With it on, a 0.2 ms event and a 5 ms event are drawn the same width — good for shape, useless for duration."
       },
       {
         "label": "Align",
         "kind": "combo",
         "group": "Event waveforms ▸ Ensemble",
         "what_it_does": "Real-time alignment reference (used only when 'Normalize time' is off).",
-        "notes": "Choices: start, center, extremum. start / center put each event's first sample or midpoint at t = 0; extremum puts each event's deepest sample there (the sample of maximum excursion, read with the event table's polarity), and an event with no finite sample in its own span is left out and counted in the title and Details. It is greyed out (genuinely disabled) whenever 'Normalize time' is ticked — un-tick that checkbox to enable it."
+        "notes": "Choices: start, center, extremum. start / center put each event's first sample or midpoint at t = 0; extremum puts each event's deepest sample there (the sample of maximum excursion, read with the event table's polarity), and an event with no finite sample in its own span is left out and counted in the title and Details. It is greyed out (genuinely disabled) whenever 'Normalize time' is ticked — un-tick that checkbox to enable it. Changing it while time is displayed as milliseconds takes the typed Title, X label and Y label and the range pinned on the ensemble's X axis back to automatic, because it is what t = 0 means on that axis: one Undo step and a status line ('Title, X label, Y label and X range reset: the plot now shows the ensemble with t = 0 at each event's deepest sample.'). It takes nothing while Normalize time is ticked, when no alignment is drawn."
       },
       {
         "label": "Points",
@@ -5932,22 +6372,22 @@
         "label": "Band",
         "kind": "combo",
         "group": "Event waveforms ▸ Ensemble",
-        "what_it_does": "Shade the spread of the events around a summary curve: mean ± 1 sample SD around the solid mean, or the 25th–75th percentile band around the dashed median. Drawn from the traces already on screen — choosing one never re-reads the recording. Details gives how many events each point uses. (Verbatim tooltip.)",
-        "notes": "Choices: None (default), Mean ± 1 SD, Median IQR (25–75 %). A changed band only re-shades: the zoom and the traces stay. Saved with the project and in an Event waveforms template."
+        "what_it_does": "Shade spread around the summary curve: mean ± 1 sample SD or the 25th–75th percentile band. Details gives how many events each point uses.",
+        "notes": "Choices: None (default), Mean ± 1 SD, Median IQR (25–75 %). In managed Figures the choice waits for Update plot; standalone legacy windows re-shade immediately. Saved with the project and in an Event waveforms recipe."
       },
       {
         "label": "Title",
         "kind": "text field",
         "group": "Event waveforms ▸ Ensemble",
         "what_it_does": "Overrides the ensemble title; empty uses the automatic one.",
-        "notes": "Placeholder 'title (auto)'. The automatic title is 'Ensemble of N event(s)   ·   M edge-skipped   —   mean (solid) + median (dashed)'."
+        "notes": "Hosted location: Format, in the corresponding element panel (Colour map for a palette). Placeholder 'title (auto)'. The automatic title is 'Ensemble of N event(s)   ·   M edge-skipped   —   mean (solid) + median (dashed)'."
       },
       {
         "label": "Export current figure…",
         "kind": "button",
         "group": "Event waveforms ▸ Ensemble",
         "what_it_does": "Export the visible committed figure through the shared publication export dialog.",
-        "notes": "Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
+        "notes": "Hosted location: Export ▾. Choose native/physical dimensions and inspect the frozen preview; warning details stay in their own section and metadata. Export does not run a new analysis."
       },
       {
         "label": "Event reference · open-pore baseline",
@@ -5961,14 +6401,14 @@
         "kind": "spinbox",
         "group": "Open-pore baseline",
         "what_it_does": "Pass 1. Decides WHICH excursions count as events. It must be several times the longest state you want treated as an event — a rough window shorter than the state it is sitting in becomes that state, and nothing gets masked. (Measured on the -600 mV apo file: its 521 ms partial clog is 15% masked at 0.5 s and 99.96% masked at 2.0 s.)",
-        "notes": "Range 0.002–60 s, 3 decimals, 0.1 s step, app default 0.5 s. Lowering it drags the Base window down with it (Base window can never exceed it). Editing it by hand immediately restamps the source as 'set by hand'."
+        "notes": "Displayed ms (scientific range 0.002–60 s, default 0.5 s = 500 ms). Stored values remain seconds. Base window cannot exceed Rough window; editing marks the reference as set by hand."
       },
       {
         "label": "Base window",
         "kind": "spinbox",
         "group": "Open-pore baseline",
         "what_it_does": "Pass 2. Decides how fast the baseline may follow the trace. It must be SHORTER than the shortest genuine conductance level dwell, or a gating pore's steps get smoothed into the baseline instead of being measured against it.",
-        "notes": "Range 0.001–30 s, 4 decimals, 0.05 s step, app default 0.1 s — but its live maximum is pinned to the Rough window's current value, so you cannot type a base window wider than the rough one. To raise it, raise Rough window first."
+        "notes": "Displayed ms (scientific range 0.001–30 s, default 0.1 s = 100 ms). Stored values remain seconds. Raise Rough window first if Base window reaches its live maximum."
       },
       {
         "label": "Decimation",
@@ -6037,7 +6477,7 @@
         "label": "Segment (quiet open-pore baseline)",
         "kind": "group",
         "group": "Noise spectrum page",
-        "what_it_does": "The box that decides which slice of the trace the spectrum is computed from (Start, End, Use full trace and the samples/seconds read-out). Its name is the instruction: pick a quiet open-pore stretch, not one full of events.",
+        "what_it_does": "The box that decides which slice of the trace the spectrum is computed from (Start, End, Use full trace and the samples/ms readout). Its name is the instruction: pick a quiet open-pore stretch, not one full of events.",
         "from_crosscheck": true
       },
       {
@@ -6066,7 +6506,8 @@
         "kind": "group",
         "group": "Noise spectrum page",
         "what_it_does": "The box holding Title, Data colour, Fit colour, Background and Export size — everything that changes how the saved figure looks rather than what it measures.",
-        "from_crosscheck": true
+        "from_crosscheck": true,
+        "notes": "Hosted location: Format, in the corresponding element panel (Colour map for a palette). "
       },
       {
         "label": "Auto",
@@ -6097,10 +6538,10 @@
         "from_crosscheck": true
       },
       {
-        "label": "Median dwell (s)",
+        "label": "Median dwell (ms)",
         "kind": "combo",
         "group": "Voltage dependence ▸ Metric",
-        "what_it_does": "Plots each recording's median event duration in seconds against its applied voltage.",
+        "what_it_does": "Plots each recording's median event duration in milliseconds against its applied voltage.",
         "from_crosscheck": true
       },
       {
@@ -6154,10 +6595,10 @@
         "from_crosscheck": true
       },
       {
-        "label": "Dwell (s)",
+        "label": "Dwell (ms)",
         "kind": "combo",
         "group": "Event waveforms ▸ Event-count heatmap ▸ X and Y",
-        "what_it_does": "Event duration in seconds — the default X metric, and the one Log x is on for by default.",
+        "what_it_does": "Event duration in milliseconds — the default X metric, and the one Log x is on for by default.",
         "from_crosscheck": true
       },
       {
@@ -6242,14 +6683,14 @@
         "label": "Proposed rough window",
         "kind": "readout",
         "group": "Open-pore baseline ▸ Proposed for this recording",
-        "what_it_does": "The pass-1 window the probe suggests, in seconds. Nothing changes in the form until you press Use these values.",
+        "what_it_does": "The pass-1 window the probe suggests, in milliseconds. Nothing changes in the form until you press Use these values.",
         "from_crosscheck": true
       },
       {
         "label": "Proposed base window",
         "kind": "readout",
         "group": "Open-pore baseline ▸ Proposed for this recording",
-        "what_it_does": "The pass-2 window the probe suggests, shown in milliseconds (the Base window spin box above shows the same number in seconds).",
+        "what_it_does": "The pass-2 window the probe suggests, shown in milliseconds, like the Base window control; stored scientific values remain seconds.",
         "from_crosscheck": true
       },
       {
@@ -6288,11 +6729,11 @@
         "notes": "Enter the signed, calibrated current justified for THIS recording/channel; −120 pA is not interchangeable with +120 pA. This supplies a constant reference rather than subtracting a baseline from the source trace. It can still change residual-noise estimation, automatic polarity, event boundaries, counts and measurements when Detect is run. It does not make those results independent of the recording. Source: nanoscope/gui/baseline_panel.py; nanoscope/analysis/open_pore_reference.py."
       },
       {
-        "label": "Start (s) / End (s)",
+        "label": "Start (ms) / End (ms)",
         "kind": "control",
         "group": "Event reference · open-pore baseline",
         "what_it_does": "Edit recording-relative half-open [start, end) open-pore intervals.",
-        "notes": "These are seconds, not absolute instrument times or sample indices. Intervals must be ordered, non-overlapping, within the trace and contain at least five samples; that minimum is validation, not proof the pore was open. Source: nanoscope/gui/baseline_panel.py; open_pore_preview.py; nanoscope/analysis/baseline.py."
+        "notes": "Recording-relative milliseconds, not absolute instrument times or sample indices. Stored intervals remain seconds. Ordered, non-overlapping, within-trace intervals require at least five samples; this is validation, not proof of an open pore."
       },
       {
         "label": "Add current trace selection",
@@ -6418,14 +6859,14 @@
         "kind": "control",
         "group": "Noise spectrum — additional views",
         "what_it_does": "Export numerical data for the selected noise view.",
-        "notes": "Retain source/span, units, window and estimator metadata with the figure. Source: nanoscope/gui/psd_panel.py."
+        "notes": "Hosted location: Export ▾. Retain source/span, units, window and estimator metadata with the figure. Source: nanoscope/gui/psd_panel.py."
       },
       {
-        "label": "Analyze…",
+        "label": "Update plot",
         "kind": "control",
         "group": "Subpopulations",
-        "what_it_does": "Open the explicit Subpopulations analysis workflow.",
-        "notes": "Section and appearance changes never rerun feature extraction, PCA, clustering or mixture analysis. Source: nanoscope/gui/subpop_window.py; main_window.py."
+        "what_it_does": "Recomputes a report from its pinned detection’s current accepted events using model-search defaults.",
+        "notes": "For a new report, binds the selected detection. Existing reports do not follow another main-window selection. Missing, replaced or scientifically mismatched sources are refused; the stored report survives. Appearance changes do not rerun feature extraction, PCA, clustering or mixture analysis."
       },
       {
         "label": "Embedding / Colour by",
@@ -6439,7 +6880,7 @@
         "kind": "control",
         "group": "Subpopulations",
         "what_it_does": "Export report text, JSON settings/caveats and numerical tables.",
-        "notes": "Includes event membership/posteriors, population summaries and available embedding/waveform data; does not merely save a screenshot. Source: nanoscope/gui/subpop_window.py; main_window.py."
+        "notes": "Hosted location: Export ▾. Includes event membership/posteriors, population summaries and available embedding/waveform data; does not merely save a screenshot. Source: nanoscope/gui/subpop_window.py; main_window.py."
       },
       {
         "label": "Copy report",
@@ -6453,14 +6894,14 @@
         "kind": "control",
         "group": "Subpopulations",
         "what_it_does": "Review report-linked event tiles and subpopulation classes.",
-        "notes": "A statistical assignment is not an accept/reject decision or an identified analyte. Source: nanoscope/gui/subpop_window.py; main_window.py."
+        "notes": "A statistical assignment is not an accept/reject decision or an identified analyte. Source: nanoscope/gui/subpop_window.py; main_window.py. Requires the original valid detection to be selected; a different recording is never silently substituted."
       },
       {
         "label": "Colour the trace",
         "kind": "control",
         "group": "Subpopulations",
         "what_it_does": "Shade the main trace with the report class colors.",
-        "notes": "Presentation only; original detector classifications and measurements are not replaced. Source: nanoscope/gui/subpop_window.py; main_window.py."
+        "notes": "Presentation only; original detector classifications and measurements are not replaced. Source: nanoscope/gui/subpop_window.py; main_window.py. Requires the original valid detection to be selected; a different recording is never silently substituted."
       },
       {
         "label": "Caveats",
@@ -6468,6 +6909,27 @@
         "group": "Subpopulations",
         "what_it_does": "Read the persistent caveat summary and expandable report details.",
         "notes": "Caveats stay outside plot artwork and travel with report/provenance exports. Source: nanoscope/gui/subpop_window.py; main_window.py."
+      },
+      {
+        "label": "Source / Channel / Detector",
+        "kind": "readout",
+        "group": "Subpopulations ▸ Sources",
+        "what_it_does": "Identifies the report’s original detection and explains its update behavior.",
+        "notes": "An unbound stored report can be viewed/exported and can generate UMAP from stored PCA scores, but cannot borrow another recording for report updates or trace actions."
+      },
+      {
+        "label": "Generate UMAP",
+        "kind": "button",
+        "group": "Subpopulations ▸ View",
+        "what_it_does": "Computes UMAP from the report’s stored PCA scores in a background worker and selects the new embedding.",
+        "notes": "Preserves existing t-SNE, classes and mixture results. Unavailable while busy, without suitable PCA scores or when UMAP is already present. Save Project retains coordinates; reopen does not regenerate them. Embeddings are exploratory, not species identification."
+      },
+      {
+        "label": "Full details",
+        "kind": "toggle",
+        "group": "Noise / Subpopulations report",
+        "what_it_does": "Expands the full explanatory report.",
+        "notes": "Noise keeps α, R² and the descriptive-fit qualification visible when collapsed. In a small window, scroll the content and inspector to reach remaining details."
       }
     ]
   },

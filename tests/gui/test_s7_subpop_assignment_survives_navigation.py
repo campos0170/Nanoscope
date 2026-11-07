@@ -179,6 +179,11 @@ def _report_for(w, doc_id: str, events: EventSet | None = None):
 def _adopt(w, qtbot, doc_id: str, events: EventSet | None = None):
     """Hand a report to the REAL landing slot, launch target and all."""
     res, report, signal = _report_for(w, doc_id, events)
+    from nanoscope.core.analysis_workspace import result_recipe
+    # Match the worker launch contract, including the persistent source identity.
+    w._subpop_source_recipe_pending = result_recipe(w, res)
+    w._subpop_accepted_ids_pending = frozenset(
+        int(e) for e in (res.payload if events is None else events).accepted.df["event_id"])
     w._subpop_signal_pending = signal
     w._subpop_target = res
     w._on_subpop_finished(report)
@@ -383,7 +388,18 @@ def test_opening_a_project_retires_it_and_a_restored_frame_is_not_re_adopted_by_
         w._open_project(str(proj))
     qtbot.wait(100)
     assert w._subpop_assignment is None
-    assert w._subpop_window.assignment_state()[0] == SW.ASSIGNMENT_RETIRED
+    owner = w._ensure_figure_workspace()
+    key = owner.most_recent("subpopulations")
+    assert key is not None and owner.activate(key)
+    restored_report = owner.page(key)
+    # Exact persisted lineage makes a restored report ready for explicit attachment;
+    # opening or selecting it must not install a map or signal by event id alone.
+    from nanoscope.core.analysis_workspace import resolve_result_recipe
+    resolved, _reason = resolve_result_recipe(w, restored_report._nanoscope_workspace_source)
+    assert resolved is not None
+    assert restored_report.assignment_state()[0] == SW.ASSIGNMENT_READY
+    assert "apply its stored classes" in restored_report.live_note_full()
+    assert w._subpop_signal is None
     live_a = w._session.doc_id_for_source(str(Path(src).resolve()))
     assert live_a is not None
     w._on_selection(live_a, 0)
@@ -391,7 +407,24 @@ def test_opening_a_project_retires_it_and_a_restored_frame_is_not_re_adopted_by_
     assert w._session.results.get(live_a, 0, "detect.schmitt") is not None
     assert w._subpop_assignment is None, "re-attached by event id onto a different load"
     assert w._analysis_panel.subpop_labels() is None
-    assert not w._subpop_window.can_show_events()
+    assert restored_report.can_show_events()
+    changed = resolved.payload.df.copy(deep=True)
+    changed.loc[changed.index[0], "depth_pA"] += 1.0
+    resolved.payload.df = changed
+    match, reason = resolve_result_recipe(w, restored_report._nanoscope_workspace_source)
+    assert match is None and reason, "identical event IDs must not accept changed measurements"
+    # The native entry point must independently enforce that lineage check, even
+    # before a general UI refresh has disabled its previously ready button.
+    stored_report = restored_report.report()
+    assert restored_report._gallery_btn.isEnabled()
+    restored_report._gallery_btn.click()
+    qtbot.wait(30)
+    assert restored_report.report() is stored_report
+    assert w._event_gallery is None
+    assert w._subpop_assignment is None and w._subpop_signal is None
+    assert w._analysis_panel.subpop_labels() is None
+    refusal = w.statusBar().currentMessage()
+    assert refusal and _NO_MIXTURE not in refusal, refusal
 
 
 # ================================================================================================
@@ -421,6 +454,7 @@ def test_the_two_modules_spell_the_states_the_same_way():
     two spellings are pinned equal here so a rename cannot split them."""
     assert MainWindow._SUBPOP_NONE == SW.ASSIGNMENT_NONE
     assert MainWindow._SUBPOP_INSTALLED == SW.ASSIGNMENT_INSTALLED
+    assert MainWindow._SUBPOP_READY == SW.ASSIGNMENT_READY
     assert MainWindow._SUBPOP_AWAY == SW.ASSIGNMENT_AWAY
     assert MainWindow._SUBPOP_RETIRED == SW.ASSIGNMENT_RETIRED
     with pytest.raises(ValueError):

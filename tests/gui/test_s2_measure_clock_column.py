@@ -83,7 +83,7 @@ def test_t_start_header_is_badged_and_tooltipped_on_a_t0_recording(window, tmp_p
     # The field_note vocabulary the event table uses: names the clock, spells out the
     # conversion with THIS recording's t0.
     assert "recording" in tip.lower() and "clock" in tip.lower()
-    assert f"{T0_APO:.4f}" in tip
+    assert f"{T0_APO * 1000:.1f} ms" in tip
     # ...and the pooled-table truth: each row's own t0_s column.
     assert "t0_s" in tip
 
@@ -93,7 +93,7 @@ def test_t_start_header_is_plain_when_the_clocks_agree(window, tmp_path):
     still explains the convention — same condition the event table branches on."""
     mp, _ = _install_and_measure(window, _doc(tmp_path, name="zero.dat", t0_s=0.0))
 
-    assert str(_header(mp, "t_start_s", Qt.DisplayRole)) == "t_start_s"
+    assert str(_header(mp, "t_start_s", Qt.DisplayRole)) == "Start time (ms)"
     tip = str(_header(mp, "t_start_s", Qt.ToolTipRole))
     # field_note's agree-case wording ("t₀ is 0, so ... read the same number") plus the
     # pooled-table sentence naming the per-row t0_s column.

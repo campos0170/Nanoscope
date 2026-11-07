@@ -219,7 +219,12 @@ def test_render_never_recomputes_and_appearance_never_changes_geometry(kind, mon
         for a, b in zip(first.collections, changed.collections):
             np.testing.assert_array_equal(a.get_offsets(), b.get_offsets())
     assert not any(line.get_visible() for ax in figures[2].axes for line in ax.get_xgridlines() + ax.get_ygridlines())
-    assert figures[2]._suptitle is None
+    # Blank wording hides rendered ink while preserving the P3 editable title target.
+    from nanoscope.plot.matplotlib_targets import artist_targets
+    title = figures[2]._suptitle
+    assert title is not None and not title.get_text().strip()
+    target = next(row for row in artist_targets(figures[2]) if row[:2] == ("figure", "title"))
+    assert target[2] == [title] and "edit" in target[4]
 
 
 def test_warning_prose_never_becomes_plot_text_and_pair_units_survive():

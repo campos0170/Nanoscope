@@ -8,6 +8,8 @@ pre-existing event catalogs.
 """
 from __future__ import annotations
 
+from ..core.atomic_write import write_staged
+
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -100,7 +102,7 @@ def _jsonable(value):
 
 
 def _write_json(path: Path, value) -> None:
-    path.write_text(json.dumps(_jsonable(value), indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
+    write_staged(path, Path.write_text, json.dumps(_jsonable(value), indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
 
 
 def _absolute(path: Path | str, base: Path | None = None) -> Path:
@@ -341,9 +343,9 @@ def _original_clustering(features: pd.DataFrame, folder: Path, cancel=None) -> t
     table["kmeans3"] = SC.kmeans_labels(projection.scores, random_state=0)
     for i in range(projection.scores.shape[1]):
         table[f"PC{i+1}"] = projection.scores[:, i]
-    SC.loading_table(projection).to_csv(folder / "loadings.csv", index=False)
-    pd.DataFrame({"pc": np.arange(len(projection.explained_variance_ratio)) + 1,
-                  "explained_variance_ratio": projection.explained_variance_ratio}).to_csv(folder / "variance.csv", index=False)
+    write_staged(folder / "loadings.csv", SC.loading_table(projection).to_csv, index=False)
+    write_staged(folder / "variance.csv", pd.DataFrame({"pc": np.arange(len(projection.explained_variance_ratio)) + 1,
+                  "explained_variance_ratio": projection.explained_variance_ratio}).to_csv, index=False)
     # Record the complete transform, not just rounded human-readable loadings.
     X = features[list(NOTEBOOK_FEATURES)].to_numpy(float)
     X = np.where(np.isfinite(X), X, np.nan)
@@ -355,9 +357,9 @@ def _original_clustering(features: pd.DataFrame, folder: Path, cancel=None) -> t
                 n_kept=projection.n_kept, pca_metadata=projection.meta))
     for label in ("hdbscan", "kmeans3"):
         ct = pd.crosstab(table[label], table.incubation_h)
-        ct.to_csv(folder / f"{label}_composition_counts.csv")
-        ct.div(ct.sum(axis=1), axis=0).to_csv(folder / f"{label}_composition_fractions.csv")
-        table.groupby(label)[list(NOTEBOOK_FEATURES)].median().to_csv(folder / f"{label}_feature_medians.csv")
+        write_staged(folder / f"{label}_composition_counts.csv", ct.to_csv)
+        write_staged(folder / f"{label}_composition_fractions.csv", ct.div(ct.sum(axis=1), axis=0).to_csv)
+        write_staged(folder / f"{label}_feature_medians.csv", table.groupby(label)[list(NOTEBOOK_FEATURES)].median().to_csv)
     info.update(n_pcs=projection.n_kept, pca_metadata=projection.meta,
                 hdbscan_clusters=int(len(set(table.hdbscan) - {-1})),
                 hdbscan_noise_fraction=float((table.hdbscan < 0).mean()))
@@ -421,7 +423,7 @@ def _appendix(features: pd.DataFrame, mixture, spec: StudySpec, folder: Path, pr
                 status="computed", warnings=[])
     if not len(table):
         info.update(status="insufficient_events", warnings=["No measurable accepted events."])
-        table.to_csv(folder / "features_assignments.csv", index=False)
+        write_staged(folder / "features_assignments.csv", table.to_csv, index=False)
         _write_json(folder / "report.json", info)
         return table, None, info
     clusters = SC.cluster_scopes(table, scope_column="scope", random_state=0, cancel=cancel,
@@ -430,7 +432,7 @@ def _appendix(features: pd.DataFrame, mixture, spec: StudySpec, folder: Path, pr
     for col in labels:
         table[col] = labels[col]
     for scope, result in clusters.scopes.items():
-        result.loadings.to_csv(folder / f"loadings_{scope}.csv", index=False)
+        write_staged(folder / f"loadings_{scope}.csv", result.loadings.to_csv, index=False)
         _write_json(folder / f"projection_{scope}.json", dict(components=result.pca.components,
                     explained_variance_ratio=result.pca.explained_variance_ratio, metadata=result.pca.meta,
                     n_hdbscan_clusters=result.n_hdbscan_clusters, hdbscan_noise_fraction=result.hdbscan_noise_fraction,
@@ -461,13 +463,13 @@ def _appendix(features: pd.DataFrame, mixture, spec: StudySpec, folder: Path, pr
         table.loc[sub.index, "subpop_confidence"] = quant.fit.confidence
         for k in range(quant.fit.k):
             table.loc[sub.index, f"posterior_{k}"] = quant.fit.posteriors[:, k]
-        _appendix_population_table(quant, mixture.duration_s).to_csv(folder / "population_quantification.csv", index=False)
-        pd.DataFrame(quant.selection.grid, index=pd.Index(quant.selection.p_grid, name="n_pcs"),
-                     columns=pd.Index(quant.selection.k_grid, name="k")).to_csv(folder / "cv_grid.csv")
-        pd.DataFrame(quant.ci.samples, columns=[f"subpop_{k}" for k in range(quant.fit.k)]).to_csv(folder / "fraction_bootstrap.csv", index=False)
-        pd.DataFrame({"k": list(quant.fit.bic or {}), "bic": list((quant.fit.bic or {}).values())}).to_csv(folder / "bic_ladder.csv", index=False)
+        write_staged(folder / "population_quantification.csv", _appendix_population_table(quant, mixture.duration_s).to_csv, index=False)
+        write_staged(folder / "cv_grid.csv", pd.DataFrame(quant.selection.grid, index=pd.Index(quant.selection.p_grid, name="n_pcs"),
+                     columns=pd.Index(quant.selection.k_grid, name="k")).to_csv)
+        write_staged(folder / "fraction_bootstrap.csv", pd.DataFrame(quant.ci.samples, columns=[f"subpop_{k}" for k in range(quant.fit.k)]).to_csv, index=False)
+        write_staged(folder / "bic_ladder.csv", pd.DataFrame({"k": list(quant.fit.bic or {}), "bic": list((quant.fit.bic or {}).values())}).to_csv, index=False)
         if quant.crosstab is not None:
-            quant.crosstab.to_csv(folder / "exploratory_crosstab.csv")
+            write_staged(folder / "exploratory_crosstab.csv", quant.crosstab.to_csv)
         # Explicit half-open windows for waveform kernel (stored event table uses inclusive end).
         # SR's waveform helper constructs an EventSet internally, whose schema is
         # wider than its two consumed sample columns. Leave unrelated measurements
@@ -481,7 +483,7 @@ def _appendix(features: pd.DataFrame, mixture, spec: StudySpec, folder: Path, pr
         windows["accepted"] = True
         windows["flag"] = ""
         waves = SR.subpopulation_waveforms(mixture.raw, mixture.fs_hz, windows, quant.fit.labels)
-        waves.to_csv(folder / "population_median_waveforms.csv", index=False)
+        write_staged(folder / "population_median_waveforms.csv", waves.to_csv, index=False)
         _write_json(folder / "population_median_waveforms_metadata.json", dict(n_events=waves.attrs.get("n_events", {}),
                     axis="duration-normalized; 200 points; 25% padding; raw current, unchanged CSV sign"))
         info.update(claim=quant.claim(), selection=quant.selection, separation=quant.separation,
@@ -496,7 +498,7 @@ def _appendix(features: pd.DataFrame, mixture, spec: StudySpec, folder: Path, pr
         thin = SR._gmm_note(len(sub), quant.fit.n_pcs, quant.fit.k)
         if thin:
             info["warnings"].insert(0, thin)
-    table.to_csv(folder / "features_assignments.csv", index=False)
+    write_staged(folder / "features_assignments.csv", table.to_csv, index=False)
     _write_json(folder / "report.json", info)
     return table, quant, info
 
@@ -634,7 +636,7 @@ def run_study(spec: StudySpec, *, output_dir: Path | str, progress: Progress | N
                 raise ValueError(f"{rec.tag}: global open-pore current is not positive and finite")
             catalog["aggregation_fracblock_global"] = catalog.depth_peak_pA / i0
             catalog["f_sust_global"] = catalog.depth_sust_pA / i0
-            catalog.to_csv(staging / "catalogs" / f"events_catalog_{rec.tag}.csv", index=False)
+            write_staged(staging / "catalogs" / f"events_catalog_{rec.tag}.csv", catalog.to_csv, index=False)
             _write_json(staging / "catalogs" / f"{rec.tag}_provenance.json", analyzed.provenance)
             accepted = catalog[catalog.passes_gate].copy()
             frames.append(accepted)
@@ -668,22 +670,22 @@ def run_study(spec: StudySpec, *, output_dir: Path | str, progress: Progress | N
         events = pd.concat(frames, ignore_index=True)
         features = pd.concat(feature_parts, ignore_index=True)
         summary = pd.DataFrame(summaries)
-        summary.to_csv(staging / "summary.csv", index=False)
-        events.to_csv(staging / "events.csv", index=False)
-        events.to_csv(staging / "comparison" / "incubation_events_local_sustained.csv", index=False)
+        write_staged(staging / "summary.csv", summary.to_csv, index=False)
+        write_staged(staging / "events.csv", events.to_csv, index=False)
+        write_staged(staging / "comparison" / "incubation_events_local_sustained.csv", events.to_csv, index=False)
         legacy = events.copy()
         legacy["fracblock"] = legacy.aggregation_fracblock_global
-        legacy.to_csv(staging / "comparison" / "incubation_comparison_events_peak_global.csv", index=False)
+        write_staged(staging / "comparison" / "incubation_comparison_events_peak_global.csv", legacy.to_csv, index=False)
         comparison = _comparison_tables(events, summary)
         for name, table in comparison.items():
-            table.to_csv(staging / "comparison" / f"{name}.csv", index=False)
+            write_staged(staging / "comparison" / f"{name}.csv", table.to_csv, index=False)
         if progress:
             progress(0.50, "Rendering recording comparisons")
         figure_paths.extend(IF.comparison_figures(events, summary, comparison, staging / "figures", cancel=cancel))
         if progress:
             progress(0.56, "Original notebook: pooled 12-feature clustering")
         original, original_info = _original_clustering(features, staging / "original_clustering", cancel=cancel)
-        original.to_csv(staging / "original_clustering" / "features_assignments.csv", index=False)
+        write_staged(staging / "original_clustering" / "features_assignments.csv", original.to_csv, index=False)
         _write_json(staging / "original_clustering" / "report.json", original_info)
         figure_paths.extend(IF.clustering_figures(original, staging / "figures", prefix="original12", cancel=cancel))
         check_cancelled(cancel)
@@ -712,7 +714,7 @@ def run_study(spec: StudySpec, *, output_dir: Path | str, progress: Progress | N
                         original_clustering=original_info, quantitative_appendix=appendix_info,
                         figure_paths=[p.as_posix() for p in relative_figures])
         metadata = _jsonable(metadata)
-        (staging / "report.md").write_text(_report(spec, summary, metadata, relative_figures), encoding="utf-8")
+        write_staged(staging / "report.md", Path.write_text, _report(spec, summary, metadata, relative_figures), encoding="utf-8")
         metadata["output_sha256"] = {p.relative_to(staging).as_posix(): _sha256(p, cancel) for p in sorted(staging.rglob("*")) if p.is_file()}
         _write_json(staging / "metadata.json", metadata)
         check_cancelled(cancel)

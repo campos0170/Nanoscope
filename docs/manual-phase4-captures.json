@@ -1,0 +1,211 @@
+{
+  "edition": "2026-11-03",
+  "source_revision": "403311a6cb44a7d250f4487331acb4a77c84ed0a",
+  "status": "passed-and-visually-reviewed",
+  "installed_utc": "2026-11-04T04:52:46.113949+00:00",
+  "method": "Qt offscreen widget/menu grabs; no desktop screen",
+  "scope": "Functional UI/persistence test from existing accepted apo CSV rows. No recording or calibration writes.",
+  "interpretation": "Voltage labels are filename labels; fractional depth is provisional. Software acceptance is not human curation.",
+  "input_project": {
+    "file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase3-20261103/captures/apo-phase3.nanoscope",
+    "sha256_before": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+    "sha256_after": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4"
+  },
+  "inputs": [
+    {
+      "path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/apo-analysis/apo_500mv_bessel_5khz_events.csv",
+      "sha256_before": "52837469158a6065d28d05f8b2232f1464583e403a0ebbe5261ebae2d973b4d2",
+      "accepted": 2317,
+      "median_dwell_ms": 9.6199997706413,
+      "sha256_after": "52837469158a6065d28d05f8b2232f1464583e403a0ebbe5261ebae2d973b4d2"
+    },
+    {
+      "path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/apo-analysis/apo_600mv_bessel_5khz_events.csv",
+      "sha256_before": "a933dece5110bf35a4ac36a961f848193d6477e057cb8e3c443e8b36939ab0a4",
+      "accepted": 649,
+      "median_dwell_ms": 7.6399998178482,
+      "sha256_after": "a933dece5110bf35a4ac36a961f848193d6477e057cb8e3c443e8b36939ab0a4"
+    },
+    {
+      "path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/apo-analysis/apo_700mv_bessel_5khz_events.csv",
+      "sha256_before": "aaa1a5efa3d6c813e204c56e1d4e1de39fdf13d0453c7bfe7e2946a99142e93b",
+      "accepted": 2506,
+      "median_dwell_ms": 9.649999769926001,
+      "sha256_after": "aaa1a5efa3d6c813e204c56e1d4e1de39fdf13d0453c7bfe7e2946a99142e93b"
+    }
+  ],
+  "captured_project": {
+    "file": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/apo-phase4.nanoscope",
+    "sha256": "65ecf817b3f43ea2cd9dce9f3f61cce863aeb7291088f724b44f4d4434931751",
+    "version": 13
+  },
+  "capture_report_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/capture-report.json",
+  "capture_report_sha256": "95f90d1c04e5f2b88ccc2c39191ac7b3f09ccebf26f582118088dfb2c318e4dd",
+  "checks": {
+    "legacy_live_figures_restore_without_analysis_and_keep_raw_resources": true,
+    "old_snapshot_bytes_and_provenance_unchanged": true,
+    "dwell_only_comparison_has_no_fractional_calibration_dependency": true,
+    "dwell_comparison_generated_once": true,
+    "apo_source_series_format_and_undo_preserve_exact_tables": true,
+    "undeclared_style_width_refuses_without_inventing_dimensions": true,
+    "batch_dormant_column_exports_preserve_navigation": true,
+    "old_snapshot_export_preserves_original_svg_bytes": true,
+    "existing_exports_refused_without_overwrite": true,
+    "large_vector_batch_reports_refusal_without_sampling": true,
+    "retained_report_and_density_export_without_rebuilding": true,
+    "density_raw_seconds_and_additive_display_columns_agree": true,
+    "frozen_two_panel_composition_keeps_words_sources_and_shared_letter_style": true,
+    "actual_new_recipe_chooser_captured_without_creating_or_analyzing": true,
+    "project_and_computer_style_sections_captured_with_actual_scopes": true,
+    "canvas_and_column_export_defaults_visible_without_editing_style": true,
+    "composition_project_roundtrip_preserves_exact_embedded_snapshots": true,
+    "phase4_roundtrip_exact_tables_and_old_snapshots": true,
+    "input_csvs_and_prior_project_unchanged": true
+  },
+  "assets": [
+    {
+      "id": "figures-multiple",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/07-reopened-apo-phase4.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_figures.png",
+      "sha256": "e922208f99f476396fdbd3c465076ae26d28b64ee86d04cd660dbb79350663ee",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        1440,
+        900
+      ],
+      "caption": "Independent apo-ferritin figures after project reopening. The Figures list retains live entries and saved categories; a retained result remains editable without a new calculation.",
+      "status": "approved"
+    },
+    {
+      "id": "new-recipe",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/11-new-recipe.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_recipe.png",
+      "sha256": "f6d9669da4326106c7d5259a3de7a966ece8f09e94193700ae147ce53fb88494",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        820,
+        600
+      ],
+      "caption": "The From recipe chooser lists its input requirements. Including typed wording is off by default; opening the chooser does not run an analysis.",
+      "status": "approved"
+    },
+    {
+      "id": "format-series",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/08-apo-per-series-format.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_series.png",
+      "sha256": "3ce7ade5f0b4453770f016a1f9b3fdabca665d3bf79dd826cdac3c644223fc2f",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        1440,
+        900
+      ],
+      "caption": "A source series in an apo-ferritin figure is selected in Format. Appearance changes and Undo preserve the exact source tables; Project Sources opens the separate shared name/color registry.",
+      "status": "approved"
+    },
+    {
+      "id": "project-styles",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/12-project-style-scopes.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_styles.png",
+      "sha256": "9b14183ed7b19a9ebc6e0f602ed2f804e5453796f97f3c01af9e1ace20754e37",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        750,
+        275
+      ],
+      "caption": "The Style menu offers figure scopes and Built in, Project and On this computer stores. This illustration arranges two actual offscreen menu captures together; it is not one simultaneous application view.",
+      "status": "approved"
+    },
+    {
+      "id": "style-editor",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/09-apo-style-editor.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_style_editor.png",
+      "sha256": "9ce16ce7ee22548c019ba3ac54846443c214f123c1015bda0a093157ef587516",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        920,
+        850
+      ],
+      "caption": "The shared style editor changes look only and previews synthetic points. The preview is not an apo-ferritin analysis or a publisher-compliance check; extra fields remain available by scrolling.",
+      "status": "approved"
+    },
+    {
+      "id": "milliseconds",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/02-apo-dwell-comparison-ms.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_milliseconds.png",
+      "sha256": "3fc81bf2e6e8ac28b4e7f204e829c8a33583f841e69eb67efa9b354111bae228",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        1440,
+        900
+      ],
+      "caption": "A descriptive apo-ferritin dwell comparison displays milliseconds. Raw dwell_s tables remain in seconds; this display test does not validate detector performance or current calibration.",
+      "status": "approved"
+    },
+    {
+      "id": "composition",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/10-apo-composer-style.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_composition.png",
+      "sha256": "c590ff27bc50ffa7a8f528821fce70c21786d79c8554f3a4f8f69f2d5c1ae52e",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        1280,
+        850
+      ],
+      "caption": "Two populated frozen apo-ferritin panels in the composer. Shared panel-letter style preserves literal labels and component snapshots; Update preview prepares a new composition without changing its source figures.",
+      "status": "approved"
+    },
+    {
+      "id": "batch-export",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/03-batch-export-options.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_batch_options.png",
+      "sha256": "6dcb1ce86d05fa0191d502662dfc23ccb2efb36c509c83dc846e2f30e19a9d3c",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        650,
+        600
+      ],
+      "caption": "Selected-figure export options specify formats and physical sizing. The captured run exports existing results serially without detection, fitting or Update plot.",
+      "status": "approved"
+    },
+    {
+      "id": "batch-export-results",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/04-batch-export-results.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_batch_results.png",
+      "sha256": "6604705d22f1b52eb8e11c08f19fd96cfea51fb34c7dc55e6428156b9ee245a0",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        900,
+        600
+      ],
+      "caption": "The result report names the outputs written by this batch. Missing named widths and existing-file collisions are reported explicitly in the capture checks; no replacement dimensions or analyses are invented.",
+      "status": "approved"
+    },
+    {
+      "id": "new-figure-menu",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/13-new-figure-menu.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_new_menu.png",
+      "sha256": "254341bb26a6e32c67d9af3291a87f7b031eca5e441664c9db5ade14ee2cf811",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        194,
+        393
+      ],
+      "caption": "The New menu offers independent figures by plot type and a From recipe route. Input requirements are available as menu hints; creating a draft does not compute a result.",
+      "status": "approved"
+    },
+    {
+      "id": "style-canvas-settings",
+      "capture_path": "/Users/abrahamcampos/Documents/Codex/2026-10-19/i-x20/outputs/phase4-20261103/captures-final/14-style-canvas-settings.png",
+      "manual_image_path": "manual-markdown/images/current_phase4_canvas_settings.png",
+      "sha256": "4d55a3492f881f7694068a7ee538fd71c2e2fe51225e849dc9c8c7d205b3fbbb",
+      "input_project_sha256": "7a4cf4a6a345b93fdf3ba528360cdb6349a33a2c8c4275e340df42cd8d2ed5b4",
+      "capture_size": [
+        920,
+        850
+      ],
+      "caption": "The scrolled style editor exposes physical canvas width and height; column reference sizes are listed beneath the preview. Dimensions seed export choices without recomputing or rearranging an analytical figure.",
+      "status": "approved"
+    }
+  ],
+  "generated_manual_build": "not performed by this asset installer"
+}

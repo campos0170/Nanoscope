@@ -86,8 +86,8 @@ def test_shared_preset_panel_palette_and_reset_preserve_science(page, monkeypatc
     page._color.setCurrentIndex(page._color.findData('#147d92'))
     monkeypatch.setattr(QtWidgets.QColorDialog, 'getColor', lambda *a, **kw: QtGui.QColor('#7f00ff'))
     page._choose_color()
-    assert page._style != page._applied
-    assert ax.get_title() == 'Accepted events'  # explicit Apply boundary
+    assert page._style == page._applied
+    assert ax.get_title() == 'Curated recording'  # shared Format edits preview immediately
     assert page.apply_appearance()
     assert ax.get_title() == 'Curated recording'
     assert ax.get_xlabel() == 'Duration (ms)'
@@ -201,7 +201,9 @@ def test_library_uses_real_frozen_artifact_and_study_save_callback(page):
     page._panel_edits['title'].textEdited.emit('Save this draft')
     page.save_to_study()
     assert len(saved) == 1
-    assert saved[0][0]['panels']['0']['title'] == 'Save this draft'
+    from nanoscope.plot.matplotlib_targets import panel_identity, storage_key
+    key = storage_key(panel_identity(page._figure.axes[0], 0), 'title')
+    assert saved[0][0]['appearance']['text'][key]['text'] == 'Save this draft'
     assert saved[0][2] is page
     assert saved[0][1].config()['style'] == saved[0][0]
     page.saved()
@@ -416,7 +418,9 @@ def test_bundle_excludes_obsolete_style_resource_and_keeps_current_style(page, t
         assert editor.export_bundle(path=path) == path, editor._status.text()
         with zipfile.ZipFile(path) as archive:
             assert not any(name.endswith('.style.json') for name in archive.namelist())
-            assert json.loads(archive.read('config.json'))['style']['panels']['0']['title'] == 'current'
+            from nanoscope.plot.matplotlib_targets import panel_identity, storage_key
+            key = storage_key(panel_identity(editor._figure.axes[0], 0), 'title')
+            assert json.loads(archive.read('config.json'))['style']['appearance']['text'][key]['text'] == 'current'
             assert archive.read('study_data/methods.json') == b'{"science":"unchanged"}'
     finally:
         editor.close()

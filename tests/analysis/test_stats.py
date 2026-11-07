@@ -783,19 +783,24 @@ def test_the_band_is_declined_when_the_replicates_are_not_there():
 
     fit, t = _exp_fit()
     x = np.geomspace(t.min(), t.max(), 40)
-    assert ci_band(fit_from_json(fit_to_json(fit)), x) is None, "a reopened project"
+    saved = fit_to_json(fit)
+    saved["meta"].pop("boot", None)
+    saved["meta"].pop("boot_params", None)
+    assert ci_band(fit_from_json(saved), x) is None, "an older project without replicates"
     with point_fits_only():
         assert ci_band(fit_dwell_exponential(t, t_min=1e-4), x) is None
 
 
-def test_the_replicates_stay_out_of_the_saved_project():
-    """megabytes of resampled parameter noise per project that nothing reads back."""
+def test_the_replicates_are_versioned_and_preserved_in_saved_projects():
+    """Saved plots retain their correlated bootstrap density bands without refitting."""
     from nanoscope.analysis.stats import BOOT_KEY, BOOT_PARAMS_KEY, fit_to_json
 
     fit, _ = _exp_fit()
     assert fit.meta[BOOT_KEY].shape == (fit.meta["n_boot_ok"], 1)
     blob = fit_to_json(fit)
-    assert BOOT_KEY not in blob["meta"] and BOOT_PARAMS_KEY not in blob["meta"]
+    assert blob["uncertainty_schema_version"] == 1
+    np.testing.assert_array_equal(blob["meta"][BOOT_KEY], fit.meta[BOOT_KEY])
+    assert blob["meta"][BOOT_PARAMS_KEY] == fit.meta[BOOT_PARAMS_KEY]
     assert blob["ci"], "the INTERVALS still persist; only the band's raw material does not"
 
 

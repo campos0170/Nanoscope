@@ -6,6 +6,8 @@ KDEs for tiny/constant samples are explicitly rendered as observations.
 """
 from __future__ import annotations
 
+from ..core.atomic_write import write_staged
+
 from pathlib import Path
 import textwrap
 
@@ -16,6 +18,8 @@ from matplotlib.figure import Figure
 from scipy.stats import gaussian_kde
 
 from ..analysis.cancel import check_cancelled
+from .quantity_axes import time_axis, log_time_axis, set_quantity_axis
+from ..core.quantity_display import quantity_for, density_quantity
 
 def _pore_caveat(summary):
     """Describe the identities actually included in this figure's subset."""
@@ -78,9 +82,9 @@ def _save(fig, folder, name, source=None, *, cancel=None):
     if capture_saved_figure(fig, name, source):
         check_cancelled(cancel)
         return path
-    fig.savefig(path, dpi=160, bbox_inches="tight")
+    write_staged(path, fig.savefig, dpi=160, bbox_inches="tight")
     if source is not None:
-        source.to_csv(path.with_suffix(".data.csv"), index=False)
+        write_staged(path.with_suffix(".data.csv"), source.to_csv, index=False)
     fig.clear()
     check_cancelled(cancel)
     return path
@@ -140,9 +144,13 @@ def _distribution_set(events, folder, name, amplitude, amplitude_label, *, cance
     axes[0,0].set(xlabel="log10 dwell (ms)", ylabel=amplitude_label, title="Joint distributions and observations")
     axes[0,1].set(xlabel=amplitude_label, ylabel="Density", title="Amplitude distributions; dotted = mean")
     axes[0,2].set(xlabel="log10 dwell (ms)", ylabel="Density per log10(ms)", title="Dwell distributions; dotted = mean(log dwell)")
+    log_time_axis(axes[0,0], "bottom")
+    log_time_axis(axes[0,2], "bottom")
+    set_quantity_axis(axes[0,2], "left", density_quantity([quantity_for("dwell_ms")], measures="log10"))
     for ax, label in ((axes[1,0], amplitude_label), (axes[1,1], "log10 dwell (ms)")):
         ax.set_xticks(range(len(groups)), [label for label,_ in groups], rotation=25, ha="right", fontsize=7)
         ax.set(ylabel=label, title="Median / IQR; whiskers 1.5 IQR")
+    log_time_axis(axes[1,1], "left")
     # Separate coordinates instead of overlaying incomparable amplitude/dwell units.
     axes[1,2].clear()
     for i, (label, group) in enumerate(groups):
@@ -161,7 +169,7 @@ def _distribution_set(events, folder, name, amplitude, amplitude_label, *, cance
         axes[0,0].legend(fontsize=7)
     fig.suptitle(f"{name.replace('_', ' ')}\n{caption}", fontsize=12)
     path = _save(fig, folder, name, events, cancel=cancel)
-    pd.DataFrame(curves, columns=["metric", "condition", "x", "density"]).to_csv(path.with_suffix(".kde.csv"), index=False)
+    write_staged(path.with_suffix(".kde.csv"), pd.DataFrame(curves, columns=["metric", "condition", "x", "density"]).to_csv, index=False)
     return path
 
 
@@ -200,10 +208,11 @@ def comparison_figures(events, summary, tables, folder, *, cancel=None, settings
     axes[0].set(ylabel="Accepted event rate (/s)", title=f"95% time-block bootstrap ({blocks} blocks; {draws} draws)")
     axes[1].set(ylabel="Sustained / local I0", title="Median ± IQR")
     axes[2].set(ylabel="Dwell (ms)", title="Median ± IQR")
+    time_axis(axes[2], "left", "dwell_ms", stored_unit="ms")
     if len(events):
         axes[2].set_yscale("log")
     for ax in axes:
-        ax.set_xlabel("Incubation (h)"); ax.grid(alpha=.2)
+        time_axis(ax, "bottom", "incubation_h", stored_unit="h", label="Incubation (ms)"); ax.grid(alpha=.2)
     axes[0].legend(fontsize=7)
     fig.suptitle(caption, fontsize=11)
     paths.append(_save(fig, folder, "incubation_rates_and_medians", summary, cancel=cancel))
@@ -232,7 +241,9 @@ def comparison_figures(events, summary, tables, folder, *, cancel=None, settings
             sub = grp[grp.f_sust_global >= floor] if filtered else grp
             curves.extend(dict(variable=column, above_common_floor=filtered, **r)
                           for r in _density(ax, sub[column], label, f"C{i%10}", log=log))
-    axes[0].set(xlabel="log10 dwell (ms)", ylabel="Density", title="Dwell")
+    axes[0].set(xlabel="log10 dwell (ms)", ylabel="Density per log10(ms)", title="Dwell")
+    log_time_axis(axes[0], "bottom")
+    set_quantity_axis(axes[0], "left", density_quantity([quantity_for("dwell_ms")], measures="log10"))
     axes[1].set(xlabel="Sustained / global I0", ylabel="Density", title=all_events_title)
     axes[2].set(xlabel="Sustained / global I0", ylabel="Density", title=f"Common floor ≥ {floor:.3g}")
     for ax in axes:
@@ -243,7 +254,7 @@ def comparison_figures(events, summary, tables, folder, *, cancel=None, settings
                       "Kernel-density gallery: source cell43 fresh-detector fallback")
     fig.suptitle(f"{gallery_method}\n{caption}", fontsize=11)
     path = _save(fig, folder, "common_floor_kde", events, cancel=cancel)
-    pd.DataFrame(curves).to_csv(path.with_suffix(".kde.csv"), index=False)
+    write_staged(path.with_suffix(".kde.csv"), pd.DataFrame(curves).to_csv, index=False)
     paths.append(path)
     return paths
 
@@ -265,9 +276,9 @@ def clustering_figures(table, folder, prefix="original12", *, cancel=None, setti
                 fig.colorbar(points, ax=ax)
             else:
                 for i, (value, rows) in enumerate(table.groupby(column, sort=True)):
-                    ax.scatter(rows[x], rows[y], s=8, alpha=.5, color="0.65" if value == -1 else f"C{i%10}", label=f"{value} (n={len(rows)})")
+                    ax.scatter(rows[x], rows[y], s=8, alpha=.5, color="0.65" if value == -1 else f"C{i%10}", label=(f"{float(value) * 3600000:.3g} ms (n={len(rows)})" if column == "incubation_h" else f"{value} (n={len(rows)})"))
                 ax.legend(fontsize=6)
-            ax.set(title=column, xlabel=x, ylabel=y)
+            ax.set(title="Incubation (ms)" if column == "incubation_h" else column, xlabel=x, ylabel=y)
         title = ("Original notebook 12-feature" if settings is None else
                  f"Selected {len(settings.feature_columns)}-feature")
         sources = table.drop_duplicates("tag") if "tag" in table else pd.DataFrame(index=[0, 1])
@@ -294,6 +305,8 @@ def recording_figures(analysis, accepted, folder, *, cancel=None):
         ax.set(xlabel=label, ylabel="Count")
     axes[2].scatter(candidates.single_dwell_rounded_ms, candidates.single_peak_global_baseline_pA, s=8, alpha=.4)
     axes[2].set(xlabel="Dwell (ms)", ylabel="Peak depth (pA)", title="Ungated candidates, full-trace baseline")
+    log_time_axis(axes[1], "bottom")
+    time_axis(axes[2], "bottom", "dwell_ms", stored_unit="ms")
     fig.suptitle(f"{analysis.tag}: single-recording summary ({len(candidates)} candidates; gate not applied)")
     paths.append(_save(fig, folder, f"single_recording_candidates_{analysis.tag}", candidates, cancel=cancel))
     return paths

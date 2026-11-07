@@ -2,11 +2,165 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from .widget_transfer import prepare_widget_move
+
 
 SECTIONS = ("Data", "Analysis", "Appearance", "Export")
+
+#: What each old Section name means once the controls live in the Explorer's inspector
+#: (a group key, or ``"@format"`` for the Format tab). A page's adapter may override it.
+DEFAULT_REVEAL = {"Data": "sources", "Analysis": "plot", "Appearance": "@format",
+                  "Export": "recipes"}
+
+
+# -- the page / shell interface -------------------------------------------------------------
+# Plain data: the Analysis Explorer's inspector and toolbar (gui/analysis_inspector.py,
+# analysis_toolbar.py) reach a page ONLY through a PageAdapter that the page itself writes
+# (``inspector_adapter()``). Nothing here imports another gui module, and nothing here
+# computes: every callable is an existing handler of the page, every state reader reads
+# state the page already keeps.
+
+@dataclass(frozen=True)
+class PendingState:
+    count: int = 0                     # independent pending changes; 0 = nothing to update
+    reasons: tuple[str, ...] = ()      # short phrases, most recent last; the tooltip lists them
+    busy: bool = False                 # a background gather is running (I-V): Update plot is greyed
+
+
+@dataclass(frozen=True)
+class HistoryState:
+    can_undo: bool = False
+    can_redo: bool = False
+    undo_text: str = "Nothing to undo"  # the tooltip the page already writes: "Undo: title bold on"
+    redo_text: str = "Nothing to redo"
+    mark: int = 0                      # depth of the undo stack; Style's batch undo compares it
+
+
+@dataclass(frozen=True)
+class ExportEntry:
+    text: str                          # the page's own wording: "Export plotted coordinates CSV…"
+    run: Callable[[], object]
+    enabled: Callable[[], bool] | None = None   # evaluated when the menu is about to show
+    kind: str = "figure"               # "figure" | "data" | "recipe" | "page" (orders and separates the menu)
+
+
+@dataclass
+class InspectorGroup:
+    key: str                           # stable, persisted: "sources" "plot" "fit" "groups" "estimator" "layout" "recipes" ...
+    title: str                         # "Sources", "Plot", "Fit" ...
+    widgets: Sequence[QtWidgets.QWidget]   # EXISTING widgets (or form_rows containers), moved into the group, in order
+    expanded: bool = True              # the default; the user's choice is persisted
+    visible_when: Callable[[], bool] | None = None   # follows the page's own view (Event tab, Noise view)
+    tooltip: str = ""
+
+
+@dataclass
+class FormatSpec:
+    appearance: object                 # the page's PlotAppearanceWidget (duck-typed; the shell never imports it)
+    controllers: Callable[[], Sequence[object]]      # FigureTextControllers of the plots ON SCREEN now
+    extras: Mapping[str, Sequence[QtWidgets.QWidget]] = field(default_factory=dict)
+        # page-owned Format widgets keyed by element panel: "figure" "legend" "series" "fit_label"
+        # "caption" "colour_map". Moved into that panel, in order.
+    defaults: Callable[[], object] | None = None
+        # a PlotAppearance holding the page's real defaults; Distributions only
+    views_changed: object | None = None            # a signal: which plot is on screen changed (Event tab, Noise view)
+    project_sources: Callable[[], None] | None = None  # shell-owned, project appearance only
+    series_provider: Callable[[], Sequence[object]] | None = None
+    series_selected: object | None = None   # renderer signal(str stable series ID)
+    series_select: Callable[[str | None], None] | None = None  # renderer selection overlay
+    axis_log_target: Callable[[str, str], tuple[str, QtWidgets.QWidget] | None] | None = None
+        # (plot id, axis side) -> existing inspector group/Format target and the page's
+        # own Log control. Navigation only: the Format panel never owns a second Log box.
+
+
+@dataclass
+class PageAdapter:
+    key: str                           # the Explorer's key (page id today)
+    page: QtWidgets.QWidget
+    groups: list[InspectorGroup]       # Data & analysis tab, top to bottom
+    format: FormatSpec
+    # the verb
+    update: Callable[[], None]         # the page's existing primary handler
+    update_tooltip: str = ""
+    pending: Callable[[], PendingState] = PendingState
+    pending_changed: object | None = None          # a signal, or None: the shell then recomputes on workspaceChanged
+    # history (the page's own; the keys stay on the page)
+    undo: Callable[[], bool] = lambda: False
+    redo: Callable[[], bool] = lambda: False
+    history: Callable[[], HistoryState] = HistoryState
+    history_changed: object | None = None          # a signal
+    # look
+    apply_look: Callable[[object, bool], bool] = lambda look, keep_hand: False   # (PlotAppearance, keep_hand) -> moved
+    reset_figure: Callable[[], None] = lambda: None
+    # export
+    exports: Callable[[], Sequence[ExportEntry]] = lambda: ()
+    # view
+    navigation: Callable[[], object | None] = lambda: None        # the PlotNavigation view_button resolves
+    navigations: Callable[[], Sequence[object]] = lambda: ()
+    status_bar: Callable[[], QtWidgets.QStatusBar | None] = lambda: None
+    canvas_actions: Sequence[QtGui.QAction] = ()   # Lasso select (Distributions)
+    # what the old Section names mean here (the compatibility shim)
+    reveal_map: Mapping[str, str] = field(default_factory=lambda: dict(DEFAULT_REVEAL))
+    # lifecycle
+    chrome: Sequence[QtWidgets.QWidget] = ()     # bars/toolbars hidden when hosted
+    on_adopt: Callable[[], None] = lambda: None    # page-specific hosting steps (minimum size, readout, shortcuts)
+    on_retire: Callable[[], None] = lambda: None
+    fallback: bool = False             # compatibility marker; every real page supplies a native adapter
+    kind: str | None = None            # tool kind; key is the independent figure id when hosted
+
+    def __post_init__(self) -> None:
+        if self.kind is None:
+            self.kind = self.key
+
+    @classmethod
+    def from_widget(cls, page, key, widget, **fields) -> "PageAdapter":
+        """An adapter whose history, look and reset come from a ``PlotAppearanceWidget``.
+
+        Duck-typed (this module imports no gui module): ``widget.undo`` / ``redo``,
+        ``undo_button.toolTip()`` / ``isEnabled()`` (the tooltips already say "Undo: title
+        bold on"), ``history_mark()``, ``historyChanged``, ``apply_look`` and
+        ``reset_figure``. Anything the caller passes in ``fields`` wins; ``groups`` and
+        ``format`` are the caller's and have no default."""
+        def history() -> HistoryState:
+            undo, redo = widget.undo_button, widget.redo_button
+            if undo is None or redo is None:       # a widget built without history
+                return HistoryState()
+            return HistoryState(
+                can_undo=undo.isEnabled(), can_redo=redo.isEnabled(),
+                undo_text=undo.toolTip(), redo_text=redo.toolTip(), mark=widget.history_mark())
+
+        defaults = dict(
+            undo=widget.undo, redo=widget.redo, history=history,
+            history_changed=getattr(widget, "historyChanged", None),
+            apply_look=lambda look, keep_hand: widget.apply_look(look, keep_hand=keep_hand),
+            reset_figure=widget.reset_figure)
+        return cls(key=key, page=page, **{**defaults, **fields})
+
+
+def form_rows(rows: Sequence[tuple[str, QtWidgets.QWidget]], *, parent=None) -> QtWidgets.QWidget:
+    """A new container with one ``QFormLayout`` that ADOPTS the existing ``widgets`` (a move).
+
+    The label text comes from the tuple; the inline labels of the strip the widgets leave
+    stay behind in its hidden husk. Minimum width 0, so a long combo shrinks instead of
+    widening the inspector. Every adopted widget is shown (``setVisible(True)``): a Section
+    switch may have hidden it, and a page that wants one hidden hides it again afterwards."""
+    box = QtWidgets.QWidget(parent)
+    box.setMinimumWidth(0)
+    form = QtWidgets.QFormLayout(box)
+    form.setContentsMargins(0, 0, 0, 0)
+    form.setSpacing(4)
+    form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+    for label, widget in rows:
+        widget.setMinimumWidth(0)
+        prepare_widget_move(widget)
+        form.addRow(label, widget)
+        widget.setVisible(True)
+    return box
 
 
 class PlotWorkflowBar(QtWidgets.QWidget):
@@ -65,15 +219,26 @@ class PlotWorkflowBar(QtWidgets.QWidget):
         layout.addWidget(self.export_button)
         #: The page's Reset figure button, once :meth:`adopt_reset_figure` has put it here.
         self.reset_button: QtWidgets.QPushButton | None = None
+        #: Hosted mode (:meth:`attach_inspector`): the Explorer's inspector shows the
+        #: controls, so a Section name no longer toggles any widget.
+        self._reveal: Callable[[str], None] | None = None
 
-    def adopt_reset_figure(self, appearance, keeps: str = "") -> QtWidgets.QPushButton:
+    def adopt_reset_figure(self, appearance, keeps: str = "",
+                           takes_ranges: bool = False) -> QtWidgets.QPushButton:
         """Show ``appearance``'s Reset figure button here, left of Export ▾.
 
         The same button its Appearance section had (``PlotAppearanceWidget.take_reset_button``),
         so it resets the figure's words and look as one Undo step whichever Section is
         showing. ``keeps`` names the page's own Appearance rows that the shared look does not
-        hold, and so Reset figure leaves (a colormap): the tool tip says so."""
+        hold, and so Reset figure leaves (a colormap): the tool tip says so.
+        ``takes_ranges`` is for a page with Axis properties, whose pinned ranges and major tick
+        spacings are part of the appearance this button puts back (Distributions keeps its range
+        in the Axis range boxes and has its own button text; Comparison figures has no Axis
+        properties): the tool tip says so too."""
         button = appearance.take_reset_button()
+        if takes_ranges:
+            button.setToolTip(f"{button.toolTip()} A range or tick spacing typed in Axis "
+                              "properties goes with the look.")
         if keeps:
             button.setToolTip(f"{button.toolTip()} Here it also keeps {keeps}.")
         layout = self.layout()
@@ -109,8 +274,9 @@ class PlotWorkflowBar(QtWidgets.QWidget):
             raise ValueError(f"Unknown plot section: {name}")
         self._sections[name] = (*self._sections.get(name, ()), widget)
         # Only this widget's visibility: re-running _show_section would re-announce the
-        # section to listeners that already know it.
-        widget.setVisible(self.sections.currentText() == name)
+        # section to listeners that already know it. Hosted, the inspector owns what shows.
+        if self._reveal is None:
+            widget.setVisible(self.sections.currentText() == name)
 
     def set_section(self, name: str) -> None:
         if name not in SECTIONS:
@@ -121,11 +287,34 @@ class PlotWorkflowBar(QtWidgets.QWidget):
             self.sections.setCurrentText(name)
 
     def _show_section(self, name: str) -> None:
+        if self._reveal is not None:
+            # Hosted: the name is only a request to look at a part of the inspector.
+            self.sectionChanged.emit(name)
+            self._reveal(name)
+            return
         shown = set(self._sections.get(name, ()))
         all_widgets = {w for widgets in self._sections.values() for w in widgets}
         for widget in all_widgets:
             widget.setVisible(widget in shown)
         self.sectionChanged.emit(name)
+
+    def attach_inspector(self, reveal: Callable[[str], None]) -> None:
+        """Hosted mode. ``_show_section(name)`` no longer toggles any widget: it emits
+        ``sectionChanged`` and calls ``reveal(name)``. The four Ctrl+1..4 shortcuts are
+        disabled (a disabled shortcut takes no part in Qt's ambiguity rule, so the
+        Explorer's own keys are the only ones on those combinations)."""
+        self._reveal = reveal
+        for shortcut in self.section_shortcuts:
+            shortcut.setEnabled(False)
+
+    def detach_chrome(self) -> None:
+        """Hide the bar (and the ``QToolBar`` it sits in). Every object stays alive: the
+        Section combo, the verbs and Export ▾ are the compatibility facade behind the
+        attribute names ``core/analysis_workspace.py`` and the tests read."""
+        parent = self.parentWidget()
+        self.hide()
+        if isinstance(parent, QtWidgets.QToolBar):
+            parent.hide()
 
 
 def install_plot_workflow(window: QtWidgets.QMainWindow, *, sections, actions=(), exports=()):
@@ -185,6 +374,7 @@ class WarningSummary(QtWidgets.QWidget):
         super().__init__(parent)
         self._title = title
         self._full = ""
+        self._summary_text = ""
         self.setObjectName("plotWarningSummary")
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -193,10 +383,13 @@ class WarningSummary(QtWidgets.QWidget):
         self.summary = QtWidgets.QLabel()
         self.summary.setTextFormat(QtCore.Qt.PlainText)
         self.summary.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-        self.summary.setWordWrap(True)
+        self.summary.setWordWrap(False)  # _fit_summary supplies complete bounded lines
         self.summary.setMaximumHeight(48)
+        self.summary.setMinimumWidth(1)
+        self.summary.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         self.summary.setStyleSheet("color:#ffd479;")
         self.summary.setAccessibleName(title + " summary")
+        self.summary.installEventFilter(self)
         row.addWidget(self.summary, 1)
         self.toggle = QtWidgets.QToolButton()
         self.toggle.setText("Full details")
@@ -219,6 +412,40 @@ class WarningSummary(QtWidgets.QWidget):
         self.details.setVisible(checked)
         self.toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
 
+    def eventFilter(self, watched, event):  # noqa: N802 (Qt)
+        if watched is self.summary and event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.FontChange):
+            self._fit_summary()
+        return super().eventFilter(watched, event)
+
+    def _fit_summary(self):
+        """Show at most three whole lines; every omitted word remains in Details."""
+        text = self._summary_text
+        width = max(1, self.summary.contentsRect().width())
+        layout = QtGui.QTextLayout(text, self.summary.font())
+        option = QtGui.QTextOption()
+        option.setWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        lines = []
+        layout.beginLayout()
+        for index in range(3):
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(width)
+            start = line.textStart()
+            if index == 2:
+                lines.append(self.summary.fontMetrics().elidedText(
+                    text[start:].strip(), QtCore.Qt.ElideRight, width))
+            else:
+                lines.append(text[start:start + line.textLength()].strip())
+        layout.endLayout()
+        shown = "\n".join(lines)
+        if self.summary.text() != shown:
+            self.summary.setText(shown)
+        height = self.summary.fontMetrics().lineSpacing() * max(1, len(lines)) + 2
+        self.summary.setMinimumHeight(height)
+        self.summary.setMaximumHeight(height)
+
     def set_warnings(self, warnings: Sequence[str], *, full_text: str | None = None) -> None:
         blocks = [str(w) for w in warnings if str(w).strip()]
         self._full = "\n\n".join(blocks) if full_text is None else str(full_text)
@@ -227,7 +454,8 @@ class WarningSummary(QtWidgets.QWidget):
         # The count and explicit disclosure survive truncation; full text is never lost.
         if len(first) > 170:
             first = first[:167].rstrip() + "…"
-        self.summary.setText(f"⚠ {self._title} ({len(blocks)}): {first}" if blocks else "")
+        self._summary_text = f"⚠ {self._title} ({len(blocks)}): {first}" if blocks else ""
+        self._fit_summary()
         self.summary.setToolTip(self._full)
         self.setVisible(bool(self._full))
 

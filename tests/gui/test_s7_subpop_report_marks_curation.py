@@ -266,17 +266,36 @@ def test_a_re_run_over_the_curated_set_clears_the_line(reported, qtbot):
 
 def test_the_standing_line_moves_no_widget_when_it_appears(reported, qtbot):
     """One label, always in the layout, fixed height: the splitter (and every figure in
-    it) and the button row sit exactly where they sat before the sentence arrived."""
+    it) and the button row keep their geometry at the same page viewport size.
+
+    The hosted Explorer now deliberately reveals a separate pending-change notice.
+    Account for that outer row, keep it visible, then compare this page at its original
+    size. Hiding the notice or bypassing the events-table curation would evade the
+    integration contract this test is meant to preserve.
+    """
     w, a = reported
     sw = w._subpop_window
     sw.show()
     qtbot.wait(40)
+    explorer = w._analysis_explorer
+    notice = explorer._pending_notice
+    assert not notice.isVisible()
+    page_size = QtCore.QSize(sw.size())
     before = (sw._split.geometry(), sw._gallery_btn.geometry(), sw._live_note.geometry(),
               sw._figures.geometry())
     for eid in _frame(w, a)["event_id"].to_numpy()[:5]:
         w._analysis_panel.set_event_accepted(int(eid), False)
     qtbot.wait(60)
     assert sw.curation_note() != ""
+    assert notice.isVisible() and notice.text().startswith("Pending:")
+    assert "Update plot" in notice.text()
+    notice_space = notice.height() + notice.parentWidget().layout().spacing()
+    assert page_size.height() - sw.height() == notice_space
+    assert sw.width() == page_size.width()
+    assert sw._live_note.height() == before[2].height()
+    explorer.resize(explorer.width(), explorer.height() + notice_space)
+    qtbot.wait(60)
+    assert notice.isVisible() and sw.size() == page_size
     after = (sw._split.geometry(), sw._gallery_btn.geometry(), sw._live_note.geometry(),
              sw._figures.geometry())
     assert after == before, f"the standing line moved the layout: {before} -> {after}"

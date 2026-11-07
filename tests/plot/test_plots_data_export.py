@@ -85,7 +85,13 @@ def test_the_histogram_csv_reproduces_the_bars_from_the_source_events(window):
     bins = _part(df, "bins")
     assert len(bins) == 15
     assert list(df.columns) == ["series", "part", "bin_left", "bin_right",
-                                "dwell_s", "count"]
+                                "dwell_s", "count", "dwell_s_display", "dwell_s_display_unit",
+                                "count_display", "count_display_unit", "bin_left_display",
+                                "bin_left_display_unit", "bin_right_display", "bin_right_display_unit"]
+    for column in ('dwell_s', 'bin_left', 'bin_right'):
+        np.testing.assert_allclose(bins[column+'_display'], bins[column]*1000)
+        assert set(bins[column+'_display_unit']) == {'ms'}
+    np.testing.assert_array_equal(bins['count_display'], bins['count'])
 
     # The exported edges, re-binned over the ACCEPTED source rows, must give the
     # exported heights back. This is the whole claim of the file in one assertion:
@@ -120,27 +126,17 @@ def test_the_height_column_is_named_for_the_quantity_it_holds(window):
     widths = (bins["bin_right"] - bins["bin_left"]).to_numpy()
     assert float((bins["density"].to_numpy() * widths).sum()) == pytest.approx(1.0, rel=1e-6)
 
-    # THE SPLIT S6-03 INTRODUCED, PINNED HERE (this is the test that fails if somebody
-    # later "simplifies" ``_y_axis_label`` back into ``_y_label``). The PICTURE's y axis now
-    # reads ``density (1/s)``, because its x TICKS are re-scaled for display and the heights
-    # are not — but this CSV must NOT be renamed to match. A table has no display scale, and
-    # its x column is the schema's own unit-bearing name, so a column called ``density``
-    # beside ``dwell_s`` is per-second by construction. Renaming it would break a
-    # user-facing column for no gain and disturb ``plot_source_data``'s
-    # ``density_name in (x_name, y_name)`` guard, whose own comment names this case.
-    for unit, expected_axis in (("s", "density (1/s)"), ("ms", "density (1/s)"),
-                                ("µs", "density (1/s)")):
-        window.set_time_unit(unit)
-        assert window._plot.getAxis("left").labelText == expected_axis
-        df = window._plot_data()
-        assert list(df.columns).count("density") == 1
-        assert not any(c.startswith("density (") for c in df.columns)
-        bins = _part(df, "bins")
-        widths = (bins["bin_right"] - bins["bin_left"]).to_numpy()
-        # ...and the numbers themselves are the SAME numbers in every unit: the export is
-        # in stored units, always, because nothing about the display reached the data.
-        assert float((bins["density"].to_numpy() * widths).sum()) == pytest.approx(
-            1.0, rel=1e-6)
+    # Scientific columns retain seconds and 1/s. Explicit display columns carry ms
+    # and 1/ms, so either representation can independently reconstruct unit area.
+    window.set_time_unit('ms')
+    assert window._plot.getAxis('left').labelText == 'density (1/ms)'
+    df = window._plot_data()
+    assert list(df.columns).count('density') == 1
+    bins = _part(df, 'bins')
+    assert set(bins['density_display_unit']) == {'1/ms'}
+    np.testing.assert_allclose(bins['density_display'], bins['density']/1000)
+    display_widths = bins['bin_right_display']-bins['bin_left_display']
+    assert float((bins['density_display']*display_widths).sum()) == pytest.approx(1., rel=1e-6)
 
 
 def test_a_fitted_curve_travels_with_the_bars_it_was_drawn_over(window):
@@ -183,7 +179,12 @@ def test_the_scatter_csv_is_the_plotted_rows_in_stored_units(window):
 
     df = window._plot_data()
     pts = _part(df, "points")
-    assert list(df.columns) == ["series", "part", "dwell_s", "amplitude"]
+    assert list(df.columns) == ["series", "part", "dwell_s", "amplitude",
+                                "dwell_s_display", "dwell_s_display_unit",
+                                "amplitude_display", "amplitude_display_unit"]
+    np.testing.assert_allclose(pts['dwell_s_display'], pts['dwell_s']*1000)
+    assert set(pts['dwell_s_display_unit']) == {'ms'}
+    np.testing.assert_array_equal(pts['amplitude_display'], pts['amplitude'])
 
     src = _events()
     kept = src[src["accepted"]]

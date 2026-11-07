@@ -1,0 +1,6 @@
+{
+  "file": "all_pages_v12.nanoscope",
+  "sha256": "62fd9c22079983ed525b24bf39d61029dd260627d025b22105c8ec2eece569f9",
+  "provenance": "Byte-identical recovered phase2/corpus_v12_sample/all_pages.nanoscope, captured 2026-11-02 by the paused v12 workflow. Not generated or relabelled by these tests.",
+  "scope": "Eight real native analytical page payloads/resources plus untouched analysis panel; source recordings need not be present to decode the frozen workspace."
+}

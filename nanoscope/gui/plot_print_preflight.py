@@ -105,7 +105,7 @@ def inspect_print_metrics(svg: bytes | None) -> PrintMetrics:
         return PrintMetrics(notes=("The frozen SVG viewport could not be inspected.",))
     notes, text_sizes, stroke_sizes = set(), [], []
     css = " ".join(node.text or "" for node in root.iter() if node.tag.split("}")[-1] == "style")
-    if re.search(r"(?:font|stroke|transform|display|visibility)\s*[-:]", css, flags=re.I):
+    if re.search(r"(?:font(?:-[a-z-]+)?|stroke(?:-width|-opacity)?|transform|display|visibility)\s*:", css, flags=re.I):
         return PrintMetrics(*viewbox[2:], notes=(
             "Stylesheet-controlled typography or strokes cannot be estimated safely; inspect manually.",))
 

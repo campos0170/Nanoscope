@@ -321,7 +321,9 @@ def test_a_run_the_gate_refuses_starts_nothing(ready, monkeypatch):
                         lambda *a, **k: False)
     window._run_subpopulations()
     assert not window._subpop_pending
-    assert window._subpop_window is None
+    # The managed workspace may show an empty figure, but a refused job installs no report.
+    assert window._subpop_window is None or window._subpop_window.report() is None
+    assert window._subpop_figure_request is None
 
 
 # ================================================================================================
@@ -509,8 +511,11 @@ def _relative_sibling_imports(module) -> list[str]:
 #: right-click menu / pointer readout that every plot window installs. It imports no gui
 #: module and wires nothing; the alternative was a private copy per window.
 # figure_text (2026-11-01): the shared in-figure text editing, not a panel.
-_ALLOWED_SIBLING_IMPORTS = ["analysis_catalog", "figure_text", "plot_appearance",
-                            "plot_interaction", "plot_workflow", "categorical"]
+_ALLOWED_SIBLING_IMPORTS = {
+    "analysis_catalog", "figure_text", "figure_series", "plot_appearance",
+    "plot_interaction", "plot_workflow", "categorical", "series_points",
+    "widget_transfer",
+}
 
 
 def test_the_report_window_imports_only_the_shared_leaf():
@@ -520,7 +525,8 @@ def test_the_report_window_imports_only_the_shared_leaf():
     """
     import nanoscope.gui.subpop_window as mod
 
-    assert _relative_sibling_imports(mod) == _ALLOWED_SIBLING_IMPORTS
+    # The inspector/series/style helpers are shared services, not analytical panels.
+    assert set(_relative_sibling_imports(mod)) == _ALLOWED_SIBLING_IMPORTS
 
 
 def test_the_shared_leaf_really_is_a_leaf():

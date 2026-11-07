@@ -27,9 +27,9 @@ truncated on the RIGHT too, and a left-only likelihood then biases tau *short*
 
 Depths have a floor for exactly the same reason: the Schmitt trigger defines an
 event as a run of ``dev > k_out*noise``, so a blockade population sitting near
-that threshold is cut off from below. :func:`fit_depth_gaussians` does not
-(yet) model that truncation, but given ``depth_floor`` it will refuse to let you
-read a clean mu/sigma off a cut-off population without being told.
+that threshold is cut off from below. :func:`fit_depth_gaussians` can condition
+on explicit ``lower``/``upper`` observation bounds. An approximate ``depth_floor``
+on its own remains a warning about possible truncation, not an assumed exact gate.
 
 Units: dwell times in seconds, depths as dimensionless dI/I0 (``frac_depth``).
 """
@@ -61,6 +61,7 @@ __all__ = [
     # JSON round trip that project storage is built on. See density_from().
     "FIT_FAMILIES",
     "density_from",
+    "cdf_from",
     "fit_to_json",
     "fit_from_json",
     "fit_dwell_exp_gamma",
@@ -234,9 +235,9 @@ def deferred_ci():
     Nests inside :func:`point_fits_only` the sensible way round: a caller that does
     not want CIs at all appends nothing, because there is no interval to defer.
 
-    A fitter that has no bootstrap to offer (``fit_dwell_exp_gamma``, whose every
-    replicate is a 12-start optimisation, so it reports no CI by design) appends
-    nothing and is unchanged -- ``jobs`` may legitimately come back empty, and a
+    A fit with zero requested replicates appends nothing. The costly
+    ``fit_dwell_exp_gamma`` defaults to zero and offers a background bootstrap
+    when explicitly requested. ``jobs`` may legitimately come back empty, and a
     caller must not assume one job per fit.
     """
     jobs: list[Callable[[], dict[str, Any]]] = []
@@ -1401,7 +1402,13 @@ def fit_dwell_exponential(
     # k sets of parameters, and it prints as k time constants. Said here, in the
     # fitter, because BOTH panels print these params and neither can tell.
     degenerate = _degenerate_pairs(taus, _DEGENERATE_REL_GAP)
-    light = [j for j in range(k) if k > 1 and w[j] * t.size < _MIN_COMPONENT_EVENTS]
+    # The parameters contain pre-selection population shares. Support belongs to
+    # the observed sample, so condition each component on the same selection model.
+    component_mass = np.asarray([norm(np.asarray([tau]), np.asarray([1.0]))
+                                 for tau in taus], dtype=float)
+    observed_weights = w * component_mass
+    observed_weights /= observed_weights.sum()
+    light = [j for j in range(k) if k > 1 and observed_weights[j] * t.size < _MIN_COMPONENT_EVENTS]
     if degenerate:
         # Worded through (note_factor, note_suffix) like every number the depth mixture
         # prints: the estimate line converts tau into the axis's unit, and a note quoting
@@ -1419,7 +1426,7 @@ def fit_dwell_exponential(
         ))
     if light:
         notes.append(
-            "component(s) " + ", ".join(f"{j + 1} (w = {w[j]:.3g}, ~{w[j] * t.size:.0f} events)"
+            "component(s) " + ", ".join(f"{j + 1} (observed share = {observed_weights[j]:.3g}, ~{observed_weights[j] * t.size:.0f} events)"
                                         for j in light)
             + f" are supported by fewer than {_MIN_COMPONENT_EVENTS} events — the minimum this "
               f"module will fit a whole sample with. Treat them as unresolved, not as a "
@@ -1461,13 +1468,15 @@ def fit_dwell_exponential(
         # A fit read back out of a project has to be able to say which of its two bounds
         # was the detector's and which was the analyst's; None means "not recorded".
         "t_max_source": None if t_max_source is None else str(t_max_source),
+        "n_boot_requested": int(n_boot or 0), "bootstrap_seed": seed,
+        "uncertainty_sampling": "independent-observation percentile bootstrap",
         "n_boot_ok": 0 if boot is None else int(boot.shape[0]),
         # THE REPLICATES THEMSELVES, kept rather than reduced to two percentiles and
         # dropped: a confidence BAND is the pointwise envelope of the replicate curves
         # and cannot be rebuilt from the per-parameter intervals below (see ci_band()).
         # Columns are in `params` order, which is the order the intervals were read off
         # `boot` in, so the two can never disagree about which column is which.
-        # `fit_to_json` drops both keys -- the memory is noise, the persistence is not.
+        # Both keys are versioned by `fit_to_json` so the band survives save/reload.
         "boot": None if boot is None else np.asarray(boot, dtype=np.float64),
         "boot_params": list(params),
         "closed_form": bool(use_closed_form),
@@ -1481,6 +1490,8 @@ def fit_dwell_exponential(
         # dwell times, the column's own unit otherwise; a weight is a share and
         # never takes one.
         "param_units": {p: (unit if p.startswith("tau") else "") for p in params},
+        "observed_component_weights": observed_weights.tolist(),
+        "observed_component_support": (observed_weights * t.size).tolist(),
         "degenerate_pairs": [[int(i) + 1, int(j) + 1] for i, j in degenerate],
         "degenerate": bool(degenerate),
         "warnings": notes,
@@ -1704,11 +1715,142 @@ def _identifiability_notes(mu, sd, w, ci: dict, n: int, k: int, unit: str,
     return notes
 
 
+def _fit_truncated_gaussian(x, k, lower, upper, rng, *, warm=None, restarts=4):
+    """Conditional Gaussian-mixture MLE on a fixed observed interval.
+
+    Optimize observed mixture shares for numerical stability, then transform them
+    to pre-selection shares for the public parameter contract. Standardization
+    makes the numerical safeguards independent of the physical current units.
+    """
+    from scipy import special
+    center, scale = float(x.mean()), max(float(x.std()), 1e-12)
+    y = (x-center)/scale
+    a, b = (lower-center)/scale, (upper-center)/scale
+    def unpack(p):
+        mu, sd = p[:k], np.exp(p[k:2*k])
+        logits = np.r_[p[2*k:], 0.]
+        q = np.exp(logits-special.logsumexp(logits))
+        return mu, sd, q
+    def objective(p):
+        check_cancelled()
+        mu, sd, q = unpack(p)
+        mass = _gaussian_interval_mass(a, b, mu, sd)
+        if np.any(mass <= 0) or not np.all(np.isfinite(mass)):
+            return 1e100
+        logdens = (-.5*((y[None,:]-mu[:,None])/sd[:,None])**2
+                   -np.log(sd[:,None])-.5*np.log(2*np.pi))
+        terms = np.log(q[:,None])+logdens-np.log(mass[:,None])
+        value = -float(np.sum(special.logsumexp(terms,axis=0)))
+        return value if np.isfinite(value) else 1e100
+    starts=[]
+    if warm is not None:
+        mu,sd,w=warm
+        mz,sz=(mu-center)/scale,sd/scale
+        mass=_gaussian_interval_mass(a,b,mz,sz)
+        q=np.maximum(w*mass,1e-15);q/=q.sum()
+        starts.append(np.r_[mz,np.log(sz),np.log(q[:-1]/q[-1])])
+    quantiles=np.quantile(y,(np.arange(k)+.5)/k)
+    for j in range(max(1,restarts-len(starts))):
+        shift=0. if j==0 else (-.6 if j==1 else .6 if j==2 else float(rng.normal(0,.3)))
+        sd=np.full(k,max(.3,1./k)*(1. if j==0 else 1.5))
+        starts.append(np.r_[quantiles+shift,np.log(sd),np.zeros(k-1)])
+    bounds=[(-20.,20.)]*k+[(-8.,5.)]*k+[(-18.,18.)]*(k-1)
+    best=None
+    for p in starts:
+        check_cancelled()
+        r=minimize(objective,p,method='Nelder-Mead',bounds=bounds,
+                   options={'maxiter':3000,'xatol':1e-7,'fatol':1e-7})
+        if np.isfinite(r.fun) and r.fun<1e90 and (best is None or r.fun<best.fun):best=r
+    if best is None:
+        raise RuntimeError('truncated Gaussian likelihood did not produce a finite solution')
+    mu,sd,q=unpack(best.x)
+    mass=_gaussian_interval_mass(a,b,mu,sd)
+    logw=np.log(q)-np.log(mass);w=np.exp(logw-special.logsumexp(logw))
+    order=np.argsort(mu);mu=mu[order]*scale+center;sd=sd[order]*scale
+    w,q=w[order],q[order]
+    bound_hit=any(abs(float(v)-lo)<1e-4 or abs(float(v)-hi)<1e-4
+                  for v,(lo,hi) in zip(best.x,bounds))
+    return mu,sd,w,q,-float(best.fun)-x.size*np.log(scale),bool(best.success),bound_hit
+
+
+def _truncated_gaussian_result(x, *, k, lower, upper, n_boot, seed, quantity, unit,
+                               display, depth_floor):
+    """Result/uncertainty seam shared by direct calls and deferred GUI workers."""
+    lower=-np.inf if lower is None else float(lower)
+    upper=np.inf if upper is None else float(upper)
+    if np.isnan(lower) or np.isnan(upper) or not lower<upper:
+        raise ValueError('Gaussian lower and upper bounds must define a non-empty interval')
+    tolerance=1e-10*max(1.,float(np.max(np.abs(x))))
+    if x.min()<lower-tolerance or x.max()>upper+tolerance:
+        raise ValueError('Gaussian observations lie outside the declared truncation bounds; select the intended rows first')
+    rng=np.random.default_rng(seed)
+    mu,sd,w,q,ll,converged,bound_hit=_fit_truncated_gaussian(x,k,lower,upper,rng)
+    params={}
+    for j in range(k):
+        params[f'mu_{j+1}']=float(mu[j]);params[f'sigma_{j+1}']=float(sd[j])
+        if k>1:params[f'w_{j+1}']=float(w[j])
+    unit=('' if quantity==DEFAULT_DEPTH_QUANTITY else quantity) if unit is None else str(unit)
+    notes=['Gaussian likelihood conditioned on the declared observable interval; component weights describe the pre-selection population.']
+    if not converged:notes.append('Optimizer did not satisfy its convergence criterion; estimates require review.')
+    if bound_hit:notes.append('UNIDENTIFIED: a numerical optimization safeguard was reached; do not interpret boundary parameters as measured populations.')
+    if depth_floor is not None and lower<float(depth_floor):
+        notes.append('The supplied detection floor exceeds the modelled lower bound; depth-selection bias may remain.')
+    npar=3*k-1
+    meta={'family':'gauss-mixture','n_components':k,'truncated':True,
+          'lower':None if np.isneginf(lower) else lower,'upper':None if np.isposinf(upper) else upper,
+          'censoring':f'Gaussian conditional support [{lower:g}, {upper:g}]',
+          'quantity':quantity,'param_units':{name:('' if name.startswith('w') else unit) for name in params},
+          'converged':converged,'numerical_bound_reached':bound_hit,'depth_floor':depth_floor,
+          'floor_biased':bool(depth_floor is not None and lower<float(depth_floor)),'n_boot_ok':0,'boot':None,'boot_params':list(params),
+          'n_boot_requested':int(n_boot or 0),'bootstrap_seed':seed,
+          'observed_component_weights':q.tolist(),'observed_component_support':(q*x.size).tolist(),
+          'warnings':notes,'uncertainty_sampling':'independent-observation percentile bootstrap'}
+    def bootstrap():
+        if not ci_wanted():
+            return {'ci':{},'n_boot_ok':0,'boot':None,'note':None}
+        rows=[]
+        for _ in range(int(n_boot)):
+            check_cancelled();sample=x[rng.integers(0,x.size,size=x.size)]
+            try:
+                mb,sb,wb,_qb,_ll,ok,hit=_fit_truncated_gaussian(sample,k,lower,upper,rng,warm=(mu,sd,w),restarts=1)
+                if not ok or hit:continue
+                rows.append(np.concatenate([[mb[j],sb[j],wb[j]] if k>1 else [mb[j],sb[j]] for j in range(k)]))
+            except OperationCancelled:raise
+            except (ValueError,RuntimeError,FloatingPointError):continue
+        ci={}
+        if len(rows)>=20:
+            quantiles=np.percentile(np.asarray(rows),[2.5,97.5],axis=0)
+            ci={name:(float(quantiles[0,i]),float(quantiles[1,i])) for i,name in enumerate(params)}
+        return {'ci':ci,'n_boot_ok':len(rows),'boot':np.asarray(rows) if rows else None,
+                'note':None if len(rows)>=20 else 'bootstrap failed to produce enough converged replicates; CIs unavailable'}
+    fit=FitResult(params=params,ci={},loglik=float(ll),aic=float(2*npar-2*ll),
+                  bic=float(npar*np.log(x.size)-2*ll),n=int(x.size),
+                  model=f'Gaussian mixture on {quantity} (k={k}, truncated MLE)',meta=meta,
+                  _pdf=density_from('gauss-mixture',params,meta))
+    if ci_wanted() and n_boot and int(n_boot)>0:
+        if ci_deferred():
+            jobs=_CI_DEFER.get()
+            jobs.append(bootstrap);meta['ci_pending']=True
+        else:apply_ci(fit,bootstrap())
+    factor,note_unit=(1.,unit) if display is None else (float(display[0]),str(display[1]))
+    if k>1:
+        notes.extend(_identifiability_notes(mu,sd,w,fit.ci,int(x.size),k,note_unit,factor))
+        light=[j for j in range(k) if q[j]*x.size<_MIN_COMPONENT_EVENTS]
+        if light:notes.append('Component(s) '+', '.join(str(j+1) for j in light)+' have fewer than 20 expected observed events; treat them as unresolved.')
+    return _stamp_gof(fit,x)
+
+
 def fit_depth_gaussians(frac_depth, *, n_components: int = 1, depth_floor: float | None = None,
+                        lower: float | None = None, upper: float | None = None,
                         n_boot: int = 400, seed: int | None = 0,
                         quantity: str | None = None, unit: str | None = None,
                         display: tuple[float, str] | None = None) -> FitResult:
-    """Fit a Gaussian mixture to blockade depths by EM, to resolve populations.
+    """Fit a Gaussian population density, with optional explicit truncation.
+
+    ``lower``/``upper`` condition the likelihood on that observed interval. The
+    data must already be selected to lie inside it. With neither bound the
+    historical untruncated EM path is unchanged; ``depth_floor`` alone remains a
+    warning because a detector threshold is not automatically a hard depth cut.
 
     Args:
         frac_depth: Blockade depths, always positive magnitudes -- see the sign
@@ -1817,6 +1959,10 @@ def fit_depth_gaussians(frac_depth, *, n_components: int = 1, depth_floor: float
             f"{x.size} values of {fitted_name} is too few for a {k}-component mixture "
             f"(need >= {_MIN_EVENTS * k})"
         )
+
+    if lower is not None or upper is not None:
+        return _truncated_gaussian_result(x,k=k,lower=lower,upper=upper,n_boot=n_boot,
+            seed=seed,quantity=quantity,unit=unit,display=display,depth_floor=depth_floor)
 
     rng = np.random.default_rng(seed)
     notes: list[str] = []
@@ -1953,6 +2099,8 @@ def fit_depth_gaussians(frac_depth, *, n_components: int = 1, depth_floor: float
     meta = {
         "family": "gauss-mixture",     # v6 persistence discriminator; see density_from()
         "n_components": k, "n_boot_ok": len(rows),
+        "n_boot_requested": int(n_boot or 0), "bootstrap_seed": seed,
+        "uncertainty_sampling": "independent-observation percentile bootstrap",
         # See fit_dwell_exponential: the replicates a band needs, in `params` order.
         "boot": (np.asarray(rows, dtype=np.float64) if rows else None),
         "boot_params": list(params),
@@ -2288,7 +2436,8 @@ def fit_dwell_peaked(
             # it stopped. Recorded rather than inferred: "nit < maxiter" used to mean
             # "converged" and no longer does.
             "n_iter": int(getattr(res, "nit", -1)), "stalled": bool(stall.stopped),
-            "n_boot_ok": n_boot_ok,
+            "n_boot_ok": n_boot_ok, "n_boot_requested": int(n_boot or 0),
+            "bootstrap_seed": seed, "uncertainty_sampling": "independent-observation percentile bootstrap",
             "boot": boot_rows,
             "boot_params": list(fit_params),
             **({"ci_pending": True} if ci_pending else {}),
@@ -2378,9 +2527,15 @@ def density_from(family: str, params: dict[str, float],
         w = (np.array([float(params[f"w_{j + 1}"]) for j in range(k)]) if k > 1
              else np.array([1.0]))
 
+        lower = -np.inf if meta.get("lower") is None else float(meta["lower"])
+        upper = np.inf if meta.get("upper") is None else float(meta["upper"])
+        mass = float(np.dot(w, _gaussian_interval_mass(lower, upper, mu, sd)))
+        if not np.isfinite(mass) or mass <= 0:
+            raise ValueError("Gaussian observable support has no finite positive probability mass")
         def pdf_gauss(v: np.ndarray) -> np.ndarray:
             v = np.asarray(v, dtype=np.float64)
-            return np.sum(w[:, None] * _norm_pdf(v, mu, sd), axis=0)
+            result = np.sum(w[:, None] * _norm_pdf(v, mu, sd), axis=0) / mass
+            return np.where((v >= lower) & (v <= upper), result, 0.)
 
         return pdf_gauss
 
@@ -2454,9 +2609,101 @@ def density_from(family: str, params: dict[str, float],
             def _c(x):
                 return _invgauss_cdf(np.asarray(x, float), a, b)
         mass = float((_c(t_max) if t_max else 1.0) - (_c(t_min) if t_min > 0 else 0.0)) or 1.0
-        return lambda x: np.asarray(_f(np.asarray(x, float)), float) / mass
+        def pdf_peaked(x):
+            x = np.asarray(x, float)
+            selected = (x >= t_min) & (x > 0)
+            if t_max is not None:
+                selected &= x <= t_max
+            out = np.zeros_like(x)
+            out[selected] = np.asarray(_f(x[selected]), float) / mass
+            return out
+        return pdf_peaked
 
     raise ValueError(f"unknown fit family {family!r}; expected one of {FIT_FAMILIES}")
+
+
+def cdf_from(family: str, params: dict[str, float],
+             meta: dict[str, Any] | None = None) -> Callable[[np.ndarray], np.ndarray]:
+    """Reconstruct a CDF normalized on the declared observable support.
+
+    Sample extrema never enter this calculation. Gaussian mixtures retain full
+    real-line support unless explicit bounds were used; dwell models use their
+    detector/fit bounds and, for exponentials, the measured efficiency curve.
+    """
+    from scipy import special
+    meta = dict(meta or {})
+    if family == "gauss-mixture":
+        k = sum(name.startswith("mu_") for name in params)
+        mu = np.asarray([params[f"mu_{j+1}"] for j in range(k)], float)
+        sd = np.asarray([params[f"sigma_{j+1}"] for j in range(k)], float)
+        w = np.asarray([params.get(f"w_{j+1}", 1.) for j in range(k)], float)
+        lo = -np.inf if meta.get("lower") is None else float(meta["lower"])
+        hi = np.inf if meta.get("upper") is None else float(meta["upper"])
+        z = float(np.dot(w, _gaussian_interval_mass(lo, hi, mu, sd)))
+        if z <= 0 or not np.isfinite(z):
+            raise ValueError("Gaussian observable support has no probability mass")
+        def cdf_gauss(x):
+            x = np.asarray(x, float)
+            clipped = np.clip(x.ravel(), lo, hi)
+            values = np.asarray([np.dot(w, _gaussian_interval_mass(lo, q, mu, sd)) / z
+                                 for q in clipped])
+            return np.clip(values, 0., 1.).reshape(x.shape)
+        return cdf_gauss
+    lo = float(meta.get("t_min") or 0.)
+    hi = np.inf if meta.get("t_max") is None else float(meta["t_max"])
+    if family == "exp-mixture":
+        taus, w = _mix_params(params)
+        g, v = meta.get("eta_grid"), meta.get("eta_vals")
+        grid = None if g is None else np.asarray(g, float)
+        vals = None if v is None else np.asarray(v, float)
+        normalizer = _Normalizer(lo, grid, vals, None if np.isinf(hi) else hi)
+        z = normalizer(taus, w)
+        if z <= 0 or not np.isfinite(z):
+            raise ValueError("Exponential observable support has no probability mass")
+        if normalizer.q_t is not None:
+            nodes = normalizer.q_t
+            densities = normalizer.q_eta * _mix_pdf(nodes, taus, w)
+            cumulative = np.r_[0., np.cumsum((densities[1:]+densities[:-1])*np.diff(nodes)*.5)]
+        else:
+            nodes, cumulative = np.asarray([lo]), np.asarray([0.])
+        def cdf_exp(x):
+            x = np.asarray(x, float); q = np.clip(x.ravel(), lo, hi)
+            base = np.interp(q, nodes, cumulative)
+            above = q > normalizer.T
+            if np.any(above):
+                base[above] += normalizer.eta_tail * (
+                    _mix_surv(normalizer.T, taus, w)[0] - _mix_surv(q[above], taus, w))
+            return np.clip(base / z, 0., 1.).reshape(x.shape)
+        return cdf_exp
+    if family == "gamma":
+        shape, scale = float(params["k"]), float(params["theta"])
+        survival = lambda x: special.gammaincc(shape, np.asarray(x, float) / scale)
+    elif family == "inverse-gaussian":
+        from scipy.stats import invgauss
+        mu, lam = float(params["mu"]), float(params["lambda"])
+        survival = lambda x: invgauss.sf(np.asarray(x, float), mu / lam, scale=lam)
+    elif family == "exp-gamma-mixture":
+        w, tau = float(params["w_exp"]), float(params["tau"])
+        shape, scale = float(params["k"]), float(params["theta"])
+        survival = lambda x: (w * np.exp(-np.asarray(x, float) / tau)
+                              + (1-w)*special.gammaincc(shape, np.asarray(x, float)/scale))
+    else:
+        raise ValueError(f"unknown fit family {family!r}")
+    s_lo, s_hi = float(survival(lo)), float(survival(hi))
+    mass = s_lo - s_hi
+    if mass <= 0 or not np.isfinite(mass):
+        raise ValueError("Observable support has no finite positive probability mass")
+    def cdf_positive(x):
+        x = np.asarray(x, float)
+        return np.clip((s_lo - survival(np.clip(x, lo, hi))) / mass, 0., 1.)
+    return cdf_positive
+
+
+def _gaussian_interval_mass(lower, upper, means, sigma):
+    """Stable component probability for a normal interval, including either tail."""
+    from scipy.special import ndtr
+    a, b = (lower - means) / sigma, (upper - means) / sigma
+    return np.maximum(np.where(a >= 0., ndtr(-a)-ndtr(-b), ndtr(b)-ndtr(a)), 0.)
 
 
 def fit_to_json(fit: FitResult) -> dict[str, Any]:
@@ -2471,12 +2718,10 @@ def fit_to_json(fit: FitResult) -> dict[str, Any]:
         "ci": {str(k): [float(lo), float(hi)] for k, (lo, hi) in fit.ci.items()},
         "loglik": float(fit.loglik), "aic": float(fit.aic), "bic": float(fit.bic),
         "n": int(fit.n), "model": str(fit.model),
-        # THE REPLICATES ARE DROPPED HERE, DELIBERATELY. `meta` is serialised wholesale,
-        # and the retained bootstrap is up to 8000 float64 per fit -- megabytes of
-        # resampled parameter noise per project that nothing reads back, to save a band
-        # a refit rebuilds for free. Intervals persist; the band does not. See ci_band().
-        "meta": _json_scalars({k: v for k, v in fit.meta.items()
-                               if k not in (BOOT_KEY, BOOT_PARAMS_KEY)}),
+        # Preserve correlated parameter replicates: marginal CI endpoints cannot
+        # reconstruct a density band. Project archives compress these small arrays.
+        "uncertainty_schema_version": 1,
+        "meta": _json_scalars(fit.meta),
     }
 
 
@@ -2509,6 +2754,22 @@ def fit_from_json(blob: dict[str, Any]) -> FitResult:
     """
     meta = dict(blob.get("meta") or {})
     params = {str(k): float(v) for k, v in (blob.get("params") or {}).items()}
+    # Old projects simply lack replicates. Malformed uncertainty must not prevent
+    # restoring valid estimates, nor silently produce a band with swapped columns.
+    if blob.get("uncertainty_schema_version", 1) != 1:
+        meta.pop(BOOT_KEY, None)
+        meta.setdefault("warnings", []).append("Saved uncertainty schema is newer than this reader; density band unavailable.")
+    if meta.get(BOOT_KEY) is not None:
+        try:
+            rows = np.asarray(meta[BOOT_KEY], dtype=float)
+            names = list(meta.get(BOOT_PARAMS_KEY) or [])
+            if (rows.ndim != 2 or rows.shape[1] != len(names)
+                    or set(names) != set(params) or not np.all(np.isfinite(rows))):
+                raise ValueError("invalid saved bootstrap replicate schema")
+            meta[BOOT_KEY] = rows
+        except (TypeError, ValueError):
+            meta.pop(BOOT_KEY, None)
+            meta.setdefault("warnings", []).append("Saved uncertainty replicates are invalid; density band unavailable.")
     family = meta.get("family")
     pdf = None
     if family in FIT_FAMILIES:
@@ -2543,6 +2804,8 @@ def fit_dwell_exp_gamma(
     t_max: float | None = None,
     quantity: str | None = None,
     unit: str | None = None,
+    n_boot: int = 0,
+    seed: int | None = 0,
 ) -> FitResult:
     """Fit ``w·Exp(tau) + (1-w)·Gamma(k, theta)`` to dwell times, truncated like the rest.
 
@@ -2600,8 +2863,14 @@ def fit_dwell_exp_gamma(
             f"need >= {_MIN_EVENTS} positive dwell times to fit, got {t.size}"
             if quantity is None else
             f"need >= {_MIN_EVENTS} positive {quantity} values to fit, got {t.size}")
-    lo = float(t_min) if t_min else 0.0
-    hi = float(t_max) if (t_max is not None and np.isfinite(t_max)) else None
+    lo = 0.0 if t_min is None else float(t_min)
+    hi = None if t_max is None else float(t_max)
+    if not np.isfinite(lo) or lo < 0:
+        raise ValueError("t_min must be a finite non-negative truncation bound")
+    if hi is not None and (not np.isfinite(hi) or hi <= lo):
+        raise ValueError("t_max must be finite and greater than t_min")
+    if hi is not None and float(np.max(t)) > hi * (1 + 1e-9):
+        raise ValueError("Observed values exceed the declared upper truncation bound; refusing to fit")
     if lo > 0 and float(np.min(t)) < lo * (1 - 1e-9):
         raise ValueError(
             (f"{int(np.sum(t < lo))} event(s) are shorter than the stated detection limit "
@@ -2629,9 +2898,11 @@ def fit_dwell_exp_gamma(
         w, tau, k, th = unpack(p)
         if not all(np.isfinite([w, tau, k, th])) or min(tau, k, th) <= 0:
             return np.inf
-        f = (w * np.exp(-t / tau) / tau
-             + (1 - w) * np.exp((k - 1) * np.log(t) - t / th
-                                - special.gammaln(k) - k * np.log(th)))
+        log_components = np.vstack([
+            np.log(w) - t / tau - np.log(tau),
+            np.log1p(-w) + (k - 1) * np.log(t) - t / th
+                - special.gammaln(k) - k * np.log(th)])
+        log_density = special.logsumexp(log_components, axis=0)
         # Truncation mass, per component, so each is conditioned on the observable window.
         z_e = np.exp(-lo / tau) - (np.exp(-hi / tau) if hi else 0.0)
         z_g = ((special.gammainc(k, hi / th) if hi else 1.0)
@@ -2639,7 +2910,9 @@ def fit_dwell_exp_gamma(
         z = w * z_e + (1 - w) * z_g
         if not np.isfinite(z) or z <= 0:
             return np.inf
-        return -float(np.sum(np.log(np.maximum(f, 1e-300)))) + t.size * float(np.log(z))
+        if not np.all(np.isfinite(log_density)):
+            return np.inf
+        return -float(np.sum(log_density)) + t.size * float(np.log(z))
 
     # Multi-start: the likelihood has a shallow ridge between "one broad gamma" and "a fast
     # exponential plus a sharp gamma", and a single start lands on whichever the initial k
@@ -2674,14 +2947,41 @@ def fit_dwell_exp_gamma(
     n_par = 4
     params = {"w_exp": float(w), "tau": float(tau), "k": float(k), "theta": float(th)}
 
-    # No bootstrap: a replicate here costs a full 12-start Nelder-Mead, so CIs would take
-    # minutes. The absence is SAID rather than left as a silently empty `ci` dict, because
-    # the other fitters in this module do produce CIs and a blank column reads as "the
-    # bootstrap failed" instead of "this family does not offer one".
+    # Optional expensive uncertainty uses the same complete multi-start objective
+    # for each resample. The GUI can defer it through the existing worker seam.
+    if isinstance(n_boot, bool) or int(n_boot) != n_boot or int(n_boot) < 0:
+        raise ValueError("n_boot must be a non-negative integer")
+    n_boot = int(n_boot)
     ci: dict[str, tuple[float, float]] = {}
-    notes.append(
-        "no bootstrap CIs for this family: each replicate is a 12-start optimisation. "
-        "The point estimates stand on the likelihood; compare families by BIC.")
+    def bootstrap():
+        if not ci_wanted():
+            return {'ci':{},'n_boot_ok':0,'boot':None,'note':None}
+        rng = np.random.default_rng(seed)
+        rows = []
+        for _ in range(n_boot):
+            check_cancelled()
+            sample = t[rng.integers(0, t.size, size=t.size)]
+            try:
+                with point_fits_only():
+                    result = fit_dwell_exp_gamma(sample, t_min=lo, t_max=hi,
+                        quantity=quantity, unit=unit, n_boot=0, seed=seed)
+                if result.meta.get("converged"):
+                    rows.append([result.params[name] for name in params])
+            except OperationCancelled:
+                raise
+            except (ValueError, RuntimeError, FloatingPointError):
+                continue
+        intervals = {}
+        if len(rows) >= 20:
+            quantiles = np.percentile(np.asarray(rows), [2.5, 97.5], axis=0)
+            intervals = {name: (float(quantiles[0, i]), float(quantiles[1, i]))
+                         for i, name in enumerate(params)}
+        return {"ci": intervals, "n_boot_ok": len(rows),
+                "boot": np.asarray(rows) if rows else None,
+                "note": None if len(rows) >= 20 else
+                    "bootstrap failed to produce enough converged replicates; CIs unavailable"}
+    if n_boot == 0 and ci_wanted():
+        notes.append("no bootstrap CIs requested for this costly family; request a background bootstrap to estimate uncertainty.")
 
     if k <= 1.05:
         notes.append(
@@ -2702,9 +3002,11 @@ def fit_dwell_exp_gamma(
         "gamma_mean_s": float(k * th),
         "gamma_mode_s": float((k - 1) * th) if k > 1 else None,
         "gamma_rel_sd": float(1.0 / np.sqrt(k)) if k > 0 else None,
-        "warnings": notes,
+        "warnings": notes, "boot": None, "boot_params": list(params),
+        "n_boot_ok": 0, "n_boot_requested": n_boot, "bootstrap_seed": seed,
+        "uncertainty_sampling": "independent-observation percentile bootstrap",
     }
-    return _stamp_gof(FitResult(
+    fit = FitResult(
         params=params, ci=ci, loglik=ll,
         aic=float(2 * n_par - 2 * ll), bic=float(n_par * np.log(t.size) - 2 * ll),
         n=int(t.size),
@@ -2713,7 +3015,14 @@ def fit_dwell_exp_gamma(
               + (f" on {quantity}" if quantity else ""),
         meta=meta,
         _pdf=density_from(EXP_GAMMA, params, meta),
-    ), t)
+    )
+    if n_boot > 0 and ci_wanted():
+        if ci_deferred():
+            _CI_DEFER.get().append(bootstrap)
+            meta["ci_pending"] = True
+        else:
+            apply_ci(fit, bootstrap())
+    return _stamp_gof(fit, t)
 
 
 # ================================================================================================
@@ -2742,10 +3051,9 @@ def fit_dwell_exp_gamma(
 # must not depend on which window you asked in.
 
 #: KS critical value coefficient at alpha = 0.01 for the one-sample two-sided test:
-#: ``D_crit = _KS_CRIT_001 / sqrt(n)``. Deliberately the TABULATED value, which assumes
-#: the model's parameters were known in advance rather than estimated from this very
-#: sample. Estimating them makes the true critical value SMALLER, so this threshold errs
-#: toward staying quiet -- a fit has to be clearly wrong before the panel says so.
+#: ``D_crit = _KS_CRIT_001 / sqrt(n)`` assumes a fixed CDF and independent data.
+#: Retained only as a descriptive reference. Fitted parameters, model selection,
+#: mixtures and dependent events require their own calibration; no test size is claimed.
 _KS_CRIT_001 = 1.62762
 
 
@@ -2814,83 +3122,65 @@ def r2_dof_caveat(n: int, n_params: int, *, model: str = "line",
 
 
 def goodness_of_fit(fit: FitResult, sample) -> dict[str, Any]:
-    """How well ``fit`` describes ``sample``: a Kolmogorov-Smirnov statistic and a verdict.
+    """Full observable-support CDF discrepancy, with a descriptive threshold.
 
-    The reference CDF is obtained by integrating :meth:`FitResult.predict` -- the
-    **observed** (censored) density, i.e. the very curve the panel draws -- over the
-    window the sample occupies. Two consequences worth being explicit about:
-
-    * It tests the drawn curve. A fit whose overlay misses the histogram cannot pass
-      here, whatever its parameters say, which is exactly the failure being caught.
-    * It is family-agnostic. Every family in this module publishes a density, so one
-      implementation covers exponential mixtures, gamma, inverse-Gaussian and the
-      exponential+gamma mixture -- and the numbers are comparable between them.
-
-    THE STATISTIC IS CONDITIONED ON THE OBSERVED RANGE. The reference CDF is
-    renormalised over ``[min(sample), max(sample)]`` (or ``[t_min, max]`` where the fit
-    knows a detection floor), so this asks "does this shape describe this histogram",
-    not "does this model also predict the right amount of mass beyond the data". On a
-    correctly specified fit the two agree: measured against ``scipy.stats.kstest`` with
-    the analytic truncated-exponential CDF on 4000 draws from a truncated exponential,
-    D = 0.015456 here against 0.015518 there. ``grid_mass`` reports how much of the
-    model's own probability landed inside the window, so a family leaking most of its
-    mass past the data is visible rather than flattered.
-
-    Args:
-        fit: Any :class:`FitResult` carrying a density.
-        sample: The observations it was fit to (seconds for dwell, data units for depth).
-
-    Returns:
-        ``{'ks', 'ks_critical_001', 'describes_data', 'n', 'grid_mass', 'note'}``.
-        ``describes_data`` is False when ``ks`` exceeds the 1% critical value.
-
-    The gotcha:
-        The p-value of a KS test whose parameters were estimated from the same sample is
-        not the tabulated one, so none is reported. ``ks`` against ``ks_critical_001`` is
-        a decision, not a probability, and it is stated that way in the note.
+    The model is never renormalized to the sample extrema. The conventional KS
+    reference threshold is retained for continuity, but it is not a calibrated
+    significance test after fitting parameters, selecting a model, or dependent
+    sampling. No p-value or probability of model correctness is claimed.
     """
     x = np.asarray(sample, dtype=np.float64).ravel()
     x = x[np.isfinite(x)]
     n = int(x.size)
     if n < 2:
         raise ValueError(f"need >= 2 finite observations to test a fit, got {n}")
-    lo = float(np.min(x))
-    hi = float(np.max(x))
-    if not (hi > lo):
+    lo, hi = float(x.min()), float(x.max())
+    if not hi > lo:
         raise ValueError("all observations are identical; there is no distribution to test")
-    t_min = fit.meta.get("t_min")
-    if t_min is not None and np.isfinite(float(t_min)) and 0 < float(t_min) <= lo:
-        lo = float(t_min)
-    # A log grid where the data are positive and span decades (dwell times), linear
-    # otherwise (depths, which can sit anywhere): both give the trapezoid a comparable
-    # number of points per unit of probability.
-    span = hi / lo if lo > 0 else 0.0
-    grid = (np.geomspace(lo, hi, 4001) if span >= 10.0 else np.linspace(lo, hi, 4001))
-    dens = np.asarray(fit.predict(grid), dtype=np.float64)
-    dens = np.where(np.isfinite(dens), dens, 0.0)
-    cum = np.concatenate([[0.0], np.cumsum(0.5 * (dens[1:] + dens[:-1]) * np.diff(grid))])
-    total = float(cum[-1])
-    if not (total > 0):
-        raise ValueError(
-            f"{fit.model} places no probability mass on the observed range "
-            f"[{lo:g}, {hi:g}]; it cannot be compared with this sample")
-    cdf = cum / total
-    xs = np.sort(x)
-    f = np.interp(xs, grid, cdf)
-    i = np.arange(1, n + 1, dtype=np.float64)
+    family = fit.meta.get("family")
+    if family in FIT_FAMILIES:
+        cdf = cdf_from(str(family), fit.params, fit.meta)
+        xs = np.sort(x)
+        f = np.asarray(cdf(xs), dtype=float)
+        mass = float(cdf(np.asarray([hi]))[0] - cdf(np.asarray([lo]))[0])
+    else:
+        # Compatibility for external/custom FitResult densities. Integrate their
+        # actual tails, rather than declaring that mass outside the data is zero.
+        from scipy.integrate import quad
+        lower = fit.meta.get("lower", fit.meta.get("t_min", -np.inf))
+        upper = fit.meta.get("upper", fit.meta.get("t_max", np.inf))
+        lower = -np.inf if lower is None else float(lower)
+        upper = np.inf if upper is None else float(upper)
+        pdf = lambda value: float(fit.predict(value))
+        left = quad(pdf, lower, lo, epsabs=1e-9, limit=150)[0]
+        right = quad(pdf, hi, upper, epsabs=1e-9, limit=150)[0]
+        grid = np.unique(np.r_[np.linspace(lo, hi, 4001), np.sort(x)])
+        dens = np.asarray(fit.predict(grid), dtype=float)
+        if not np.all(np.isfinite(dens)) or np.any(dens < 0):
+            raise ValueError("reference density is not finite and non-negative")
+        cum = np.r_[0., np.cumsum((dens[1:] + dens[:-1]) * np.diff(grid) * .5)]
+        total = float(left + cum[-1] + right)
+        if not np.isfinite(total) or total <= 0:
+            raise ValueError("reference density has no finite positive probability mass")
+        xs = np.sort(x)
+        f = (left + np.interp(xs, grid, cum)) / total
+        mass = float(cum[-1] / total)
+    if not np.all(np.isfinite(f)):
+        raise ValueError("reference CDF is not finite")
+    f = np.clip(f, 0., 1.)
+    i = np.arange(1, n + 1, dtype=float)
     ks = float(max(np.max(i / n - f), np.max(f - (i - 1) / n)))
     crit = _KS_CRIT_001 / math.sqrt(n)
     ok = bool(ks <= crit)
-    note = (
-        f"KS D = {ks:.4f} against a 1% critical value of {crit:.4f} (n = {n}). "
-        + ("The fitted curve is consistent with these data."
-           if ok else
-           "THE FITTED CURVE DOES NOT DESCRIBE THESE DATA — the largest gap between the "
-           "model and the empirical distribution is far beyond chance. Its parameters "
-           "should not be reported as measurements.")
-    )
+    note = (f"KS D = {ks:.4f}; descriptive reference threshold {crit:.4f} (n = {n}). "
+            + ("No large CDF discrepancy at this reference threshold. " if ok else
+               "THE FITTED CURVE DOES NOT DESCRIBE THESE DATA at this descriptive threshold. ")
+            + "This is not a calibrated significance test: parameters were fitted and "
+              "independent observations are not established. Model adequacy is not proved.")
     return {"ks": ks, "ks_critical_001": float(crit), "describes_data": ok,
-            "n": n, "grid_mass": total, "note": note}
+            "n": n, "grid_mass": mass, "note": note,
+            "cdf_scope": "full observable support", "calibrated": False,
+            "threshold_kind": "conventional known-CDF KS reference, descriptive only"}
 
 
 def _stamp_gof(fit: FitResult, sample) -> FitResult:
@@ -3024,8 +3314,8 @@ def binned_residuals(fit: FitResult, sample, edges,
     drawn bars describing the same bins -- a chi-square computed over a different pooling
     than the picture shows is a number nobody can check by eye.
 
-    The expected counts are CONDITIONED ON THE BINNED RANGE, the same convention
-    :func:`goodness_of_fit` uses: the model's density is renormalised over
+    The expected counts are CONDITIONED ON THE BINNED RANGE, unlike the full-support
+    :func:`goodness_of_fit` diagnostic: the model's density is renormalised over
     ``[edges[0], edges[-1]]`` and multiplied by the number of observations that landed
     there. So this asks "does this shape describe this histogram", not "does this model
     also predict the right amount of mass off the edge of the picture" -- ``grid_mass``
@@ -3067,7 +3357,7 @@ def binned_residuals(fit: FitResult, sample, edges,
     if n_in < 2:
         raise ValueError("fewer than 2 observations fall inside the given bin edges")
 
-    # The same integration grid goodness_of_fit uses, for the same reason: log where the
+    # Integrate the density over the displayed bins: log where the
     # data span decades (dwell), linear otherwise (depths), so the trapezoid gets a
     # comparable number of points per unit of probability either way. Sampled densely and
     # interpolated at the edges rather than integrated bin by bin, so a narrow first bin
@@ -3171,7 +3461,7 @@ def ci_band(fit: FitResult, x, *, level: float = 0.95) -> dict[str, Any] | None:
     """A pointwise confidence band for ``fit``'s density at ``x``, or ``None``.
 
     ``None`` -- never an exception, and never a fabricated band -- whenever the replicates
-    are not there to build one from: a fit restored from a project (see :func:`fit_to_json`),
+    are not there to build one from: a fit restored from an older project without them,
     a fit made under :func:`point_fits_only`, a family that offers no bootstrap
     (:func:`fit_dwell_exp_gamma`, whose replicate is a 12-start optimisation), or one whose
     bootstrap produced too few usable rows. The caller draws a band or does not; it must

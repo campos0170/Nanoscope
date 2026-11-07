@@ -490,6 +490,20 @@ def _stamp(value: float | None) -> float | None:
     return float(value)
 
 
+def _detrend_algorithm_stamp(params: Mapping[str, Any]) -> dict[str, str]:
+    """Generated algorithm identity, separate from editable conditioning inputs."""
+    from .baseline import baseline_endpoint_policy, baseline_sample_count_policy, baseline_mask_noise_policy
+
+    method = str(params.get("detrend_method", "block_median"))
+    stamp = {}
+    for key, policy in (("detrend_endpoint_policy", baseline_endpoint_policy(method)),
+                        ("detrend_sample_count_policy", baseline_sample_count_policy(method)),
+                        ("detrend_mask_noise_policy", baseline_mask_noise_policy(method))):
+        if policy is not None:
+            stamp[key] = policy
+    return stamp
+
+
 def processed_trace_provenance(
     *,
     params: Mapping[str, Any],
@@ -566,6 +580,7 @@ def processed_trace_provenance(
         "signal_basis": BASIS_PROCESSED,
         "chain": chain_description(chain),
         "params": _json_safe(chain),
+        **(_detrend_algorithm_stamp(chain) if chain.get("detrend_enabled") else {}),
     }
 
 
@@ -877,6 +892,10 @@ def baseline_correction_provenance(
         # before opting it into detection.
         "runtime_correction_active": runtime_active,
         "runtime_params": runtime,
+        # A retained-offset comparison computes this stage even when its runtime
+        # switch is OFF. No recipe means unknown; never invent an algorithm stamp.
+        **(_detrend_algorithm_stamp(runtime) if runtime and
+           selected_mode == BASELINE_CORRECTION_RETAINED_OFFSET_RUNTIME else {}),
         "warnings": _baseline_export_warnings(warnings),
     }
 
@@ -898,17 +917,18 @@ def _write_baseline_correction_csv(
     columns: list[str],
 ) -> None:
     """Write the comparison table to an already-staged ``path`` in bounded chunks."""
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(",".join(columns) + "\n")
-        for lo in range(0, raw.size, _BASELINE_EXPORT_CHUNK_SAMPLES):
-            hi = min(raw.size, lo + _BASELINE_EXPORT_CHUNK_SAMPLES)
-            time_s = (np.arange(lo, hi, dtype=np.float64) + float(start_idx)) / fs
-            np.savetxt(
-                handle,
-                np.column_stack((time_s, raw[lo:hi], baseline[lo:hi], corrected[lo:hi])),
-                delimiter=",",
-                fmt=_SAMPLE_FMT,
-            )
+    with staged_path(path) as temporary:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(",".join(columns) + "\n")
+            for lo in range(0, raw.size, _BASELINE_EXPORT_CHUNK_SAMPLES):
+                hi = min(raw.size, lo + _BASELINE_EXPORT_CHUNK_SAMPLES)
+                time_s = (np.arange(lo, hi, dtype=np.float64) + float(start_idx)) / fs
+                np.savetxt(
+                    handle,
+                    np.column_stack((time_s, raw[lo:hi], baseline[lo:hi], corrected[lo:hi])),
+                    delimiter=",",
+                    fmt=_SAMPLE_FMT,
+                )
 
 
 def write_baseline_correction(

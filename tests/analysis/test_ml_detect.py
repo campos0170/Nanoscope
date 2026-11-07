@@ -562,13 +562,15 @@ def test_resolve_channels_accepts_1_12_none_and_rejects_others():
 # ===========================================================================
 # e. lazy TF + graceful degradation
 # ===========================================================================
-def test_ml_unavailable_is_raised_when_tf_import_fails(monkeypatch):
+@pytest.mark.parametrize("frozen", [False, True])
+def test_ml_unavailable_is_raised_when_tf_import_fails(monkeypatch, frozen):
     """If TensorFlow cannot be imported, the loader surfaces MLUnavailable -- a
     clear, catchable error -- rather than a bare ImportError or a crash. Simulated
     by monkeypatching the import so this runs even where TF *is* installed."""
     import nanoscope.analysis.ml_detect as m
 
     monkeypatch.setattr(m, "_TF", None)  # force a fresh import attempt
+    monkeypatch.setattr(m.sys, "frozen", frozen, raising=False)
     real_import = m.importlib.import_module
 
     def _boom(name, *args, **kwargs):
@@ -577,8 +579,18 @@ def test_ml_unavailable_is_raised_when_tf_import_fails(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(m.importlib, "import_module", _boom)
-    with pytest.raises(MLUnavailable, match="TensorFlow"):
+    with pytest.raises(MLUnavailable, match="TensorFlow") as failure:
         m._import_tf()
+    message = str(failure.value)
+    assert isinstance(failure.value.__cause__, ImportError)
+    assert "simulated: no tensorflow" in str(failure.value.__cause__)
+    assert "2.15" not in message
+    if frozen:
+        assert "Reinstall the latest NanoScope app" in message
+        assert "Python environment" not in message
+    else:
+        assert "compatible TensorFlow and Keras pair" in message
+        assert "packaging/README.md" in message
 
 
 def test_tensorflow_available_flag_is_bool():

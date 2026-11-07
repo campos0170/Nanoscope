@@ -23,7 +23,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pandas as pd
 import pytest
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtTest import QTest
 
 from nanoscope.analysis.events import SCHEMA, EventSet, empty_df
@@ -120,9 +120,13 @@ def _reopen(qtbot, window: MainWindow, tmp_path):
 
 def _figure(plots) -> dict:
     legend = plots._plot.legend
+    def plain(html):
+        document = QtGui.QTextDocument()
+        document.setHtml(html)
+        return document.toPlainText()
     return {"label": plots._fit_label_item.plain_text() if plots._fit_label_item.isVisible()
             else "(hidden)",
-            "legend": [label.text for _sample, label in legend.items] if legend else []}
+            "legend": [plain(label.text) for _sample, label in legend.items] if legend else []}
 
 
 @pytest.mark.parametrize("kind,col,shown", [
@@ -174,7 +178,7 @@ def test_in_legend_instead_keeps_the_numbers_in_the_fit_row_through_a_redraw_and
 
     before = _figure(plots)
     assert before["label"] == "(hidden)"
-    assert all("<br>" in row and number in row and "n = 120" in row
+    assert all("\n" in row and number in row and "n = 120" in row
                for row in fit_rows(before)), before
     plots.set_bins(17)                      # a live redraw
     _settle()
@@ -232,10 +236,12 @@ def test_an_overlay_reopens_with_named_rows_and_one_label_line_per_source(qapp, 
     again._dirty = False
 
 
-def test_a_reopened_scatter_fit_is_pending_and_the_plot_button_says_so(qapp, qtbot, tmp_path):
-    """Opening a project never runs a regression, so the saved scatter's line, its fit
-    label and its legend rows are not on the reopened picture. The KDE overlay's rule:
-    the gate's ● and its banner say the controls ask for more than is drawn."""
+def test_a_reopened_scatter_fit_restores_its_snapshot_without_a_pending_change(qapp, qtbot,
+                                                                           tmp_path,
+                                                                           monkeypatch):
+    """The saved regression line, label and legend reopen as a frozen snapshot.
+    Unchanged controls leave Plot without a pending marker; an explicit Plot keeps
+    the same visible result."""
     window, plots = _recordings(qtbot, tmp_path, names=("apo", "holo"))
     plots.set_plot_type("Scatter")
     plots.set_scatter_columns("dwell_s", "depth_pA")
@@ -244,10 +250,13 @@ def test_a_reopened_scatter_fit_is_pending_and_the_plot_button_says_so(qapp, qtb
     before = _figure(plots)
     assert plots._plot_btn.text() == "Plot" and "y = " in before["label"], before
 
-    again, reopened = _reopen(qtbot, window, tmp_path)
-    assert _figure(reopened)["label"] == "(hidden)"
-    assert reopened._plot_btn.text() == "Plot ●"
-    assert "scatter fit" in reopened._plot_btn.toolTip()
+    from nanoscope.gui import plots_panel
+    with monkeypatch.context() as reopening:
+        reopening.setattr(plots_panel.populations, "linear_fit",
+                          lambda *a, **kw: pytest.fail("reopening recomputed the regression"))
+        again, reopened = _reopen(qtbot, window, tmp_path)
+    assert _figure(reopened) == before
+    assert reopened._plot_btn.text() == "Plot"
     reopened._plot_btn.click()
     _settle()
     assert _figure(reopened) == before
@@ -284,12 +293,12 @@ def test_a_reopened_fit_the_ks_test_rejected_still_says_so(qapp, qtbot, tmp_path
     plots.set_fit("exponential")
     _settle()
     details = plots.details_text()
-    assert "KS REJECTED" in details, details
+    assert "CDF mismatch (descriptive)" in details, details
     verdict = next(line for line in details.splitlines() if line.startswith("KS D = "))
 
     again, reopened = _reopen(qtbot, window, tmp_path)
     after = reopened.details_text()
-    assert "KS REJECTED" in after and verdict in after, after
+    assert "CDF mismatch (descriptive)" in after and verdict in after, after
     assert _figure(reopened)["label"] == _figure(plots)["label"]
     again._dirty = False
 

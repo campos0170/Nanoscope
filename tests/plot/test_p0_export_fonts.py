@@ -317,16 +317,27 @@ def test_generate_report_figures_writes_truetype_pdfs_in_arial(detected_window, 
     out = tmp_path / "figs"
     out.mkdir()
     _choose_file(monkeypatch, out / "figures.pdf")
+    dwell = {}
+    original_save = figures.save_figure
+    def observe_save(figure, *args, **kwargs):
+        plots = figures.figure_details(figure)["plots"]
+        if plots and plots[0]["kind"] == "dwell_histogram":
+            dwell.update(label=figure.axes[0].get_xlabel(), fit=plots[0]["fit"],
+                         counts=figure._nanoscope_source_data["fit_expected_count"].copy())
+        return original_save(figure, *args, **kwargs)
+    monkeypatch.setattr(figures, "save_figure", observe_save)
     detected_window._export_figures()
     pdfs = sorted(out.glob("figures_*.pdf"))
     assert {p.stem for p in pdfs} >= {"figures_dwell", "figures_depth", "figures_scatter"}
     for pdf in pdfs:
         fonts = _assert_embedded_truetype(pdf)
         assert "ArialMT" in fonts["names"], (pdf.name, fonts)
-    # the dwell histogram writes tau and the microsecond sign as math text, which matplotlib sets in
-    # DejaVu Sans whatever the font list says -- and the PDF carries that face too (USER_GUIDE)
-    dwell = _pdf_fonts(out / "figures_dwell.pdf")["names"]
-    assert any(name.startswith("DejaVuSans") for name in dwell), dwell
+    # Millisecond axis text needs no math fallback face. A successful fit may still
+    # use math text for tau; the command's unchanged no-fit fallback must not invent
+    # fitted counts solely to force that optional face into its PDF.
+    assert dwell["label"] == "Dwell time (ms)"
+    if dwell["fit"] is None:
+        assert dwell["counts"].isna().all()
 
 
 @needs_arial
@@ -595,6 +606,19 @@ def test_the_groups_font_family_is_dropped_and_nothing_else_about_them():
     assert len(list(root.iter(f"{{{SVG_NS}}}path"))) == 1 and _texts(out) == ["t"]
 
 
+def test_a_tspan_that_names_a_family_gets_its_stack_and_one_that_names_none_inherits():
+    """Neither Qt's SVG writer nor pyqtgraph writes a ``<tspan>`` today. If one ever does, a
+    ``<tspan>`` with a face of its own is stacked like a ``<text>`` (never dropped, which would
+    hand it the ``<text>``'s face), and one with none keeps inheriting the stack of its ``<text>``."""
+    out = pg_svg.set_font_stack(_svg(
+        '<text font-family="Arial">a<tspan font-family="Times New Roman">b</tspan>'
+        '<tspan>c</tspan><tspan font-family=".AppleSystemUIFont"/></text>'))
+    spans = list(ET.fromstring(out).iter(f"{{{SVG_NS}}}tspan"))
+    assert [s.get("font-family") for s in spans] == [TIMES_STACK, None, ARIAL_STACK]
+    assert _texts(out) == ["abc"]
+    assert pg_svg.set_font_stack(out) == out
+
+
 def test_set_font_stack_is_idempotent_and_survives_awkward_names():
     once = pg_svg.set_font_stack(_svg(
         '<text font-family="Foo&quot;Bar">a</text>', '<text font-family="Fo&amp;o">b</text>',
@@ -753,6 +777,8 @@ def distributions(qapp, qtbot):
     window._open_plots()
     page = window._plots_window
     page.set_data({"apo": _events_for_page()})
+    page._run_plot()  # New figures wait for explicit Plot; source binding is catalog-only.
+    assert page._plot_armed and page._message_item is None
     qtbot.wait(20)
     yield page
     window._analysis_controller.abort()
@@ -857,6 +883,8 @@ def _synthetic_main_window(qtbot, tmp_path, monkeypatch):
         payload=EventSet(frame, {})))
     window._on_selection(doc_id, 0)
     window._open_plots()
+    window._plots_window._run_plot()
+    assert window._plots_window._plot_armed and window._plots_window._message_item is None
     return window
 
 
@@ -969,16 +997,15 @@ def test_the_comparison_page_draws_and_exports_in_the_chosen_family(qtbot, tmp_p
         assert (tmp_path / f"comparison{extension}").stat().st_size > 100
 
 
-def test_comparison_figure_text_is_exported_as_outlines_in_svg_and_pdf(qtbot, tmp_path):
-    """Documented as it is (USER_GUIDE, Comparison figures): the canvas item records text as
-    glyph paths, so the SVG has no <text> and the PDF no font object. Nature asks for editable
-    text; whether that changes is the owner's call, and this test is where it will say so."""
+def test_comparison_figure_text_is_editable_in_svg_and_embedded_in_pdf(qtbot, tmp_path):
+    """P4 retains literal text and embedded fonts without rerunning scientific geometry."""
     page = _comparison_page(qtbot)
-    svg = page.save_image(str(tmp_path / "outlines.svg"))
-    pdf = page.save_image(str(tmp_path / "outlines.pdf"))
-    assert b"<text" not in svg.read_bytes()
+    svg = page.save_image(str(tmp_path / "editable.svg"))
+    pdf = page.save_image(str(tmp_path / "embedded.pdf"))
+    root = ET.fromstring(svg.read_bytes())
+    assert any(node.tag.endswith('}text') for node in root.iter())
     fonts = _pdf_fonts(pdf)
-    assert fonts["names"] == [] and fonts["type3"] == 0
+    assert fonts["names"] and fonts["font_file2"] > 0 and fonts["type3"] == 0
 
 
 @needs_arial
@@ -1131,9 +1158,11 @@ def test_the_study_editor_draws_and_exports_in_the_chosen_family(study_page, tmp
     for extension in (".svg", ".pdf", ".png"):
         out = tmp_path / f"study{extension}"
         assert page.export_image(path=out) == out, page._status.text()
-    # documented (USER_GUIDE): the editor's SVG holds its text as outlines, like Comparison figures
-    assert b"<text" not in (tmp_path / "study.svg").read_bytes()
-    assert _pdf_fonts(tmp_path / "study.pdf")["names"] == []
+    # P4 keeps literal text editable and names the chosen fallback stack.
+    families = _svg_text_families((tmp_path / "study.svg").read_text())
+    assert families and TIMES_STACK in families
+    fonts = _assert_embedded_truetype(tmp_path / "study.pdf")
+    assert any("Times" in name for name in fonts["names"])
 
 
 @needs_arial

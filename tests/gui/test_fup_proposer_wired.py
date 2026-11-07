@@ -28,6 +28,7 @@ import pytest
 from PySide6 import QtCore, QtGui
 
 from nanoscope.analysis import baseline as B
+from .baseline_corpus_contracts import assert_detection_matches_reference
 
 APO_700 = pathlib.Path("/Users/abrahamcampos/500 pM Apo ferritin_1 x PBS_22 nm_"
                        "0005_Process_-700 mV.abf")
@@ -67,9 +68,9 @@ def test_the_seven_hundred_millivolt_screen_after_one_apply_click(qapp, qtbot):
     Before this change that sequence left the form on the app default 0.5 / 0.1 s with
     the source line reading *"app default (this recording was not measured)"* and a
     REFUSED banner over the button, because the proposal (0.1 / 0.03) was condemned by
-    two health checks and M1's gate would not apply it on one press. The proposal is
-    now 0.5 / 0.1, all eight checks pass, and the same one press applies it as
-    ``proposed``.
+    two health checks and M1's gate would not apply it on one press. The proposer
+    floor now permits 0.5 / 0.1; the intrusion ranking selects 1.0 / 0.3, all eight
+    checks pass, and the same one press applies it as ``proposed``.
     """
     import nanoscope
     from nanoscope.core.types import ChannelKind
@@ -125,16 +126,20 @@ def test_the_seven_hundred_millivolt_screen_after_one_apply_click(qapp, qtbot):
     summary = rendered(bp.summary_label)
     assert "Median state" in summary, summary
     assert "base_s floor" in summary, summary
-    assert "21.7 ms" in summary, (
+    assert f"{pr.probe.state_dwell_s * 1e3:.1f} ms" in summary, (
         "the summary does not show the median state base_s is now sized on", summary)
     assert "base_s >= 100 ms" in summary, summary
-    assert "31 ms" in summary, ("the longest state must still be shown beside it -- "
-                                "the two are different statistics", summary)
+    # Automatic masked baselines now use robust flank anchors; the earlier
+    # mask/flank policy gave 31 ms here. Render the current statistic faithfully,
+    # and keep it distinct from the median used for the floor.
+    assert pr.probe.longest_state_s > pr.probe.state_dwell_s
+    assert f"{pr.probe.longest_state_s * 1e3:.0f} ms" in summary, (
+        "the longest state must still be shown beside the distinct median", summary)
 
     # ---- what the reason paragraph SAYS ---------------------------------
     reason = rendered(bp.reason_label)
     assert "floored" in reason, reason
-    assert "0.1 s / 30 ms" in reason, (
+    assert "100 ms / 30 ms" in reason, (
         "the reason must name the window the 4:1 rule alone would have proposed, or "
         "the user cannot tell that anything was overridden", reason)
     assert "1.4x the states" in reason, reason
@@ -143,7 +148,7 @@ def test_the_seven_hundred_millivolt_screen_after_one_apply_click(qapp, qtbot):
     assert not reason.startswith("Could not measure"), reason
 
     # ---- the button is plain, and ONE press applies -----------------------
-    assert bp.apply_button.text() == "Use these values", bp.apply_button.text()
+    assert bp.apply_button.text() == "Use proposed windows", bp.apply_button.text()
     assert bp.apply_button.styleSheet() == "", bp.apply_button.styleSheet()
     assert bp.gate_label.text() == "", bp.gate_label.text()
     assert bp.gate_label.isVisible() is False
@@ -170,13 +175,7 @@ def test_the_seven_hundred_millivolt_screen_after_one_apply_click(qapp, qtbot):
     with qtbot.waitSignal(ctrl.finished, timeout=900_000):
         dp.detect_button.click()
     _drain(qapp, qtbot, 400)
-    df = ap.current_events_df()
-    assert df is not None and len(df) == 1179, len(df) if df is not None else None
-    prov = ap.current_detection().payload.provenance
-    assert prov.get("baseline_fingerprint") == "sha256:b64a75ebdf29", prov.get(
-        "baseline_fingerprint")
-    assert str(prov.get("baseline_param_source")) == "proposed", prov.get(
-        "baseline_param_source")
+    assert_detection_matches_reference(w, NOW, "proposed")
 
 
 def test_the_condemned_window_still_says_what_to_do_and_names_the_probe(qapp, qtbot):
@@ -225,11 +224,10 @@ def test_the_condemned_window_still_says_what_to_do_and_names_the_probe(qapp, qt
         ap.detection_panel.detect_button.click()
     _drain(qapp, qtbot, 400)
 
-    # the published table is still reachable, bit-for-bit in its row count
-    df = ap.current_events_df()
-    assert df is not None and len(df) == 1179, len(df) if df is not None else None
-    assert ap.current_detection().payload.provenance.get(
-        "baseline_fingerprint") == "sha256:1a29aabf5fb1"
+    # The manual recipe remains reachable. Its current numerical policy must be
+    # identified honestly; an old row count/fingerprint is not exact replay of the
+    # automatic estimator after its versioned mask/flank algorithm changed.
+    assert_detection_matches_reference(w, WAS, "user")
 
     said = bp.health_text()
     assert "base window vs state dwell" in said, said[:600]

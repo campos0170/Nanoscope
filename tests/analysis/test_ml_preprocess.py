@@ -144,7 +144,8 @@ def test_baseline_masked_median_matches_reference_bit_for_bit():
     # deep, long events -> the ferritin_data2 pathology the masked estimator exists for
     x = _trace(n_events=12, depth=120.0, width=800).astype(np.float64)
     got_d, got_b = mp.baseline_masked_median(
-        x, FS, rough_s=0.5, base_s=0.1, decim=50, mask_sigma=3.5, dilate_ms=1.0)
+        x, FS, rough_s=0.5, base_s=0.1, decim=50, mask_sigma=3.5, dilate_ms=1.0,
+        _legacy_sample_counts=True, _legacy_mask_noise=True)
     ref_d, ref_b = _ref_masked_median(x, FS)
 
     assert got_d.dtype == np.float32 and got_b.dtype == np.float32
@@ -156,7 +157,8 @@ def test_baseline_masked_median_notebook3_windows_match_reference():
     """Notebook 3's short windows + decim 10 go down a different arithmetic branch."""
     x = _trace(n_events=20, depth=90.0, width=120).astype(np.float64)
     got_d, got_b = mp.baseline_masked_median(
-        x, FS, rough_s=0.03, base_s=0.01, decim=10, mask_sigma=3.5, dilate_ms=1.0)
+        x, FS, rough_s=0.03, base_s=0.01, decim=10, mask_sigma=3.5, dilate_ms=1.0,
+        _legacy_sample_counts=True, _legacy_mask_noise=True)
     ref_d, ref_b = _ref_masked_median(x, FS, rough_s=0.03, base_s=0.01, decim=10)
     np.testing.assert_array_equal(got_b, ref_b)
     np.testing.assert_array_equal(got_d, ref_d)
@@ -774,10 +776,24 @@ def test_apply_ml_preprocess_runs_notch_then_baseline_then_despike():
     detr, _ = mp.baseline_masked_median(
         notched, FS, rough_s=cfg.masked_rough_s, base_s=cfg.masked_base_s,
         decim=cfg.baseline_decim, mask_sigma=cfg.masked_mask_sigma,
-        dilate_ms=cfg.masked_dilate_ms)
+        dilate_ms=cfg.masked_dilate_ms,
+        _legacy_sample_counts=True, _legacy_mask_noise=True)
     expect = mp.despike_median(detr, size=cfg.despike_size)
     np.testing.assert_array_equal(got, np.asarray(expect, np.float32))
     assert got.dtype == np.float32
+
+
+def test_ml_pipeline_matches_independent_notebook_after_automatic_baseline_upgrade():
+    # This oracle never calls the production baseline helper: preserving trained
+    # model inputs must be checked independently from its new automatic default.
+    x = _trace()
+    cfg = mp.PREPROCESS_PRESETS["notebook2"]
+    notched = mp.notch_sequential(x, FS, freqs=cfg.notch_freqs, q=cfg.notch_q)
+    detr, _ = _ref_masked_median(notched, FS, rough_s=cfg.masked_rough_s,
+        base_s=cfg.masked_base_s, mask_sigma=cfg.masked_mask_sigma,
+        dilate_ms=cfg.masked_dilate_ms, decim=cfg.baseline_decim)
+    expected = mp.despike_median(detr, size=cfg.despike_size).astype(np.float32)
+    np.testing.assert_array_equal(mp.apply_ml_preprocess(x, FS, cfg), expected)
 
 
 def test_apply_ml_preprocess_baseline_none_only_notches():

@@ -221,6 +221,7 @@ def test_dwell_histogram_uses_log_bins_by_default():
 def test_dwell_histogram_shades_below_detection_limit():
     events = make_events(500)
     fig, ax = figures.dwell_histogram(events, fit=False)
+    # Artist coordinates retain microseconds; the quantity formatter displays ms.
     assert ax.get_xlim()[0] < T_MIN * 1e6, "the below-detection region is not visible"
     assert any("detection limit" in t.get_text() for t in ax.texts)
 
@@ -229,7 +230,7 @@ def test_dwell_histogram_annotates_tau_and_ci():
     events = make_events(1000)
     fig, ax = figures.dwell_histogram(events, fit=ExpFit())
     blob = " ".join(t.get_text() for t in ax.texts)
-    assert "200.0" in blob and "190.0" in blob and "210.0" in blob
+    assert r"$\tau$ = 0.2 [0.19, 0.21] ms" in blob
 
 
 def test_precomputed_multi_component_fit_is_used_verbatim_not_refit():
@@ -247,7 +248,7 @@ def test_precomputed_multi_component_fit_is_used_verbatim_not_refit():
     # Both taus are annotated -- a one-component refit could only print one.
     assert blob.count(r"$\tau$") == 2
     for tau in (two.params["tau_1"], two.params["tau_2"]):
-        assert f"{tau * 1e6:.1f}" in blob
+        assert f"{tau * 1e3:.3g} ms" in blob
 
     # ...and the exported source data is that fit's curve, not another one's.
     refit, ax2 = figures.dwell_histogram(events, fit=True)

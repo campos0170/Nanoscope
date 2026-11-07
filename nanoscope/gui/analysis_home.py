@@ -40,7 +40,16 @@ class AnalysisHome(QtWidgets.QWidget):
         self._search.setObjectName("analysisHomeSearch")
         self._search.setPlaceholderText("Find a tool, plot type or input…")
         self._search.setClearButtonEnabled(True)
-        root.addWidget(self._search)
+        search_row = QtWidgets.QHBoxLayout()
+        search_row.addWidget(self._search, 1)
+        # Was "Refresh availability" in the Explorer's top band; the shell no longer has one.
+        self._refresh = QtWidgets.QPushButton("Refresh availability")
+        self._refresh.setObjectName("analysisHomeRefresh")
+        self._refresh.setToolTip(
+            "Recheck which tools are available. No analytical view is constructed or recomputed.")
+        self._refresh.clicked.connect(lambda _checked=False: self.refresh_availability())
+        search_row.addWidget(self._refresh)
+        root.addLayout(search_row)
         split = QtWidgets.QSplitter()
         self._list = _ToolList()
         self._list.setObjectName("analysisHomeTools")

@@ -383,14 +383,14 @@ def test_a_results_row_click_after_the_switch_shows_that_tables_event(rig, host)
     assert _row(rig.frame(S), eid)["start_idx"] != _row(rig.frame(C), eid)["start_idx"]
     _click_results_row(rig, eid)
     assert rig.panel.selected_event_id() == eid
-    dwell_us = int(round(float(_row(rig.frame(C), eid)["dwell_s"]) * 1e6))
-    other_us = int(round(float(_row(rig.frame(S), eid)["dwell_s"]) * 1e6))
-    assert dwell_us != other_us
+    dwell_ms = f'{float(_row(rig.frame(C), eid)["dwell_s"]) * 1e3:g}'
+    other_ms = f'{float(_row(rig.frame(S), eid)["dwell_s"]) * 1e3:g}'
+    assert dwell_ms != other_ms
     readout = insp._readout.text()
-    assert f"{dwell_us} µs" in readout, (
-        f"the row clicked is CUSUM's event {eid} ({dwell_us} µs); "
+    assert f"{dwell_ms} ms" in readout, (
+        f"the row clicked is CUSUM's event {eid} ({dwell_ms} ms); "
         "the inspector shows:\n" + readout)
-    assert f"{other_us} µs" not in readout, readout
+    assert f"{other_ms} ms" not in readout, readout
     assert "of 5" in readout, readout
     rig.assert_holds(insp, C)
     assert insp.current_event_id() == eid

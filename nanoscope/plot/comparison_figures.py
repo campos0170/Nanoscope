@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 
 from nanoscope.analysis.distribution_summary import summarize_distribution
+from nanoscope.core.figure_series import SeriesDescriptor, stable_series_id, validate_series_styles
+from nanoscope.core.figure_style import resolve_series_color
 from nanoscope.core.source_style import compact_source_labels, validate_source_appearance
 from nanoscope.plot.style import OKABE_ITO, font_family_list, nanoscope_style
 
@@ -604,7 +606,55 @@ def _validate(snapshot, tables):
         _text(note, "Warning", 10_000)
 
 
-def render_comparison(snapshot, tables, appearance=None, *, source_appearance=None):
+def comparison_target_panel(snapshot, panel):
+    """Editing identity; geometry table panel IDs remain their historical wire format."""
+    kind = snapshot['config']['kind']
+    if kind == 'facets':
+        return 'facet:source:' + str(panel['counts'][0]['source_key'])
+    if kind == 'pairs':
+        return 'pair:features:' + str(panel['x']) + ':' + str(panel['y'])
+    return 'events'
+
+
+def comparison_axis_quantities(snapshot):
+    """Each editable axis's displayed measurement, independent of layout position."""
+    out = {}
+    for panel in snapshot.get('panels', ()):
+        identity = comparison_target_panel(snapshot, panel)
+        event = panel['kind'] == 'events'
+        out[identity, 'bottom'] = ('recordings' if event else panel['x'], panel['xscale'])
+        out[identity, 'left'] = (panel['x'] if event else panel['y'] or 'event_count', panel['yscale'])
+    return out
+
+
+def comparison_series(snapshot, source_appearance=None, appearance=None):
+    """Original recording identities, including hidden series, without drawing."""
+    source_appearance = validate_source_appearance(source_appearance or {})
+    state = appearance.to_dict() if hasattr(appearance, 'to_dict') else dict(appearance or {})
+    if state.get('style_binding'):
+        from ..core.figure_style_mapping import project_legacy_style
+        state = project_legacy_style(state['style_binding'], 'matplotlib_appearance', state)
+    overrides = validate_series_styles(state.get('series_styles') or {})
+    def effective(source):
+        own = overrides.get(stable_series_id('comparison', 'data', source['key']), {})
+        values = {'color': own.get('color', source_appearance.get(source['key'], {}).get('color', source['color'])),
+                  'marker_size_pt': own.get('marker_size_pt', state.get('marker_size', 3.5))}
+        if 'line_width_pt' in capabilities:
+            values['line_width_pt'] = own.get('line_width_pt', state.get('line_width', 1.))
+        return values
+    config = snapshot.get('config', {})
+    capabilities = ['color', 'marker_size_pt', 'visible']
+    if config.get('kind') == 'pairs' or (config.get('kind') == 'events' and config.get('show_box')):
+        capabilities.insert(1, 'line_width_pt')
+    return tuple(SeriesDescriptor(
+        stable_series_id('comparison', 'data', source['key']),
+        source_appearance.get(source['key'], {}).get('label', source['label']),
+        identity_kind='source', identity_key=source['key'], color=source['color'],
+        capabilities=tuple(capabilities), extra={'effective_style': effective(source)})
+        for source in snapshot.get('sources', ()))
+
+
+def render_comparison(snapshot, tables, appearance=None, *, source_appearance=None, automatic_quantity_labels=False):
     """Draw frozen geometry only; warnings stay in Details/provenance."""
     validate_comparison(snapshot, tables)
     source_appearance = validate_source_appearance(source_appearance or {})
@@ -614,14 +664,25 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
     from matplotlib.patches import Rectangle
 
     state = appearance.to_dict() if hasattr(appearance, "to_dict") else dict(appearance or {})
+    from ..core.figure_style_mapping import project_legacy_style
+    from .matplotlib_targets import apply_text_overrides, bind_panel, remember_automatic_text
+    if state.get("style_binding"):
+        state = project_legacy_style(state["style_binding"], "matplotlib_appearance", state)
     dark = state.get("background") == "dark"
     foreground, background = ("#eeeeee", "#17191d") if dark else ("#202226", "#ffffff")
     title_size = state.get("title_size", 11.)
     axis_size, tick_size = state.get("axis_size", 9.), state.get("tick_size", 8.)
     marker_size, line_width = state.get("marker_size", 3.5), state.get("line_width", 1.0)
     layout, cfg = snapshot["layout"], snapshot["config"]
-    colors = {source["key"]: source_appearance.get(source["key"], {}).get("color", source["color"])
-              for source in snapshot["sources"]}
+    series = validate_series_styles(state.get('series_styles') or {})
+    styles = {source['key']: series.get(stable_series_id('comparison', 'data', source['key']), {})
+              for source in snapshot['sources']}
+    colors = {source['key']: resolve_series_color(state.get('style_binding'), index=index,
+        identity_color=source_appearance.get(source['key'], {}).get('color', source['color']),
+        explicit_color=styles[source['key']].get('color'))
+        for index, source in enumerate(snapshot['sources'])}
+    visible_sources = [source for source in snapshot['sources']
+                       if styles[source['key']].get('visible', True)]
     # With no explicit label edit, old snapshots keep their exact saved labels.
     # A figure-local edit changes drawing only, never the committed geometry.
     display_labels = ({source["key"]: source["plot_label"] for source in snapshot["sources"]}
@@ -648,33 +709,52 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
         for panel in snapshot["panels"]:
             ax = axes[panel["row"], panel["col"]]
             active.add((panel["row"], panel["col"]))
+            bind_panel(ax, comparison_target_panel(snapshot, panel), label=f"Panel {panel['row'] + 1}, {panel['col'] + 1}",
+                       labels_locked="Pair-matrix labels retain each feature's scientific units."
+                       if cfg["kind"] == "pairs" else "")
             ax.set_xscale(panel["xscale"])
             ax.set_yscale(panel["yscale"])
             ax.set_xlim(panel["xlim"])
             ax.set_ylim(panel["ylim"])
             if panel["kind"] == "hist":
-                for source in snapshot["sources"]:
+                for source in visible_sources:
                     bars = tables["histograms"]
                     bars = bars[(bars["panel_id"] == panel["id"]) & (bars["source_key"] == source["key"])]
+                    if bars.empty:
+                        continue
                     edges = np.r_[bars["left"].to_numpy(), bars["right"].iloc[-1]]
-                    ax.stairs(bars["count"].to_numpy(), edges, color=colors[source["key"]], linewidth=line_width)
+                    artist = ax.stairs(bars["count"].to_numpy(), edges, color=colors[source["key"]],
+                                       linewidth=styles[source['key']].get('line_width_pt', line_width))
+                    artist._nanoscope_series_id = stable_series_id('comparison', 'data', source['key'])
             else:
-                for source in snapshot["sources"]:
+                for source in visible_sources:
                     points = tables["plotted"]
                     points = points[(points["panel_id"] == panel["id"]) & (points["source_key"] == source["key"])]
                     if len(points):
+                        previous = len(ax.collections)
                         sns.scatterplot(x=points["x"].to_numpy(), y=points["y"].to_numpy(), ax=ax,
-                                        color=colors[source["key"]], s=float(marker_size)**2,
+                                        color=colors[source["key"]],
+                                        s=float(styles[source['key']].get('marker_size_pt', marker_size))**2,
                                         alpha=.75, linewidth=0, legend=False)
+                        for artist in list(ax.collections)[previous:]:
+                            artist._nanoscope_series_id = stable_series_id('comparison', 'data', source['key'])
                 for box in tables["boxes"][tables["boxes"]["panel_id"] == panel["id"]].to_dict("records"):
+                    series_style = styles[box['source_key']]
+                    if not series_style.get('visible', True):
+                        continue
+                    stroke_width = series_style.get('line_width_pt', line_width)
                     color, x, halfwidth = colors[box["source_key"]], box["center"], .28
-                    ax.add_patch(Rectangle((x - halfwidth, box["q1"]), 2 * halfwidth, box["q3"] - box["q1"],
-                                           fill=False, edgecolor=color, linewidth=line_width, zorder=3))
+                    series_id = stable_series_id('comparison', 'data', box['source_key'])
+                    artist = ax.add_patch(Rectangle((x - halfwidth, box["q1"]), 2 * halfwidth, box["q3"] - box["q1"],
+                                                   fill=False, edgecolor=color, linewidth=stroke_width, zorder=3))
+                    artist._nanoscope_series_id = series_id
                     for low, high in ((box["lower_whisker"], box["q1"]), (box["q3"], box["upper_whisker"])):
-                        ax.plot([x, x], [low, high], color=color, linewidth=line_width, zorder=3)
+                        artist, = ax.plot([x, x], [low, high], color=color, linewidth=stroke_width, zorder=3)
+                        artist._nanoscope_series_id = series_id
                     for level, width in ((box["median"], halfwidth), (box["lower_whisker"], halfwidth / 2),
                                          (box["upper_whisker"], halfwidth / 2)):
-                        ax.plot([x - width, x + width], [level, level], color=color, linewidth=line_width, zorder=3)
+                        artist, = ax.plot([x - width, x + width], [level, level], color=color, linewidth=stroke_width, zorder=3)
+                        artist._nanoscope_series_id = series_id
             if panel["kind"] == "events":
                 ax.set_xticks(range(len(snapshot["sources"])),
                               [display_labels[s["key"]] for s in snapshot["sources"]], rotation=25, ha="right")
@@ -686,11 +766,39 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
             # window (design 13.4 Q1).
             ax.set_xlabel(panel["x_label"] if cfg["kind"] == "pairs" else (state.get("x_label") or panel["x_label"]).strip(), fontsize=axis_size)
             ax.set_ylabel(panel["y_label"] if cfg["kind"] == "pairs" else (state.get("y_label") or panel["y_label"]).strip(), fontsize=axis_size)
+            from .quantity_axes import set_quantity_axis
+            from ..core.quantity_display import quantity_for
+            metric_axes = {"bottom": None if panel["kind"] == "events" else panel["x"],
+                           "left": panel["x"] if panel["kind"] == "events" else panel["y"]}
+            auto_labels = {"bottom": panel["x_label"], "left": panel["y_label"]}
+            for side, metric in metric_axes.items():
+                if not metric:
+                    continue
+                quantity = quantity_for(metric)
+                if quantity.quantity not in ("duration", "clock"):
+                    continue
+                # Public callers may supply literal scientific labels. Only the native
+                # page opts in to replacing its own generated labels on old snapshots.
+                auto = (f"{quantity.label} ({quantity.display_unit})"
+                        if automatic_quantity_labels or metric not in cfg.get("labels", {})
+                        else auto_labels[side])
+                auto_labels[side] = auto
+                override = state.get("x_label" if side == "bottom" else "y_label")
+                set_quantity_axis(ax, side, quantity,
+                    label=auto if cfg["kind"] == "pairs" or not override else None)
+            ax.title._nanoscope_automatic_text = panel_title
+            ax.xaxis.label._nanoscope_automatic_text = auto_labels["bottom"]
+            ax.yaxis.label._nanoscope_automatic_text = auto_labels["left"]
+            if state.get("x_label") and cfg["kind"] != "pairs": ax.xaxis.label.set_parse_math(False)
+            if state.get("y_label") and cfg["kind"] != "pairs": ax.yaxis.label.set_parse_math(False)
             if state.get("grid", False):
                 ax.grid(True, alpha=.2)
             else:
                 ax.grid(False)
             ax.tick_params(labelsize=tick_size)
+            if isinstance(state.get('frame'), bool) and ax.get_visible() and ax.axison:
+                for side in ('top', 'right'):
+                    ax.spines[side].set_visible(state['frame'])
         for row in range(layout["rows"]):
             for col in range(layout["columns"]):
                 if (row, col) not in active:
@@ -699,9 +807,17 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
                                         "events": "Individual-event comparison"}[cfg["kind"]]).strip()
         if title:
             figure.suptitle(title, fontsize=title_size)
-        if state.get("legend_visible", True) and cfg["kind"] != "facets":
-            handles = [Line2D([], [], linestyle="none", marker="o", markersize=marker_size,
-                              color=colors[source["key"]], label=display_labels[source["key"]]) for source in snapshot["sources"]]
-            figure.legend(handles=handles, loc="outside lower center", ncols=min(4, len(handles)),
-                          fontsize=state.get("legend_size", 8), labelcolor=foreground)
+            figure._suptitle._nanoscope_automatic_text = {"facets": "Recording comparisons", "pairs": "Event-feature pair matrix", "events": "Individual-event comparison"}[cfg["kind"]]
+            if state.get("title"): figure._suptitle.set_parse_math(False)
+        if state.get("legend_visible", True) and cfg["kind"] != "facets" and visible_sources:
+            handles = [Line2D([], [], linestyle="none", marker="o",
+                              markersize=styles[source['key']].get('marker_size_pt', marker_size),
+                              color=colors[source["key"]], label=display_labels[source["key"]]) for source in visible_sources]
+            legend = figure.legend(handles=handles, loc="outside lower center", ncols=min(4, len(handles)),
+                                   fontsize=state.get("legend_size", 8), labelcolor=foreground)
+            legend._nanoscope_source_keys = [source["key"] for source in visible_sources]
+            for artist, source in zip(legend.legend_handles, visible_sources):
+                artist._nanoscope_series_id = stable_series_id('comparison', 'data', source['key'])
+        remember_automatic_text(figure)
+        apply_text_overrides(figure, state)
     return figure

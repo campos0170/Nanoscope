@@ -1,30 +1,15 @@
-"""RP+BL THROUGH THE WIRED APPLICATION -- the -600 mV screen, ladder, guard and table.
+"""RP+BL through the real application: the two-sided guard, evidence and event table.
 
-WHY THIS FILE EXISTS, AND WHICH "ONE STEP PAST" IT TAKES
-=======================================================
-The RK batch shipped a wired test for this exact panel and it did not see the RP
-defect, because it only ever read the **-700 mV** screen; the RP batch fixed the
-one-sided ladder and this file then asserted ITS offer -- 1 s / 300 ms, the shorter
-window that "ties at 0.0". The BL batch measured what that tie was worth: the shorter
-window's tracked baseline rides into the recording's **521 ms partial clog at
-t = 37.13 s** (56% of the one state's own excursion followed, at a MEDIAN intrusion
-of exactly 0.0 -- one state among 239 cannot move a median), the clog stops being
-detected at all, and 33 shallow events are invented on the collapsed local baseline.
-So this file now asserts the guarded offer end to end:
+The -600 mV recording contains a roughly 521 ms clog near t=37.13 s. The
+1 s / 300 ms and 2 s / 500 ms windows tie on median intrusion, but the shorter
+window rides into that long state. The test retains the guarded offer, explicit
+manual override and visible explanation of both criteria.
 
-  * **the one click** proposes the rule's own 2 s / 500 ms, with the riding
-    1 s / 300 ms ESTIMATED, named on the screen with the number that rejected it,
-    and the worst-state criterion (`baseline_probe.WORST_STATE_INTRUSION_MAX`)
-    spelled out in the reason text;
-  * **the second gesture** -- after the one click is applied and detected, the
-    REJECTED 1 s / 300 ms is HAND-ENTERED into the same panel and detected again,
-    in the same window, so the harm the guard prevents is a thing the app was
-    actually made to do rather than a claim about a library function;
-  * **the number the user is actually buying** -- the clog as ONE 519.5 ms event at
-    the offered window against NO clog event and 33 events on a sub--45 pA local
-    baseline at the rejected one.
-
-Cost ~2 minutes: a 36 MB / 3.0 M-sample ABF, one probe and two detections.
+Automatic masks, robust flank anchors and the long-state depth gate are versioned.
+Compare the displayed ladder with fresh scientific measurements and the event table
+with the direct detection entry point, rather than pinning results from an older
+policy. Independent quiet raw-signal flanks establish the physical clog depth:
+the offered window must preserve it and the rejected window must attenuate it.
 """
 from __future__ import annotations
 
@@ -34,6 +19,9 @@ import pathlib
 import numpy as np
 import pytest
 from PySide6 import QtCore
+
+from nanoscope.analysis import baseline as B
+from .baseline_corpus_contracts import assert_detection_matches_reference
 
 FS = 50_000.0
 APO_600 = pathlib.Path("/Users/abrahamcampos/500 pM Apo ferritin_1 x PBS_22 nm_"
@@ -45,10 +33,6 @@ APO_600 = pathlib.Path("/Users/abrahamcampos/500 pM Apo ferritin_1 x PBS_22 nm_"
 RIDDEN = (1.0, 0.3)
 OFFERED = (2.0, 0.5)
 
-#: The app's own event-excluded open pore for this recording: the median of every
-#: sample OUTSIDE `baseline.reference_states`' wide-pass mask. Not a new statistic --
-#: it is the mask every candidate's intrusion is measured over.
-EXCLUDED_OPEN_PORE = -34.48486328125
 
 
 def api(obj, name):
@@ -96,18 +80,32 @@ def _detect(qapp, qtbot, ap, ctrl):
     return ap.current_events_df(), ap.current_detection().payload.provenance
 
 
+def _clog_coverage(df):
+    """Detected occupancy of the independently identified 37.13–37.65 s episode."""
+    original_starts = np.asarray(df["t_start_s"], float)
+    original_ends = np.asarray(df["t_start_s"] + df["dwell_s"], float)
+    starts = np.maximum(original_starts, 37.13)
+    ends = np.minimum(original_ends, 37.65)
+    inside = ends > starts
+    rows = df.loc[inside]
+    starts, ends = starts[inside], ends[inside]
+    assert len(rows) > 0, "no detected samples in the known clog interval"
+    # Schmitt intervals cannot overlap; summing these clipped durations is their
+    # union, not a double-counted event total that could hide lost coverage.
+    assert np.all(starts[1:] >= ends[:-1])
+    durations = ends - starts
+    depth = float(np.average(np.asarray(rows["depth_pA"], float), weights=durations))
+    # Preserve the original onset/offset for the separate edge assertions;
+    # clipping must not disguise an event that starts too early or ends too late.
+    return (float(durations.sum()), float(original_starts[inside][0]),
+            float(original_ends[inside][-1]), depth)
+
+
 @pytest.mark.corpus
 @pytest.mark.skipif(not APO_600.exists(), reason="the -600 mV recording is not here")
 def test_the_six_hundred_millivolt_one_click_rejects_the_window_that_rides(
         qapp, qtbot):
-    """THE GUARD, END TO END, ON THE RECORDING THAT CARRIES THE STATE IT IS FOR.
-
-    Before (RP): one click offered 1 s / 300 ms because it "ties at 0.0 and is
-    shorter", and detection at that offer un-detected a 521 ms clog while inventing
-    33 shallow events inside it. After (BL): the descent still estimates that rung
-    -- the guard is a measurement, not a skip -- and the screen says which state it
-    rides into, by how much, and why the tie the median reports is not a tie.
-    """
+    """The guard must report the real long-state harm behind a clean median."""
     where_from()
     from nanoscope.core.types import ChannelKind
     from nanoscope.gui.main_window import MainWindow
@@ -156,7 +154,23 @@ def test_the_six_hundred_millivolt_one_click_rejects_the_window_that_rides(
         "1 s / 300 ms no longer ties on the median, so this recording no longer "
         "demonstrates the tie the guard exists to judge", by_window[RIDDEN].to_dict())
     assert api(by_window[RIDDEN], "rides") is True
-    assert float(by_window[RIDDEN].worst_fraction) == pytest.approx(0.5557, abs=5e-4)
+    # Automatic masks, flank anchors and the separate long-state depth gate are
+    # versioned. Preserve the measured guard, not the old 0.5557 scalar.
+    x = np.asarray(w._session.calibrated_array(doc_id, channel), np.float64)
+    fs = float(w._session.document(doc_id).meta.sample_rate_hz)
+    reference = B.reference_states(x, fs, config=B.DEFAULT_BASELINE.replace(
+        rough_s=B.reference_rough_s(x.size, fs) / 2.0))
+    assert reference is not None
+    for candidate in ranking:
+        measured = B.config_intrusion(x, fs, config=pr.config.replace(
+            rough_s=candidate.rough_s, base_s=candidate.base_s),
+            polarity=-1, state_mask=reference[0])
+        assert measured is not None
+        assert candidate.fraction == measured["fraction"]
+        assert candidate.worst_fraction == measured["worst_fraction"]
+        assert candidate.worst_dwell_s == measured["worst_dwell_s"]
+        assert candidate.worst_t_s == measured["worst_t_s"]
+    assert by_window[RIDDEN].worst_fraction > B.LONG_STATE_INTRUSION_MAX
     assert by_window[RIDDEN].chosen is False
     assert by_window[OFFERED].fraction == 0.0
     assert by_window[OFFERED].rides is False
@@ -175,9 +189,11 @@ def test_the_six_hundred_millivolt_one_click_rejects_the_window_that_rides(
     # the criterion, named with its threshold, and the rider named with its number
     assert "50% of any one state's excursion" in shown, (
         "the worst-state criterion the offer now rests on is not named", shown)
-    assert "1 s / 300 ms follows NONE" in shown, shown
+    assert "1000 ms / 300 ms follows NONE" in shown, shown
     assert "RIDES INTO its worst single state" in shown, shown
-    assert "55.6% of a 473 ms state's own excursion followed" in shown, shown
+    ridden = by_window[RIDDEN]
+    assert (f"{ridden.worst_fraction * 100:.1f}% of a "
+            f"{ridden.worst_dwell_s * 1e3:.0f} ms state's own excursion followed") in shown, shown
     assert "cannot move a median" in shown, shown
     # the offer is the RULE's own window: nothing may claim a supersession
     assert "NOT WHAT THE APP OFFERS" not in shown, (
@@ -185,14 +201,14 @@ def test_the_six_hundred_millivolt_one_click_rejects_the_window_that_rides(
         shown)
     assert "SUPERSEDES" not in shown, shown
     # every rung estimated is named, and the evidence table carries both criteria
-    assert "Ranked: 1 s / 300 ms" in shown, shown
-    assert "Ranked: 2 s / 500 ms" in shown, shown
+    assert "Ranked: 1000 ms / 300 ms" in shown, shown
+    assert "Ranked: 2000 ms / 500 ms" in shown, shown
     assert "CHOSEN" in shown, shown
     assert shown.count("CHOSEN") == 1, shown
     assert "worst single state" in shown, shown
     # the optimality claims are scoped, and the unestimated windows are counted
     assert "under this ranking's objective" in shown, shown
-    assert ("2 shorter windows on the grid (0.3 s / 100 ms; 0.5 s / 100 ms) were "
+    assert ("2 shorter windows on the grid (300 ms / 100 ms; 500 ms / 100 ms) were "
             "NOT estimated") in shown, (
         "the screen does not say which windows it never tried", shown)
     assert "rather than a claim that they are worse" in shown, shown
@@ -202,7 +218,7 @@ def test_the_six_hundred_millivolt_one_click_rejects_the_window_that_rides(
     assert health is not None
     assert bool(health.ok), [c.name for c in health.checks if not c.ok]
     assert bp.condemned_checks() == (), bp.condemned_checks()
-    assert bp.apply_button.text() == "Use these values", bp.apply_button.text()
+    assert bp.apply_button.text() == "Use proposed windows", bp.apply_button.text()
     assert bp.apply_button.styleSheet() == "", bp.apply_button.styleSheet()
     assert bp.gate_label.isVisible() is False
     intrusion = health.check("baseline_intrusion")
@@ -216,21 +232,28 @@ def test_the_six_hundred_millivolt_one_click_rejects_the_window_that_rides(
             round(float(bp.base_s.value()), 6)) == OFFERED
     assert bp.param_source() == "proposed"
 
-    # ---- the table it produces: the clog is ONE event ----------------------
+    # ---- the table preserves the full blocked interval ---------------------
     df, prov = _detect(qapp, qtbot, ap, ctrl)
-    assert df is not None
-    assert str(prov.get("baseline_param_source")) == "proposed"
-    assert prov.get("baseline_fingerprint") == "sha256:ce8ae31f10bd", prov.get(
-        "baseline_fingerprint")
-    assert len(df) == 276, ("the -600 mV detected count at 2 s / 500 ms", len(df))
+    assert_detection_matches_reference(w, expected_windows=OFFERED, source="proposed")
 
-    clog = df[(df["dwell_s"] > 0.4) & (df["t_start_s"] > 37.0)
-              & (df["t_start_s"] < 37.3)]
-    assert len(clog) == 1, (
-        "the offered window does not detect the 521 ms clog as one event",
-        clog.to_dict("records"))
-    assert float(clog["dwell_s"].iloc[0]) == pytest.approx(0.5195, abs=1e-3)
-    assert float(clog["depth_pA"].iloc[0]) == pytest.approx(28.87, abs=0.05)
+    # Robust flank anchors correct the historical overstated event depth. With
+    # the unchanged 5/2-sigma detector this permits brief exit crossings,
+    # splitting the episode into rows. Its detected occupancy must still retain
+    # the original narrow duration and edge bounds, regardless of row count.
+    coverage, first, last, measured_depth = _clog_coverage(df)
+    assert coverage == pytest.approx(0.5195, abs=1e-3)
+    assert first == pytest.approx(37.1302, abs=1e-3)
+    assert last == pytest.approx(37.6497, abs=1e-3)
+    # Independent physical reference: interpolate between quiet raw-signal
+    # flanks on either side of this clog, not another automatic baseline.
+    a, b = int(37.13 * fs), int(37.65 * fs)
+    left = x[int(37.03 * fs):int(37.11 * fs)]
+    right = x[int(37.67 * fs):int(37.75 * fs)]
+    quiet_pore = np.interp(np.arange(a, b) / fs, [37.07, 37.71],
+                           [np.median(left), np.median(right)])
+    true_depth = float(np.median(quiet_pore - x[a:b]))
+    assert 20 < true_depth < 26, true_depth
+    assert abs(measured_depth - true_depth) < 0.1 * true_depth
     deep = df[df["baseline_pA"] < -45.0]
     assert len(deep) == 0, (
         "the offered window stamps events on a collapsed local open pore",
@@ -253,44 +276,32 @@ def test_the_six_hundred_millivolt_one_click_rejects_the_window_that_rides(
         "provenance", bp.param_source())
 
     df2, prov2 = _detect(qapp, qtbot, ap, ctrl)
-    assert df2 is not None
-    assert prov2.get("baseline_fingerprint") == "sha256:b64a75ebdf29", prov2.get(
-        "baseline_fingerprint")
-    assert len(df2) == 311, (
-        "the rejected window no longer reproduces its measured detected count "
-        "through the app", len(df2))
+    assert_detection_matches_reference(w, expected_windows=RIDDEN, source="user")
 
     # ======================================================================
-    # WHAT THE 35-EVENT DIFFERENCE ACTUALLY IS, MEASURED THROUGH THE APP.
-    # 311 against 276 reads as "more events found". It is not: at 1 s /
-    # 300 ms the tracked baseline rides into the clog at t = 37.130159 s to
-    # ~-54.5 pA, the clog stops being an event at all, and the region
-    # 37.14-38.60 s instead yields 33 shallow events whose stamped local
-    # open pore is below -45 pA -- roughly the whole of the difference. This
-    # used to be the pinned COST of the RP move; it is now the pinned reason
-    # for the BL guard, and `baseline_intrusion`'s median still cannot see
-    # it (0.0 over 239 states) -- what sees it is the worst-state reading
-    # asserted on the ladder above.
+    # The rejected window must still lose most of the clog and put detected
+    # events on a collapsed local baseline. Exact counts depend on the versioned
+    # estimator/noise policy and are checked against a fresh direct run above.
     # ======================================================================
-    clog2 = df2[(df2["dwell_s"] > 0.4) & (df2["t_start_s"] > 37.0)
-                & (df2["t_start_s"] < 37.3)]
-    assert len(clog2) == 0, (
-        "the rejected window now detects the clog as one event -- if the estimator "
-        "changed, the guard's evidence needs re-measuring",
-        clog2.to_dict("records"))
+    ridden_coverage, _, _, _ = _clog_coverage(df2)
+    assert ridden_coverage < 0.1 * coverage, (
+        "the rejected window no longer loses most detected clog occupancy",
+        ridden_coverage, coverage)
     deep2 = df2[df2["baseline_pA"] < -45.0]
-    print(f"\n-600 mV: {OFFERED} -> {len(df)} events, clog as one event; "
+    print(f"\n-600 mV: {OFFERED} -> {len(df)} events, {coverage:.6f} s clog coverage; "
           f"{RIDDEN} -> {len(df2)} events, {len(deep2)} on a local open pore "
           "below -45 pA")
-    assert len(deep2) == 33, (
-        "the count of events the rejected window stamps inside the ridden-into clog "
-        "changed; whichever way, it is the number the guard is weighed against",
-        len(deep2))
-    assert float(deep2["t_start_s"].min()) == pytest.approx(37.14, abs=0.02)
+    assert len(deep2) > 0, "the rejected window no longer produces events on a collapsed baseline"
+    assert 37.13 < float(deep2["t_start_s"].min()) < 37.65, (
+        "the collapsed-baseline events do not originate in the known clog", deep2)
 
-    # ---- the event-excluded open pore, for the record ----------------------
-    med_off = float(np.median(np.asarray(df["baseline_pA"], float)))
-    med_rid = float(np.median(np.asarray(df2["baseline_pA"], float)))
-    print(f"median baseline_pA: {OFFERED} {med_off:.4f} pA, {RIDDEN} "
-          f"{med_rid:.4f} pA, event-excluded open pore {EXCLUDED_OPEN_PORE:.4f} pA")
-    assert med_off == pytest.approx(-34.7900, abs=5e-4), med_off
+    # Quantify what the guard protects with the same independent raw flanks.
+    # The selected window stays within 10% of the physical depth; the rejected
+    # window loses more than half of it, rather than pinning obsolete event totals.
+    measured_depths = {}
+    for window in (OFFERED, RIDDEN):
+        result = B.characterisation_baseline(x, fs, config=pr.config.replace(
+            rough_s=window[0], base_s=window[1]), polarity=-1, health=False, cache=False)
+        measured_depths[window] = float(np.median(result.baseline[a:b] - x[a:b]))
+    assert abs(measured_depths[OFFERED] - true_depth) < 0.1 * true_depth
+    assert measured_depths[RIDDEN] < 0.5 * true_depth

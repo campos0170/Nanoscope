@@ -668,9 +668,8 @@ def test_psd_gate_is_locked_without_a_known_sample_rate(win, tmp_path):
     assert "sample rate" in launcher.reason(SURFACE_PSD)
 
 
-def test_open_windows_are_marked_open_and_unmarked_when_closed(win, tmp_path):
-    """These windows are single instances that re-focus rather than re-open, so 'already open'
-    is worth saying — but only while it is TRUE."""
+def test_resident_figures_are_marked_open_and_unmarked_when_suspended(win, tmp_path):
+    """Workspace residency controls the launcher; a dormant record is retained."""
     doc_id = _install(win, _doc(tmp_path))
     win._on_selection(doc_id, 0)
     launcher = win._analysis_launcher
@@ -679,7 +678,10 @@ def test_open_windows_are_marked_open_and_unmarked_when_closed(win, tmp_path):
     launcher.surface_button(SURFACE_PSD).clicked.emit()
     assert launcher.is_open(SURFACE_PSD) is True
 
-    win._psd_window.close()
+    owner = win._figure_workspace
+    figure_id = owner.id_for_page(win._psd_window)
+    assert owner.suspend(figure_id)
+    assert owner.get(figure_id) is not None and owner.page(figure_id) is None
     assert launcher.is_open(SURFACE_PSD) is False
 
 
@@ -848,8 +850,9 @@ _ANALYSIS_ACTION_ATTRS = (
     "_act_show_saved_subpop", "_act_figure_library", "_act_distribution_summaries", "_act_comparison_figures",
     "_act_iv", "_act_vdep",
     "_act_export_events", "_act_export_processed", "_act_export_training", "_act_export_levels",
-    "_act_export_density", "_act_density_style", "_act_export_figure",
+    "_act_export_density", "_act_edit_density", "_act_density_style", "_act_export_figure",
     "_act_analysis_home", "_act_first_analysis_guide",
+    "_act_edit_report_figure",
     # Listed here once the Incubation/Manual/Acid Study commit added it to the menu (this
     # test was red at 1aeb651 for exactly that omission).
     "_act_incubation_study",

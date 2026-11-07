@@ -3,8 +3,8 @@
 Everything this needs is in the repository, and every path is resolved relative to this
 file — you can clone, run it, and get the page:
 
-    /opt/anaconda3/bin/python3 docs/gen_page.py            # the two HTML copies
-    /opt/anaconda3/bin/python3 docs/gen_page.py --pdf --zip  # …and the PDF and the zip
+    python3 docs/gen_page.py            # the two HTML copies
+    python3 docs/gen_page.py --pdf --zip --pdf-engine reportlab
 
 Sources
     docs/manual-markdown/manual.md      the prose — the single source of truth. Edit
@@ -20,7 +20,7 @@ Sources
 
 Outputs (all under docs/)
     manual.html and manual-markdown/manual.html   byte-identical copies
-    nanoscope-manual.pdf   --pdf, needs Google Chrome; prints the page's own print CSS
+    nanoscope-manual.pdf   --pdf; ReportLab is the offline renderer
     nanoscope-manual.zip   --zip, the markdown + images + html + pdf bundle
 
 The build verifies itself: every <img> must be inlined, every internal link must resolve
@@ -46,8 +46,10 @@ from pathlib import Path
 
 try:
     import markdown
+    MARKDOWN_BACKEND = 'Python-Markdown'
 except ModuleNotFoundError:  # pragma: no cover
-    sys.exit("This build needs Python-Markdown:  /opt/anaconda3/bin/python3 -m pip install markdown")
+    import markdown_backend as markdown
+    MARKDOWN_BACKEND = 'bundled Node marked compatibility backend'
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_manual  # noqa: E402  (same directory)
@@ -141,6 +143,7 @@ code{background:var(--code-bg);color:var(--code-ink);padding:1.5px 5px;border-ra
 .shot figcaption{font-size:13.5px;color:var(--ink-3);margin-top:9px;max-width:70ch;line-height:1.5}
 .shot.narrow img{max-width:620px}
 .shot.half img{max-width:900px}
+.shot.compact img{max-width:380px}
 
 /* callouts */
 .callout{border-left:3px solid var(--trace);background:var(--trace-soft);padding:13px 17px;margin:20px 0;border-radius:0 4px 4px 0}
@@ -334,7 +337,8 @@ def _figures(body: str, images: dict[str, str]) -> str:
         caption = (m.group(2) or attrs.get("alt", "")).strip()
         if not stem.startswith("current_") and "historical" not in caption.lower():
             caption = "<b>Historical interface illustration.</b> " + caption
-        return (f'<figure class="shot" data-img="{stem}">'
+        compact = " compact" if stem == "current_design_computer_styles" else ""
+        return (f'<figure class="shot{compact}" data-img="{stem}">'
                 f'<img src="{images[stem]}" alt="" loading="lazy">'
                 f"<figcaption>{caption}</figcaption></figure>")
 
@@ -471,7 +475,7 @@ def build_page() -> str:
 <div class="wrap">{rail}<main>
 {body}
 <footer>
-<p>NanoScope build 40.15.59 &middot; Manual edition 2026-09-29. This manual documents {total} controls across {len(ref_toc)} areas.</p>
+<p>NanoScope build 45.37.98 &middot; Manual edition 2026-11-05. This manual documents {total} controls across {len(ref_toc)} areas.</p>
 {prov}
 <p>Built from <code>docs/manual-markdown/manual.md</code> and <code>docs/inventory.json</code> by
 <code>docs/gen_page.py</code>. {body.count('<img ')} illustrations are embedded in this file; it loads nothing
@@ -576,6 +580,10 @@ def build_zip(zip_path: Path) -> None:
                      'INCUBATION_STUDIES.md', 'MANUAL_ZN_WORKFLOW.md', 'MANUAL_CU_WORKFLOW.md',
                      'MANUAL_ACID_WORKFLOW.md',
                      'MANUAL_REVISION_2026-09-11.md', 'MANUAL_REVISION_2026-09-29.md',
+                     'MANUAL_REVISION_2026-11-03.md', 'MANUAL_REVISION_2026-11-05.md',
+                     'manual-usability-captures.json', 'BUILDING-THE-MANUAL.md', 'manual-phase1-captures.json',
+                     'manual-phase4-captures.json', 'manual-phase4-capture-plan.json',
+                     'manual-design-connections-captures.json', 'manual-design-connections-capture-plan.json',
                      'manual-incubation-captures.json',
                      'manual-current-captures.json', 'manual-plot-navigation-captures.json',
                      'manual-build-manifest.json', 'inventory.json'):
@@ -616,17 +624,39 @@ def main() -> None:
                              '--pdf-python PATH_TO_PYTHON_WITH_REPORTLAB for offline rendering.')
         print(f"wrote {OUT_PDF.relative_to(HERE.parent)}  "
               f"({OUT_PDF.stat().st_size / 1e6:.2f} MB)")
-    manifest = dict(edition='2026-09-29', application_build='40.15.59',
-                    scope='Unified incubation entry, study metadata, shared main-workspace curation and staged recalculation',
-                    retained_prior_review=dict(date='2026-09-11',source_revision='703a96a',
-                        scope='Other main-analysis chapters and dated illustrations; not all re-audited in this edition'),
+    manifest = dict(edition='2026-11-05', application_build='45.37.98',
+                    build_id='20261105T043813486839Z-nogit-5447ddda145a',
+                    source_sha256='5447ddda145a83c1e898dab5d309da3a703739fd339745d340cb473f5c498813',
+                    executable_sha256='d4c89fed8124f7726c1145bd0940a7e3191e25cdf394dc572dbb44de3b89c1c9',
+                    source_status='Current plotting and analysis controls checked against the installed build; historical chapters retain their dated scope',
+                    usability_capture_manifest='manual-usability-captures.json',
+                    scope='Figures visibility and direct comparison entries; analytical draft and completed-result ownership; pinned Subpopulations source, curation update and Generate UMAP; Curve fit setup, constraints, diagnostics, application and completed-fit export; visible descriptive Noise summary; retained independent Figures, v13 projects, styles, composition and scientific chapters',
+                    retained_prior_review=[
+                        dict(date='2026-09-29', application_build='40.15.59',
+                             scope='Unified incubation entry, metadata, curation and staged recalculation'),
+                        dict(date='2026-09-11', source_revision='703a96a',
+                             scope='Other main-analysis chapters and dated illustrations; not all re-audited in this edition')],
+                    phase1_capture_manifest=('manual-phase1-captures.json'
+                        if (HERE/'manual-phase1-captures.json').exists() else None),
+                    phase4_capture_manifest=('manual-phase4-captures.json'
+                        if (HERE/'manual-phase4-captures.json').exists() else None),
+                    phase4_capture_plan='manual-phase4-capture-plan.json',
+                    design_connections_capture_manifest=('manual-design-connections-captures.json'
+                        if (HERE/'manual-design-connections-captures.json').exists() else None),
+                    design_connections_capture_plan='manual-design-connections-capture-plan.json',
                     pdf_rebuilt=bool(args.pdf),
                     pdf_engine=args.pdf_engine if args.pdf else None,
+                    markdown_backend=MARKDOWN_BACKEND,
                     checks=verify(page), sha256={})
     for path in (MD_FILE, gen_manual.INVENTORY, HERE/'USER_GUIDE.md', HERE/'INCUBATION_STUDIES.md',
                  HERE/'MANUAL_ZN_WORKFLOW.md', HERE/'MANUAL_CU_WORKFLOW.md', HERE/'MANUAL_ACID_WORKFLOW.md',
                  HERE/'MANUAL_REVISION_2026-09-29.md', HERE/'manual-incubation-captures.json',
+                 HERE/'MANUAL_REVISION_2026-11-03.md', HERE/'MANUAL_REVISION_2026-11-05.md',
+                 HERE/'manual-usability-captures.json', HERE/'BUILDING-THE-MANUAL.md', HERE/'manual-phase1-captures.json',
+                 HERE/'manual-phase4-captures.json', HERE/'manual-phase4-capture-plan.json',
+                 HERE/'manual-design-connections-captures.json', HERE/'manual-design-connections-capture-plan.json',
                  HERE/'gen_page.py', HERE/'gen_manual.py', HERE/'render_manual_pdf.py',
+                 HERE/'markdown_backend.py', HERE/'render_markdown.mjs',
                  OUT_HTML, OUT_HTML_COPY, OUT_PDF):
         if path.exists():
             manifest['sha256'][str(path.relative_to(HERE))] = hashlib.sha256(path.read_bytes()).hexdigest()

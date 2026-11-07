@@ -573,7 +573,8 @@ def test_the_raised_dwell_floor_is_the_price_of_not_eating_events():
     assert b["ge5"] > 1.8 * a["ge5"], stats
 
 
-def test_the_null_refuses_to_report_a_rate_when_the_surrogate_is_not_one():
+@pytest.mark.parametrize("noise_policy", ["global", "auto"])
+def test_the_null_refuses_to_report_a_rate_when_the_surrogate_is_not_one(noise_policy):
     """THE CONTROL CHECKS ITS OWN PREMISE.
 
     ``null_control`` returned ``estimated_fdr = 1.00`` on all three of the owner's real
@@ -590,17 +591,27 @@ def test_the_null_refuses_to_report_a_rate_when_the_surrogate_is_not_one():
     noise and a drifting recording is not that.
     """
     clean = null_control(_lowpass_drifting(drift_pA=0.0),
-                         detect_kwargs={"k_in": 5.0, "min_dwell_s": 1e-4},
+                         detect_kwargs={"k_in": 5.0, "min_dwell_s": 1e-4,
+                                        "noise_policy": noise_policy},
                          n_surrogates=3, rng=0)
     assert clean["notes"] == ()
     assert clean["estimated_fdr"] < 0.1
     assert clean["n_event_free"] <= 2
 
     drifting = null_control(_lowpass_drifting(drift_pA=200.0),
-                            detect_kwargs={"k_in": 5.0, "min_dwell_s": 1e-4},
+                            detect_kwargs={"k_in": 5.0, "min_dwell_s": 1e-4,
+                                           "noise_policy": noise_policy},
                             n_surrogates=3, rng=0)
     assert drifting["n_real"] > 40
-    assert drifting["n_surrogate_mean"] > 100 * max(drifting["n_event_free"], 1)
+    # Adaptive thresholds reduce the historical surrogate count, but do not
+    # make the surrogate faithful. Establish that premise independently of the
+    # app's refusal rule: the difference exceeds five Poisson counting-error
+    # scales for one count and the mean of three surrogate counts. This is a
+    # fixture effect-size check, not a calibrated significance test for the
+    # correlated detections produced by AAFT.
+    count_difference = drifting["n_surrogate_mean"] - drifting["n_event_free"]
+    counting_error = np.sqrt(drifting["n_event_free"] + drifting["n_surrogate_mean"] / 3)
+    assert count_difference > 5 * counting_error, drifting
     assert np.isnan(drifting["estimated_fdr"]), (
         "a rate read off a surrogate that is not a null of the recording is worse "
         "than no rate at all"

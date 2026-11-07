@@ -642,6 +642,15 @@ def _events_doc(tmp_path, name, seed):
     return TraceDocument(meta=meta, channels=(y.astype(np.float32),))
 
 
+def _update_managed_page(w, page):
+    """Commit the chosen page through its actual shared Update plot button."""
+    explorer = w._analysis_explorer
+    key = next(key for key in explorer.page_ids() if explorer.page(key) is page)
+    assert explorer.raise_page(key)
+    assert explorer.toolbar().update_button.isEnabled()
+    explorer.toolbar().update_button.click()
+
+
 def _open_every_plot_window(w, qtbot, tmp_path):
     """Two synthetic recordings with detected events, and every MainWindow plot page open."""
     from nanoscope.analysis.modules import register_all
@@ -661,6 +670,11 @@ def _open_every_plot_window(w, qtbot, tmp_path):
     for opener in ("_open_psd", "_open_iv", "_open_vdep", "_open_event_plots",
                    "_open_subpopulations_view"):
         getattr(w, opener)()
+        # Managed openers show a staged figure. Commit its inputs before testing
+        # the geometry/history; the Subpopulations opener remains a report viewer.
+        if opener != "_open_subpopulations_view":
+            explorer = w._analysis_explorer
+            _update_managed_page(w, explorer.page(explorer.current_page_id()))
         qtbot.wait(300)
     return (w._psd_window, w._iv_window, w._vdep_window, w._event_plot_window,
             w._subpop_window)
@@ -721,7 +735,13 @@ def test_every_plot_window_has_reset_view_history_menu_and_readout(main_window, 
     # The density map draws log10 values on a linear axis: the readout shows the real
     # value, names the metric without "(log10)", and adds the event count under the pointer.
     w._open_event_plots()
+    _settle(qtbot)
+    before = np.asarray(waves._density_main.viewRange())
+    history = navigation_for(waves._density_main).history()
     waves._logx.setChecked(True)
+    assert np.allclose(waves._density_main.viewRange(), before)
+    assert navigation_for(waves._density_main).history() == history
+    _update_managed_page(w, waves)
     qtbot.wait(100)
     main = waves._density_main
     (x0, x1), (y0, y1) = main.viewRange()
@@ -729,7 +749,9 @@ def test_every_plot_window_has_reset_view_history_menu_and_readout(main_window, 
     main.scene().sigMouseMoved.emit(main.getViewBox().mapViewToScene(view))
     text = waves._readout.full_text()
     name = waves._metric_label(waves._x_combo.currentData())
-    assert text.startswith(f"{name} {10 ** view.x():.5g}"), text
+    assert waves._x_combo.currentData() == "dwell_s" and name == "Dwell (ms)"
+    # The geometry remains log10(seconds); ticks and readout explicitly present ms.
+    assert text.startswith(f"{name} (log) {1000.0 * 10 ** view.x():.5g}"), text
     assert "(log10)" not in text and "Event count " in text   # as the colour bar names it
     main.scene().sigMouseMoved.emit(QtCore.QPointF(-50, -50))   # off every plot
     assert waves._readout.full_text() == ""
@@ -748,21 +770,32 @@ def test_each_window_restarts_its_history_on_new_geometry_and_keeps_it_on_appear
     from nanoscope.gui.psd_panel import VIEW_SPECTROGRAM
 
     psd, iv, vdep, waves, subpop = _open_every_plot_window(main_window, qtbot, tmp_path)
-    restyle = PlotAppearance(title="Restyled", line_width=3.0)
+    def restyle_page(page):
+        # Use the appearance widget's edit path so its authoritative quantity/style
+        # metadata accompanies the values delivered to the page's changed slot.
+        widget = page._appearance_widget
+        widget._apply(replace(widget.state(), title="Restyled", line_width=3.0))
+    def redraw_density():
+        before = np.asarray(waves._density_main.viewRange())
+        history = navigation_for(waves._density_main).history()
+        waves._logy.toggle()
+        assert np.allclose(waves._density_main.viewRange(), before)
+        assert navigation_for(waves._density_main).history() == history
+        _update_managed_page(main_window, waves)
     cases = [
-        ("Noise spectrum", psd._plot, lambda: psd._on_appearance_changed(restyle),
+        ("Noise spectrum", psd._plot, lambda: restyle_page(psd),
          psd._recompute),
-        ("I-V", iv._plot, lambda: iv._appearance_from_user(restyle), iv._refresh_from_user),
-        ("Voltage dependence", vdep._plot, lambda: vdep._appearance_from_user(restyle),
+        ("I-V", iv._plot, lambda: restyle_page(iv), iv._refresh_from_user),
+        ("Voltage dependence", vdep._plot, lambda: restyle_page(vdep),
          vdep._refresh_from_user),
         ("waveform ensemble", waves._ensemble_plot,
-         lambda: waves._on_appearance_changed(restyle), waves._redraw_ensemble),
-        ("density map", waves._density_main, lambda: waves._on_appearance_changed(restyle),
-         waves._logy.toggle),
+         lambda: restyle_page(waves), waves._redraw_ensemble),
+        ("density map", waves._density_main, lambda: restyle_page(waves),
+         redraw_density),
     ]
     for view in (subpop.embedding_view(), subpop.waveform_view()):
         cases.append((type(view).__name__, view._plot.getPlotItem(),
-                      lambda: subpop._appearance_from_user(restyle),
+                      lambda: restyle_page(subpop),
                       lambda view=view: view.set_report(view._report)))
     for name, plot, appearance, redraw in cases:
         nav = navigation_for(plot)
@@ -785,7 +818,7 @@ def test_each_window_restarts_its_history_on_new_geometry_and_keeps_it_on_appear
     # name is the readout's name too.
     w = main_window
     w._open_event_plots()
-    waves._on_appearance_changed(PlotAppearance(x_label="My dwell axis"))
+    waves._d_xlabel.setText("My dwell axis")
     qtbot.wait(50)
     main = waves._density_main
     (x0, x1), (y0, y1) = main.viewRange()
@@ -799,6 +832,7 @@ def test_each_window_restarts_its_history_on_new_geometry_and_keeps_it_on_appear
     waves._colorbar.mouseClickEvent(_RightClick())
     w._open_psd()
     psd.set_view(VIEW_SPECTROGRAM)
+    _update_managed_page(w, psd)
     qtbot.wait(300)
     assert psd._spec_bar is not None
     psd._spec_bar.mouseClickEvent(_RightClick())

@@ -23,7 +23,7 @@ A pure view. It holds parameter VALUES, renders a proposal and a health block, a
 emits intent. It never measures: no estimator call, no probe call, nothing that
 touches a trace -- the probe STAGE alone measured 343 ms on a 3 M-sample recording
 and 1,073 ms on 9.1 M (medians of three presses, 2026-09-01; the first press of a
-file is colder), and the whole "Measure this recording" job -- conditioning + probe +
+file is colder), and the whole "Estimate window settings" job -- conditioning + probe +
 health pass -- 2 s on 3 M samples and 6 s on 9 M, which on the GUI thread is a
 visible freeze (see ``baseline_probe.probe_and_propose`` for the bench). The owning
 :class:`~nanoscope.gui.analysis_panel.AnalysisPanel` runs the probe off-thread on the
@@ -47,7 +47,7 @@ THE UX RULES THIS CODEBASE ALREADY PAID FOR
   windows the estimator's own checks then condemn -- on the owner's -700 mV apo
   recording it proposes 0.1 / 0.03 s and ``BaselineHealth.ok`` comes back False -- and
   Apply used to take that click plain, unmarked, in one press. It now refuses the
-  first press with the reason, arms itself (``Use these values anyway``, in the
+  first press with the reason, arms itself (``Use proposed windows anyway``, in the
   warning colour), and, once accepted, says in :attr:`source_label` for as long as
   the form holds those numbers that they were accepted over a failed check. See
   :meth:`BaselinePanel._recompute_condemnation` for why this is a two-step and not a
@@ -57,7 +57,7 @@ THE UX RULES THIS CODEBASE ALREADY PAID FOR
   this form's minimum width from becoming a minimum width for the entire dock.
 
 Signals:
-    probeRequested(): "Measure this recording" clicked and nothing blocks it.
+    probeRequested(): "Estimate window settings" clicked and nothing blocks it.
     paramsChanged(dict): a value changed; carries :meth:`params`.
     resetPerformed(str): one part of the form was just reset; carries the step's name.
     addReferenceSelectionRequested(): deliberately copy the trace's time selection.
@@ -69,10 +69,13 @@ from __future__ import annotations
 import copy
 import html
 import math
+import re
 from typing import Any, Mapping
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from .time_controls import SecondsSpinBox
 
 from ..analysis.baseline import (
     BASELINE_PARAM_KEYS,
@@ -85,8 +88,10 @@ from ..analysis.baseline import (
     DEFAULT_BASELINE,
     PARAM_SOURCES,
     derive_decim,
+    level_occupancy_unverified,
 )
 from ..analysis.baseline_probe import BaselineProposal, proposal_summary
+from ..analysis.sample_count import floor_sample_count
 from ..analysis.open_pore_reference import OpenPoreReference
 from .numeric_text import parse_strict_number
 
@@ -167,10 +172,10 @@ _WARN_BUTTON = "color:#ffb454;"
 _CERTIFYING_LEVEL = "ok"
 
 #: The confirmation on a condemned proposal, once the user has been told. Kept
-#: distinct from "Use these values" so the click that accepts a warned window and the
+#: distinct from "Use proposed windows" so the click that accepts a warned window and the
 #: click that accepts a clean one are not the same click.
-_APPLY_TEXT = "Use these values"
-_APPLY_ANYWAY_TEXT = "Use these values anyway"
+_APPLY_TEXT = "Use proposed windows"
+_APPLY_ANYWAY_TEXT = "Use proposed windows anyway"
 
 #: Absolute spin bounds. ``base_s``'s LIVE maximum is tighter -- it is pinned to
 #: ``rough_s``, so ``base_s > rough_s`` (which `BaselineConfig` refuses, because a
@@ -179,6 +184,16 @@ _APPLY_ANYWAY_TEXT = "Use these values anyway"
 #: that cap back to this value while it lands both numbers.
 _ROUGH_RANGE = (0.002, 60.0)
 _BASE_RANGE = (0.001, 30.0)
+
+
+def _milliseconds_message(text):
+    """Present explicitly unit-labelled, generated baseline evidence in milliseconds.
+
+    This accepts only the estimator's messages, never a user's names/notes or a stored
+    recipe. Rates (/s), samples and existing ms values do not match the unit token.
+    """
+    return re.sub(r"(?<![\w.])([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?) s\b",
+                  lambda match: f"{float(match[1]) * 1000:g} ms", str(text))
 
 
 class _OpenPoreReferenceEditor(QtWidgets.QWidget):
@@ -212,28 +227,20 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         self.mode.setToolTip(
             "Choose a reference for this recording only. Automatic keeps the existing "
             "estimator. The other modes use information you provide, not independently verified.")
-        # CLEAR REFERENCE RIDES THE MODE'S ROW. Everything under this row changes with
-        # the mode, and this button changes the mode, so anywhere lower would move it out
-        # from under the pointer that pressed it. Sharing the row costs 2 px of height
-        # (the button stands that much taller than the combo) where a row of its own
-        # would cost a button's. The combo may elide down to eight characters instead,
-        # so this row never sets the panel's minimum width: the dock opens at the widest
-        # page minimum, and this panel is not to become it. Measured offscreen: the
-        # minimum is still 260 px in Automatic and constant and 279 px in intervals, as
-        # before the button existed, and every mode name shows whole from a 344 px
-        # panel up.
+        # Keep the explicit reset label on its own row so it cannot force a
+        # narrow Inspector wider. Both controls remain above source-specific fields.
         self.mode.setSizeAdjustPolicy(
             QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.mode.setMinimumContentsLength(8)
-        self.clear_button = QtWidgets.QPushButton("Clear reference")
+        self.clear_button = QtWidgets.QPushButton("Use automatic reference")
         self.clear_button.setToolTip(
             "Go back to Automatic for this recording: clears the chosen mode, the "
             "open-pore current, the intervals and the notes. The automatic estimator's "
-            "rough and base windows are kept -- Back to default resets those.")
-        top = QtWidgets.QHBoxLayout()
+            "rough and base windows are kept -- Reset automatic windows resets those.")
+        top = QtWidgets.QVBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(6)
-        top.addWidget(self.mode, 1)
+        top.addWidget(self.mode)
         top.addWidget(self.clear_button)
         layout.addLayout(top)
 
@@ -257,12 +264,12 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         intervals.setSpacing(4)
         caption = QtWidgets.QLabel(
             "Mark intervals known to contain open-pore current, not blocked states. "
-            "Times are seconds from the recording start, not the displayed clock.")
+            "Times are milliseconds from the recording start, not the instrument clock.")
         caption.setWordWrap(True)
         caption.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
         intervals.addWidget(caption)
         self.table = QtWidgets.QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Start (s)", "End (s)"])
+        self.table.setHorizontalHeaderLabels(["Start (ms)", "End (ms)"])
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setMinimumWidth(0)
@@ -328,7 +335,7 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         self.current.textChanged.connect(self._edited)
         self.method.currentIndexChanged.connect(self._edited)
         self.notes.textChanged.connect(self._edited)
-        self.table.cellChanged.connect(self._edited)
+        self.table.cellChanged.connect(self._interval_edited)
         self.add_button.clicked.connect(self._add_blank)
         self.remove_button.clicked.connect(self._remove_selected)
         self.selection_button.clicked.connect(self.selectionRequested)
@@ -346,10 +353,43 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         value pasted from elsewhere) is preserved."""
         return parse_strict_number(value, allow_unicode_minus=True)
 
+    def _interval_edited(self, row, col):
+        if self._loading:
+            return
+        item = self.table.item(row, col)
+        if item is not None:
+            # An intentional edit adopts the units named by the current column.
+            blocker = QtCore.QSignalBlocker(self.table)
+            item.setData(QtCore.Qt.UserRole, "ms")
+            item.setToolTip("Milliseconds from recording start; stored as seconds.")
+            del blocker
+        self._edited()
+
+    def _interval_item(self, value, *, unit="ms", from_seconds=False):
+        text = "" if value is None else str(value)
+        number = self._number(text)
+        if from_seconds and number is not None:
+            text, unit = repr(number * 1000.), "ms"
+        elif from_seconds:
+            unit = "s"
+        item = QtWidgets.QTableWidgetItem(text)
+        item.setData(QtCore.Qt.UserRole, unit)
+        item.setToolTip("Milliseconds from recording start; stored as seconds." if unit == "ms" else
+                        "Saved invalid seconds draft retained verbatim. Edit this cell in milliseconds.")
+        return item
+
     def _intervals(self):
-        return [[self._number(self.table.item(row, col).text())
-                 if self.table.item(row, col) else None for col in range(2)]
-                for row in range(self.table.rowCount())]
+        rows = []
+        for row in range(self.table.rowCount()):
+            values = []
+            for col in range(2):
+                item = self.table.item(row, col)
+                value = self._number(item.text()) if item else None
+                unit = item.data(QtCore.Qt.UserRole) if item else "ms"
+                values.append(value / 1000. if value is not None and unit in (None, "ms") else
+                              value if unit == "s" else None)
+            rows.append(values)
+        return rows
 
     def params(self) -> dict[str, Any]:
         if self._restore_error:
@@ -394,7 +434,7 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
             if start is None or end is None or not 0 <= start < end:
                 return f"Interval {row}: enter finite times with 0 ≤ start < end."
             if self._duration_s is not None and end > self._duration_s:
-                return f"Interval {row} ends beyond this recording ({self._duration_s:g} s)."
+                return f"Interval {row} ends beyond this recording ({self._duration_s * 1000:g} ms)."
             if self._fs and (math.ceil(math.nextafter(end * self._fs, -math.inf))
                              - math.ceil(math.nextafter(start * self._fs, -math.inf))) < 5:
                 return f"Interval {row} needs at least five samples."
@@ -428,7 +468,7 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
         for col in range(2):
-            self.table.setItem(row, col, QtWidgets.QTableWidgetItem(""))
+            self.table.setItem(row, col, self._interval_item(""))
         self._loading = False
         self._edited()
         self.table.setCurrentCell(row, 0)
@@ -470,7 +510,7 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
                     if a is not None and start < a), self.table.rowCount())
         self.table.insertRow(row)
         for col, value in enumerate((start, end)):
-            self.table.setItem(row, col, QtWidgets.QTableWidgetItem(repr(value)))
+            self.table.setItem(row, col, self._interval_item(value, from_seconds=True))
         self._loading = False
         self._edited()
         return True
@@ -496,7 +536,7 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         self._refresh()
 
     def clearable(self) -> bool:
-        """Does Clear reference have anything to clear?
+        """Does Use automatic reference have anything to clear?
 
         Exactly when this form puts something into the run: a user-provided mode, or
         a stored reference that could not be restored, which blocks detection until
@@ -522,6 +562,10 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
             "intervals": [[self.table.item(row, col).text() if self.table.item(row, col)
                            else "" for col in range(2)]
                           for row in range(self.table.rowCount())],
+            "interval_display": {"version": 1, "units": [
+                [self.table.item(row, col).data(QtCore.Qt.UserRole) or "ms"
+                 if self.table.item(row, col) else "ms" for col in range(2)]
+                for row in range(self.table.rowCount())]},
             "confirmed": self._confirmed,
             "restore_error": self._restore_error,
             "invalid_recipe": copy.deepcopy(self._invalid_recipe),
@@ -534,6 +578,21 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
         Not :meth:`set_params`, which is a seed and steps aside for a confirmed form.
         A key that is absent leaves its part of the form alone.
         """
+        interval_rows = None
+        if "intervals" in state:
+            presentation = state.get("interval_display")
+            if presentation is not None and (not isinstance(presentation, Mapping) or presentation.get("version") != 1):
+                raise ValueError("Unsupported saved interval display basis; the draft cannot be reinterpreted.")
+            units = presentation.get("units", []) if presentation is not None else []
+            interval_rows = []
+            for index, texts in enumerate(state["intervals"]):
+                row = []
+                for col in range(2):
+                    unit = units[index][col] if index < len(units) and col < len(units[index]) else "s"
+                    if unit not in ("s", "ms"):
+                        raise ValueError("Unsupported saved interval cell unit")
+                    row.append((str(texts[col]), unit))
+                interval_rows.append(row)
         self._loading = True
         try:
             if "mode" in state:
@@ -544,13 +603,13 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
                 self.notes.setText(str(state["notes"]))
             if "interpolation" in state:
                 self.method.setCurrentIndex(max(0, self.method.findData(state["interpolation"])))
-            if "intervals" in state:
+            if interval_rows is not None:
                 self.table.setRowCount(0)
-                for texts in state["intervals"]:
+                for values in interval_rows:
                     row = self.table.rowCount()
                     self.table.insertRow(row)
-                    for col in range(2):
-                        self.table.setItem(row, col, QtWidgets.QTableWidgetItem(str(texts[col])))
+                    for col, (text, unit) in enumerate(values):
+                        self.table.setItem(row, col, self._interval_item(text, unit=unit, from_seconds=unit == "s"))
         finally:
             self._loading = False
         if "confirmed" in state:
@@ -615,8 +674,7 @@ class _OpenPoreReferenceEditor(QtWidgets.QWidget):
                 self.table.insertRow(row)
                 for col in range(2):
                     value = values[col] if isinstance(values, (tuple, list)) and len(values) > col else None
-                    self.table.setItem(row, col, QtWidgets.QTableWidgetItem(
-                        "" if value is None else str(value)))
+                    self.table.setItem(row, col, self._interval_item(value, from_seconds=True))
         finally:
             self._loading = False
         self._refresh()
@@ -647,7 +705,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
     probeRequested = QtCore.Signal()
     paramsChanged = QtCore.Signal(dict)
     #: A reset of ONE part of the form has been applied: "Reset baseline estimator"
-    #: (Back to default) or "Clear open-pore reference". Emitted after `paramsChanged`,
+    #: (Reset automatic windows) or "Clear open-pore reference". Emitted after `paramsChanged`,
     #: so whoever records the step finds the reset already in the form, and named by
     #: the button that knows what it reset -- a diff of the form could only say how
     #: many values moved.
@@ -660,6 +718,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
     #: detection -- which is exactly what folding them into the params dict would
     #: have invited.
     showBaselineToggled = QtCore.Signal(bool)
+    viewStatusChanged = QtCore.Signal(str)
     subtractBaselineToggled = QtCore.Signal(bool)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
@@ -715,11 +774,11 @@ class BaselinePanel(QtWidgets.QGroupBox):
         form.setVerticalSpacing(4)
 
         form.addWidget(QtWidgets.QLabel("Rough window"), 0, 0)
-        self.rough_s = QtWidgets.QDoubleSpinBox()
+        self.rough_s = SecondsSpinBox()
         self.rough_s.setRange(*_ROUGH_RANGE)
         self.rough_s.setDecimals(3)
         self.rough_s.setSingleStep(0.1)
-        self.rough_s.setSuffix(" s")
+        self.rough_s.setSuffix(" ms")
         self.rough_s.setValue(DEFAULT_BASELINE.rough_s)
         self.rough_s.setToolTip(
             "Pass 1. Decides WHICH excursions count as events. It must be several "
@@ -730,11 +789,11 @@ class BaselinePanel(QtWidgets.QGroupBox):
         form.addWidget(self.rough_s, 0, 1)
 
         form.addWidget(QtWidgets.QLabel("Base window"), 1, 0)
-        self.base_s = QtWidgets.QDoubleSpinBox()
+        self.base_s = SecondsSpinBox()
         self.base_s.setRange(*_BASE_RANGE)
         self.base_s.setDecimals(4)
         self.base_s.setSingleStep(0.05)
-        self.base_s.setSuffix(" s")
+        self.base_s.setSuffix(" ms")
         self.base_s.setValue(DEFAULT_BASELINE.base_s)
         self.base_s.setToolTip(
             "Pass 2. Decides how fast the baseline may follow the trace. It must be "
@@ -765,27 +824,27 @@ class BaselinePanel(QtWidgets.QGroupBox):
         # -- actions: one primary row and two secondary buttons --------------
         row = QtWidgets.QGridLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        self.probe_button = QtWidgets.QPushButton("Measure this recording")
+        self.probe_button = QtWidgets.QPushButton("Estimate window settings")
         self.probe_button.setToolTip(
             "Look at this recording and propose a rough and base window from its own "
             "timescales, then run the health checks on what it proposes. Usually a "
             "few seconds -- measured 2 s on a 3 M-sample recording and 6 s on 9 M "
             "samples (the button says Measuring... meanwhile; it has not missed the "
-            "click). Nothing is applied until you press Use these values.")
-        self.apply_button = QtWidgets.QPushButton("Use these values")
+            "click). Nothing is applied until you press Use proposed windows.")
+        self.apply_button = QtWidgets.QPushButton("Use proposed windows")
         self.apply_button.setToolTip(
             "Accept the proposed windows. This is the confirmation step -- the app "
             "never applies a measured parameter on its own. If the health block "
             "below condemns what was proposed, the first press explains what is "
             "wrong instead of applying it, and the second press accepts it anyway "
             "-- with the panel saying so from then on.")
-        self.reset_button = QtWidgets.QPushButton("Back to default")
+        self.reset_button = QtWidgets.QPushButton("Reset automatic windows")
         self.reset_button.setToolTip(
             f"Return the automatic estimator's two windows to the app default "
-            f"({DEFAULT_BASELINE.rough_s:g} s / {DEFAULT_BASELINE.base_s:g} s). A "
+            f"({DEFAULT_BASELINE.rough_s * 1000:g} ms / {DEFAULT_BASELINE.base_s * 1000:g} ms). A "
             f"defensible floor for an unseen recording, and provably wrong for some -- "
             f"measure instead where you can. It resets the estimator only, in every "
-            f"mode: an open-pore reference you supplied is kept (Clear reference clears it).")
+            f"mode: an open-pore reference you supplied is kept (Use automatic reference clears it).")
         #: Apply's cell, while a user-provided reference is chosen: whose reset Back to
         #: default is, and the windows it would reset. See the row below.
         self.estimator_windows_label = QtWidgets.QLabel()
@@ -799,25 +858,23 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.estimator_windows_label.setToolTip(
             "The automatic estimator's rough and base windows. A user-provided reference "
             "replaces the estimator, so these measure nothing while one is chosen; they "
-            "are kept for when you choose Automatic again. Back to default resets them, "
+            "are kept for when you choose Automatic again. Reset automatic windows resets them, "
             "never the reference.")
         self.estimator_windows_label.setVisible(False)
         row.addWidget(self.probe_button, 0, 0, 1, 2)
-        row.addWidget(self.apply_button, 1, 0)
-        row.addWidget(self.estimator_windows_label, 1, 0)
-        # Top-aligned, which beside Apply changes nothing. Beside the caption it keeps
-        # the button still: a press re-words the caption, the new words can wrap to a
-        # line fewer or more, and a centred button then moved under the pointer that
-        # pressed it (measured offscreen, 12.345 / 0.1234 s back to the default: 7 px at
-        # a 280 px host, 8 px at 340 px).
-        row.addWidget(self.reset_button, 1, 1, QtCore.Qt.AlignTop)
+        row.addWidget(self.apply_button, 1, 0, 1, 2)
+        row.addWidget(self.estimator_windows_label, 3, 0, 1, 2)
+        # One action per row keeps long, explicit labels reachable in a narrow
+        # Inspector. The changing estimator caption is BELOW Reset, so resetting
+        # cannot move the button under the pointer as the caption wraps.
+        row.addWidget(self.reset_button, 2, 0, 1, 2, QtCore.Qt.AlignTop)
         row.setColumnStretch(0, 1)
         row.setColumnStretch(1, 1)
         # IN THE PANEL, NOT IN `automatic_controls`, which a user-provided reference
-        # hides. Back to default resets the estimator in every mode -- its windows still
+        # hides. Reset automatic windows resets the estimator in every mode -- its windows still
         # travel in `params` and in the baseline fingerprint while a reference is chosen
         # -- and a reset that exists in one mode only is not one the user can count on.
-        # It is the ONLY one of the three that stays. Measure and Use these values
+        # It is the ONLY one of the three that stays. Measure and Use proposed windows
         # propose and confirm windows for the estimator a reference replaces, so they
         # leave with the spins (`_refresh_reference_mode`), and Apply's cell shows
         # `estimator_windows_label` instead: alone under a reference form the button
@@ -833,7 +890,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         # -- SEEING IT (owner: "processing should be visible rather than occurring
         #    entirely in the background") ------------------------------------------
         # Until these two boxes existed, this panel was pure text: a user chose the two
-        # windows that decide every depth_pA in the table, pressed Use these values, and
+        # windows that decide every depth_pA in the table, pressed Use proposed windows, and
         # never once saw what those windows produced on his own recording. The estimate
         # was a number in a sentence.
         #
@@ -939,8 +996,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
         #
         # UNDER THE BUTTON ROW, LIKE `gate_label` -- NOT under the source line, where
         # it first sat. The line follows the form, and two of the gestures that move
-        # the form are clicks on this row: "Use these values" over a detection run at
-        # other windows makes it appear, "Back to default" makes it vanish. Above the
+        # the form are clicks on this row: "Use proposed windows" over a detection run at
+        # other windows makes it appear, "Reset automatic windows" makes it vanish. Above the
         # row it moved the button just pressed. Measured in the real window at the
         # dock's 460 px: Apply moved the row 163 px with the line above it and 142 px
         # without it (the 142 is the staleness banner appearing ABOVE the panel, not
@@ -1095,7 +1152,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
     def _refresh_reference_mode(self) -> None:
         automatic = self.reference_mode() == "automatic"
         self.automatic_controls.setVisible(automatic)
-        # Of the estimator's three actions only Back to default stays under a
+        # Of the estimator's three actions only Reset automatic windows stays under a
         # reference, beside the caption that says whose reset it is (see the row).
         self.probe_button.setVisible(automatic)
         self.apply_button.setVisible(automatic)
@@ -1322,14 +1379,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
 
     @staticmethod
     def _windows_text(rough: float, base: float) -> str:
-        """``"0.08 s / 0.016 s"`` -- ONE unit for both halves of the run-windows line.
-
-        Seconds, because that is the unit the two spins above the line carry (their
-        suffix is `` s``) and the line exists to be read against them. The first
-        version printed the run in ms and the form in s ("80 ms ... 0.5 s"), which is
-        two units for one quantity on one line.
-        """
-        return f"{rough:g} s / {base:g} s"
+        """The run and configured windows share the spins' millisecond presentation."""
+        return f"{rough * 1000:g} ms / {base * 1000:g} ms"
 
     def _refresh_run_windows(self) -> None:
         """Render `_run_windows` against the form AS IT IS NOW. The single writer.
@@ -1348,7 +1399,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
 
         Hidden, too, while a user-provided reference is chosen: the sentence points at
         the spins "above", which that mode hides. The rule lives HERE, in the single
-        writer, and not only in `_refresh_reference_mode`, because Back to default is
+        writer, and not only in `_refresh_reference_mode`, because Reset automatic windows is
         reachable in every mode and its own refresh (through `_set_windows`) comes
         here -- under a constant reference it put the line back up, quoting windows
         nobody could see.
@@ -1370,8 +1421,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
                "tracking window; depths are not comparable with ones measured at the "
                "configured windows" if clamped else "")
         self.run_windows_label.setText(
-            f"The detection on screen actually ran at rough {rough:g} s / base "
-            f"{base:g} s{contrast}{why}.")
+            f"The detection on screen actually ran at rough {rough * 1000:g} ms / base "
+            f"{base * 1000:g} ms{contrast}{why}.")
         self.run_windows_label.setVisible(True)
 
     def set_recording(self, fs: float | None, target: Any = None,
@@ -1449,7 +1500,8 @@ class BaselinePanel(QtWidgets.QGroupBox):
             self.reason_label.clear()
             self._restyle_buttons()
             return
-        rows = proposal_summary(proposal, self._fs)
+        rows = tuple((_milliseconds_message(key), _milliseconds_message(value))
+                     for key, value in proposal_summary(proposal, self._fs))
         # ESCAPED, for the reason :meth:`_check_html` spells out at length: this label
         # is RICH TEXT, and Qt's parser silently swallows a "<" and everything up to
         # the next ">" -- there it deleted a whole criterion on its way to the screen
@@ -1466,7 +1518,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         # The fallback says so IN THE PROPOSAL TEXT, per the spec: a proposal the
         # probe could not make must not look like one it did.
         prefix = "" if proposal.confident else "Could not measure -- "
-        self.reason_label.setText(prefix + proposal.reason)
+        self.reason_label.setText(prefix + _milliseconds_message(proposal.reason))
         self.reason_label.setStyleSheet(
             "color:#c3c9d1;" if proposal.confident else "color:#ffb454;")
         self.proposal_box.setVisible(self.reference_mode() == "automatic")
@@ -1715,8 +1767,16 @@ class BaselinePanel(QtWidgets.QGroupBox):
             self._restyle_buttons()
             return
         rows.sort(key=lambda r: _LEVEL_ORDER.index(r[0]) if r[0] in _LEVEL_ORDER else 9)
-        self.health_scope_label.setText(
-            self._HEALTH_SCOPE.get(measured_for, "").format(n=len(rows)))
+        scope = self._HEALTH_SCOPE.get(measured_for, "").format(n=len(rows))
+        def health_value(name):
+            return health.get(name) if isinstance(health, Mapping) else getattr(health, name, None)
+        if level_occupancy_unverified(health_value('level_occupancy'),
+                                      health_value('alt_level_occupancy')):
+            scope = (html.escape(scope) + '<br><b style="color:#ffb454">'
+                     'Open-pore reference unverified.</b> Passing these checks does not '
+                     'identify which conductance level is open; compare a known '
+                     'open-pore interval.')
+        self.health_scope_label.setText(scope)
         self.health_label.setText("".join(self._check_html(*row) for row in rows))
         self.health_box.setVisible(True)
         self._restyle_buttons()
@@ -1893,7 +1953,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         """A probe is in flight: the button says so and a second click is refused."""
         self._busy = bool(busy)
         self.probe_button.setText(
-            "Measuring…" if self._busy else "Measure this recording")
+            "Measuring…" if self._busy else "Estimate window settings")
         self._restyle_buttons()
 
     def is_busy(self) -> bool:
@@ -1924,7 +1984,7 @@ class BaselinePanel(QtWidgets.QGroupBox):
         if self._busy:
             return "Still measuring this recording — one moment.", "busy"
         if what == "apply" and self._proposal is None:
-            return ("Nothing has been proposed yet. Press Measure this recording "
+            return ("Nothing has been proposed yet. Press Estimate window settings "
                     "first, then this button applies what it found."), "unproposed"
         # LAST, because it is the last thing that can be wrong: there is a recording,
         # a finished probe and a proposal, and the checks measured ON THAT PROPOSAL
@@ -1988,7 +2048,18 @@ class BaselinePanel(QtWidgets.QGroupBox):
         try the draw, and it is not this panel; ``""`` clears the line. Lands on the
         SAME label a refused click uses, because to the user it is the same question.
         """
+        self._view_status = str(message)
         self._post(message)
+        self.viewStatusChanged.emit(self._view_status)
+
+    def clear_view_status(self) -> None:
+        """Discard an abandoned drawing's status without clearing proposal notices."""
+        self._view_status = ""
+        self.viewStatusChanged.emit("")
+
+    def view_status(self) -> str:
+        """Current display-only progress/refusal, separate from proposal health."""
+        return getattr(self, "_view_status", "")
 
     def _on_view_toggled(self, _on: bool) -> None:
         """Announce both view requests on either box, and say why if neither can run.
@@ -2041,9 +2112,9 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.apply_proposal()
 
     def _on_reset_clicked(self) -> None:
-        """Back to default: the estimator's windows, their source and the mark.
+        """Reset automatic windows: the estimator's windows, their source and the mark.
 
-        In every mode, and never the reference -- Clear reference is that reset -- so
+        In every mode, and never the reference -- Use automatic reference is that reset -- so
         each of the two resets one thing and can name it (`resetPerformed`).
         """
         self._post("")
@@ -2057,13 +2128,13 @@ class BaselinePanel(QtWidgets.QGroupBox):
         self.resetPerformed.emit("Reset baseline estimator")
 
     def _on_clear_reference_clicked(self) -> None:
-        """Clear reference: the reference form back to Automatic, the windows kept.
+        """Use automatic reference: the reference form back to Automatic, the windows kept.
 
         Through the editor's own `reset` -- the one a new recording gets -- so the
         mode, every box and row, a stored reference that could not be restored, and
         the confirmation all go. Dropping the confirmation is what makes it a reset
         rather than a choice of Automatic: a stored run's reference may seed the form
-        again, as on a recording nobody has edited, just as Back to default's
+        again, as on a recording nobody has edited, just as Reset automatic windows's
         ``'default'`` source lets a stored run seed the windows.
 
         With nothing to clear, the click says so and changes nothing: no
@@ -2126,11 +2197,13 @@ class BaselinePanel(QtWidgets.QGroupBox):
         except Exception:  # noqa: BLE001 -- a mid-edit value must not break the label
             self.decim_label.setText("auto")
             return
-        taps = int(float(self.base_s.value()) * self._fs / max(d, 1))
+        taps = floor_sample_count(float(self.base_s.value()) * self._fs / max(d, 1))
+        if taps % 2 == 0:
+            taps += 1
         self.decim_label.setText(f"{d}  ({taps} taps)")
 
     def _refresh_estimator_windows(self, *_a) -> None:
-        """Quote the two spins in the caption Back to default sits beside under a reference.
+        """Quote the two spins in the caption Reset automatic windows sits beside under a reference.
 
         Connected to the spins themselves rather than called from the paths that move
         them: most of those paths write with `_on_edited` muted -- a seed, a

@@ -149,9 +149,11 @@ def test_the_editor_widgets_live_in_the_workspace(window, qtbot):
                    det.hp_enabled, det.notch_freqs):
         assert widget.window() is ws, widget
     assert det.params() == before
-    # The Preprocess card stays in the dock, with the preview toggle where it was.
+    # The Inspector keeps navigation; the one real display toggle joins the workspace
+    # scope bar so it remains accessible on every route and comparison source.
     assert det.signal_chain_summary.window() is window
-    assert det.filter_preview.window() is window
+    assert det.preprocess_open_button.window() is window
+    assert det.filter_preview.window() is ws
     assert ws.preview_tabs.objectName() == "signalConditioningPreview"
     # D-beta added the Time and Spectrum previews ahead of the relocated Response view.
     assert [ws.preview_tabs.tabText(i) for i in range(ws.preview_tabs.count())] == [
@@ -323,7 +325,7 @@ def test_opening_from_the_chip_after_a_change_cannot_revert_by_space(detected, q
     det = ap.detection_panel
     det.set_stage_enabled("detrend", True)
     qtbot.waitUntil(lambda: ap._table.notice_chip.isVisible(), timeout=2000)
-    menu_answer("Open Signal Conditioning…")
+    menu_answer("Open Preprocess workspace…")
     ap._table.notice_chip.click()
     qtbot.wait(20)
     ws = _ws(window)
@@ -585,7 +587,7 @@ def test_the_chip_menu_reverts_and_opens_through_the_seam(detected, qtbot, menu_
     assert not det.median_enabled.isChecked()
     det.set_stage_enabled("median", True)
     qtbot.waitUntil(lambda: ap._table.notice_chip.isVisible(), timeout=2000)
-    menu_answer("Open Signal Conditioning…")
+    menu_answer("Open Preprocess workspace…")
     ap._table.notice_chip.click()
     assert _ws(window) is not None and _ws(window).isVisible()
 
@@ -772,7 +774,8 @@ def test_geometry_persists_and_bad_values_fall_back(qapp, qtbot, monkeypatch):
     assert ws.isVisible() and ws.width() >= ws.minimumWidth()
     assert "Ignored saved Signal Conditioning" in w.statusBar().currentMessage()
     assert ws.follows_main()
-    ws.setGeometry(10, 20, 780, 580)   # inside the offscreen screen, so Qt keeps it
+    saved_size = (780, ws.minimumHeight() + 20)
+    ws.setGeometry(10, 20, *saved_size)   # above the hosted workspace minimum
     ws.set_follow_main(False)
     w._save_settings()
     assert isinstance(s.value("signalConditioning/geometry"), QtCore.QByteArray)
@@ -783,7 +786,7 @@ def test_geometry_persists_and_bad_values_fall_back(qapp, qtbot, monkeypatch):
                         lambda: QtCore.QRect(0, 0, 1512, 875))
     w2._open_signal_conditioning()
     ws2 = w2._signal_conditioning
-    assert (ws2.width(), ws2.height()) == (780, 580)
+    assert (ws2.width(), ws2.height()) == saved_size
     assert not ws2.follows_main()
 
 
@@ -882,7 +885,10 @@ def test_the_module_imports_no_sibling_gui_module():
     # D-beta: the previews need the mandated worker-thread seam, the readable axes and the
     # trace view's curve factory — all on test_measure_navigation's non-panel allowlist —
     # and ⌘Z / ⇧⌘Z, forwarded to the main window, the one key-list rule (design §3.7).
-    assert reached == {"1:worker_thread", "1:axes", "1:trace_view", "1:key_sequences"}
+    # widget_transfer owns native layout-item invalidation; it reaches no panel or
+    # analysis controller and is required when the existing toggle changes owners.
+    assert reached == {"1:worker_thread", "1:axes", "1:trace_view", "1:key_sequences",
+                       "1:widget_transfer"}
 
 
 def test_hosting_does_not_raise_the_inspector_floor(window, qtbot):
@@ -916,5 +922,5 @@ def test_closing_the_recording_refreshes_an_open_window(loaded, qtbot):
     assert "current" in ws.windowTitle()
     window._session.close_document(did)
     qtbot.wait(20)
-    assert ws.windowTitle() == "Signal Conditioning"
+    assert ws.windowTitle() == "Preprocess workspace"
     assert ws.chain_status().kind == "none"

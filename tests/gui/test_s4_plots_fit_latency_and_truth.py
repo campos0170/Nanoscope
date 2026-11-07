@@ -122,8 +122,15 @@ def test_a_real_up_arrow_on_the_component_spin_returns_inside_the_budget(qtbot, 
     """
     w = _hist(qtbot, _bimodal(1200), col, fit)
     _settle(w)
+    w.show()
+    w._show_control_section("Analysis")
     spin = _fit_k_spin(w)
+    w._section_area.ensureWidgetVisible(spin)
+    spin.setFocus(Qt.OtherFocusReason)
+    qtbot.waitUntil(lambda: spin.isVisible() and spin.hasFocus())
+    assert w._from_the_user(spin)
     assert spin.isEnabled() and spin.value() == 1
+    assert w._applied_fit_k == 1
 
     fired: list[float] = []
     timer = QtCore.QTimer()
@@ -133,12 +140,17 @@ def test_a_real_up_arrow_on_the_component_spin_returns_inside_the_budget(qtbot, 
     t0 = time.perf_counter()
     QTest.keyClick(spin, Qt.Key_Up)              # <-- the real gesture
     dt_ms = (time.perf_counter() - t0) * 1000.0
-    timer.stop()
-
     assert spin.value() == 2
     assert dt_ms < MAX_CLICK_MS, (
         f"one Up-arrow on the component spin blocked the GUI thread for {dt_ms:.0f} ms "
         f"({dt_ms / MAX_CLICK_MS:.1f}x the {MAX_CLICK_MS:g} ms budget)")
+    qtbot.waitUntil(lambda: bool(fired), timeout=1000)
+    # The gesture proposes a change. The explicit Apply gate keeps the drawn fit
+    # stable and makes that pending change visible until the user commits it.
+    assert w._applied_fit_k == 1
+    assert w._pending_fit_change()
+    assert w._fit_apply_btn.isEnabled()
+    assert "●" in w._fit_apply_btn.text()
 
 
 @pytest.mark.parametrize("fit,col", [(PP._FIT_EXP, "dwell_s"), (PP._FIT_GMM, "frac_depth")])
@@ -474,17 +486,28 @@ def test_an_unusable_fit_bound_is_declared_instead_of_silently_dropped(qtbot, lo
     w._fit_hi.setText(hi)
     w._redraw()
     pane = w.details_text()
-    assert f"Fit range min “{lo}” is not a usable bound and was IGNORED" in pane, pane
+    assert f"Fit range min must be a finite number; correct or clear “{lo}”." in pane, pane
+    assert "Fit unavailable" in pane
+    assert w.fit_result() is None
+    assert "No new fit was run because the requested fit range is invalid." in pane
+    assert "subset is what the fitter was given" not in pane
+    assert "IGNORED" not in pane
     assert "dwell_s is empty" not in pane
 
 
-def test_an_inverted_fit_range_says_both_bounds_were_ignored(qtbot):
+def test_an_inverted_fit_range_is_refused_without_running_a_broader_fit(qtbot):
     w = _hist(qtbot, _dwell_frame(), "dwell_s", PP._FIT_EXP)
     w._time_unit.setCurrentText("ms")
     w._fit_lo.setText("9")
     w._fit_hi.setText("2")
     w._redraw()
-    assert "is empty (min ≥ max)" in w.details_text()
+    pane = w.details_text()
+    assert "Fit range minimum must be smaller than maximum." in pane
+    assert "Fit unavailable" in pane
+    assert w.fit_result() is None
+    assert "No new fit was run because the requested fit range is invalid." in pane
+    assert "subset is what the fitter was given" not in pane
+    assert "IGNORED" not in pane
 
 
 def test_a_usable_fit_range_keeps_the_success_path_line_and_gains_no_blame(qtbot):

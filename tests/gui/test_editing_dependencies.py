@@ -139,6 +139,8 @@ def _set_gain(w: MainWindow, doc_id: str, gain: float) -> None:
 def _press_fit(w: MainWindow) -> None:
     """The Fits tab's own Fit button, the way the user presses it."""
     w._analysis_panel._stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(w._analysis_panel._stats)
     QtWidgets.QApplication.processEvents()
 
 

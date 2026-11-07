@@ -52,3 +52,36 @@ def test_resolve_installed_walks_the_stack_in_the_installed_spelling():
 def test_matplotlib_list_drops_the_generic():
     lst = ff.matplotlib_font_list("Arial")
     assert lst[0] == "Arial" and "sans-serif" not in lst
+
+
+@pytest.mark.parametrize("standin, listed, generic", [
+    ("Liberation Serif", "Times New Roman", "serif"),
+    ("Tinos", "Times New Roman", "serif"),
+    ("TeX Gyre Termes", "Times New Roman", "serif"),
+    ("Times", "Times New Roman", "serif"),
+    ("liberation serif", "Times New Roman", "serif"),
+    ("Liberation Mono", "Courier New", "monospace"),
+    ("Cousine", "Courier New", "monospace"),
+    ("Courier", "Courier New", "monospace"),
+    ("Liberation Sans", "Arial", "sans-serif"),       # Arial's and Helvetica's alike: both sans-serif
+])
+def test_a_stand_in_keeps_the_kind_of_the_family_it_stands_in_for(standin, listed, generic):
+    """Qt writes the NAME THE FIGURE WAS DRAWN IN into an SVG: on a computer without Times New
+    Roman that is a stand-in, and the list behind it must still end in serif."""
+    assert ff.standin_of(standin) == listed
+    stack = ff.fallback_stack(standin)
+    assert stack[0].casefold() == standin.casefold()      # what was drawn is still named first
+    assert stack[1] == listed and stack[-1] == generic    # then the family chosen, then its kind
+    assert len({s.casefold() for s in stack}) == len(stack)
+    assert ff.generic_family(standin) == generic
+    assert ff.css_font_family(standin).endswith(f", {generic}")
+
+
+def test_a_listed_family_and_a_family_on_no_list_are_no_stand_in():
+    for name in (*ff.FIGURE_FAMILIES, "Garamond", "Calibri", "Menlo", "DejaVu Serif", "", None):
+        assert ff.standin_of(name) is None, name
+    # unchanged: an unknown family is followed by Arial's list and the sans-serif generic
+    assert ff.fallback_stack("DejaVu Serif")[1] == "Arial" and ff.generic_family("DejaVu Serif") == "sans-serif"
+    # the listed families' own stacks are untouched
+    assert ff.fallback_stack("Times New Roman")[:3] == ("Times New Roman", "Times", "Liberation Serif")
+    assert ff.fallback_stack("Helvetica")[:2] == ("Helvetica", "Arial")

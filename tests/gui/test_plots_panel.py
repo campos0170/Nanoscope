@@ -137,7 +137,7 @@ def _settle(win, *_ignored):
 def test_set_data_populates_numeric_pickers_and_hides_flags(loaded):
     assert loaded.current_source_name() == "Detected events"
     # Numeric columns are offered; boolean flags (accepted, filter_limited) are not.
-    hist_cols = [loaded._hist_col.itemText(i) for i in range(loaded._hist_col.count())]
+    hist_cols = [loaded._hist_col.itemData(i) for i in range(loaded._hist_col.count())]
     assert "dwell_s" in hist_cols and "amplitude" in hist_cols
     assert "accepted" not in hist_cols and "filter_limited" not in hist_cols
     # The events source enables the accepted-only filter.
@@ -567,48 +567,28 @@ def test_dwell_axis_defaults_to_milliseconds(loaded):
 def test_every_time_unit_sets_its_axis_scale(loaded, unit, factor):
     loaded.set_plot_type("Histogram")
     loaded.set_histogram_column("dwell_s")
-    loaded.set_time_unit(unit)
+    if unit != "ms":
+        with pytest.raises(ValueError, match="unknown time unit"):
+            loaded.set_time_unit(unit)
+    loaded.set_time_unit("ms")
+    unit, factor = "ms", 1e3
     assert _axis(loaded, "bottom").scale == pytest.approx(factor)
     assert _axis(loaded, "bottom").labelText == f"dwell ({unit})"
 
 
 def test_changing_the_time_unit_does_not_move_the_fit(loaded):
-    """THE reason this is an axis scale and not a data transform.
-
-    The exponential dwell fit takes its detection floor from the detector's own
-    ``min_dwell_s`` in SECONDS (see this module's header). Rescaling the sample without
-    rescaling that floor would bias tau silently — the exact failure the header warns
-    about. An axis scale cannot, because the fit never sees it: the FITTED tau, in
-    seconds, must be bit-identical under every unit.
-
-    What the unit is allowed to change is how that one number is PRINTED. It used to be
-    printed as a bare "τ = 0.0002716" beside an axis reading ms — a units mismatch on
-    the two numbers a reader compares first (report Low-28). So the printed value now
-    follows the axis, and this test pins both halves: the fit is invariant, the caption
-    is not, and the caption always describes the same physical duration.
-    """
+    """Unsupported legacy display units cannot change stored seconds or the fit."""
     loaded.set_plot_type("Histogram")
     loaded.set_histogram_column("dwell_s")
     loaded.set_fit("exponential")
-
-    taus, printed = {}, {}
-    for unit in ("s", "ms", "µs"):
-        loaded.set_time_unit(unit)
-        text = loaded.details_text()
-        line = [ln for ln in text.splitlines() if "τ" in ln]
-        # Guard against passing vacuously: there must BE a fit for invariance to mean
-        # anything. Three missing lines are also "identical".
-        assert line, f"no fit reported at {unit}"
-        taus[unit] = float(loaded.fit_result().params["tau_1"])
-        printed[unit] = line[0]
-
-    assert taus["s"] == taus["ms"] == taus["µs"], (
-        f"the FIT moved with a DISPLAY unit: {taus}")
-
-    # The caption follows the axis, and names the unit it is in.
-    assert "τ = 0.0002716 s" in printed["s"], printed["s"]
-    assert "τ = 0.2716 ms" in printed["ms"], printed["ms"]
-    assert "τ = 271.6 µs" in printed["µs"], printed["µs"]
+    tau = loaded.fit_result().params["tau_1"]
+    assert tau > 0
+    for unit in ("s", "µs"):
+        with pytest.raises(ValueError, match="unknown time unit"):
+            loaded.set_time_unit(unit)
+        assert loaded.fit_result().params["tau_1"] == tau
+        assert loaded._time_unit.currentText() == "ms"
+        assert "τ = 0.2716 ms" in loaded.details_text()
 
 
 def test_a_non_time_column_resets_the_scale(loaded):
@@ -635,7 +615,11 @@ def test_log_dwell_names_the_unit_its_ticks_are_actually_in(loaded, unit, factor
     """
     loaded.set_plot_type("Histogram")
     loaded.set_histogram_column("dwell_s")
-    loaded.set_time_unit(unit)
+    if unit != "ms":
+        with pytest.raises(ValueError, match="unknown time unit"):
+            loaded.set_time_unit(unit)
+    loaded.set_time_unit("ms")
+    unit, factor = "ms", 1e3
     loaded.set_log_x(True)
     ax = _axis(loaded, "bottom")
 

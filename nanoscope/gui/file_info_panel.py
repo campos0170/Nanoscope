@@ -139,7 +139,7 @@ class FileInfoPanel(QtWidgets.QWidget):
         if meta.duration_s is None:
             self._fields["Duration"].setText("unknown (no sample rate)")
         else:
-            self._fields["Duration"].setText(f"{meta.duration_s:.6g} s")
+            self._fields["Duration"].setText(f"{meta.duration_s * 1000:.6g} ms")
 
         if meta.sample_rate_hz is None:
             self._fields["Sample rate"].setText("unknown  ·  x-axis is in samples")
@@ -153,7 +153,7 @@ class FileInfoPanel(QtWidgets.QWidget):
             # value AS WRITTEN, in a unit the file does not declare — never 'seconds'.
             self._fields["t₀"].setText(f"{meta.t0_s:,.6g} as written (unit undeclared)")
         else:
-            self._fields["t₀"].setText(f"{meta.t0_s:.6g} s")
+            self._fields["t₀"].setText(f"{meta.t0_s * 1000:.6g} ms")
 
         if meta.loaded_range is None:
             self._fields["Loaded range"].setText("whole file")

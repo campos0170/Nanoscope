@@ -358,7 +358,13 @@ def to_instrument_s(offset_s: float | None, recording_s: float) -> float | None:
     return float(recording_s) + total
 
 
-def format_t0(offset_s: float | None) -> str:
+def _display_factor(unit: str) -> float:
+    if unit not in ("s", "ms"):
+        raise ValueError("Clock presentation must use seconds or milliseconds")
+    return 1000. if unit == "ms" else 1.
+
+
+def format_t0(offset_s: float | None, *, display_unit: str = "s") -> str:
     """``t0`` as the user will compare it against a spin box: fixed, four decimals.
 
     Four, because that is the resolution the recordings actually differ at
@@ -367,10 +373,11 @@ def format_t0(offset_s: float | None) -> str:
     """
     if offset_s is None:
         return "—"
-    return f"{float(offset_s):.4f}"
+    factor = _display_factor(display_unit)
+    return f"{float(offset_s) * factor:.1f}" if display_unit == "ms" else f"{float(offset_s):.4f}"
 
 
-def axis_label(unit: str, clock: str, offset_s: float | None) -> str:
+def axis_label(unit: str, clock: str, offset_s: float | None, *, display_unit: str = "s") -> str:
     """The bottom-axis / spin-box-suffix text for a time in ``unit`` on ``clock``.
 
     A non-time axis (``"sample"``) is returned untouched: samples are on neither
@@ -384,30 +391,32 @@ def axis_label(unit: str, clock: str, offset_s: float | None) -> str:
     """
     if unit != "s":
         return unit
+    _display_factor(display_unit)
+    shown = display_unit
     if offset_s is None:
-        return unit
+        return shown
     short = CLOCK_SHORT.get(clock, clock)
     rebased = rebased_origin_s(offset_s)
     if not _is_zero(rebased):
-        text = (f"s (this cut's own clock, rebased to t₀ = 0 — its first sample was "
-                f"recorded at {format_t0(rebased)} s on the instrument clock")
+        text = (f"{shown} (this cut's own clock, rebased to t₀ = 0 — its first sample was "
+                f"recorded at {format_t0(rebased, display_unit=shown)} {shown} on the instrument clock")
         if not _is_zero(offset_s):
             # A rebased document can ALSO carry a layer alignment nudge; then the axis is
             # not even at the cut's own zero, and saying only one of the two is a
             # half-truth of exactly the kind this module exists to stop.
-            text += (f", and this layer is drawn shifted by {format_t0(offset_s)} s "
+            text += (f", and this layer is drawn shifted by {format_t0(offset_s, display_unit=shown)} {shown} "
                      f"for alignment")
         return text + ")"
     if clocks_agree(offset_s):
-        return f"s ({short}; t₀ = 0, so both clocks read alike here)"
+        return f"{shown} ({short}; t₀ = 0, so both clocks read alike here)"
     if clock == INSTRUMENT:
-        return (f"s ({short} — this recording starts at "
-                f"t₀ = {format_t0(offset_s)} s)")
-    return (f"s ({short} — add t₀ = {format_t0(offset_s)} s for the "
+        return (f"{shown} ({short} — this recording starts at "
+                f"t₀ = {format_t0(offset_s, display_unit=shown)} {shown})")
+    return (f"{shown} ({short} — add t₀ = {format_t0(offset_s, display_unit=shown)} {shown} for the "
             f"instrument clock)")
 
 
-def field_note(clock: str, offset_s: float | None) -> str:
+def field_note(clock: str, offset_s: float | None, *, display_unit: str = "s") -> str:
     """One sentence for a tooltip / header, naming the clock and the conversion.
 
     Longer than :func:`axis_label` because a tooltip has room, and because this is
@@ -415,9 +424,13 @@ def field_note(clock: str, offset_s: float | None) -> str:
     number in front of them needs to be told how to get the right one, not merely
     that the one they have is on a different clock.
     """
+    _display_factor(display_unit)
+    shown = display_unit
+    word = "milliseconds" if shown == "ms" else "seconds"
+    names = {key: name.replace("seconds", word) for key, name in CLOCK_NAMES.items()}
     if offset_s is None:
         return ("This recording declares no sample rate, so its x-axis is in samples "
-                "and no time in seconds is defined for it.")
+                f"and no time in {word} is defined for it.")
     rebased = rebased_origin_s(offset_s)
     if not _is_zero(rebased):
         # The rebased branch, ahead of the two it would otherwise fall into. Two facts,
@@ -427,31 +440,31 @@ def field_note(clock: str, offset_s: float | None) -> str:
         same = ("the trace x-axis and the event table read the same number here"
                 if _is_zero(offset_s) else
                 f"the trace x-axis is additionally drawn shifted by "
-                f"{format_t0(offset_s)} s to align this layer with another")
-        note = (f"Time {CLOCK_NAMES.get(clock, clock)}. This recording is a CUT of "
+                f"{format_t0(offset_s, display_unit=shown)} {shown} to align this layer with another")
+        note = (f"Time {names.get(clock, clock)}. This recording is a CUT of "
                 f"another one and its clock was rebased to 0, so {same} — but neither "
                 f"is the instrument clock: the cut's first sample was recorded at "
-                f"t₀ = {format_t0(rebased)} s, so add {format_t0(rebased)} s to a "
+                f"t₀ = {format_t0(rebased, display_unit=shown)} {shown}, so add {format_t0(rebased, display_unit=shown)} {shown} to a "
                 f"number here to place it in the experiment (that is the number the "
                 f"segment's name, its File Info notes and the Files dock all show).")
         return note
     if clocks_agree(offset_s):
-        return (f"Time {CLOCK_NAMES.get(clock, clock)}. This recording's "
+        return (f"Time {names.get(clock, clock)}. This recording's "
                 f"t₀ is 0, so the trace x-axis and the event table read the same "
                 f"number — they do NOT on a recording whose t₀ is not 0.")
     if clock == INSTRUMENT:
-        return (f"Time {CLOCK_NAMES[INSTRUMENT]}: the first sample of this recording "
-                f"is at t₀ = {format_t0(offset_s)} s. The event table and every "
-                f"analysis window in seconds are on the OTHER clock — subtract "
-                f"{format_t0(offset_s)} s from a number read here before typing it "
+        return (f"Time {names[INSTRUMENT]}: the first sample of this recording "
+                f"is at t₀ = {format_t0(offset_s, display_unit=shown)} {shown}. The event table and every "
+                f"analysis window in {word} are on the OTHER clock — subtract "
+                f"{format_t0(offset_s, display_unit=shown)} {shown} from a number read here before typing it "
                 f"into one of those.")
-    return (f"Time {CLOCK_NAMES[RECORDING]}: 0 is the first sample. The trace x-axis "
-            f"is on the OTHER clock — add t₀ = {format_t0(offset_s)} s to a "
+    return (f"Time {names[RECORDING]}: 0 is the first sample. The trace x-axis "
+            f"is on the OTHER clock — add t₀ = {format_t0(offset_s, display_unit=shown)} {shown} to a "
             f"number here to find it on the trace.")
 
 
 def both_clocks(offset_s: float | None, *, recording_s: float | None = None,
-                instrument_s: float | None = None, decimals: int = 4) -> str:
+                instrument_s: float | None = None, decimals: int = 4, display_unit: str = "s") -> str:
     """One instant stated on BOTH clocks, e.g. ``10.2526 s in · 20.5052 s instrument``.
 
     Give exactly one of ``recording_s`` / ``instrument_s``; the other is derived.
@@ -464,18 +477,19 @@ def both_clocks(offset_s: float | None, *, recording_s: float | None = None,
     segment's name and its notes are on. That comes out of :func:`to_instrument_s`,
     which carries the rebase, so this function needs no branch of its own.
     """
+    factor = _display_factor(display_unit)
     if recording_s is None and instrument_s is None:
         raise ValueError("both_clocks needs one of recording_s / instrument_s")
     if recording_s is not None and instrument_s is not None:
         raise ValueError("both_clocks takes one instant, not two")
     if offset_s is None:
         val = recording_s if recording_s is not None else instrument_s
-        return f"{float(val):.{decimals}f}"
+        return f"{float(val) * factor:.{decimals}f}"
     if recording_s is None:
         recording_s = to_recording_s(offset_s, float(instrument_s))  # type: ignore[arg-type]
     else:
         instrument_s = to_instrument_s(offset_s, float(recording_s))
     if clocks_agree(offset_s):
-        return f"{float(recording_s):.{decimals}f} s"
-    return (f"{float(recording_s):.{decimals}f} s in  ·  "
-            f"{float(instrument_s):.{decimals}f} s instrument")
+        return f"{float(recording_s) * factor:.{decimals}f} {display_unit}"
+    return (f"{float(recording_s) * factor:.{decimals}f} {display_unit} in  ·  "
+            f"{float(instrument_s) * factor:.{decimals}f} {display_unit} instrument")

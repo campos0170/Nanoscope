@@ -1,9 +1,15 @@
 """Arrange project-owned frozen figures without opening their source analyses."""
 from __future__ import annotations
 
+from copy import deepcopy
+import weakref
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..plot import figure_fonts as ff
+from ..core.figure_style import (FigureStyle, builtin_styles, style_binding,
+    normalize_style_binding, logical_pixels_to_points)
+from ..core.figure_composition_style import panel_style, panel_overrides_from_legacy
 from .figure_bundle import FigureSnapshot
 from .figure_composition import DEFAULT_LABEL_STYLE
 from .font_picker import FontPicker
@@ -23,8 +29,31 @@ def _paint_swatch(button: QtWidgets.QPushButton, hex_color: str) -> None:
 class FigureComposerDialog(QtWidgets.QDialog):
     """Explicit preview/commit boundary: the saved result is the approved preview."""
 
-    def __init__(self, entries, parent=None, *, current_id=None, initial_layout=None, name="Multi-panel figure"):
+    def __init__(self, entries, parent=None, *, current_id=None, initial_layout=None, name="Multi-panel figure",
+                 available_styles=None, default_style=None):
         super().__init__(parent)
+        owner = parent
+        while owner is not None and getattr(owner, '_figure_workspace', None) is None:
+            owner = owner.parent() if hasattr(owner, 'parent') else None
+        workspace = getattr(owner, '_figure_workspace', None)
+        self._style_owner = weakref.ref(owner) if owner is not None else None
+        self._style_workspace = weakref.ref(workspace) if workspace is not None else None
+        self._style_epoch = getattr(workspace, '_epoch', None)
+        self._available_styles = available_styles
+        self._label_binding = deepcopy((initial_layout or {}).get('style_binding'))
+        if self._label_binding:
+            self._label_binding = normalize_style_binding(self._label_binding)
+        self._label_native = deepcopy((initial_layout or {}).get('label_style', DEFAULT_LABEL_STYLE))
+        self._label_overrides = deepcopy((initial_layout or {}).get('label_overrides',
+            panel_overrides_from_legacy(self._label_native)))
+        self._writing_letters = False
+        # Revision always restores the saved binding/pixels. Only a new composition
+        # takes today's project default; an unreadable registry leaves native ink.
+        if initial_layout is None:
+            if default_style is None and workspace is not None and workspace.style_registry() is not None:
+                default_style = workspace.default_style()
+            if default_style is not None:
+                self._label_binding = style_binding(default_style)
         self.setWindowTitle("Revise publication figure" if initial_layout is not None else "Compose publication figure")
         self.resize(1120, 780)
         self._entries = {entry.artifact_id: entry for entry in entries}
@@ -72,7 +101,23 @@ class FigureComposerDialog(QtWidgets.QDialog):
         settings.addWidget(self._shared_legend)
         settings.addStretch()
         form.addRow(settings)
-        style = (initial_layout or {}).get("label_style", DEFAULT_LABEL_STYLE)
+        style = panel_style(self._label_binding, self._label_overrides, legacy=self._label_native)
+        style_row = QtWidgets.QHBoxLayout()
+        self._style_button = QtWidgets.QToolButton()
+        self._style_button.setText('Style')
+        self._style_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._style_menu = QtWidgets.QMenu(self._style_button)
+        self._style_menu.aboutToShow.connect(self._fill_style_menu)
+        self._style_button.setMenu(self._style_menu)
+        style_row.addWidget(self._style_button)
+        self._style_name = QtWidgets.QLabel()
+        style_row.addWidget(self._style_name)
+        self._keep_label_edits = QtWidgets.QCheckBox('Keep manual label edits')
+        self._keep_label_edits.setChecked(True)
+        self._keep_label_edits.setToolTip('Applying a style retains explicit letter typography. Panel words and positions are always retained.')
+        style_row.addWidget(self._keep_label_edits)
+        style_row.addStretch()
+        form.addRow(style_row)
         appearance = QtWidgets.QHBoxLayout()
         spacing = (initial_layout or {}).get("spacing", 20)
         self._spacing = QtWidgets.QDoubleSpinBox()
@@ -88,8 +133,7 @@ class FigureComposerDialog(QtWidgets.QDialog):
         # composition shows the family it was saved with (an extra row when the list lacks
         # it, kept as saved).
         self._label_font = FontPicker()
-        if initial_layout is not None:
-            self._label_font.set_value(style["family"])
+        self._label_font.set_value(style["family"])
         self._label_font.setToolTip(
             "Panel-label font. The first row is Arial, the figure default; "
             "Other font… lists every font installed on this computer except the system's "
@@ -97,15 +141,19 @@ class FigureComposerDialog(QtWidgets.QDialog):
         self._label_font.setMaximumWidth(230)
         appearance.addWidget(QtWidgets.QLabel("Panel labels:"))
         appearance.addWidget(self._label_font)
-        self._label_size = QtWidgets.QSpinBox()
-        self._label_size.setRange(6, 72)
-        self._label_size.setSuffix(" px")
-        self._label_size.setValue(style["size_px"])
-        self._label_size.setToolTip("Native composition pixels. Library export scales the complete frozen figure.")
+        self._label_size = QtWidgets.QDoubleSpinBox()
+        self._label_size.setDecimals(3)
+        self._label_size.setRange(.001, 1000)
+        self._label_size.setSuffix(" pt")
+        self._label_size.setValue(logical_pixels_to_points(style["size_px"]))
+        self._label_size.setToolTip("Physical points at the composition's 96-dpi coordinate basis. Export scales the complete frozen figure.")
         appearance.addWidget(self._label_size)
         self._label_bold = QtWidgets.QCheckBox("Bold")
         self._label_bold.setChecked(style["bold"])
         appearance.addWidget(self._label_bold)
+        self._label_italic = QtWidgets.QCheckBox('Italic')
+        self._label_italic.setChecked(style.get('italic', False))
+        appearance.addWidget(self._label_italic)
         self._label_color_value = style["color"]
         self._label_color = QtWidgets.QPushButton()
         self._label_color.setToolTip("Panel-label colour")
@@ -194,10 +242,114 @@ class FigureComposerDialog(QtWidgets.QDialog):
         self._share_y.toggled.connect(self._invalidate)
         self._shared_legend.toggled.connect(self._invalidate)
         self._spacing.valueChanged.connect(self._invalidate)
-        self._label_font.changed.connect(self._invalidate)
-        self._label_size.valueChanged.connect(self._invalidate)
-        self._label_bold.toggled.connect(self._invalidate)
+        self._label_font.changed.connect(self._font_edited)
+        self._label_size.valueChanged.connect(self._size_edited)
+        self._label_bold.toggled.connect(self._bold_edited)
+        self._label_italic.toggled.connect(self._italic_edited)
         self._name.textChanged.connect(self._name_changed)
+        self._refresh_style_name()
+
+    def _style_context_current(self):
+        if self._style_workspace is None:
+            return True
+        workspace = self._style_workspace()
+        owner = self._style_owner() if self._style_owner is not None else None
+        return (workspace is not None and workspace._epoch == self._style_epoch
+                and owner is not None and getattr(owner, '_figure_workspace', None) is workspace)
+
+    @QtCore.Slot()
+    def _fill_style_menu(self):
+        self._style_menu.clear()
+        if not self._style_context_current():
+            action = self._style_menu.addAction('Project changed; reopen this composer')
+            action.setEnabled(False)
+            return
+        offered = list(builtin_styles())
+        provider = self._available_styles
+        workspace = self._style_workspace() if self._style_workspace is not None else None
+        if provider is None and workspace is not None:
+            provider = workspace.available_styles
+        if callable(provider):
+            offered.extend(provider())
+        seen = set()
+        for style in offered:
+            identity = (style.style_id, style.revision)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            self._style_menu.addAction(style.name, lambda checked=False, value=style: self.apply_style(value))
+        from .computer_styles import styles
+        self._style_menu.addSection('On this computer')
+        try:
+            local = styles()
+        except ValueError as exc:
+            self._style_menu.addAction(str(exc)).setEnabled(False)
+        else:
+            if not local:
+                self._style_menu.addAction('None saved on this computer').setEnabled(False)
+            for style in local:
+                self._style_menu.addAction(style.name, lambda checked=False, value=style: self.apply_style(value))
+
+    def _refresh_style_name(self):
+        name = self._label_binding['snapshot']['name'] if self._label_binding else 'Original label appearance'
+        self._style_name.setText(name + (' · manual edits' if self._label_overrides else ''))
+
+    def apply_style(self, style):
+        if not self._style_context_current():
+            self._message.setText('The project changed. Reopen the composer before applying a style.')
+            return False
+        # A new style changes only the composition's own lettering. Source panels
+        # and their exact embedded resources have no path through this operation.
+        self._label_native = panel_style(self._label_binding, self._label_overrides,
+                                         legacy=self._label_native)
+        self._label_binding = style_binding(style)
+        if not self._keep_label_edits.isChecked():
+            self._label_overrides = {}
+        self._write_letter_controls()
+        self._invalidate()
+        return True
+
+    def _write_letter_controls(self):
+        style = panel_style(self._label_binding, self._label_overrides, legacy=self._label_native)
+        self._writing_letters = True
+        try:
+            self._label_font.set_value(style['family'])
+            self._label_size.setValue(logical_pixels_to_points(style['size_px']))
+            self._label_bold.setChecked(style['bold'])
+            self._label_italic.setChecked(style.get('italic', False))
+            self._label_color_value = style['color']
+            _paint_swatch(self._label_color, self._label_color_value)
+        finally:
+            self._writing_letters = False
+        self._refresh_style_name()
+
+    def _letter_edited(self, key, value):
+        if self._writing_letters:
+            return
+        if not self._label_binding:
+            # Editing an old composition starts a local pinned style without
+            # inventing journal defaults for its other explicit native typography.
+            self._label_binding = style_binding(FigureStyle('composition.custom', 1,
+                'Custom lettering', provenance={'inherit_native_defaults': True}))
+        self._label_overrides[key] = value
+        self._refresh_style_name()
+        self._invalidate()
+
+    @QtCore.Slot()
+    def _font_edited(self):
+        self._letter_edited('family', self.label_family())
+
+    @QtCore.Slot(float)
+    def _size_edited(self, value):
+        self._letter_edited('size_pt', value)
+
+    @QtCore.Slot(bool)
+    def _bold_edited(self, value):
+        self._letter_edited('bold', value)
+
+    @QtCore.Slot(bool)
+    def _italic_edited(self, value):
+        self._letter_edited('italic', value)
 
     def figure_name(self):
         return self._name.text().strip()
@@ -212,7 +364,7 @@ class FigureComposerDialog(QtWidgets.QDialog):
         if color.isValid():
             self._label_color_value = color.name()
             _paint_swatch(self._label_color, self._label_color_value)
-            self._invalidate()
+            self._letter_edited('color', self._label_color_value)
 
     def _name_changed(self, *_args):
         self._save_btn.setEnabled(self.snapshot is not None and bool(self.figure_name()))
@@ -266,9 +418,9 @@ class FigureComposerDialog(QtWidgets.QDialog):
                 [self._snapshots[key] for key in selected], labels, self._columns.value(),
                 share_x=self._share_x.isChecked(), share_y=self._share_y.isChecked(),
                 panel_spans=spans, spacing=self._spacing.value(),
-                label_style={"family": self.label_family(),
-                             "size_px": self._label_size.value(), "bold": self._label_bold.isChecked(),
-                             "color": self._label_color_value}, shared_legend=self._shared_legend.isChecked())
+                label_style=self._label_native,
+                style_binding=self._label_binding, label_overrides=self._label_overrides,
+                shared_legend=self._shared_legend.isChecked())
             self._pixmap.loadFromData(result.png_bytes, "PNG")
             if self._pixmap.isNull():
                 raise ValueError("The composition preview could not be decoded.")

@@ -267,7 +267,7 @@ def test_a_condemned_proposal_is_not_accepted_by_one_unmarked_click(qapp, qtbot,
     assert "anyway" in said.lower()
 
     # The second press is a DIFFERENT press, and says so before it is made.
-    assert w.apply_button.text() == "Use these values anyway"
+    assert w.apply_button.text() == "Use proposed windows anyway"
     assert "ffb454" in w.apply_button.styleSheet().lower(), w.apply_button.styleSheet()
 
     w.apply_button.click()
@@ -302,7 +302,7 @@ def test_a_clean_proposal_is_untouched_by_any_of_this(qapp, qtbot, clean):
 
     assert w.apply_button.isEnabled() is True
     assert w.apply_button.styleSheet() == ""
-    assert w.apply_button.text() == "Use these values"
+    assert w.apply_button.text() == "Use proposed windows"
 
     w.apply_button.click()
     qapp.processEvents()
@@ -314,7 +314,7 @@ def test_a_clean_proposal_is_untouched_by_any_of_this(qapp, qtbot, clean):
     assert w.source_label.text() == (
         "These values: measured on this recording, and confirmed")
     assert "ACCEPTED" not in w.source_label.text()
-    assert w.apply_button.text() == "Use these values"
+    assert w.apply_button.text() == "Use proposed windows"
 
 
 # ===========================================================================
@@ -433,12 +433,12 @@ def test_a_second_probe_disarms_a_previous_override(qapp, qtbot, condemned, clea
     w.set_proposal(proposal)
     w.set_health(health, measured_for="proposal")
     w.apply_button.click()                       # refused; armed
-    assert w.apply_button.text() == "Use these values anyway"
+    assert w.apply_button.text() == "Use proposed windows anyway"
 
     # A second probe comes back with the SAME (still condemned) window.
     w.set_proposal(proposal)
     w.set_health(health, measured_for="proposal")
-    assert w.apply_button.text() == "Use these values", (
+    assert w.apply_button.text() == "Use proposed windows", (
         "the arming survived a fresh proposal, so one click now accepts a "
         "condemnation the user was shown for a different measurement")
     before = _form(w)
@@ -471,7 +471,7 @@ def test_a_click_refused_by_a_different_blocker_arms_nothing(qapp, qtbot, condem
     qapp.processEvents()
     assert "Select a current channel" in w.gate_label.text()
     assert "REFUSED" not in w.gate_label.text()
-    assert w.apply_button.text() == "Use these values", (
+    assert w.apply_button.text() == "Use proposed windows", (
         "a click refused by the channel gate armed the condemnation override")
 
     w.set_gate(True)
@@ -747,7 +747,7 @@ def test_on_the_owners_seven_hundred_millivolt_recording_through_a_real_window(
 
     # The screen M1's REFUSED banner used to occupy: plain button, no gate, one press.
     assert bp.apply_button.isEnabled() is True
-    assert bp.apply_button.text() == "Use these values", bp.apply_button.text()
+    assert bp.apply_button.text() == "Use proposed windows", bp.apply_button.text()
     assert bp.apply_button.styleSheet() == "", bp.apply_button.styleSheet()
     assert bp.gate_label.text() == "", bp.gate_label.text()
     assert bp.gate_label.isVisible() is False

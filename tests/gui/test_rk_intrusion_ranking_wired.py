@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import pathlib
 
+import numpy as np
 import pytest
 from PySide6 import QtCore
 
 from nanoscope.analysis import baseline as B
 from nanoscope.analysis import baseline_probe as P
 from nanoscope.gui.baseline_panel import BaselinePanel
+from .baseline_corpus_contracts import assert_detection_matches_reference
 
 FS = 50_000.0
 APO_700 = pathlib.Path("/Users/abrahamcampos/500 pM Apo ferritin_1 x PBS_22 nm_"
@@ -110,7 +112,7 @@ def test_the_summary_rows_survive_the_rich_text_parser(panel, monkeypatch):
     panel.set_recording(FS)
     panel.set_proposal(_proposal())
     shown = api(panel, "proposal_text")()
-    assert "Ranked: 0.5 s / 100 ms" in shown, shown
+    assert "Ranked: 500 ms / 100 ms" in shown, shown
     assert "<= 0.428% of the state depth" in shown, (
         "the criterion was eaten between the label and the pixel -- the same defect "
         "the health block already carries a fix for", shown)
@@ -129,7 +131,8 @@ def test_the_reason_paragraph_reaches_the_screen_exactly_as_written(panel):
     panel.set_proposal(_proposal(reason=marked))
     assert panel.reason_label.textFormat() == QtCore.Qt.PlainText
     shown = api(panel, "proposal_text")()
-    assert marked in shown, shown
+    # GUI time labels use milliseconds; literal markup must still survive as text.
+    assert marked.replace("0.5 s", "500 ms") in shown, shown
 
 
 def test_the_ladder_is_rendered_under_the_proposal_it_justifies(panel):
@@ -150,11 +153,11 @@ def test_the_ladder_is_rendered_under_the_proposal_it_justifies(panel):
     panel.set_recording(FS)
     panel.set_proposal(_proposal(ranking=ranking))
     shown = api(panel, "proposal_text")()
-    assert "Ranked: 0.5 s / 100 ms" in shown, shown
+    assert "Ranked: 500 ms / 100 ms" in shown, shown
     assert "0.428%" in shown, shown
-    assert "Ranked: 1 s / 300 ms" in shown, shown
+    assert "Ranked: 1000 ms / 300 ms" in shown, shown
     assert "CHOSEN" in shown, shown
-    assert shown.index("Ranked: 0.5 s / 100 ms") < shown.index("Ranked: 1 s / 300 ms")
+    assert shown.index("Ranked: 500 ms / 100 ms") < shown.index("Ranked: 1000 ms / 300 ms")
 
 
 # ===========================================================================
@@ -163,19 +166,11 @@ def test_the_ladder_is_rendered_under_the_proposal_it_justifies(panel):
 @pytest.mark.corpus
 @pytest.mark.skipif(not APO_700.exists(), reason="the -700 mV recording is not here")
 def test_the_seven_hundred_millivolt_one_click_answer_is_the_ranked_window(qapp, qtbot):
-    """H3/H4, end to end: open -> select ch2 -> Measure -> Apply -> Detect.
+    """The wired offer, rendered measurements and detection share one contract.
 
-    The floor took this recording from a CONDEMNED 0.1 / 0.03 s to a certified
-    0.5 / 0.1 s and stopped, because 0.5 / 0.1 is the shortest window
-    ``base_vs_state`` tolerates. Its ``baseline_intrusion`` is 0.00428 -- the baseline
-    follows 0.43% of every state's depth -- and the stamped open pore is -48.857 pA
-    against the app's own event-excluded estimate of -48.218 (1.33% out). One grid
-    point up the same statistic reads exactly 0.0 and the stamped open pore is
-    -48.2178 pA (0.0005% out). The click now lands there.
-
-    Everything asserted here is what a person sees or gets: the two windows in the
-    form, the ladder rendered under them, a plain (not armed) Apply, one press
-    applying as ``proposed``, and the table that comes out.
+    The shorter certified window has positive measured intrusion; the next rung
+    has zero. Preserve that ordering and the chosen windows while comparing their
+    current values with fresh measurements, rather than legacy estimator scalars.
     """
     where_from()
     from nanoscope.core.types import ChannelKind
@@ -219,19 +214,34 @@ def test_the_seven_hundred_millivolt_one_click_answer_is_the_ranked_window(qapp,
     # ---- the ladder the app measured, and what it read on each rung -------
     ranking = api(pr, "ranking")
     assert [(c.rough_s, c.base_s) for c in ranking] == [FLOOR_STOPPED_AT, NOW], ranking
-    assert ranking[0].fraction == pytest.approx(0.004278771600903435, abs=1e-9)
+    # Versioned automatic masks and robust flank anchors changed the historical
+    # 0.004278 reading. Check the wired evidence against fresh measurements on
+    # one shared reference mask, while retaining the scientific ordering.
+    x = np.asarray(w._session.calibrated_array(doc_id, channel), np.float64)
+    fs = float(w._session.document(doc_id).meta.sample_rate_hz)
+    reference = B.reference_states(x, fs, config=B.DEFAULT_BASELINE.replace(
+        rough_s=B.reference_rough_s(x.size, fs) / 2.0))
+    assert reference is not None
+    for candidate in ranking:
+        measured = B.config_intrusion(x, fs, config=pr.config.replace(
+            rough_s=candidate.rough_s, base_s=candidate.base_s),
+            polarity=-1, state_mask=reference[0])
+        assert measured is not None
+        assert candidate.fraction == measured["fraction"]
+        assert candidate.worst_fraction == measured["worst_fraction"]
+    assert ranking[0].fraction > ranking[1].fraction
     assert ranking[1].fraction == 0.0
     assert ranking[1].chosen is True
 
     # ---- ...and what the SCREEN says about it -----------------------------
     shown = api(bp, "proposal_text")()
     assert "RANKED BY MEASURED INTRUSION" in shown, shown
-    assert "0.5 s / 100 ms follows 0.428%" in shown, shown
-    assert "1 s / 300 ms follows NONE" in shown, shown
-    assert "Ranked: 0.5 s / 100 ms" in shown, shown
-    assert "Ranked: 1 s / 300 ms" in shown, shown
+    assert f"500 ms / 100 ms follows {ranking[0].fraction * 100:.3f}%" in shown, shown
+    assert "1000 ms / 300 ms follows NONE" in shown, shown
+    assert "Ranked: 500 ms / 100 ms" in shown, shown
+    assert "Ranked: 1000 ms / 300 ms" in shown, shown
     assert "CHOSEN" in shown, shown
-    assert "0.4% shallow" in shown, (
+    assert f"{ranking[0].fraction * 100:.1f}% shallow" in shown, (
         "the screen does not say what the window it declined would have cost a depth",
         shown)
     assert "SHORTEST" in shown, shown
@@ -251,7 +261,7 @@ def test_the_seven_hundred_millivolt_one_click_answer_is_the_ranked_window(qapp,
     assert "floored at 3x that median" in shown, (
         "the sentence that explains base_s is gone; ranking is a second step, not a "
         "replacement for it", shown)
-    assert "the rule's rough window 0.5 s" in shown, (
+    assert "the rule's rough window 500 ms" in shown, (
         "the derivation still presents the floor's rough window as the offer", shown)
     assert "the rule's base window 100 ms" in shown, (
         "the derivation still presents the floor's base window as the offer", shown)
@@ -259,7 +269,7 @@ def test_the_seven_hundred_millivolt_one_click_answer_is_the_ranked_window(qapp,
         "nothing on the screen tells the reader the three declarations of "
         "0.5 s / 100 ms above have been superseded by the 1 s / 300 ms below them",
         shown)
-    assert "SUPERSEDES it with 1 s / 300 ms" in shown, shown
+    assert "SUPERSEDES it with 1000 ms / 300 ms" in shown, shown
     assert shown.index("floored at 3x that median") < shown.index(
         "IS THE RULE'S WINDOW AND NOT WHAT THE APP OFFERS"), (
         "the correction has to come AFTER the claim it corrects", shown)
@@ -269,7 +279,7 @@ def test_the_seven_hundred_millivolt_one_click_answer_is_the_ranked_window(qapp,
     assert health is not None
     assert bool(health.ok), [c.name for c in health.checks if not c.ok]
     assert bp.condemned_checks() == (), bp.condemned_checks()
-    assert bp.apply_button.text() == "Use these values", bp.apply_button.text()
+    assert bp.apply_button.text() == "Use proposed windows", bp.apply_button.text()
     assert bp.apply_button.styleSheet() == "", bp.apply_button.styleSheet()
     assert bp.gate_label.isVisible() is False
 
@@ -294,9 +304,6 @@ def test_the_seven_hundred_millivolt_one_click_answer_is_the_ranked_window(qapp,
     with qtbot.waitSignal(ctrl.finished, timeout=1_800_000):
         dp.detect_button.click()
     _drain(qapp, qtbot, 400)
-    df = ap.current_events_df()
-    assert df is not None and len(df) == 1179, len(df) if df is not None else None
-    prov = ap.current_detection().payload.provenance
-    assert prov.get("baseline_fingerprint") == "sha256:b64a75ebdf29", prov.get(
-        "baseline_fingerprint")
-    assert str(prov.get("baseline_param_source")) == "proposed"
+    # The GUI must run exactly its displayed settings under the current stamped
+    # estimator. Historical event counts/fingerprints belong to an older policy.
+    assert_detection_matches_reference(w, expected_windows=NOW, source="proposed")

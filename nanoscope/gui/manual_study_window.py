@@ -1,6 +1,8 @@
 """Interactive raw-recording study operations with explicit, saved stage boundaries."""
 from __future__ import annotations
 
+from ..core.atomic_write import write_staged
+
 from dataclasses import asdict, replace
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -16,6 +18,8 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
+
+from .time_controls import SecondsSpinBox, HoursSpinBox, rescale_time_text
 
 from ..analysis import manual_preparation as prep
 from ..analysis import manual_detection as detect
@@ -286,6 +290,11 @@ class _OperationWorker(QtCore.QObject):
             self.finished.emit(result)
 
 
+_FORM_SECONDS_FIELDS = frozenset({'keep_start_s', 'keep_stop_s', 'masked_rough_s',
+    'masked_base_s', 'baseline_window_s', 'i0_window_s', 'block_s', 'i0_block_s',
+    'LINE_FIT_WINDOW_S', 'BASELINE_WINDOW_S', 'CUSUM_CAL_TOTAL_S', 'CUSUM_MAX_EVENT_S'})
+
+
 class _Form(QtWidgets.QWidget):
     changed = QtCore.Signal()
 
@@ -294,11 +303,20 @@ class _Form(QtWidgets.QWidget):
         form = QtWidgets.QFormLayout(self)
         self.controls, self.kinds = {}, {}
         for key, label, kind, default in fields:
+            seconds = key in _FORM_SECONDS_FIELDS
+            if key == "incubation_h":
+                label = label.replace("(h)", "(ms)")
+            if seconds:
+                label = label.replace("(s)", "(ms)").replace("(s;", "(ms;")
             if isinstance(kind, tuple):
                 widget = QtWidgets.QComboBox()
                 for title, value in kind: widget.addItem(title, value)
             elif kind is bool:
                 widget = QtWidgets.QCheckBox()
+            elif key == "incubation_h" and kind in (int, float):
+                widget = HoursSpinBox(); widget.setRange(-1e9, 1e9); widget.setDecimals(6)
+            elif seconds and kind in (int, float):
+                widget = SecondsSpinBox(); widget.setRange(-1e9, 1e9); widget.setDecimals(6)
             elif kind is int:
                 widget = QtWidgets.QSpinBox(); widget.setRange(0, 1_000_000)
             elif kind is float:
@@ -319,7 +337,11 @@ class _Form(QtWidgets.QWidget):
         if isinstance(kind, tuple): widget.setCurrentIndex(max(0, widget.findData(value)))
         elif kind is bool: widget.setChecked(bool(value))
         elif kind in (int, float): widget.setValue(value)
-        else: widget.setText(', '.join(map(str, value)) if isinstance(value, (tuple, list)) else '' if value is None else str(value))
+        else:
+            text = ', '.join(map(str, value)) if isinstance(value, (tuple, list)) else '' if value is None else str(value)
+            if key in _FORM_SECONDS_FIELDS or key == 'exclude_s':
+                text = rescale_time_text(text, 1000., intervals=key == 'exclude_s')
+            widget.setText(text)
         widget.blockSignals(False)
 
     def set_values(self, values):
@@ -332,6 +354,8 @@ class _Form(QtWidgets.QWidget):
             kind = self.kinds[key]
             result[key] = (widget.currentData() if isinstance(kind, tuple) else widget.isChecked() if kind is bool
                            else widget.value() if kind in (int, float) else widget.text().strip())
+            if kind not in (int, float, bool) and not isinstance(kind, tuple) and (key in _FORM_SECONDS_FIELDS or key == 'exclude_s'):
+                result[key] = rescale_time_text(result[key], .001, intervals=key == 'exclude_s')
         return result
 
 
@@ -353,7 +377,7 @@ def _export_event_tables(catalog, tag, folder, *, cancel=None):
     with tempfile.TemporaryDirectory(prefix='.nanoscope-export-', dir=folder) as staging:
         temporary=[Path(staging)/p.name for p in targets]
         for frame,path in zip((catalog,catalog[catalog.accepted]),temporary):
-            check_cancelled(cancel); frame.to_csv(path,index=False)
+            check_cancelled(cancel); write_staged(path, frame.to_csv, index=False)
         try:
             for source,target in zip(temporary,targets):
                 check_cancelled(cancel); os.link(source,target); published.append(target)
@@ -423,7 +447,7 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
         splitter.addWidget(self._stages)
         self._build_sources(); self._build_preparation(); self._build_detection(); self._build_comparisons(); self._build_clustering(); self._build_figures()
         self._results = QtWidgets.QTabWidget(); splitter.addWidget(self._results); splitter.setSizes([530, 850])
-        self._trace = pg.PlotWidget(background='w'); self._trace.setLabel('bottom','Retained acquisition time',units='s'); self._trace.setLabel('left','Current',units='pA')
+        self._trace = pg.PlotWidget(background='w'); self._trace.setLabel('bottom','Retained acquisition time (ms)'); self._trace.getAxis('bottom').enableAutoSIPrefix(False); self._trace.getAxis('bottom').setScale(1000.); self._trace.setLabel('left','Current',units='pA')
         # The application's dark theme uses light global plot text. This preview
         # has a fixed white canvas, so keep its axes readable in either theme.
         for name in ('left', 'bottom'):
@@ -471,7 +495,7 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
             ('add_channel','Add current channel (1-based; 0 disables)',int,0),
             ('add_channel_as_pa','Additional channel values are pA (override header)',bool,False),
             ('keep_start_s','Keep from source time (s)',float,0),('keep_stop_s','Keep until source time (s; 0 = end)',float,0),
-            ('exclude_s','Exclude source intervals (start:stop; start:stop)',str,''),
+            ('exclude_s','Exclude source intervals (ms; start:stop; start:stop)',str,''),
             ('median_engine','Median window edges',(('Reflect samples at edges','reflect'),('Shrink window at edges','shrinking')),'reflect'),
             ('comparison_only','Supplementary recording (exclude from pooled series)',bool,False)])
         box.addWidget(self._source_form)
@@ -943,7 +967,7 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
             settings=signal.NullSettings(**self._null_form.values()); folder=self._stage_folder('signal-nulls')
             def compute(p,c):
                 result=signal.null_controls(row['analysis'],settings,progress=p,cancel=c)
-                result.to_csv(folder/(row['tag']+'_null_counts.csv'),index=False)
+                write_staged(folder/(row['tag']+'_null_counts.csv'), result.to_csv, index=False)
                 return result
             def apply(state,result):
                 state['records'][index]['signal_nulls']=result
@@ -1369,10 +1393,10 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
                     destination=self._stage_folder('figure-style'); target=destination/path.name
                     def write(progress,cancel):
                         from .figure_bundle import write_figure_bundle
-                        for name,value in resources.items():(destination/name).write_bytes(value)
-                        target.write_bytes(snapshot.png_bytes)
-                        target.with_suffix('.svg').write_bytes(snapshot.svg_bytes)
-                        target.with_suffix('.style.json').write_text(json.dumps(style,indent=2))
+                        for name,value in resources.items():write_staged(destination/name, Path.write_bytes, value)
+                        write_staged(target, Path.write_bytes, snapshot.png_bytes)
+                        write_staged(target.with_suffix('.svg'), Path.write_bytes, snapshot.svg_bytes)
+                        write_staged(target.with_suffix('.style.json'), Path.write_text, json.dumps(style,indent=2))
                         write_figure_bundle(target.with_suffix('.figure.zip'),snapshot)
                     def apply(current,result):
                         current['figures']=[target if p==expected[1] else p for p in current['figures']]
@@ -1512,7 +1536,7 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
         region=pg.LinearRegionItem((start/fs,(end+1)/fs),movable=False,brush=pg.mkBrush(0,158,115,45)); self._trace.addItem(region)
         minimum=start+int(np.argmin(prepared.detrended[start:end+1]))
         self._trace.plot([minimum/fs],[float(prepared.detrended[minimum])],pen=None,symbol='o',symbolBrush='#D55E00',symbolSize=7)
-        self._trace.setTitle(f"{event.get('event_id',tag)} | source onset {float(event.get('original_onset_s',event.onset_s)):.6f} s | inclusive samples {start}:{end} | {(end-start+1)/fs*1000:.3g} ms", color='#333333')
+        self._trace.setTitle(f"{event.get('event_id',tag)} | source onset {float(event.get('original_onset_s',event.onset_s))*1000:.6f} ms | inclusive samples {start}:{end} | {(end-start+1)/fs*1000:.3g} ms", color='#333333')
         self._trace.enableAutoRange(); self._results.setCurrentWidget(self._trace)
 
     def show_figure(self,index):
@@ -1568,7 +1592,7 @@ class ManualStudyWindow(QtWidgets.QMainWindow):
         self._source_info.setText(str(row['source_path'])+'\n'+channels+f"\n{row['source_info'].get('fs_hz',0):g} Hz · {row['source_info'].get('n_samples',0):,} samples")
         summary=[]
         if 'prepared' in row:
-            prepared=row['prepared']; summary.append(f"{prepared.duration_s:.5f} s prepared")
+            prepared=row['prepared']; summary.append(f"{prepared.duration_s*1000:.5f} ms prepared")
             noise=prepared.metadata.get('qc_mad_noise_pA')
             if noise is not None: summary.append(f"preparation noise {noise:.4g} pA (MAD)")
         if 'inference' in row:

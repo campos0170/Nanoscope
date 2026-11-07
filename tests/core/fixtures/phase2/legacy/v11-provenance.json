@@ -1,0 +1,209 @@
+{
+  "revision": "5eae42a9d74326980553848f3d934c921b00a9cb",
+  "dialect": "v11",
+  "writer_project_version": 11,
+  "writer_app_version": "0.1.0",
+  "source_archive_sha256": "716b8419f40768c0db37136041014e1adcc1601a9b5b7719952211cb77ebc0e2",
+  "method": "Historical actual PlotConfig value and tagged metadata codec, actual historical save_project; no QWidget/QApplication or analysis execution.",
+  "data": "Nine synthetic rows from numpy.default_rng(20261103); intentionally not experimental data.",
+  "files": {
+    "v11-defaults.nanoscope": {
+      "sha256": "8fa57c18b7aae7c78d32f2f533b304b607daf81548bb675e70a23772014d14da",
+      "payload_sha256": "092866cfa04e06bdfa385289f35be300c5cb9781a5ed0b864f5f16d219924cfe",
+      "plot_config": {
+        "format": "nanoscope-plot-config",
+        "version": 2,
+        "app_version": "0.1.0",
+        "plot_type": "Histogram",
+        "norm_user_set": false,
+        "selection": {
+          "source_keys": [],
+          "accepted_only": true
+        },
+        "histogram": {
+          "column": "",
+          "bins": 30,
+          "normalization": "count",
+          "colour_by": "None",
+          "log_x": false,
+          "log_y": false,
+          "include_filter_limited": false
+        },
+        "scatter": {
+          "x": "",
+          "y": "",
+          "log_x": false,
+          "log_y": false,
+          "colour_by": "None"
+        },
+        "kde": {
+          "x": "",
+          "y": "",
+          "log_x": true,
+          "log_y": false,
+          "levels": 8
+        },
+        "cluster": {
+          "features": [],
+          "method": "GMM",
+          "k_mode": "Auto (BIC)",
+          "k": 2
+        },
+        "fit": {
+          "kind": "none",
+          "k": 1,
+          "k_auto": false,
+          "scatter_kind": "none",
+          "applied": "none",
+          "applied_k": 1,
+          "applied_k_auto": false,
+          "applied_scatter": "none",
+          "range_lo": "",
+          "range_hi": "",
+          "range_unit": "ms"
+        },
+        "axes": {
+          "time_unit": "ms",
+          "x_min": "",
+          "x_max": "",
+          "y_min": "",
+          "y_max": "",
+          "manual_x": null,
+          "manual_y": null
+        },
+        "style": {
+          "title": "",
+          "x_label": "",
+          "y_label": "",
+          "show_legend": true,
+          "font_family": "",
+          "font_size_pt": 10,
+          "data_color": "#0072B2",
+          "fit_color": "#D55E00",
+          "point_size": 7,
+          "line_width": 1,
+          "background": "dark",
+          "export_w": 0,
+          "export_h": 0,
+          "fit_values_on_plot": false,
+          "label_overrides": {},
+          "legend_pos": null,
+          "legend_font_size_pt": 0,
+          "legend_counts": true,
+          "legend_include": {},
+          "show_grid": true,
+          "title_font_size_pt": 0,
+          "axis_label_font_size_pt": 0,
+          "tick_font_size_pt": 0,
+          "title_bold": false,
+          "title_italic": false,
+          "show_r2": true,
+          "show_gof": true,
+          "show_ci_band": false,
+          "show_provenance": false,
+          "show_residuals": false
+        }
+      },
+      "rows": 9
+    },
+    "v11-legacy-look.nanoscope": {
+      "sha256": "f964b42bd5a6e9ccfe000b7646fcac140245da634ac75f1df76c4604c0f28507",
+      "payload_sha256": "5801c381f68aabab0ef5673b13ac0e2b5bde07dea328727c27dfd5c3fd39faf3",
+      "plot_config": {
+        "format": "nanoscope-plot-config",
+        "version": 2,
+        "app_version": "0.1.0",
+        "plot_type": "Histogram",
+        "norm_user_set": false,
+        "selection": {
+          "source_keys": [],
+          "accepted_only": true
+        },
+        "histogram": {
+          "column": "",
+          "bins": 30,
+          "normalization": "count",
+          "colour_by": "None",
+          "log_x": false,
+          "log_y": false,
+          "include_filter_limited": false
+        },
+        "scatter": {
+          "x": "",
+          "y": "",
+          "log_x": false,
+          "log_y": false,
+          "colour_by": "None"
+        },
+        "kde": {
+          "x": "",
+          "y": "",
+          "log_x": true,
+          "log_y": false,
+          "levels": 8
+        },
+        "cluster": {
+          "features": [],
+          "method": "GMM",
+          "k_mode": "Auto (BIC)",
+          "k": 2
+        },
+        "fit": {
+          "kind": "none",
+          "k": 1,
+          "k_auto": false,
+          "scatter_kind": "none",
+          "applied": "none",
+          "applied_k": 1,
+          "applied_k_auto": false,
+          "applied_scatter": "none",
+          "range_lo": "",
+          "range_hi": "",
+          "range_unit": "ms"
+        },
+        "axes": {
+          "time_unit": "ms",
+          "x_min": "",
+          "x_max": "",
+          "y_min": "",
+          "y_max": "",
+          "manual_x": null,
+          "manual_y": null
+        },
+        "style": {
+          "title": "Historical synthetic fixture",
+          "x_label": "Own dwell label",
+          "y_label": " ",
+          "show_legend": true,
+          "font_family": "",
+          "font_size_pt": 10,
+          "data_color": "#0072B2",
+          "fit_color": "#D55E00",
+          "point_size": 7,
+          "line_width": 1,
+          "background": "dark",
+          "export_w": 0,
+          "export_h": 0,
+          "fit_values_on_plot": true,
+          "label_overrides": {},
+          "legend_pos": null,
+          "legend_font_size_pt": 0,
+          "legend_counts": true,
+          "legend_include": {},
+          "show_grid": true,
+          "title_font_size_pt": 0,
+          "axis_label_font_size_pt": 0,
+          "tick_font_size_pt": 0,
+          "title_bold": true,
+          "title_italic": true,
+          "show_r2": false,
+          "show_gof": false,
+          "show_ci_band": false,
+          "show_provenance": false,
+          "show_residuals": false
+        }
+      },
+      "rows": 9
+    }
+  }
+}

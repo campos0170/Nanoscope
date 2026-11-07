@@ -198,6 +198,9 @@ class FitLabelItem(pg.LabelItem):
     moved = QtCore.Signal(tuple)
     editRequested = QtCore.Signal()
     menuRequested = QtCore.Signal(object)
+    #: A left or right click, or the start of a drag, landed on it, before it does anything
+    #: with it: the Format tab selects it (``figure_text.FigureTextController.refresh``).
+    selectRequested = QtCore.Signal()
 
     def __init__(self, view_box: pg.ViewBox | None = None) -> None:
         super().__init__("", justify="left")
@@ -207,14 +210,44 @@ class FitLabelItem(pg.LabelItem):
         self._state = FitLabelState()
         self._offset = (_MARGIN[0], _MARGIN[1])
         self._drag_from: tuple[float, float] | None = None
+        self._wrapping = False
         self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         self.setToolTip("Fit label: drag to move, double-click to edit its text "
                         "(the numbers stay live)")
         if view_box is not None:
             self.setParentItem(view_box)
+            view_box.sigResized.connect(self._place)
             self._place()
 
     # -- drawing --------------------------------------------------------------------------
+    def setText(self, text, **options):  # noqa: N802 - pyqtgraph API
+        # Measure the full rich text again after edits/restyles. A previously narrow
+        # viewport must not leave the label wrapped when the figure grows or exports.
+        self.item.setTextWidth(-1)
+        super().setText(text, **options)
+        self._natural_width = self.item.boundingRect().width()
+        if hasattr(self, "_state"):
+            self._place()
+
+    def _wrap_to_parent(self) -> None:
+        parent = self.parentItem()
+        if parent is None or getattr(self, "_wrapping", False):
+            return
+        self._wrapping = True
+        try:
+            available = parent.boundingRect().width() - 2 * _MARGIN[0]
+            if self._state.placement == "custom" and self._state.offset is not None:
+                available = parent.boundingRect().width() - max(0.0, self._state.offset[0]) - _MARGIN[0]
+            width = max(1.0, min(getattr(self, "_natural_width", 1.0), available))
+            option = self.item.document().defaultTextOption()
+            option.setWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            self.item.document().setDefaultTextOption(option)
+            self.item.setTextWidth(width)
+            self.updateMin()
+            self.resize(width, self.item.boundingRect().height())
+        finally:
+            self._wrapping = False
+
     def apply_state(self, state: FitLabelState, readouts: Sequence[FitReadout] = (),
                     style=None, family: str | None = None) -> None:
         """Draw ``readouts`` as ``state`` says; hidden when there is nothing to show, when
@@ -258,9 +291,10 @@ class FitLabelItem(pg.LabelItem):
         y = 1.0 if placement.startswith("bottom") else 0.0
         return (x, y), (_MARGIN[0] * (1 - 2 * x), _MARGIN[1] * (1 - 2 * y))
 
-    def _place(self) -> None:
+    def _place(self, *_args) -> None:
         if self.parentItem() is None:
             return
+        self._wrap_to_parent()
         corner, offset = self._corner()
         self._offset = (float(offset[0]), float(offset[1])) if corner == (0.0, 0.0) else self._offset
         self.anchor(itemPos=corner, parentPos=corner, offset=offset)
@@ -281,6 +315,8 @@ class FitLabelItem(pg.LabelItem):
             ev.acceptClicks(QtCore.Qt.MouseButton.RightButton)
 
     def mouseClickEvent(self, ev):  # noqa: N802 - pyqtgraph API
+        if ev.button() in (QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton):
+            self.selectRequested.emit()
         if ev.button() == QtCore.Qt.MouseButton.LeftButton and GATE(ev, ("fit", id(self))):
             ev.accept()
             self.editRequested.emit()
@@ -296,6 +332,7 @@ class FitLabelItem(pg.LabelItem):
             return
         ev.accept()           # the drag is the label's: the ViewBox must not pan
         if ev.isStart():
+            self.selectRequested.emit()
             self._drag_from = self.offset()
         if self._drag_from is None:
             return

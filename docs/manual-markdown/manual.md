@@ -1,12 +1,12 @@
 # NanoScope — User Manual
 
-*NanoScope build 40.15.59. Manual edition 2026-09-29. The incubation-study workflow is updated against this build. Other main-analysis chapters retain their 2026-09-11 source review (revision 703a96a), unless a later date is stated; this edition does not claim a new audit of every feature or a recapture of every illustration. Historical apo-ferritin results retain their original recipes and are not detector-performance or calibration guarantees.*
+*Manual edition 2026-11-05, current plotting and analysis controls in installed NanoScope build 45.37.98 (build ID `20261105T043813486839Z-nogit-5447ddda145a`). Current control illustrations are offscreen captures using synthetic validation fixtures. The incubation workflow retains its 2026-09-29 review against build 40.15.59, and other chapters retain their 2026-09-11 source review (703a96a) unless dated otherwise. Retained screenshots may show earlier control locations; current paths are given in the text. Historical apo-ferritin results retain their original recipes and are not detector-performance or calibration guarantees.*
 
-> Images live in `images/`. `manual.html` beside this file is the same text as a single self-contained page; open it in a browser and print to PDF, or run `docs/gen_page.py --pdf` to rebuild both. (Do not use `pandoc` — it is not installed on this bench, and the page's own print stylesheet is what makes the PDF readable.)
+> Images live in `images/`. `manual.html` beside this file is the same text as a single self-contained page. Open the distributed HTML or PDF directly. For a background rebuild, see `BUILDING-THE-MANUAL.md`; the offline ReportLab route does not use the screen.
 
 ---
 
-User manual · edition 2026-09-29 · build 40.15.59
+User manual · edition 2026-11-05 · NanoScope build 45.37.98
 
 # NanoScope
 
@@ -29,7 +29,7 @@ what is left — without ever losing track of which number was measured and whic
 7. [Recording-specific references](#recording-specific-references)
 8. [Editable amplitude and event characterization](#current-event-characterization-and-editable-amplitude)
 9. [Current population plots: step-by-step recipes](#current-population-plots-recipes-and-interpretation)
-10. [Figure Library and publication export](#figure-library-and-publication-export)
+10. [Figures, snapshots and publication export](#figures-snapshots-and-publication-export)
 11. [Plotting problems: where to look](#plotting-problems-where-to-look)
 12. [Projects, recovery and verification](#projects-recovery-and-verification)
 13. [Incubation studies: one entry and shared curation](#incubation-studies-one-entry-and-shared-curation)
@@ -79,7 +79,7 @@ on the baseline estimator, undo behaviour and project reopening. This page is th
 companion: it documents every control by label and works through complete analyses on real data.
 Both documents are maintained together. This edition adds the unified General, Zn, Cu and Acid
 incubation entry and the complete main-workspace curation handoff. Earlier chapters cover the
-Analysis Explorer, Figure Library and composition, publication export, optional amplitudes,
+Analysis Explorer, Figures snapshots and composition, publication export, optional amplitudes,
 recording-specific open-pore references, and analytical-project recovery. The numbered historical
 walkthroughs retain their measured results and illustrations with an explicit date and scope;
 they are not claims that the current app will reproduce those counts under different settings.
@@ -87,7 +87,7 @@ they are not claims that the current app will reproduce those counts under diffe
 **Reading this manual**
 
 **For Analysis and plotting, read the navigation guide and worked histogram first.** Then use
-the numbered current-population recipes and the Figure Library/export instructions. These
+the numbered current-population recipes and the Figures/export instructions. These
 chapters follow the actual controls in their on-screen order. The historical walkthroughs
 later in the manual preserve earlier examples; they are not the best place to learn today's
 navigation. In the PDF, open the bookmarks panel to jump directly to a tool recipe.
@@ -96,6 +96,8 @@ Current menu paths are written `Analysis › Event gallery…`. Code formatting 
 filenames, columns and example values. Historical screenshots may show older labels; use the
 current navigation map below. The manual is a maintained reference checked against source and
 tests, not an automatically exhaustive inventory of every runtime control.
+
+**Current controls for all five historical walkthroughs:** use **Format** or **Style ▾** for the old Style group, **Export ▾** for Save image, and **Update plot** for a hosted Apply fit or Generate action. The current report entry is **Analysis > Generate Subpopulations…**. Historical screenshot labels remain unchanged.
 
 ## The window
 
@@ -282,10 +284,11 @@ The proposal is **2 s / 0.5 s**, four and five times the defaults. Re-detecting 
 Both counts are in the `Summary` table, on separate rows — quote the one you mean. (Earlier
 printings of this manual gave 316 and 275, which are the *accepted* counts, against a Summary that
 reads 317 and 276.) The whole top row was re-taken through the GUI on 2026-08-20, and every cell
-in it is legible in the screenshot immediately below. Read the dwell cell carefully: the Summary
+in it is legible in the historical screenshot immediately below. That older Summary
 prints `median dwell (µs) 1.754e+04` — **microseconds, in scientific notation** — while the
 histogram axis, the fit readouts and the gallery captions all speak milliseconds. `1.754e+04` is
-17.54 ms, not 17,540 ms, and nothing on the row guards against the thousandfold reading.
+17.54 ms, not 17,540 ms. The current Summary displays dwell in ms; do not use the old screenshot
+as the current field-unit reference.
 
 ![The Summary panel after detecting the −600 mV recording at the default 0.5 / 0.1 s baseline.](images/summary_frac_depth.webp)
 
@@ -503,17 +506,129 @@ complete route from an existing event table to a saved figure.
 |---|---|---|
 | Main-window Inspector: Analysis | Preprocessing, detection, ML and manual measurement controls beside the recording | The catalog of population-plot tools |
 | Main-window Analysis menu | Opens tools such as Distributions, Comparison figures and Figure Library | A command to run every analysis |
-| Analysis Explorer and its tool tabs | The window that hosts the analytical pages you have opened | A list of all saved figures |
-| Section selector inside a tool | Shows Data, Analysis, Appearance or Export controls for that same tool | Four separate tool tabs, or an automatic analysis pipeline |
+| Analysis Explorer and its Figures list | Independent live figures, frozen Snapshots and compositions in this project | A request to recompute every result |
+| Explorer right inspector | Data & analysis groups and Format elements for the selected tool | A second analytical tool or an automatic analysis pipeline |
 
-**Two choices, in order:** first choose the **tool**; then choose the **Section** within that
-tool. For example: **Analysis menu > Comparison figures... > Section: Data**. Later choosing
-**Section: Appearance** keeps the Comparison figures tool and its displayed result; it only
-changes the visible controls. Do not return to the main Inspector to look for that figure's colors.
+**Two choices, in order:** choose a **figure** (or create one with **New ▾**), then the inspector tab. For example,
+**Analysis menu > Comparison figures... > Data & analysis > Plot**. Choosing **Format** keeps that
+tool and result and shows appearance controls. The old Section selector and stacked control bands
+are gone. Ctrl/⌘1 opens Data & analysis; Ctrl/⌘2 opens Format. The first two groups start open,
+later groups collapsed, and your inspector width, visibility, tab and group choices are remembered.
+
+The project toolbar holds **Figures**, **New ▾**, **Duplicate**, **Undo**, **Redo**, **Update plot ▾**, the
+current **Style ▾** name and **Export ▾**. **Reset figure** is in **Update plot ▾**. Ctrl/⌘Return (or keypad Enter) commits a focused field before Update plot. Its count
+names pending changes in the tooltip: Distributions counts independent recipe changes and a proposed
+fit; summaries/comparisons count draft differences, with at least 1 for a stale or ungenerated
+result; Voltage dependence counts a waiting fit. Event waveforms and Noise also show analytical
+changes waiting for Update; their committed picture stays visible while controls are drafts.
+I-V disables Update while gathering. Subpopulations counts a curation-change notice; Update
+recomputes its pinned detection using the app’s model-search defaults, refusing a missing or
+mismatched source instead of adopting the main-window selection. Switching inspector tabs does not apply a pending recipe.
 
 ![Analysis home lists tools, inputs and availability without calculating a result.](images/current_analysis_home.webp)
 
 *Dated source capture, 2026-09-11; retained in this edition. Analysis home is the capability catalog, not an analysis result. Selecting a tool explains its requirements; opening a numerical page is a separate action.*
+
+### Current plotting controls: choose, update, inspect, export
+
+The **Figures** toolbar toggle shows or hides the project list; **Ctrl/⌘Shift+L**
+does the same. Hiding the list gives the canvas more space and does not delete figures
+or recompute their data. The preference is remembered. The separate **Inspector**
+toggle controls the right-hand panel. In a narrow window, scroll the inspector to reach
+later groups and use the Figures toggle to make room for a pair matrix.
+
+1. Use **New ▾ > Pair-plot matrix**, **Faceted comparisons** or **Individual-event
+   overlays** for a direct comparison entry. Select the required **Sources**, then
+   choose the columns and other settings in **Data & analysis > Plot**. A pair matrix
+   compares several selected features in one figure; it does not require one manually
+   created scatter plot per pair.
+2. Press **Update plot** to apply a pending analytical change. A pending count or stale
+   state means that the displayed result still belongs to the last completed recipe.
+   Distributions also has immediate geometry redraws, including bins, normalization
+   and log axes; inspect the pending indicator rather than assuming every control waits.
+   Changing inspector tabs does not apply the draft. **Ctrl/⌘Return** commits the field
+   being edited and requests Update. If an update fails, the previous result remains
+   visible; the pending/stale state is retained. Correct the input and update again.
+3. Use **Format** for appearance, and **Style ▾** for a reusable look. These controls
+   act on the completed figure's presentation. **Undo** and **Redo** restore supported
+   appearance changes without substituting an earlier measurement quantity or rerunning
+   the analysis. **Reset view** restores the plot viewport; **Reset figure** in
+   **Update plot ▾** resets the figure's appearance. They serve different purposes.
+4. Inspect the figure header, source names and result state before **Export ▾**.
+   Export uses the available completed result; it does not silently calculate a pending
+   recipe. A frozen Snapshot or composition has its own saved data and disables live
+   Update/Undo/Style actions. Select the intended live figure to resume analysis.
+
+![Current pair-plot matrix with Figures and the Data & analysis inspector visible.](images/current_453798_pairplot.png)
+
+*NanoScope 45.37.98, offscreen synthetic comparison fixture, 2026-11-05. This is a current control illustration, not a new apo-ferritin result.*
+
+![The same pair matrix with the Figures list hidden.](images/current_453798_pairplot_compact.png)
+
+*The Figures toggle gives the same completed matrix more canvas space; it does not rerun the analysis.*
+
+### Subpopulations: source identity and Generate UMAP
+
+In a hosted Subpopulations figure, open **Data & analysis > Sources** and read the
+recording, channel and detector before running an update. A report is pinned to its
+original detection. Selecting another recording in the main window does not retarget
+that existing report. For a new report, **Update plot** uses the selected detection
+and the app's model-search defaults. For a bound report, it recomputes from the current
+accepted events of the original detection with those defaults; it does not open an
+analysis-settings dialog. Presentation controls in **View** do not rerun feature
+extraction, PCA or mixture analysis.
+
+If you curate events in the original detection, inspect the curation notice and press
+**Update plot** when ready to replace the report. Until then, its numbers and exports
+describe the completed analysis. If its source is missing, replaced or no longer
+matches its scientific provenance, the update is refused and the saved report remains
+intact. Select and restore the original source rather than relying on the current
+selection as a substitute. **Event gallery…** and **Colour the trace** also require
+the original, valid detection to be selected; reopening a report does not silently
+apply its assignments to another recording.
+
+To add UMAP to a completed report:
+
+1. Open **Data & analysis > View** and press **Generate UMAP**.
+2. Wait for the background calculation to finish. It uses that report's stored PCA
+   scores, preserving its existing t-SNE coordinates, classes and mixture results.
+   The view switches to UMAP when it succeeds. The button is unavailable while busy,
+   when there are no suitable stored PCA scores, or when UMAP already exists.
+3. Use **Embedding** to switch among the available captured embeddings, and
+   **Colour by** to choose the grouping. These are presentation choices.
+4. Save the project to retain the generated coordinates. Reopening shows the saved
+   embedding without recalculation. **Report > Export report and tables…** exports
+   the report; **Copy report** copies its text. A stored report without a valid live
+   detection can still be viewed/exported and can generate UMAP from stored PCA scores.
+
+UMAP and t-SNE are exploratory embeddings. Their neighborhoods, apparent clusters and
+colors do not establish molecular identity; library versions can change coordinates.
+**Full details** expands the explanatory report. On a small window, scroll its content
+and the inspector to reach the remaining text and controls.
+
+### Noise summary and fitting context
+
+In **Noise spectrum**, inspect the source, range and estimator, then press **Update
+plot** to commit analytical changes. The 1/f exponent **α**, fit **R²** and
+**descriptive fit only** qualification remain visible when **Full details** is
+collapsed. Open Full details for the complete report. A descriptive slope is not a
+calibrated test of a physical noise model. Keep the same calibration, bandwidth,
+quiet-segment rule and estimator when comparing recordings. Standalone legacy Noise
+windows label their local run control **Analyze / refresh**.
+
+![Subpopulations identifies its original source while a different source is selected.](images/current_453798_subpop_source.png)
+
+*NanoScope 45.37.98, offscreen synthetic source-pinning fixture. The report belongs to A; selecting B elsewhere does not change that identity.*
+
+![Generate UMAP in the Subpopulations View controls.](images/current_453798_umap_button.png)
+
+![The generated UMAP result from the same stored report.](images/current_453798_umap_result.png)
+
+*NanoScope 45.37.98, synthetic subpopulation fixture before and after Generate UMAP. The existing report supplies PCA scores; these coordinates are not evidence for molecular species.*
+
+![Noise spectrum with a visible descriptive 1/f summary.](images/current_453798_noise.png)
+
+*NanoScope 45.37.98, offscreen synthetic Noise fixture. The visible α, R² and descriptive-fit qualification keep the summary interpretable when Full details is collapsed.*
 
 ### Find a tool, even when its tab is missing
 
@@ -521,9 +636,9 @@ Start with `Analysis › Analysis home…`. Search by task, such as ECDF, curren
 events. Read the selected tool's input requirements, then choose `Open…`. An unavailable tool
 explains what is missing. Browsing the catalog does not run detection or fit anything.
 
-Explorer tabs appear as tools are opened. A missing **Comparison figures** tab does not by itself
-mean the feature is missing: use **Analysis > Comparison figures...**, or search for it in
-**Analysis home** and open it. Return to an already opened tool using its Explorer tab.
+Use **New ▾** to make another figure of a supported type, including another Comparison figure.
+Choose an existing named figure in **Figures** to return to it. The main Analysis menu and
+Analysis home remain routes to the tools; they are not the inventory of project figures.
 The home catalog's **Refresh availability** only rechecks whether required inputs exist.
 
 The **Guided first analysis** is optional navigation assistance, not a preset detector. It can
@@ -535,13 +650,13 @@ directly to the appropriate page. Stages show workflow progress, not a scientifi
 | Histograms, scatter, fitted distributions, clustering, PCA | Distributions | Stored per-event or manual-measurement tables; inspect selected sources and metric |
 | ECDF, empirical survival, box, violin | Distribution summaries | Stored event measurements; descriptive summaries, not significance tests |
 | Facets, pair matrices, individual-event overlays | Comparison figures | Explicitly selected event sources; separate-source comparison, not silent pooling |
-| Event-count heatmap and aligned ensemble | Event waveforms | Accepted event intervals and waveform source; see current heatmap display limitation |
+| Event-count heatmap and aligned ensemble | Event waveforms | Accepted event intervals and waveform source; inspect units and source lineage |
 | PSD, frequency-band noise | Noise spectrum | Calibrated trace/range and sample rate; not an event-depth histogram |
 | Current-voltage relation and conductance | I-V / conductance | Compatible calibrated current and voltage information; units alone do not certify calibration |
 | Metrics versus applied voltage | Voltage dependence | Comparable sources and exposure; rate and amplitude have different comparability requirements |
 | Waveform/feature population characterization | Subpopulations | Compatible event sources and explicit analytical choices; cluster is not molecular identity |
 | Screen/curate individual events | Event gallery or Event inspector | Shared event table; decisions affect downstream populations |
-| Preserve/export a finished figure | Figure Library | Frozen numbers, appearance and provenance; not an editable live analysis |
+| Preserve/export a finished figure | Figures ▸ Snapshots or Compositions | Frozen numbers, appearance and provenance in the Explorer canvas; not an editable live analysis |
 
 Use **Distributions** for a histogram, an overlaid scatter, a fitted distribution or PCA.
 Use **Distribution summaries** for ECDF, survival, box or violin views.
@@ -549,13 +664,93 @@ Use **Comparison figures** for separate-source panels, a feature matrix or indiv
 strips. These are three distinct tools, not three tabs inside Distributions. In particular,
 **Violin is not in the Distributions Plot list**.
 
+### Work with several figures in one project
+
+The **Figures** list separates editable live figures, frozen **Snapshots**, and compositions.
+A live row shows **Current**, **Stale**, **Saved result** or **No data** and may also say **Dormant**: its editor is
+not loaded, but its saved recipe, result, wording, look and history remain. Current is a lineage
+check, not a validation of the scientific method. A Snapshot's state reports its saved lineage.
+
+Use **New ▾** in the list or toolbar to create an independent named figure. Menu hints state its
+input requirements; creating a figure does not run detection or calculate a result. Select sources
+and settings, then **Update plot**. **Duplicate** copies the selected live figure for an independent
+variant, or copies a selected Snapshot as another frozen entry. **Rename** changes the selected
+row's name, not its plot title. **Delete** removes only selected entries; **Restore deleted** restores
+deleted live figures until the project closes. Save the project to persist the set.
+
+Selecting a Snapshot or composition shows its frozen preview and provenance in the same Explorer
+canvas. The common **Export ▾** offers **Figure…**, **Data…** and **Bundle…** for that saved entry.
+Update, Undo/Redo and Style are disabled while frozen artwork is selected. Choose a live row to
+resume editing. A live figure that has never been plotted remains **No data** after project reopening.
+
+<!-- design-capture:freshness-no-data -->
+
+![A proposed measurement change leaves the committed comparison visible. Both the Figures row and the header say Stale, and Update plot reports the pending choice.](images/current_design_freshness.png)
+
+*A proposed measurement change leaves the committed comparison visible. Both the Figures row and the header say Stale, and Update plot reports the pending choice. Synthetic workflow fixture, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:freshness-no-data -->
+
+<!-- design-capture:empty-reopen-support -->
+
+![A reopened figure with no committed result remains No data. Saving a project does not manufacture a numerical result.](images/current_design_no_data.png)
+
+*A reopened figure with no committed result remains No data. Saving a project does not manufacture a numerical result. Synthetic workflow fixture, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:empty-reopen-support -->
+
+**New ▾ > From recipe…** starts a new figure from a saved analytical recipe and its look, without
+copying source bindings or computed results. **Include typed title, axis labels, fit wording and
+captions** is off by default; opt in deliberately. Save/manage recipes from **Export ▾**. The
+supported stores cover Distributions, Distribution summaries, Comparison figures, Event waveforms,
+Noise and Voltage dependence. I-V and Subpopulations explain their lack of a separate plotting
+recipe; use Style for reusable appearance, Duplicate for an independent figure, or the report's
+analysis controls to generate new results. A recipe is not a Snapshot.
+
+To restore an exported Distributions configuration file, open **Data & analysis ▸ Import plot
+settings ▸ Import JSON…**. Inspect the reported sources and pending/applied state after importing.
+The file route is distinct from **New ▾ > From recipe…**, which recalls a named reusable recipe.
+
+<!-- design-capture:configuration-import -->
+
+![Distributions exposes Import JSON in Data & analysis > Import plot settings. Named reusable recipes remain under New and Export.](images/current_design_json_import.png)
+
+*Distributions exposes Import JSON in Data & analysis > Import plot settings. Named reusable recipes remain under New and Export. Synthetic workflow fixture, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:configuration-import -->
+
+New project saves use format **v13**. Existing v11/v12 projects open with their saved results and
+compatibility defaults; older NanoScope builds cannot open v13 files. Before overwriting an older
+project, choose **Save and convert**, **Save a copy** or **Cancel**. Conversion retains a verified
+original backup and verifies the staged project. Keep raw recordings accessible: figure resources
+and saved tables do not replace all referenced recording files. Unknown/unsupported records remain
+identified and preserved rather than being replaced by empty figures.
+
+<!-- phase4-approved-capture:figures-multiple -->
+
+![Independent apo-ferritin figures after project reopening. The Figures list retains live entries and saved categories; a retained result remains editable without a new calculation.](images/current_phase4_figures.png)
+
+*Independent apo-ferritin figures after project reopening. The Figures list retains live entries and saved categories; a retained result remains editable without a new calculation. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
+<!-- phase4-approved-capture:new-recipe -->
+
+![The From recipe chooser lists its input requirements. Including typed wording is off by default; opening the chooser does not run an analysis.](images/current_phase4_recipe.png)
+
+*The From recipe chooser lists its input requirements. Including typed wording is off by default; opening the chooser does not run an analysis. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
+<!-- phase4-approved-capture:new-figure-menu -->
+
+![The New menu offers independent figures by plot type and a From recipe route. Input requirements are available as menu hints; creating a draft does not compute a result.](images/current_phase4_new_menu.png)
+
+*The New menu offers independent figures by plot type and a From recipe route. Input requirements are available as menu hints; creating a draft does not compute a result. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
 ### Select the actual data, not just the visible recording
 
 1. Open the project or recording. If starting from a saved project, inspect its existing event
    table before deciding that another detection is necessary.
 2. In the main window, verify the recording, channel and stored detector result. Schmitt,
    CUSUM, ML and Reconciled results can coexist; they are not interchangeable populations.
-3. Open the plotting tool and choose **Section: Data**. Its source list is the authority for
+3. Open the plotting tool and choose **Data & analysis ▸ Sources**. Its source list is the authority for
    what will be plotted. **Tick the source checkbox**. A highlighted row alone is not a
    selection of analytical data, and highlighting a recording in File Manager does not tick
    that source in every plotting tool.
@@ -572,14 +767,30 @@ If the source list is empty, first check that there is a stored, nonempty event 
 intended channel. Loading a raw trace alone is not sufficient for an event-distribution plot.
 Noise spectrum and I-V use other kinds of inputs; choose those tools when that is your question.
 
+For Noise and Event waveforms, **Follow selection** determines whether Update uses the main
+window's selected input or the figure's pinned source. With it off, selecting another recording in
+the main window does not replace the figure's source. Choosing a recording in Noise's own Sources
+control changes that figure's source. Followed source changes are staged too: the displayed result
+and pending analytical settings remain intact until **Update plot**. Turning Follow selection off
+pins the staged source. The header describes the displayed figure's sources; inspect Data & analysis
+before Update when a source or analytical setting is pending.
+
+<!-- design-capture:source-ownership-pending -->
+
+![Noise has a new source selected in Data & analysis while the committed spectrum remains on the canvas. Update plot shows pending changes; the header names the displayed source.](images/current_design_sources_pending.png)
+
+*Noise has a new source selected in Data & analysis while the committed spectrum remains on the canvas. Update plot shows pending changes; the header names the displayed source. Synthetic workflow fixture, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:source-ownership-pending -->
+
 ### Translate the measurement names between tools
 
-The older Distributions pickers show **column names**. The newer pages show **measurement
-labels**. This is a naming difference, not a request to recalculate amplitudes.
+Measurement pickers use friendly labels, while stable column keys remain available in source
+metadata and exported tables. A label change does not recalculate amplitudes or rename a stored key.
 
-| Meaning | Distributions column | Newer pages |
+| Meaning | Stable stored/exported key | Visible label |
 |---|---|---|
-| Event duration | dwell_s | Dwell (s) |
+| Event duration | dwell_s | Dwell (ms) |
 | Original median event depth | depth_pA | Median depth (source units), or Median depth (recorded units) |
 | Explicitly chosen optional amplitude | amplitude_pA | Selected amplitude (recorded units) |
 | Depth relative to the recorded reference | frac_depth | Fractional depth ΔI/I₀ |
@@ -592,43 +803,61 @@ different chosen estimators. Read exclusions and amplitude provenance before com
 The label “recorded units” is deliberate: a column name ending in pA is not proof that the
 recording's gain or signal domain is correct.
 
-Distributions has a **Time unit** selector: seconds, milliseconds or microseconds change the
-display and relevant entry units, not the stored dwell values. The newer Dwell (s) recipes use
-seconds. A value of 0.01 s and 10 ms represents the same duration.
+Declared time quantities are displayed in **milliseconds (ms)** throughout the plotting and
+measurement surfaces. Distributions shows a fixed **ms** indicator. A stored dwell of `0.01 s`
+appears as `10 ms`; type `10` in an ms-labelled range field. The stored `dwell_s`, raw tables and
+scientific fit parameters stay in their canonical units. Unknown-rate traces stay in samples.
+Normalized dwell time is dimensionless, frequency/rates keep Hz or their rate units, and charge
+keeps its existing signal-unit × second definition. Density labels and values include the inverse
+unit conversion; counts, probabilities and normalized violin widths are not density conversions.
+
+Clock labels retain their origin: an instrument-clock position and elapsed time from the first
+loaded sample can both be in ms and still be different numbers. Read the origin as well as the unit.
+Time-entry controls convert back to the stored basis. Older saved ranges, fitted curves and
+sampled density results are converted for display once, without fitting again or rewriting the
+underlying raw measurements. Typed title/axis wording is retained, so review a custom label that
+explicitly says an older unit. CSV raw keys keep their original units; display-valued columns,
+where offered, are separately named and accompanied by display metadata.
+
+<!-- phase4-approved-capture:milliseconds -->
+
+![A descriptive apo-ferritin dwell comparison displays milliseconds. Raw dwell_s tables remain in seconds; this display test does not validate detector performance or current calibration.](images/current_phase4_milliseconds.png)
+
+*A descriptive apo-ferritin dwell comparison displays milliseconds. Raw dwell_s tables remain in seconds; this display test does not validate detector performance or current calibration. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
 
 ### Understand which buttons calculate something
 
 | Control | What it does | How to use it safely |
 |---|---|---|
-| Section: Data / Analysis / Appearance / Export | Shows another control group in the same tool | Use freely to find controls; it does not calculate |
+| Data & analysis / Format | Shows the recipe or an element’s appearance controls | Opening a tab or group does not calculate |
 | Analysis home: Refresh availability | Rechecks the catalog's input requirements | Use when a tool is listed as unavailable |
-| Explorer: Refresh current | Refreshes the active analytical page; for summaries/comparisons this generates from current sources | Do not use as a harmless “show my saved picture” button |
+| Update plot ▾ ▸ Refresh from recordings | Refreshes the active analytical page; for summaries/comparisons this generates from current sources | Do not use as a harmless “show my saved picture” button |
 | Distributions: Refresh, in Data sources | Pulls the offered sources again and can redraw/reset derived PCA or clustering state | Recheck source choices and any derived analysis afterward |
-| Distributions: Plot, Plot / Apply, Apply fit | Commits the same pending source, plot and fit choices | Review all pending analytical choices, not only the field beside the button |
-| Summaries/comparisons: Generate | Computes the selected descriptive figure from existing measurements | Use after configuring Data and Analysis; it does not detect new events |
+| Distributions: Update plot | Commits the same pending source, plot and fit choices | Review all pending analytical choices, not only the field beside the button |
+| Summaries/comparisons: Update plot | Computes the selected descriptive figure from existing measurements | Use after configuring Sources and Plot; it does not detect new events |
 | Run PCA / Run clustering | Performs the named feature analysis | Select only the intended source and feature set first |
 | Fit canvas, in Comparison figures | Fits the drawn canvas into the viewer | It is magnification, not a statistical fit |
-| Appearance controls | Restyle the committed picture | Do not press Plot / Apply merely to apply a font or color |
-| Source names and colors: Apply to figure | Applies that editor's label/color choices to the current figure | This is a separate appearance action, not a distribution fit |
+| Format controls | Restyle the committed picture | Do not press Update plot merely to apply a font or color |
+| Format legend/Series controls | Edit a figure-local source label or series appearance | Undo belongs to that figure; Project Sources… saves explicit defaults for future figures |
 
 Do not assume all tools behave identically. **Distribution summaries and Comparison figures**
-wait for explicit Generate. **Live Distributions can draw on opening or refresh**, and some
+wait for explicit Update plot. **Live Distributions can draw on opening or refresh**, and some
 geometry controls, including bins, normalization and log axes, can redraw an already active
 plot. Its source/type/column/fit proposals use the explicit commit controls. Save an important
-result to Figure Library before experimenting with its live controls.
+result as a Snapshot in Figures before experimenting with its live controls.
 
 ### Read the result state before saving
 
-The visible plot and the controls beside it can describe **different moments**. A filled dot
-on **Plot**, **Apply fit**, or **Generate**, or an unapplied-changes message, means a proposed
-change has not yet replaced the previous result. On the newer pages, export can still export
+The visible plot and the controls beside it can describe **different moments**. A pending count
+on **Update plot**, or an unapplied-changes message, means a proposed change has not yet replaced
+the previous result. On the newer pages, export can still export
 that previous result. If you intend the new recipe, finish it and generate before saving.
 
 | State | Meaning | Next decision |
 |---|---|---|
 | CURRENT | The displayed result agrees with the source lineage checks available to the app | Still inspect units, exclusions and method assumptions |
 | STALE | Relevant sources/settings changed or the result needs regeneration | Keep it as a historical snapshot, or explicitly refresh/generate a replacement |
-| SAVED SNAPSHOT | A stored result is being shown without a fresh calculation | Inspect/export as saved, or deliberately return to current sources to make a new version |
+| SAVED RESULT | An editable live figure shows its retained result without a fresh calculation | Inspect/export as saved, or use Update plot deliberately; frozen Snapshots are separate Figures entries |
 
 “Current” is not a scientific quality score. “Saved snapshot” is not a failure. Opening an
 old project does not establish that its plots used today's detection, calibration or curation.
@@ -642,7 +871,7 @@ Read **Details** and provenance before choosing whether to regenerate.
    File Manager does not select it for every plot.
 3. Set data/analytical controls and use the tool's calculation action as explained above.
    Read pending-change indicators before exporting; Distributions has some immediate redraw controls.
-4. Change titles, typography, colors, legend and axis presentation under Appearance. These
+4. Change titles, typography, colors, legend and axis presentation under Format. These
    edits do not request a detector run or refit and should preserve a manually chosen zoom.
 5. Inspect Details for exclusions, units, model diagnostics and provenance. Save the finished
    figure and the project, then export its picture and numerical context.
@@ -661,16 +890,16 @@ for other data. The apo current gain remains unverified, so its amplitudes are i
 
 1. From the main window choose **Analysis > Distributions...**. The Analysis Explorer opens or
    switches to its Distributions tab. An existing or initially generated picture may already be visible.
-2. Find **Section** in the fixed toolbar and choose **Data**. If you were looking at fonts or
-   export options, this brings back the source list and plotting recipe.
+2. Open **Data & analysis** in the right inspector. **Sources** holds the source list and
+   **Plot** holds the plotting recipe.
 3. In **Data sources**, untick every row except the intended -700 mV / IN15 / Schmitt source.
    Keep **Use accepted events only** checked. Do not merely highlight its name.
 
-![Distributions with Section set to Data: choose source checkboxes and the plot recipe here.](images/current_plot_data.webp)
+![Earlier Distributions Data layout: source checkboxes and the plot recipe.](images/current_plot_data.webp)
 
-*Current-source capture of a restored apo figure. The Explorer toolbar belongs to the whole
-analysis window; the Section selector and Plot / Apply belong to this tool. The source list,
-not the File Manager selection, determines the plotted population.*
+*Retained pre-Phase1 capture of a restored apo figure. In the current layout use Data & analysis
+for Sources and Plot, and the common Update plot toolbar action. The source checkboxes determine
+the plotted population.*
 
 ### Step 2: specify and commit the histogram
 
@@ -678,10 +907,9 @@ not the File Manager selection, determines the plotted population.*
 2. Set **Column = depth_pA**, the original median depth.
 3. Enter **Bins = 40**, **Normalize = count**, and **Colour by = None**.
 4. Turn **Log x** and **Log y** off for this reference example. Set **Fit = none**.
-5. Press **Plot / Apply** in the fixed toolbar, or **Plot** beside the recipe. This commits
-   the complete pending recipe. A former fit choice is not ignored simply because you pressed
-   a button labeled Plot rather than Apply fit.
-6. Choose **Section: Analysis > Axis range > Auto** to release any pinned axes left from an
+5. Press **Update plot** in the common toolbar. This commits the complete pending recipe,
+   including a proposed fit and any source changes.
+6. Choose **Format > X axis > Auto**, then **Y axis > Auto**, to release pinned axes from an
    earlier figure. This ensures the full histogram is visible; it changes the view, not the bins.
 7. Expand **Details - methods and provenance** below the figure. Check the source identity,
    accepted filter, metric, plotted count and exclusions. Warnings belong here, not inside
@@ -693,37 +921,37 @@ bin range, accepted filter or metric will change that check. Investigate a misma
 
 ### Step 3: style without applying a new analytical recipe
 
-1. Choose **Section: Appearance**. Start with **Publication · light**.
+1. Choose **Style ▾ > This figure > Publication · light**, then open **Format**.
 2. Set **Title**, **X label** and **Y label**. Keep the measurement and units explicit, for
    example “Median event depth (instrument pA scale)” and “Event count” for this unverified example.
 3. Adjust the font, title/axis/tick sizes, marker/line options where applicable, grid and legend.
-   These are appearance edits. **Do not press Plot / Apply to apply the font**; that button can
+   These are appearance edits. **Do not press Update plot to apply the font**; that button can
    commit unrelated analytical changes waiting in the controls.
-4. For a shorter source label in Distributions, return to Data and double-click that source's
+4. For a shorter source label in Distributions, return to Sources and double-click that source's
    name. Enter a local alias such as “Apo -700 mV”; the underlying source identity is retained.
    Do not rename different detector results to the same ambiguous label.
-5. Inspect the drawing. Switch sections as needed; section switching does not erase the result.
+5. Inspect the drawing. Switch inspector tabs as needed; tab switching does not erase the result.
 
 ![Appearance controls for the same restored Distributions figure.](images/current_plot_appearance.webp)
 
-*Section: Appearance shows styling rather than another analysis. The persistent Plot / Apply
-button remains visible, but is not needed for an appearance-only edit.*
+*Retained pre-Phase1 Appearance capture. The current Format tab shows these controls by element;
+Style ▾ chooses a whole-figure look. Update plot is not needed for an appearance-only edit.*
 
 ### Step 4: save a figure, save the project, then export
 
-1. Above the Explorer's tool tabs, choose **Save to Figure Library...**.
+1. Choose **Export ▾ > Snapshot to Figures…**.
 2. In **Save figure snapshot**, enter a meaningful **Figure name**, such as
    “Apo -700 mV | median depth | accepted | 40-bin count”, then **Save**.
-3. The Library opens on the new entry. This saves a frozen figure into the current session.
-   Return to the main window and choose **File > Save Project...** to persist it.
-4. In the Library, select that entry and choose **Export saved figure...**. Choose PNG, PDF or
+3. The new Snapshot becomes selected in Figures and appears in the same Explorer canvas.
+   Choose **File > Save Project...** in the main window to persist it.
+4. With that saved row selected, choose **Export ▾ > Figure…**. Choose PNG, PDF or
    SVG; use **Physical dimensions** if sizing it for a paper. The publication-export chapter
    explains the controls in order.
-5. Later, open the project and choose **Analysis > Figure Library...** to retrieve this exact
+5. Later, open the project and select the saved row under **Figures ▸ Snapshots** to retrieve this exact
    figure. Do not rerun detection just to see or export it.
 
 You now have three different things: the **live tool** for making a new analytical version,
-the **Library entry** for retaining the finished snapshot, and the **exported image** for slides
+the **Snapshot entry** for retaining the finished snapshot, and the **exported image** for slides
 or a manuscript. One is not a substitute for the other two.
 
 ## Recording-specific references
@@ -758,14 +986,14 @@ changing an optional event amplitude does not redetect the recording.
 
 ![Known-current reference controls with an existing synthetic +120 pA recipe.](images/current_reference.webp)
 
-*Current-source offscreen capture. +120 pA is generator-known information for the synthetic majority-blocked fixture only. It is not a recommended open-pore current for the experimental apo-ferritin recordings.*
+*Retained earlier offscreen capture. +120 pA is generator-known information for the synthetic majority-blocked fixture only. It is not a recommended open-pore current for the experimental apo-ferritin recordings.*
 
 ### Supply open-pore intervals
 
 1. Select `Selected open-pore intervals` instead of known current.
 2. Bracket an identified open-pore region with the trace Measure cursors and choose
    `Add current trace selection`, or use `Add interval` and double-click the start/end cells.
-3. Enter seconds from this recording's start: start included, end excluded. These are not
+3. Enter milliseconds from this recording's start: start included, end excluded. These are not
    instrument-clock timestamps and not sample indices. Keep intervals ordered, non-overlapping
    and within the loaded recording; invalid entries are refused rather than silently clipped.
 4. Choose `Constant reference (stable recording)` or `Linear between interval anchors (drift)`.
@@ -830,7 +1058,7 @@ reproducible than dragging; the field keeps eight decimal places, not infinite p
 
 ![Current Event Inspector showing saved optional amplitude and sub-state structure.](images/current_event_inspector.webp)
 
-*Current-source offscreen capture of the saved apo-ferritin curation example. Event ID 146 is position 147 in the unchanged All filter. The optional manual level and fitted segments are distinct from the original median-based depth. (Captured before the inspector could dock: its toolbar now reads ◀ / ▶ for Prev / Next, and the Label row sits under the waveform beside **Details**.)*
+*Retained earlier offscreen capture of the saved apo-ferritin curation example. Event ID 146 is position 147 in the unchanged All filter. The optional manual level and fitted segments are distinct from the original median-based depth. (Captured before the inspector could dock: its toolbar now reads ◀ / ▶ for Prev / Next, and the Label row sits under the waveform beside **Details**.)*
 
 ### Worked checkpoint: one event, different legitimate definitions
 
@@ -906,23 +1134,22 @@ for -500 / -600 / -700 mV, respectively. Each plotting page has its **own source
 Repeat the checkbox check when moving between tools. Do not assume that choosing three sources
 in Distributions also chooses them in Comparison figures.
 
-For each exercise: **configure Data, configure Analysis, generate, read Details, style, save
-to Figure Library, then Save Project**. Save each completed version before changing the
-figure type on that same page. The tab holds the current working view; it is not a gallery
-of all previous choices.
+For each exercise: **New figure, configure Data & analysis, Update plot, read Details, style,
+then Save Project**. Use **Duplicate** for an editable variant. Use **Snapshot to Figures…**
+when a frozen checkpoint is needed; keep the live figure alongside it.
 
 ### Recipe 1: separate dwell-depth panels for three recordings
 
 **Use:** compare each source's dwell-depth cloud without hiding it behind overlaid points.
 
-1. Open **Analysis > Comparison figures...**. Choose **Section: Data**.
+1. Open **Analysis > Comparison figures...**. Choose **Data & analysis ▸ Sources**.
 2. Tick the three intended IN15 / Schmitt sources and retain **Accepted events only**.
-3. Set **Figure = Faceted comparisons**. This figure-type selector is in **Data**, not Analysis.
-4. Switch **Section** to **Analysis**. In the Facets controls choose **X = Dwell (s)**,
+3. In **Data & analysis ▸ Plot**, set **Figure = Faceted comparisons**.
+4. Open **Data & analysis ▸ Plot**. In the Facets controls choose **X = Dwell (ms)**,
    **Y = Median depth (recorded units)**, and **Columns = 3**.
 5. Check **Log x** and leave **Log y** unchecked. Nonpositive values cannot appear on a log
    axis; inspect any exclusions instead of treating missing points as zero.
-6. Press **Generate**. Expect three source-separated scatter panels with common numerical
+6. Press **Update plot**. Expect three source-separated scatter panels with common numerical
    ranges. Check 881 / 239 / 984 retained observations if all selected metrics are finite.
 7. Choose **Fit canvas** if the whole figure is not visible. This changes viewer magnification,
    not the measurements, fit model or export dimensions. Use + / - and drag to inspect labels.
@@ -937,12 +1164,12 @@ comparison easier but does not establish common calibration or physical comparab
 **Use:** inspect all pairwise relationships among dwell, median depth and SNR at once.
 
 1. Stay in **Comparison figures**. Save the facets first.
-2. Choose **Section: Data**, confirm the same three sources, and set **Figure = Pair-plot matrix**.
-3. Choose **Section: Analysis**. In **Pair matrix**, check **only** Dwell (s),
+2. Choose **Data & analysis ▸ Sources** and confirm the same three sources. In **Plot**, set **Figure = Pair-plot matrix**.
+3. Choose **Data & analysis ▸ Plot**. In **Pair matrix**, check **only** Dwell (ms),
    Median depth (recorded units), and SNR.
 4. **Untick Event area** if it is selected: the default feature set includes it. Three selected
    features produce a 3-by-3 matrix; four produce a 4-by-4 matrix.
-5. Set **Diagonal histogram bins = 35**, then **Generate**.
+5. Set **Diagonal histogram bins = 35**, then **Update plot**.
 6. Check that diagonal panels are per-source count histograms and off-diagonal panels are
    scatter plots. These axes are linear; this is not a log-space KDE or a correlation matrix.
 7. Inspect each panel's retained/excluded counts. Missing SNR can exclude an event from an
@@ -956,15 +1183,15 @@ Distributions uses highlighted multi-selection instead; do not transfer that int
 
 **Use:** show the observations themselves, alongside a descriptive median/quartile summary.
 
-1. In **Comparison figures > Section: Data**, keep the same sources and choose
+1. In **Comparison figures > Data & analysis**, keep the same sources and choose
    **Figure = Individual-event overlays**.
-2. In **Section: Analysis**, set **Measurement = Median depth (recorded units)**.
+2. In **Data & analysis ▸ Plot**, set **Measurement = Median depth (recorded units)**.
 3. Set **Points = Strip · deterministic horizontal spread**. Keep
    **Overlay box summary (linear quartiles; 1.5 IQR)** checked and **Log measurement axis** off.
-4. Press **Generate**. Expect all 2,104 accepted observations for the current recipe, grouped
+4. Press **Update plot**. Expect all 2,104 accepted observations for the current recipe, grouped
    by source. Horizontal spread is a layout aid: it is not time, voltage, another measurement
    or randomization of the scientific data.
-5. Inspect Details and save the figure. In Appearance you can change marker size without
+5. Inspect Details and save the figure. In Format you can change marker size without
    recomputing the spread; larger markers can overlap.
 
 **Swarm · non-overlapping layout** is an alternative for smaller datasets. It is limited to
@@ -974,8 +1201,9 @@ a swarm. Box whiskers/outliers are descriptive, not confidence intervals or a hy
 
 ![Comparison figures showing the individual-event overlay controls and saved canvas.](images/current_comparison_analysis.webp)
 
-*Current-source capture of the restored individual-event overlay. Choose the Figure type in
-Data; its detailed controls appear in Analysis. Generate creates the result. Fit canvas
+*Retained pre-Phase1 capture of the restored individual-event overlay. Choose the Figure type in
+Data in this retained pre-Phase1 capture. In the current layout Figure and its detailed controls
+are together in Data & analysis ▸ Plot. Update plot creates the result. Fit canvas
 only fits the picture into the viewer; export still retains the complete canvas.*
 
 ### Recipe 4: an ECDF of median depth
@@ -983,10 +1211,10 @@ only fits the picture into the viewer; export still retains the complete canvas.
 **Use:** compare cumulative distributions without choosing histogram bins or a fitted family.
 
 1. Open **Analysis > Distribution summaries...**, a different Explorer tool.
-2. Choose **Section: Data**. Explicitly tick the three sources, retain **Accepted events only**,
-   and select **Measurement = Median depth (source units)**.
-3. Choose **Section: Analysis**, then **Summary = ECDF**.
-4. Press **Generate**. Each source should have its own curve and count; sources are not pooled.
+2. Choose **Data & analysis ▸ Sources**. Explicitly tick the three sources and retain **Accepted events only**.
+   In **Plot**, select **Measurement = Median depth (source units)**.
+3. Choose **Data & analysis ▸ Plot**, then **Summary = ECDF**.
+4. Press **Update plot**. Each source should have its own curve and count; sources are not pooled.
 5. Read a point as “the fraction of this source's retained events at or below this depth”.
    The vertical scale runs from 0 to 1; it is not an event count.
 6. Inspect Full details for exclusions and calibration/baseline qualifications. Style and save
@@ -996,10 +1224,10 @@ only fits the picture into the viewer; export still retains the complete canvas.
 
 **Use:** display what fraction of the observed events lasts longer than a chosen dwell.
 
-1. Save the ECDF, then in **Distribution summaries > Section: Data** set
-   **Measurement = Dwell (s)**. Confirm the same source checkboxes.
-2. In **Section: Analysis**, select **Summary = Empirical survival (uncensored)**.
-3. Press **Generate**. Read the x axis in seconds: 0.01 s means 10 ms.
+1. Save the ECDF, then in **Distribution summaries > Data & analysis ▸ Plot** set
+   **Measurement = Dwell (ms)**. Confirm the same source checkboxes.
+2. In **Data & analysis ▸ Plot**, select **Summary = Empirical survival (uncensored)**.
+3. Press **Update plot**. Read the x axis in milliseconds: 10 ms is a stored duration of 0.01 s.
 4. At a dwell x, read the y value as the fraction with **dwell strictly greater than x**.
    Repeated durations are handled as repeated observations, not fabricated intermediate events.
 5. Save with a name that includes “empirical” and “uncensored”.
@@ -1010,8 +1238,8 @@ curation and observation limits. Do not label the exported curve “corrected su
 
 ### Recipe 6: dwell box plots
 
-1. In **Distribution summaries > Data**, use **Dwell (s)** and the intended checked sources.
-2. In **Analysis**, choose **Box (linear quartiles)**, then **Generate**.
+1. In **Distribution summaries > Data**, use **Dwell (ms)** and the intended checked sources.
+2. In **Data & analysis ▸ Plot**, choose **Box (linear quartiles)**, then **Update plot**.
 3. Locate each source's median and quartile box. Whiskers end at observed values within
    1.5 interquartile ranges; observations outside the fences remain visible as outliers.
 4. Inspect long-dwell observations rather than deleting them to improve the picture.
@@ -1021,8 +1249,8 @@ curation and observation limits. Do not label the exported curve “corrected su
 ### Recipe 7: depth violin plots
 
 1. Save the boxes. In **Distribution summaries > Data**, choose **Median depth (source units)**.
-2. In **Analysis**, select **Violin (Scott KDE)** and set **Violin grid points = 256**.
-3. Press **Generate**. Each source has an equal maximum display width regardless of its event count.
+2. In **Data & analysis ▸ Plot**, select **Violin (Scott KDE)** and set **Violin grid points = 256**.
+3. Press **Update plot**. Each source has an equal maximum display width regardless of its event count.
 4. Read the shape as a smoothed description of the retained depths, not a count-versus-width
    encoding. The grid changes the evaluation resolution, **not** the Scott bandwidth rule.
 5. Inspect counts and sparse/constant-data messages in Full details. The page does not infer
@@ -1030,11 +1258,11 @@ curation and observation limits. Do not label the exported curve “corrected su
 6. Style and save “Apo | median-depth violins”. Apparent multiple peaks are not evidence of
    molecular species without further analysis.
 
-![Distribution summaries with Section set to Analysis, Summary set to Violin, and the saved result.](images/current_summary_analysis.webp)
+![Earlier Distribution summaries layout, with Summary set to Violin and the saved result.](images/current_summary_analysis.webp)
 
-*Current-source capture of the restored violin example. Measurement and source checkboxes are
-in Data; ECDF, survival, box and violin are selected in Analysis. A different Summary choice
-remains a draft until Generate, even while the earlier curve remains visible.*
+*Retained pre-Phase1 capture of the restored violin example. In the current inspector, source
+checkboxes are in Sources; Measurement and Summary are in Plot. A different Summary choice
+remains a draft until Update plot, even while the earlier curve remains visible.*
 
 ### Recipe 8: the single-source depth-count histogram
 
@@ -1045,16 +1273,16 @@ probability-per-bin answers a different question.
 
 ### Recipe 9: the four-panel overview
 
-After saving the facets, individual depths, ECDF and violin as **four separate Library entries**,
+After saving the facets, individual depths, ECDF and violin as **four separate Snapshots in Figures**,
 follow the composition instructions in the next chapter. Use two columns, panel labels A-D,
 and 1-by-1 panel spans. Begin with shared X/Y ranges and shared legend disabled because these
 panels show different quantities/layouts. Save the composition and then the project.
 
 ### Additional recipe: overlay scatter, then inspect selected events
 
-1. Open **Distributions > Section: Data**. Check the intended sources and accepted filter.
-2. Choose **Plot = Scatter**, **X = dwell_s**, **Y = depth_pA**, **Fit = none**.
-   Choose log axes deliberately, then **Plot / Apply**.
+1. Open **Distributions > Data & analysis ▸ Sources**. Check the intended sources and accepted filter.
+2. Choose **Plot = Scatter**, **X = dwell_s**, **Y = depth_pA**, **Quick fit = none**.
+   Choose log axes deliberately, then **Update plot**.
 3. With several sources, colors identify sources. Inspect Details and the legend before
    interpreting overlapping clouds. Use facets instead when overlay hides one source.
 4. Click a point to navigate to its source event. To select a region, enable **Lasso select**
@@ -1068,19 +1296,19 @@ panels show different quantities/layouts. Save the composition and then the proj
 1. In **Distributions**, choose **Plot = KDE (density)**, then explicitly set X and Y.
    For a dwell-depth example use dwell_s and depth_pA. Do not silently accept a fractional-depth
    default when the intended metric is median depth.
-2. Set log axes and **Contours**, then **Plot / Apply**. Read Details for retained points and bandwidth.
+2. Set log axes and **Contours**, then **Update plot**. Read Details for retained points and bandwidth.
 3. Each source's contour levels refer to its **own peak density**, not common event-count
    thresholds. Equal contour shapes do not imply equal sample sizes.
 4. Save the KDE as a distinct result. It is not the **Event waveforms** event-count heatmap.
 
-The current Event waveforms heatmap has the coordinate-mapping defect described below and in
-Known limits. Use verified scatter, histograms or KDE with their own qualifications; do not
-use the heatmap's apparent hotspot coordinates as a measurement.
+The historical Event waveforms heatmap had a coordinate-mapping defect recorded in Known limits.
+The November 3 development gate passed eight asymmetric-bin live/frozen/export tests on source
+`9ddafefa`; the dated pictures remain historical and were not retroactively recaptured.
 
 ### Additional recipe: apply a fit without confusing fit range and zoom
 
 1. In **Distributions**, choose the source and histogram/scatter recipe first. For a dwell
-   histogram, choose dwell_s and verify Time unit and the detector's time resolution.
+   histogram, choose Dwell (ms), whose stored key is dwell_s, and verify the detector's time resolution.
 2. Choose a model suited to the question, not merely one that draws a smooth curve. A simple
    exponential has no interior mode in its linear dwell-time density. A peak in log-spaced-bin
    counts alone does not rule it out. Scatter offers linear or
@@ -1088,18 +1316,110 @@ use the heatmap's apparent hotspot coordinates as a measurement.
 3. Set **Fit components**, **Fit range**, and **include filter-limited events** deliberately
    where available. **Fit range changes the analytical sample/likelihood. Axis range only
    changes the view.** Their entry units follow the displayed axis.
-4. Press **Apply fit**. This commits the full pending recipe, just like Plot / Apply;
+4. Press **Update plot**. This commits the full pending recipe;
    inspect source and metric changes too.
 5. Read fitted n, exclusions, parameters, uncertainty and model diagnostics in Details.
    If it says **Fit unavailable**, the histogram may still be present without a fitted curve.
 6. If a residual panel is displayed and needed, include it when saving/exporting. A fit curve,
    high R² or lower BIC alone does not validate the physical interpretation.
 
+### Nonlinear curve fitting: Gaussian peaks and logistic models
+
+Choose **Scatter** in Distributions, or open **Voltage dependence**, then press
+**Curve fit…** in **Data & analysis** (the **Fit** group in Voltage dependence).
+Select one plotted source and a model. This fits a continuous X–Y relationship;
+histogram Gaussian mixtures fit the distribution of event values. The nearby
+**Quick fit** selector is a separate, simpler fit control.
+
+Available curve models are straight line, Gaussian peak with baseline, single and
+double exponential with baseline, power law, four-parameter logistic (4PL),
+five-parameter logistic (5PL), Hill, Boltzmann sigmoid, stretched exponential,
+Lorentzian, Voigt and a custom equation. The dialog displays each model's equation
+and parameter convention. Gaussian sigma is standard deviation; the Voigt peak is
+height-normalized. In 5PL the midpoint scale is not generally EC50 when asymmetry differs
+from one. Use a Boltzmann voltage sigmoid for signed voltage; positive-dose Hill/logistic
+models have a different domain.
+
+1. Review **Source**, **Model**, the equation, and the X/Y quantity names and **units
+   shown in the dialog**. Parameters and **Fit x range** use those storage units,
+   including seconds for stored time, even when the parent figure displays milliseconds.
+   **Draft data** shows the observations for the proposed fit.
+2. Expand **Advanced: starts, constraints and loss**. **Estimate starts** estimates
+   free starting values inside your current bounds; it preserves fixed values and
+   constraints. **Reset constraints** restores model bounds and releases fixed
+   parameters while preserving the current starting values. Edit **Start**, **Lower**,
+   **Upper** and **Fixed** deliberately. The **Unit** column identifies each parameter's
+   unit. A custom equation uses `x` and the listed parameter names; arithmetic and the
+   named mathematical functions are supported, without Python statements or file access.
+3. Optionally restrict **Fit x range**. Choose **Error weights**: uniform errors or a
+   measurement-standard-deviation column for weights of 1/sigma². Under **Loss**, select
+   **Least squares**, **Robust soft L1** or **Robust Huber**. **Robust scale** is automatic
+   or a positive value in response units, or sigma units when weighted.
+4. Press **Fit**. **Cancel fit** stops the attempt and preserves the previous completed
+   result. On **Last completed fit**, check the source/model identity, curve,
+   raw-response residuals, metrics and parameter table. Expand **Detailed diagnostics**
+   for the full report. An estimate or high R² alone does not establish a suitable model.
+5. Press **Apply to figure** to attach a successful fit matching the current draft.
+   Editing the draft keeps the previous result on **Last completed fit**, but disables
+   Apply until a matching fit succeeds. **Remove applied fit** removes the figure's
+   overlay; it does not alter the original observations.
+6. **Export last completed fit…** writes that identified completed result as a JSON
+   fit record or CSV observations, predictions, residuals and sampled bands. It exports
+   the original source, model and settings of that result, even if a newer draft is
+   visible. Draft edits are not exported. Save the project after applying the fit to
+   retain its settings and evaluated outputs. Reopening restores those outputs without
+   running the optimizer. Changing the source or plotted coordinates invalidates the
+   old overlay.
+
+All these curve models minimize residuals in the original response space. The Scatter
+**Quick fit** power-law option fits log10–log10 values, and the Voltage dependence
+**Quick fit** exponential option fits log-response values; their R² describes that
+transformed space. These objectives can return different parameters on the same noisy
+observations.
+
+Intervals are local linearized approximations; bands are pointwise rather than
+simultaneous. Robust fits and poorly identified/boundary-constrained fits withhold
+conventional symmetric intervals. Supplied sigma is treated as known uncertainty;
+weighted prediction bands interpolate sigma across the fitted range. Residual
+structure, limited range and missing plateaus can make a smooth curve scientifically
+unconvincing. The solver refuses insufficient free-parameter observations: three
+apo-ferritin voltage summaries cannot identify an unconstrained 4PL or 5PL fit.
+Shared-parameter fitting across several sources is not offered by this dialog.
+
+![Curve fit advanced starts, bounds, fixed parameters, error weights and loss.](images/current_453798_fit_setup.png)
+
+![The last completed Gaussian fit with residuals and parameter intervals.](images/current_453798_fit_result.png)
+
+![An edited draft remains distinct from the last completed result.](images/current_453798_fit_draft.png)
+
+*NanoScope 45.37.98, offscreen synthetic Gaussian fitting fixture. These current controls distinguish proposed settings from a completed result. Export last completed fit uses the named completed result, not later draft edits. The displayed synthetic fit is a workflow example rather than a calibration or model-selection guarantee.*
+
+### Distribution-fit reliability and saved diagnostics
+
+Histogram likelihood fits retain detector truncation. Explicit Gaussian fit-range
+bounds now use a conditional Gaussian-mixture likelihood; the detector depth-floor
+advisory alone does not assume a uniform detection threshold. Exponential-mixture
+weak-component warnings count expected observed events after selection.
+
+The CDF diagnostic uses the declared observable support, including tails outside
+observed minima/maxima. Its comparison threshold is a descriptive reference, **not a
+calibrated fitted-model hypothesis test or p-value**. A smaller BIC ranks models on
+identical observations and support; it does not establish model adequacy. Historical
+screenshots and quoted outputs elsewhere in this manual retain their original dates;
+their older “KS rejected (1%)” or “far beyond chance” wording is superseded by this
+qualification and the current CDF mismatch label.
+
+Confidence-band and residual geometry now survive saving/reopening, with stored fit
+uncertainty. The Inspector's dwell/depth Fit action runs in a cancellable background
+worker and discards an answer if its events or calibration changed during the run.
+I-V details and CSV include Student-t OLS intervals when residual degrees of freedom
+exist; these assume independent constant-variance current errors.
+
 ### Additional recipe: PCA and clustering on one chosen source
 
-1. Open **Distributions > Data** and **untick all but the intended source**. PCA and clustering
+1. Open **Distributions > Data & analysis ▸ Sources** and **untick all but the intended source**. PCA and clustering
    use the first checked source, not the highlighted row.
-2. Choose **Section: Analysis**, select **Plot = PCA**, then find **Features (clustering & PCA)**.
+2. Choose **Data & analysis ▸ Plot**, select **Plot = PCA**, then expand **Groups** for **Features (clustering & PCA)**.
 3. Click the feature rows to highlight at least two numeric columns. This is a multi-select
    list, **not a checkbox list**. Inspect which rows are highlighted before proceeding.
 4. Choose **Run PCA**, not just Plot. Features are standardized; read explained variance,
@@ -1108,94 +1428,100 @@ use the heatmap's apparent hotspot coordinates as a measurement.
 5. For grouping, set **Method = GMM** with Auto (BIC) or Fixed k, or **k-means** with a fixed k;
    choose **Run clustering**. Document features, exclusions and settings.
 6. Save the resulting figure. A subsequent source Refresh can clear PCA/clustering state;
-   a frozen Library entry preserves the result you intended to keep.
+   a frozen Snapshot preserves the result you intended to keep.
 
 ### Compact gallery recipe checklist
 
 | Figure | Page and controls | Check before saving |
 |---|---|---|
-| Dwell-depth facets | Comparison figures; Faceted comparisons; X Dwell (s), Y Median depth; 3 columns; Log x on, Log y off; Generate | Three source-separated panels, 881/239/984 events |
-| Pair matrix | Comparison figures; Pair-plot matrix; only Dwell, Median depth, SNR; untick Event area; 35 diagonal bins; Generate | 3×3 matrix; linear axes and per-panel exclusion details |
-| Individual depths | Comparison figures; Individual-event overlays; Median depth; Strip deterministic spread; Overlay box summary; Generate | All 2104 events; horizontal spacing is not measured data |
-| Depth ECDF | Distribution summaries; Median depth; ECDF; Generate | Fraction at or below x, no bins or fitted family |
-| Dwell survival | Distribution summaries; Dwell (s); Empirical survival (uncensored); Generate | P(dwell > x), not Kaplan-Meier or missed-event correction |
-| Dwell boxes | Distribution summaries; Dwell (s); Box (linear quartiles); Generate | Preserve long events/outliers; not a significance test |
-| Depth violins | Distribution summaries; Median depth; Violin (Scott KDE); 256 grid points; Generate | Equal peak width per source; width is not event count |
-| −700 mV depth counts | Distributions; only −700 mV; Histogram; Column depth_pA; 40 bins; Normalize count; both log axes off; Fit none; Plot | Counts sum 984; tallest bin 85 events near 96.7576 pA |
-| Four-panel overview | Figure Library composer; facets, individual depths, ECDF, violin; 2 columns; 1×1 spans | Labels A-D; shared X, shared Y and shared legend off; save each constituent first |
+| Dwell-depth facets | Comparison figures; Faceted comparisons; X Dwell (ms), Y Median depth; 3 columns; Log x on, Log y off; Update plot | Three source-separated panels, 881/239/984 events |
+| Pair matrix | Comparison figures; Pair-plot matrix; only Dwell, Median depth, SNR; untick Event area; 35 diagonal bins; Update plot | 3×3 matrix; linear axes and per-panel exclusion details |
+| Individual depths | Comparison figures; Individual-event overlays; Median depth; Strip deterministic spread; Overlay box summary; Update plot | All 2104 events; horizontal spacing is not measured data |
+| Depth ECDF | Distribution summaries; Median depth; ECDF; Update plot | Fraction at or below x, no bins or fitted family |
+| Dwell survival | Distribution summaries; Dwell (ms); Empirical survival (uncensored); Update plot | P(dwell > x), not Kaplan-Meier or missed-event correction |
+| Dwell boxes | Distribution summaries; Dwell (ms); Box (linear quartiles); Update plot | Preserve long events/outliers; not a significance test |
+| Depth violins | Distribution summaries; Median depth; Violin (Scott KDE); 256 grid points; Update plot | Equal peak width per source; width is not event count |
+| −700 mV depth counts | Distributions; only −700 mV; Histogram; Column depth_pA; 40 bins; Normalize count; both log axes off; Fit none; Update plot | Counts sum 984; tallest bin 85 events near 96.7576 pA |
+| Four-panel overview | Figures ▸ Compose…; facets, individual depths, ECDF, violin; 2 columns; 1×1 spans | Labels A-D; shared X, shared Y and shared legend off; save each constituent first |
 
-In Comparison figures and Distribution summaries, use `Appearance › Source names and colors`,
-choose a source, edit `Display label`, and `Apply to figure`. In Distributions, double-click
-the source name instead. A project source default affects future figures; it is not necessary for
-a local presentation edit. Save each result before changing the view on the same page.
+In Comparison figures and Distribution summaries, edit a local source label through Format or
+the on-canvas legend, and use Format ▸ Series for its colour. These edits belong to the figure
+and its Undo history. In Distributions, double-click the source name. **Project Sources…** saves
+explicit defaults for future figures; it is not needed for a local presentation edit.
+Save each result before changing the view on the same page.
 
-The current Event waveforms count heatmap has a confirmed image-orientation defect: displayed
-coordinates can disagree with correctly indexed bins and marginals. **Do not use that heatmap to
-assign dwell-depth coordinates** until a verified fix is installed. Use a scatter, the validated
-histogram, or numerical tables. A KDE probability density is a different analysis, not another name
-for the event-count heatmap. The manual documents this limitation; this documentation update does
-not fix application code.
+The September 11 event-count heatmap audit found an image-orientation defect despite correct
+counts and marginals; its screenshots are historical evidence, not current coordinate references.
+The November 3 gate on `9ddafefa` passed all eight asymmetric-bin live/frozen/export checks. A KDE probability
+density remains a different analysis from an event-count heatmap.
 
-## Figure Library and publication export
+## Figures, snapshots and publication export
 
-![Current Figure Library with the nine saved population results.](images/current_figure_library.webp)
+<!-- design-capture:embedded-saved-figure -->
 
-*Current-source offscreen capture. Entries preserve numerical snapshots, appearance and provenance. The library is separate from the Event gallery, which curates individual events.*
+![The selected Snapshot opens inside the Explorer. Figures is the single inventory; the frozen canvas has no live Update, Undo or Style target.](images/current_design_saved_view.png)
+
+*The selected Snapshot opens inside the Explorer. Figures is the single inventory; the frozen canvas has no live Update, Undo or Style target. Synthetic workflow fixture, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:embedded-saved-figure -->
 
 ### Save, reopen and revise deliberately
 
 1. Generate the live analytical figure. Inspect its metrics, sources, warnings and pending-change
    indicators; a draft control is not necessarily the rendered result.
-2. Select **Save to Figure Library...** above the Explorer tabs. In **Save figure snapshot**,
+2. Select **Export ▾ > Snapshot to Figures…**. In **Save figure snapshot**,
    enter **Figure name**. If needed and offered, select **Include the displayed residual panel**,
-   then **Save**. The Library opens on the new entry. Save the main project afterward:
-   the entry initially exists in memory, not as an independently saved project file.
-3. In `Analysis › Figure Library…`, inspect the name, thumbnail, sources, saved settings and status.
-   Rename and Duplicate manage snapshots. **Duplicate does not reopen an editable analytical page.**
+   then **Save**. The new Snapshot becomes the selected row and appears in the Explorer canvas.
+   Save the main project afterward: the entry initially exists in memory.
+3. Inspect its sources, saved settings and status in the same canvas. Figures-list **Rename**,
+   **Duplicate** and **Delete** act on the selected entry. **Duplicate keeps a Snapshot frozen.**
 4. For a new analytical or styling variant, reopen the appropriate Analysis tool, generate from
    stored event data, edit appearance, and save a new entry. Exporting a frozen entry does not rerun it.
 5. Reopen the project once to verify persistence. Keep the referenced raw recordings available.
 
-### Find a saved figure and understand the Library buttons
+### Find a saved figure and understand its actions
 
-Use **File > Open Project...**, then **Analysis > Figure Library...**. Select an entry by name
-and thumbnail. Expand **Analysis settings and provenance** to inspect the captured sources and
-recipe. The Library is separate from **Event gallery**, which displays event waveforms for curation.
+Use **File > Open Project...**, then select a row under **Figures ▸ Snapshots** or **Compositions**.
+**Analysis > Figure Library...** and **Snapshot details…** remain compatibility routes to this same
+Explorer view; they do not open another inventory. Expand **Analysis settings and provenance** to
+inspect the captured sources and recipe. **Event gallery** remains the separate event-curation tool.
 
-| Library action | What changes | Common misunderstanding |
+| Saved-figure action | What changes | Common misunderstanding |
 |---|---|---|
-| Rename... | The entry's library name | It does not change the title drawn inside the plot |
-| Duplicate | Creates another frozen copy | It does not open an editable analysis |
-| Check status | Checks tracked source lineage | It does not regenerate the figure |
-| Export saved figure... | Writes the selected frozen picture | It does not use today's uncommitted live controls |
-| Reveal file | Shows an existing exported file | It is unavailable before an export, or if that file is gone |
-| Revise composition... | Reopens a stored composition's layout | It is not a general editor for every saved plot |
+| Figures ▸ Rename… | The selected entry's name | It does not change a title inside the frozen picture |
+| Figures ▸ Duplicate | Creates and selects another frozen copy | It does not create an editable analysis |
+| Figures ▸ Delete… | Removes the selected saved entries from this project | Unselected snapshots and compositions remain |
+| Export ▾ ▸ Figure… | Writes the selected frozen picture | It does not use uncommitted live controls |
+| Export ▾ ▸ Data… / Bundle… | Writes the saved numerical data or complete bundle | It does not regenerate an analysis |
+| Revise composition… | Reopens the selected composition's layout | It does not edit every kind of frozen plot |
 
-Library statuses use **Current**, **Outdated**, and **Saved snapshot**. All three are still
-frozen pictures. “Current” only means the available source-lineage checks match. “Outdated”
-does not erase the old result; decide whether to retain it as a historical version or generate
-a new one. A composition normally remains a saved snapshot of its components.
+Saved-entry statuses use **Current**, **Outdated**, and **Saved snapshot**. All three are frozen
+pictures. Current means the available source-lineage checks match. Outdated does not erase the
+old result; retain it as a historical version or generate a new one. A composition normally
+remains a saved snapshot of its components.
 
-To change the contents or styling of an individual saved figure, open the appropriate live tool,
-select/configure/generate the desired result, change its appearance, and save a **new** Library
-entry. Give versions distinct names. Do not expect Rename or Duplicate to expose plotting controls.
+To change an individual saved figure's content or styling, select its live figure, configure and
+Update if needed, then edit Format and save a **new** Snapshot. Give versions distinct names.
 
 ### Compose panels
 
-1. Save at least **two individual figures** to the Library. Choose **Compose multi-panel figure...**.
-   Do not try to select several thumbnails in the Library itself; it is single-select.
+1. Save at least **two individual figures** as Snapshots. Select their rows together in **Figures**
+   with the platform's multi-select gesture, then choose **Compose…**. The selection stays in the
+   Explorer; selecting a saved row does not open another window.
 2. In **Compose publication figure**, use the table's **Use** checkboxes to include 2-12 figures.
    Enter a **Figure name**.
 3. For the four-panel example, choose **Columns = 2**. Edit the **Label** cells to A, B, C and D.
    Set each row's **Rows = 1** and **Cols = 1**. Those cells are panel spans in a grid, not
    counts of sources or events. Choose a row and use **Move up / Move down** to set reading order.
-4. Adjust **Panel spacing** and **Panel labels** styling if needed. Start with **Share X range**,
+4. Adjust **Panel spacing** and **Panel labels** styling if needed. A shared style can supply
+   panel-letter typography; explicit per-panel typography, typed letters and their positions remain. Start with **Share X range**,
    **Share Y range**, and **One shared legend** off.
 5. Choose **Update preview**. Inspect all panels, labels and legends. If you change any layout
    or style control afterward, the preview becomes out of date and Save is disabled:
    choose **Update preview** again.
-6. Choose **Save to Figure Library**, then return to the main window and **Save Project**.
-   Each component is a frozen copy; later changes to live tools do not replace it.
+6. Choose **Save to Figure Library** in the composer. The new composition is selected under
+   **Figures ▸ Compositions**. Use **Save Project** to retain it. Each component is a frozen copy;
+   later changes to live tools do not replace it.
 
 **When sharing axes is appropriate:** compatible Cartesian panels must represent matching
 units, labels, scale/log mode, direction and tick formatting. The shared range uses their
@@ -1205,43 +1531,121 @@ independent axes or legends. Do not relabel incompatible quantities simply to pa
 
 **Revise the arrangement:** select a composition, choose **Revise composition...**, edit its
 layout, **Update preview**, then **Save as new figure**. Revision uses the composition's
-embedded original panels, not a newer similarly named Library entry. To replace a panel with
+embedded original panels, not a newer similarly named Snapshot. To replace a panel with
 newly analyzed or styled content, save that individual figure and make a new composition.
 
-### Appearance and selection
+<!-- phase4-approved-capture:composition -->
 
-1. On the live tool, choose **Section: Appearance**. This is where to find typography and
-   graphics controls; do not look in the main-window Inspector or Library Rename dialog.
-2. Start with **Publication · light**, then inspect **Font**, **Title (pt)**, **Axis labels (pt)**,
-   **Ticks (pt)**, background/grid, supported colors, line width, marker size and legend options.
-   A disabled control often means that graphic has no corresponding element, not that its data is missing.
-3. Keep scientific quantities and units in the axis labels. Appearance changes the displayed
-   label; it does not convert a normalized signal into calibrated pA.
-4. In **Comparison figures** or **Distribution summaries**, find **Source names and colors**.
-   Choose **Source**, enter **Display label**, optionally **Choose color...**, then **Apply to figure**.
-   This editor has its own explicit appearance commit. Use short, unambiguous source names.
-5. **Use as project source default** is optional: it affects future generated figures for that
-   exact recording/segment, channel and detector. It does not rewrite existing Library entries.
-   In Distributions, double-click the source name for a local alias; its project-default actions
-   are separate buttons.
-6. Choose **Save appearance preset...** to store shared appearance in local app preferences.
-   Reuse it with **Choose saved appearance...**. This does not save an analytical protocol,
-   source selection, bins, fits or source aliases. Save each styled figure and the project as well.
+![Two populated frozen apo-ferritin panels in the composer. Shared panel-letter style preserves literal labels and component snapshots; Update preview prepares a new composition without changing its source figures.](images/current_phase4_composition.png)
 
-Shared controls cover typography, titles/axis labels, legend, source colors, markers, lines and
-axis presentation where each plot supports them. **Appearance-only presets** do not alter detector
-settings, fitting choices, bins or numerical arrays. Start with Publication · light, inspect actual
-contrast and clipping, and adapt typography to the intended print size rather than the monitor zoom.
+*Two populated frozen apo-ferritin panels in the composer. Shared panel-letter style preserves literal labels and component snapshots; Update preview prepares a new composition without changing its source figures. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
+### Styles, source identity and element selection
+
+**Style ▾** offers **This figure**, **Selected figures** and **All live figures**. The last two
+operate on existing project figures, including dormant ones, with one Undo step per figure.
+**All live figures** also includes open retained Study and Report figure editors. **Selected figures**
+uses the live rows selected in Figures. Frozen Snapshots and compositions are excluded. **Keep text styles I set by hand** is on by default. **Undo style on N
+figures** remains available only while the affected histories are still at that batch's result.
+
+Each scope lists **Built in**, **Project styles** and **On this computer**. **Save this figure's
+look as…** saves a project style; **Save this figure's look on this computer…** makes a reusable
+local style. **Manage saved looks…** edits project definitions; **Manage styles on this computer…**
+manages local ones. A style carries appearance, not sources, fit choices or typed words. Figures
+store a pinned style revision and snapshot. Editing a definition creates a new revision; existing
+figures keep their revision until explicitly restyled. **Project default for new figures** affects
+plain New figures. Duplicate preserves the original figure; From recipe brings the recipe's look.
+The toolbar shows the pinned name and revision, with **●** for figure/element overrides.
+
+The style editor includes font and text-role sizes (including panel letters), fractional line and
+marker sizes, background, grid, frame and palette. Its preview uses labelled synthetic points;
+it never runs the current analysis. Palette defaults color series without an existing identity
+color. Source/class colors and explicit figure overrides remain authoritative. Optional **Default
+canvas width/height** set physical export defaults; an unset dimension follows the captured aspect
+ratio, and both unset retain Native size. Separate single/double-column widths are convenient
+presets, not a claim of journal compliance. No size edit recomputes or rearranges scientific panels.
+
+Open **Format** and select Figure, a text/axis/legend element, or a specific **Series**. Supported
+canvas text and series can also be clicked; the selected element's properties appear in the inspector.
+The floating text toolbar offers font, size, bold, italic, color, alignment and wording edits where
+supported. Double-click editing and existing context menus remain. Empty-space clicks clear the
+selection; panning preserves it. Selection outlines and editing controls stay out of exported artwork.
+Comparison/Study matplotlib surfaces expose their supported elements and series through the same
+controls; unavailable properties are disabled rather than silently rewriting the data.
+
+In Study and Report editors, use **Format** for titles, axis labels and series colours. The retained
+**Study details** or **Figure details** tab holds save/export and study-specific actions, not a
+second wording/colour editor. Their style menus include **On this computer** as well as built-in
+and project styles. Keeping hand-set text styles off replaces text styling, including fit-label
+size and colour, while preserving the words.
+
+<!-- design-capture:retained-editor-format -->
+
+![A Report title is selected in the shared Format inspector and the floating text toolbar. Figure details retains save/export actions without a second title or colour editor.](images/current_design_report_format.png)
+
+*A Report title is selected in the shared Format inspector and the floating text toolbar. Figure details retains save/export actions without a second title or colour editor. Synthetic workflow fixture, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:retained-editor-format -->
+
+<!-- design-capture:computer-menu-support -->
+
+![A retained Report editor offers On this computer alongside built-in and project styles. The displayed Lab style belongs to an isolated test catalog.](images/current_design_computer_styles.png)
+
+*A retained Report editor offers On this computer alongside built-in and project styles. The displayed Lab style belongs to an isolated test catalog. Synthetic workflow fixture, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:computer-menu-support -->
+
+For a specific series, change its color, line width, marker size or visibility where supported.
+Stable series identity keeps an edit attached to the intended source/category. Hiding a series is a
+presentation choice, not event rejection. **Format ▸ Series ▸ Project Sources…** edits shared display
+names/colors for exact project source IDs without gathering data. Figure-local overrides take
+precedence; existing frozen Snapshots are unchanged. Rename a displayed legend entry through
+Format/on-canvas editing and set its colour through the corresponding Series. These figure-local
+edits use the figure's Undo history; Project Sources is the explicit project-default action.
+
+Inheritance markers identify **set here**, **from style**, **from figure** or the native default.
+Click a set-here marker to clear just that override. **Reset element** keeps words and clears the
+element's style; on an axis it also releases range and major tick in the same Undo step. **Reset
+look** preserves words, ranges, annotation positions and legend names. **Copy format / Paste format**
+transfer compatible appearance without wording, source identity or scientific settings; series copy
+carries ink rather than visibility. **Reset figure**, under Update plot, also resets supported
+wording/pins according to that page's established rules. Neither action reruns the analysis.
 
 Lasso selection on Distributions Scatter/PCA views is an event-selection tool. Check source
 identity and selected event counts before any follow-on curation. Selection alone is not a new
 population model, statistical test or independent replicate definition.
 
+<!-- phase4-approved-capture:format-series -->
+
+![A source series in an apo-ferritin figure is selected in Format. Appearance changes and Undo preserve the exact source tables; Project Sources opens the separate shared name/color registry.](images/current_phase4_series.png)
+
+*Retained Phase 4 source-series capture from development source `403311a6cb44`. The former local Source names/colors editor visible at right has been superseded by Format Legend/Series and the explicit Project Sources route described above. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
+<!-- design-capture:global-computer-styles -->
+
+![The Explorer Style menu offers This figure, Selected figures and All live figures. All live includes dormant project figures and open Study/Report editors.](images/current_design_global_styles.png)
+
+*The Explorer Style menu offers This figure, Selected figures and All live figures. All live includes dormant project figures and open Study/Report editors. Synthetic workflow fixture, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:global-computer-styles -->
+
+<!-- phase4-approved-capture:style-editor -->
+
+![The shared style editor changes look only and previews synthetic points. The preview is not an apo-ferritin analysis or a publisher-compliance check; extra fields remain available by scrolling.](images/current_phase4_style_editor.png)
+
+*The shared style editor changes look only and previews synthetic points. The preview is not an apo-ferritin analysis or a publisher-compliance check; extra fields remain available by scrolling. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
+<!-- phase4-approved-capture:style-canvas-settings -->
+
+![The scrolled style editor exposes physical canvas width and height; column reference sizes are listed beneath the preview. Dimensions seed export choices without recomputing or rearranging an analytical figure.](images/current_phase4_canvas_settings.png)
+
+*The scrolled style editor exposes physical canvas width and height; column reference sizes are listed beneath the preview. Dimensions seed export choices without recomputing or rearranging an analytical figure. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
 ### Three different export intentions
 
 | Intention | Action | What to retain |
 |---|---|---|
-| Export the figure currently shown | Current-figure export, or Export saved figure from the library | PNG for raster; SVG/PDF for vector where supported |
+| Export the figure currently shown | Export ▾ on the selected live or saved figure | PNG for raster; SVG/PDF for vector where supported |
 | Create a standard set of report outputs | Analysis › Generate Report figures… | Explicit report recipe; this can calculate new figures |
 | Preserve the figure plus its numerical context | Save figure bundle… | Image, plotted data, configuration and provenance together |
 
@@ -1266,19 +1670,28 @@ from artwork does not justify excluding it from the paper's methods or the archi
 
 ### Publication-sized export, in dialog order
 
-1. For the live figure choose **Export > Export current figure...**. For a saved figure,
-   select it in **Figure Library** and choose **Export saved figure...**.
+<!-- design-capture:composition-style-export -->
+
+![Composition export uses the saved composition’s pinned style for physical sizing and named column presets. This 89 mm two-panel example flags text below the readability target; choose a larger width or restyle the live panels before publication.](images/current_design_composition_export.png)
+
+*Composition export uses the saved composition’s pinned style for physical sizing and named column presets. This 89 mm two-panel example flags text below the readability target; choose a larger width or restyle the live panels before publication. Frozen apo-ferritin composition used as a workflow illustration, captured offscreen during the 4 November integration review. See the integration capture manifest for scope and approval status.*
+
+<!-- /design-capture:composition-style-export -->
+
+1. For the live figure choose **Export ▾ > Export current figure...**. For a saved figure,
+   select its Snapshot/composition row in **Figures** and choose **Export ▾ > Figure…**.
 2. Choose **Format**: **PNG · raster image**, **PDF · vector document**, or **SVG · vector image**.
    SVG/PDF preserve vector paths where supported; a screenshot embedded in a figure remains raster.
-3. Set **Size = Physical dimensions**, not Native size, when you need a known manuscript width.
-4. Choose **Width preset = Single column · 85 mm**, **Double column · 180 mm**, or **Custom**.
-   Verify the actual journal requirement; these presets are starting points.
+3. Review **Size**. A pinned style's explicit canvas dimensions seed Physical dimensions;
+   otherwise the dialog starts at Native size. Choose Physical dimensions for a known width.
+4. Choose a single/double-column preset or **Custom**. Named widths come from the pinned style
+   when provided; an unavailable named width is not invented. Verify the actual venue requirement.
 5. Set **Units** and **Width × height**. Usually retain **Keep original plot aspect ratio**.
    If you need a different layout, recompose it; stretching does not improve panel organization.
 6. For PNG, set **PNG resolution (DPI)**, for example 300. This changes raster sampling,
    not data precision or font size at a fixed physical width.
 7. For a live fitted plot, select **Include residual panel below the main plot** if needed.
-   A saved Library figure must already include its residual; export cannot add one omitted at capture.
+   A saved Snapshot must already include its residual; export cannot add one omitted at capture.
 8. Expand **Print readability details and targets**. The default 8 pt text and 0.5 pt line
    targets are editable checks, not journal approval.
 9. Choose **Approximate print-size preview...** and inspect titles, ticks, units and legends.
@@ -1294,6 +1707,33 @@ physical-size settings from a preceding image export. Keep the publication-sized
 its matching bundle together. **Generate Report figures...** makes a standardized report set;
 it is not the way to export the figure you just styled in the Explorer.
 
+### Export a selection without generating new analyses
+
+Select multiple live figures, Snapshots or compositions in **Figures**, then choose **Export ▾ >
+Export selected figures…**. The plan lists output names and each figure's size. **Style canvas
+(Native if unset)** uses each pinned style's canvas dimensions. Explicit Native and named column
+choices remain available; a requested named width missing from a style is reported instead of
+silently using another journal's width. Review collisions and failures in the result report.
+
+Batch export captures existing results serially and never runs Update plot, fitting or detection.
+A draft or stale result remains identified. A dormant figure can be materialized to export its
+saved picture without recomputing it. PNG DPI controls raster sampling; vector PDF/SVG preserve
+supported paths. Inspect the actual output fonts and readability: font fallback depends on what is
+installed, and neither an export preset nor a synthetic style preview certifies publisher compliance.
+Keep raw numerical tables and the quantity/display metadata with the final artwork.
+
+<!-- phase4-approved-capture:batch-export -->
+
+![Selected-figure export options specify formats and physical sizing. The captured run exports existing results serially without detection, fitting or Update plot.](images/current_phase4_batch_options.png)
+
+*Selected-figure export options specify formats and physical sizing. The captured run exports existing results serially without detection, fitting or Update plot. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
+<!-- phase4-approved-capture:batch-export-results -->
+
+![The result report names the outputs written by this batch. Missing named widths and existing-file collisions are reported explicitly in the capture checks; no replacement dimensions or analyses are invented.](images/current_phase4_batch_results.png)
+
+*The result report names the outputs written by this batch. Missing named widths and existing-file collisions are reported explicitly in the capture checks; no replacement dimensions or analyses are invented. Background capture from development source `403311a6cb44`. Input CSV/project hashes remained unchanged; see the Phase 4 capture manifest.*
+
 ## Plotting problems: where to look
 
 Start with the smallest relevant check below. Do not rerun detection, reset calibration or
@@ -1302,16 +1742,16 @@ change the baseline merely to solve a navigation or presentation problem.
 | What you see | Check this first | What to do |
 |---|---|---|
 | I cannot find a new plot type | Which tool is open? | ECDF/box/violin are in Distribution summaries; facets/pair matrix/strip are in Comparison figures. Open them from Analysis home or the main Analysis menu |
-| The tool is not in the Explorer tabs | Has it been opened? | Use Analysis home search; tabs list opened tools, not the complete catalog |
-| I only see fonts, not source controls | Section selector | Choose Data; the figure stays in the same tool |
-| I cannot find facets or the pair-matrix selector | Comparison figures: Section Data | Choose Figure there, then change Section to Analysis for its settings |
+| The figure is not in Figures | Has it been created? | Use New or Analysis home; the list contains project figures, not every possible analysis |
+| I only see fonts, not source controls | Right inspector | Choose Data & analysis, then Sources; the figure stays in the same tool |
+| I cannot find facets or the pair-matrix selector | Comparison figures: Data & analysis ▸ Plot | Choose Figure there; its settings appear in the same group |
 | Only one recording appears | Source checkboxes inside this tool | Tick each intended source; highlighting a row or the Explorer header does not select every plot input |
 | The source list is empty | Stored detector table and selected channel | Load/detect the intended source if no event result exists; plotting raw traces uses other tools |
 | Unavailable source is listed | Saved source identity and raw/result availability | Restore the intended source or explicitly untick it; do not replace it with an unrelated similarly named recording |
-| I changed a control but still see the old graph | Filled dot or unapplied-changes message | For the new recipe, use Generate or the Distributions commit action. Save the old snapshot first if needed |
-| My graph changed before I pressed Plot | Live Distributions geometry controls | Bins, normalization and some log controls can redraw. Use Library snapshots to retain versions |
-| My color or source alias did not change | Which appearance editor is being used? | In Source names and colors, choose the source and press Apply to figure. General typography updates directly |
-| Library Rename did not change the plot title | Entry name versus artwork | Edit Title in the live tool's Appearance section, then save a new snapshot |
+| I changed a control but still see the old graph | Filled dot or unapplied-changes message | For the new recipe, use Update plot. Save the old snapshot first if needed |
+| My graph changed before I pressed Update plot | Live Distributions geometry controls | Bins, normalization and some log controls can redraw. Use Figures snapshots to retain versions |
+| My color or source alias did not change | Figure override versus project default | Use Format Series for local colour, edit the legend name for local wording, or Project Sources for defaults used by new/refreshed figures |
+| Snapshot Rename did not change the plot title | Entry name versus frozen artwork | Edit Title in the live tool's Format tab, then save a new Snapshot |
 | The matrix has four rows instead of three | Pair-matrix feature checkboxes | Explicitly untick Event area and keep only the three desired features |
 | PCA used the wrong recording | First checked source, not highlighted row | Untick every other source before Run PCA or Run clustering |
 | PCA still has no new result | Its dedicated action and selected features | Select at least two highlighted feature rows and press Run PCA |
@@ -1319,14 +1759,14 @@ change the baseline merely to solve a navigation or presentation problem.
 | Changing Axis range did not refit the model | View range versus Fit range | Axis range is a view change. Use Fit range only when you intend to change the fitted analytical sample |
 | The comparison is cropped on screen | Canvas magnification | Use Fit canvas or zoom out. Export retains the complete canvas, not the scrolled viewport |
 | Swarm is refused | Selected counts and crowding limits | Use Strip for the full current apo population; do not silently discard events |
-| I cannot compose multiple figures | Number of Library entries | Save at least two first, then use the composer dialog's Use checkboxes |
+| I cannot compose multiple figures | Selected saved rows | Select at least two Snapshots/compositions in Figures, then choose Compose… |
 | Save composition is disabled | Preview freshness | Choose Update preview after the final layout or label change |
 | Shared axes or legend are refused | Unit, scale, label and style compatibility | Keep independent axes/legends; do not falsify labels to force agreement |
 | A revised composition has the old panel content | Embedded original panels | Save new individual figures and build a new composition to replace analytical content |
-| The residual is missing from Library export | Whether it was captured | Save the live fitted figure again with its displayed residual included |
+| The residual is missing from saved-figure export | Whether it was captured | Save the live fitted figure again with its displayed residual included |
 | The export is tiny or text is too small | Physical width and font size | Use physical dimensions and inspect print-size readability; DPI alone does not enlarge text |
-| Reveal file is disabled | Whether an export exists | Export a file first; if it was moved/deleted, export again to a known location |
-| Saved figures are missing after reopening | Was the main project saved? | A Library entry is initially in memory; use File > Save Project after adding it |
+| Import JSON is hard to find | Distributions input controls | Open Data & analysis ▸ Import plot settings; named recipes remain under New ▾ > From recipe… |
+| Saved figures are missing after reopening | Was the main project saved? | A saved figure is initially in memory; use File > Save Project after adding it |
 
 ### A reliable final check before using a figure
 
@@ -1337,7 +1777,7 @@ change the baseline merely to solve a navigation or presentation problem.
 4. **Which result?** Resolve pending changes and distinguish current data from a saved snapshot.
 5. **Which interpretation?** Read Details for calibration, baseline, comparability, model and
    descriptive-statistic limitations. A clean plot does not mean the warnings were resolved.
-6. **Which saved version?** Give it a meaningful Library name, save the project and export the
+6. **Which saved version?** Give it a meaningful Snapshot name, save the project and export the
    matching figure/bundle. Reopen once to verify the version you intend to distribute.
 
 If the interface no longer resembles the screenshots, check **Help > About NanoScope...** for
@@ -1831,6 +2271,9 @@ segments over the trace and are listed underneath:
 
 **Current amplitude curation:** in Event inspector → Amplitude, choose an estimator and Apply, or enable **Edit red level** to edit the in-event level. The selected/manual result is stored separately as **Selected amplitude**; it does not overwrite the detector's **Median depth** (`depth_pA`), repair missed events or change event boundaries. A selected interval must lie within that event. The red event level is not the recording's open-pore reference. Editing event bounds is a different action and remeasures the affected event; if saved conditioning cannot be reproduced, NanoScope refuses the edit and preserves the old values.
 
+The following is a **historical readout**, including its original µs units. Current duration
+readouts use ms (25360 µs = 25.36 ms); the stored scientific measurements are unchanged.
+
 ```
 Event 1    [2 of 317 · All]
 dwell:        25360 µs   (0.02536 s)
@@ -1927,7 +2370,7 @@ Both fits were rejected on this historical unmerged table. That shows disagreeme
 
 ### Step 7 · See the fit against the data
 
-Open **Analysis → Distributions** (called `Plots` in historical screenshots), set `Column` to `dwell_s`, `Time unit` to `ms`, tick `Log x`, pick a `Fit`, then press **Apply fit**. Choosing a family is a draft until applied; it is not an appearance edit.
+Open **Analysis → Distributions** (called `Plots` in historical screenshots), set `Column` to **Dwell (ms)** (`dwell_s`), confirm the fixed **ms** indicator, tick `Log x`, pick a `Fit`, then press **Update plot**. Choosing a family is a draft until applied; it is not an appearance edit.
 
 **A note on this figure's numbers.** The screenshot and the verdict quoted below are from the same
 −600 mV recording, but at its *measured* baseline window and after a 10 ms merge, so n = 239 rather
@@ -2426,7 +2869,7 @@ the legend entirely.
 In the Plots window, the Style group now also carries **X label** / **Y label**
 overrides (text only — tick scaling still applies), a **Show legend** toggle, and
 the fit label's **Numbers** row; the **Axis range** fields read in the unit the axis
-displays, so a time axis follows the Time-unit combo and you type the number you
+displays, so a declared time axis uses ms and you type the number you
 read off the ticks.
 
 ### Step 5 · I–V and voltage dependence
@@ -2575,9 +3018,9 @@ The histogram and KDE show distributional structure, while the historical GMM la
 
 `PCA` in the plot-type combo projects the same selected features onto two components,
 which is worth a look when you have more than two features and want to know whether they carry
-independent information. **Analysis → Event waveforms** (historically `Event plots (density / ensemble)`) includes an **event-count heatmap**, marginal histograms and an ensemble-average view. A count heatmap is not KDE probability density. **September 11 audit caveat:** the then-reviewed heatmap had a confirmed image-orientation/bin-coordinate defect; this unrelated behavior was not re-audited for the incubation update, so do not use its apparent hotspot coordinates as measurements or publish that view until corrected. The current example gallery substitutes a validated one-dimensional depth histogram; see Known limits.
+independent information. **Analysis → Event waveforms** (historically `Event plots (density / ensemble)`) includes an **event-count heatmap**, marginal histograms and an ensemble-average view. A count heatmap is not KDE probability density. **September 11 audit caveat:** the then-reviewed heatmap had a confirmed image-orientation/bin-coordinate defect; that old capture is not a validated coordinate reference for the current implementation. The November 3 gate on `9ddafefa` passed all eight asymmetric-bin live/frozen/export checks. The current example gallery substitutes a validated one-dimensional depth histogram; see Known limits.
 
-![Historical Event plots count-heatmap and ensemble interface. The current heatmap coordinate defect is described in Known limits; this image is not a validated publication example.](images/event_plots.webp)
+![Historical Event plots count-heatmap and ensemble interface. The historical heatmap coordinate defect is described in Known limits; this image is not a validated publication example.](images/event_plots.webp)
 
 *Historical Event plots count-heatmap interface. The Ensemble tab averages aligned waveforms. Do not interpret the heatmap hotspot coordinates as validated measurements; see Known limits.*
 
@@ -2708,14 +3151,14 @@ caveats.](images/ex_scatter.webp)
 ### Step 6 · KDE — fractional blockade vs dwell, all three
 
 **Analysis ▸ Export density figure…**, choose *fractional ΔI/I₀* at the amplitude prompt. The figure
-overlays one KDE contour set per recording with marginals and n in the legend. Evaluate the fractional-amplitude caveats before comparing sources. The in-app KDE is **Analysis → Distributions → KDE (density)**. **Event waveforms** instead offers a binned event-count heatmap and ensemble view; it is not this KDE, and its current heatmap has the coordinate defect described in Known limits.
+overlays one KDE contour set per recording with marginals and n in the legend. Evaluate the fractional-amplitude caveats before comparing sources. The in-app KDE is **Analysis → Distributions → KDE (density)**. **Event waveforms** instead offers a binned event-count heatmap and ensemble view; it is not this KDE, and its historical coordinate-mapping caveat is dated in Known limits.
 
 ![The exported density figure: ΔI/I₀ vs dwell, one colour per recording.](images/ex_kde_all3.webp)
 
 ### Step 7 · Histograms — and reading a fit's verdict
 
 Histogram of `depth_pA` over all three sources shows the per-source normalised amplitude
-distributions. For dwell: select the −700 mV source alone, Column = `dwell_s`, Time unit = ms, and
+distributions. For dwell: select the −700 mV source alone, Column = **Dwell (ms)** (`dwell_s`), and
 pick a family in the Fit combo (arrow 7a), then press `Apply fit` beside it. Picking is only a
 proposal — until you apply it the button carries a ●, and the plot still shows whatever was drawn
 before — which is deliberate: walking the list to read the options used to run a fit per entry,
@@ -2753,7 +3196,7 @@ Then **Analysis → Subpopulations** runs the report. This historical run select
 caveat block — the report names what its numbers count and the clock they are cut
 at.](images/ex_subpop_report.webp)
 
-t-SNE is the default embedding. The UMAP example below required the explicit **analysis-layer** option `SubpopConfig(with_umap=True)`; this is a programmatic extension, not a missing beginner GUI button. UMAP availability depends on the environment, and coordinates are not guaranteed bit-reproducible across library versions. Retain that caveat with the report; neither embedding geometry nor a colored cluster proves molecular identity.
+t-SNE is the default embedding. The historical UMAP example below used the explicit **analysis-layer** option `SubpopConfig(with_umap=True)`. In build 45.37.98, use **Data & analysis > View > Generate UMAP** on a completed Subpopulations report instead; the current button workflow is illustrated in the navigation chapter above. UMAP availability depends on the environment, and coordinates are not guaranteed bit-reproducible across library versions. Retain that caveat with the report; neither embedding geometry nor a colored cluster proves molecular identity.
 
 ![UMAP of the pooled PCA space coloured by GMM subpopulation, with the app's stability caveat kept
 visible.](images/ex_umap.webp)
@@ -3019,8 +3462,12 @@ Older I–V/Voltage dependence screenshots combine a voltage-unit label and an S
 Windows-oriented source paths and a build spec exist (`packaging/NanoScope-win.spec`, `packaging/build_app.ps1`), but the current release has not been validated as a Windows build. Do not treat source compatibility as a completed platform test. Two differences: saving over a file that is open in another program fails rather than
 succeeding, and the hard-link advisory never fires.
 
+#### Event waveforms palette control in build 45.37.98
+
+The Event waveforms **Event-count heatmap** currently shows an empty **Format > Colour map** panel. Its palette cannot be changed through that hosted panel in this build. This is a control-visibility limitation, not a change to the computed count matrix. The separate Distributions **Heatmap colormap** control works.
+
 #### Event-count heatmap warning from the September 11 audit
 
-This incubation-focused documentation update did not re-audit the heatmap in build 40.15.59. The September 11 gallery audit confirmed an image-orientation/bin-mapping defect in **Event waveforms → event-count heatmap**, including its saved-figure rendering path, on source/build `703a96a6a50a`. The count matrix and marginal histograms can be correct while the displayed hotspot is placed at the wrong x/y coordinates. In the audited −700 mV example the 34-event peak belongs near log₁₀(dwell/s) = −1.689 and depth = 90.48 pA, but the image displayed it near −2.780 and 156.42 pA. This is a presentation defect, not a changed event table, but it can cause a wrong scientific reading. Do not publish or infer hotspot coordinates from this heatmap until the app defect is fixed and asymmetric-bin mapping is tested. The refreshed gallery uses a separately verified 40-bin depth histogram whose counts sum to 984 instead; no application-code fix is claimed by this manual update.
+The September 11 gallery audit confirmed an image-orientation/bin-mapping defect in **Event waveforms → event-count heatmap**, including its saved-figure rendering path, on source/build `703a96a6a50a`. The count matrix and marginal histograms can be correct while the displayed hotspot is placed at the wrong x/y coordinates. In the audited −700 mV example the 34-event peak belongs near log₁₀(dwell/s) = −1.689 and depth = 90.48 pA, but the image displayed it near −2.780 and 156.42 pA. This is a presentation defect, not a changed event table, but it can cause a wrong scientific reading. The illustrated historical gallery therefore used a separately verified 40-bin depth histogram whose counts sum to 984. The November 3 development gate on source `9ddafefa` passed all eight `test_event_heatmap_coordinates.py` cases: asymmetric bins, both global image-order settings, live/frozen rectangular project restoration, PNG peak pixels, and CSV/SVG/PDF coordinates. The September defect is therefore a historical caveat rather than a current-code limitation established by this edition. These checks do not recapture the older picture or validate its scientific interpretation.
 
-NanoScope build 40.15.59 · Manual edition 2026-09-29. This manual distinguishes current source-verified workflows, historical real-recording walkthroughs, current native screenshots/exports and explicitly synthetic or programmatic illustrations. Historical numerical results retain their original settings and caveats; screenshots are not proof of calibration, accuracy or publication readiness. Check the installed build identity and each figure's provenance when reproducing an example.
+NanoScope build 45.37.98 · Manual edition 2026-11-05. This manual distinguishes updated plotting navigation, earlier reviewed workflows, historical real-recording walkthroughs, dated native screenshots/exports and explicitly synthetic or programmatic illustrations. Historical numerical results retain their original settings and caveats; screenshots are not proof of calibration, accuracy or publication readiness. Check the installed build identity and each figure's provenance when reproducing an example.

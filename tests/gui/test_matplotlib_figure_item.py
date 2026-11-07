@@ -198,5 +198,5 @@ def test_native_svg_uses_frozen_full_canvas_layout_and_isolated_defaults(qtbot, 
     assert figure.canvas is canvas
     root = ET.fromstring(item.native_figure_svg())
     assert list(map(float, root.attrib["viewBox"].split())) == [0, 0, 576, 288]
-    assert not any(node.tag.endswith("}text") for node in root.iter())
+    assert any(node.tag.endswith("}text") for node in root.iter())
     assert not any(node.tag.endswith("}image") for node in root.iter())

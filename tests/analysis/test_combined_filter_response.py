@@ -7,8 +7,11 @@ narrow notch cannot disappear between sparse log-grid samples.
 
 from __future__ import annotations
 
+from decimal import Decimal, localcontext
+
 import numpy as np
 import pytest
+from scipy import signal
 
 from nanoscope.analysis import filters
 
@@ -16,49 +19,190 @@ from nanoscope.analysis import filters
 FS = 250_000.0
 
 
-def test_combined_response_is_the_pointwise_product_on_one_shared_grid():
+def test_combined_response_is_the_pointwise_product_on_one_shared_grid(monkeypatch):
     stages = [
         {"stage": "highpass", "cutoff_hz": 20.0, "order": 2, "kind": "butter"},
         {"stage": "running_mean", "window_s": 80e-6},
         {"stage": "savgol", "window_s": 120e-6, "polyorder": 3},
         {"stage": "lowpass", "cutoff_hz": 12_000.0, "order": 4, "kind": "bessel"},
     ]
+    evaluated = []
+    real_response = filters.response
+
+    def record_response(stage, fs, **kwargs):
+        result = real_response(stage, fs, **kwargs)
+        evaluated.append((stage, kwargs, result))
+        return result
+
+    monkeypatch.setattr(filters, 'response', record_response)
     f, combined = filters.combined_response(stages, FS, n=2048, f_min_hz=1.0)
 
     expected = np.ones_like(combined)
-    for spec in stages:
-        kwargs = dict(spec)
-        stage = kwargs.pop("stage")
-        stage_f, magnitude = filters.response(
-            stage, FS, n=f.size, f_min_hz=f[0], **kwargs
-        )
+    assert len(evaluated) == len(stages)
+    for spec, (stage, kwargs, (stage_f, magnitude)) in zip(stages, evaluated):
+        assert stage == spec['stage']
+        assert all(kwargs[key] == value for key, value in spec.items() if key != 'stage')
         # This is the contract: no interpolation between independently chosen grids.
         assert np.array_equal(stage_f, f)
         expected *= magnitude
 
-    # scipy's repeated SOS accumulation can differ by a few hundred ULPs between
-    # otherwise identical calls; this remains far below any physical precision.
-    np.testing.assert_allclose(combined, expected, rtol=1e-11, atol=0.0)
+    # Check the responses actually consumed by the chain, exactly. Independently
+    # repeating sosfreqz is not an exact oracle: at 1 Hz its high-pass numerator
+    # condition exceeds 6e9, amplifying sub-ULP complex-evaluation differences.
+    # The independent 80-digit check below separately bounds that numerical error.
+    np.testing.assert_array_equal(combined, expected)
 
 
-def test_zero_phase_default_squares_each_iir_design_exactly_once():
+def _high_precision_sos_power(sos, frequencies, fs):
+    """Exact stored-coefficient response and polynomial condition, at 80 digits.
+
+    |a+b*z+c*z^2|^2 = a²+b²+c²+2*b*(a+c)*cos(w)+2*a*c*cos(2*w).
+    Evaluating this identity in Decimal avoids both SciPy's complex Horner path
+    and its double-precision cancellation; the input coefficients remain the
+    actual binary64 filter, rather than an idealized unquantized design.
+    """
+    values, conditions = [], []
+    pi = Decimal('3.141592653589793238462643383279502884197169399375105820974944592307816406286208998628')
+    with localcontext() as context:
+        context.prec = 80
+        sections = [[Decimal.from_float(float(v)) for v in row] for row in sos]
+        for frequency in frequencies:
+            angle = 2*pi*Decimal.from_float(float(frequency))/Decimal.from_float(float(fs))
+            cosine = term = Decimal(1)
+            for k in range(1, 100):
+                term *= -angle*angle/Decimal((2*k-1)*(2*k))
+                cosine += term
+                if abs(term) < Decimal('1e-78'):
+                    break
+            else:
+                raise AssertionError('High-precision cosine did not converge')
+            power, condition = Decimal(1), Decimal(0)
+            for row in sections:
+                squared = []
+                for coefficients in (row[:3], row[3:]):
+                    a, b, c = coefficients
+                    magnitude_squared = (a*a+b*b+c*c+2*b*(a+c)*cosine
+                                         +2*a*c*(2*cosine*cosine-1))
+                    squared.append(magnitude_squared)
+                    condition += sum(abs(v) for v in coefficients)/magnitude_squared.sqrt()
+                power *= squared[0]/squared[1]
+            values.append(float(power))
+            conditions.append(float(condition))
+    return np.asarray(values), np.asarray(conditions)
+
+
+def test_low_cutoff_highpass_response_matches_high_precision_quantized_sos():
+    sos = filters._design_sos(FS, 20., 2, 'butter', btype='high')
+    frequency, magnitude = filters.response('highpass', FS, cutoff_hz=20., order=2,
+                                             kind='butter', n=2048, f_min_hz=1.)
+    reference, condition = _high_precision_sos_power(sos, frequency, FS)
+    # Standard polynomial evaluation sensitivity is sum|coeff| / |P(z)|.
+    # Propagate numerator + denominator conditioning through the squared magnitude.
+    # gamma_64 is a conservative first-order envelope for the complex arithmetic,
+    # phase evaluation, division and squaring; it is NOT a fixed relaxed tolerance.
+    epsilon = np.finfo(float).eps
+    gamma = 64*epsilon/(1-64*epsilon)
+    relative_error = np.abs(magnitude/reference-1)
+    assert condition[0] > 1e9, 'the fixture must exercise severe cancellation'
+    assert np.all(relative_error <= gamma*condition), (
+        frequency[np.argmax(relative_error/(gamma*condition))],
+        float(np.max(relative_error/(gamma*condition))))
+
+
+def _capture_stage_responses(monkeypatch):
+    """Observe the stage values the chain actually consumed, without recomputing them."""
+    captured = []
+    real_response = filters.response
+
+    def record(stage, fs, **kwargs):
+        frequency, magnitude = real_response(stage, fs, **kwargs)
+        captured.append((stage, dict(kwargs), frequency, magnitude))
+        return frequency, magnitude
+
+    monkeypatch.setattr(filters, "response", record)
+    return captured
+
+
+def _assert_requested_stage_parameters(expected, captured):
+    """The numerical oracle must describe the requested design, not altered inputs."""
+    assert [item[0] for item in captured] == [spec["stage"] for spec in expected]
+    for spec, (_stage, kwargs, _frequency, _magnitude) in zip(expected, captured, strict=True):
+        for name, value in spec.items():
+            if name != "stage":
+                assert kwargs[name] == value, (name, kwargs[name], value)
+
+
+def _assert_iir_stage_matches_high_precision(stage, kwargs, frequency, magnitude, fs):
+    """Independently check single/two-pass semantics of the quantized SOS design.
+
+    A repeated SciPy SOS evaluation is not an exact numerical oracle near a
+    cancelling numerator. The independent Decimal response and its polynomial
+    condition bound both phase modes without an arbitrary fixed tolerance.
+    """
+    if stage in ("highpass", "lowpass"):
+        sos = filters._design_sos(
+            fs, kwargs["cutoff_hz"], kwargs["order"], kwargs["kind"],
+            btype="high" if stage == "highpass" else "low")
+    else:
+        assert stage == "notch"
+        lines = filters.notch_frequencies(
+            fs, kwargs.get("freq_hz", 60.0),
+            harmonics=kwargs.get("harmonics", 3), freqs=kwargs.get("freqs"))
+        sos = np.vstack([
+            np.hstack(signal.iirnotch(line, kwargs.get("q", 30.0), fs=fs))[None, :]
+            for line in lines])
+    power, condition = _high_precision_sos_power(sos, frequency, fs)
+    reference = power if kwargs["zero_phase"] else np.sqrt(power)
+    assert np.all(np.isfinite(reference) & (reference > 0)), "fixture needs a finite positive reference"
+    assert np.all(np.isfinite(condition) & (condition > 0)), "fixture needs finite polynomial conditioning"
+    assert np.all(np.isfinite(magnitude))
+    epsilon = np.finfo(float).eps
+    gamma = 64*epsilon/(1-64*epsilon)
+    relative_error = np.abs(magnitude/reference-1)
+    assert np.all(relative_error <= gamma*condition), (
+        stage, kwargs["zero_phase"],
+        frequency[np.argmax(relative_error/(gamma*condition))],
+        float(np.max(relative_error/(gamma*condition))))
+
+
+def _assert_captured_iir_product(frequency, combined, captured, fs):
+    expected = np.ones_like(combined)
+    for stage, kwargs, stage_frequency, magnitude in captured:
+        np.testing.assert_array_equal(stage_frequency, frequency)
+        expected *= magnitude
+        _assert_iir_stage_matches_high_precision(
+            stage, kwargs, stage_frequency, magnitude, fs)
+    np.testing.assert_array_equal(combined, expected)
+
+
+def test_zero_phase_default_squares_each_iir_design_exactly_once(monkeypatch):
     stages = [
         {"stage": "highpass", "cutoff_hz": 10.0, "order": 2, "kind": "butter"},
         {"stage": "notch", "freq_hz": 60.0, "q": 20.0, "harmonics": 2},
         {"stage": "lowpass", "cutoff_hz": 10_000.0, "order": 3, "kind": "bessel"},
     ]
+    captured = _capture_stage_responses(monkeypatch)
     f_single, single = filters.combined_response(
         stages, FS, zero_phase=False, n=512, f_min_hz=1.0
     )
+    single_stages = list(captured)
+    captured.clear()
     f_applied, applied = filters.combined_response(
         stages, FS, zero_phase=True, n=512, f_min_hz=1.0
     )
 
-    assert np.array_equal(f_single, f_applied)
-    np.testing.assert_allclose(applied, single**2, rtol=2e-14, atol=1e-300)
+    np.testing.assert_array_equal(f_single, f_applied)
+    _assert_requested_stage_parameters(stages, single_stages)
+    _assert_requested_stage_parameters(stages, captured)
+    assert all(item[1]["zero_phase"] is False for item in single_stages)
+    assert all(item[1]["zero_phase"] is True for item in captured)
+    # Omitted stage flags inherit the chain default. Verify each consumed stage
+    # independently as |H| or |H|², then its exact contribution to the product.
+    _assert_captured_iir_product(f_single, single, single_stages, FS)
+    _assert_captured_iir_product(f_applied, applied, captured, FS)
 
 
-def test_a_stage_can_explicitly_override_the_chain_zero_phase_default():
+def test_a_stage_can_explicitly_override_the_chain_zero_phase_default(monkeypatch):
     stages = [
         {
             "stage": "highpass",
@@ -69,19 +213,12 @@ def test_a_stage_can_explicitly_override_the_chain_zero_phase_default():
         },
         {"stage": "lowpass", "cutoff_hz": 8_000.0, "order": 2, "kind": "butter"},
     ]
+    captured = _capture_stage_responses(monkeypatch)
     f, combined = filters.combined_response(stages, FS, zero_phase=True, f_min_hz=1.0)
-    _, high = filters.response(
-        "highpass", FS, cutoff_hz=20.0, order=2, kind="butter",
-        zero_phase=False, n=f.size, f_min_hz=f[0],
-    )
-    _, low = filters.response(
-        "lowpass", FS, cutoff_hz=8_000.0, order=2, kind="butter",
-        zero_phase=True, n=f.size, f_min_hz=f[0],
-    )
-    # At Nyquist SciPy's independently repeated SOS accumulation may differ by one
-    # machine epsilon around a mathematical zero; that is numerical dust, not a
-    # response disagreement.
-    np.testing.assert_allclose(combined, high * low, rtol=2e-14, atol=1e-15)
+    _assert_requested_stage_parameters(stages, captured)
+    assert captured[0][1]["zero_phase"] is False  # explicit stage override
+    assert captured[1][1]["zero_phase"] is True   # omitted flag inherits default
+    _assert_captured_iir_product(f, combined, captured, FS)
 
 
 def test_notch_automatically_refines_but_keeps_a_geometric_shared_grid():
@@ -103,32 +240,30 @@ def test_notch_automatically_refines_but_keeps_a_geometric_shared_grid():
     assert magnitude[nearest] < 0.01
 
 
-def test_notch_refinement_still_uses_the_same_grid_for_every_stage():
+def test_notch_refinement_still_uses_the_same_grid_for_every_stage(monkeypatch):
     stages = [
         {"stage": "notch", "freqs": (x for x in (60.0, 120.0, 180.0)), "q": 30.0},
         {"stage": "lowpass", "cutoff_hz": 1_000.0, "order": 2, "kind": "butter"},
     ]
+    captured = _capture_stage_responses(monkeypatch)
     f, combined = filters.combined_response(stages, 10_000.0, n=64, f_min_hz=1.0)
-    _, notch = filters.response(
-        "notch", 10_000.0, freqs=(60.0, 120.0, 180.0), q=30.0,
-        n=f.size, f_min_hz=f[0],
-    )
-    _, low = filters.response(
-        "lowpass", 10_000.0, cutoff_hz=1_000.0, order=2, kind="butter",
-        n=f.size, f_min_hz=f[0],
-    )
-    np.testing.assert_allclose(combined, notch * low, rtol=2e-14, atol=0.0)
+    _assert_requested_stage_parameters(
+        [{**stages[0], "freqs": (60.0, 120.0, 180.0)}, stages[1]], captured)
+    assert all(item[1]["zero_phase"] is True for item in captured)
+    _assert_captured_iir_product(f, combined, captured, 10_000.0)
 
 
 def test_highpass_defaults_describe_the_filter_that_highpass_actually_applies():
     f, combined = filters.combined_response(
         [{"stage": "highpass", "cutoff_hz": 100.0}], FS, n=1024, f_min_hz=1.0
     )
-    _, actual_default = filters.response(
-        "highpass", FS, cutoff_hz=100.0, order=4, kind="butter",
-        n=f.size, f_min_hz=f[0],
-    )
-    np.testing.assert_allclose(combined, actual_default, rtol=0.0, atol=0.0)
+    # The kernel's default is order-4 Butterworth. Compare to its independent
+    # coefficient oracle, not a second cancellation-sensitive SOS accumulation.
+    sos = filters._design_sos(FS, 100., 4, 'butter', btype='high')
+    reference, condition = _high_precision_sos_power(sos, f, FS)
+    epsilon = np.finfo(float).eps
+    gamma = 64*epsilon/(1-64*epsilon)
+    assert np.all(np.abs(combined/reference-1) <= gamma*condition)
 
 
 def test_empty_chain_is_the_flat_identity():

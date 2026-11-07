@@ -108,6 +108,8 @@ def _fit(window: MainWindow, qtbot) -> None:
     stats.n_components_dwell.setValue(1)
     stats.n_components_depth.setValue(1)
     stats.fit_button.click()
+    from .fit_test_helpers import wait_for_fit
+    wait_for_fit(stats)
     qtbot.wait(30)
 
 

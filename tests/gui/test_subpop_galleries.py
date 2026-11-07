@@ -822,6 +822,9 @@ def reported(win, qtbot):
         "the fixture produced no mixture, so nothing below is about the wiring")
     # The trace the worker measured on, exactly as the real launch stashes it.
     w._subpop_signal_pending = signal
+    w._subpop_source_recipe_pending = w._subpop_result_recipe(
+        w._analysis_panel.current_detection())
+    w._subpop_accepted_ids_pending = frozenset(int(e) for e in events.accepted.df["event_id"])
     w._subpop_pending = True
     w._on_subpop_finished(report)
     qtbot.wait(20)
@@ -1039,8 +1042,11 @@ def test_the_report_window_offers_the_entry_points_without_importing_a_surface()
                 if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module}
     # figure_text (2026-11-01): in-figure text editing, which every plot window installs
     # through plot_interaction; a controller over the window's own items, not a surface.
+    # Shared series styling, point rendering and safe widget reparenting are also
+    # infrastructure; the exact allowlist still rejects actual sibling surfaces.
     allowed = {"categorical", "analysis_catalog", "plot_appearance", "plot_workflow",
-               "plot_interaction", "figure_text"}
+               "plot_interaction", "figure_text", "figure_series", "series_points",
+               "widget_transfer"}
     assert siblings == allowed, (
         f"the report window reaches {sorted(siblings - allowed)} beyond the shared "
         f"infrastructure it is allowed to reuse {sorted(allowed)}; a real surface "
