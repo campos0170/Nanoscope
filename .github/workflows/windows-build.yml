@@ -74,42 +74,38 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -c $constraints -e ".[dev]" tensorflow keras
       - name: Run core, I/O, packaging and recovery tests
-        # Shorter than the job's limit, so the steps after it still run when this one is cut off.
-        timeout-minutes: 75
         env:
           NANOSCOPE_RECOVERY_ROOT: ${{ runner.temp }}\nanoscope-recovery
         run: |
-          # Python writes its output straight to files, so they hold everything up to the moment
-          # a time limit stops the run, and the next step can say which test was running. A test
-          # that runs over 5 minutes gets every thread's stack dumped to stderr
-          # (faulthandler_timeout), which shows where it is stuck.
-          $out = Join-Path $env:RUNNER_TEMP "windows-tests.out.txt"
-          $err = Join-Path $env:RUNNER_TEMP "windows-tests.err.txt"
-          $xml = Join-Path $env:RUNNER_TEMP "windows-tests.xml"
-          $pytestArgs = "-u -m pytest -v -p no:cacheprovider -m `"not corpus`" " +
-            "-o faulthandler_timeout=300 --durations=30 --junitxml `"$xml`" " +
-            "tests/core tests/io tests/packaging " +
-            "tests/gui/test_recovery_controller.py tests/gui/test_project_recovery.py"
-          $proc = Start-Process -FilePath (Get-Command python).Source -ArgumentList $pytestArgs `
-            -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
-          Get-Content $out, $err -ErrorAction SilentlyContinue
-          exit $proc.ExitCode
+          # Twice this job ran into its time limit with no report, so the tests run under
+          # run_tests_resumably.py: pytest gets its own hidden console and output files, a test
+          # that stops making progress for 5 minutes is killed and recorded (with the stack dump
+          # faulthandler_timeout writes at 4 minutes), a test that ends pytest is recorded, and
+          # the run carries on after either. results.xml covers every test.
+          python .github/scripts/run_tests_resumably.py `
+            --out-dir (Join-Path $env:RUNNER_TEMP "windows-tests") `
+            --idle-minutes 5 --time-limit-minutes 70 `
+            pytest -q -p no:cacheprovider -m "not corpus" -o faulthandler_timeout=240 `
+            tests/core tests/io tests/packaging `
+            tests/gui/test_recovery_controller.py tests/gui/test_project_recovery.py 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP "windows-tests.log")
+          exit $LASTEXITCODE
       - name: Report test results as annotations
         if: always()
         run: |
           python .github/scripts/junit_to_annotations.py `
-            (Join-Path $env:RUNNER_TEMP "windows-tests.xml") "Windows tests" `
-            --log (Join-Path $env:RUNNER_TEMP "windows-tests.out.txt") `
-            --err (Join-Path $env:RUNNER_TEMP "windows-tests.err.txt")
+            (Join-Path $env:RUNNER_TEMP "windows-tests\results.xml") "Windows tests" `
+            --log (Join-Path $env:RUNNER_TEMP "windows-tests.log")
       - name: Keep the test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-test-record
           path: |
-            ${{ runner.temp }}/windows-tests.out.txt
-            ${{ runner.temp }}/windows-tests.err.txt
-            ${{ runner.temp }}/windows-tests.xml
+            ${{ runner.temp }}/windows-tests.log
+            ${{ runner.temp }}/windows-tests/*.txt
+            ${{ runner.temp }}/windows-tests/results.xml
+            ${{ runner.temp }}/windows-tests/state/events.jsonl
           if-no-files-found: ignore
           retention-days: 30
 
