@@ -162,7 +162,8 @@ def test_a_name_at_the_filesystem_limit_can_still_be_saved(tmp_path):
 
 
 def test_the_temp_name_fits_the_filesystems_own_limit(tmp_path):
-    name_max = os.pathconf(str(tmp_path), "PC_NAME_MAX")
+    # Windows has no os.pathconf; NTFS and ReFS allow 255 characters per name.
+    name_max = os.pathconf(str(tmp_path), "PC_NAME_MAX") if hasattr(os, "pathconf") else 255
     for length in (1, 60, 200, name_max - 11, name_max - 1):
         target = tmp_path / ("x" * length + ".nanoscope")
         tmp = temp_sibling(target)
@@ -202,6 +203,8 @@ def test_a_hard_linked_project_is_saved_and_the_other_names_are_named(tmp_path):
     assert any("hard link" in n for n in notes), notes
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows keeps no POSIX permission bits (st_mode is always 0o666 or 0o444)")
 def test_the_saved_project_still_keeps_the_permissions_it_had(tmp_path):
     p = tmp_path / "p.nanoscope"
     save_project(p, _state())

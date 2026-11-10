@@ -107,14 +107,17 @@ def test_the_font_cache_is_built_once_and_reused_on_the_next_launch(launches):
     assert first["fontlists"] and first["fontlists"] == second["fontlists"], (first, second)
     # And the cost the packaging promised to pay once is in fact paid once. The build is ~10 s and
     # a load is ~0.2 s; a factor of three is far outside the noise and far inside that gap.
-    assert second["seconds"] * 3 < first["seconds"], (first["seconds"], second["seconds"])
+    # On Windows the build itself took 0.49 s against a 0.21 s load on GitHub's machines, so
+    # timing cannot tell them apart there; the shared fontlist file above is the evidence.
+    if sys.platform != "win32":
+        assert second["seconds"] * 3 < first["seconds"], (first["seconds"], second["seconds"])
 
 
 def test_the_launcher_says_which_directory_it_had_to_repair(launches):
     """No silent fix: the log line names the throwaway directory it overrode and the one it chose."""
     info = launches[1]
 
-    assert info["throwaway"] in info["note"], info["note"]
+    assert repr(info["throwaway"]) in info["note"], info["note"]  # the launcher quotes it with !r
     assert info["persistent"] in info["note"], info["note"]
     assert "PyInstaller's own matplotlib runtime hook" in info["note"]
 

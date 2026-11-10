@@ -211,7 +211,9 @@ def test_a_segfault_leaves_a_python_traceback_in_the_log_and_no_exit_line(tmp_pa
     """The point of the whole item: a native crash used to leave the log simply stopping."""
     proc, text = _run(tmp_path, "segfault")
 
-    assert proc.returncode == -signal.SIGSEGV, f"rc {proc.returncode}\n{text}"
+    # Windows has no signal exit status: the C runtime ends a SIGSEGV with exit code 3.
+    expected = 3 if sys.platform == "win32" else -signal.SIGSEGV
+    assert proc.returncode == expected, f"rc {proc.returncode}\n{text}"
     assert "Fatal Python error: Segmentation fault" in text, text
     # faulthandler names the Python frames that were running, innermost first.
     assert re.search(r'File ".*start_nanoscope\.py", line \d+ in _crash_inside_the_app', text), text

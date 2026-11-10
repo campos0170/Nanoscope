@@ -13,6 +13,7 @@ always "the file that was there before is still exactly there".
 from __future__ import annotations
 
 import os
+import sys
 import zipfile
 from pathlib import Path
 
@@ -154,6 +155,10 @@ def test_a_keyboard_interrupt_mid_save_is_survivable(tmp_path, monkeypatch):
     assert _leftovers(tmp_path, target) == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows will not replace a file another handle holds open (packaging/BUILD-WINDOWS.md), "
+           "so the held-handle proof cannot be made there; the save is refused instead")
 def test_the_replace_is_atomic_not_a_truncate_and_copy(tmp_path):
     """The target must never be observed empty or partial.
 
@@ -178,6 +183,8 @@ def test_the_replace_is_atomic_not_a_truncate_and_copy(tmp_path):
     assert len(load_project(target).results) == 5       # ...and the name now has the new one
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows keeps no POSIX permission bits (st_mode is always 0o666 or 0o444)")
 def test_the_saved_project_keeps_the_permissions_it_had(tmp_path):
     """os.replace installs a NEW inode. Without carrying the mode over, a project the user
     had locked down to 0600 would silently come back at whatever the umask allows."""

@@ -25,6 +25,7 @@ reason, and an action — and never the temp.
 from __future__ import annotations
 
 import os
+import sys
 import re
 import stat
 from pathlib import Path
@@ -55,6 +56,8 @@ def _drained():
 def readonly_dir(tmp_path: Path) -> Path:
     """A folder the process cannot write into — a mounted share, a read-only volume, a
     folder owned by someone else. Restored so pytest can clean up."""
+    if sys.platform == "win32":
+        pytest.skip("chmod 555 does not stop writes into a folder on Windows")
     d = tmp_path / "archive_share"
     d.mkdir()
     d.chmod(0o555)

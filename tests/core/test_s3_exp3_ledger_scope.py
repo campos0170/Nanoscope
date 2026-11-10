@@ -26,6 +26,7 @@ Every test here fails on the pristine module.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -305,6 +306,8 @@ def test_an_in_app_export_files_its_note_under_its_own_path(tmp_path: Path):
     assert peek_identity_notes() == ()
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="chmod 555 does not stop writes into a folder on Windows")
 def test_an_in_app_export_that_refuses_leaves_no_note_behind(tmp_path: Path):
     """The export was refused (its folder is not writable), so nothing about the target's
     identity changed — and the next export must not inherit a sentence saying it did."""

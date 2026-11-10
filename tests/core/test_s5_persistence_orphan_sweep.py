@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import errno
 import os
+import sys
 import subprocess
 from pathlib import Path
 
@@ -43,7 +44,7 @@ from nanoscope.core.atomic_write import (
 
 def _dead_pid() -> int:
     """A pid guaranteed to belong to no running process: a child we already reaped."""
-    p = subprocess.Popen(["/usr/bin/true"])
+    p = subprocess.Popen([sys.executable, "-c", "pass"])  # a program every platform has
     p.wait()
     # The pid is free the moment the child is reaped; recycling within this test's
     # lifetime would require the OS to wrap the whole pid space in milliseconds.

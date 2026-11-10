@@ -70,7 +70,7 @@ def _seed(home: Path, content: str = OVERSIZED) -> Path:
             p.unlink()
     else:
         d.mkdir(parents=True)
-    (d / "nanoscope.log").write_text(content)
+    (d / "nanoscope.log").write_bytes(content.encode())  # no \r\n on Windows: sizes are compared
     return d
 
 
@@ -171,4 +171,10 @@ def test_a_live_instances_log_is_not_rotated_away_from_it(tmp_path):
     assert "nanoscope.log.1" not in files, f"a live instance's log was rotated away: {files}"
     assert files["nanoscope.log"]["hellos"] == 2, files
     text = (d / "nanoscope.log").read_text(errors="replace")
-    assert "was NOT rotated" in text and "another NanoScope instance is using it" in text, text
+    if sys.platform == "win32":
+        # msvcrt has no shared lock, so the live instance cannot announce itself the POSIX way;
+        # Windows refuses to rename a file another process has open, and the launcher appends
+        # instead and says why. The outcome the user needs is the same: not rotated away.
+        assert "log rotation failed, appending instead" in text and "WinError 32" in text, text
+    else:
+        assert "was NOT rotated" in text and "another NanoScope instance is using it" in text, text

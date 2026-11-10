@@ -95,7 +95,8 @@ def test_an_unquoted_path_with_spaces_is_refused_rather_than_silently_truncated(
     out = _run(tmp_path, "/Users/abrahamcampos/500", "pM", "Apo")
 
     assert out.returncode == 2, out.stdout
-    assert "the data file you passed does not exist: /Users/abrahamcampos/500" in out.stdout
+    missing = Path("/Users/abrahamcampos/500").expanduser()  # as the self-test prints it
+    assert f"the data file you passed does not exist: {missing}" in out.stdout
     assert "argument(s) after FILE.abf and MODEL.keras were ignored: ['Apo']" in out.stdout
     assert "has to be quoted" in out.stdout
 
