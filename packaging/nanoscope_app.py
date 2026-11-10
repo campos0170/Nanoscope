@@ -170,7 +170,16 @@ def _redirect_stdio_to_log() -> str:
             if not exclusive:
                 # Someone else is starting or already running. Wait for them to finish rotating
                 # (they hold the exclusive lock for microseconds) so we open the file they chose.
-                _lock(lock_fd, exclusive=False, blocking=True)
+                if sys.platform == "win32":
+                    # Windows has no shared lock, so a running instance holds none (see the
+                    # downgrade below) and the exclusive lock means only "rotating right now".
+                    # Waiting for it is the only wait there is: without it this instance read the
+                    # log's size mid-rename, the error was swallowed, and it logged nothing at all.
+                    # Holding it afterwards is safe; the log a live instance has open cannot be
+                    # renamed, and the replace below says so and appends.
+                    exclusive = _lock(lock_fd, exclusive=True, blocking=True)
+                else:
+                    _lock(lock_fd, exclusive=False, blocking=True)
 
         # Single-file rotation: keep one previous run around, don't grow without bound.
         note = ""
