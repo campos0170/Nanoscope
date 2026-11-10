@@ -3,9 +3,13 @@ name: Windows build
 # Builds NanoScope.exe on GitHub's Windows machines (PyInstaller cannot build a Windows app from a
 # Mac), runs the Windows tests and the bundle self-test, and keeps the ZIP as a run artifact.
 #
-# The ZIP is attached to a GitHub release only when a release is published, or when this workflow
-# is run by hand with a release tag: Actions -> Windows build -> Run workflow -> release_tag.
-# A tag build checks out that tag, so the ZIP is built from the same commit as the release's DMG.
+# The ZIP is attached to a GitHub release only:
+#   * when a release is published (the build is of the release's own tag), or
+#   * when this workflow is run by hand with a release tag: Actions -> Windows build ->
+#     Run workflow -> release_tag. That builds the branch it is run from, and refuses unless the
+#     branch's app code (nanoscope/ and pyproject.toml) is identical to the tag's, so the ZIP
+#     carries the same app as the release's DMG. Packaging may differ: that is how a release made
+#     before a Windows packaging fix still gets a working Windows build.
 #
 # Job logs need a signed-in GitHub account to read. Test and build failures are therefore also
 # written as annotations, which the public API returns without one.
@@ -21,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to build and attach the ZIP to, for example v45.55.44. Leave empty to build this branch without attaching anything."
+        description: "Release tag to attach the ZIP to, for example v45.55.44. Leave empty to build without attaching anything."
         required: false
         default: ""
 
@@ -35,7 +39,7 @@ concurrency:
 env:
   PYTHONDONTWRITEBYTECODE: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  # The release being built, or empty for a branch build.
+  # The release the ZIP is for, or empty for a plain build.
   RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
 
 jobs:
@@ -46,28 +50,18 @@ jobs:
     defaults:
       run:
         shell: pwsh
-        working-directory: src
     env:
       QT_QPA_PLATFORM: offscreen
       MPLBACKEND: Agg
     steps:
-      - name: Check out the source (the release tag, when building one)
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          path: src
-      - name: Check out this workflow's helper scripts
-        uses: actions/checkout@v6
-        with:
-          path: ci
-          sparse-checkout: .github/scripts
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: |
-            src/pyproject.toml
-            src/packaging/environments/macos-arm64-py311-validated.constraints.txt
+            pyproject.toml
+            packaging/environments/macos-arm64-py311-validated.constraints.txt
       - name: Install the validated release dependencies
         run: |
           # The macOS release pins, minus the ones that do not carry over to Windows: pytest 7.4
@@ -90,7 +84,7 @@ jobs:
             tests/gui/test_project_recovery.py
       - name: Report test failures as annotations
         if: always()
-        run: python ../ci/.github/scripts/junit_to_annotations.py (Join-Path $env:RUNNER_TEMP "windows-tests.xml") "Windows tests"
+        run: python .github/scripts/junit_to_annotations.py (Join-Path $env:RUNNER_TEMP "windows-tests.xml") "Windows tests"
 
   build:
     name: Build NanoScope.exe
@@ -99,20 +93,28 @@ jobs:
     defaults:
       run:
         shell: pwsh
-        working-directory: src
     steps:
-      - name: Check out the source (the release tag, when building one)
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          path: src
+      - uses: actions/checkout@v6
+      - name: Check this commit has the release's app code
+        if: env.RELEASE_TAG != ''
+        run: |
+          git fetch --no-tags --depth=1 origin "refs/tags/$($env:RELEASE_TAG):refs/tags/$($env:RELEASE_TAG)"
+          if ($LASTEXITCODE -ne 0) { throw "Release tag $($env:RELEASE_TAG) was not found on GitHub" }
+          $changed = git diff --name-only "$($env:RELEASE_TAG)" HEAD -- nanoscope pyproject.toml
+          if ($LASTEXITCODE -ne 0) { throw "Could not compare this commit with $($env:RELEASE_TAG)" }
+          if ($changed) {
+            $list = ($changed -join "%0A")
+            Write-Output "::error title=App code differs from $($env:RELEASE_TAG)::This commit's app code is not the release's, so its ZIP would not match the DMG. Changed:%0A$list"
+            exit 1
+          }
+          "App code (nanoscope/, pyproject.toml) is identical to $($env:RELEASE_TAG)."
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: |
-            src/pyproject.toml
-            src/packaging/environments/macos-arm64-py311-validated.constraints.txt
+            pyproject.toml
+            packaging/environments/macos-arm64-py311-validated.constraints.txt
       - name: Install the validated release dependencies and PyInstaller
         run: |
           # Same pins as the test job; PyInstaller matches the macOS release build.
@@ -124,41 +126,22 @@ jobs:
           python -m pip install -c $constraints -e ".[dev]" tensorflow keras `
             "pyinstaller==6.21.0" "pyinstaller-hooks-contrib==2026.6"
           python -m pip freeze --exclude-editable > (Join-Path $env:RUNNER_TEMP "windows-resolved.txt")
-      - name: Build with packaging/build_app.ps1
+      - name: Build, self-test and zip with packaging/build_app.ps1
         run: |
-          # A release tag can predate the fix to build_app.ps1's self-test, which did not wait for
-          # the exe, so tag builds skip it and rely on the self-test step below.
-          $buildArgs = @()
-          if ($env:RELEASE_TAG) { $buildArgs += "-SkipSelfTest" }
-          pwsh -NoProfile -File packaging/build_app.ps1 @buildArgs 2>&1 |
+          pwsh -NoProfile -File packaging/build_app.ps1 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP "build.log")
           exit $LASTEXITCODE
-      - name: Self-test the built exe
-        timeout-minutes: 15
-        run: |
-          # NanoScope.exe is a windowed program: Start-Process -Wait is what waits for it, and the
-          # redirects are the only way to see what it prints.
-          $out = Join-Path $env:RUNNER_TEMP "selftest.out.txt"
-          $err = Join-Path $env:RUNNER_TEMP "selftest.err.txt"
-          $exe = (Resolve-Path "dist\NanoScope\NanoScope.exe").Path
-          $proc = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru -NoNewWindow `
-            -RedirectStandardOutput $out -RedirectStandardError $err
-          Get-Content $out, $err -ErrorAction SilentlyContinue
-          "self-test exit code: $($proc.ExitCode)"
-          if ($proc.ExitCode -ne 0) { exit 1 }
       - name: Report a build or self-test failure as annotations
         if: failure()
         run: |
           function Escape([string]$text) { $text.Replace("%", "%25").Replace("`r", "").Replace("`n", "%0A") }
-          $out = Join-Path $env:RUNNER_TEMP "selftest.out.txt"
-          if (Test-Path $out) {
-            $lines = Get-Content $out | Where-Object { $_ -match "\[FAIL\]|checks passed|BAD ARGUMENTS|Traceback|Error" }
-            if (-not $lines) { $lines = Get-Content $out -Tail 40 }
+          if (Test-Path "build\selftest.out.txt") {
+            $lines = Get-Content "build\selftest.out.txt" | Where-Object { $_ -match "\[FAIL\]|checks passed|BAD ARGUMENTS" }
+            if (-not $lines) { $lines = Get-Content "build\selftest.out.txt" -Tail 40 }
             Write-Output ("::error title=Windows self-test::" + (Escape ($lines -join "`n")))
           }
-          $err = Join-Path $env:RUNNER_TEMP "selftest.err.txt"
-          if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) {
-            Write-Output ("::error title=Windows self-test stderr::" + (Escape ((Get-Content $err -Tail 40) -join "`n")))
+          if ((Test-Path "build\selftest.err.txt") -and (Get-Item "build\selftest.err.txt").Length -gt 0) {
+            Write-Output ("::error title=Windows self-test stderr::" + (Escape ((Get-Content "build\selftest.err.txt" -Tail 40) -join "`n")))
           }
           $log = Join-Path $env:RUNNER_TEMP "build.log"
           if (Test-Path $log) {
@@ -168,7 +151,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: NanoScope-windows
-          path: src/dist/NanoScope-*-win64.zip
+          path: dist/NanoScope-*-win64.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
@@ -179,10 +162,10 @@ jobs:
           name: windows-build-record
           path: |
             ${{ runner.temp }}/build.log
-            ${{ runner.temp }}/selftest.out.txt
-            ${{ runner.temp }}/selftest.err.txt
             ${{ runner.temp }}/windows-resolved.txt
-            src/build/release-metadata/_build_info.json
+            build/selftest.out.txt
+            build/selftest.err.txt
+            build/release-metadata/_build_info.json
           if-no-files-found: ignore
           retention-days: 30
 

@@ -23,6 +23,7 @@ honestly for one format and wrongly (or silently) for another:
 from __future__ import annotations
 
 import os
+import sys
 
 import nanoscope  # noqa: F401  -> Qt plugin-path bootstrap, per tests/conftest.py
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -176,8 +177,8 @@ def test_a_directory_named_like_a_recording_is_a_folder(tmp_path, suffix):
 
 @pytest.mark.parametrize("suffix", [".h5", ".tdms"])
 def test_a_permission_locked_recording_says_permission_denied(tmp_path, suffix):
-    if os.geteuid() == 0:  # pragma: no cover - root reads through chmod 000
-        pytest.skip("running as root: chmod 000 does not deny anything")
+    if sys.platform == "win32" or os.geteuid() == 0:  # pragma: no cover
+        pytest.skip("chmod 000 does not deny anything as root or on Windows")
     path = _valid_recording(tmp_path, suffix)
     path.chmod(0o000)
     try:

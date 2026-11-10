@@ -417,6 +417,15 @@ def main() -> int:
     # readers, worker thread, TensorFlow, figure export. Keep this BEFORE the stdio redirect so
     # its output goes to the terminal the owner ran it from. See nanoscope_selftest.py.
     if "--self-test" in sys.argv:
+        # Redirected output on Windows is encoded with the ANSI code page (cp1252), which has no
+        # character for the check marks the acid analysis prints, so the print raised and failed
+        # that check. The GUI branch already writes its log as UTF-8; do the same here.
+        for stream in (sys.stdout, sys.stderr):
+            if stream is not None and hasattr(stream, "reconfigure"):
+                try:
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    pass
         import nanoscope_selftest
 
         if mpl_note:

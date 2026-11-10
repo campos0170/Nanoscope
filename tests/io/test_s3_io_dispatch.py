@@ -39,6 +39,7 @@ next sweep.
 from __future__ import annotations
 
 import os
+import sys
 
 import nanoscope  # noqa: F401  -> Qt plugin-path bootstrap, per tests/conftest.py
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -59,8 +60,11 @@ from nanoscope.io.errors import CorruptFileError, ReaderError, UnsupportedFormat
 _CLAIMED = (".abf", ".h5", ".tdms", ".csv")
 _UNCLAIMED = (".dat", ".bin", "")
 
+# On Windows chmod only toggles the read-only flag, so 000 denies nothing there either (and
+# os.geteuid does not exist).
 as_root = pytest.mark.skipif(
-    os.geteuid() == 0, reason="running as root: chmod 000 does not deny anything")
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="chmod 000 does not deny anything as root or on Windows")
 
 
 def _both_doors(path: Path) -> list[tuple[type, str]]:

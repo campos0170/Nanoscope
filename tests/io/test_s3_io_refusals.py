@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import nanoscope  # noqa: F401  -> Qt plugin-path bootstrap, per tests/conftest.py
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -50,8 +51,11 @@ pytest.importorskip("nptdms")
 
 _EXTENSIONS = (".abf", ".h5", ".tdms", ".csv")
 
+# On Windows chmod only toggles the read-only flag, so 000 denies nothing there either (and
+# os.geteuid does not exist).
 as_root = pytest.mark.skipif(
-    os.geteuid() == 0, reason="running as root: chmod 000 does not deny anything")
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="chmod 000 does not deny anything as root or on Windows")
 
 
 def _text(strings) -> str:

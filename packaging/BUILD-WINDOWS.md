@@ -68,7 +68,10 @@ keeps the ZIP as a run artifact for 30 days.
 - Publishing a GitHub release builds that release's tag and attaches
   `NanoScope-<tag>-win64.zip` to it, adding the ZIP's line to `SHA256SUMS.txt`.
 - For a release that already exists: Actions → Windows build → Run workflow, with `release_tag` set
-  to its tag (for example `v45.55.44`).
+  to its tag (for example `v45.55.44`). This builds the branch it is run from, and refuses unless
+  that branch's app code (`nanoscope/` and `pyproject.toml`) is identical to the tag's, so the ZIP
+  carries the same app as the DMG. Only packaging may differ, which is how a release made before
+  a Windows packaging fix still gets a working Windows build.
 
 Nothing is attached unless the tests and the self-test pass.
 
