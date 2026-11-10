@@ -53,6 +53,9 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       MPLBACKEND: Agg
+      # The built NanoScope.exe runs in Python's UTF-8 mode (NanoScope-win.spec), so the tests
+      # do too; otherwise they would test cp1252 text handling the app never uses.
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5

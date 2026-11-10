@@ -76,3 +76,8 @@ secrets*.json
 /docs/sweep*/fixes/reports/
 /docs/sweep*/repros/
 *.log
+
+# Project-file test fixtures: their SHA-256 sums are pinned by the provenance files committed
+# beside them, and the tests that read them fail on any fresh clone without them.
+!tests/core/fixtures/phase2/*.nanoscope
+!tests/core/fixtures/phase2/legacy/*.nanoscope

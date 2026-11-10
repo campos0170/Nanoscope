@@ -270,7 +270,11 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
+    # Python's UTF-8 mode. Without it Windows Python reads and writes text in the ANSI code page
+    # (cp1252), while macOS, where the app is developed and tested, uses UTF-8: the same file
+    # would read differently on the two platforms. The self-test's "frozen bundle" check fails
+    # a Windows build where this did not take effect.
+    [("X utf8", None, "OPTION")],
     exclude_binaries=True,
     name=APP_NAME,
     debug=False,

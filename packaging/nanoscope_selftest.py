@@ -429,7 +429,14 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
                 "not running frozen — this is meant to run from inside the built bundle")
         import nanoscope
 
-        return f"nanoscope {nanoscope.__version__}, python {sys.version.split()[0]}"
+        # NanoScope-win.spec turns on Python's UTF-8 mode so text files read the same as on
+        # macOS; without it Windows uses the ANSI code page (cp1252).
+        if sys.platform == "win32" and not sys.flags.utf8_mode:
+            raise AssertionError(
+                "Python's UTF-8 mode is off: the spec's ('X utf8', None, 'OPTION') did not take "
+                "effect, so text files would be read and written as cp1252")
+        return (f"nanoscope {nanoscope.__version__}, python {sys.version.split()[0]}"
+                + (", UTF-8 mode" if sys.flags.utf8_mode else ""))
 
     @check("bootstrap stands down when frozen")
     def _bootstrap():

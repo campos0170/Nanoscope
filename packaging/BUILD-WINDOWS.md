@@ -73,6 +73,9 @@ keeps the ZIP as a run artifact for 30 days.
   carries the same app as the DMG. Only packaging may differ, which is how a release made before
   a Windows packaging fix still gets a working Windows build.
 
+The tests run under `.github/scripts/run_tests_resumably.py`, which names a test that hangs or
+stops pytest and carries on after it, and every failure is posted as an annotation on the run.
+
 Nothing is attached unless the tests and the self-test pass.
 
 ## What differs from the macOS build
@@ -85,6 +88,7 @@ Nothing is attached unless the tests and the self-test pass.
 | icon | `NanoScope.icns` | `NanoScope.ico` (checked in; `make_icon.py --ico`) |
 | signing | ad-hoc `codesign` | **none** — see below |
 | logs | `~/Library/Logs/NanoScope` | `%LOCALAPPDATA%\NanoScope\Logs` |
+| text files | UTF-8 (the macOS default) | UTF-8 too: the spec turns on Python's UTF-8 mode, which the self-test checks |
 
 Shared on purpose, because they are facts about *this app* rather than about an OS: the hidden
 imports, the exclude list, and `rthooks/rthook_nanoscope_env.py`.
