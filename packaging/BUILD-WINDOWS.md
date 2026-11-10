@@ -55,6 +55,23 @@ dist\NanoScope\NanoScope.exe          the app (onedir — ship the whole folder)
 dist\NanoScope-0.1.0-win64.zip        distributable
 ```
 
+## Built on GitHub instead
+
+`.github/workflows/windows-build.yml` does all of the above on GitHub's Windows machines, so no
+Windows PC is needed. It installs the macOS release's pinned versions
+(`packaging/environments/macos-arm64-py311-validated.constraints.txt`, minus pytest 7.4 and
+`tensorflow-io-gcs-filesystem`, which has no Windows wheel at that version), runs the core, I/O,
+packaging and recovery tests, builds with `build_app.ps1`, runs `NanoScope.exe --self-test`, and
+keeps the ZIP as a run artifact for 30 days.
+
+- It runs on every push that changes `packaging/` or the workflow.
+- Publishing a GitHub release builds that release's tag and attaches
+  `NanoScope-<tag>-win64.zip` to it, adding the ZIP's line to `SHA256SUMS.txt`.
+- For a release that already exists: Actions → Windows build → Run workflow, with `release_tag` set
+  to its tag (for example `v45.55.44`).
+
+Nothing is attached unless the tests and the self-test pass.
+
 ## What differs from the macOS build
 
 | | macOS | Windows |

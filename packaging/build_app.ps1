@@ -83,10 +83,22 @@ try {
     # --- self-test ---------------------------------------------------------------------------
     # Launch the REAL exe with --self-test. This is what catches an over-broad prune: the build
     # is green, the exe exists, and it dies on a missing plugin or a module that was excluded.
+    #
+    # NanoScope.exe is a windowed program (console=False in the spec). PowerShell does not wait for
+    # a windowed program and does not set $LASTEXITCODE from it, so `& $ExePath --self-test`
+    # returned at once and the check read the PyInstaller run's exit code: it always "passed".
+    # Start-Process -Wait waits, and redirecting its output is how a windowed exe's prints are seen.
+    # (Keep this file ASCII: Windows PowerShell 5.1 reads a BOM-less script as ANSI, and a UTF-8
+    # em dash decodes to a closing quote there, which breaks the string it is in.)
     if (-not $SkipSelfTest) {
         Write-Host "-- self-test" -ForegroundColor Cyan
-        & $ExePath --self-test
-        if ($LASTEXITCODE -ne 0) { throw "self-test FAILED (exit $LASTEXITCODE) — the bundle is broken" }
+        $SelfTestOut = Join-Path $Root "build\selftest.out.txt"
+        $SelfTestErr = Join-Path $Root "build\selftest.err.txt"
+        $proc = Start-Process -FilePath (Resolve-Path $ExePath).Path -ArgumentList "--self-test" `
+            -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $SelfTestOut -RedirectStandardError $SelfTestErr
+        Get-Content $SelfTestOut, $SelfTestErr -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        if ($proc.ExitCode -ne 0) { throw "self-test FAILED (exit $($proc.ExitCode)): the bundle is broken" }
         Write-Host "-- self-test passed" -ForegroundColor Green
     }
 
