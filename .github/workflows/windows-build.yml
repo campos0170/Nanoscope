@@ -16,10 +16,13 @@ name: Windows build
 
 on:
   push:
+    # App changes alone do not start a run (they reach Windows at the next release); changes
+    # to the Windows packaging, this workflow or the tests it runs do.
     paths:
       - ".github/workflows/windows-build.yml"
       - ".github/scripts/**"
       - "packaging/**"
+      - "tests/**"
   release:
     types: [published]
   workflow_dispatch:
