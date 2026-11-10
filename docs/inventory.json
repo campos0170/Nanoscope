@@ -1419,7 +1419,7 @@
         "label": "Detection",
         "kind": "tab",
         "group": "DetectionPanel tab strip",
-        "what_it_does": "Shows the Schmitt-trigger threshold and dwell parameters, the polarity readout/override, and the Detect / Sweep threshold… / Null control… / Recovery map… buttons."
+        "what_it_does": "Shows the detector choice (Schmitt or CUSUM) with its threshold and dwell parameters, the polarity readout/override, and the Detect / Sweep threshold… / Null control… / Recovery map… buttons. Sweep threshold… and Recovery map… are Schmitt only and are disabled with CUSUM selected; Null control… runs the selected detector."
       },
       {
         "label": "ML",
@@ -1883,29 +1883,29 @@
         "label": "Detect",
         "kind": "button",
         "group": "Detection ▸ buttons",
-        "what_it_does": "Runs the Schmitt-trigger detection on the selected current channel using everything on the Preprocess and Detection tabs plus the open-pore baseline block, and replaces the event table below with the result.",
-        "notes": "This is the panel's DEFAULT button, so pressing Enter in the panel fires it. Also available as Analysis ▸ Run detection (Ctrl+D). Greyed out with a banner unless a CURRENT channel with a known sample rate is selected. It runs in the background and can be cancelled; a cancelled run returns nothing rather than a half-built table."
+        "what_it_does": "Runs the selected detector (Schmitt or CUSUM) on the selected current channel using everything on the Preprocess and Detection tabs plus the open-pore baseline block, and replaces the event table below with the result.",
+        "notes": "This is the panel's DEFAULT button, so pressing Enter in the panel fires it. Also available as Analysis ▸ Run detection (Ctrl+D). Greyed out with a banner unless a CURRENT channel with a known sample rate is selected. It runs in the background and can be cancelled; a cancelled run returns nothing rather than a half-built table. A CUSUM run also records how many detections the same settings give in the opposite direction, and the Summary shows an advisory when that count is material."
       },
       {
         "label": "Sweep threshold…",
         "kind": "button",
         "group": "Detection ▸ buttons",
-        "what_it_does": "Re-runs detection at a whole range of enter thresholds and opens the Threshold sweep dialog: events-vs-k plotted with the plateau shaded and a surrogate (false-positive) curve overlaid — the evidence that replaces guessing at k_in.",
-        "notes": "Same enable gate as Detect. Runs off-thread. On some recordings the dialog itself warns that the surrogate is \"NOT a null here\", meaning that curve is not a false-positive count for this trace."
+        "what_it_does": "Re-runs Schmitt detection at a whole range of enter thresholds (k_in) and opens the Threshold sweep dialog: events-vs-k plotted with the plateau shaded and a surrogate (false-positive) curve overlaid — the evidence that replaces guessing at k_in. Tooltip (verbatim): \"Counts events across a range of the Schmitt enter threshold k_in. Schmitt only.\"",
+        "notes": "Same enable gate as Detect, and Schmitt only: with CUSUM selected the button is disabled and the note under the detector box says why. Runs off-thread. On some recordings the dialog itself warns that the surrogate is \"NOT a null here\", meaning that curve is not a false-positive count for this trace."
       },
       {
         "label": "Null control…",
         "kind": "button",
         "group": "Detection ▸ buttons",
-        "what_it_does": "Runs the current detection settings against a surrogate (event-free) version of this trace to estimate how many of your events could be false positives, and fills in the false-discovery readout in the summary panel below.",
-        "notes": "Same enable gate as Detect; runs off-thread. The polarity override and every preprocessing key are stripped before the control run."
+        "what_it_does": "Runs the selected detector (Schmitt or CUSUM) with the current detection settings against a surrogate (event-free) version of this trace to estimate how many of your events could be false positives, and fills in the false-discovery readout in the summary panel below. Tooltip (verbatim): \"Counts what the selected detector finds on this recording's own noise with the events removed.\"",
+        "notes": "Same enable gate as Detect; runs off-thread. The polarity override and every preprocessing key are stripped before the control run. With CUSUM selected it runs CUSUM with the form's CUSUM settings and the Baseline panel's settings, and the result also carries the real run's opposite-direction count. With CUSUM selected it needs High-pass off: with High-pass enabled nothing starts and the status bar says \"Null control with CUSUM needs High-pass off: with it on, the far edge of each event also fires in the opposite direction. Turn High-pass off and run it again.\" This holds on Auto polarity and with an override; the Schmitt control runs as before. A detector other than Schmitt or CUSUM is refused with \"Null control works with the Schmitt and CUSUM detectors only.\" The result is tagged with its detector and thresholds (for CUSUM also the low-pass cutoff) and is shown only under a table of that detector. If it finishes while another detector's table is on screen it is kept, and the status bar says, for a CUSUM run, \"Null control finished for CUSUM; it is shown with a CUSUM table.\" The readout then reads, for example, \"false-positive rate: measured for CUSUM (k 0.75, h 28, low-pass 5 kHz); shown with a CUSUM table.\" It is not saved in the project."
       },
       {
         "label": "Recovery map…",
         "kind": "button",
         "group": "Detection ▸ buttons",
-        "what_it_does": "Measures how efficiently the current settings recover events as a function of dwell time, and makes the resulting efficiency curve available to the dwell-time fits in the summary panel.",
-        "notes": "Same enable gate as Detect; runs off-thread. Once it has run, the summary panel's \"use measured efficiency\" option becomes meaningful for this recording/channel."
+        "what_it_does": "Measures how efficiently the current Schmitt settings recover injected events as a function of dwell time, and makes the resulting efficiency curve available to the dwell-time fits of a Schmitt table in the summary panel. Tooltip (verbatim): \"Measures how many injected events the Schmitt detector recovers, for the dwell-fit efficiency correction. Schmitt only.\"",
+        "notes": "Same enable gate as Detect, and Schmitt only: with CUSUM selected the button is disabled and the note under the detector box says why. Runs off-thread. Once it has run, the summary panel's \"use measured efficiency\" option becomes meaningful for this recording/channel while a Schmitt table is on screen. If the map finishes while the table on screen is not a Schmitt table it is kept, and the status bar says \"Recovery map finished for Schmitt; it is used for fits of a Schmitt table.\" The map is not saved in the project."
       },
       {
         "label": "gate banner (top of the panel)",
@@ -2299,7 +2299,7 @@
         "label": "false-positive rate: not measured (run Null control)",
         "kind": "label",
         "group": "Stats panel (same file — check overlap with any 'stats' area)",
-        "what_it_does": "FDR readout under the summary. After a null control it reads 'estimated false-positive rate: 4.2% (AAFT, 20 surrogates) — individual surrogates gave 1.9–11.3%'; the trailing clause is dropped only when every surrogate lands on the same printed percentage. The printed rate is the MEAN of independent draws, so the run is seeded from the recording and the settings and the tooltip carries the per-surrogate counts and that seed — press it again and the same number comes back. When the surrogates are not a valid null it refuses to give a rate and instead reports 'false-positive rate NOT estimated — N detection(s) on this recording's own event-free noise (a lower bound, measured with no surrogate).' It resets to 'not measured' whenever you point at a recording that has no null control of its own.",
+        "what_it_does": "FDR readout under the summary. After a null control it names the detector and thresholds the control ran with and then the result, for example 'Schmitt (k_in 5, k_out 2): estimated false-positive rate: 4.2% (AAFT, 20 surrogates) — individual surrogates gave 1.9–11.3%'; the trailing clause is dropped only when every surrogate lands on the same printed percentage. The printed rate is the MEAN of independent draws, so the run is seeded from the recording and the settings and the tooltip carries the per-surrogate counts and that seed — press it again and the same number comes back. When the surrogates are not a valid null it refuses to give a rate and instead reports 'false-positive rate NOT estimated — N detection(s) on this recording's own event-free noise (a lower bound, measured with no surrogate).' A CUSUM result names its low-pass too and leads with the real run's opposite-direction count, which is the number to read for CUSUM: 'CUSUM (k 0.75, h 28, low-pass 5 kHz): N opposite-direction detection(s) against M on the recording. F on its event-free noise, a weak lower bound for CUSUM.' The label ends 'no low-pass' when the low-pass is off, and an 'Estimated false-positive rate: …' sentence follows only when a surrogate rate was estimated. It reads 'not measured' whenever you point at a recording that has no null control of its own. With a result on file and a table from another detector on screen it says where the result shows instead, for example 'false-positive rate: measured for CUSUM (k 0.75, h 28, low-pass 5 kHz); shown with a CUSUM table.'",
         "from_crosscheck": true
       },
       {
@@ -2327,7 +2327,7 @@
         "label": "use measured efficiency (needs recovery map)",
         "kind": "checkbox",
         "group": "Stats panel > Fits",
-        "what_it_does": "Corrects the fit with the detector efficiency actually measured for this recording. Greyed out until a recovery map exists — run 'Recovery map…' on the Detection tab; if the map goes away the box is unticked for you.",
+        "what_it_does": "Corrects the fit with the detector efficiency actually measured for this recording. Greyed out until a recovery map exists — run 'Recovery map…' on the Detection tab; if the map goes away the box is unticked for you. The map is measured with the Schmitt detector, so the box is also greyed under any table that is not a Schmitt table; there it keeps its tick, so the choice is back under the Schmitt table. Tooltip (verbatim): 'Weights the dwell fit by the detection efficiency the Recovery map measured with the Schmitt detector. Used only for fits of a Schmitt table.' Under another table the tooltip adds: 'This recording's recovery map was measured with Schmitt, so it is not used for this table.'",
         "from_crosscheck": true
       },
       {
@@ -2387,10 +2387,10 @@
         "from_crosscheck": true
       },
       {
-        "label": "Threshold sweep",
+        "label": "Threshold sweep (Schmitt k_in)",
         "kind": "dialog",
         "group": "Sweep threshold… dialog",
-        "what_it_does": "Window title of the dialog opened by 'Sweep threshold…'. It plots the event count against k with the plateau shaded, marks the recommended k with a dotted 'k*=…' line, and overlays the surrogate count as a dashed series named either 'surrogate (false +)' or, when the surrogates are not a valid null for this recording, 'surrogate — NOT a null here (see below)' drawn in grey.",
+        "what_it_does": "Window title of the dialog opened by 'Sweep threshold…'. The sweep is Schmitt only. It plots the event count against k with the plateau shaded, marks the recommended k with a dotted 'k*=…' line, and overlays the surrogate count as a dashed series named either 'surrogate (false +)' or, when the surrogates are not a valid null for this recording, 'surrogate — NOT a null here (see below)' drawn in grey.",
         "from_crosscheck": true
       },
       {
@@ -2461,7 +2461,7 @@
         "kind": "control",
         "group": "Detection panel",
         "what_it_does": "Choose Schmitt trigger (hysteresis) or Sequential CUSUM.",
-        "notes": "Each detector has separate stored results/settings. Selecting an existing result does not itself run detection. Source: nanoscope/gui/panels.py."
+        "notes": "Each detector has separate stored results/settings. Selecting an existing result does not itself run detection. With Sequential CUSUM selected the Sweep threshold… and Recovery map… buttons are disabled. At the Advanced control level, where the three study buttons are visible, the grey note under the box then adds \"Sweep threshold and Recovery map work with Schmitt only. Null control runs CUSUM.\" At Essential the buttons are hidden and that line is left out. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "Schmitt trigger (hysteresis)",
@@ -2475,7 +2475,7 @@
         "kind": "control",
         "group": "Detection panel",
         "what_it_does": "Locate excursions using a sequential cumulative-sum change detector.",
-        "notes": "Defaults k=0.750 σ and h=28.00 σ·samples; not the same operation as fitting substates inside detected events. Source: nanoscope/gui/panels.py."
+        "notes": "Defaults k=0.750 σ and h=28.00 σ·samples; not the same operation as fitting substates inside detected events. h assumes independent samples, so a low-pass filter or 1/f noise raises the noise firings. Every run records its opposite-direction count (n_opposite_events, n_opposite_isolated) beside what it found in the event direction (n_opposite_reference), and the Summary shows an advisory when the count away from detected events is at least 5 and at least 10% of that: \"N opposite-direction detection(s) against M in the event direction. CUSUM fires that often where no events are expected, so unless events really run both ways many of the shallow rows here may be noise. Raise h or k and re-run.\" When the count is at least three times M the sentence is instead \"N opposite-direction detection(s) against M in the event direction: check the polarity setting. If it is right, noise alone is firing CUSUM at these settings.\" When that rule is not met, the advisory is still raised if the count before the 2 ms rule (n_opposite_events) is at least 5 and at least half of M, which covers a very low h where the rows are too dense for anything to be away from one; the number shown is then that count. With High-pass on the far edge of each event also fires in the opposite direction, so the count is not a noise estimate; such a run gets none of those sentences and, when the count is large enough, this one: \"N opposite-direction detection(s) with High-pass on. The far edge of each event also fires in the opposite direction there, so this count is not a noise estimate; turn High-pass off to check for noise firings.\" The numbers are fixed at detection time, so later merges or hand edits do not change the sentence. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "k (drift)",
@@ -2489,7 +2489,7 @@
         "kind": "control",
         "group": "Detection panel",
         "what_it_does": "Set the CUSUM cumulative decision threshold.",
-        "notes": "Default 28.00 σ·samples. Depends on sample rate and the recording, not a universal amplitude cutoff. Source: nanoscope/gui/panels.py."
+        "notes": "Default 28.00 σ·samples. Depends on sample rate and the recording, not a universal amplitude cutoff. Assumes independent samples: raise it (or k) when the run's opposite-direction advisory appears. Source: nanoscope/gui/panels.py."
       },
       {
         "label": "Advanced detection settings",
@@ -2559,8 +2559,8 @@
       "Fits use ACCEPTED events only, so every accept/reject you make in the event table silently changes what the next Fit reports.",
       "Filter-limited events are EXCLUDED from fits by default — check the count line above the Fit button, or the fit's n will not match \"n accepted\" in the summary.",
       "Toggling \"include filter-limited events\" does not re-run the fit; it only rewrites the count line. Press Fit again.",
-      "\"use measured efficiency\" stays greyed out until you run Recovery map… for THIS target — a map from another recording will not enable it.",
-      "The false-positive-rate line only ever fills in after running Null control…, and it resets to \"not measured\" whenever you switch recordings.",
+      "\"use measured efficiency\" stays greyed out until you run Recovery map… for THIS target — a map from another recording will not enable it. It is also greyed under any table that is not a Schmitt table, because the map is measured with the Schmitt detector; greyed for that reason it keeps its tick.",
+      "The false-positive-rate line only ever fills in after running Null control…, and it reads \"not measured\" when you switch to a recording with no result of its own. With a result on file and a table from a detector other than the one the control ran with, it reads, for example, \"false-positive rate: measured for Schmitt (k_in 5, k_out 2); shown with a Schmitt table.\" Null control and recovery-map results are not saved in the project.",
       "Merge edits are undone through Edit → Undo, not by redetecting. An explicit replacement detection can replace curation and prompts when applicable; save a project before intentionally replacing reviewed results.",
       "\"Merge all\" acts on the whole detection in one click with no per-event confirmation; check the before/after counts in the status bar.",
       "A merge can be REFUSED rather than performed, and \"nothing merged\" is not the same sentence as \"nothing to merge\": a run of events the window really did catch is left alone when the span it would make is mostly open pore (the fragments covering less than 50% of it), because that is several translocations glued to the gaps between them, not one repaired. The status bar names the count and says to try a smaller window. Read a refusal as \"this window is too wide for this recording\", never as \"the merge is not working\".",
@@ -2586,8 +2586,8 @@
         "label": "false-positive rate: not measured (run Null control)",
         "kind": "readout",
         "group": "Stats panel — Summary",
-        "what_it_does": "The false-discovery-rate line under the summary table. Once a null control has been run it reads \"estimated false-positive rate: N.N% (AAFT, N surrogates)\".",
-        "notes": "Only populated by the \"Null control…\" button on the Detection tab — it is not part of this box. The FDR belongs to the recording it was measured on, so switching to another target resets this line to \"not measured\" rather than leaving the previous recording's number on screen. When the null control refuses to stand behind a rate it instead reads \"false-positive rate NOT estimated — N detection(s) on this recording's own event-free noise (a lower bound, measured with no surrogate)\", and the reason is in the tooltip."
+        "what_it_does": "The false-discovery-rate line under the summary table. Once a null control has been run it reads, for example, \"Schmitt (k_in 5, k_out 2): estimated false-positive rate: N.N% (AAFT, N surrogates)\": the detector and thresholds the control ran with, then the result.",
+        "notes": "Only populated by the \"Null control…\" button on the Detection tab — it is not part of this box. The FDR belongs to the recording it was measured on, so switching to another target resets this line to \"not measured\" rather than leaving the previous recording's number on screen. It also belongs to the detector it was measured with, so it is not shown under a table from any other detector; the line then reads, for example, \"false-positive rate: measured for Schmitt (k_in 5, k_out 2); shown with a Schmitt table.\" When the null control refuses to stand behind a rate it instead reads \"false-positive rate NOT estimated — N detection(s) on this recording's own event-free noise (a lower bound, measured with no surrogate)\", and the reason is in the tooltip. A CUSUM result leads with the real run's opposite-direction count instead: \"CUSUM (k 0.75, h 28, low-pass 5 kHz): N opposite-direction detection(s) against M on the recording. F on its event-free noise, a weak lower bound for CUSUM.\" For CUSUM read that count, because its event-free count is a weak lower bound."
       },
       {
         "label": "⚠ About these numbers",
@@ -2615,7 +2615,7 @@
         "kind": "checkbox",
         "group": "Fits",
         "what_it_does": "Correct the dwell fit for the detector's measured recovery efficiency η(t) instead of assuming every event was found.",
-        "notes": "DISABLED until you run \"Recovery map…\" (on the Detection tab) FOR THIS target — a map run on a different recording/channel does not enable it. Unchecking happens automatically whenever the map goes away. Even if checked, the fit only uses it while the box is enabled."
+        "notes": "DISABLED until you run \"Recovery map…\" (on the Detection tab) FOR THIS target — a map run on a different recording/channel does not enable it. Also disabled under any table that is not a Schmitt table: the map is measured with the Schmitt detector and is used only for fits of a Schmitt table. Disabled for that reason, the box keeps its tick and its tooltip says why. Unchecking happens automatically only when the map itself goes away. Even if checked, the fit only uses it while the box is enabled."
       },
       {
         "label": "include filter-limited events",
@@ -2825,15 +2825,21 @@
         "label": "estimated false-positive rate: {pct}% (AAFT, {n} surrogates)",
         "kind": "readout",
         "group": "Statistics panel (panels.py StatsPanel)",
-        "what_it_does": "The measured state of the false-positive line: after a Null control run it replaces \"false-positive rate: not measured (run Null control)\" with the percentage and how many AAFT surrogates it came from. Verbatim source: f\"estimated false-positive rate: {100.0 * fdr:.1f}% (AAFT, {n} surrogates)\". It is reset back to \"not measured\" whenever you select a recording that has no null control of its own, so it never reports another pore's number.",
+        "what_it_does": "The measured state of the false-positive line: after a Null control run it replaces \"false-positive rate: not measured (run Null control)\" with the percentage and how many AAFT surrogates it came from. Verbatim source: f\"estimated false-positive rate: {100.0 * fdr:.1f}% (AAFT, {n} surrogates)\". A result measured from the panel is prefixed with the detector and thresholds it ran with, for example \"Schmitt (k_in 5, k_out 2): \". In a CUSUM result this sentence comes after the opposite-direction lead and takes a capital: \"… a weak lower bound for CUSUM. Estimated false-positive rate: …\". It is reset back to \"not measured\" whenever you select a recording that has no null control of its own, and under a table from another detector it is replaced by \"false-positive rate: measured for {label}; shown with a {name} table.\", so it never reports another pore's or another detector's number.",
         "from_crosscheck": true
       },
       {
         "label": "false-positive rate NOT estimated — {n} detection(s) on this recording's own event-free noise (a lower bound, measured with no surrogate).",
         "kind": "readout",
         "group": "Statistics panel (panels.py StatsPanel)",
-        "what_it_does": "The third state of the same line: shown when the null control refuses to stand behind a rate. Instead of a percentage you get the count of false detections found on the recording's own event-free noise, which is a lower bound. Hovering the line shows the reason for the refusal (the first entry of the result's notes).",
+        "what_it_does": "The third state of the same line: shown when the null control refuses to stand behind a rate. Instead of a percentage you get the count of false detections found on the recording's own event-free noise, which is a lower bound. Hovering the line shows the reason for the refusal (the first entry of the result's notes). A Schmitt result carries the same detector prefix. A CUSUM result does not use this wording: it reads \"CUSUM (k 0.75, h 28, low-pass 5 kHz): N opposite-direction detection(s) against M on the recording. F on its event-free noise, a weak lower bound for CUSUM.\" (\"no low-pass\" when the low-pass is off).",
         "from_crosscheck": true
+      },
+      {
+        "label": "false-positive rate: measured for {label}; shown with a {name} table.",
+        "kind": "readout",
+        "group": "Statistics panel (panels.py StatsPanel)",
+        "what_it_does": "A further state of the same line: shown when a Null control result is on file for this recording and channel but is not shown, because the table on screen belongs to another detector (or, with no table yet, another detector is selected). {label} is the stored result's label, for example \"CUSUM (k 0.75, h 28, low-pass 5 kHz)\", and {name} is the detector whose table shows it, Schmitt or CUSUM. Show a table of that detector to read the result. \"false-positive rate: not measured (run Null control)\" is kept for a recording and channel with nothing on file."
       },
       {
         "label": "Detector score (vs your curation)",

@@ -446,37 +446,71 @@ def test_a_max_abs_ml_run_is_untouched_by_the_new_branch(monkeypatch,
     assert prov["norm_scale"] is not None
 
 
-def test_the_surrogate_studies_get_a_schmitt_only_dict(qtbot):
-    """REGRESSION. Sweep / null control / recovery map forward what they are handed to
-    `detect_events` after stripping only the PREPROCESSING keys, so ``detector`` and
-    ``cusum_*`` would arrive as unexpected keyword arguments and kill the run. They are
-    Schmitt-only studies (they sweep ``k_in``), so they get a narrowed dict -- and the
-    narrowing is taken from `DETECTOR_PRIVATE_KEYS`, not re-spelled here or there.
+def test_the_surrogate_studies_get_the_selected_detectors_dict(qtbot):
+    """The study dict is narrowed to THE SELECTED DETECTOR, from `DETECTOR_PRIVATE_KEYS`.
+
+    This test used to pin the defect: with CUSUM selected the dict was still narrowed to
+    Schmitt (no ``detector``, no ``cusum_*``), so a Null control pressed beside a CUSUM
+    table measured the Schmitt detector and its number was read as CUSUM's.
+
+    The rule now:
+
+    * Schmitt selected -- exactly the dict the studies always got: no ``detector``, no
+      ``cusum_*``, and what the receivers build from it is a legal `detect_events` call.
+      Nothing may be added to it: the Null control seed is a hash of this dict.
+    * CUSUM selected -- ``detector == "detect.cusum"`` with CUSUM's own thresholds and
+      none of Schmitt's four private keys, and what `detector_kwargs` builds from it is
+      a legal `detect_events_cusum` call.
     """
     import inspect
 
     from nanoscope.analysis.detect import detect_events
-    from nanoscope.analysis.modules import DETREND_PARAM_KEYS, FILTER_PARAM_KEYS
+    from nanoscope.analysis.detect_cusum import detect_events_cusum
+    from nanoscope.analysis.modules import (
+        DETECTOR_PRIVATE_KEYS,
+        DETREND_PARAM_KEYS,
+        FILTER_PARAM_KEYS,
+        detector_kwargs,
+    )
 
     panel = DetectionPanel()
     qtbot.addWidget(panel)
-    panel.set_detector("detect.cusum")           # even with CUSUM selected
 
+    # --- Schmitt: byte-identical to what the studies always received --------------------
     sp = panel.surrogate_params()
     assert "detector" not in sp
     assert not {"cusum_k", "cusum_h"} & set(sp)
-    assert {"k_in", "k_out"} <= set(sp)
-
+    assert {"k_in", "k_out", "noise_policy", "noise_window_s"} <= set(sp)
+    full = panel.params()
+    assert sp == {k: v for k, v in full.items()
+                  if k not in {"detector", "cusum_k", "cusum_h"}}
     # ...and what the receiver builds from it is a legal detect_events call. This is the
     # exact filter `AnalysisPanel._detect_kwargs_for_truth` applies.
     drop = {"polarity", "k_in", *DETREND_PARAM_KEYS, *FILTER_PARAM_KEYS}
     kw = {k: v for k, v in sp.items() if k not in drop and v is not None}
     assert set(kw) <= set(inspect.signature(detect_events).parameters), sorted(kw)
 
+    # --- CUSUM: its own thresholds, and it says which detector it is ---------------------
+    panel.set_detector("detect.cusum")
+    cp = panel.surrogate_params()
+    assert cp["detector"] == "detect.cusum"
+    assert {"cusum_k", "cusum_h"} <= set(cp)
+    assert not DETECTOR_PRIVATE_KEYS["detect.schmitt"] & set(cp), sorted(cp)
+    assert not {"k_in", "k_out", "noise_policy", "noise_window_s"} & set(cp)
+    # The kwargs the Null control handler forwards (it passes the polarity itself).
+    ckw = {k: v for k, v in detector_kwargs(cp, "detect.cusum").items() if k != "polarity"}
+    assert set(ckw) <= set(inspect.signature(detect_events_cusum).parameters), sorted(ckw)
+
+    # --- and back: switching detectors leaves no CUSUM key behind ------------------------
+    panel.set_detector("detect.schmitt")
+    again = panel.surrogate_params()
+    assert "detector" not in again and not {"cusum_k", "cusum_h"} & set(again)
+
 
 def test_the_detect_button_still_carries_the_detector_choice(qtbot):
-    """The narrowing is for the surrogate studies ONLY -- the Detect button must still
-    say which detector to run, or the owning panel cannot pick a module id."""
+    """The Detect button says which detector to run, or the owning panel cannot pick a
+    module id -- and with CUSUM selected so does the Null control button, while the
+    Schmitt-only Sweep threshold button is disabled and emits nothing."""
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     panel.set_detector("detect.cusum")
@@ -487,5 +521,20 @@ def test_the_detect_button_still_carries_the_detector_choice(qtbot):
 
     sweeps: list[dict] = []
     panel.sweepRequested.connect(sweeps.append)
+    assert not panel.sweep_button.isEnabled(), (
+        "Sweep threshold sweeps the Schmitt k_in; it must be greyed out with CUSUM selected")
+    panel.sweep_button.click()                    # a click on a disabled button is a no-op
+    assert sweeps == []
+
+    nulls: list[dict] = []
+    panel.nullControlRequested.connect(nulls.append)
+    assert panel.null_button.isEnabled()
+    panel.null_button.click()
+    assert nulls[0]["detector"] == "detect.cusum"
+    assert "k_in" not in nulls[0] and "cusum_h" in nulls[0]
+
+    # With Schmitt selected the sweep is live again and its dict names no detector.
+    panel.set_detector("detect.schmitt")
+    assert panel.sweep_button.isEnabled()
     panel.sweep_button.click()
-    assert "detector" not in sweeps[0]
+    assert len(sweeps) == 1 and "detector" not in sweeps[0]

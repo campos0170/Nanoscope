@@ -25,6 +25,31 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- A CUSUM run now counts what the same settings find in the opposite direction, and the three
+  validation studies follow or name their detector. Null control runs the selected detector; its
+  readout names the detector and its settings and is shown only under a table of that detector.
+  Under CUSUM it leads with the new count: *CUSUM (k 0.75, h 28, low-pass 5 kHz): N
+  opposite-direction detection(s) against M on the recording.* Sweep threshold and Recovery map
+  are Schmitt only: both are disabled with CUSUM selected, and a recovery map is used only for
+  fits of a Schmitt table (under any other table *use measured efficiency* is greyed with the
+  reason and keeps its tick). When the opposite-direction count away from detected events is at
+  least 5 and at least 10% of what the run found in the event direction, the Summary shows the
+  advisory *N opposite-direction detection(s) against M in the event direction. CUSUM fires that
+  often where no events are expected, so unless events really run both ways many of the shallow
+  rows here may be noise. Raise h or k and re-run.* The count is an estimate, not a rate. With
+  High-pass on it is not a noise estimate, because the far edge of each event also fires in the
+  opposite direction: the advisory then says that instead, and a CUSUM Null control is refused
+  until High-pass is off.
+  CUSUM's `h` assumes independent samples, so low-pass filtering and 1/f noise both raise its
+  noise firings, and nothing reported it. On a 60 s apo-ferritin recording the run now says so
+  itself: 707 events with 810 opposite-direction detections in the same run; raising h to 224
+  leaves 259 events and 17. With CUSUM selected, Null control ran the Schmitt study and showed
+  its count under the CUSUM table.
+  New CUSUM provenance keys: `n_opposite_events`, `n_opposite_isolated`, `n_opposite_reference`
+  and `opposite_guard_s`. Existing CUSUM and Schmitt settings return the same event tables as
+  before; at a very low `h`, where firings are dense, a CUSUM run can take up to about twice as
+  long. Project format unchanged; study results are not saved. The generated manuals are not
+  rebuilt.
 - Automatic masked baselines use local noise-aware masks and robust flank anchors, preventing
   noisy intervals from becoming one-sided interpolation bias and isolated endpoint samples
   from biasing event depths. Stationary automatic gap filling uses the same robust anchors;

@@ -431,7 +431,7 @@ open_document (io) ──▶ Session.add_document
 | `analysis/baseline.py` | `BaselineConfig`; the two-pass masked-median open-pore estimator (kernel imported from `ml_preprocess`), the block-median/percentile/ASLS + PCHIP detrenders, `measured_polarity`, `baseline_health`, `remove_baseline_wander`, and `characterisation_baseline` — THE door. |
 | `analysis/baseline_probe.py` | Measures a recording's own timescales on the no-high-pass characterization trace and **proposes** `rough_s`/`base_s` from them. Reports; never applies. |
 | `analysis/detect.py` | Schmitt two-threshold detector; measured polarity; merged-exclusion analyzed-duration. Candidate-localization kernel; the module adapter owns the high-pass split. |
-| `analysis/detect_cusum.py` | One-sided sequential candidate detector with changepoint onset/exit estimates; the module adapter gives it the same high-pass split and event schema as Schmitt. |
+| `analysis/detect_cusum.py` | One-sided sequential candidate detector with changepoint onset/exit estimates; the module adapter gives it the same high-pass split and event schema as Schmitt. Each run also counts what the same finder and gates report on the negated deviation and stamps `n_opposite_events`, `n_opposite_isolated`, `n_opposite_reference` and `opposite_guard_s`; `modules._build_warnings` raises the advisory from these keys alone: `n_opposite_isolated` at least 5 and at least 10% of `n_opposite_reference`, or, failing that, `n_opposite_events` at least 5 and at least half of it (dense firings at a very low `h`, where the isolated count collapses; that count is then the one shown). All are frozen at detection, so a merge, a hand edit or a re-measure cannot change the sentence. With `hp_enabled` in the provenance it never raises the noise sentence: on the high-passed candidate trace the far edge of each event also fires in the opposite direction, so the count is not a noise estimate there and the sentence says that instead. A count, never a rate, and it gates nothing. The opposite pass costs little at default settings; at a very low `h` a run can take up to about twice as long. |
 | `analysis/merge.py` | Post-detection sub-event merge (window-based and selection-based), re-characterizing each merged span through `characterize`; the occupancy floor that refuses a merge whose span would be mostly open pore. Reuses `detect.group_starts_by_gap`, so the gap rule is not re-derived. |
 | `analysis/characterize.py` | Per-event dwell, **median** depth, ECD, SNR, rise/fall, sub-state count → the events DataFrame. |
 | `analysis/events.py` | The frozen 20-column event schema + `EventSet` (accept filtering, pooling that refuses cross-pore). |
@@ -439,7 +439,7 @@ open_document (io) ──▶ Session.add_document
 | `analysis/stats.py` | Censored-MLE exponential dwell fit; hand-rolled Gaussian-mixture amplitude fit; log-bin histograms with the Jacobian. |
 | `analysis/populations.py` | GMM/k-means clustering (BIC k-selection), PCA, and linear/power-law fits — all scikit-learn/NumPy. |
 | `analysis/measure.py` | Manual-selection statistics (dwell, amplitude by method, skewness, kurtosis, …) + a 28-column measurement schema (`MEASUREMENT_SCHEMA`), separate from the frozen 20-column event schema. |
-| `analysis/truth.py` | Synthetic trace + AAFT surrogate generators used to validate detection (recall/precision) and for null controls. |
+| `analysis/truth.py` | Synthetic trace + AAFT surrogate generators used to validate detection (recall/precision) and for null controls. `null_control` takes the detector to run (`detector=`, Schmitt when omitted); `sweep_threshold` and `recovery_map` are Schmitt only. |
 
 ### Classical high-pass is a dual-signal adapter contract
 
@@ -598,6 +598,19 @@ Preserved deliberately; changing them silently corrupts the science:
   null of the recording it came from, and reports no rate rather than a wrong one. Phase
   randomisation is a null for a stationary spectrum plus Gaussian noise; a drifting real pore is
   not, and the control was returning `estimated_fdr = 1.00` on every real recording measured.
+  The control runs the detector it is given, so the GUI's Null control follows the selected
+  detector. Under CUSUM the result also carries the real run's opposite-direction count
+  (`n_opposite`) and resolved `polarity`, because the event-free count is a weak lower bound for a
+  detector whose excised detections include its own noise firings; the Statistics readout leads
+  with that count. The GUI stamps each stored result with its `detector` and `thresholds` (for
+  CUSUM `cusum_k`, `cusum_h` and `filter_cutoff_hz`) and shows it only with a table of that
+  detector; under another detector's table the readout names the stored result and the table it
+  shows with, and says "not measured" only when nothing is stored. The GUI refuses, through
+  `runRefused` and before anything starts, a CUSUM control while High-pass is enabled (the
+  opposite-direction count is not a noise estimate there, and an Auto vote on the high-passed
+  trace can pick the wrong sign) and a detector id that is neither `detect.schmitt` nor
+  `detect.cusum`. A recovery map is Schmitt's, so it weights the dwell fit of a Schmitt table
+  only; one that lands under another table is kept and a status line says so.
 - **MAD** noise, never `std` (std absorbs the events being detected).
 - **Median** blockade depth, not max (max is biased by dwell → spurious dwell–depth correlation).
 - **Two-threshold** Schmitt with `k_out < k_in` (single threshold shatters events).

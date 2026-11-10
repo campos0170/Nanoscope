@@ -107,6 +107,7 @@ from .time_controls import SecondsSpinBox
 
 from ..core import clock
 from ..core.quantity_display import quantity_for, column_entry, to_display
+from ..core.sources import detector_name
 from ..analysis import events as events_mod
 from ..analysis import baseline as baseline_mod
 from ..analysis import filters, ml_detect
@@ -524,9 +525,14 @@ class DetectionPanel(QWidget):
 
     Emits:
         detectRequested(dict): run detection with these detect_events kwargs.
-        sweepRequested(dict): run sweep_threshold() with these detect kwargs.
-        nullControlRequested(dict): run null_control() with these detect kwargs.
-        recoveryRequested(dict): run recovery_map() with these detect kwargs.
+        sweepRequested(dict): run sweep_threshold() with :meth:`surrogate_params`.
+            Schmitt only: the button is disabled with CUSUM selected and the owner
+            refuses any other detector's dict.
+        nullControlRequested(dict): run null_control() with :meth:`surrogate_params`,
+            the form narrowed to the SELECTED detector (Schmitt or CUSUM). The owner
+            refuses any other detector, and CUSUM while High-pass is enabled.
+        recoveryRequested(dict): run recovery_map() with :meth:`surrogate_params`.
+            Schmitt only, as the sweep.
         paramsChanged(dict): any parameter changed (for the live filter preview).
         previewFilterToggled(bool): the "show on trace" filter preview toggle.
         mlDetectRequested(dict): run the ML detector with these params
@@ -620,6 +626,21 @@ class DetectionPanel(QWidget):
             "min_dwell_s": float(DEFAULT_CUSUM_MIN_DWELL_S),
         },
     }
+
+    #: What each validation study does, and for which detector. Null control runs the
+    #: detector the combo names; the sweep (it sweeps ``k_in``) and the recovery map are
+    #: Schmitt-only, and both buttons are disabled with CUSUM selected.
+    _SWEEP_TIP = ("Counts events across a range of the Schmitt enter threshold k_in. "
+                  "Schmitt only.")
+    _NULL_TIP = ("Counts what the selected detector finds on this recording's own noise "
+                 "with the events removed.")
+    _RECOVERY_TIP = ("Measures how many injected events the Schmitt detector recovers, "
+                     "for the dwell-fit efficiency correction. Schmitt only.")
+    #: The line added under the detector combo with CUSUM selected: the visible reason
+    #: two of the three study buttons are grey. Shown at the Advanced control level
+    #: only, where those buttons are on screen (`_refresh_detector_note`).
+    _CUSUM_STUDY_NOTE = ("Sweep threshold and Recovery map work with Schmitt only. "
+                         "Null control runs CUSUM.")
 
     _DETREND_LABELS: dict[str, str] = _DETREND_LABELS
     _DETREND_OMITTED: frozenset[str] = _DETREND_OMITTED
@@ -2036,6 +2057,16 @@ class DetectionPanel(QWidget):
         self.sweep_button = QPushButton("Sweep threshold…")
         self.null_button = QPushButton("Null control…")
         self.recovery_button = QPushButton("Recovery map…")
+        # WHICH DETECTOR each study runs. Null control follows the detector combo; the
+        # sweep and the recovery map are Schmitt-only and are greyed out with CUSUM
+        # selected (`_refresh_study_buttons`), where the note under the combo says why
+        # (`_refresh_detector_note`).
+        self.sweep_button.setToolTip(self._SWEEP_TIP)
+        self.null_button.setToolTip(self._NULL_TIP)
+        self.recovery_button.setToolTip(self._RECOVERY_TIP)
+        #: The owner's run gate as last pushed through `set_runnable`. Kept so a change
+        #: of detector can re-judge the study buttons without waiting for the next push.
+        self._runnable = True
         btn_row.addWidget(self.detect_button, 0, 0)
         btn_row.addWidget(self.sweep_button, 0, 1)
         btn_row.addWidget(self.null_button, 1, 0)
@@ -2214,12 +2245,14 @@ class DetectionPanel(QWidget):
         self._refresh_notch_mode()
 
         self.detect_button.clicked.connect(lambda: self.detectRequested.emit(self.params()))
-        # THE THREE SURROGATE STUDIES ARE SCHMITT-ONLY and get a narrowed dict. They
-        # sweep k_in, and their receivers hand what they are given straight to
-        # `detect_events`, so a CUSUM threshold riding along would reach it as an
-        # unexpected keyword and kill the run. Sending the whole form would also be
-        # wrong on its own terms: a sweep of the Schmitt enter threshold has no business
-        # carrying another detector's knobs.
+        # THE THREE VALIDATION STUDIES GET A DICT NARROWED TO THE SELECTED DETECTOR
+        # (`surrogate_params`): the form minus every other detector's thresholds. Null
+        # control runs the detector that dict names, Schmitt or CUSUM. Sweep threshold
+        # and Recovery map are Schmitt-only: their buttons are disabled with CUSUM
+        # selected and their receivers refuse any other dict. The Schmitt receivers hand
+        # what they are given straight to `detect_events`, so a CUSUM threshold riding
+        # along would reach it as an unexpected keyword and kill the run; and a sweep of
+        # the Schmitt enter threshold has no business carrying another detector's knobs.
         self.sweep_button.clicked.connect(
             lambda: self.sweepRequested.emit(self.surrogate_params()))
         self.null_button.clicked.connect(
@@ -2587,6 +2620,9 @@ class DetectionPanel(QWidget):
         for widget in (self.sweep_button, self.null_button, self.recovery_button,
                        self.response_hint):
             widget.setVisible(not essential)
+        # The note under the detector combo names the study buttons only while they are
+        # on screen. A label's text, not a scientific widget.
+        self._refresh_detector_note()
         # The hosted response view lives in the expert Signal Conditioning window, which
         # the Inspector's control level does not govern.
         for widget in (self.response_plot, self.response_note, self.response_chain_check):
@@ -4364,14 +4400,33 @@ class DetectionPanel(QWidget):
         rather than fabricating a dwell time from a nonexistent rate.
         """
         moved = self.detect_button.isEnabled() != bool(runnable)
-        for btn in (self.detect_button, self.sweep_button,
-                    self.null_button, self.recovery_button):
-            btn.setEnabled(bool(runnable))
+        self._runnable = bool(runnable)
+        self.detect_button.setEnabled(bool(runnable))
+        self._refresh_study_buttons()
         self._gate_label.setText("" if runnable else reason)
         self._gate_label.setVisible(bool(reason) and not runnable)
         self._gate_host.setVisible(bool(reason) and not runnable)
         if moved:
             self.runGateChanged.emit(bool(runnable))
+
+    def _refresh_study_buttons(self) -> None:
+        """Enable the three study buttons from the run gate AND the selected detector.
+
+        Null control runs whichever detector the combo names, so it follows the run
+        gate alone. Sweep threshold sweeps the Schmitt ``k_in`` and Recovery map
+        measures the Schmitt detector, so both also need Schmitt selected; with CUSUM
+        they are greyed out and the note under the combo says why (while the buttons
+        are on screen: :meth:`_refresh_detector_note`).
+
+        Called from :meth:`set_runnable` and from :meth:`_on_detector_changed`: the
+        owner re-pushes the run gate only when the gate itself moves, so a change of
+        detector has to be re-judged here.
+        """
+        runnable = bool(self._runnable)
+        schmitt = self.detector_choice() == "detect.schmitt"
+        self.null_button.setEnabled(runnable)
+        self.sweep_button.setEnabled(runnable and schmitt)
+        self.recovery_button.setEnabled(runnable and schmitt)
 
     # -- ML detector ------------------------------------------------------
     def browse_model(self) -> None:
@@ -4785,14 +4840,34 @@ class DetectionPanel(QWidget):
                     self.merge_gap_ms.value(), theirs.get("merge_gap_s", 0.0) * 1e3):
                 self.merge_gap_ms.setValue(float(mine["merge_gap_s"]) * 1e3)
 
-        if module_id == "detect.cusum":
-            self.detector_note.setText(
-                "k and h are DIMENSIONLESS — multiples of the MAD noise sigma, the same "
-                "sigma the table's snr column is divided by. They are not picoamps and "
-                "they do not rescale with the recording's gain.")
+        self._refresh_detector_note()
+        # The sweep and the recovery map are Schmitt-only; the run gate is re-pushed
+        # only when it moves, so the detector's half of their gate is re-judged here.
+        self._refresh_study_buttons()
+
+    def _refresh_detector_note(self) -> None:
+        """Write the grey note under the detector combo. THE ONLY WRITER of it.
+
+        The selected detector's sentence about its thresholds; and, with CUSUM, the
+        line saying which studies work with it (`_CUSUM_STUDY_NOTE`) -- AT THE ADVANCED
+        CONTROL LEVEL ONLY. That line is the visible reason two of the three study
+        buttons are grey, and at Essential all three are hidden while the combo and
+        this note stay: it then named three controls that were not on screen.
+
+        Called from :meth:`_on_detector_changed` and from :meth:`set_control_level`,
+        the two things the text depends on. The first call comes while the panel is
+        still being built, before the control levels exist; the level is then read as
+        Advanced, and `set_control_level` writes the note again once it is known.
+        """
+        if self.detector_choice() == "detect.cusum":
+            text = ("k and h are DIMENSIONLESS — multiples of the MAD noise sigma, the same "
+                    "sigma the table's snr column is divided by. They are not picoamps and "
+                    "they do not rescale with the recording's gain.")
+            if getattr(self, "_control_level", "advanced") == "advanced":
+                text += "\n" + self._CUSUM_STUDY_NOTE
         else:
-            self.detector_note.setText(
-                "k_in and k_out are DIMENSIONLESS — multiples of the MAD noise sigma.")
+            text = "k_in and k_out are DIMENSIONLESS — multiples of the MAD noise sigma."
+        self.detector_note.setText(text)
 
     def detrend_method_choice(self) -> str:
         """The baseline-drift estimator method string, as
@@ -5358,19 +5433,34 @@ class DetectionPanel(QWidget):
         }
 
     def surrogate_params(self) -> dict[str, Any]:
-        """:meth:`params` for the three SCHMITT-ONLY studies (sweep / null / recovery).
+        """:meth:`params` for the three validation studies (sweep / null / recovery),
+        narrowed to THE SELECTED DETECTOR.
 
-        Identical to ``params()`` minus ``"detector"`` and every OTHER detector's private
-        thresholds, taken from `modules.DETECTOR_PRIVATE_KEYS` rather than re-spelled --
-        those three receivers forward what they are handed to `detect_events` after
-        stripping only the preprocessing keys, so a stray ``cusum_h`` arrives as an
-        unexpected keyword argument and the study dies. It is also the honest dict: these
-        studies sweep ``k_in``, and none of them has a CUSUM analogue.
+        ``params()`` minus every OTHER detector's private thresholds, taken from
+        `modules.DETECTOR_PRIVATE_KEYS` rather than re-spelled. ``"detector"`` is kept
+        only when it is not ``detect.schmitt``:
+
+        * Schmitt selected: exactly the dict these studies always received -- no
+          ``detector``, no ``cusum_*``. The receivers forward it to `detect_events`
+          after stripping only the preprocessing keys, and the Null control seed is a
+          hash of it, so it must not gain a key.
+        * CUSUM selected: ``detector == "detect.cusum"`` with ``cusum_k`` / ``cusum_h``
+          and none of Schmitt's ``k_in`` / ``k_out`` / ``noise_policy`` /
+          ``noise_window_s``. Null control then runs CUSUM (the owner refuses it while
+          High-pass is enabled); the sweep and the recovery map are disabled, and their
+          handlers refuse this dict if it reaches them.
+
+        This used to narrow to Schmitt whatever the combo said, so a Null control
+        pressed with CUSUM selected measured the Schmitt detector and its number was
+        read beside a CUSUM table.
         """
+        module_id = self.detector_choice()
         foreign = frozenset().union(
-            *(v for k, v in DETECTOR_PRIVATE_KEYS.items() if k != "detect.schmitt"))
-        return {k: v for k, v in self.params().items()
-                if k != "detector" and k not in foreign}
+            *(v for k, v in DETECTOR_PRIVATE_KEYS.items() if k != module_id))
+        out = {k: v for k, v in self.params().items() if k not in foreign}
+        if module_id == "detect.schmitt":
+            out.pop("detector", None)
+        return out
 
     def set_params(self, params: Mapping[str, Any]) -> None:
         """Seed the whole Schmitt + preprocessing form from a params dict — :meth:`params`'
@@ -6584,6 +6674,9 @@ class StatsPanel(QWidget):
         self.n_components_depth.setValue(1)
         self.use_efficiency = _ElidingCheckBox("use measured efficiency (needs recovery map)")
         self.use_efficiency.setEnabled(False)  # enabled once a recovery map exists
+        # The same text `set_recovery_available` writes, so the box says what it does
+        # from the first paint and not only after the owner's first push.
+        self.use_efficiency.setToolTip(self._EFFICIENCY_TIP)
 
         # Filter-limited events are EXCLUDED from the distribution fits by default.
         # Their dwell is within ~2x the filter rise time, so the low-pass never let
@@ -6840,13 +6933,27 @@ class StatsPanel(QWidget):
         self.fdr_label.setText(text)
         self.fdr_label.setToolTip(tip)
 
-    def set_fdr(self, null_result: dict[str, Any] | None) -> None:
+    def set_fdr(self, null_result: dict[str, Any] | None, *,
+                measured_for: Mapping[str, Any] | None = None) -> None:
         """Show the FDR from a ``null_control()`` result dict.
 
         ``None`` resets the readout to "not measured". The FDR belongs to the recording it
         was measured on, so the owner pushes None whenever it repoints at a target that has
         no null control of its own — leaving the previous recording's percentage on screen
         states a measurement that was never made about this pore.
+
+        THE THIRD STATE: MEASURED, BUT NOT FOR THIS TABLE. ``measured_for`` is a result
+        that IS on file for this recording and channel and is not shown, because the
+        table on screen belongs to another detector. The owner passes it with
+        ``null_result=None``, and the readout then says so (:meth:`_fdr_hidden_text`):
+        ``false-positive rate: measured for CUSUM (k 0.75, h 28, low-pass 5 kHz); shown
+        with a CUSUM table.``
+
+        Without it the label read "not measured (run Null control)" under a Keras,
+        Manual or Reconciled table, where pressing the button files one more result
+        that is hidden again: an instruction that could never fill the readout. No
+        number is shown in this state, so it carries no tooltip. ``measured_for`` is
+        read only when ``null_result`` is empty.
 
         A REFUSAL IS NOT A NUMBER. ``null_control`` returns ``nan`` when it will not stand
         behind a rate — because the AAFT surrogates are not the same noise as this
@@ -6864,18 +6971,36 @@ class StatsPanel(QWidget):
             # clicking another recording -- and a stale provenance tooltip is at its most
             # convincing precisely here, where the label says the number was never
             # measured. Both halves go, together, through the one writer.
-            self._set_fdr_readout(self._NO_FDR_TEXT)
+            self._set_fdr_readout(
+                self._fdr_hidden_text(measured_for) if measured_for
+                else self._NO_FDR_TEXT)
             return
         fdr = null_result.get("estimated_fdr")
         n_sur = null_result.get("per_surrogate")
         n = len(n_sur) if n_sur is not None else null_result.get("n_surrogates", "?")
+        # WHICH DETECTOR, AT WHICH THRESHOLDS. A result the owner stamped with its
+        # detector says so in front of the number ("Schmitt (k_in 5, k_out 2): ..."): the
+        # count is a property of that detector at those settings and of nothing else.
+        # A result with no tag (every one made before the tag existed, all of them
+        # Schmitt) renders exactly as it always did -- `prefix` is then "".
+        label = self._fdr_detector_label(null_result)
+        prefix = f"{label}: " if label else ""
+        # A CUSUM RESULT LEADS WITH THE OPPOSITE-DIRECTION COUNT. It is the number that
+        # says how often CUSUM fires at these settings where no events are expected,
+        # and the event-free count beside it is a weak lower bound for this detector
+        # (the stretches cut out include its own noise firings). "" for every other
+        # result, which then reads as it did.
+        lead = self._fdr_opposite_lead(null_result, prefix)
         if fdr is None or not np.isfinite(float(fdr)):
             notes = tuple(null_result.get("notes") or ())
             n_free = null_result.get("n_event_free")
-            if n_free is None:
+            if lead:
+                text = lead
+            elif n_free is None:
                 text = self._NO_FDR_TEXT
             else:
                 text = (
+                    f"{prefix}"
                     f"false-positive rate NOT estimated — {n_free} detection(s) on this "
                     f"recording's own event-free noise (a lower bound, measured with no "
                     f"surrogate)."
@@ -6912,11 +7037,101 @@ class StatsPanel(QWidget):
         per = [int(v) for v in n_sur] if n_sur is not None else []
         n_real = null_result.get("n_real")
         spread = self._fdr_spread(per, n_real)
+        rate = (f"estimated false-positive rate: {100.0 * fdr:.1f}% (AAFT, {n} surrogates)"
+                f"{spread}")
         self._set_fdr_readout(
-            f"estimated false-positive rate: {100.0 * fdr:.1f}% (AAFT, {n} surrogates)"
-            f"{spread}",
+            # After the lead the rate is a sentence of its own, so it takes a capital.
+            f"{lead} {rate[0].upper()}{rate[1:]}" if lead else f"{prefix}{rate}",
             self._fdr_provenance(null_result, per, n_real),
         )
+
+    #: How each detector's thresholds are spelled in the readout: (shown name, key in
+    #: the result's ``thresholds``). The CUSUM pair reads "k" and "h", as on its form.
+    _FDR_THRESHOLD_NAMES: dict[str, tuple[tuple[str, str], ...]] = {
+        "detect.schmitt": (("k_in", "k_in"), ("k_out", "k_out")),
+        "detect.cusum": (("k", "cusum_k"), ("h", "cusum_h")),
+    }
+
+    @classmethod
+    def _fdr_detector_label(cls, null_result: Mapping[str, Any]) -> str:
+        """``"CUSUM (k 0.75, h 28, low-pass 5 kHz)"`` / ``"CUSUM (k 0.75, h 28, no
+        low-pass)"`` / ``"Schmitt (k_in 5, k_out 2)"``, or ``""``.
+
+        Read from the ``detector`` and ``thresholds`` the owner stamps on a Null control
+        result. ``""`` when the result carries no ``detector``: that is every result
+        made before the tag existed, and its readout must not change by a character.
+        The thresholds are named because a stored result is not dropped when the form
+        is edited -- the label is how a reader sees it was measured at other settings.
+
+        The CUSUM label also names the low-pass (``filter_cutoff_hz`` in the stamp;
+        ``None`` is "no low-pass"), because the low-pass changes how often CUSUM fires
+        on noise. A CUSUM stamp with no such key says nothing about the low-pass.
+        """
+        detector = null_result.get("detector")
+        if not detector:
+            return ""
+        name = detector_name(detector)
+        thresholds = null_result.get("thresholds")
+        if not isinstance(thresholds, Mapping):
+            return name
+        names = cls._FDR_THRESHOLD_NAMES.get(
+            str(detector), tuple((str(k), k) for k in thresholds))
+        parts = []
+        for shown, key in names:
+            value = thresholds.get(key)
+            if value is None:
+                continue
+            try:
+                parts.append(f"{shown} {float(value):g}")
+            except (TypeError, ValueError):
+                parts.append(f"{shown} {value}")
+        if str(detector) == "detect.cusum" and "filter_cutoff_hz" in thresholds:
+            cutoff = thresholds.get("filter_cutoff_hz")
+            try:
+                parts.append("no low-pass" if cutoff is None
+                             else f"low-pass {_hz_text(cutoff)}")
+            except (TypeError, ValueError):
+                parts.append(f"low-pass {cutoff}")
+        return f"{name} ({', '.join(parts)})" if parts else name
+
+    @classmethod
+    def _fdr_hidden_text(cls, null_result: Mapping[str, Any]) -> str:
+        """The readout for a result that is on file but not shown with this table.
+
+        ``"false-positive rate: measured for {label}; shown with a {name} table."`` --
+        ``{label}`` is the result's own label (:meth:`_fdr_detector_label`, so it names
+        the settings it was measured at) and ``{name}`` the detector whose table shows
+        it, ``Schmitt`` or ``CUSUM``. A result with no ``detector`` tag was made by
+        Schmitt (the only detector the study ran before the tag existed) and has no
+        label of its own; it reads "measured for Schmitt".
+        """
+        name = detector_name(null_result.get("detector") or "detect.schmitt")
+        label = cls._fdr_detector_label(null_result) or name
+        return f"false-positive rate: measured for {label}; shown with a {name} table."
+
+    @staticmethod
+    def _fdr_opposite_lead(null_result: Mapping[str, Any], prefix: str) -> str:
+        """The sentences a CUSUM result's readout leads with, or ``""``.
+
+        ``"{label}: {n_opposite} opposite-direction detection(s) against {n_real} on the
+        recording. {n_event_free} on its event-free noise, a weak lower bound for
+        CUSUM."``
+
+        Only for a result tagged ``detect.cusum`` that carries ``n_opposite`` (the count
+        `truth.null_control` copies from the CUSUM run). ``n_real`` is called
+        "detections on the recording": at these settings many of them may be noise.
+        """
+        n_opposite = null_result.get("n_opposite")
+        if str(null_result.get("detector")) != "detect.cusum" or n_opposite is None:
+            return ""
+        n_real = null_result.get("n_real")
+        against = f" against {n_real}" if n_real is not None else ""
+        text = (f"{prefix}{n_opposite} opposite-direction detection(s){against} on the "
+                f"recording.")
+        n_free = null_result.get("n_event_free")
+        if n_free is not None:
+            text += f" {n_free} on its event-free noise, a weak lower bound for CUSUM."
+        return text
 
     @staticmethod
     def _fdr_spread(per: list[int], n_real: Any) -> str:
@@ -6947,9 +7162,13 @@ class StatsPanel(QWidget):
         """Where the printed percentage came from, and whether pressing again repeats it."""
         lines: list[str] = []
         if per and n_real:
+            # A CUSUM count is "detections on the recording", as in its readout: at
+            # these settings many of them may be noise. Every other result reads as it did.
+            cusum = str(null_result.get("detector")) == "detect.cusum"
             lines.append(
-                f"The mean of {len(per)} independent AAFT surrogates, over {n_real} real "
-                f"detections. Per-surrogate counts: {', '.join(str(v) for v in per)}.")
+                f"The mean of {len(per)} independent AAFT surrogates, over {n_real} "
+                f"{'detections on the recording' if cusum else 'real detections'}. "
+                f"Per-surrogate counts: {', '.join(str(v) for v in per)}.")
             if min(per) > 0 and max(per) >= 2 * min(per):
                 # `:.0f` ROUNDED THE ONE NUMBER ON THIS LINE WHOSE JOB IS DISPERSION,
                 # and in BOTH directions. Measured on the owner's own -700 mV counts
@@ -6984,6 +7203,12 @@ class StatsPanel(QWidget):
             lines.append(
                 f"For comparison, {n_free} detection(s) on this recording's own event-free "
                 f"noise, measured with no surrogate at all.")
+
+        n_opposite = null_result.get("n_opposite")
+        if n_opposite is not None:
+            lines.append(
+                f"For comparison, {n_opposite} opposite-direction detection(s) on the "
+                f"recording itself, away from detected events.")
         return "\n\n".join(lines)
 
     _NO_DETECTION_REASON = ("Run detection first — the fits are computed from the accepted "
@@ -7016,11 +7241,31 @@ class StatsPanel(QWidget):
         """The reason the Fit button is disabled ("" when it is live) — what the user reads."""
         return self._fit_gate_label.text()
 
-    def set_recovery_available(self, available: bool) -> None:
-        """Enable the 'use measured efficiency' checkbox once a recovery map exists."""
+    _EFFICIENCY_TIP = (
+        "Weights the dwell fit by the detection efficiency the Recovery map measured "
+        "with the Schmitt detector. Used only for fits of a Schmitt table.")
+
+    def set_recovery_available(self, available: bool, reason: str = "") -> None:
+        """Enable the 'use measured efficiency' checkbox once a recovery map exists
+        AND the table on screen is one it was measured for.
+
+        The map is measured with the Schmitt detector, so the owner passes ``True``
+        only for a Schmitt table (or, with no table, the Schmitt form). ``reason`` is
+        why a map that exists is not on offer; it is appended to the tooltip after a
+        blank line, so the greyed-out box says what it is waiting for.
+
+        THE TICK IS THE USER'S. With no map at all (no ``reason``) the box is unticked,
+        as it always was. With a map that is only not on offer for THIS table (a
+        ``reason``) the box is greyed out and keeps its tick, so Schmitt -> CUSUM ->
+        Schmitt returns to the fit the user set up. A greyed-out tick weights nothing:
+        the Fit button sends ``use_efficiency`` only from an enabled box, and the owner
+        gives the map to a Schmitt table only.
+        """
         self.use_efficiency.setEnabled(bool(available))
-        if not available:
+        if not available and not reason:
             self.use_efficiency.setChecked(False)
+        self.use_efficiency.setToolTip(
+            self._EFFICIENCY_TIP + (f"\n\n{reason}" if reason else ""))
 
     def set_filter_limited_count(self, n: int) -> None:
         """Show how many accepted events the fits will drop as filter-limited.
@@ -9699,7 +9944,7 @@ class SweepDialog(QDialog):
 
     def __init__(self, sweep_df: pd.DataFrame, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Threshold sweep")
+        self.setWindowTitle("Threshold sweep (Schmitt k_in)")
         self._df = sweep_df.reset_index(drop=True)
         self._k_recommended = sweep_df.attrs.get("k_recommended")
         # `sweep_threshold` decides for itself whether its AAFT surrogate is a null for

@@ -24,6 +24,11 @@ until they have thresholded their own science away -- all while the app displays
 a badge certifying rigor. A control that is confidently wrong is worse than no
 control.
 
+A CUSUM run's own opposite-direction count (`detect_cusum`, reported by
+`null_control` as ``n_opposite``) is NOT that mirror control. It is a count carrying
+exactly this caveat -- where events really run both ways it counts real events --
+and it is never turned into a rate and gates nothing.
+
 The Amplitude Adjusted Fourier Transform surrogate assumes nothing about
 direction and nothing about Gaussianity. It preserves the measured power spectrum
 (so 1/f noise, line pickup and the anti-alias filter roll-off all survive) and
@@ -80,11 +85,19 @@ class SynthRecording:
     samples (`data`, float32), the sample rate, and the polarity that makes
     `dev = polarity * (current - baseline)` positive inside events. `current`
     and `fs` are read-only aliases so ported code and tests can use either name.
+
+    ``polarity=None`` means "let the detector measure it" and is accepted by
+    `null_control` ONLY. Handed a ``detector=``, it measures the sign once, on the
+    real run, and holds it for the event-free and surrogate runs; its default call
+    (no ``detector=``) is left exactly as it always was, where every run measures
+    its own. `sweep_threshold` and `recovery_map` need a known sign -- handed
+    ``None`` they would take a fresh vote on every run -- and refuse it with a
+    ``ValueError``.
     """
 
     data: np.ndarray
     sample_rate_hz: float
-    polarity: int
+    polarity: int | None
     name: str = "synthetic"
     units: str = "pA"
     meta: dict = field(default_factory=dict)
@@ -114,21 +127,29 @@ class SynthRecording:
 # ---------------------------------------------------------------------------
 # lazy imports of sibling modules (avoid an import cycle; detect imports much)
 # ---------------------------------------------------------------------------
-def _detect() -> Callable[..., Any]:
-    """A Recording-consuming detector built on the signal-first `detect_events`.
+def _detect(detector: Callable[..., Any] | None = None) -> Callable[..., Any]:
+    """A Recording-consuming detector built on a signal-first detector function.
 
     Returns a callable `detect(rec, **kwargs) -> EventSet` so the ported truth
     machinery (and its tests) can keep the SOURCE's `detect(rec)` call shape. The
     recording's stored polarity is always passed explicitly; there is no stored
     polarity to cross-check in the signal-first model, so the SOURCE's
     `check_polarity` flag is a no-op and is stripped.
+
+    ``detector`` is the function to wrap -- anything with the contract of
+    `detect.detect_events` / `detect_cusum.detect_events_cusum`:
+    ``(signal, fs, *, polarity, recording, **kwargs) -> (frame, provenance)``.
+    ``None`` is `detect.detect_events`, as it always was.
     """
-    from nanoscope.analysis.detect import detect_events
     from nanoscope.analysis.events import EventSet
+
+    if detector is None:
+        from nanoscope.analysis.detect import detect_events
+        detector = detect_events
 
     def detect(rec: SynthRecording, **kwargs: Any):
         kwargs.pop("check_polarity", None)
-        df, prov = detect_events(
+        df, prov = detector(
             rec.data,
             rec.sample_rate_hz,
             polarity=rec.polarity,
@@ -469,7 +490,8 @@ def synth_trace(
 # null control
 # ---------------------------------------------------------------------------
 def _event_free_trace(
-    rec: SynthRecording, real, detect_kwargs: dict, rng: np.random.Generator
+    rec: SynthRecording, real, detect_kwargs: dict, rng: np.random.Generator,
+    baseline_config: Any = None,
 ) -> np.ndarray:
     """`rec.data` with detected events excised, so the surrogate is pure noise.
 
@@ -485,12 +507,18 @@ def _event_free_trace(
     *removed* -- excise each detected event (padded) and refill it with noise resampled
     from the event-free stretches, so the amplitude distribution fed to AAFT is the
     noise distribution, not noise+events.
+
+    ``baseline_config`` is the estimator configuration the refill is drawn against;
+    ``None`` is the app default, which is what this always used. `_null_control`
+    passes the detect kwargs' own ``baseline_config`` when it was handed a detector,
+    so the excised stretches are refilled around the SAME baseline the detector
+    measured its events against, instead of mixing two baselines in one study.
     """
     x = rec.data.astype(np.float64).copy()
     df = real.df
     if not len(df):
         return x
-    baseline, _ = _baseline_of(rec)
+    baseline, _ = _baseline_of(rec, baseline_config)
     pad = int(round(2e-3 * rec.sample_rate_hz))
     keep = np.ones(x.size, dtype=bool)
     s = np.maximum(0, df["start_idx"].to_numpy(dtype=np.int64) - pad)
@@ -516,6 +544,7 @@ def null_control(
     n_surrogates: int = 5,
     rng: Any = None,
     cancel: CancelFlag | None = None,
+    detector: Callable[..., Any] | None = None,
 ) -> dict:
     """False-positive rate of the detector, measured on the user's own noise.
 
@@ -524,6 +553,42 @@ def null_control(
     removed. Surrogates keep this recording's spectrum and (noise) amplitude
     distribution but have no localised events, so every detection in one is a
     false positive.
+
+    WHICH DETECTOR. ``detector`` is the detector function every one of the
+    ``n_surrogates + 2`` runs calls; ``None`` is `detect.detect_events` (Schmitt), as
+    before. Pass `detect_cusum.detect_events_cusum` with that detector's own
+    ``detect_kwargs`` to measure a CUSUM table: a null measured with one detector
+    says nothing about a table another detector produced.
+
+    Four things follow a GIVEN detector and leave the default call exactly as it
+    was for every input (same seven keys, same notes, same use of the seed, same
+    polarity handed to every run):
+
+    * a ``baseline_config`` in ``detect_kwargs`` is also the configuration the
+      event-free refill is drawn against (`_event_free_trace`), so one study uses
+      one baseline;
+    * a detector that counted its own opposite direction adds ``n_opposite`` and
+      ``polarity`` to the result;
+    * for such a detector a refused surrogate does not point at ``n_event_free``:
+      the stretches cut out around its detections include its own noise firings, so
+      that count is a weak lower bound and the note says to read the
+      opposite-direction count instead;
+    * an unset polarity is measured once and then HELD (next paragraph).
+
+    ``rec.polarity`` may be ``None`` here (and only here). WITH A DETECTOR GIVEN the
+    detector measures the sign on the real run, exactly as a Detect run on Auto does,
+    and that measured sign is held for the event-free and surrogate runs, which have
+    no events to vote with; a detector whose provenance carries no ``polarity`` to
+    hold is refused with a ``ValueError`` that names it. WITHOUT ONE the call does
+    what it always did with ``None``: each of the ``n_surrogates + 2`` runs is handed
+    ``None`` and measures its own sign. That is the older behaviour, kept so the
+    default call returns the same numbers as before for every input; pass a known
+    sign, or the detector, if one direction is wanted throughout.
+
+    HAND IT THE TRACE WITHOUT HIGH-PASS. On a high-passed trace the far edge of each
+    real event also fires in the opposite direction, so ``n_opposite`` is not a noise
+    estimate there, and with ``polarity=None`` the detector's own vote can come out
+    reversed (see `detect_cusum.OPPOSITE_GUARD_S`).
 
     Why the events are removed first: AAFT preserves the amplitude distribution
     exactly, so surrogating the raw trace keeps the deep event samples and merely
@@ -545,6 +610,8 @@ def null_control(
             derives the app's, and `gui.panels.StatsPanel.set_fdr` prints both.
         cancel: zero-arg cancel predicate; `None` uses the ambient token. See
             `sweep_threshold` for why every one of these takes one.
+        detector: the detector function to run (see WHICH DETECTOR above); `None`
+            is `detect.detect_events`.
 
     THE CONTROL CHECKS ITS OWN PREMISE, and refuses rather than guessing. See
     `_surrogate_is_faithful`: the AAFT null is exact for Gaussian noise and is NOT a
@@ -575,11 +642,20 @@ def null_control(
         * ``estimated_fdr`` -- ``nan`` when ``n_real == 0`` (undefined, not zero) and
           ``nan`` when the surrogate is not a faithful null of this recording.
         * ``notes`` -- tuple of sentences; empty when the control is clean.
+        * ``n_opposite`` -- PRESENT ONLY when the detector stamped
+          ``n_opposite_isolated`` on the real run (CUSUM does, Schmitt does not): the
+          opposite-direction detections on the recording itself, away from detected
+          events. Read from that run's provenance, so it costs nothing extra. A
+          count with the caveat in the module docstring, not a rate.
+        * ``polarity`` -- PRESENT ONLY next to ``n_opposite``: the resolved event
+          direction (+1 or -1, a plain int) every run of the study used -- the
+          recording's own, or the one the detector measured on the real run when
+          ``rec.polarity`` was ``None`` -- so a reader knows which way "opposite" is.
     """
     if n_surrogates < 1:
         raise ValueError(f"n_surrogates must be >= 1, got {n_surrogates}")
     with cancel_scope(resolve_cancel(cancel)):
-        return _null_control(rec, detect_kwargs, n_surrogates, rng)
+        return _null_control(rec, detect_kwargs, n_surrogates, rng, detector=detector)
 
 
 #: A faithful surrogate is the same noise as the trace it was built from, so the
@@ -653,8 +729,8 @@ def _surrogate_is_faithful(n_event_free: int, n_surrogate_mean: float) -> bool:
     return float(n_surrogate_mean) <= tolerated
 
 
-def _null_control(rec, detect_kwargs, n_surrogates, rng) -> dict:
-    detect = _detect()
+def _null_control(rec, detect_kwargs, n_surrogates, rng, detector=None) -> dict:
+    detect = _detect(detector)
     kw = dict(detect_kwargs or {})
     # A caller-supplied baseline was estimated on the real trace; it does not
     # describe a surrogate, whose samples are a permutation in time.
@@ -663,8 +739,34 @@ def _null_control(rec, detect_kwargs, n_surrogates, rng) -> dict:
 
     real = detect(rec, **dict(detect_kwargs or {}))
     n_real = len(real.df)
+    # An unset polarity was measured by the detector on the real run, where the
+    # events are. Hold THAT sign from here on: the event-free trace and the
+    # surrogates have nothing to vote with, and `_event_free_trace` hands the sign
+    # to the baseline -- so this must come before it.
+    #
+    # ONLY FOR A GIVEN DETECTOR. The default call (no ``detector=``) has always
+    # handed ``None`` to every run and let each one vote, and it must return the
+    # same numbers as before for every input, this one included.
+    if detector is not None and rec.polarity is None:
+        measured = (real.provenance or {}).get("polarity")
+        if measured is None or measured not in (-1, 1):
+            name = getattr(detector, "__name__", None) or repr(detector)
+            raise ValueError(
+                f"null_control was handed polarity=None, and the detector {name} "
+                "stamped no polarity (+1 or -1) in its provenance, so there is no "
+                "measured direction to hold for the event-free and surrogate runs. "
+                "Give the recording a known polarity for this detector."
+            )
+        rec = replace(rec, polarity=int(measured))
+    # Only a detector that counted its own opposite direction has this to give (the
+    # CUSUM detector does; Schmitt does not).
+    n_opposite = (real.provenance or {}).get("n_opposite_isolated")
+    # ONE BASELINE PER STUDY, for a given detector: the refill below is drawn against
+    # the configuration the detector itself was handed. The default call (no
+    # ``detector=``) keeps the refill it always had.
+    refill_config = kw.get("baseline_config") if detector is not None else None
     # Surrogate the noise with the events removed, not the raw trace (see above).
-    noise = _event_free_trace(rec, real, kw, gen)
+    noise = _event_free_trace(rec, real, kw, gen, baseline_config=refill_config)
     # A surrogate has no localised events, so its measured polarity is noise-driven
     # and may disagree with rec.polarity; we know it has no events, so the polarity
     # guard (meant for the user's real trace) must not fire here.
@@ -686,6 +788,22 @@ def _null_control(rec, detect_kwargs, n_surrogates, rng) -> dict:
     notes: list[str] = []
     faithful = _surrogate_is_faithful(n_event_free, mean)
     if not faithful:
+        if detector is not None and n_opposite is not None:
+            # The excised stretches are padded detections, and for CUSUM many of
+            # those detections ARE its noise firings -- so the event-free trace has
+            # had the detector's own false positives cut out of it and is not the
+            # number to send the reader to. The run's opposite-direction count is.
+            instead = (
+                "For CUSUM the event-free count is a weak lower bound, because the "
+                "stretches cut out include its own noise firings. Read the "
+                "opposite-direction count."
+            )
+        else:
+            instead = (
+                "Use n_event_free instead -- it is the false-positive count on this "
+                "recording's own noise, measured with no surrogate at all, and it is a "
+                "lower bound."
+            )
         notes.append(
             f"the AAFT surrogates produced {mean:.0f} detections where this "
             f"recording's own event-free noise produces {n_event_free}, so the "
@@ -694,9 +812,7 @@ def _null_control(rec, detect_kwargs, n_surrogates, rng) -> dict:
             "stationary spectrum plus Gaussian noise; a recording with slow open-pore "
             "drift or heavy tails is not, and the surrogate's power comes back "
             "inflated (measured on this machine's recordings: every band, by up to "
-            "14x). Use n_event_free instead -- it is the false-positive count on this "
-            "recording's own noise, measured with no surrogate at all, and it is a "
-            "lower bound."
+            "14x). " + instead
         )
     if n_real == 0:
         notes.append("no real detections, so a false-positive RATE is undefined "
@@ -706,7 +822,7 @@ def _null_control(rec, detect_kwargs, n_surrogates, rng) -> dict:
         fdr = float("nan")
     else:
         fdr = float(min(1.0, mean / n_real))
-    return {
+    out = {
         "n_real": int(n_real),
         "n_event_free": int(n_event_free),
         "n_surrogate_mean": mean,
@@ -715,6 +831,13 @@ def _null_control(rec, detect_kwargs, n_surrogates, rng) -> dict:
         "per_surrogate": [int(v) for v in per],
         "notes": tuple(notes),
     }
+    # The Schmitt result keeps exactly the seven keys above. A detector that counted
+    # its own opposite direction adds that count and the direction it was counted
+    # against (resolved above: the recording's, or the one measured on the real run).
+    if n_opposite is not None:
+        out["n_opposite"] = int(n_opposite)
+        out["polarity"] = int(rec.polarity)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +863,9 @@ def sweep_threshold(
     The plateau is the longest run of adjacent k where |d ln(n) / dk| <= plateau_tol.
 
     Args:
-        rec: recording to sweep.
+        rec: recording to sweep. Its polarity must be known (+1 or -1): a recording
+            with ``polarity=None`` is refused with a ``ValueError``, because every
+            detection here would otherwise take its own vote on the direction.
         k_values: thresholds in units of noise RMS. Default: 2.5 to 10.0 step 0.5.
         detect_kwargs: passed to `detect`; `k_in` is overridden by the sweep.
         plateau_tol: max |d ln n / dk| counted as flat, per unit k.
@@ -771,7 +896,19 @@ def sweep_threshold(
         return _sweep_threshold(rec, k_values, detect_kwargs, plateau_tol, rng)
 
 
+#: What `sweep_threshold` and `recovery_map` say to a recording with no polarity.
+#: ``SynthRecording(polarity=None)`` is a value `null_control` understands; these two
+#: would run to the end with it, every detection taking its own vote (each k, the
+#: surrogate, the quiet pool, the baseline), and return numbers with nothing on them
+#: to say the direction was never fixed.
+_NEEDS_KNOWN_POLARITY = (
+    "this study needs a known polarity; polarity=None is accepted by null_control only"
+)
+
+
 def _sweep_threshold(rec, k_values, detect_kwargs, plateau_tol, rng) -> pd.DataFrame:
+    if rec.polarity is None:
+        raise ValueError(_NEEDS_KNOWN_POLARITY)
     detect = _detect()
     if k_values is None:
         k_values = np.arange(2.5, 10.01, 0.5)
@@ -990,7 +1127,9 @@ def recovery_map(
     weighted by what the detector can actually see.
 
     Args:
-        rec: real recording, used for its noise and its open-pore current.
+        rec: real recording, used for its noise and its open-pore current. Its
+            polarity must be known (+1 or -1); ``polarity=None`` is refused with a
+            ``ValueError`` for the same reason as in `sweep_threshold`.
         detect_kwargs: passed to `detect`, both to find the quiet stretches and to
             score the injected events. Use the settings you will analyse with.
         dwell_grid: dwell times to test, s. Default 6 points, 2e-5..5e-3, log spaced.
@@ -1016,6 +1155,8 @@ def recovery_map(
 
 
 def _recovery_map(rec, detect_kwargs, dwell_grid, depth_grid, n_per_cell, seed) -> pd.DataFrame:
+    if rec.polarity is None:
+        raise ValueError(_NEEDS_KNOWN_POLARITY)
     kw = dict(detect_kwargs or {})
     kw.pop("baseline", None)  # baselines belong to a trace, not to a synthetic splice
     # Shallow/short cells inject events near the detection floor, so the probe's

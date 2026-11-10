@@ -393,6 +393,37 @@ exit lower than the entry so a noisy event is less readily chopped into fragment
 CUSUM** is also available, with different parameters and defaults; it is not the same operation as
 fitting sub-state levels inside already detected events. The `ML` tab runs a compatible loaded model.
 
+CUSUM's `h` assumes independent samples, so low-pass filtering and 1/f noise both raise its noise
+firings. Every CUSUM run counts what the same settings find in the opposite direction, and adds an
+advisory to `⚠ About these numbers` when that count is at least 5 and at least 10% of what the run
+found in the event direction: *N opposite-direction detection(s) against M in the event direction.
+CUSUM fires that often where no events are expected, so unless events really run both ways many of
+the shallow rows here may be noise. Raise h or k and re-run.* Raising `h` or `k` is the remedy: on
+one 60 s recording the default `h` 28 gave 707 rows with 810 opposite-direction detections, and
+`h` 224 left 259 rows with 17. The count is an estimate, not a rate, and an upper bound when
+events really run both ways.
+
+Three more rules decide what the advisory says. When the count is at least three times what the
+run found in the event direction, it points at the polarity: *N opposite-direction detection(s)
+against M in the event direction: check the polarity setting. If it is right, noise alone is
+firing CUSUM at these settings.* Detections within 2 ms of a detected event are left out of the
+count. When that leaves too few to raise the advisory but the full count is at least 5 and at
+least half of what the run found in the event direction, the advisory is raised with the full
+count; this covers a very low `h`, where the rows are too dense for anything to be away from one.
+With high-pass on, the far edge of each event also fires in the opposite direction, so the count
+is not a noise estimate and the advisory reads *N opposite-direction detection(s) with High-pass
+on. The far edge of each event also fires in the opposite direction there, so this count is not a
+noise estimate; turn High-pass off to check for noise firings.*
+
+Of the three studies beside `Detect`, `Null control…` runs the selected detector and its readout
+names it; under CUSUM the readout leads with the opposite-direction count. `Sweep threshold…` and
+`Recovery map…` are Schmitt only and are disabled with CUSUM selected, and a recovery map is used
+only for fits of a Schmitt table: under any other table `use measured efficiency` is greyed with
+the reason and keeps its tick. A map that finishes under another table is kept, and the status
+bar says *Recovery map finished for Schmitt; it is used for fits of a Schmitt table.* With CUSUM
+selected, `Null control…` needs high-pass off; with it on nothing runs and the status bar says
+why. Study results are not saved in the project.
+
 ![The Detection tab on real data, with the event table docked beneath it. Polarity is measured, not assumed — here, on the −700 mV recording at that file's then-proposed 0.1 s / 30 ms baseline, enhancement (down): 1969 down / 0 up, confidence 1.00, meaning these events increase the current magnitude rather than block it. The vote is taken against the baseline in force: the same recording reads 2047 down / 1 up at the app default and 2184 down / 2 up at the 1 s / 300 ms window now proposed for it. Note the read-only `range` row: the Schmitt detector always runs over the whole recording.](images/panel_detection.webp)
 
 *The Detection tab on real data, with the event table docked beneath it. Polarity is measured, not assumed — here, on the −700 mV recording at that file's then-proposed 0.1 s / 30 ms baseline, enhancement (down): 1969 down / 0 up, confidence 1.00, meaning these events increase the current magnitude rather than block it. The vote is taken against the baseline in force: the same recording reads 2047 down / 1 up at the app default and 2184 down / 2 up at the 1 s / 300 ms window now proposed for it. Note the read-only `range` row: the Schmitt detector always runs over the whole recording.*
@@ -3448,6 +3479,23 @@ on the −600 mV file both read 31), the seed is stamped into the result, and th
 range the surrogates spanned beside the mean. Reproducible is not the same as meaningful: it is
 still one draw from a wide distribution, and the refusal wording and the lower-bound framing are
 what to quote.
+
+The control runs the selected detector, and the readout names it. Under CUSUM the readout names
+the low-pass too and leads with the run's opposite-direction count, which is the number to read:
+*CUSUM (k 0.75, h 28, low-pass 5 kHz): N opposite-direction detection(s) against M on the
+recording. F on its event-free noise, a weak lower bound for CUSUM.* The event-free count is a
+weak lower bound there because the stretches cut out include CUSUM's own noise firings. The
+opposite-direction count is itself an estimate, and an upper bound when events really run both
+ways. With high-pass on it is not a noise estimate at all, so a CUSUM control is refused until
+high-pass is off: *Null control with CUSUM needs High-pass off: with it on, the far edge of each
+event also fires in the opposite direction. Turn High-pass off and run it again.*
+
+A result is shown only with a table of the detector it was measured with. Otherwise the readout
+says where it shows, for example *false-positive rate: measured for CUSUM (k 0.75, h 28, low-pass
+5 kHz); shown with a CUSUM table.* It reads *false-positive rate: not measured (run Null
+control)* only when nothing is on file for the recording and channel. The control measures
+Schmitt and CUSUM only; any other detector is refused with *Null control works with the Schmitt
+and CUSUM detectors only.*
 
 #### Inspect ticks and labels at final export size
 

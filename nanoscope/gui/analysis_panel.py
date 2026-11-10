@@ -136,6 +136,7 @@ from ..analysis.modules import (
     detection_params_from_provenance,
     detection_signal,
     detection_signal_key,
+    detector_kwargs,
     detrend_method_kwargs,
     fit_depth,
     fit_dwell,
@@ -1987,16 +1988,67 @@ class AnalysisPanel(QtWidgets.QWidget):
         if notice:
             self.statusMessage.emit(notice)
 
+    def _study_detector(self) -> str | None:
+        """WHICH DETECTOR a study result has to be about to be shown here, or ``None``.
+
+        The module id of the table on screen (Schmitt, CUSUM, Keras, Reconciled, Study,
+        Manual). With no table on screen it is the detector the form names, because that
+        is the detector the next Null control would run. ``None`` with no selection.
+        """
+        if self._sel is None:
+            return None
+        res = self._stored_detection()
+        if res is not None:
+            return str(res.module_id)
+        return self._detection.detector_choice()
+
+    #: Why a recovery map that exists is not on offer for the table on screen.
+    _RECOVERY_OTHER_TABLE = ("This recording's recovery map was measured with Schmitt, "
+                             "so it is not used for this table.")
+    #: The status line when a recovery map lands while the table on screen is not a
+    #: Schmitt table: it is stored, and the efficiency box does not light up.
+    _RECOVERY_LANDED_ELSEWHERE = ("Recovery map finished for Schmitt; it is used for "
+                                  "fits of a Schmitt table.")
+
     def _sync_surrogate_readouts(self) -> None:
-        """Point the FDR label and the 'use measured efficiency' toggle at the CURRENT target.
+        """Point the FDR label and the 'use measured efficiency' toggle at the CURRENT
+        target AND THE DETECTOR OF THE TABLE ON SCREEN.
 
         Both readouts describe a surrogate study run on one (doc_id, channel); neither is a
         property of the panel. Repointing the panel therefore has to repoint them — showing
         the new target's own numbers, or none at all — rather than leave the previous
-        recording's on screen where they read as this one's."""
-        self._stats.set_fdr(self._fdr.get(self._sel) if self._sel is not None else None)
+        recording's on screen where they read as this one's.
+
+        ...and a study is a measurement of ONE DETECTOR. A Null control result is shown
+        only when the detector it was run with (its ``detector`` tag; a result with no
+        tag was made by Schmitt, the only detector the study ran before the tag existed)
+        is :meth:`_study_detector`. The recovery map is measured with Schmitt by
+        construction, so the efficiency toggle is on offer only for a Schmitt table.
+        Before this rule both were keyed on the recording alone: a Schmitt Null control's
+        count stayed on the Summary tab under a CUSUM table of the same recording, and
+        the Schmitt recovery map weighted a dwell fit of CUSUM rows.
+
+        A result that is on file but hidden is NOT "not measured". The readout then
+        says what was measured and where it is shown (``StatsPanel.set_fdr``'s
+        ``measured_for``): under a Keras, Manual or Reconciled table the old "not
+        measured (run Null control)" asked for a click that files one more hidden
+        result and could never fill the label.
+
+        Called from both halves of every repoint -- :meth:`_show_result` and
+        :meth:`_clear_results` -- as well as on a selection change and when a study lands.
+        """
+        detector = self._study_detector()
+        entry = self._fdr.get(self._sel) if self._sel is not None else None
+        hidden = None
+        if entry is not None:
+            tag = entry.get("detector") if isinstance(entry, Mapping) else None
+            if str(tag or _MODULE_ID) != detector:
+                entry, hidden = None, entry
+        self._stats.set_fdr(entry, measured_for=hidden)
+        has_map = self._sel is not None and self._sel in self._recovery
+        usable = has_map and detector == _MODULE_ID
         self._stats.set_recovery_available(
-            self._sel is not None and self._sel in self._recovery)
+            usable, self._RECOVERY_OTHER_TABLE if has_map and not usable else "")
 
     def _load_stored_detection(self, doc_id: str, channel: int) -> None:
         """Show the stored detection for this selection, if any. Prefers the
@@ -2604,6 +2656,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         DetectionPanel's own two, so every knock-on has landed: make the switch it asked
         for now (:meth:`_show_detector_choice`)."""
         self._combo_index_settled = self._detection.detector_combo.currentIndex()
+        # With no table on screen the form's detector decides which study result is
+        # shown (`_study_detector`), and not every combo move ends in a table switch
+        # (`_show_detector_choice` returns early when the last table shown was an ML or
+        # Manual one). A switch that does happen re-judges again through `_show_result`
+        # / `_clear_results`.
+        self._sync_surrogate_readouts()
         module_id, self._detector_switch_due = self._detector_switch_due, None
         absorbed, self._form_absorbed = self._form_absorbed, False
         if module_id is None:
@@ -3922,16 +3980,37 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._form_run_from = None
 
     # -- surrogate studies (off-thread; they re-detect on full-trace surrogates) -----------------
-    def _surrogate_builder(self, detect_params: dict[str, Any]):
+    def _surrogate_builder(self, detect_params: dict[str, Any], *,
+                           detector_measures_polarity: bool = False):
         """A zero-arg callable that builds the study's ``truth.SynthRecording``
         ON THE WORKER THREAD.
 
-        The SAME baseline-drift removal detection applies is baked into the wrapped
-        signal (preprocess_for_detection), so the surrogate studies detect on the
-        identical preprocessed trace. The low-pass is NOT baked in: detect_events still
-        owns it via ``filter_cutoff_hz`` in the detect kwargs (the detrend keys are
-        stripped from those kwargs so the detector never sees them). Polarity is the
-        user's override, else measured from the data.
+        ``detector_measures_polarity`` (the CUSUM Null control): when the form's
+        polarity is Auto the recording is built with ``polarity=None``, so the detector
+        measures the sign on the real run exactly as a Detect run on Auto does, and
+        `truth.null_control` holds that sign for the event-free and surrogate runs. Off
+        (the Schmitt studies), an Auto polarity is voted here by `derive_polarity`, as
+        it always was.
+
+        The SAME conditioning chain detection applies (every enabled stage of
+        `preprocess_for_detection`, the baseline-drift removal and the High-pass among
+        them) is baked into the wrapped signal, and the studies detect on that trace.
+        The low-pass is NOT baked in: the detector still owns it via
+        ``filter_cutoff_hz`` in the detect kwargs -- `detect_events` for the three
+        Schmitt studies, `detect_events_cusum` for the CUSUM Null control. The
+        conditioning keys are stripped from those kwargs, so the detector never sees
+        them. Polarity is the user's override, else measured from the data: here for
+        Schmitt, by the detector for CUSUM (above).
+
+        WITH HIGH-PASS ON THIS IS NOT THE TRACE A DETECT RUN READS ITS EVENTS FROM. A
+        Detect run only localises on the high-passed trace and measures the direction
+        and every row on the trace without the High-pass
+        (`modules._run_highpass_dual_path`). A study has the high-passed trace alone,
+        and on it the far edge of each event also fires in the opposite direction: the
+        polarity vote can come out reversed and the opposite-direction count is not a
+        noise count. So :meth:`_on_null_requested` REFUSES CUSUM while High-pass is
+        enabled, and a CUSUM recording is never built with it on. The Schmitt studies
+        run with High-pass on as they always did.
 
         WHY A BUILDER RATHER THAN THE RECORDING. This used to run the whole conditioning
         chain inline, on the GUI thread, before the job reached the controller. Measured
@@ -3966,10 +4045,11 @@ class AnalysisPanel(QtWidgets.QWidget):
             data = np.ascontiguousarray(raw, dtype=np.float32)
             data = preprocess_for_detection(data, fs, params)
             pol = params.get("polarity")
-            if pol is None:
+            if pol is None and not detector_measures_polarity:
                 pol = int(derive_polarity(data))
             return SynthRecording(data=data, sample_rate_hz=float(fs),
-                                  polarity=int(pol), name=name, units=units)
+                                  polarity=None if pol is None else int(pol),
+                                  name=name, units=units)
 
         return build
 
@@ -3983,8 +4063,20 @@ class AnalysisPanel(QtWidgets.QWidget):
         out = {k: v for k, v in params.items() if k not in drop}
         return {k: v for k, v in out.items() if v is not None}
 
+    #: The two Schmitt-only studies refuse another detector's dict. The buttons are
+    #: disabled with CUSUM selected; these are for any other route to the handlers.
+    _SWEEP_SCHMITT_ONLY = ("Sweep threshold works with the Schmitt detector only. "
+                           "Select Schmitt, or use Null control with CUSUM.")
+    _RECOVERY_SCHMITT_ONLY = ("Recovery map works with the Schmitt detector only. "
+                              "Select Schmitt to measure it.")
+
     def _on_sweep_requested(self, params: dict[str, Any]) -> None:
         if self._refuse_reference_surrogate(params):
+            return
+        if str(params.get("detector") or _MODULE_ID) != _MODULE_ID:
+            # The sweep walks the Schmitt ``k_in``; run on a CUSUM dict it would sweep
+            # a threshold the selected detector does not have.
+            self.runRefused.emit(self._SWEEP_SCHMITT_ONLY)
             return
         if self._sel is None:
             return
@@ -4836,15 +4928,90 @@ class AnalysisPanel(QtWidgets.QWidget):
         return int.from_bytes(
             hashlib.blake2b(payload.encode("utf-8"), digest_size=4).digest(), "big")
 
+    #: Null control runs the two detectors the Detection tab offers and refuses any
+    #: other id. The combo cannot name one; this is for any other route to the handler.
+    _NULL_DETECTORS_ONLY = "Null control works with the Schmitt and CUSUM detectors only."
+    #: ...and CUSUM only with High-pass off (see :meth:`_on_null_requested`).
+    _NULL_CUSUM_NEEDS_HIGHPASS_OFF = (
+        "Null control with CUSUM needs High-pass off: with it on, the far edge of each "
+        "event also fires in the opposite direction. Turn High-pass off and run it again.")
+
     def _on_null_requested(self, params: dict[str, Any]) -> None:
+        """Run Null control WITH THE DETECTOR THE FORM NAMES.
+
+        ``params`` is `DetectionPanel.surrogate_params()`: narrowed to the selected
+        detector, with ``"detector"`` present only when it is not Schmitt.
+
+        * **Schmitt** (no ``detector`` key, or ``detect.schmitt``): the lines this
+          handler always ran -- the same kwargs filter, the same recording builder, the
+          same `null_control` call with no ``detector=``. Existing Schmitt numbers and
+          seeds do not move. A ``detector`` key is not a `detect_events` argument and
+          is left out of the kwargs, so a dict that names ``detect.schmitt`` runs; the
+          button's own dict carries no such key and its call is unchanged.
+        * **CUSUM**: the call a CUSUM Detect makes. The kwargs come from
+          `modules.detector_kwargs`, which forwards ``merge_gap_s=None`` (the Schmitt
+          filter drops ``None``, and CUSUM would then merge at its own 0.5 ms default
+          although the form says "off"). The baseline is the Baseline panel's, resolved
+          by the same `baseline_config_from_params` a run uses. On Auto polarity the
+          detector measures the sign itself.
+
+        TWO REFUSALS, both through ``runRefused`` and both before anything starts:
+
+        * **A detector that is neither Schmitt nor CUSUM.** It used to fall into the
+          Schmitt branch, die on the worker with an unexpected-keyword ``TypeError``,
+          and would otherwise have filed a Schmitt count under the foreign id.
+        * **CUSUM while High-pass is enabled on the form** (``hp_enabled``), on Auto
+          polarity and with an override alike. The study detects on the high-passed
+          trace, where the far edge of each event also fires in the opposite direction.
+          On Auto the detector's vote on that trace can be reversed -- a CUSUM Detect
+          does not trust it and re-measures the direction without the High-pass
+          (`modules._run_highpass_dual_path`) -- so the study ran the other way from
+          the table beside it. With an override the direction is right and the
+          opposite-direction count the readout leads with is still the far edges, not
+          noise. The Schmitt study is not refused: it runs as it always did.
+
+        The result is stamped on the worker with the detector and its two thresholds,
+        beside the seed, so the readout can say what was measured and
+        :meth:`_sync_surrogate_readouts` can show it only under that detector's table.
+        The CUSUM stamp also carries ``filter_cutoff_hz`` (``None`` when the low-pass is
+        off): the low-pass changes how often CUSUM fires on noise, so the readout names
+        it beside k and h.
+        """
         if self._refuse_reference_surrogate(params):
+            return
+        module_id = str(params.get("detector") or _MODULE_ID)
+        if module_id not in (_MODULE_ID, _CUSUM_MODULE_ID):
+            self.runRefused.emit(self._NULL_DETECTORS_ONLY)
+            return
+        if module_id == _CUSUM_MODULE_ID and params.get("hp_enabled"):
+            self.runRefused.emit(self._NULL_CUSUM_NEEDS_HIGHPASS_OFF)
             return
         if self._sel is None:
             return
-        build = self._surrogate_builder(params)
-        kw = {k: v for k, v in params.items()
-              if k != "polarity" and k not in DETREND_PARAM_KEYS
-              and k not in FILTER_PARAM_KEYS and v is not None}
+        if module_id == _CUSUM_MODULE_ID:
+            from ..analysis.detect_cusum import detect_events_cusum
+            # The Baseline panel's block joins the form, as on Detect (`_form_params`):
+            # it is what the detector's baseline is resolved from, and -- through the
+            # seed line below -- a setting that reaches the surrogate.
+            params = {**params, **self._baseline.params()}
+            # ``baseline_config`` joins these on the worker (see ``job``).
+            kw = {k: v for k, v in detector_kwargs(params, module_id).items()
+                  if k != "polarity"}
+            build = self._surrogate_builder(params, detector_measures_polarity=True)
+            detector: Any = detect_events_cusum
+            thresholds = {"cusum_k": params.get("cusum_k"),
+                          "cusum_h": params.get("cusum_h"),
+                          # The cutoff the detector is handed in ``kw``; None is "off".
+                          "filter_cutoff_hz": params.get("filter_cutoff_hz")}
+        else:
+            build = self._surrogate_builder(params)
+            # ``detector`` is this panel's routing key, never a `detect_events`
+            # argument. The button's dict has none, so its kwargs are what they were.
+            kw = {k: v for k, v in params.items()
+                  if k not in ("polarity", "detector") and k not in DETREND_PARAM_KEYS
+                  and k not in FILTER_PARAM_KEYS and v is not None}
+            detector = None
+            thresholds = {"k_in": params.get("k_in"), "k_out": params.get("k_out")}
         # SEED FROM ``params``, THE WHOLE FORM -- not from ``kw``. ``kw`` is what the
         # DETECTOR takes; ``build`` closes over ``params`` and conditions the trace the
         # surrogates are drawn from with all of it. See :meth:`_null_seed`.
@@ -4852,10 +5019,23 @@ class AnalysisPanel(QtWidgets.QWidget):
 
         def job():
             from ..analysis.truth import null_control
-            # A dict copy so the seed stamp is this panel's annotation and never a
+            # A dict copy so the stamps are this panel's annotation and never a
             # mutation of what `null_control` handed back.
-            out = dict(null_control(build(), detect_kwargs=kw, rng=seed))
+            if detector is None:
+                # The Schmitt call shape, unchanged: no ``detector=``.
+                out = dict(null_control(build(), detect_kwargs=kw, rng=seed))
+            else:
+                # The Baseline panel's block, resolved by the resolver a run uses and
+                # ON THE WORKER, where a run resolves it: a value the estimator refuses
+                # then reaches the user as the same "Analysis failed" box Detect shows,
+                # not as an exception inside a button's slot.
+                cfg = baseline_config_from_params(params)[0]
+                out = dict(null_control(
+                    build(), detect_kwargs={**kw, "baseline_config": cfg}, rng=seed,
+                    detector=detector))
             out["seed"] = int(seed)
+            out["detector"] = module_id
+            out["thresholds"] = dict(thresholds)
             return out
 
         if self._controller.run_callable(job, label="null_control"):
@@ -4863,6 +5043,11 @@ class AnalysisPanel(QtWidgets.QWidget):
 
     def _on_recovery_requested(self, params: dict[str, Any]) -> None:
         if self._refuse_reference_surrogate(params):
+            return
+        if str(params.get("detector") or _MODULE_ID) != _MODULE_ID:
+            # The map is the Schmitt detector's efficiency; it divides the dwell
+            # likelihood, so a map measured with the wrong detector biases tau silently.
+            self.runRefused.emit(self._RECOVERY_SCHMITT_ONLY)
             return
         if self._sel is None:
             return
@@ -5004,14 +5189,31 @@ class AnalysisPanel(QtWidgets.QWidget):
             self._show_sweep(obj)
         elif pending == "null" and isinstance(obj, dict):
             if target is not None:
+                # Filed, then judged like every other repoint: it is shown only if the
+                # table on screen is the detector it was measured with.
                 self._fdr[target] = obj
-                if self._sel == target:
-                    self._stats.set_fdr(obj)
+                self._sync_surrogate_readouts()
+                tag = str(obj.get("detector") or _MODULE_ID)
+                if self._sel == target and tag != self._study_detector():
+                    # The table on screen is another detector's (the user moved the
+                    # combo while it ran, or it is an ML, Manual or Reconciled table).
+                    # Kept, not shown -- and said, or the click reads as ignored. It
+                    # says where the result is shown, not "show that table": there
+                    # may be no such table yet.
+                    name = detector_name(tag)
+                    self.statusMessage.emit(
+                        f"Null control finished for {name}; it is shown with a {name} "
+                        f"table.")
         elif pending == "recovery":
             if target is not None:
                 self._recovery[target] = obj
-                if self._sel == target:
-                    self._stats.set_recovery_available(True)
+                self._sync_surrogate_readouts()
+                if self._sel == target and self._study_detector() != _MODULE_ID:
+                    # The map is the Schmitt detector's and the table on screen is
+                    # not a Schmitt table (the user moved on while it ran): it is
+                    # kept and the efficiency box stays grey. Said, like the hidden
+                    # Null control result above, or the click reads as ignored.
+                    self.statusMessage.emit(self._RECOVERY_LANDED_ELSEWHERE)
 
     #: What the last install carried over from the table it replaced (tests and the batch
     #: summary read it); ``None`` when nothing was carried.
@@ -5567,6 +5769,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         # detection on this target to fit. It used to have no gate at all and reported the
         # failure into its own results box AFTER the click.
         self._stats.set_detection_present(True)
+        # The study readouts belong to the DETECTOR of the table now on screen.
+        self._sync_surrogate_readouts()
 
     def _show_result_advisories(self, res: AnalysisResult) -> None:
         """Keep recorded caveats and current advisory validity beside the summary.
@@ -8458,7 +8662,12 @@ class AnalysisPanel(QtWidgets.QWidget):
         provenance_stamp = json.dumps(res.payload.provenance, sort_keys=True, default=repr)
         stamp = (res, fingerprint_frame(res.payload.df), fp, provenance_stamp)
         snapshot = deepcopy(res)
-        eff = deepcopy(self._recovery.get((doc_id, channel))) if opts.get("use_efficiency") else None
+        # The recovery map is the SCHMITT detector's efficiency. It weights a fit of a
+        # Schmitt table and of nothing else, whatever the caller asked for: applied to
+        # CUSUM (or ML, Manual, Reconciled) rows it biases tau and the fit text then
+        # says "measured eta(t)" about a detector that was never measured.
+        eff = (deepcopy(self._recovery.get((doc_id, channel)))
+               if opts.get("use_efficiency") and res.module_id == _MODULE_ID else None)
         use_fl = bool(opts.get("use_filter_limited", False))
         dwell_k = int(opts.get("n_components_dwell", 1))
         depth_k = int(opts.get("n_components_depth", 1))
@@ -9461,6 +9670,8 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._schedule_chain_judge()
         # ...and the threshold lines, whose absence is said rather than left standing.
         self._apply_threshold_lines()
+        # ...and the study readouts: with no table shown the form's detector decides.
+        self._sync_surrogate_readouts()
 
     def _show_empty(self) -> None:
         # The form leaves before the two resets below move it (a closed recording's form

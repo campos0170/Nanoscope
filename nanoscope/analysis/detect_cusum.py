@@ -122,6 +122,7 @@ __all__ = [
     "DEFAULT_CUSUM_H",
     "DEFAULT_CUSUM_MERGE_GAP_S",
     "DEFAULT_CUSUM_MIN_DWELL_S",
+    "OPPOSITE_GUARD_S",
     "PARAMETER_NOTES",
 ]
 
@@ -183,6 +184,24 @@ DEFAULT_CUSUM_MIN_DWELL_S = 1e-3
 #: above; WHY 0.25 rather than 0.1 or 0.5 is not recorded anywhere and is not
 #: reconstructible -- see ``PARAMETER_NOTES``.
 CUSUM_LEVEL_FLOOR_OFFSET = 0.25
+
+#: Guard, in seconds, around every KEPT true-direction region -- the ones that become
+#: rows -- when the run counts its own opposite-direction detections
+#: (`_opposite_direction_counts`). An opposite-direction region that overlaps a kept
+#: region padded by this much on each side is attached to an event -- filter
+#: overshoot beside the row -- and is left out of ``n_opposite_isolated``. 2 ms is
+#: the pad `truth._event_free_trace` already uses to keep event edges out of its
+#: noise pool.
+#:
+#: IT DOES NOT COVER A HIGH-PASSED TRACE. There the kept region holds only the ONSET
+#: of an event, and the far edge of every event longer than about this guard fires
+#: in the opposite direction well outside the pad. Measured through the CUSUM module
+#: on clean one-way events of 3 to 8 ms over white noise (6 s at 50 kHz, default k
+#: and h): no opposite region at all with High-pass off; with a 100 Hz High-pass, 27
+#: of them beside 25 rows, 16 isolated. So on a high-passed trace
+#: ``n_opposite_isolated`` is not a noise estimate, and `modules._build_warnings`
+#: says so instead of blaming noise.
+OPPOSITE_GUARD_S = 2e-3
 
 #: Threshold handed to `detect_polarity` for the evidence record. The polarity
 #: measurement is a property of the recording, not of the detector, so it uses the
@@ -474,6 +493,138 @@ def cusum_onset_recovery_regions(
 
 
 # ---------------------------------------------------------------------------
+# the run's own opposite-direction count
+# ---------------------------------------------------------------------------
+def _opposite_direction_counts(
+    z: np.ndarray,
+    k: float,
+    h: float,
+    *,
+    fs: float,
+    merge_gap_s: float | None,
+    min_samples: int,
+    ex: Sequence[tuple[int, int]],
+    forward_starts: np.ndarray,
+    forward_ends: np.ndarray,
+    cancel: CancelFlag | None,
+) -> dict[str, Any]:
+    """Count what the same finder and gates report in the OPPOSITE direction.
+
+    ``z`` is the run's own standardized deviation, so the baseline, the noise sigma,
+    ``k``, ``h`` and the level floor are exactly the ones the true-direction pass
+    used. IT IS CONSUMED: its sign is flipped IN PLACE here (a full-length float64
+    copy is 90 MB on an 11.3 M-sample trace), so the caller must own the array and
+    must not read it afterwards. The flip lives inside this function, not at the
+    call site, so that everything the opposite pass does to the run is in ONE place:
+    a test that replaces this function runs the detector with the whole pass
+    removed, the flip included, and compares the rows.
+
+    The regions then go through the same three gates in the same order -- merge,
+    minimum duration in samples, exclusion -- and are only COUNTED: nothing here is
+    characterised, no row is written, and no number the event table carries is read
+    or changed.
+
+    THE GATES ARE REPEATED HERE, NOT SHARED with `detect_events_cusum`, on purpose:
+    extracting them would have meant editing the arithmetic that produces the event
+    table. `tests/analysis/test_cusum_opposite_direction.py` holds the two copies
+    together by checking that this count on a trace equals ``n_events`` on the
+    mirrored trace.
+
+    ``forward_starts`` / ``forward_ends`` are the KEPT true-direction regions, in app
+    coordinates (end exclusive): what the forward path had left after its own merge,
+    minimum duration and exclusion, i.e. the regions that become rows. They are read
+    here, never recomputed.
+
+    Returns the four provenance keys:
+
+    * ``n_opposite_events`` -- regions left after the gates; comparable with
+      ``n_events``.
+    * ``n_opposite_isolated`` -- those that do not overlap any KEPT true-direction
+      region padded by `OPPOSITE_GUARD_S` on each side. A lobe attached to a row is
+      therefore not counted, however long it lasts, as long as it starts inside the
+      pad after the row or ends inside the pad before it. The anchor is the kept
+      regions and NOT the raw firings on purpose: a short noise firing that the
+      minimum duration later rejects would otherwise blank 4 ms around itself, and
+      the count would fall exactly when noise fires densely.
+    * ``n_opposite_reference`` -- how many kept true-direction regions there were,
+      frozen here. It is the number the isolated count is read against, and it does
+      not follow the table: a later merge, hand edit or re-measure changes
+      ``n_events`` and leaves this alone.
+    * ``opposite_guard_s`` -- that pad, so a reader knows what "isolated" meant.
+
+    WHAT THE COUNT IS NOT. It is a count, never a rate, and it gates nothing. Where
+    events really run both ways it counts real events, so it is an upper bound on
+    the noise firings, not a measurement of them. It also inherits three biases:
+    the masked baseline masks event-side excursions only; ``z`` is not re-centred,
+    so a baseline offset raises one direction's effective ``k`` and lowers the
+    other's; and a true-direction noise firing next to a real event merges into it
+    while an opposite one cannot.
+
+    NOT A NOISE ESTIMATE ON A HIGH-PASSED TRACE. The guard does not cover that case.
+    A high-pass turns the far edge of every event longer than about the guard into
+    an excursion the other way, and the kept region there holds only the event's
+    onset, so that excursion is far outside the pad and is counted as isolated --
+    once per real event, on a recording with no noise firing at all (see
+    `OPPOSITE_GUARD_S` for the measurement). This function cannot see how its input
+    was conditioned; `modules._build_warnings` reads ``hp_enabled`` from the run's
+    provenance and words the advisory accordingly.
+
+    AT VERY LOW ``h`` THE ISOLATED COUNT COLLAPSES. Once the kept rows are dense
+    their pads cover most of the trace, so few opposite regions are isolated although
+    there are as many of them as rows (measured on 10 s of noise only, 30% pink,
+    5 kHz low-pass, minimum dwell 0.1 ms, k 0.5 / h 3: 3352 opposite regions against
+    3397 rows, 114 isolated). That is why ``n_opposite_events`` is stamped beside it
+    and the advisory has a second trigger on it.
+
+    COST. One more pass of the sequential core, which costs about 40 microseconds
+    per firing. At the default ``k`` and ``h`` that is 0.1 to 0.2 s on 5,000,000
+    samples. Where noise fires densely -- very low ``h`` -- the core is most of the
+    run, so the run can take up to about twice as long (one measurement on a busy
+    machine, 5,000,000 samples of noise at k 0.3 / h 1, 409,455 firings: 25.7 s
+    without this pass, 41.6 s with it). The cost is linear in the number of
+    firings; nothing here is quadratic.
+    """
+    # The one write this pass makes to anything the run owns: the sign of ``z``.
+    np.negative(z, out=z)
+    found = cusum_onset_recovery_regions(z, k, h, cancel=cancel)
+    s = np.asarray([a for a, _ in found.regions], dtype=np.int64)
+    e = np.asarray([b + 1 for _, b in found.regions], dtype=np.int64)
+    # Two int64 arrays hold everything the gates need; the list of tuples is not
+    # read again, and at dense firing it is the larger of the two.
+    del found
+    if merge_gap_s is not None and s.size > 1:
+        g = group_starts_by_gap(s, e, gap_window_samples(merge_gap_s, fs))
+        g, _refused, _marginal = split_low_occupancy_groups(s, e, g)
+        s, e = s[g], e[np.concatenate((g[1:], [True]))]
+    keep = (e - s) >= min_samples
+    s, e = s[keep], e[keep]
+    for i0, i1 in ex:
+        keep = ~((s < i1) & (e > i0))
+        s, e = s[keep], e[keep]
+    n_events = int(s.size)
+    n_isolated = n_events
+    f0 = np.asarray(forward_starts, dtype=np.int64)
+    f1 = np.asarray(forward_ends, dtype=np.int64)
+    n_reference = int(f0.size)
+    if n_events and n_reference:
+        pad = int(round(OPPOSITE_GUARD_S * fs))
+        # The kept regions are sorted by start, so the padded starts are sorted; the
+        # padded ends are made non-decreasing so "any kept region starting before
+        # this one ends reaches past its start" is one lookup.
+        f0 = f0 - pad
+        f1 = np.maximum.accumulate(f1 + pad)
+        j = np.searchsorted(f0, e, side="left")
+        near = (j > 0) & (f1[np.maximum(j - 1, 0)] > s)
+        n_isolated = int((~near).sum())
+    return {
+        "n_opposite_events": n_events,
+        "n_opposite_isolated": n_isolated,
+        "n_opposite_reference": n_reference,
+        "opposite_guard_s": OPPOSITE_GUARD_S,
+    }
+
+
+# ---------------------------------------------------------------------------
 # the app-facing detector
 # ---------------------------------------------------------------------------
 @propagate_cancel
@@ -561,7 +712,34 @@ def detect_events_cusum(
     statistic has already crossed ``h`` -- there is no such thing as a candidate that
     failed the test. ``n_clipped_boundary``, ``n_open_at_end``, ``n_merges_refused``
     and ``n_merges_marginal`` are deliberately NOT terms: none of them drops a row.
-    `tests/analysis/test_cusum_detect_audit_trail.py` pins the identity.
+    `tests/analysis/test_detect_cusum_audit_trail.py` pins the identity.
+
+    THE RUN ALSO COUNTS ITS OWN OPPOSITE DIRECTION. After the gates above, the same
+    finder runs once more on the sign-flipped deviation -- same baseline, sigma,
+    ``k``, ``h`` and level floor -- and its regions pass the same merge, minimum
+    duration and exclusion gates (`_opposite_direction_counts`). Four keys are
+    stamped, on the empty-table path too:
+
+    * ``n_opposite_events``    -- opposite-direction regions after the gates,
+      comparable with ``n_events``.
+    * ``n_opposite_isolated``  -- those not overlapping any KEPT true-direction
+      region (after merge, minimum duration and exclusion: the regions that become
+      rows) padded by ``opposite_guard_s`` on each side.
+    * ``n_opposite_reference`` -- the number of those kept regions, frozen at
+      detection time (0 on the empty-table path). The advisory reads the isolated
+      count against THIS, not against ``n_events``, which follows later edits.
+    * ``opposite_guard_s``     -- that pad (`OPPOSITE_GUARD_S`).
+
+    They are NOT terms of the audit identity and they change no row: the pass only
+    counts. It is a count, never a rate, and it gates nothing; where events really
+    run both ways it counts real events. On a HIGH-PASSED trace it is not a noise
+    estimate either: the far edge of each event also fires in the opposite direction
+    there (see `OPPOSITE_GUARD_S`).
+
+    WHAT IT COSTS. One more pass of the sequential core. At the default ``k`` and
+    ``h`` that adds 0.1 to 0.2 s on 5,000,000 samples. The core costs about 40
+    microseconds per firing, so where noise fires densely -- very low ``h`` -- it is
+    most of the run, and the run can take up to about twice as long.
 
     Gotcha: ``analyzed_duration_s`` -- the denominator of every rate -- accounts for
     ``exclude_regions``, so it is the recorded duration only when nothing was excluded.
@@ -770,6 +948,31 @@ def detect_events_cusum(
     # exists only because provenance is assembled before characterisation.
     n_clipped = int(((starts <= 0) | (ends >= n)).sum()) if starts.size else 0
 
+    # -- the same finder and gates, in the OPPOSITE direction: counted only ---
+    # `z` is this function's own array and nothing below reads it, so the helper
+    # flips it in place rather than copying it (a full-length float64 temporary is
+    # 90 MB on an 11.3 M-sample trace); it is dropped straight after, so a later edit
+    # cannot read the flipped values by accident. Nothing above this line is touched
+    # by it: the event table is already decided. `starts` / `ends` are the KEPT
+    # regions the gates above left -- the ones that become rows -- and are only read:
+    # the guard is anchored on them, not on the raw firings, and their count is the
+    # frozen reference.
+    #
+    # The forward pass's own region list is released first. `starts` / `ends` carry
+    # the kept regions and the only other thing still wanted from it is one count,
+    # so there is no reason to hold a tuple per firing while the second pass builds
+    # its own list (a tuple of two ints is about 120 bytes in CPython: 120 MB at a
+    # million firings, which is what a very low h produces).
+    n_open_at_end = int(found.n_open_at_end)
+    del found
+    check_cancelled(cancel)
+    opposite = _opposite_direction_counts(
+        z, cusum_k, cusum_h,
+        fs=fs, merge_gap_s=merge_gap_s, min_samples=min_samples, ex=ex,
+        forward_starts=starts, forward_ends=ends, cancel=cancel,
+    )
+    del z
+
     provenance: dict[str, Any] = {
         "nanoscope_version": _VERSION,
         # NOT "cusum": `analysis.cusum` is the sub-state level fitter and a bare
@@ -854,7 +1057,7 @@ def detect_events_cusum(
         #: one is about the DETECTOR running out of trace, that one is about the ROW
         #: touching the edge of the analysed span (a merge or a min-dwell rejection can
         #: leave one true and the other false).
-        "n_open_at_end": int(found.n_open_at_end),
+        "n_open_at_end": n_open_at_end,
         #: Merges the gap rule proposed and the occupancy floor declined. NOT a term:
         #: a refused merge drops nothing, it only declines to fold rows together, so
         #: its events are already inside `n_events`. Counted because "12 proposed, 12
@@ -868,6 +1071,12 @@ def detect_events_cusum(
         #: Rows cut off by the edge of the analysed span; kept, flagged and NOT
         #: accepted. Re-derived from the rows below.
         "n_clipped_boundary": n_clipped,
+        #: What the same finder and gates report in the OPPOSITE direction on this
+        #: run's own deviation: ``n_opposite_events``, ``n_opposite_isolated``,
+        #: ``n_opposite_reference`` (the kept true-direction regions at this moment,
+        #: frozen) and ``opposite_guard_s``. NOT terms of the identity above --
+        #: nothing is dropped or added because of them -- and a count, never a rate.
+        **opposite,
         **span_provenance(0, n),
     }
 

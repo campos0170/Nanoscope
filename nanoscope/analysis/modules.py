@@ -149,6 +149,12 @@ __all__ = [
     "stored_fit_problem",
     "report_fit_problem",
     "NO_TMIN_WARNING",
+    "detector_kwargs",
+    "opposite_direction_warning",
+    "OPPOSITE_ADVISORY_MIN",
+    "OPPOSITE_ADVISORY_FRACTION",
+    "OPPOSITE_EVENTS_ADVISORY_FRACTION",
+    "OPPOSITE_POLARITY_FACTOR",
 ]
 
 # Identity calibration -> no gain/offset applied. The controller overrides this
@@ -985,6 +991,12 @@ def _detect_kwargs(
     }
 
 
+#: PUBLIC NAME for :func:`_detect_kwargs`, the same function object. The validation
+#: studies build the call a Detect run makes, and a GUI file should not import a
+#: private name to do it.
+detector_kwargs = _detect_kwargs
+
+
 def notch_settling_from_provenance(
     prov: Mapping[str, Any]
 ) -> tuple[float, float] | None:
@@ -1180,6 +1192,164 @@ def highpass_measurement_warning(prov: Mapping[str, Any]) -> str:
     )
 
 
+#: When a CUSUM run's own opposite-direction count becomes an advisory: at least this
+#: many isolated opposite-direction detections AND at least this fraction of the
+#: run's frozen reference (``n_opposite_reference``, the true-direction regions the
+#: run kept). Both are judgement, not measurements -- a handful of opposite firings
+#: on a long recording is not worth a sentence, and neither is a count that is small
+#: beside what the run found in the event direction.
+OPPOSITE_ADVISORY_MIN = 5
+OPPOSITE_ADVISORY_FRACTION = 0.10
+
+#: THE SECOND TRIGGER, on the count BEFORE the 2 ms rule (``n_opposite_events``): at
+#: least `OPPOSITE_ADVISORY_MIN` of them AND at least this fraction of the frozen
+#: reference. It exists because the isolated count collapses exactly when noise fires
+#: most densely: once the kept rows are dense their 2 ms pads cover most of the
+#: trace, so almost no opposite region is "isolated" although there are as many of
+#: them as rows. Measured on noise only (10 s, 30% pink, 5 kHz low-pass, minimum
+#: dwell 0.1 ms) at k 0.5 / h 3: 3352 opposite regions against 3397 rows, 114
+#: isolated -- 3% of the reference, so the first trigger alone said nothing while the
+#: false positives were at their highest.
+#:
+#: WHAT IT COSTS. This count is taken BEFORE the 2 ms rule, so lobes attached to rows
+#: are in it. A run in which at least half the rows carry an opposite lobe that
+#: passes the minimum dwell meets this trigger with nothing in it being noise; the
+#: sentence's own caveat ("unless events really run both ways") is all that covers
+#: that case. Fewer lobes than half the rows stay unsaid, as before.
+OPPOSITE_EVENTS_ADVISORY_FRACTION = 0.5
+
+#: When the count shown is at least this many times the frozen reference (and the
+#: reference is not zero) the sentence names the polarity setting first. A wrong
+#: polarity override on correlated noise leaves a few noise rows in the (wrong)
+#: event direction, so "none in the event direction" is not the only way it looks:
+#: measured with a flipped override on 30% pink noise, 85 opposite against 9 and 86
+#: against 25.
+OPPOSITE_POLARITY_FACTOR = 3
+
+
+def opposite_direction_warning(
+    n_opposite: int, n_events: int, *, lowpass: Any = None, highpass: bool = False
+) -> str:
+    """The sentence for a CUSUM run whose opposite-direction count is material.
+
+    ``n_opposite`` is the count SHOWN. It is ``provenance['n_opposite_isolated']`` --
+    what the same finder and gates report in the opposite direction, away from every
+    kept true-direction region -- unless only the second trigger was met
+    (`OPPOSITE_EVENTS_ADVISORY_FRACTION`), when it is
+    ``provenance['n_opposite_events']``, the count before the 2 ms rule.
+    ``n_events`` is ``provenance['n_opposite_reference']``: how many true-direction
+    regions that SAME RUN kept, frozen at detection time. (The parameter keeps its
+    first name for existing callers; it is not the live row count.) All of these
+    come from one detection pass, so the sentence reads the same after a merge, a
+    hand edit or a re-measure.
+
+    FOUR SENTENCES, chosen in this order:
+
+    1. ``highpass`` true -- the run's provenance says Preprocess > High-pass was on.
+       The count is then NOT a noise estimate: on the high-passed trace the far edge
+       of each real event also fires in the opposite direction, outside the 2 ms
+       guard (see `detect_cusum.OPPOSITE_GUARD_S`). The sentence says that and names
+       no noise remedy, whatever the two numbers are.
+    2. nothing in the event direction -- check the polarity setting.
+    3. the count shown is at least `OPPOSITE_POLARITY_FACTOR` times the reference --
+       check the polarity setting, with both numbers.
+    4. otherwise -- the noise sentence, with its caveat.
+
+    ``lowpass`` is accepted and ignored. The sentence used to offer "turn the
+    low-pass off" as a remedy; low-pass filtering and 1/f noise both raise CUSUM's
+    noise firings, so the remedy named is the one that works in either case.
+
+    A COUNT WITH A CAVEAT, never a rate: where events really run both ways the
+    opposite direction holds real events, and the sentence says so instead of
+    calling them noise. It must also read correctly when the opposite count is the
+    larger of the two (810 against 707 on the owner's recording), which is why it
+    says "many of the shallow rows" and not "a similar number of rows".
+    """
+    n_opposite = int(n_opposite)
+    n_reference = int(n_events)
+    if highpass:
+        return (
+            f"{n_opposite} opposite-direction detection(s) with High-pass on. The far "
+            "edge of each event also fires in the opposite direction there, so this "
+            "count is not a noise estimate; turn High-pass off to check for noise "
+            "firings."
+        )
+    if n_reference <= 0:
+        return (
+            f"{n_opposite} opposite-direction detection(s) and none in the event "
+            "direction: check the polarity setting. If it is right, noise alone is "
+            "firing CUSUM at these settings."
+        )
+    if n_opposite >= OPPOSITE_POLARITY_FACTOR * n_reference:
+        return (
+            f"{n_opposite} opposite-direction detection(s) against {n_reference} in "
+            "the event direction: check the polarity setting. If it is right, noise "
+            "alone is firing CUSUM at these settings."
+        )
+    return (
+        f"{n_opposite} opposite-direction detection(s) against {n_reference} in the "
+        "event direction. CUSUM fires that often where no events are expected, so "
+        "unless events really run both ways many of the shallow rows here may be "
+        "noise. Raise h or k and re-run."
+    )
+
+
+def _opposite_direction_advisory(prov: Mapping[str, Any]) -> str | None:
+    """The opposite-direction sentence for a run's provenance, or ``None``.
+
+    Reads STAMPED NUMBERS and nothing else: the isolated count, the count before
+    the 2 ms rule, and the reference the run froze beside them (its own kept
+    true-direction regions). NOT ``len(df)`` and not the live ``n_events``: those
+    follow a merge, a hand-added event and a re-measure, and an edit to the table
+    must not switch a statement about the DETECTION on or off, or change its
+    numbers.
+
+    ``n_opposite_isolated`` or ``n_opposite_reference`` ABSENT means "not measured"
+    -- a Schmitt run, an ML run, a CUSUM table from before the count existed -- and
+    says nothing; so does an unreadable value in either.
+
+    THE TRIGGER, in order:
+
+    1. ``n_opposite_isolated >= OPPOSITE_ADVISORY_MIN`` and
+       ``>= OPPOSITE_ADVISORY_FRACTION * n_opposite_reference``: the count shown is
+       ``n_opposite_isolated``.
+    2. otherwise, ``n_opposite_events >= OPPOSITE_ADVISORY_MIN`` and
+       ``>= OPPOSITE_EVENTS_ADVISORY_FRACTION * n_opposite_reference``: the count
+       shown is ``n_opposite_events``. (Absent or unreadable: this trigger is not
+       met.)
+    3. otherwise nothing is said.
+
+    WHICH SENTENCE is `opposite_direction_warning`'s business. High-pass is read
+    from ``hp_enabled``: `stamp_preprocess_provenance` writes it (true or false) on
+    every run of a detector module, it is true on the high-pass split path
+    (`_run_highpass_dual_path`), and it is the same stamp `_build_warnings` already
+    reads to raise the High-pass advisory. A bare `detect_events_cusum` call carries
+    no such stamp and is read as High-pass off.
+    """
+    n_isolated = prov.get("n_opposite_isolated")
+    n_reference = prov.get("n_opposite_reference")
+    if n_isolated is None or n_reference is None:
+        return None
+    try:
+        n_isolated, n_reference = int(n_isolated), max(int(n_reference), 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (n_isolated >= OPPOSITE_ADVISORY_MIN
+            and n_isolated >= OPPOSITE_ADVISORY_FRACTION * n_reference):
+        shown = n_isolated
+    else:
+        try:
+            n_before_guard = int(prov.get("n_opposite_events"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not (n_before_guard >= OPPOSITE_ADVISORY_MIN
+                and n_before_guard >= OPPOSITE_EVENTS_ADVISORY_FRACTION * n_reference):
+            return None
+        shown = n_before_guard
+    return opposite_direction_warning(
+        shown, n_reference, highpass=bool(prov.get("hp_enabled")))
+
+
 def _build_warnings(prov: dict[str, Any], df: pd.DataFrame) -> tuple[str, ...]:
     """Surface the detector's soft advisories on the result (undetermined
     polarity, filter-limited fraction, what the conditioning chain cost, and whether
@@ -1216,6 +1386,15 @@ def _build_warnings(prov: dict[str, Any], df: pd.DataFrame) -> tuple[str, ...]:
     pw = prov.get("polarity_warning")
     if pw:
         warns.append(str(pw))
+    # A CUSUM run's own opposite-direction count (`detect_cusum`). The trigger and
+    # the sentence read the run's STAMPED NUMBERS and nothing else -- never
+    # ``len(df)`` or the live ``n_events`` -- so an edit to the table cannot switch
+    # a statement about the DETECTION on or off, or change its numbers. With
+    # High-pass on the sentence is a different one: the count is not a noise
+    # estimate there. See `_opposite_direction_advisory`.
+    opposite = _opposite_direction_advisory(prov)
+    if opposite:
+        warns.append(opposite)
     n_fl = int(prov.get("n_filter_limited", 0) or 0)
     if n_fl:
         n = max(len(df), 1)
