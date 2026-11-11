@@ -1,7 +1,130 @@
-"""Layout-only building blocks for the inspector; never own analysis parameters."""
+"""Layout-only building blocks for the inspector; never own analysis parameters.
+
+Plus the one key rule of the inspector's panels (:func:`install_run_key`): Ctrl/⌘+Return or
+Ctrl/⌘+keypad Enter presses the run button of the panel the keyboard is in. It owns no
+parameter either: it commits the focused field and clicks a button the panel already has.
+"""
 from __future__ import annotations
 
-from PySide6 import QtCore, QtWidgets
+import shiboken6
+from PySide6 import QtCore, QtGui, QtWidgets
+
+#: The run key: Ctrl+Return, and Ctrl with the keypad's Enter (a different key to Qt). A plain
+#: keypad Enter is not one of them. On a Mac "Ctrl" is ⌘.
+RUN_KEYS: tuple[str, ...] = ("Ctrl+Return", "Ctrl+Enter")
+#: What a run button carries while there are edits it has not run.
+PENDING_MARK = " ●"
+
+
+def _item_view_holding(field: QtWidgets.QWidget) -> QtWidgets.QAbstractItemView | None:
+    """The item view whose cell editor ``field`` is (it sits in the view's viewport), or
+    None for an ordinary field."""
+    holder = field.parentWidget()
+    view = holder.parentWidget() if holder is not None else None
+    if isinstance(view, QtWidgets.QAbstractItemView) and holder is view.viewport():
+        return view
+    return None
+
+
+def _focusable(widget: QtWidgets.QWidget) -> bool:
+    return (shiboken6.isValid(widget) and widget.isVisible() and widget.isEnabled()
+            and widget.focusPolicy() != QtCore.Qt.NoFocus)
+
+
+def _commit_focused_field(scope: QtWidgets.QWidget) -> None:
+    """Commit what is typed in the focused field inside ``scope``, as leaving it would.
+
+    A spin box with keyboard tracking off and a line edit commit on focus-out (or Return),
+    and a shortcut takes the key before the field sees it, so without this the run would use
+    the value the field held before the typing. The field gets the focus back afterwards, so
+    the user stays where they were.
+
+    A table's open cell editor is committed by giving its view the focus: the delegate
+    commits and closes the editor on that focus-out, and the view keeps the keyboard, as
+    Return in the cell would leave it. Any other field that is gone or hidden once it lost
+    the focus hands it to its nearest focusable, visible ancestor inside ``scope``."""
+    focus = QtWidgets.QApplication.focusWidget()
+    if focus is None or not (focus is scope or scope.isAncestorOf(focus)):
+        return
+    field = focus
+    if isinstance(field.parentWidget(), QtWidgets.QAbstractSpinBox):
+        field = field.parentWidget()            # a spin box's own line edit
+    typed = (isinstance(field, (QtWidgets.QAbstractSpinBox, QtWidgets.QLineEdit))
+             or (isinstance(field, QtWidgets.QComboBox) and field.isEditable()))
+    if not typed:
+        return
+    view = _item_view_holding(field)
+    if view is not None:
+        view.setFocus(QtCore.Qt.OtherFocusReason)
+        return
+    ancestors = []                              # from the field's parent up to ``scope``
+    if focus is not scope:
+        parent = focus.parentWidget()
+        while parent is not None and parent is not scope:
+            ancestors.append(parent)
+            parent = parent.parentWidget()
+        ancestors.append(scope)
+    focus.clearFocus()
+    if shiboken6.isValid(focus) and focus.isVisible():
+        focus.setFocus(QtCore.Qt.OtherFocusReason)
+        return
+    for widget in ancestors:
+        if _focusable(widget):
+            widget.setFocus(QtCore.Qt.OtherFocusReason)
+            return
+
+
+def press_run_button(scope: QtWidgets.QWidget, button: QtWidgets.QAbstractButton) -> None:
+    """The run key's action: nothing while ``button`` is disabled; otherwise commit the
+    focused field inside ``scope``, then click ``button`` -- the exact path of a click."""
+    if not button.isEnabled():
+        return
+    _commit_focused_field(scope)
+    button.click()
+
+
+class _FollowEnabled(QtCore.QObject):
+    """Keeps run-key shortcuts enabled exactly while their button is. A disabled shortcut
+    is skipped, so with the button greyed out the key reaches the focused widget as it did
+    before there was a run key (a table's cell editor commits on it, for one)."""
+
+    def __init__(self, button: QtWidgets.QAbstractButton,
+                 shortcuts: list[QtGui.QShortcut]) -> None:
+        super().__init__(button)
+        self._shortcuts = shortcuts
+        self._sync(button)
+        button.installEventFilter(self)
+
+    def _sync(self, button: QtWidgets.QAbstractButton) -> None:
+        on = button.isEnabled()
+        for shortcut in self._shortcuts:
+            if shiboken6.isValid(shortcut) and shortcut.isEnabled() != on:
+                shortcut.setEnabled(on)
+
+    def eventFilter(self, obj, event):  # noqa: N802 -- Qt API
+        if event.type() == QtCore.QEvent.EnabledChange:
+            self._sync(obj)
+        return False
+
+
+def install_run_key(scope: QtWidgets.QWidget,
+                    button: QtWidgets.QAbstractButton) -> list[QtGui.QShortcut]:
+    """Make :data:`RUN_KEYS` press ``button`` while the keyboard is inside ``scope``.
+
+    ``Qt.WidgetWithChildrenShortcut``, never a window shortcut: the key belongs to the panel
+    that has the focus, so two scopes that do not contain one another can never both match
+    one key press (Qt fires neither of an ambiguous pair), and a hidden scope (a tab not in
+    front) matches nothing. The shortcuts are enabled only while ``button`` is, so a greyed
+    run button never swallows the key."""
+    shortcuts = []
+    for key in RUN_KEYS:
+        shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), scope)
+        shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        shortcut.setAutoRepeat(False)
+        shortcut.activated.connect(lambda s=scope, b=button: press_run_button(s, b))
+        shortcuts.append(shortcut)
+    _FollowEnabled(button, shortcuts)
+    return shortcuts
 
 
 class InspectorScrollArea(QtWidgets.QScrollArea):

@@ -107,6 +107,13 @@ The main window has four regions:
   shows: what you chose for a column one table lacks (amplitude columns before Curate ▸ Apply, ML or
   hand-made columns) is kept for when it is back. **Default columns** resets those too.
 
+**Two rules for changes.** Settings take effect when you press the panel's run button: **Apply**
+in Calibration, **Detect** in the Analysis tab, **Update plot** in the Analysis Explorer. A **●** on
+that button (**Apply ●**, **Detect ●**; Update plot shows a count) means there are edits it has not
+run yet, and **Ctrl/⌘+Return** presses it from the field you are typing in. Curation (accept,
+reject and labels in the event table, the Event inspector and the Event gallery) takes effect at
+once, and **Edit ▸ Undo** takes it back.
+
 The **analysis launcher** starts with **Analysis home**, followed by shortcuts to
 **Distributions**, **Event waveforms**, **Noise spectrum**, **I-V / conductance**,
 **Voltage dependence**, **Report figures** and **Event gallery**. Full tool names match the
@@ -667,6 +674,11 @@ with a target-units label. It shows a live **raw-vs-calibrated** table (median /
 and a **command-voltage check** that reconciles the measured voltage against the nominal applied
 voltage.
 
+Nothing you type is committed until you press **Apply** (or Return in a field, or **Ctrl/⌘+Return**
+anywhere in the tab). While the gain, offset, units or *Treat this channel as* differ from the
+channel's calibration, the button reads **Apply ●** (*There is an edit to apply.*); after Apply,
+Reset or Undo it reads **Apply** again.
+
 - For ABF recordings the **voltage channel**'s default gain is **detected from what the channel
   reads**, not assumed, because files store it two ways. A channel reading past 1,200 mV cannot be a
   bias anyone applied to a nanopore, so its raw values are stored 10× too large and it opens at a
@@ -1013,7 +1025,11 @@ Details list's Signal chain row. A table whose run did not record its polarity i
 it.
 The rows are not marked stale: they are a faithful record of the chain they were detected with,
 and nothing changes until you run detection again (**Run detection…** in the window, enabled
-exactly when the Detect button is, or the button's menu). A table from the ML detector or a reconciled table is labelled as not produced by
+exactly when the Detect button is, or the button's menu). While the chip shows, the Detect button
+reads **Detect ●** and the window's button **Run detection… ●** (their tooltips start *The form
+differs from the table on screen*); they read plain again when Revert, Undo or a run makes the form
+match the table. **Ctrl/⌘+Return** in the window presses Detect (not in the list of spectral
+lines, which keeps its own keys). A table from the ML detector or a reconciled table is labelled as not produced by
 this chain.
 
 **Revert puts back only what differs** — the stages and thresholds the line names — and leaves
@@ -1392,6 +1408,12 @@ greyed with an honest reason (e.g. a legacy TDMS file has no rate → dwell woul
 
 After a run the **Summary** shows counts and rates, the event table fills, and events appear as a
 single batched **span overlay** on the current pane.
+
+**Detect ●** means the form differs from the run that made the Schmitt or CUSUM table on screen
+(the same verdict as the table's **⚠ Settings changed** / **⚠ Chain changed** chip); Detect runs
+it. With no table, an ML or Manual table, or Detect greyed out, it reads **Detect**.
+**Ctrl/⌘+Return** anywhere in the Preprocess or Detection tab commits the field you are typing in
+and presses Detect, the same click with the same questions; in the ML and Measure tabs it does nothing.
 
 ### CUSUM's opposite-direction count
 
@@ -4404,6 +4426,8 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | **Ctrl/⌘+Z** | **Undo the last change — to the event table on screen or its Detection / ML / Baseline settings, the measurement list, or the calibration, time base or acquisition bandwidth of the recording on screen (§9b)** |
 | **Ctrl+Shift+Z / ⇧⌘Z** | **Redo it** |
 | Ctrl+D | Run detection |
+| **Calibration tab:** Ctrl/⌘+Return / Enter | Commit the field you are typing in and press **Apply** (nothing while Apply is greyed out) |
+| **Preprocess & Detection tabs, Preprocess workspace:** Ctrl/⌘+Return / Enter | Commit the field you are typing in and press **Detect**, the same click with the same questions (nothing while Detect is greyed out; nothing in the ML or Measure tab) |
 | **Ctrl+I** | **Open the Event inspector** |
 | **Ctrl+G** | **Open the Event gallery** |
 | **Ctrl+M** | **Add the current cursor region as a hand-made event in the table named beside the Add button (Schmitt, CUSUM, Manual...); works from any tab; refuses on Reconciled** |

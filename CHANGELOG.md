@@ -147,6 +147,23 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **Run buttons show the edits they have not run, and Ctrl/⌘+Return runs the panel you are in.**
+  Two rules now read the same everywhere: settings take effect on the panel's run button (Apply,
+  Detect, Update plot), and curation (accept, reject, labels) is immediate and undoable.
+  - **Detect** reads **Detect ●** while the form differs from the run of the Schmitt or CUSUM
+    table on screen, the same verdict as the table's *⚠ Settings changed* / *⚠ Chain changed*
+    chip; its tooltip starts *The form differs from the table on screen; Detect runs it.* It is
+    plain with no table, an ML or Manual table, or while greyed out. The Preprocess workspace's
+    **Run detection…** reads **Run detection… ●** on the same verdict.
+  - Calibration's **Apply** reads **Apply ●** (*There is an edit to apply.*) while the gain,
+    offset, units or *Treat this channel as* differ from the channel's calibration.
+  - **Ctrl/⌘+Return** or **Ctrl/⌘+keypad Enter** commits the field you are typing in and presses
+    Apply in the Calibration tab, or Detect in the Preprocess and Detection tabs and the
+    Preprocess workspace: the same click, with the same questions. It does nothing elsewhere or
+    while the button is greyed out; the Analysis Explorer keeps its own for Update plot, and the
+    workspace's list of spectral lines its own keys. A plain keypad Enter presses nothing new.
+    Nothing a button does has changed.
+
 - **Batch detect runs the detector selected in the Detection panel, Schmitt or CUSUM.** Until now
   it ran Schmitt whatever the detector box showed. This supersedes the earlier Schmitt-only rule
   (*Batch detect records the detector it ran*, under the 13.4 answers below). ML is still not

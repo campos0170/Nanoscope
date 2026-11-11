@@ -1131,7 +1131,7 @@
         "kind": "button",
         "group": "Inspector ▸ Calibration",
         "what_it_does": "Commits the typed gain, offset and target units to the selected channel and immediately re-renders the affected traces — no reload.",
-        "notes": "The panel's default button; pressing Enter in Gain, Offset or Target units does the same thing. Does nothing while the formula line is showing a refusal. Apply can be destructive too: if your typed values happen to equal the defaults it deletes the .npcal.json sidecar, and it raises the same warnings as Reset — worded with \"Apply\" so the prompt names the button you actually pressed. Disabled until a channel is selected.",
+        "notes": "The panel's default button; pressing Enter in Gain, Offset or Target units does the same thing, and Ctrl/⌘+Return or Ctrl/⌘+keypad Enter anywhere in the Calibration tab presses it. Reads \"Apply ●\" (tooltip \"There is an edit to apply.\") while the gain, offset, target units or \"Treat this channel as\" differ from the channel's calibration; plain \"Apply\" after Apply, Reset or Undo and while it is greyed out. Does nothing while the formula line is showing a refusal. Apply can be destructive too: if your typed values happen to equal the defaults it deletes the .npcal.json sidecar, and it raises the same warnings as Reset — worded with \"Apply\" so the prompt names the button you actually pressed. Disabled until a channel is selected.",
         "correction": "Label is verbatim, but it is the dialog's DEFAULT button (setDefault(True)), so Enter anywhere in the panel triggers it. It is greyed out until a channel of a trace recording is selected, it does nothing at all while the typed gain/offset are invalid, and it can raise a destructive delete/erase confirmation when the typed values happen to equal the defaults."
       },
       {
@@ -1494,7 +1494,7 @@
         "kind": "button",
         "group": "Signal Conditioning ▸ status row",
         "what_it_does": "Analysis ▸ Run detection with the form's chain (asks first when the table on screen carries hand curation). Enabled exactly when that action is.",
-        "notes": "objectName signalConditioningRun."
+        "notes": "objectName signalConditioningRun. Reads \"Run detection… ●\" (tooltip starting \"The form differs from the table on screen; Run detection runs it.\") while the form differs from the run of the Schmitt or CUSUM table on screen, the same verdict as Detect ●. Ctrl/⌘+Return or Ctrl/⌘+keypad Enter anywhere in this window presses the Detection panel's Detect, except in the list of spectral lines, which keeps its own keys."
       },
       {
         "label": "Active execution order: raw calibrated signal (no stages enabled)",
@@ -1884,7 +1884,7 @@
         "kind": "button",
         "group": "Detection ▸ buttons",
         "what_it_does": "Runs the selected detector (Schmitt or CUSUM) on the selected current channel using everything on the Preprocess and Detection tabs plus the open-pore baseline block, and replaces the event table below with the result.",
-        "notes": "This is the panel's DEFAULT button, so pressing Enter in the panel fires it. Also available as Analysis ▸ Run detection (Ctrl+D). Greyed out with a banner unless a CURRENT channel with a known sample rate is selected. It runs in the background and can be cancelled; a cancelled run returns nothing rather than a half-built table. A CUSUM run also records how many detections the same settings give in the opposite direction, and the Summary shows an advisory when that count is material."
+        "notes": "This is the panel's DEFAULT button, so pressing Enter in the panel fires it. Also available as Analysis ▸ Run detection (Ctrl+D), and Ctrl/⌘+Return or Ctrl/⌘+keypad Enter anywhere in the Preprocess or Detection tab or the Preprocess workspace commits the field being typed in and presses it (not in the ML or Measure tab or the workspace's list of spectral lines). Reads \"Detect ●\" while the form differs from the run of the Schmitt or CUSUM table on screen (the verdict behind the table's \"⚠ Settings changed\" / \"⚠ Chain changed\" chip), with a tooltip starting \"The form differs from the table on screen; Detect runs it.\"; plain \"Detect\" with no table, an ML or Manual table, or while greyed out. The Preprocess workspace's \"Run detection…\" reads \"Run detection… ●\" on the same verdict. Greyed out with a banner unless a CURRENT channel with a known sample rate is selected. It runs in the background and can be cancelled; a cancelled run returns nothing rather than a half-built table. A CUSUM run also records how many detections the same settings give in the opposite direction, and the Summary shows an advisory when that count is material."
       },
       {
         "label": "Sweep threshold…",

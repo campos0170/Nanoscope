@@ -103,6 +103,12 @@ _EXACT_TEXTS = ("Compute exact", "Computing…", "Retry exact")
 #: The status row's Revert, for a chain-only difference and once a threshold differs too
 #: (Revert then puts thresholds back as well). As wide as the wider, so it never reflows.
 _REVERT_TEXTS = ("Revert to detection's chain", "Revert to detection's settings")
+#: The run button's two wordings: plain, and marked while the form differs from the run of
+#: the table on screen (the chain judge's verdict, the same rule as the Detect button's).
+_RUN_TEXTS = ("Run detection…", "Run detection… ●")
+_RUN_TIP = ("Analysis ▸ Run detection with the form's chain (asks first when the table "
+            "on screen carries hand curation).")
+_RUN_PENDING_TIP = "The form differs from the table on screen; Run detection runs it."
 
 #: A stage-list row whose stage differs from the run: the chain notice's own amber.
 _DIFFERS_INK = "#FFB74D"
@@ -470,6 +476,18 @@ class _LinesList(QtWidgets.QListWidget):
 
     returnPressed = QtCore.Signal()
 
+    def event(self, event: QtCore.QEvent) -> bool:  # Qt override
+        # Ctrl/⌘+Return and Ctrl/⌘+keypad Enter stay the list's own, as they were before the
+        # window's run key: claiming the override keeps that key from pressing Detect here,
+        # and the list does with it what it always did (the item view's own handling).
+        if (event.type() == QtCore.QEvent.ShortcutOverride
+                and event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter)
+                and (event.modifiers() & ~QtCore.Qt.KeypadModifier)
+                == QtCore.Qt.ControlModifier):
+            event.accept()
+            return True
+        return super().event(event)
+
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802 (Qt override)
         if (event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter)
                 and event.modifiers() in (QtCore.Qt.NoModifier, QtCore.Qt.KeypadModifier)):
@@ -722,15 +740,15 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         self.revert_button.clicked.connect(lambda *_: self.revertRequested.emit())
         srl.addWidget(self.revert_button)
         self._fit_revert_button()
-        self.run_button = QtWidgets.QPushButton("Run detection…")
+        self.run_button = QtWidgets.QPushButton(_RUN_TEXTS[0])
         self.run_button.setObjectName("signalConditioningRun")
-        self.run_button.setToolTip(
-            "Analysis ▸ Run detection with the form's chain (asks first when the table "
-            "on screen carries hand curation).")
+        self.run_button.setAccessibleName(_RUN_TEXTS[0])
+        self.run_button.setToolTip(_RUN_TIP)
         self.run_button.setEnabled(False)
         self.run_button.setFocusPolicy(QtCore.Qt.TabFocus)
         self.run_button.clicked.connect(lambda *_: self.runDetectionRequested.emit())
         srl.addWidget(self.run_button)
+        self._fit_run_button()
         root.addWidget(status_row)
         self._status_row = status_row
 
@@ -1561,6 +1579,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         if self.revert_button.toolTip() != tip:
             self.revert_button.setToolTip(tip)
         self.revert_button.setEnabled(can)
+        self._refresh_run_mark()
         # The rows' tooltips name this verdict's differences.
         self._render_marks()
 
@@ -1620,6 +1639,18 @@ class SignalConditioningWindow(QtWidgets.QWidget):
 
     def set_run_enabled(self, enabled: bool) -> None:
         self.run_button.setEnabled(bool(enabled))
+        self._refresh_run_mark()
+
+    def _refresh_run_mark(self) -> None:
+        """"Run detection… ●" while the verdict on the status row says the form differs and
+        the run is offered; the plain wording otherwise. Labels only."""
+        marked = self._status.kind == "differs" and self.run_button.isEnabled()
+        text = _RUN_TEXTS[1 if marked else 0]
+        if self.run_button.text() != text:
+            self.run_button.setText(text)
+        tip = f"{_RUN_PENDING_TIP}\n\n{_RUN_TIP}" if marked else _RUN_TIP
+        if self.run_button.toolTip() != tip:
+            self.run_button.setToolTip(tip)
 
     def set_source_label(self, label: str) -> None:
         self._source_label = str(label or "")
@@ -2503,6 +2534,10 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         """As wide as its wider wording, so "settings" never moves the status line."""
         _fit_widest(self.revert_button, _REVERT_TEXTS)
 
+    def _fit_run_button(self) -> None:
+        """As wide as its marked wording, so the mark never moves the status line."""
+        _fit_widest(self.run_button, _RUN_TEXTS)
+
     def _refresh_status_texts(self) -> None:
         self.time_status.setText(self._time_status_text())
         self._refresh_legends()
@@ -2650,6 +2685,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
             self._fit_stage_list()
             self._fit_exact_button()
             self._fit_revert_button()
+            self._fit_run_button()
             self._render_marks()            # the marked rows' bold is of the list's font
             self._time_status_row.setFixedHeight(max(
                 self.time_status.height(), self.exact_button.sizeHint().height()))

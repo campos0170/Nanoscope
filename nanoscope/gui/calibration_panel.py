@@ -21,6 +21,7 @@ from ..core.calibration import (
 from ..core.document import TraceDocument
 from ..core.session import Session
 from ..core.types import ChannelKind, Provenance
+from .inspector_widgets import PENDING_MARK
 
 __all__ = ["CalibrationPanel", "sidecar_outcome_text"]
 
@@ -259,6 +260,9 @@ class CalibrationPanel(QtWidgets.QWidget):
         # that said "which pane" over that reach sent the user looking for a layout change
         # when the analysis had been switched off.
         form.addRow("Treat this channel as", self._treat_as)
+        # Label only: the choice is still committed by Apply alone (see below), but an
+        # Apply waiting for it is marked like one waiting for a typed number.
+        self._treat_as.currentIndexChanged.connect(lambda *_: self._refresh_apply_mark())
         root.addLayout(form)
 
         self._formula = QtWidgets.QLabel()
@@ -379,10 +383,19 @@ class CalibrationPanel(QtWidgets.QWidget):
         self._btn_apply = QtWidgets.QPushButton("Apply")
         self._btn_apply.setDefault(True)
         self._btn_apply.clicked.connect(self._apply)
+        # "Apply ●" while there is an edit to apply (:meth:`_refresh_apply_mark`). Wide
+        # enough for the mark from the start, so it never moves the button's left edge; its
+        # name stays "Apply" for a screen reader.
+        self._btn_apply.setAccessibleName("Apply")
+        self._btn_apply.setText("Apply" + PENDING_MARK)
+        self._btn_apply.setMinimumWidth(self._btn_apply.sizeHint().width())
+        self._btn_apply.setText("Apply")
         btns.addWidget(self._btn_reset)
         btns.addStretch(1)
         btns.addWidget(self._btn_apply)
         root.addLayout(btns)
+        # The tab's run key (Ctrl/⌘+Return or Ctrl/⌘+keypad Enter) presses this Apply; the
+        # owner installs it on the tab page that holds this panel (see :attr:`apply_button`).
 
         # What the last commit did to <datafile>.npcal.json. A calibration commit can WRITE
         # or DELETE a file next to the user's raw data; doing either with no visible trace is
@@ -540,6 +553,7 @@ class CalibrationPanel(QtWidgets.QWidget):
         finally:
             self._loading = False
         self._update_preview()
+        self._refresh_apply_mark()
 
     def _set_status(self, text: str) -> None:
         self._status.setText(text)
@@ -616,6 +630,48 @@ class CalibrationPanel(QtWidgets.QWidget):
             return None
         return gain, offset
 
+    @property
+    def apply_button(self) -> QtWidgets.QPushButton:
+        """The Apply button, for the owner's run key (Ctrl/⌘+Return in the tab)."""
+        return self._btn_apply
+
+    def _apply_reading(self) -> tuple | None:
+        """What :meth:`_apply` would commit from the fields, built as it builds it: the
+        parsed gain and offset (so "1" and "1.0" are one value), the units stripped and the
+        kind chosen. None while the typed values are refused."""
+        pend = self._pending()
+        if pend is None:
+            return None
+        gain, offset = pend
+        return gain, offset, self._units.text().strip(), self._treat_as.currentData()
+
+    def edit_pending(self) -> bool:
+        """Whether Apply is enabled AND would change the channel's committed calibration:
+        an edit is waiting for Apply. Compared with the calibration itself, not with the
+        fields' rounded text, so a gain of 1/3 shown as "0.333333" is pending (Apply would
+        store 0.333333) and the exact committed value typed back is not. Apply alone is
+        enabled for any committable value, the unchanged one included."""
+        if self._sel is None or not self._btn_apply.isEnabledTo(self):
+            return False
+        reading = self._apply_reading()
+        if reading is None:
+            return False
+        cal = self._session.calibration(*self._sel)
+        return reading != (cal.gain, cal.offset, cal.target_units, cal.kind)
+
+    def _refresh_apply_mark(self) -> None:
+        """"Apply ●" with the tooltip "There is an edit to apply." while :meth:`edit_pending`,
+        plain "Apply" otherwise. Labels only."""
+        if self._loading:
+            return
+        marked = self.edit_pending()
+        text = "Apply" + (PENDING_MARK if marked else "")
+        if self._btn_apply.text() != text:
+            self._btn_apply.setText(text)
+        tip = "There is an edit to apply." if marked else ""
+        if self._btn_apply.toolTip() != tip:
+            self._btn_apply.setToolTip(tip)
+
     def _pending_problem(self) -> str:
         """Why the typed values cannot be committed — the FIRST real reason, in words.
 
@@ -659,6 +715,7 @@ class CalibrationPanel(QtWidgets.QWidget):
         # enabled over a refused value and silently do nothing; the refusal is in the
         # formula line, and a disabled button says the same thing without a click.
         self._btn_apply.setEnabled(pend is not None and self._raw_sample is not None)
+        self._refresh_apply_mark()
         if pend is None or self._raw_sample is None:
             self._formula.setText(self._pending_problem())
             for raw_l, cal_l in self._stat_labels.values():
@@ -1109,3 +1166,4 @@ class CalibrationPanel(QtWidgets.QWidget):
                 w.setEnabled(False)
         finally:
             self._loading = False
+        self._refresh_apply_mark()

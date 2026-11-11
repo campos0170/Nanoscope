@@ -88,6 +88,7 @@ from .calibration_panel import CalibrationPanel, sidecar_outcome_text
 from .export_paths import ask_export_path
 from .file_dock import FileDock
 from .file_info_panel import FileInfoPanel
+from .inspector_widgets import install_run_key
 from .key_sequences import redo_sequences, undo_sequences
 from .navigator import Navigator
 from .pan_scrollbar import PanScrollBar
@@ -1522,6 +1523,12 @@ class MainWindow(QtWidgets.QMainWindow):
         cal_scroll.setWidget(self._calibration_panel)
         # Kept so the chip / strip can reveal the Calibration tab by widget (reorder-proof).
         self._cal_scroll = cal_scroll
+        # Ctrl/⌘+Return or Ctrl/⌘+keypad Enter anywhere in the Calibration tab presses
+        # Apply, after committing the field being typed in; nothing while Apply is greyed
+        # out. Scoped to the tab page itself, not the panel inside it: a click on blank
+        # space in the tab gives this scroll area the keyboard. The tab's one run key.
+        self._cal_run_key_shortcuts = install_run_key(
+            cal_scroll, self._calibration_panel.apply_button)
         info_scroll = QtWidgets.QScrollArea()
         info_scroll.setWidgetResizable(True)
         info_scroll.setMinimumWidth(0)
@@ -9469,6 +9476,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ws.stageRevertRequested.connect(ap.revert_stage)
         ws.stageResetRequested.connect(ap.reset_stage)
         ws.runDetectionRequested.connect(self._run_detection)
+        # Ctrl/⌘+Return or Ctrl/⌘+keypad Enter anywhere in the window presses the Detection
+        # panel's Detect, after committing the field being typed in: the window edits that
+        # panel's form. Scoped to this window, which the Detection tabs' own key never
+        # reaches.
+        ws.run_key_shortcuts = install_run_key(ws, det.detect_button)
         ws.exportProtocolsRequested.connect(lambda: ap.export_protocols(ws))
         ws.importProtocolsRequested.connect(lambda: ap.import_protocols(ws))
         ws.copyPythonRequested.connect(lambda: ap.copy_chain_as_python(ws.current_window()))

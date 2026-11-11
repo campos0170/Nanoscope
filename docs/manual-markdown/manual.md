@@ -315,8 +315,10 @@ larger than the 15,000,000-sample working ceiling raises a dialog offering
 
 The `Calibration` tab converts raw units into physical ones.
 `Gain`, `Offset` and `Target units` are **text fields you
-type into**, not drop-downs; press Enter or `Apply` to commit. The panel shows raw
-against calibrated side by side so you can see what the conversion did.
+type into**, not drop-downs; press Enter or `Apply` to commit (Ctrl/⌘+Return presses `Apply`
+from anywhere in the tab). The button reads `Apply ●` while there is an edit it has not
+committed. The panel shows raw against calibrated side by side so you can see what the
+conversion did.
 
 **If you skip this**
 
@@ -389,7 +391,10 @@ unchanged until you detect again.
 
 ### 4 · Detect
 
-Choose a detector in `Detection`, then press `Detect`. **Schmitt trigger (hysteresis)** uses
+Choose a detector in `Detection`, then press `Detect` (or Ctrl/⌘+Return in the Preprocess or
+Detection tab). The button reads `Detect ●` while the form differs from the run of the Schmitt or
+CUSUM table on screen: settings take effect only when you run them, while accepting, rejecting
+and labelling events is immediate and Edit ▸ Undo takes it back. **Schmitt trigger (hysteresis)** uses
 `k_in (enter)` and `k_out (exit)` are thresholds in noise multiples, with the
 exit lower than the entry so a noisy event is less readily chopped into fragments. **Sequential
 CUSUM** is also available, with different parameters and defaults; it is not the same operation as

@@ -9814,6 +9814,9 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._chain_status = status
         differs = status.kind == "differs"
         self._detection.set_chain_status(status.sentence, differs)
+        # Detect reads "Detect ●" on this same verdict, pushed with the chip below, so the
+        # button and the chip move together on every route that re-judges.
+        self._detection.set_run_pending(differs)
         # "Settings" once a threshold differs: the difference is no longer the chain's alone,
         # and Revert puts the thresholds back too (design 7.2).
         notice = "⚠ Settings changed" if status.thresholds_differ else "⚠ Chain changed"

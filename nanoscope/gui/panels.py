@@ -101,7 +101,8 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 from .column_checklist import ColumnChecklist, ColumnChooserPopup
-from .inspector_widgets import Disclosure, InspectorScrollArea, PinnedActions, host_layout
+from .inspector_widgets import (
+    PENDING_MARK, Disclosure, InspectorScrollArea, PinnedActions, host_layout, install_run_key)
 from .numeric_text import parse_strict_number
 from .time_controls import SecondsSpinBox
 
@@ -2054,6 +2055,12 @@ class DetectionPanel(QWidget):
         btn_row = QGridLayout()
         self.detect_button = QPushButton("Detect")
         self.detect_button.setDefault(True)
+        # "Detect ●" while the form differs from the run of the table on screen (the chain
+        # judge's verdict, pushed by the owner through `set_run_pending`); its name stays
+        # "Detect" for a screen reader either way.
+        self.detect_button.setAccessibleName("Detect")
+        self._detect_tip = self.detect_button.toolTip()
+        self._run_pending = False
         self.sweep_button = QPushButton("Sweep threshold…")
         self.null_button = QPushButton("Null control…")
         self.recovery_button = QPushButton("Recovery map…")
@@ -2245,6 +2252,13 @@ class DetectionPanel(QWidget):
         self._refresh_notch_mode()
 
         self.detect_button.clicked.connect(lambda: self.detectRequested.emit(self.params()))
+        # Ctrl/⌘+Return or Ctrl/⌘+keypad Enter presses Detect -- the same click, every
+        # refusal and prompt included -- while the keyboard is anywhere in the Preprocess or
+        # Detection tab, after committing the field being typed in. Scoped to those two
+        # pages (``install_run_key``): not the ML or Measure tab, and a page not in front
+        # matches nothing, so the key is never ambiguous with another panel's.
+        self.run_key_shortcuts = (install_run_key(self._preprocess_page, self.detect_button)
+                                  + install_run_key(self._detection_page, self.detect_button))
         # THE THREE VALIDATION STUDIES GET A DICT NARROWED TO THE SELECTED DETECTOR
         # (`surrogate_params`): the form minus every other detector's thresholds. Null
         # control runs the detector that dict names, Schmitt or CUSUM. Sweep threshold
@@ -4402,12 +4416,41 @@ class DetectionPanel(QWidget):
         moved = self.detect_button.isEnabled() != bool(runnable)
         self._runnable = bool(runnable)
         self.detect_button.setEnabled(bool(runnable))
+        self._refresh_detect_mark()
         self._refresh_study_buttons()
         self._gate_label.setText("" if runnable else reason)
         self._gate_label.setVisible(bool(reason) and not runnable)
         self._gate_host.setVisible(bool(reason) and not runnable)
         if moved:
             self.runGateChanged.emit(bool(runnable))
+
+    #: The first lines of Detect's tooltip while it is marked.
+    _DETECT_PENDING_TIP = "The form differs from the table on screen; Detect runs it."
+
+    def set_run_pending(self, pending: bool) -> None:
+        """Whether the form differs from the run that made the table on screen.
+
+        The owner pushes the chain judge's verdict here (``kind == "differs"``) every time
+        it re-judges, the same moment the table's "⚠ Chain changed" / "⚠ Settings changed"
+        chip moves, so the two never disagree. Labels only: nothing about a run changes."""
+        self._run_pending = bool(pending)
+        self._refresh_detect_mark()
+
+    def run_pending(self) -> bool:
+        """The verdict last pushed through :meth:`set_run_pending`."""
+        return self._run_pending
+
+    def _refresh_detect_mark(self) -> None:
+        """"Detect ●" while the form has edits Detect has not run and the gate lets it run;
+        plain "Detect" otherwise (no table, a table this chain did not make, a closed gate)."""
+        marked = self._run_pending and self._runnable
+        text = "Detect" + (PENDING_MARK if marked else "")
+        if self.detect_button.text() != text:
+            self.detect_button.setText(text)
+        base = self._detect_tip
+        tip = (self._DETECT_PENDING_TIP + (f"\n\n{base}" if base else "")) if marked else base
+        if self.detect_button.toolTip() != tip:
+            self.detect_button.setToolTip(tip)
 
     def _refresh_study_buttons(self) -> None:
         """Enable the three study buttons from the run gate AND the selected detector.
