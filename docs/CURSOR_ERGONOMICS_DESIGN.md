@@ -630,7 +630,7 @@ literally on synthetic traces. What it changed:
 Built, with tests (`tests/analysis/test_edge_fit.py`, `tests/analysis/test_characterize_rise_pad.py`,
 `tests/gui/test_trace_keys.py`, `tests/gui/test_trace_draw_mode.py`, `test_trace_empty_mask.py`,
 `test_trace_focus_cursor_label.py`, `test_trace_moving.py`, `test_trace_measure_panel_hooks.py`,
-`test_trace_rig.py`): the keys C, S, F, Shift+S, Shift+F, D, Shift+D, G, Shift+G, X, E and the
+`trace_rig.py`): the keys C, S, F, Shift+S, Shift+F, D, Shift+D, G, Shift+G, X, E and the
 Return / Enter / Esc aliases gated on a mouse-given focus (`gui/trace_keys.py`); draw mode with
 Option inversion and the fit on release; the empty-mask state; the directed step fit and `C`
 (`analysis/edge_fit.py`), with `bounds_source` per edge on the row; focus that follows the pointer

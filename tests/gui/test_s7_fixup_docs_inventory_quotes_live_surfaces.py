@@ -112,12 +112,17 @@ def test_the_measure_this_recording_entry_is_the_buttons_tooltip_byte_for_byte(
     sentence, and dropped the health-check clause and the "it has not missed the click"
     reassurance the button actually gives. Equality is the only check that keeps a
     hand-written paraphrase out of a column the manual presents as a quotation.
+
+    2026-11-11: the button was "Measure this recording" until 8661d35 renamed it (and its
+    tooltip's closing words with it). The entry is looked up under the label the button wears
+    now, so a rename the inventory has not followed fails at the lookup. The test keeps its
+    name, which is the one the sweep gave it.
     """
     from nanoscope.gui.baseline_panel import BaselinePanel
 
     panel = BaselinePanel()
     tooltip = panel.probe_button.toolTip()
-    entry = _one(inventory, "Measure this recording", "Open-pore baseline")
+    entry = _one(inventory, panel.probe_button.text(), "Open-pore baseline")
     assert entry["what_it_does"] == tooltip
 
 

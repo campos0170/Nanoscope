@@ -46,7 +46,7 @@ from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, Recording
 
 from ._inspector_hosting import (  # noqa: F401  (fixtures are used by name)
     FS, N, SPANS, build_window, close_window, private_settings, settle, signal)
-from .test_trace_rig import free_mouse, hover, point_at  # noqa: F401
+from .trace_rig import free_mouse, hover, point_at  # noqa: F401
 
 #: The event the C tests catch: the widest of the six.
 EVENT = SPANS[2]

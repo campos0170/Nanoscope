@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ import pytest
 from PySide6 import QtCore, QtGui
 
 from nanoscope.analysis import iv, voltage_dep
+from nanoscope.core.figure_quantity_basis import read_quantity_bases
 from nanoscope.core.session import Session
 from nanoscope.gui.iv_panel import IVWindow
 from nanoscope.gui.plot_appearance import (
@@ -61,6 +63,26 @@ def _xy(item):
     return np.array(x, copy=True), np.array(y, copy=True)
 
 
+def _look(appearance):
+    """``appearance`` without the witness of the quantity each axis shows: the part that is look.
+    2026-11-11: a page that presents units (Voltage dependence, not I-V) always carries the
+    witness, which ``present_page_axes`` writes at every draw (8661d35, quantity display); an
+    appearance that has never been styled is empty only in this sense."""
+    return replace(appearance, quantity_display=None)
+
+
+def _bases(window):
+    """The quantity each axis of ``window`` shows according to its appearance's witness, as
+    ``{axis: (quantity key, display unit)}``: Voltage dependence shows the capture rate in Hz,
+    I-V presents no units and records none."""
+    return {axis: (basis.quantity.key, basis.quantity.display_unit)
+            for axis, basis in read_quantity_bases(window._appearance.quantity_display).items()}
+
+
+def _drawn_quantity(window):
+    return {} if isinstance(window, IVWindow) else {"left": ("capture_rate_hz", "Hz")}
+
+
 def _forbid_analysis(monkeypatch, window):
     def fail(*args, **kwargs):
         pytest.fail("An appearance edit called a scientific/data-refresh path")
@@ -107,9 +129,28 @@ def test_appearance_edit_preserves_points_fit_provenance_and_zoom(scientific_win
 
 
 def test_empty_appearance_is_noop_and_reset_restores_original(scientific_window, monkeypatch):
+    """An appearance nobody has touched applies nothing to the plot, and Reset figure puts back
+    what the plot looked like before.
+
+    2026-11-11: the first half, "applies nothing to an untouched plot", is checked for I-V only
+    (the ``_nanoscope_appearance_defaults`` assertion below). Voltage dependence presents units, so
+    its appearance holds the witness of the quantity it shows from its first draw (8661d35), and
+    an appearance holding only the witness is not empty to ``apply_plot_appearance``: it misses
+    the early return that leaves a plot alone, so the draw's styling pass records the plot's
+    defaults before this test can read them, and every baseline below is taken after that pass.
+    For Voltage dependence the test therefore pins the second half (Reset figure restores that
+    baseline, and the witness is what is drawn), not that nothing was styled. Whether the early
+    return should ignore the witness, as ``_describe_step`` does, is the owner's choice; the app
+    is as released."""
     w = scientific_window
-    assert w._appearance.to_dict() == {}
-    assert not hasattr(w._plot, "_nanoscope_appearance_defaults")
+    # 2026-11-11: Voltage dependence's appearance holds the witness of the quantity it shows from
+    # its first draw, so it is "empty" apart from that, and its first draw already goes through the
+    # styling pass (with nothing to style). I-V, which presents no units, is empty and untouched.
+    assert _look(w._appearance) == PlotAppearance()
+    assert _bases(w) == _drawn_quantity(w)
+    if isinstance(w, IVWindow):
+        assert w._appearance.to_dict() == {}
+        assert not hasattr(w._plot, "_nanoscope_appearance_defaults")
     baseline_background = w._plot_widget.backgroundBrush()
     baseline_pen = QtGui.QPen(w._fit_item.opts["pen"])
     baseline_title_opts = dict(w._plot.titleLabel.opts)
@@ -122,7 +163,7 @@ def test_empty_appearance_is_noop_and_reset_restores_original(scientific_window,
                             "title_size": 22, "font_family": "Arial", "grid": False})
     assert w._fit_item.opts["pen"].color().name() == "#ff0000"
     w._appearance_widget.reset_button.click()
-    assert w._appearance.to_dict() == {}
+    assert _look(w._appearance) == PlotAppearance() and _bases(w) == _drawn_quantity(w)
     assert w._plot_widget.backgroundBrush() == baseline_background
     assert w._fit_item.opts["pen"] == baseline_pen
     assert w._plot.titleLabel.opts == baseline_title_opts

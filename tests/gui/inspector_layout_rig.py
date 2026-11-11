@@ -1,4 +1,6 @@
-"""Geometry witnesses for the current page-scrolled, action-pinned Inspector."""
+"""Geometry witnesses for the current page-scrolled Inspector: every mode page scrolls in an area
+of its own and pins its actions above it, except the hosted Preprocess overview, whose door
+scrolls with it."""
 from __future__ import annotations
 
 import nanoscope  # noqa: F401 -- Qt bootstrap
@@ -33,6 +35,13 @@ def build(qtbot, size=(1512, 900), width=None):
 
 
 def show_page(window, title):
+    """Raise the page and return the scroll area a user sees on it.
+
+    2026-11-11: the shipped window hosts the Preprocess page as the workspace overview, which
+    scrolls in its own area (``preprocess_overview_scroll``, 8661d35). The page's own scroller
+    (``page_scrolls``) is hidden then and keeps a stale size (its viewport stays 638 px wide at
+    every dock width, and "horizontal scrollbar not visible" is true of any hidden widget), so
+    measuring it would prove nothing about the page on screen."""
     detection = window._analysis_panel.detection_panel
     title = {'ML detector': 'ML', 'Manual measurement': 'Measure'}.get(title, title)
     index = next(i for i in range(detection.mode_tabs.count())
@@ -41,6 +50,8 @@ def show_page(window, title):
     if title == 'Preprocess':
         detection.show_signal_chain()
     settle(window)
+    if title == 'Preprocess' and getattr(detection, '_preprocess_workspace_hosted', False):
+        return detection.preprocess_overview_scroll
     return detection.page_scrolls[detection.mode_tabs.currentWidget()]
 
 

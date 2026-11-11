@@ -17,6 +17,7 @@ data only; offscreen.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import replace
 
@@ -32,9 +33,10 @@ from nanoscope.gui.key_sequences import redo_sequences
 from nanoscope.gui.plot_appearance import PlotAppearance
 
 from .test_p0_reset_on_quantity_change import (  # noqa: F401  (fixtures are used by name)
-    _boxes, _clear_status, _click_button, _drawn_title, _explorer_of, _generate, _label, _pick,
-    _said, _section, _series_window, _standing_line, _type_comparison_words, _type_in_box,
-    _user_picks, comparison, dist, events, noise, subpop, subpop_report, summaries, vdep)
+    _assert_quantity, _boxes, _clear_status, _click_button, _drawn_title, _explorer_of, _generate,
+    _label, _pick, _said, _same_words_and_look, _section, _series_window, _standing_line,
+    _type_comparison_words, _type_in_box, _user_picks, comparison, dist, events, noise, subpop,
+    subpop_report, summaries, vdep)
 from .test_plot_window_routes import (
     _add_title, _choose, _click, _edit_double_click, _install_series, _main_window, _names,
     _press_undo, _restored_main_window, window_handle)
@@ -635,6 +637,33 @@ def test_voltage_dependence_routes_that_are_not_a_change_of_metric_keep_both_pin
     _stays_pinned(plot, "left", y_pin)
 
 
+def test_voltage_dependence_log_y_over_a_range_with_a_major_tick_redraws_and_keeps_the_range(vdep):
+    """2026-11-11: Log y over a Y range pinned with a major tick spacing raised a ``QuantityError``
+    in the check box's slot (8661d35 refused a change of log frame for its owner to handle, and
+    this owner did not), so the plot was left half drawn. It redraws, and the range stays, as the
+    guide says of Log y: a real log axis, whose range is typed in the units it shows. The spacing
+    stays too, as the NUMBER typed (10 Hz reads as 10 decades on the log axis): a change of frame
+    carries it without a unit factor, and whether it should be dropped instead is an owner
+    decision. The two ``tick_major`` lines are the ones to change if it is."""
+    page, explorer = vdep
+    plot = page.plot_item()
+    y_pin = _pin_inside(plot, "left", major=10.0)
+    steps = _depth(page._appearance_widget)
+    _section(page, "Analysis")
+    _clear_status(page)
+
+    _click_button(page._log_y)
+
+    assert page._log_y.isChecked() and page._drawn_metric == "capture_rate_hz"
+    _stays_pinned(plot, "left", y_pin)
+    assert _axes_of(page)["left"]["tick_major"] == 10.0 and _axis(plot, "left").tick_major == 10.0
+    assert _depth(page._appearance_widget) == steps and _said(page, explorer)[0] == ""
+    _click_button(page._log_y)
+    assert not page._log_y.isChecked()
+    _stays_pinned(plot, "left", y_pin)
+    assert _axes_of(page)["left"]["tick_major"] == 10.0 and _axis(plot, "left").tick_major == 10.0
+
+
 def test_voltage_dependence_a_template_of_another_metric_installs_its_own_pins(vdep):
     """The rule does not run when a template moves the metric: the template's appearance is
     installed whole, its pins included, and nothing is said."""
@@ -662,7 +691,11 @@ def test_voltage_dependence_a_template_of_another_metric_installs_its_own_pins(v
 def test_voltage_dependence_pins_saved_in_a_project_open_as_saved_and_the_next_metric_takes_one(
         qapp, qtbot, tmp_path, monkeypatch):
     """One real save while both axes are pinned, reopened by ``_open_project``: the page opens
-    with both ranges drawn and says nothing; the next metric takes the Y pin and not the X one."""
+    with both ranges drawn and says nothing; the next metric takes the Y pin and not the X one.
+
+    2026-11-11: a page of the main window is a managed figure since 8661d35 and draws nothing until
+    **Update plot**: before it, ranges would be pinned on the empty message canvas (0 to 1), where
+    the next metric pick is a first draw and takes nothing. So the page is drawn first."""
     window = _restored_main_window(qtbot, tmp_path, monkeypatch)
     _install_series(window, ())
     window._open_vdep()
@@ -671,6 +704,9 @@ def test_voltage_dependence_pins_saved_in_a_project_open_as_saved_and_the_next_m
     explorer.resize(1280, 860)
     QtWidgets.QApplication.processEvents()
     page.activateWindow()
+    assert page._drawn_metric is None                           # nothing is drawn before Update plot
+    _click_button(explorer.toolbar().update_button)
+    assert page._drawn_metric == "capture_rate_hz"
     plot = page.plot_item()
     _add_title(plot, "Capture vs voltage")
     x_pin = _pin_inside(plot, "bottom")
@@ -722,12 +758,19 @@ def test_voltage_dependence_abs_v_range_saved_in_a_project_opens_as_saved_and_cl
     explorer.resize(1280, 860)
     QtWidgets.QApplication.processEvents()
     page.activateWindow()
+    # 2026-11-11: drawn first (a managed figure draws nothing until Update plot, 8661d35), or the
+    # range below would be pinned on the empty 0..1 canvas and |V| would be a first draw.
+    assert page._drawn_metric is None
+    _click_button(explorer.toolbar().update_button)
+    assert page._drawn_metric == "capture_rate_hz" and page._drawn_abs is False
     plot = page.plot_item()
     _section(page, "Analysis")
     _click_button(page._abs_v)
+    assert page._drawn_abs is True
     x_pin = _pin_inside(plot, "bottom")
     saved = _axes_of(page)
-    assert set(saved) == {"bottom"} and x_pin[0] > 0
+    volts = [abs(point.v_volts) * 1000.0 for point in page.points()]
+    assert set(saved) == {"bottom"} and min(volts) <= x_pin[0] < x_pin[1] <= max(volts), x_pin
     project = tmp_path / "abs-pins.nanoscope"
     assert window._write_project(str(project))
     window._dirty = False
@@ -924,6 +967,7 @@ def test_summaries_routes_that_are_not_a_new_measurement_keep_every_pin(summarie
     fraction = _pin_inside(plot, "left")
     _edit_double_click(plot, plot.titleLabel, "Dwell ECDF")
     pins, words, steps = _axes_of(page), widget.state(), _depth(widget)
+    _assert_quantity(plot, "bottom", "dwell_s", "ms", 1000.)    # 2026-11-11: ms since 8661d35
     _clear_status(page)
 
     _generate(page)
@@ -934,13 +978,18 @@ def test_summaries_routes_that_are_not_a_new_measurement_keep_every_pin(summarie
     page._source_list.item(other).setCheckState(QtCore.Qt.CheckState.Checked)       # another pore
     _generate(page)
     assert len(page.selected_sources()) == 2
+    assert widget.state() == words                              # the same measurement: the same record
     # A template with another measurement: the page installs the template's appearance (the same
     # pins here) and the Generate that commits its measurement keeps what came with it.
     settings, appearance = page.template_settings()
     page.apply_template_settings({**settings, "metric": "frac_depth"}, page.appearance_state())
     _generate(page)
     assert page._applied_config["metric"] == "frac_depth"
-    assert _axes_of(page) == pins and widget.state() == words and _depth(widget) == steps
+    assert _axes_of(page) == pins and _depth(widget) == steps
+    # The record of what the axis draws follows the new measurement (8661d35); the words, the look
+    # and the pins are the template's own, which is what this route promises.
+    _same_words_and_look(widget.state(), words)
+    _assert_quantity(plot, "bottom", "frac_depth", "", 1.)
     assert _said(page, explorer)[0] == ""
     _stays_pinned(plot, "bottom", value)
     _stays_pinned(plot, "left", fraction)
@@ -1151,7 +1200,10 @@ def test_noise_a_template_that_switches_to_the_asd_installs_its_own_pins(noise):
 
 def test_noise_pins_saved_in_a_project_open_as_saved_and_the_asd_takes_the_psd_one(
         qapp, qtbot, tmp_path, monkeypatch):
-    """One real save while the PSD is pinned on both axes, reopened by ``_open_project``."""
+    """One real save while the PSD is pinned on both axes, reopened by ``_open_project``.
+
+    2026-11-11: a page of the main window is a managed figure since 8661d35: nothing is computed
+    until **Update plot**, and the analytical choices (PSD or ASD, log-log) are drafts until then."""
     from nanoscope.core.project import DocumentRef, ProjectState
 
     from .test_plot_window_routes import _noisy_csv
@@ -1168,6 +1220,8 @@ def test_noise_pins_saved_in_a_project_open_as_saved_and_the_asd_takes_the_psd_o
     page = window._psd_window
     explorer = _explorer_of(window)
     page.activateWindow()
+    assert not page.has_data()                                  # nothing is computed before Update plot
+    _click_button(explorer.toolbar().update_button)
     assert page.has_data()
     plot = page._plot
     _edit_double_click(plot, plot.titleLabel, "PSD of the pore")
@@ -1195,7 +1249,10 @@ def test_noise_pins_saved_in_a_project_open_as_saved_and_the_asd_takes_the_psd_o
     _click_button(page._loglog_check)                            # the same spectrum, other axes
     _click_button(page._loglog_check)
     assert _axes_of(page) == saved
-    _click_button(page._asd_check)
+    _click_button(page._asd_check)                               # a draft until Update plot
+    assert _axes_of(page) == saved and _drawn_title(plot)[0] == "PSD of the pore"
+    _click_button(explorer.toolbar().update_button)
+    assert page.is_asd()
     assert set(_axes_of(page)) == {"psd.bottom"}
     _is_automatic(plot, "left", was=psd_pin)
     _stays_pinned(plot, "bottom", freq_pin)
@@ -1215,8 +1272,8 @@ def _tab(page, index):
 
 
 def _pin_the_event_figures(page):
-    """Linear dwell on the map (Log x off, as a person types a range in seconds), the map's x and
-    y (with a major tick on y) and the ensemble's x and y pinned through Axis properties."""
+    """Linear dwell on the map (Log x off, as a person types a range in milliseconds), the map's x
+    and y (with a major tick on y) and the ensemble's x and y pinned through Axis properties."""
     _section(page, "Analysis")
     if page._logx.isChecked():
         _click_button(page._logx)
@@ -1303,15 +1360,18 @@ def test_event_waveforms_normalize_time_takes_the_ensembles_x_range_and_the_map_
     steps, before = _depth(widget), _axes_of(page)
     _section(page, "Analysis")
 
-    _click_button(page._normalize)                               # normalised time -> time in seconds
+    _click_button(page._normalize)                               # normalised time -> real time
 
     assert not page._normalize.isChecked() and _depth(widget) == (steps[0] + 1, 0)
     assert set(_axes_of(page)) == {"map.bottom", "map.left", "ensemble.left"}
     _is_automatic(ens, "bottom", was=pins["ensemble.bottom"])
     _stays_pinned(ens, "left", pins["ensemble.left"])            # current stays current
-    assert _label(ens, "bottom") == "Time (s)"
+    # 2026-11-11: time is shown in milliseconds since 8661d35 (Phase 4, quantity display).
+    assert _label(ens, "bottom") == "Time (ms)"
+    _assert_quantity(ens, "bottom", "time_s", "ms", 1000.)
     assert _said(page, explorer) == (
-        "Title and X range reset: the plot now shows the ensemble against time in seconds.", True)
+        "Title and X range reset: the plot now shows the ensemble against time in milliseconds.",
+        True)
     _tab(page, 0)
     _stays_pinned(mp, "bottom", pins["map.bottom"])
     _stays_pinned(mp, "left", pins["map.left"])
@@ -1537,7 +1597,12 @@ def test_event_waveforms_routes_that_are_not_a_new_metric_keep_every_pin(events,
 
 def test_event_waveforms_pins_saved_in_a_project_open_as_saved_and_the_next_metric_takes_one(
         qapp, qtbot, tmp_path, monkeypatch):
-    """One real save with the map and the ensemble pinned, reopened by ``_open_project``."""
+    """One real save with the map and the ensemble pinned, reopened by ``_open_project``.
+
+    2026-11-11: a page of the main window is a managed figure since 8661d35: it draws nothing until
+    **Update plot**, and its analytical controls (the metrics, Log x and Log y) are drafts until
+    then. So the page is drawn, put on linear axes (where the ranges are typed) by Update plot, and
+    the next metric after the reopening is a draft that Update plot commits."""
     window = _series_window(qtbot, tmp_path, monkeypatch)
     first = next(iter(window._session.documents())).doc_id
     window._on_selection(first, 0)
@@ -1545,7 +1610,15 @@ def test_event_waveforms_pins_saved_in_a_project_open_as_saved_and_the_next_metr
     page = window._event_plot_window
     explorer = _explorer_of(window)
     page.activateWindow()
+    assert page.density_counts() is None                        # nothing is drawn before Update plot
+    _click_button(explorer.toolbar().update_button)
     assert page.density_counts() is not None
+    _section(page, "Analysis")
+    for box in (page._logx, page._logy):                         # drafts in the Figures workspace
+        if box.isChecked():
+            _click_button(box)
+    _click_button(explorer.toolbar().update_button)
+    assert page._density_logs == (False, False)
     pins = _pin_the_event_figures(page)
     _edit_double_click(page._density_main, page._density_main.titleLabel, "Dwell vs depth")
     saved = _axes_of(page)
@@ -1575,12 +1648,16 @@ def test_event_waveforms_pins_saved_in_a_project_open_as_saved_and_the_next_metr
     _section(page, "Analysis")
     _pick(page._x_combo, data="dwell_s")                         # the same metric: nothing
     assert _axes_of(page) == saved
-    _pick(page._x_combo, data="frac_depth")                      # the next one is a change
+    _pick(page._x_combo, data="frac_depth")                      # a draft until Update plot
+    assert _axes_of(page) == saved and _drawn_title(mp)[0] == "Dwell vs depth"
+    _click_button(explorer.toolbar().update_button)              # the next one is a change
+    assert page._density_shown[0] == "frac_depth"
     assert set(_axes_of(page)) == set(saved) - {"map.bottom"}
     _is_automatic(mp, "bottom", was=pins["map.bottom"])
     _stays_pinned(mp, "left", pins["map.left"])
     assert _said(page, explorer) == (
-        "Title and X range reset: the plot now shows median depth against dI/I₀.", True)
+        "Title and X range reset: the plot now shows the updated event-count map and ensemble.",
+        True)
     assert reopened._dirty, "the reset is an edit of the project"
     reopened._dirty = False
 
@@ -1708,11 +1785,14 @@ def test_distributions_a_column_takes_the_range_of_the_axis_that_moved_and_names
     x_pin = _pin_inside(plot, "bottom")
     y_pin = _pin_inside(plot, "left")
     _clear_status(page)
-    columns = [page._scatter_x.itemText(i) for i in range(page._scatter_x.count())]
+    # 2026-11-11: the column pickers are ScientificColumnCombo since 8661d35: ``itemText`` is the
+    # friendly label Qt paints, and the column itself is ``itemData`` (and ``currentText()``).
+    columns = [page._scatter_x.itemData(i) for i in range(page._scatter_x.count())]
     other = next(name for name in columns if name not in ("xcol", "ycol"))
 
     _user_picks(page._scatter_x, other)                          # only the X column moved
 
+    assert page._scatter_x.currentText() == other
     assert page.config().axes.ranges() == ("Y range",)
     assert _said(page, explorer)[0] == (
         f"X range reset: the plot is now set to show the scatter of ycol against {other}.")
@@ -1725,20 +1805,31 @@ def test_distributions_a_column_takes_the_range_of_the_axis_that_moved_and_names
 
 
 def test_distributions_the_time_unit_and_another_source_keep_the_ranges(dist):
-    """The unit rescales a typed range and a second pore changes no quantity (owner decision 2):
-    neither takes it."""
+    """The unit is fixed at ms and a second pore changes no quantity (owner decision 2): neither
+    takes a typed range.
+
+    2026-11-11: the Time unit used to offer s, ms and µs, and a pick rescaled the typed range. Since
+    8661d35 it is one fixed, disabled **ms** ("Time values display in milliseconds"): the range is
+    typed in ms, and the pin that is kept (``manual_x``) is in the data's units, seconds. (What the
+    old unit pick rescaled is covered, for a range saved in seconds by an older build, by
+    ``test_p4_plots_quantity``.)"""
     page, explorer = dist
     plot = page._plot
-    _pin_inside(plot, "bottom")
+    typed = _pin_inside(plot, "bottom")
     pinned = page.config().axes
+    assert [page._time_unit.itemText(i) for i in range(page._time_unit.count())] == ["ms"]
+    assert not page._time_unit.isEnabled() and pinned.time_unit == "ms"
+    assert (float(pinned.x_min), float(pinned.x_max)) == pytest.approx(typed)   # the boxes: ms
+    assert pinned.manual_x == pytest.approx((typed[0] / 1000.0, typed[1] / 1000.0))   # the pin: s
     _clear_status(page)
-    _user_picks(page._time_unit, "µs")
-    assert page.config().axes.manual_x == pinned.manual_x and page.config().axes.x_min != pinned.x_min
     other = next(i for i in range(page._source_list.count())
                  if page._source_list.item(i).checkState() != QtCore.Qt.CheckState.Checked)
     page._source_list.item(other).setCheckState(QtCore.Qt.CheckState.Checked)
     _click_button(page._plot_btn)
-    assert page.config().axes.ranges() == ("X range",) and _said(page, explorer)[0] == ""
+    after = page.config().axes
+    assert after.ranges() == ("X range",) and _said(page, explorer)[0] == ""
+    assert (after.x_min, after.x_max, after.manual_x) == (pinned.x_min, pinned.x_max, pinned.manual_x)
+    _stays_pinned(plot, "bottom", typed)
 
 
 # -- nothing typed and no pin on an axis that moved: no step and no sentence ---------------------
@@ -1883,7 +1974,11 @@ def test_the_guide_and_the_inventory_say_what_the_rule_does_with_the_pins():
             "and leaves the ECDF's and Survival's fraction axis alone",
             "A new summary type takes no range: each pair keeps its own, and the one you leave is "
             "waiting when you come back",
-            "A Comparison figure is a picture without Axis properties, so it has no range to take",
+            # 2026-11-11: Comparison figures have axis properties through Format since 8661d35, and
+            # the guide says so in place of the two sentences that called the figure a picture
+            # without them (this and the one below).
+            "Comparison figures expose supported axis properties through Format; changing the "
+            "plotted quantity releases the affected saved range",
             "The heatmap's **X** takes the map's X range and its **Y** the map's Y range, "
             "**Normalize time** takes the ensemble's X range (current stays current), and switching "
             "tabs takes none: each view keeps its own",
@@ -1904,7 +1999,8 @@ def test_the_guide_and_the_inventory_say_what_the_rule_does_with_the_pins():
             "and the ranges it was saved with in place of the ones pinned",
             "A new measurement also takes the range pinned on the value axis, in both pairs; a new "
             "summary takes no range",
-            "The figure is a picture without Axis properties, so there is no pinned range to take",
+            "Format exposes supported axis properties; a changed quantity clears the affected saved "
+            "axis range and major-tick override in the same history step",
             "until the axis comes to show another quantity",
             # What the first pass left unpinned (each is true of the code).
             "an axis whose column moved loses its typed range (a change of plot type moves "
@@ -1946,7 +2042,7 @@ def test_the_guide_and_the_inventory_say_what_the_rule_does_with_the_pins():
             "while one is ticked",
             "Changing **Log scale** in the map's Axis properties takes no range: that dialog "
             "commits the range typed beside it, and unticking Log scale there to type a range in "
-            "seconds is how the map's X axis, which opens on a log axis, is pinned",
+            "milliseconds is how the map's X axis, which opens on a log axis, is pinned",
             "Bins, the colormap, the band, the subset and the number of points keep both the "
             "words and the ranges"):
         assert sentence in flat, sentence
@@ -2021,22 +2117,31 @@ def test_noise_a_bare_pin_from_an_older_project_is_the_psds_and_goes_with_the_as
 
 
 def test_event_waveforms_a_bare_pin_from_an_older_project_is_the_maps_and_the_ensemble_leaves_it(events):
+    """2026-11-11: an appearance with no quantity witness is an older project's, and its map pin is
+    read once as the build that saved it wrote it: log10 of seconds on the log dwell axis (8661d35
+    re-expresses it as the physical milliseconds the axis shows now). So the old pin is built from
+    what the axis shows today, in the numbers that build saved."""
     page, explorer = events
     mp, ens = page._density_main, page._ensemble_plot
-    rng = _inside(mp, "bottom")
+    assert page._density_logs == (True, False)
+    rng = _inside(mp, "bottom")                                  # in ms, as the axis shows it today
+    old = tuple(math.log10(value / 1000.0) for value in rng)     # as an older build saved it: log10 s
     _tab(page, 1)
     e_rng = _inside(ens, "bottom")
     _tab(page, 0)
-    page.set_appearance_state({"axes": {"bottom": {"min": rng[0], "max": rng[1]},          # the map's
+    page.set_appearance_state({"axes": {"bottom": {"min": old[0], "max": old[1]},           # the map's
                                         "ensemble.bottom": {"min": e_rng[0], "max": e_rng[1]}}})
     _stays_pinned(mp, "bottom", rng)
     _tab(page, 1)
     _stays_pinned(ens, "bottom", e_rng)
     _section(page, "Analysis")
     _click_button(page._normalize)                               # the ensemble's x moves, not the map's
-    assert _axes_of(page) == {"bottom": {"min": rng[0], "max": rng[1]}}      # only the ensemble's went
+    assert set(_axes_of(page)) == {"bottom"}                     # only the ensemble's went
+    bare = _axes_of(page)["bottom"]
+    assert (bare["min"], bare["max"]) == pytest.approx(rng)      # the map's, now in ms
     _is_automatic(ens, "bottom", was=e_rng)
-    assert _said(page, explorer)[0] == "X range reset: the plot now shows the ensemble against time in seconds."
+    assert _said(page, explorer)[0] == (
+        "X range reset: the plot now shows the ensemble against time in milliseconds.")
     _tab(page, 0)
     _stays_pinned(mp, "bottom", rng)
     _pick(page._x_combo, data="frac_depth")                      # the map's x moves: its bare pin goes
@@ -2046,11 +2151,16 @@ def test_event_waveforms_a_bare_pin_from_an_older_project_is_the_maps_and_the_en
 
 
 def test_summaries_a_bare_pin_from_an_older_project_is_the_curves_value_axis(summaries):
+    """2026-11-11: an appearance with no quantity witness is an older project's, whose dwell pin was
+    in seconds: 8661d35 reads it once as that and shows it in milliseconds. So the old pin is built
+    from what the axis shows today, in the numbers that build saved."""
     window, page, explorer = summaries
     plot = page._plot
-    value, fraction = _inside(plot, "bottom"), _inside(plot, "left")
-    page.set_appearance_state(_bare(bottom=value, left=fraction))
+    value, fraction = _inside(plot, "bottom"), _inside(plot, "left")     # the value in ms, as shown
+    old = tuple(v / 1000.0 for v in value)                               # as an older build saved it: s
+    page.set_appearance_state(_bare(bottom=old, left=fraction))
     _stays_pinned(plot, "bottom", value)
+    _stays_pinned(plot, "left", fraction)
     _section(page, "Data")
     _pick(page._metric_combo, data="depth_pA")
     _generate(page)

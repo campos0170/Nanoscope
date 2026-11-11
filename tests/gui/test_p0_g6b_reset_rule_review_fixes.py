@@ -12,8 +12,15 @@
    ticking a second source brings by itself takes nothing.
 5. Event waveforms' Align sets what t = 0 is on the ensemble's x axis: it takes the words and that
    axis's range, like Normalize time (and nothing while time is normalised).
-6. A range Axis properties hands back as it opened, with Log scale changed beside it, is carried
-   across to the units the Event-count map's axis is about to have.
+6. A range Axis properties hands back as it opened, with Log scale changed beside it, keeps its
+   physical values (pA, ms: a pinned range is the number the axis shows, in both modes) and the
+   Event-count map keeps its frame; the major tick spacing it opened with goes, one typed beside the
+   change stays, and no spacing, however it was set, stops the redraw. The page tests of this
+   section drive the page that is not hosted in the Figures workspace (the ``events`` fixture),
+   where Axis properties applies the change at once. In the app every Event waveforms page is a
+   managed figure, where the change, from Axis properties or from the Log box, is a draft that
+   **Update plot** commits, and that commit RESETS the axis's range and spacing with the usual
+   sentence; the last test of the section drives that page through the real main window.
 
 Every gesture is a real one, as in ``test_p0_reset_on_quantity_change`` and
 ``test_p0_pins_clear_with_the_words`` (whose rigs this reuses): picks through the combo's popup,
@@ -41,11 +48,11 @@ from nanoscope.gui.plot_appearance import PlotAppearance, _describe_step
 from .test_p0_pins_clear_with_the_words import (  # noqa: F401  (fixtures are used by name)
     _axes_of, _axis, _depth, _is_automatic, _pin, _pin_inside, _press_redo, _stays_pinned, _tab)
 from .test_p0_reset_on_quantity_change import (  # noqa: F401
-    _boxes, _clear_status, _click_button, _dist_words, _drawn_title, _explorer_of, _generate,
-    _label, _pick, _said, _section, _series_window, _standing_line, _type_comparison_words,
-    _type_dist_words, _type_event_words, _type_in_box, _type_noise_words, _type_subpop_words,
-    _type_summary_words, _user_picks, comparison, dist, events, noise, subpop, subpop_report,
-    summaries, vdep)
+    _assert_quantity, _boxes, _clear_status, _click_button, _dist_words, _drawn_title,
+    _explorer_of, _generate, _label, _pick, _said, _same_words_and_look, _section, _series_window,
+    _standing_line, _type_comparison_words, _type_dist_words, _type_event_words, _type_in_box,
+    _type_noise_words, _type_subpop_words, _type_summary_words, _user_picks, comparison, dist,
+    events, noise, subpop, subpop_report, summaries, vdep)
 from .test_plot_window_routes import (
     _add_title, _edit_double_click, _main_window, _press_undo)
 
@@ -64,6 +71,22 @@ def _reset_figure(page):
     """Click the real Reset figure button of the page."""
     button = page._appearance_widget.reset_button
     _click_button(button)
+
+
+# 2026-11-11: since 8661d35 (Phase 4, quantity display) every drawn page's appearance carries a
+# ``quantity_display`` witness, the record of which quantity and unit each axis draws, and Reset
+# figure keeps it on purpose. "Nothing is typed, pinned or styled" is therefore no longer
+# ``state == PlotAppearance()``: it is this, and the witness is pinned by what the axis draws
+# (``_assert_quantity``) beside it.
+def _look_only_witness(state):
+    """Nothing typed, pinned or styled: the only thing the state holds is the witness."""
+    return replace(state, quantity_display=None) == PlotAppearance()
+
+
+def _saved_look(page):
+    """What the page saves as its appearance, without the witness."""
+    return {key: value for key, value in page.appearance_state().items()
+            if key != "quantity_display"}
 
 
 # =================================================================================================
@@ -105,8 +128,9 @@ def test_voltage_dependence_after_the_rule_reset_figure_has_nothing_to_do(vdep):
     _pick(page._metric_combo, text="Median depth (pA)")        # the rule takes the wording back
 
     assert not page.fit_label_text().startswith("Linear fit:")
-    assert widget.state() == PlotAppearance() and widget.state().fit_label is None
-    assert page.appearance_state() == {}
+    assert _look_only_witness(widget.state()) and widget.state().fit_label is None
+    assert _saved_look(page) == {}
+    _assert_quantity(plot, "left", "median_depth", "", 1.0)    # the witness: what is drawn now
     steps = _depth(widget)
     _reset_figure(page)
     assert _depth(widget) == steps                              # nothing to reset: no step
@@ -128,7 +152,8 @@ def test_voltage_dependence_a_fit_label_with_a_size_set_keeps_it_and_reset_figur
     _reset_figure(page)
 
     assert _depth(widget) == (steps[0] + 1, 0)                  # a real step: the size goes
-    assert widget.state() == PlotAppearance()
+    assert _look_only_witness(widget.state())
+    _assert_quantity(plot, "left", "median_depth", "", 1.0)
     assert widget.undo_button.toolTip() == "Undo: fit label size automatic"
 
 
@@ -141,7 +166,8 @@ def test_noise_after_the_rule_reset_figure_has_nothing_to_do(noise):
 
     _pick(page._view_combo, data="spectrogram")
 
-    assert widget.state() == PlotAppearance() and page.appearance_state() == {}
+    assert _look_only_witness(widget.state()) and _saved_look(page) == {}
+    _assert_quantity(page._spec_plot, "bottom", "time_s", "ms", 1000.)
     steps = _depth(widget)
     _reset_figure(page)
     assert _depth(widget) == steps
@@ -241,6 +267,27 @@ def test_describe_step_leaves_every_other_step_as_it_was_named():
     assert _describe_step(PlotAppearance(), preset) == f"{name} preset"
 
 
+def test_describe_step_names_a_step_by_what_moved_and_not_by_the_quantity_witness():
+    """2026-11-11: ``quantity_display`` (8661d35) is the renderer's record of which quantity each
+    axis draws, not a gesture. A step that moved it with something else is named by the something
+    else, and a Reset figure, which keeps it, still lands on no override."""
+    rate = PlotAppearance(quantity_display={
+        "version": 1, "axes": {"left": {"quantity": {"key": "capture_rate_hz"}}}})
+    depth = PlotAppearance(quantity_display={
+        "version": 1, "axes": {"left": {"quantity": {"key": "median_depth"}}}})
+    assert _describe_step(rate, depth) == "display units"           # the witness alone, as before
+    # Words taken back while the page adopts the quantity it now draws: named by the words.
+    words = replace(rate, title="Capture vs voltage", y_label="Rate (Hz)")
+    assert _describe_step(words, depth) == "reset title and Y label"
+    assert _describe_step(replace(rate, y_label="Rate (Hz)"), depth) == (
+        "y label ‘Rate (Hz)’ → automatic")
+    # A Reset figure keeps the witness, and its look going lands on no override: it is that.
+    assert _describe_step(replace(rate, title_size=14.0, axis_size=12.0), rate) == "reset figure"
+    # Any other several are counted, and the witness is not one of them.
+    assert _describe_step(replace(rate, background="dark"), replace(depth, title_size=14.0)) == (
+        "2 appearance changes")
+
+
 def test_voltage_dependence_the_rules_step_reads_as_what_it_took_back_not_as_a_reset_figure(vdep):
     """Before: 'Undo: reset figure' (the look is the default) or 'Undo: 2 appearance changes' (a
     look is set), the text of a real Reset figure, though no one pressed it."""
@@ -252,7 +299,7 @@ def test_voltage_dependence_the_rules_step_reads_as_what_it_took_back_not_as_a_r
 
     _pick(page._metric_combo, text="Median depth (pA)")
 
-    assert widget.state() == PlotAppearance() and page.appearance_state() == {}
+    assert _look_only_witness(widget.state()) and _saved_look(page) == {}
     assert widget.undo_button.toolTip() == "Undo: reset title and Y label"
     _press_undo(page)
     assert widget.redo_button.toolTip() == "Redo: reset title and Y label"
@@ -298,7 +345,8 @@ def test_a_reset_figure_on_a_figure_with_only_words_reads_like_the_rules_step(vd
 
     _reset_figure(page)
 
-    assert widget.state() == PlotAppearance()
+    assert _look_only_witness(widget.state())
+    _assert_quantity(plot, "left", "capture_rate_hz", "Hz", 1.0)
     assert widget.undo_button.toolTip() == "Undo: reset title and Y label"
 
 
@@ -398,11 +446,12 @@ def test_voltage_dependence_a_look_edit_reset_figure_and_their_undo_and_redo_lea
     assert _said(page, explorer)[0] == sentence
     QtTest.QTest.qWait(800)
     _reset_figure(page)                                        # nothing is typed after it either
-    assert widget.state() == PlotAppearance() and _said(page, explorer)[0] == sentence
+    assert _look_only_witness(widget.state()) and _said(page, explorer)[0] == sentence
+    _assert_quantity(plot, "left", "median_depth", "", 1.0)
     _press_undo(page)                                          # Reset figure's own Undo
     assert widget.state().axis_size == 12.0 and _said(page, explorer)[0] == sentence
     _press_redo(page)
-    assert widget.state() == PlotAppearance() and _said(page, explorer)[0] == sentence
+    assert _look_only_witness(widget.state()) and _said(page, explorer)[0] == sentence
     _press_undo(page)
     _press_undo(page)                                          # the axis size, still look only
     assert widget.state().title_size == 14.0 and widget.state().axis_size is None
@@ -732,11 +781,23 @@ def test_distributions_every_normalize_mode_is_a_move_of_the_y_quantity(dist):
         "with exponential.")
 
 
+# 2026-11-11: since 8661d35 (Phase 4, quantity display) Distributions' ``AxesConfig`` also holds a
+# ``quantity_display`` witness, which follows the quantity the Y axis draws (counts, density). The
+# typed boxes and the pins are compared with it set aside, and the witness is pinned by itself.
+def _same_pins(actual, expected):
+    return replace(actual, quantity_display=expected.quantity_display) == expected
+
+
+def _dist_y_quantity(page):
+    return page.config().axes.quantity_display["axes"]["left"]["quantity"]["key"]
+
+
 def test_distributions_the_swing_to_density_with_a_second_source_takes_nothing(dist):
     """Ticking another pore moves Normalize by itself (decision 2: the words survive it), and a
     Plot afterwards measures from the quantity then, not from before."""
     page, explorer, plot, pins = _dist_typed_and_pinned(dist)
     words, axes = _dist_words(page), page.config().axes
+    assert _dist_y_quantity(page) == "histogram.count"
     steps = page._history.depth()[0]
     _clear_status(page)
     other = next(i for i in range(page._source_list.count())
@@ -746,7 +807,8 @@ def test_distributions_the_swing_to_density_with_a_second_source_takes_nothing(d
     _click_button(page._plot_btn)
 
     assert page.normalization() == "density" and not page._norm_user_set       # it swung by itself
-    assert _dist_words(page) == words and page.config().axes == axes
+    assert _dist_words(page) == words and _same_pins(page.config().axes, axes)
+    assert _dist_y_quantity(page) == "histogram.density:dwell_s"                # what Y draws now
     assert _said(page, explorer)[0] == ""
     assert _drawn_title(plot)[0] == WORDY[0]
     page._source_list.item(other).setCheckState(QtCore.Qt.CheckState.Unchecked)
@@ -851,13 +913,13 @@ ENSEMBLE_WORDS = ("Dwell vs depth", "Dwell", "Depth")
 def _real_time_ensemble(events):
     """The Event waveforms page on its Ensemble tab, in real time (so Align is enabled), with the
     map's and the ensemble's ranges pinned, words typed, and then the ensemble's x range pinned
-    again over the seconds axis."""
+    again over the time axis (in milliseconds)."""
     page, explorer = events
     pins = _pin_the_event_figures(page)
     ens, widget = page._ensemble_plot, page._appearance_widget
     _tab(page, 1)
     _section(page, "Analysis")
-    _click_button(page._normalize)                              # normalised time -> seconds
+    _click_button(page._normalize)                              # normalised time -> real time
     assert not page._normalize.isChecked() and page._align_combo.isEnabled()
     assert page._align_combo.currentText() == "start"
     _type_event_words(page, plot=ens)
@@ -881,7 +943,9 @@ def test_event_waveforms_a_new_alignment_takes_the_words_and_the_ensembles_x_ran
 
     assert _depth(widget) == (steps[0] + 1, 0)                  # ONE step
     assert _boxes(widget) == ("", "", "") and widget.state().title is None
-    assert _label(ens, "bottom") == "Time (s)" and _drawn_title(ens)[0] != ENSEMBLE_WORDS[0]
+    # 2026-11-11: time is shown in milliseconds since 8661d35 (Phase 4, quantity display).
+    assert _label(ens, "bottom") == "Time (ms)" and _drawn_title(ens)[0] != ENSEMBLE_WORDS[0]
+    _assert_quantity(ens, "bottom", "time_s", "ms", 1000.)
     assert set(_axes_of(page)) == set(before) - {"ensemble.bottom"}
     _is_automatic(ens, "bottom", was=pins["ensemble.bottom"])
     _stays_pinned(ens, "left", pins["ensemble.left"])           # current stays current
@@ -925,7 +989,8 @@ def test_event_waveforms_nothing_typed_and_no_range_on_the_axis_records_no_step(
     _pick(page._align_combo, text="extremum")
 
     assert _depth(widget) == steps and _said(page, explorer)[0] == ""
-    assert _label(ens, "bottom") == "Time (s)"
+    assert _label(ens, "bottom") == "Time (ms)"                 # 2026-11-11: milliseconds (8661d35)
+    _assert_quantity(ens, "bottom", "time_s", "ms", 1000.)
 
 
 def test_event_waveforms_while_time_is_normalised_the_alignment_is_immaterial(events):
@@ -950,7 +1015,8 @@ def test_event_waveforms_while_time_is_normalised_the_alignment_is_immaterial(ev
     _click_button(page._normalize)
     assert widget.state().title is None and _said(page, explorer)[0] == (
         "Title, X label, Y label and X range reset: the plot now shows the ensemble against "
-        "time in seconds.")
+        "time in milliseconds.")                                # 2026-11-11: milliseconds (8661d35)
+    _assert_quantity(ens, "bottom", "time_s", "ms", 1000.)
 
 
 def test_event_waveforms_a_template_and_a_restore_move_the_alignment_without_taking_anything(
@@ -1037,18 +1103,28 @@ def test_event_waveforms_a_restore_that_draws_no_ensemble_leaves_no_quantity_to_
 
     if control == "align":
         _pick(page._align_combo, text="extremum")
+        drawn = ("time_s", "ms", 1000.)
     else:
         _click_button(page._normalize)                          # time normalised
+        drawn = ("normalized_time", "", 1.)
 
     assert page.ensemble_traces() is not None                   # the first ensemble since
-    assert widget.state() == words and _depth(widget) == steps  # nothing was on screen to leave
+    # 2026-11-11: the witness follows what the ensemble draws (8661d35), so the words and the look
+    # are compared with it set aside, and the quantity now drawn is pinned on the axis.
+    _same_words_and_look(widget.state(), words)
+    assert _depth(widget) == steps                              # nothing was on screen to leave
+    _assert_quantity(ens, "bottom", *drawn)
     assert _drawn_title(ens)[0] == ENSEMBLE_WORDS[0] and _said(page, explorer)[0] == ""
 
 
 def test_event_waveforms_words_typed_over_an_alignment_are_saved_and_the_next_one_resets_them(
         qapp, qtbot, tmp_path, monkeypatch):
     """One real save, reopened by ``_open_project``: the ensemble opens in the alignment it was
-    saved in, with its words, and the next alignment resets them."""
+    saved in, with its words, and the next alignment resets them.
+
+    2026-11-11: a page of the main window is a managed figure since 8661d35: it draws nothing until
+    **Update plot**, and Normalize time and Align are drafts until then, so the alignment is
+    committed (and, after the reopening, changed) with the toolbar's Update plot."""
     window = _series_window(qtbot, tmp_path, monkeypatch)
     first = next(iter(window._session.documents())).doc_id
     window._on_selection(first, 0)
@@ -1056,11 +1132,16 @@ def test_event_waveforms_words_typed_over_an_alignment_are_saved_and_the_next_on
     page = window._event_plot_window
     explorer = _explorer_of(window)
     page.activateWindow()
+    assert page.density_counts() is None                        # nothing is drawn before Update plot
+    _click_button(explorer.toolbar().update_button)
     assert page.density_counts() is not None
     _tab(page, 1)
     _section(page, "Analysis")
     _click_button(page._normalize)
     _pick(page._align_combo, text="center")
+    assert page._normalize_shown is True and page._align_shown is None   # drafts: not yet drawn
+    _click_button(explorer.toolbar().update_button)
+    assert page._normalize_shown is False and page._align_shown == "center"
     _type_event_words(page, plot=page._ensemble_plot)
     pin = _pin_inside(page._ensemble_plot, "bottom")
     project = tmp_path / "align.nanoscope"
@@ -1082,17 +1163,22 @@ def test_event_waveforms_words_typed_over_an_alignment_are_saved_and_the_next_on
     _stays_pinned(ens, "bottom", pin)
     assert _said(page, explorer)[0] == ""
     _section(page, "Analysis")
-    _pick(page._align_combo, text="extremum")
+    _pick(page._align_combo, text="extremum")                   # a draft until Update plot
+    assert widget.state().title == ENSEMBLE_WORDS[0] and "ensemble.bottom" in _axes_of(page)
+    _click_button(explorer.toolbar().update_button)
+    assert page._align_shown == "extremum"
     assert widget.state().title is None and "ensemble.bottom" not in _axes_of(page)
     assert _said(page, explorer)[0] == (
-        "Title, X label, Y label and X range reset: the plot now shows the ensemble with t = 0 "
-        "at each event's deepest sample.")
+        "Title, X label, Y label and X range reset: the plot now shows the updated event-count "
+        "map and ensemble.")
     assert reopened._dirty
     reopened._dirty = False
 
 
 # =================================================================================================
 # 6. G5 residual (c): Log scale changed in Axis properties over a range that is already pinned
+#    (2026-11-11: since 8661d35 the range stays the physical value, in pA and ms, in both modes; the
+#    map draws log10 of it while Log is ticked, which is what ``_view_is`` reads)
 # =================================================================================================
 
 def _axis_dialog(plot, side, *, log=None, untick_auto=False, tick=None):
@@ -1171,7 +1257,11 @@ def test_across_log_carries_a_range_to_the_units_the_axis_is_about_to_have():
 
 def test_event_waveforms_log_scale_over_a_pinned_range_carries_the_range_across_and_back(events):
     """Before: the range stayed in the old units over the new numbers (a Y range in pA over
-    log10 of pA), so the Event-count map went blank with no step and no sentence."""
+    log10 of pA), so the Event-count map went blank with no step and no sentence.
+
+    2026-11-11: since 8661d35 a pinned range is the physical value (pA) in both modes, so it keeps
+    its numbers and the map DRAWS log10 of them while Log is ticked (``_view_is``). The major tick
+    typed beside it went with a ``QuantityError`` in the redraw's slot; now it goes quietly."""
     page, explorer = events
     mp, widget = page._density_main, page._appearance_widget
     _section(page, "Analysis")
@@ -1185,9 +1275,10 @@ def test_event_waveforms_log_scale_over_a_pinned_range_carries_the_range_across_
 
     assert page._logy.isChecked() and page._density_logs == (True, True)
     pin = _axes_of(page)["map.left"]
-    assert (pin["min"], pin["max"]) == pytest.approx((math.log10(lo), math.log10(hi)), rel=1e-5)
+    assert (pin["min"], pin["max"]) == pytest.approx((lo, hi), rel=1e-5)
     assert "tick_major" not in pin                              # a spacing does not carry across
-    _stays_pinned(mp, "left", (pin["min"], pin["max"]))
+    _stays_pinned(mp, "left", (lo, hi))
+    _view_is(mp, "left", lo, hi, True)                          # what is drawn: log10 of the range
     assert _map_has_data_in_view(mp, "left")                    # the map is not blank
     assert _depth(widget) == (steps + 1, 0)                     # one step, the dialog's
     assert _said(page, explorer)[0] == ""                       # nothing was lost to announce
@@ -1199,25 +1290,40 @@ def test_event_waveforms_log_scale_over_a_pinned_range_carries_the_range_across_
     assert not page._logy.isChecked()
     pin = _axes_of(page)["map.left"]
     assert (pin["min"], pin["max"]) == pytest.approx((lo, hi), rel=1e-4)
+    _view_is(mp, "left", lo, hi, False)
     assert _map_has_data_in_view(mp, "left")
 
 
 import math  # noqa: E402
 
 
+def _view_is(plot, side, lo, hi, log):
+    """The range the axis DRAWS for the pinned physical range ``lo``..``hi``: the range itself on
+    a linear axis, log10 of it while the map is on a log axis."""
+    got = plot.getViewBox().viewRange()[0 if side == "bottom" else 1]
+    want = (math.log10(lo), math.log10(hi)) if log else (lo, hi)
+    assert got == pytest.approx(want, rel=1e-3), (side, got, want)
+
+
 def test_event_waveforms_log_scale_on_the_x_axis_carries_the_range_typed_in_seconds(events):
+    """2026-11-11: the name is the old one (kept so the test keeps its id). Dwell is shown in
+    milliseconds since 8661d35, so the range is typed in ms (1.2 to 3 ms is the 0.0012 to 0.003 s
+    it used to be): it keeps its numbers across the change and the map draws log10 of it."""
     page, explorer = events
     mp, widget = page._density_main, page._appearance_widget
-    _pin(mp, "bottom", 0.0012, 0.003, log=False)               # the route that opens the X axis
+    _pin(mp, "bottom", 1.2, 3.0, log=False)                    # the route that opens the X axis
     assert not page._logx.isChecked()
-    _stays_pinned(mp, "bottom", (0.0012, 0.003))
+    _stays_pinned(mp, "bottom", (1.2, 3.0))
+    _view_is(mp, "bottom", 0.0012, 0.003, False)               # drawn over the linear dwell, in s
+    assert _map_has_data_in_view(mp, "bottom")
     _clear_status(page)
 
     _axis_dialog(mp, "bottom", log=True)
 
     assert page._logx.isChecked()
     pin = _axes_of(page)["map.bottom"]
-    assert (pin["min"], pin["max"]) == pytest.approx((math.log10(0.0012), math.log10(0.003)))
+    assert (pin["min"], pin["max"]) == pytest.approx((1.2, 3.0))
+    _view_is(mp, "bottom", 0.0012, 0.003, True)
     assert _map_has_data_in_view(mp, "bottom") and _said(page, explorer)[0] == ""
 
 
@@ -1233,9 +1339,10 @@ def test_event_waveforms_log_scale_beside_a_range_typed_in_the_dialog_keeps_it_a
 
 
 def test_event_waveforms_log_scale_beside_a_major_tick_typed_in_the_dialog_keeps_the_tick(events):
-    """The spacing the dialog opened with is in the units the axis is leaving and goes with the
-    range it was pinned beside; one typed in the same dialog is for the axis as it is about to be
-    drawn. Before, both went, and the spacing the person typed was lost without a word."""
+    """The spacing the dialog opened with is in the units the axis is leaving and goes; one typed in
+    the same dialog is for the axis as it is about to be drawn. Before, both went, and the spacing
+    the person typed was lost without a word. (2026-11-11: the range beside it keeps its physical
+    values since 8661d35, and the spacing, whatever it is, no longer stops the redraw.)"""
     page, explorer = events
     mp, widget = page._density_main, page._appearance_widget
     _section(page, "Analysis")
@@ -1245,15 +1352,17 @@ def test_event_waveforms_log_scale_beside_a_major_tick_typed_in_the_dialog_keeps
     _axis_dialog(mp, "left", log=True, tick=0.1)                # range as it opened, spacing typed
 
     pin = _axes_of(page)["map.left"]
-    assert (pin["min"], pin["max"]) == pytest.approx((math.log10(lo), math.log10(hi)), rel=1e-5)
+    assert (pin["min"], pin["max"]) == pytest.approx((lo, hi), rel=1e-5)   # 2026-11-11: physical
     assert pin["tick_major"] == 0.1                             # not the 20 it opened, not lost
     assert _axis(mp, "left").tick_major == 0.1 and mp.getAxis("left").major_tick == 0.1
+    _view_is(mp, "left", lo, hi, True)
     assert _map_has_data_in_view(mp, "left") and _depth(widget) == (steps + 1, 0)
 
     _axis_dialog(mp, "left", log=False, tick=5.0)               # and back, with a spacing in pA
     pin = _axes_of(page)["map.left"]
     assert (pin["min"], pin["max"]) == pytest.approx((lo, hi), rel=1e-4)
     assert pin["tick_major"] == 5.0 and mp.getAxis("left").major_tick == 5.0
+    _view_is(mp, "left", lo, hi, False)
     assert _map_has_data_in_view(mp, "left")
 
 
@@ -1272,8 +1381,9 @@ def test_event_waveforms_log_scale_over_a_tick_with_more_digits_than_the_dialog_
     _axis_dialog(mp, "left", log=True)
 
     pin = _axes_of(page)["map.left"]
-    assert (pin["min"], pin["max"]) == pytest.approx((math.log10(lo), math.log10(hi)), rel=1e-5)
+    assert (pin["min"], pin["max"]) == pytest.approx((lo, hi), rel=1e-5)   # 2026-11-11: physical
     assert "tick_major" not in pin and getattr(mp.getAxis("left"), "major_tick", None) is None
+    _view_is(mp, "left", lo, hi, True)
 
 
 def test_event_waveforms_log_scale_with_auto_unticked_beside_a_typed_tick_keeps_the_tick(events):
@@ -1286,15 +1396,17 @@ def test_event_waveforms_log_scale_with_auto_unticked_beside_a_typed_tick_keeps_
     _axis_dialog(mp, "left", log=True, untick_auto=True, tick=0.1)
 
     pin = _axes_of(page)["map.left"]
-    assert (pin["min"], pin["max"]) == pytest.approx(
-        (math.log10(float(f"{shown[0]:.6g}")), math.log10(float(f"{shown[1]:.6g}"))))
+    want = (float(f"{shown[0]:.6g}"), float(f"{shown[1]:.6g}"))   # what the dialog showed: physical
+    assert (pin["min"], pin["max"]) == pytest.approx(want)
     assert pin["tick_major"] == 0.1 and mp.getAxis("left").major_tick == 0.1
+    _view_is(mp, "left", *want, True)
     assert _map_has_data_in_view(mp, "left")
 
 
 def test_event_waveforms_log_scale_with_auto_unticked_carries_the_range_the_dialog_showed(events):
     """Unticking Auto fills the boxes with the range the view shows; leaving them as they are is
-    asking for that frame, in the units the axis is about to have."""
+    asking for that frame, which the dialog shows in the physical units and the axis keeps in the
+    other mode (2026-11-11: 8661d35)."""
     page, explorer = events
     mp = page._density_main
     _section(page, "Analysis")
@@ -1304,8 +1416,9 @@ def test_event_waveforms_log_scale_with_auto_unticked_carries_the_range_the_dial
     _axis_dialog(mp, "left", log=True, untick_auto=True)
 
     pin = _axes_of(page)["map.left"]
-    assert (pin["min"], pin["max"]) == pytest.approx(
-        (math.log10(float(f"{shown[0]:.6g}")), math.log10(float(f"{shown[1]:.6g}"))))
+    want = (float(f"{shown[0]:.6g}"), float(f"{shown[1]:.6g}"))   # what the dialog showed: physical
+    assert (pin["min"], pin["max"]) == pytest.approx(want)
+    _view_is(mp, "left", *want, True)
     assert _map_has_data_in_view(mp, "left")
 
 
@@ -1335,6 +1448,81 @@ def test_event_waveforms_log_scale_over_auto_leaves_the_axis_on_auto(events):
     assert page._logy.isChecked() and _axes_of(page) == {}
     _is_automatic(mp, "left", auto_ranging=False)               # the page frames its own data
     assert _depth(widget) == steps
+
+
+def test_event_waveforms_in_the_project_window_a_log_scale_drafted_over_a_pinned_range_is_taken_at_update_plot(
+        qapp, qtbot, tmp_path, monkeypatch):
+    """The page the app builds, in the real main window, is a managed figure: Log y, ticked in its
+    box or changed in Axis properties, is a DRAFT until **Update plot**, and Update plot is what
+    carries a pinned range and a major tick spacing across the change of frame. Before, that
+    commit stopped with a ``QuantityError`` in the redraw's slot (a spacing was refused on a
+    change of log frame) and left the map half drawn. Now it resets the range and the spacing in
+    one step, with the sentence the app shows. (The other tests of this section drive the page
+    that is not hosted in the Figures workspace, where Axis properties applies the change at
+    once.)"""
+    window = _series_window(qtbot, tmp_path, monkeypatch)
+    first = next(iter(window._session.documents())).doc_id
+    window._on_selection(first, 0)
+    window._open_event_plots()
+    page = window._event_plot_window
+    explorer = _explorer_of(window)
+    page.activateWindow()
+    assert page._nanoscope_figure_managed, "the page as the app builds it"
+    update = explorer.toolbar().update_button
+    _click_button(update)
+    assert page.density_counts() is not None
+    _section(page, "Analysis")
+    for box in (page._logx, page._logy):                         # drafts in the Figures workspace
+        if box.isChecked():
+            _click_button(box)
+    _click_button(update)
+    assert page._density_logs == (False, False)
+    mp, widget = page._density_main, page._appearance_widget
+    sentence = ("Y range and Y major tick reset: "
+                "the plot now shows the updated event-count map and ensemble.")
+
+    # The check box: a draft; the range and the spacing stand until Update plot takes them.
+    lo, hi = _pin_inside(mp, "left", major=20.0)
+    pinned, steps = _axes_of(page)["map.left"], _depth(widget)
+    assert pinned["tick_major"] == 20.0
+    _clear_status(page)
+    _click_button(page._logy)
+    assert page._logy.isChecked() and page._density_logs == (False, False), "a draft"
+    assert page.inspector_adapter().pending().reasons == ("log y",)
+    assert _axes_of(page)["map.left"] == pinned and _depth(widget) == steps
+    _stays_pinned(mp, "left", (lo, hi))
+    assert _said(page, explorer)[0] == ""
+
+    _click_button(update)
+
+    assert page._density_logs == (False, True) and page.inspector_adapter().pending().count == 0
+    assert "map.left" not in _axes_of(page) and _depth(widget) == (steps[0] + 1, 0)
+    state = _axis(mp, "left")
+    assert state.range is None and state.tick_major is None and state.log
+    assert getattr(mp.getAxis("left"), "major_tick", None) is None
+    assert _map_has_data_in_view(mp, "left"), "the map is not left half drawn"
+    assert _said(page, explorer) == (sentence, True)
+
+    # Axis properties: the same draft (the box follows it), the same commit.
+    lo, hi = _pin_inside(mp, "left")
+    steps = _depth(widget)
+    _clear_status(page)
+    _axis_dialog(mp, "left", log=False, tick=5.0)
+    assert not page._logy.isChecked() and page._density_logs == (False, True), "a draft"
+    assert page.inspector_adapter().pending().reasons == ("log y",)
+    pin = _axes_of(page)["map.left"]
+    assert (pin["min"], pin["max"]) == pytest.approx((lo, hi), rel=1e-5) and pin["tick_major"] == 5.0
+    assert _depth(widget) == (steps[0] + 1, 0) and _said(page, explorer)[0] == ""
+
+    _click_button(update)
+
+    assert page._density_logs == (False, False) and page.inspector_adapter().pending().count == 0
+    assert "map.left" not in _axes_of(page) and _depth(widget) == (steps[0] + 2, 0)
+    state = _axis(mp, "left")
+    assert state.range is None and state.tick_major is None and not state.log
+    assert _map_has_data_in_view(mp, "left")
+    assert _said(page, explorer) == (sentence, True)
+    window._dirty = False
 
 
 # =================================================================================================
@@ -1416,12 +1604,13 @@ GUIDE_SENTENCES = (
     "takes that sentence off the status line",
     # CRITIC gap B: Event waveforms' Align.
     "Ensemble tabs, **Normalize time**, and **Align**.",
+    # 2026-11-11: time is a duration in ms since 8661d35, and the guide says so.
     "**Align** (start, center, extremum) is what t = 0 means on the ensemble's X axis once time is "
-    "in seconds, so another alignment takes the words and that X range too (*…the plot now shows "
-    "the ensemble with t = 0 at each event's deepest sample.*); while time is normalised the "
+    "a duration in ms, so another alignment takes the words and that X range too (*…the plot now "
+    "shows the ensemble with t = 0 at each event's deepest sample.*); while time is normalised the "
     "alignment is immaterial and the combo is greyed out, and setting it then takes nothing.",
-    "toggling **Normalize time**, or changing **Align** (once time is in seconds, when it is what "
-    "t = 0 means on the ensemble's X axis) puts the typed Title, X label and Y label",
+    "toggling **Normalize time**, or changing **Align** (once time is a duration in ms, when it is "
+    "what t = 0 means on the ensemble's X axis) puts the typed Title, X label and Y label",
     "**Align** takes the ensemble's X range too.",
     "Bins, the colormap, the band, the subset and the number of points keep both the words and "
     "the ranges.",
@@ -1459,8 +1648,8 @@ INVENTORY_PIECES = (
     # (page, list, index, key or None, piece)
     ("Normalize", "Picking another value yourself (not the automatic switch) is a change of what "
                   "the Y axis counts"),
-    ("Align", "Changing it while time is in seconds takes the typed Title, X label and Y label "
-              "and the range pinned on the ensemble's X axis back to automatic"),
+    ("Align", "Changing it while time is displayed as milliseconds takes the typed Title, X label "
+              "and Y label and the range pinned on the ensemble's X axis back to automatic"),
     ("Log x", "A range left as the dialog opened with it is carried across to the new units"),
     ("Log y", "In Axis properties a range left as the dialog opened with it is carried across to "
               "the new units"),
@@ -1472,7 +1661,7 @@ GOTCHA_PIECES = (
     "again (the Undo of the reset does that), and on the pages with an appearance Undo the Undo "
     "and Redo tooltips name the step ('reset title and Y label'; Distributions' Configuration "
     "Undo only counts its steps)",
-    "Normalize time and Align once time is in seconds (the ensemble's X range)",
+    "Normalize time and Align once time is in ms (the ensemble's X range)",
     "(and carries a range left as the dialog opened with it across to the new units)",
     "the Undo and Redo tooltips name the step ('reset title, Y label and Y range')",
 )

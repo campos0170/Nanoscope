@@ -137,10 +137,15 @@ def test_bring_all_to_front_raises_every_open_window_and_keeps_the_active_one(
         private_settings, qtbot, monkeypatch):
     window = build_window(qtbot)
     window._open_event_gallery()
+    # 2026-11-11: the standalone Figure Library window is gone (8661d35: saved figures use the
+    # project's one list); its opener is a compatibility entry point that opens the Analysis
+    # Explorer, so that is the third window here.
     window._open_figure_library()
     settle()
+    explorer = window._analysis_explorer
+    assert explorer is not None and explorer.isVisible()
     raised: list[str] = []
-    for win in (window, window._event_gallery, window._figure_library):
+    for win in (window, window._event_gallery, explorer):
         monkeypatch.setattr(win, "raise_", lambda w=win: raised.append(w.windowTitle()))
     window._event_gallery.activateWindow()
     settle()
@@ -148,9 +153,9 @@ def test_bring_all_to_front_raises_every_open_window_and_keeps_the_active_one(
     window._act_bring_all_to_front.trigger()
     settle()
     assert QtWidgets.QApplication.activeWindow() is active
-    assert {window.windowTitle(), window._figure_library.windowTitle()} <= set(raised)
+    assert {window.windowTitle(), explorer.windowTitle()} <= set(raised)
     window._event_gallery.hide()
-    window._figure_library.hide()
+    explorer.hide()
     close_window(window)
 
 

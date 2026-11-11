@@ -62,6 +62,86 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- **A Manual Study workspace that holds a recording opens again.** A workspace saved by 46.31.52
+  with a recording in it was refused when opened (a `TypeError` naming
+  `baseline_sample_count_policy`; the previous workspace stayed active and the saved files were
+  never damaged). **Open** now checks the saved preparation settings with Preprocess's own
+  reader, which understands the baseline policy stamps; the saved settings are only checked,
+  never rewritten, so a confirmed review keeps its fingerprint. A workspace that is still
+  refused, because its saved preparation settings hold a setting this build does not know, an
+  unsupported baseline policy, a value out of range or notch frequencies that are not a list of
+  numbers, now names the problem (*Invalid saved preparation settings: unknown setting(s) …* or
+  *… notch_freqs must be a list of numbers.*).
+- **Update plot on a Distributions figure draws the current event tables.** After a re-detection
+  or a merge the figure is marked Stale, and its next **Update plot** now draws the session's
+  current tables for the recordings it ticks, also when the figure was reopened from a project,
+  duplicated or not open at the time; before, it redrew the superseded rows and said Current.
+  That holds for a re-detection that found the same events (it is another detection), for a
+  recording calibrated again, and for a re-detection that found none or manual measurements that
+  were all removed: that table leaves the figure, as after **Update plot ▾ ▸ Refresh from
+  recordings**. If the Sources list holds another table, that one is ticked and drawn in its
+  place; if not, the figure reads *No data*, its typed title and the legend name of that
+  recording are reset (one Undo step), and Refresh from recordings brings a table back once there
+  is one. When a table was replaced, PCA and clustering are cleared with it, as with Refresh from
+  recordings. A ticked recording that is no longer open keeps the table the figure holds for it,
+  in the same row of Sources, while the other recordings take their new tables; an unticked one
+  leaves the list when the figure takes new tables. A detection on a recording the figure does
+  not tick leaves the figure, its PCA and its clustering as they were; Refresh from recordings
+  brings a new recording in, and a figure that was never plotted lists it at its first Update
+  plot. Accepting or rejecting events does not replace the table of a figure that has stayed
+  open, so its Update plot keeps PCA and clustering. After a table the figure uses was replaced,
+  a press the page refuses because a Fit range box holds text that is not a number (it says so in
+  the status bar and in Details) leaves the figure as it was, Stale over the rows it drew,
+  instead of marking it Current; the new tables are drawn by the next press once the box is
+  corrected or cleared.
+- **Opening a project no longer shifts a typed X range on a Distributions histogram.** It is
+  drawn at exactly that range, with the Residual strip shown or hidden; before, it came back
+  about 1 % of its width off until **Plot** was pressed. What a project stores is unchanged, so a
+  project saved by this build opens as before in 46.31.52.
+- **Log x / Log y over a typed major tick spacing no longer stops with an internal error.**
+  Ticking **Log x** / **Log y** on the Event-count map, or **Log y** in Voltage dependence, over
+  an axis with a typed major tick spacing left the plot half drawn. On the Event-count map in the
+  project window the Log change, from its box or from **Axis properties…**, is a draft that
+  **Update plot** commits; that commit resets the axis's range and spacing in one Undo step with
+  the usual sentence. In Voltage dependence the **Log y** box redraws at once and keeps the range
+  and the spacing. In **Axis properties…** on the Event-count map, a major tick spacing with more
+  than six decimals (from a template or an older project) is dropped on a Log scale change like
+  any other spacing the dialog opened with.
+- **The Undo/Redo tooltip names a Reset figure again.** A real **Reset figure** reads *Undo:
+  reset figure*, and a step recorded before a change of quantity keeps its own name after that
+  change is undone; both read *Undo: N appearance changes* (the record of which quantity an axis
+  draws was counted as a change).
+- **A project figure with a legend can be composed with shared axes again.** Since the
+  figure-style work, **Compose** refused every such figure for **Share X range** / **Share Y
+  range** and **One shared legend** as having no supported Cartesian model. A legend row that was
+  given its own font family, and a styled colour-bar label, still make a frozen panel.
+- **Text style…, Rename and Hide on a legend row work for a long file path.** In Distributions
+  and Comparison figures the row of a recording whose path is longer than about 200 characters
+  silently ignored them.
+- **The Inspector's Preprocess page scrolls inside its own scroll area**, like the Detection, ML
+  and Measure pages. Its overview used to stop the Inspector being dragged narrower than 227 px
+  and raised the window's minimum height from 460 to 498 px (Results closed). The Inspector can
+  again be dragged down to about 157 px and the window down to 460 px; a page narrower than its
+  button scrolls sideways, and in the shortest window the page scrolls instead of cutting its
+  summary text off. The page looks as before. Tab now stops once on the page's scroll area before
+  the first route button, and a click on blank space of the page puts the keyboard there until
+  the pointer moves back over the trace, as on the other pages.
+- **Curve fit ▸ Export last completed fit… uses the export prompt every other export uses.**
+  Replacing an existing file is confirmed by NanoScope's own question, which names the file and
+  keeps Cancel as the default (on macOS it follows the system panel's own question).
+- **Documentation follows the app.** The control reference source (`docs/inventory.json`) names
+  the Open-pore baseline buttons as the app does (**Estimate window settings**, **Use proposed
+  windows**, **Reset automatic windows**) and quotes the live tooltip; `docs/ARCHITECTURE.md`
+  describes project format v13 and what the export guard enforces; the user guide says what
+  **Update plot** takes on a stale Distributions figure. The manual edition of 2026-11-11 predates
+  these edits: its control reference and its build manifest follow at the next manual build.
+- **The test suite is green again.** The 249 tests that failed on the 2026-11-11 release are
+  cleared: the defects above are fixed, and the tests that described the app as it was before
+  the 2026-11-07 integration (seconds instead of milliseconds on screen, pages that drew without
+  **Update plot**, the Templates combo on project pages, the old Inspector layout) were rewritten
+  to today's behaviour, each one shown able to fail. One empty test file was removed and the
+  shared trace rig is `tests/gui/trace_rig.py`, so no test file collects nothing; the fit helper
+  no longer starves the fit thread while it waits.
 - A CUSUM run now counts what the same settings find in the opposite direction, and the three
   validation studies follow or name their detector. Null control runs the selected detector; its
   readout names the detector and its settings and is shown only under a table of that detector.

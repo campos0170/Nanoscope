@@ -270,17 +270,29 @@ def wired(qapp, tmp_path_factory, monkeypatch_module):
         prov = dict(res.payload.provenance or {})
         n_acc = int(res.payload.accepted.df.shape[0])
         assert n_acc > 120, f"fixture guard ({kind}): only {n_acc} accepted events"
-        win._subpop_window = None
+        # 2026-11-11 (8661d35): the Subpopulations page is a RESIDENT figure. A second run
+        # re-activates the page the first one left (`_run_subpopulations`: `most_recent`
+        # / `activate`), which re-points `win._subpop_window` at it while it is still showing
+        # the PREVIOUS report -- so "a window with a report" is true 200 ms after the
+        # trigger, long before this run's report exists, and the visible run was paired with
+        # the whole recording's. (This used to reset `win._subpop_window = None` and wait for
+        # a freshly built window.) The awaited thing is THIS run's report: the run has landed
+        # and the page shows a report that is not the one it showed before the trigger.
+        before = None if win._subpop_window is None else win._subpop_window.report()
         assert win._act_subpop.isEnabled()
         win._act_subpop.trigger()
         _pump(qapp, 200)
         assert win._subpop_pending, "the wired action did not start a run"
         _until(qapp,
-               lambda: win._subpop_window is not None
-               and win._subpop_window.report() is not None,
+               lambda: not win._subpop_pending
+               and win._subpop_window is not None
+               and win._subpop_window.report() is not None
+               and win._subpop_window.report() is not before,
                900.0, f"the {kind} subpopulation report (modals: {boxed})")
         _pump(qapp, 200)
         assert not boxed, f"the wired {kind} run raised a modal: {boxed}"
+        assert win._subpop_window.report() is not before, (
+            f"fixture guard ({kind}): the report on screen is the previous run's")
         run = _Run(win, win._subpop_window.report(), prov)
         print(f"\n[CLOCK/{kind}] span={run.span_s} accepted={n_acc} "
               f"pooled={run.pooled():.4f}")
@@ -289,6 +301,8 @@ def wired(qapp, tmp_path_factory, monkeypatch_module):
 
     runs["whole"] = _one("whole")
     runs["visible"] = _one("visible")
+    assert runs["visible"].report is not runs["whole"].report, (
+        "fixture guard: both runs were given the same report")
     win._analysis_controller.abort()
     win._controller.abort()
     _pump(qapp, 100)

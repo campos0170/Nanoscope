@@ -109,9 +109,16 @@ def test_the_panel_states_the_windows_a_clamped_run_actually_used(qapp, qtbot):
                            "baseline_fallback": B.FALLBACK_CLAMPED})
     assert panel.run_windows_label.isVisibleTo(panel)
     text = panel.run_windows_label.text()
-    # One unit for both halves (sweep-7 fix-batch X-SURF-4): the run in seconds,
-    # like the spins it is read against -- not "80 ms ... 0.5 s".
-    assert "0.08 s / base 0.016 s" in text and "CLAMPED" in text and "0.5 s / 0.1 s" in text
+    # One unit for both halves (sweep-7 fix-batch X-SURF-4): the run in the unit of the
+    # spins it is read against -- not "80 ms ... 0.5 s".
+    # 2026-11-11: that unit is milliseconds now. The spins show "500 ms" since 8661d35 (they
+    # showed seconds when this was written) and the sentence follows them, so BOTH halves
+    # read ms: "ran at rough 80 ms / base 16 ms, not the 500 ms / 100 ms above".
+    assert panel.rough_s.suffix() == panel.base_s.suffix() == " ms"
+    assert "ran at rough 80 ms / base 16 ms" in text
+    assert "not the 500 ms / 100 ms above" in text
+    assert "CLAMPED" in text
+    assert "0.08 s" not in text and "0.5 s" not in text    # neither half left in seconds
     # A run at the form's own windows has nothing to add.
     panel.set_run_windows({"baseline_rough_s": 0.5, "baseline_base_s": 0.1})
     assert not panel.run_windows_label.isVisibleTo(panel)

@@ -137,6 +137,7 @@ def test_appearance_save_preserves_science_and_numeric_recipe(window,tmp_path,qt
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from nanoscope.plot.acid_figure_recipe import capture_figure,reconstruct
+    from nanoscope.plot.matplotlib_targets import panel_identity,storage_key
     seeded(window,tmp_path)
     complete(qtbot,window,window.confirm_selection)
     before=window.state['records'][0]['catalog'].copy(deep=True)
@@ -154,6 +155,7 @@ def test_appearance_save_preserves_science_and_numeric_recipe(window,tmp_path,qt
     assert window.state.get('analysis') is None
     complete(qtbot,window,window.style_selected_figure)
     editor=window._style_windows[-1]
+    title_key=storage_key(panel_identity(editor._figure.axes[0],0),'title')
     editor._panel_edits['title'].textEdited.emit('User-styled events')
     assert editor.apply_appearance()
     complete(qtbot,window,editor.save_to_study)
@@ -166,14 +168,19 @@ def test_appearance_save_preserves_science_and_numeric_recipe(window,tmp_path,qt
     pd.testing.assert_frame_equal(window.state['records'][0]['catalog'],before)
     assert window.state['records'][0]['review_receipt']==receipt
     complete(qtbot,window,lambda:window.open_workspace(window.folder))
-    assert window.state['figure_styles']['study::test_acid_plot']['panels']['0']['title']=='User-styled events'
+    # 2026-11-11 (commit 8661d35): Format is the one place wording is edited, so the saved title sits in
+    # the style's appearance text under the panel title's storage key, no longer in style['panels'].
+    assert window.state['figure_styles']['study::test_acid_plot']['appearance']['text'][title_key]['text']=='User-styled events'
     editor.close()
     complete(qtbot,window,window.style_selected_figure)
     editor=window._style_windows[-1]
+    assert editor._figure.axes[0].get_title()=='User-styled events'
+    assert editor._appearance_widget.state().text_style(title_key).text=='User-styled events'
     editor.reset_style()
     assert editor._figure.axes[0].get_title()==''
     complete(qtbot,window,editor.save_to_study)
     complete(qtbot,window,lambda:window.open_workspace(window.folder))
+    assert title_key not in (window.state['figure_styles']['study::test_acid_plot'].get('appearance',{}).get('text') or {})
     restored,_,_=engine.reconstruct_figure(window.state,window.state['figures'][0])
     assert restored.axes[0].get_title()==''
     np.testing.assert_array_equal(restored.axes[0].lines[0].get_ydata(),[4,8,6])

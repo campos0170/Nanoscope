@@ -14,7 +14,7 @@ from PySide6 import QtCore, QtWidgets
 from .test_trace_annotate_mode import (  # noqa: F401  (rig and free_mouse are fixtures)
     EVENT, SECOND, Qt, armed, at, drag, drag_move, free_mouse, hover, press, release, rig, rows,
     settle, table, target_vb, zoom)
-from .test_trace_rig import double_click
+from .trace_rig import double_click
 
 
 def _items(menu) -> dict[str, QtWidgets.QAction]:

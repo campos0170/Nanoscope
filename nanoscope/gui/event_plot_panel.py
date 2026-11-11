@@ -170,9 +170,11 @@ class _MapTextHost(AppearanceTextHost):
     def apply_axis(self, side: str, values) -> None:
         if getattr(self.plot.getAxis(side), "_nanoscope_quantity_basis", None) is not None:
             # Physical displayed ranges keep their meaning across log modes. A major
-            # interval does not: unedited decades must not become milliseconds.
+            # interval does not: unedited decades must not become milliseconds. The dialog
+            # shows a tick to six decimals: that is how it is told from a typed one.
             before = self.axis_state(side)
-            if values.log != before.log and values.tick_major == before.tick_major:
+            opened_tick = None if before.tick_major is None else round(before.tick_major, 6)
+            if values.log != before.log and values.tick_major == opened_tick:
                 values = replace(values, tick_major=None)
             return super().apply_axis(side, values)
         before = self.axis_state(side)

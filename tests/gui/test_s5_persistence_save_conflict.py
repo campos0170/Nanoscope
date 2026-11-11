@@ -79,12 +79,12 @@ def _accepted0(path: Path) -> bool:
     return bool(load_project(path).results[0].events["accepted"].iloc[0])
 
 
-def _other_window_saves(path: Path) -> None:
-    """A concurrent writer, through the app's own pure save: the same project with event 0
-    rejected — committed curation this window has never seen."""
+def _other_window_saves(path: Path, row: int = 0) -> None:
+    """A concurrent writer, through the app's own pure save: the same project with event
+    ``row`` rejected — committed curation this window has never seen."""
     state = load_project(path)
     df = state.results[0].events.copy()
-    df.loc[df.index[0], "accepted"] = False
+    df.loc[df.index[row], "accepted"] = False
     state.results[0] = ResultRec(
         state.results[0].doc_id, state.results[0].channel,
         state.results[0].module_id, df, provenance=state.results[0].provenance)
@@ -222,30 +222,76 @@ def test_first_save_detects_file_created_after_absent_preflight(win, monkeypatch
 
 
 def test_approval_does_not_cover_a_third_revision(win, monkeypatch):
-    """A writer landing while the first question is open requires a fresh answer."""
+    """A writer landing while the first question is open requires a fresh answer.
+
+    2026-11-11: the third revision is a real project, another window's save of event 1, no
+    longer arbitrary bytes. Since 8661d35 (project format v13) a target that cannot be read as
+    a project is refused before any comparison (next test), so bytes that are not a project
+    never reach the second question."""
 
     w, doc_id, proj = win
     assert w._write_project(str(proj))
     remembered = w._project_disk_stamp
     _other_window_saves(proj)
 
-    third = b"a third process replaced the project while the dialog was open"
     asked = 0
+    third = b""
 
     def _answer(self, path):
-        nonlocal asked
+        nonlocal asked, third
         asked += 1
         if asked == 1:
-            Path(path).write_bytes(third)
+            _other_window_saves(Path(path), row=1)    # lands while the first question is open
+            third = Path(path).read_bytes()
             return True
         return False
 
     monkeypatch.setattr(MainWindow, "_confirm_overwrite_newer_project", _answer)
 
     assert w._write_project(str(proj)) is False
-    assert asked == 2
+    assert asked == 2, "one approval must not cover a revision the user never saw"
     assert proj.read_bytes() == third
+    assert _accepted0(proj) is False and not bool(
+        load_project(proj).results[0].events["accepted"].iloc[1]), (
+        "both other-window rejections must still be on disk")
     assert w._project_disk_stamp == remembered
+
+
+def test_a_target_replaced_by_something_that_is_not_a_project_is_refused_and_left_alone(
+        win, monkeypatch, blocked_modals):
+    """What the app does when the third writer's bytes are not a project at all (damaged on
+    disk, or replaced by another program).
+
+    2026-11-11: pinned as the app's current behaviour. Since 8661d35 (project format v13) the
+    save preflight reads the target's container header inside the save lock, before the
+    conflict comparison, so Save writes nothing, says why, and asks no second question; Save As
+    to another name still works. OWNER QUESTION: should Save offer to replace an unreadable
+    file, as it offered to replace a readable newer one?"""
+
+    w, doc_id, proj = win
+    assert w._write_project(str(proj))
+    remembered = w._project_disk_stamp
+    _other_window_saves(proj)
+
+    garbage = b"a third process replaced the project while the dialog was open"
+    asked = 0
+
+    def _answer(self, path):
+        nonlocal asked
+        asked += 1
+        Path(path).write_bytes(garbage)
+        return True
+
+    monkeypatch.setattr(MainWindow, "_confirm_overwrite_newer_project", _answer)
+
+    assert w._write_project(str(proj)) is False
+    assert asked == 1
+    assert proj.read_bytes() == garbage
+    assert w._project_disk_stamp == remembered
+    assert any("Could not save the project" in modal.text
+               and "cannot read the project header" in modal.text for modal in blocked_modals), (
+        f"the user was not told why nothing was saved: {blocked_modals}")
+    assert w._write_project(str(proj.with_name("elsewhere.nanoscope"))) is True
 
 
 def test_open_adopts_the_stamp_returned_with_the_locked_read(win, monkeypatch):

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from PySide6 import QtWidgets
 
-from .test_trace_rig import (  # noqa: F401  (fixtures are used by name)
+from .trace_rig import (  # noqa: F401  (fixtures are used by name)
     Recorder, free_mouse, rig, zoom_middle)
 
 

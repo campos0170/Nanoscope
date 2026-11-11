@@ -1,18 +1,21 @@
 """Phase 2 figure lifetime: plain history, source policy, and sampled outputs stay independent."""
 from dataclasses import replace
+from types import SimpleNamespace
 from uuid import uuid4
 
 import nanoscope  # noqa: F401 bootstrap before Qt
 import numpy as np
 import pandas as pd
+import pyqtgraph as pg
 import pytest
-from PySide6 import QtCore, QtTest
+from PySide6 import QtCore, QtTest, QtWidgets
 
 from nanoscope.core.figure_codecs import decode_legacy, encode_legacy
 from nanoscope.core.figure_history_state import HistoryCapsule
 from nanoscope.core.figure_spec import FigureRecord, FigureValidationError, thaw_json
 from nanoscope.gui.figure_adapter_pages import (
-    adapter_for, apply_look_to_record, initial_history, move_history, NeedsResidentHistory)
+    _capture_views, _plots, _restore_views, adapter_for, apply_look_to_record, initial_history,
+    move_history, NeedsResidentHistory)
 from nanoscope.gui.plot_appearance import PlotAppearance, PlotAppearanceWidget
 from nanoscope.gui.plots_panel import PlotsWindow, plot_config_to_json
 from . import p1_hosting as H
@@ -258,3 +261,76 @@ def test_fresh_catalog_install_does_not_draw_or_replace_the_empty_canvas(qtbot, 
     page.set_data({"input": frame}, catalog_only=True)
     assert page.selected_source_keys() == ["input"]
     assert not page._plot_armed
+
+
+def _screen_x(widget, plot, value):
+    """Where ``value`` on the plot's X axis is on the screen."""
+    point = plot.getViewBox().mapViewToScene(QtCore.QPointF(value, 0))
+    return widget.mapToGlobal(widget.mapFromScene(point)).x()
+
+
+@pytest.mark.parametrize("saved_strip_auto_x", [False, True],
+                         ids=["x-auto-off-as-saved", "x-auto-on-in-the-file"])
+def test_restoring_a_view_linked_in_x_never_hands_its_saved_x_to_the_view_it_follows(
+        qtbot, saved_strip_auto_x):
+    """The Distributions Residual strip is X-linked to the histogram, and a figure's saved views
+    hold one for each. pyqtgraph hands a linked view's new X range to the view it is linked to,
+    lined up by screen geometry. So writing the strip's own saved X after the histogram's own
+    moved the histogram off its typed range whenever the layout the file was saved in is not the
+    one it is restored in (a reopened project drew 1.78-6.89 for a typed 1.72-6.85). Here the
+    layout changes between the capture and the restore, and afterwards the histogram has its own
+    saved X, the strip is lined up under it with its own saved Y, and its X auto-range is off
+    even when the file says it was on."""
+    box = QtWidgets.QWidget()
+    qtbot.addWidget(box)
+    column = QtWidgets.QVBoxLayout(box)
+    plot_widget, strip_widget = pg.PlotWidget(), pg.PlotWidget()
+    column.addWidget(plot_widget, 3)
+    column.addWidget(strip_widget, 1)
+    plot, strip = plot_widget.getPlotItem(), strip_widget.getPlotItem()
+    plot.getAxis("left").setWidth(30)
+    strip.getAxis("left").setWidth(70)          # the strip's wider axis: its X is offset from the plot's
+    strip.setXLink(plot)
+    strip.plot([0.5, 9.5], [0.2, -0.2])         # residuals: an X extent of their own
+    box.resize(900, 600)
+    box.show()
+    QtWidgets.QApplication.processEvents()
+    typed_x, typed_y, strip_y = (1.72, 6.85), (0.0, 900.0), (-3.0, 3.0)
+    plot.getViewBox().setRange(xRange=typed_x, yRange=typed_y, padding=0)
+    strip.getViewBox().setRange(yRange=strip_y, padding=0)
+    QtWidgets.QApplication.processEvents()
+    page = SimpleNamespace(_plot=plot, _resid=strip)
+    saved = _capture_views(page, "distributions")
+    assert saved["plots"]["main"]["range"][0] == pytest.approx(typed_x)
+    assert saved["plots"]["residuals"]["range"][0] != pytest.approx(typed_x, rel=1e-3), (
+        "the premise: the strip is saved with an X of its own, not the plot's")
+    if saved_strip_auto_x:
+        saved["plots"]["residuals"]["auto"][0] = True
+
+    box.resize(560, 600)                        # the layout it is restored in
+    QtWidgets.QApplication.processEvents()
+    plot.getViewBox().setRange(xRange=(0.0, 100.0), yRange=(0.0, 5.0), padding=0)
+    strip.getViewBox().setRange(yRange=(-1.0, 1.0), padding=0)
+    _restore_views(page, "distributions", saved)
+    QtWidgets.QApplication.processEvents()
+
+    assert plot.viewRange()[0] == pytest.approx(typed_x, rel=1e-9), "the plot's own saved X"
+    assert plot.viewRange()[1] == pytest.approx(typed_y)
+    assert strip.viewRange()[1] == pytest.approx(strip_y), "the strip's own saved Y"
+    assert not strip.getViewBox().autoRangeEnabled()[0], "the link owns the strip's X"
+    for value in typed_x:
+        assert _screen_x(strip_widget, strip, value) == pytest.approx(
+            _screen_x(plot_widget, plot, value), abs=0.5), "a bar and its residual line up"
+
+
+@pytest.mark.parametrize("kind", list(H.page_builders()))
+def test_the_only_view_a_figure_restores_that_is_linked_is_the_strip_and_it_is_linked_in_x(qtbot, kind):
+    """``_restore_views`` gives a view linked in X its saved Y only, and has no rule for a view
+    linked in Y: none is. (The Event map's marginal plots are, but they are not among the views a
+    figure saves and restores.) A restored view that is linked in Y one day needs that same rule
+    for axis 1, so this fails then."""
+    page = H.page_builders()[kind]()
+    qtbot.addWidget(page)
+    linked = {(key, axis) for key, plot in _plots(page, kind).items() for axis in (0, 1)
+              if plot.getViewBox().linkedView(axis) is not None}
+    assert linked == ({("residuals", 0)} if kind == "distributions" else set()), linked

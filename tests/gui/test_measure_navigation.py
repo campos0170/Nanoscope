@@ -958,7 +958,8 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           "quantity_axis", "quantity_selectors", "time_controls",
                           "numeric_text", "pending_analysis", "figure_quantity_native",
                           # Reusable fit dialog over a supplied immutable CurveDataset;
-                          # its only GUI dependencies are series tags and worker lifetime.
+                          # its only GUI dependencies are series tags, worker lifetime and
+                          # (2026-11-11) the export seam for its "Export last completed fit".
                           "nonlinear_fit_dialog",
                           # plot_export's own transitive reach: the shared
                           # "Export current figure" dialog (ExportOptionsDialog) and
@@ -1113,7 +1114,11 @@ def test_the_non_panel_allowlist_holds_no_panel():
         "matplotlib_series": {"figure_text", "matplotlib_figure_item"},
         "figure_series": {"figure_text"},
         "plots_series": {"categorical", "figure_series", "series_points"},
-        "nonlinear_fit_dialog": {"figure_series", "worker_thread"},
+        # 2026-11-11: + export_paths. The dialog's "Export last completed fit" used to open
+        # its own getSaveFileName (8661d35); it now asks through the one save-dialog seam
+        # like every other export (tests/gui/test_export_overwrite.py holds the guard).
+        # export_paths is already on the allowlist, defines no widget and reaches nothing.
+        "nonlinear_fit_dialog": {"export_paths", "figure_series", "worker_thread"},
         "pending_analysis": {"plot_workflow"}, "time_controls": {"numeric_text"},
         "quantity_axis": set(), "quantity_selectors": set(), "numeric_text": set(),
         "series_points": set(), "figure_quantity_native": set(),

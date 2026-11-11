@@ -15,7 +15,7 @@ from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from nanoscope.core.layer import ViewMode
 
-from .test_trace_rig import (  # noqa: F401  (fixtures are used by name)
+from .trace_rig import (  # noqa: F401  (fixtures are used by name)
     CURRENT, VOLTAGE, Qt, build_rig, free_mouse, hover, point_at, zoom_middle)
 
 

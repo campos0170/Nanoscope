@@ -1,5 +1,5 @@
 """Sweep 7, S7-NOTCH1 (major), the launcher half: a STORED or REPLAYED Schmitt param dict
-whose explicit notch list the Preprocess tab's box would refuse is refused by the launcher
+whose explicit notch list the Preprocess chain's notch box would refuse is refused by the launcher
 too -- by name, through the same status line -- and one notch-line cap exists.
 
 Agent F gave the DetectionPanel's "lines" box the cap (``NOTCH_MAX_LINES``) and the
@@ -112,7 +112,9 @@ def test_a_replayed_dict_over_the_cap_is_refused_by_name_and_nothing_starts(sele
         assert panel._run_detection(params) is False
     msg = refused.args[0]
     assert f"{CAP + 1} lines" in msg and f"at most {CAP}" in msg, msg
-    assert "Preprocess tab" in msg
+    # 2026-11-11: the chain editor moved into the Preprocess workspace (8661d35), and the
+    # refusal names that route: Filters & drift, Notch stage.
+    assert "Preprocess workspace ▸ Filters & drift" in msg and "Notch stage" in msg, msg
     assert panel._pending is None
     assert not list(window._session.results.for_doc(did))
     qtbot.wait(20)

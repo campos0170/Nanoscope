@@ -748,7 +748,14 @@ def test_panels_module_still_imports_no_sibling_gui_panel():
     # inspector_widgets: pure ASCII number-parsing, no widget, no gui/ import of its
     # own. column_checklist (2026-11-01, the Columns… popup) is another: a Qt-only
     # checklist widget that imports no gui/ module.
-    assert reached <= {'inspector_widgets', 'numeric_text', 'column_checklist'}, (
+    # 2026-11-11: widget_transfer and time_controls joined (8661d35, the Preprocess
+    # workspace: panels.py moves a control between pages through widget_transfer and the
+    # duration fields through time_controls' SecondsSpinBox). Both are shared leaves, not
+    # panels: functions / a spin box over supplied values, neither reaching a panel. They
+    # are on test_measure_navigation's _NON_PANEL_GUI_MODULES list, whose own guard proves
+    # that, so this one is widened by exactly those two names.
+    assert reached <= {'inspector_widgets', 'numeric_text', 'column_checklist',
+                       'widget_transfer', 'time_controls'}, (
         f"panels.py imported a sibling panel: {reached}")
     # ...and the checker above really would catch the import it is standing guard over.
     guarded = ast.parse("from .measure_panel import MeasurePanel")

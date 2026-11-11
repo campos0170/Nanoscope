@@ -27,6 +27,13 @@ histogram of rise_s or ecd_pA_s is not a dwell distribution"), so the gate now a
 ``depth_pA`` was already correct; these tests pin that ``rise_s`` and ``fall_s`` are
 treated the way ``depth_pA`` is, and that ``dwell_s`` keeps its historical wording
 bit-for-bit.
+
+2026-11-11: the window is no longer put in seconds. Since 8661d35 the Explore window's
+Time unit holds only "ms" (disabled), so a declared time column -- ``dwell_s``,
+``rise_s``, ``fall_s`` -- is shown in ms and its Fit range boxes are read in ms. The
+constants below stay in SECONDS (the unit the fitters, the provenance and ``fit.meta``
+speak, and what these tests were written in); ``_window`` types them the way a person now
+does and the quoted Details lines say ms. Every promise above is unchanged.
 """
 
 from __future__ import annotations
@@ -63,16 +70,36 @@ def _frame(n: int, *, seed: int = 11) -> pd.DataFrame:
     })
 
 
+#: The declared time columns, which the Explore window shows -- and reads its Fit range
+#: boxes in -- in ms. Spelled out here on purpose (not imported from the window): that these
+#: three are in ms and ``depth_pA`` is not IS what the typed ceilings below depend on.
+_MS_COLUMNS = ("dwell_s", "rise_s", "fall_s")
+
+
+def _typed_ceiling(col: str, hi: str) -> str:
+    """What a person types into the Fit range max box for the ceiling ``hi``.
+
+    ``hi`` is written as these tests always wrote it: seconds for a time column, the
+    column's own unit (pA) for ``depth_pA``. The box is read in the unit the axis shows,
+    so a time ceiling is typed in ms ("4e-4" s is "0.4"); typing the old "4e-4" now would
+    mean 0.0004 ms and empty the fit instead of exercising the note under test.
+    """
+    return f"{float(hi) * 1e3:g}" if col in _MS_COLUMNS else hi
+
+
 def _window(qtbot, col: str, fit: str, *, n: int = 400, hi: str | None = None) -> PlotsWindow:
     w = PlotsWindow(Session())
     qtbot.addWidget(w)
     w.set_data({"run": _frame(n)}, {"run": dict(PROV)})
     w.set_plot_type("Histogram")
     w.set_histogram_column(col)
-    w.set_time_unit("s")
+    # 2026-11-11: this used to call ``w.set_time_unit("s")``, which now raises -- the combo
+    # offers only "ms" since 8661d35. The window's unit is pinned instead of set: every
+    # ceiling typed and every "t_max=... ms" quoted below depends on it.
+    assert w.time_unit() == "ms"
     w.set_fit(fit)
     if hi is not None:
-        w._fit_hi.setText(hi)
+        w._fit_hi.setText(_typed_ceiling(col, hi))
         w._changed()
     return w
 
@@ -120,6 +147,8 @@ def test_the_dwell_provenance_story_is_not_repeated_in_dwell_words(qapp, qtbot, 
 def test_the_provenance_is_not_denied_when_the_recording_declares_it(qapp, qtbot, col):
     """The same window on ``dwell_s`` reads min_dwell_s out of the SAME provenance."""
     w = _window(qtbot, "dwell_s", "exponential")
+    # (the detection-limit line is still written in seconds, the unit min_dwell_s is
+    # declared in, even though the truncation line below it reads in ms)
     assert "detection limit t_min = 2e-05 s (from min_dwell_s)" in w.details_text()
     assert "provenance has no" not in _window(qtbot, col, "exponential").details_text()
 
@@ -137,6 +166,8 @@ def test_a_typed_ceiling_is_not_blamed_on_the_detector(qapp, qtbot, col):
     # unchanged and stronger.
     assert "NOT a detector limit" in line, line
     assert col in line, line
+    # 2026-11-11: and it is the typed bound that is quoted -- 4e-4 s, typed as "0.4" ms.
+    assert "t_max=0.4 ms" in line, line
 
 
 def test_a_picoamp_ceiling_is_worded_the_same_way_it_always_was(qapp, qtbot):
@@ -161,7 +192,8 @@ def test_a_dwell_ceiling_still_names_the_detector(qapp, qtbot):
     w = _window(qtbot, "dwell_s", "exponential")
     line = next((ln for ln in w.details_text().splitlines() if "right truncation at" in ln), "")
     assert line, w.details_text()
-    assert f"t_max={PROV['max_dwell_s']:g} s" in line, line
+    # 2026-11-11: 0.05 s reads "50 ms" (8661d35)
+    assert f"t_max={PROV['max_dwell_s'] * 1e3:g} ms" in line, line
     assert "detector max_dwell_s" in line, line
 
 
@@ -176,7 +208,7 @@ def test_a_typed_dwell_ceiling_is_not_blamed_on_the_detector_either(qapp, qtbot)
     w = _window(qtbot, "dwell_s", "exponential", hi="4e-3")
     line = next((ln for ln in w.details_text().splitlines() if "right truncation at" in ln), "")
     assert line, w.details_text()
-    assert "t_max=0.004 s" in line, line
+    assert "t_max=4 ms" in line, line      # 2026-11-11: 0.004 s, typed and read in ms
     assert "detector max_dwell_s" not in line, line
     assert "NOT a detector limit" in line, line
 
@@ -191,7 +223,8 @@ def test_the_fitted_numbers_are_labelled_with_the_fitted_column(qapp, qtbot):
     assert fit is not None
     assert fit.meta["quantity"] == "rise_s"
     assert "rise_s" in fit.model
-    # the parameter is still a time in seconds -- only the naming moved
+    # the parameter is still a time in seconds -- only the naming moved. (2026-11-11: and
+    # the DISPLAY, which is ms now; the fit itself is stored and fitted in seconds.)
     assert fit.meta["param_units"]["tau_1"] == "s"
 
 

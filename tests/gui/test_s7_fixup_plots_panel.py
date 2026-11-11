@@ -139,24 +139,29 @@ def test_a_typed_title_keeps_the_ks_verdict_ahead_of_the_users_own_text(rejected
     rejected.set_title("Figure 3: apo-ferritin dwell times")
     rejected._redraw()
     title = _title(rejected)
-    assert "KS REJECTED" not in title
+    assert pp._KS_REJECTED_TAG not in title
     assert pp._KS_REJECTED_TAG in rejected.details_text()
     assert "Figure 3: apo-ferritin dwell times" in title, title
 
 
 def test_the_verdict_is_said_once_on_the_automatic_title(rejected):
-    """Prepended through ``warn`` AND appended to the summary would read 'KS REJECTED ·
-    τ = … — KS REJECTED'; the title takes the plain summary."""
+    """Prepended through ``warn`` AND appended to the summary it would read 'CDF mismatch
+    (descriptive) · τ = … — CDF mismatch (descriptive)'; the title takes the plain summary, and
+    neither the title nor the fit label carries the tag (it is Details')."""
     # Now the fit label, which took the automatic title's numbers: said once, untagged.
     text = _fit_text(rejected)
-    assert "KS REJECTED" not in text and "KS REJECTED" not in _title(rejected)
+    assert pp._KS_REJECTED_TAG not in text and pp._KS_REJECTED_TAG not in _title(rejected)
     assert text.count("τ =") == 1, text
 
 
 def test_a_typed_title_with_the_legend_off_still_exports_the_verdict(rejected, tmp_path):
     """The exact figure the skeptic saved: typed title, Show legend off, KS at its default
     (not in the fit label's numbers). The curve is drawn; the SVG must still carry the
-    verdict."""
+    verdict.
+
+    2026-11-11: since 8661d35 the verdict is descriptive and is never written into artwork: the
+    SVG carries no tag (the first assertion below, which reads the live tag) and Details says it.
+    The name is the old one."""
     rejected.set_title("Figure 3: apo-ferritin dwell times, -600 mV")
     rejected._legend_check.setChecked(False)
     rejected._redraw()
@@ -166,15 +171,20 @@ def test_a_typed_title_with_the_legend_off_still_exports_the_verdict(rejected, t
     svg = tmp_path / "typed_title_legend_off.svg"
     rejected.save_image(svg)
     texts = _svg_texts(svg)
-    assert not any("KS REJECTED" in t for t in texts), texts
+    assert not any(pp._KS_REJECTED_TAG in t for t in texts), texts
     assert "DOES NOT DESCRIBE THESE DATA" in rejected.details_text()
 
 
-def test_the_legend_entry_still_carries_the_tag_while_the_legend_is_shown(rejected):
-    """The per-fit tag on the legend entry is kept -- on an overlay it is what says WHICH
-    curve was thrown out; only the title's copy moved channels."""
+def test_the_legend_entry_carries_no_verdict_tag_while_the_legend_is_shown(rejected):
+    """2026-11-11: this was named ``..._still_carries_the_tag_...`` and said the legend entry
+    keeps the per-fit tag, which its assertion never said and the app does not do: since 8661d35
+    the verdict is descriptive and lives in Details, so the row names the curve ("fit
+    (exponential)") and says nothing of it, drawn or offered (a long row is middle-elided when it
+    is drawn, so the offer is read too)."""
     fit_rows = [t for t in _legend(rejected) if t.startswith("fit (")]
-    assert fit_rows and "KS REJECTED" not in fit_rows[0]
+    assert fit_rows and pp._KS_REJECTED_TAG not in fit_rows[0]
+    assert not any(pp._KS_REJECTED_TAG in str(offered) for offered in rejected._legend_offered.values())
+    assert pp._KS_REJECTED_TAG in rejected.details_text(), "the verdict is where it belongs"
 
 
 def test_an_accepted_fit_puts_no_verdict_over_a_typed_title(qapp, qtbot):

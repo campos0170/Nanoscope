@@ -115,14 +115,21 @@ def test_guide_control_routes_preserve_science(window, tmp_path, qtbot):
 
 
 def test_open_subpopulations_does_not_run_mixture(window, monkeypatch):
+    # 2026-11-11: since 8661d35 (plotting redesign) Explorer pages are keyed by the figure's
+    # id, not by the tool's name, and the explicit refresh reaches the mixture as
+    # ``_run_subpopulations(source_result=...)`` through the figure's own route.
     calls = []
-    monkeypatch.setattr(window, "_run_subpopulations", lambda: calls.append("run"))
+    monkeypatch.setattr(window, "_run_subpopulations", lambda **kwargs: calls.append(kwargs))
     window._launch_analysis_route("subpopulations")
-    assert window._analysis_explorer.current_page_id() == "subpopulations"
+    owner = window._figure_workspace
+    key = owner.current_id()
+    assert owner.get(key).spec.kind == "subpopulations"
+    assert window._analysis_explorer.current_page_id() == key
+    assert window._subpop_window is owner.page(key)
     assert window._subpop_window.report() is None
     assert calls == []
     window._analysis_explorer.refresh_current()
-    assert calls == ["run"]
+    assert calls == [{"source_result": None}]
 
 
 def test_canonical_menu_destinations_and_live_gate(window, monkeypatch):

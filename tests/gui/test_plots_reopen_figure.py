@@ -303,8 +303,20 @@ def test_a_reopened_fit_the_ks_test_rejected_still_says_so(qapp, qtbot, tmp_path
     again._dirty = False
 
 
-def test_legend_row_and_detection_limit_styles_survive_a_reopen(qapp, qtbot, tmp_path):
-    window, plots = _recordings(qtbot, tmp_path, names=("apo", "holo"))
+@pytest.mark.parametrize("deep", [False, True], ids=["folder-as-given", "folder-over-200-characters"])
+def test_legend_row_and_detection_limit_styles_survive_a_reopen(qapp, qtbot, tmp_path, deep):
+    """2026-11-11: a legend row of Distributions is keyed by its source's key, which holds the
+    recording's full path (``legend.entry.fit:<path>#0``). The element-key rule once stopped at
+    200 characters, so Text style... on a row silently did nothing for a recording in a deep
+    folder and this test passed or failed with the length of the folder it ran in. The
+    recordings now also go in a folder that makes every source key longer than 200."""
+    folder = tmp_path
+    if deep:
+        folder = tmp_path / ("d" * 150)
+        folder.mkdir()
+    window, plots = _recordings(qtbot, folder, names=("apo", "holo"))
+    if deep:
+        assert all(len(key) > 200 for key in plots._sources), list(plots._sources)
     plots.set_plot_type("Histogram")
     plots.set_histogram_column("dwell_s")
     plots.set_fit("exponential")
@@ -322,6 +334,8 @@ def test_legend_row_and_detection_limit_styles_survive_a_reopen(qapp, qtbot, tmp
     again, reopened = _reopen(qtbot, window, tmp_path)
     rows = [label.text for _s, label in reopened._plot.legend.items]
     assert rows == [label.text for _s, label in plots._plot.legend.items], rows
+    reopened_styled = [row for row in rows if "font-weight: bold" in row and "#d55e00" in row]
+    assert len(reopened_styled) == 1, rows          # the same one row, in the same ink, after the reopen
     text = reopened._limit_line.label
     assert text.toPlainText() == "detector floor" and "italic" in text.toHtml()
     again._dirty = False

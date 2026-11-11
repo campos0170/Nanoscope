@@ -46,7 +46,7 @@ from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, Recording
 from ._inspector_hosting import (  # noqa: F401  (fixtures are used by name)
     FS, I0, N, SPANS, accepted, build_window, close_window, docked, private_settings, settle,
     signal)
-from .test_trace_rig import free_mouse, hover, point_at  # noqa: F401
+from .trace_rig import free_mouse, hover, point_at  # noqa: F401
 
 #: The event the detector was not handed: on the trace, not in the table.
 MISSED = 3

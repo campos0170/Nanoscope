@@ -7,6 +7,10 @@ says ``median depth (depth_pA)``; ``accepted`` 19th of 25 while it is the table'
 column), had no filter or bulk action, let every column be hidden — and saved it — and
 its one reset entry, "Restore scientific column order", reset visibility too.
 
+2026-11-11: the header reads the quantity labels since 8661d35 ("Median depth (pA)", "Signal-to-
+noise ratio", "Start time (ms)"), and the rows and the header menu's Hide entry are worded as the
+header is, so the strings below spell those; the rows' keys (``Qt.UserRole``) stay the raw names.
+
 Synthetic detections only. QSettings is the suite's private IniFormat store.
 """
 from __future__ import annotations
@@ -113,9 +117,10 @@ def test_the_rows_are_the_header_in_its_visual_order(table, qtbot):
     proxy = popup.checklist.proxy
     rows = [proxy.index(r, 0).data() for r in range(proxy.rowCount())]
     assert rows == expected
-    assert rows[:2] == ["accepted", "snr"]
-    assert "median depth (depth_pA) ⚠" in rows
-    assert "t_start_s (t₀=0)" in rows
+    assert rows[:2] == ["Accepted", "Signal-to-noise ratio"]
+    assert [proxy.index(r, 0).data(Qt.UserRole) for r in range(2)] == ["accepted", "snr"]
+    assert "Median depth (pA) ⚠" in rows
+    assert "Start time (ms) (t₀=0)" in rows
     depth = next(proxy.index(r, 0) for r in range(proxy.rowCount())
                  if proxy.index(r, 0).data(Qt.UserRole) == "depth_pA")
     assert "superseded estimator" in depth.data(Qt.ToolTipRole)
@@ -211,7 +216,7 @@ def test_header_right_click_hides_that_column(table, qtbot, menu_answer):
     header = table.view.horizontalHeader()
     logical = list(table.dataframe.columns).index("snr")
     pos = QPoint(header.sectionViewportPosition(logical) + 4, header.height() // 2)
-    menu_answer("Hide “snr”")
+    menu_answer("Hide “Signal-to-noise ratio”")
     header.customContextMenuRequested.emit(pos)
     assert "snr" in _hidden(table)
     assert "snr" in _saved()["hidden"]
@@ -228,7 +233,7 @@ def test_header_hide_is_greyed_on_the_last_visible_column(table, qtbot, blocked_
     logical = list(table.dataframe.columns).index("accepted")
     pos = QPoint(header.sectionViewportPosition(logical) + 4, header.height() // 2)
     header.customContextMenuRequested.emit(pos)
-    assert blocked_modals and "Hide “accepted” (disabled)" in blocked_modals[-1].text
+    assert blocked_modals and "Hide “Accepted” (disabled)" in blocked_modals[-1].text
     assert "accepted" not in _hidden(table)
 
 
@@ -240,7 +245,7 @@ def test_a_real_right_click_on_a_header_offers_hide(table, qtbot, menu_answer):
     header = table.view.horizontalHeader()
     logical = list(table.dataframe.columns).index("snr")
     pos = QPoint(header.sectionViewportPosition(logical) + 4, header.height() // 2)
-    menu_answer("Hide “snr”")
+    menu_answer("Hide “Signal-to-noise ratio”")
     QTest.mouseClick(header.window().windowHandle(), Qt.RightButton, Qt.NoModifier,
                      header.viewport().mapTo(header.window(), pos))
     qtbot.waitUntil(lambda: "snr" in _hidden(table), timeout=2000)
@@ -335,7 +340,7 @@ def test_a_choice_survives_a_change_on_a_table_without_that_column(table, qtbot,
         # second QWindow right-click in one process never reaches the header offscreen).
         header = table.view.horizontalHeader()
         logical = list(table.dataframe.columns).index("snr")
-        menu_answer("Hide “snr”")
+        menu_answer("Hide “Signal-to-noise ratio”")
         header.customContextMenuRequested.emit(
             QPoint(header.sectionViewportPosition(logical) + 4, header.height() // 2))
         assert "snr" in _hidden(table)

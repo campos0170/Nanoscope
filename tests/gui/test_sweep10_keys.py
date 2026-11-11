@@ -74,22 +74,28 @@ def test_the_guard_is_installed_by_the_apps_own_factory(qapp):
 @pytest.mark.parametrize("kind", ["iv", "psd", "vdep", "event"])
 def test_a_stepped_size_spin_box_lets_cmd_z_undo_and_redo_the_appearance(qtbot, kind):
     window, w = _plot_window(qtbot, kind)
+    # 2026-11-11: a Noise or Voltage-dependence window records the axis quantity it presents in
+    # its appearance state (8661d35, the quantity-display witness), so "nothing chosen yet" is
+    # that witness alone, no longer {}. The steps are compared with the state before the step,
+    # which also pins that undo and redo leave the witness exactly where it was.
+    base = window.appearance_state()
+    assert set(base) <= {"quantity_display"}, "no presentation choice has been made yet"
     spin = w.title_size
     _focus(qtbot, spin)
     QTest.keyClick(spin, Qt.Key_PageUp)               # one page: ten single steps
     qtbot.wait(PAUSE_MS)                              # the run closes: one step
-    assert window.appearance_state() == {"title_size": 10.0}
+    assert window.appearance_state() == {**base, "title_size": 10.0}
     assert QtWidgets.QApplication.focusWidget() is spin
 
     _key(undo_sequences()[0])
-    assert window.appearance_state() == {}, "⌘Z on a stepped spin box did not undo the step"
+    assert window.appearance_state() == base, "⌘Z on a stepped spin box did not undo the step"
     assert spin.text() == "Default"
     for key in redo_sequences():                      # every Redo key this platform resolves
         assert QtWidgets.QApplication.focusWidget() is spin
         _key(key)
-        assert window.appearance_state() == {"title_size": 10.0}, key.toString()
+        assert window.appearance_state() == {**base, "title_size": 10.0}, key.toString()
         _key(undo_sequences()[0])
-        assert window.appearance_state() == {}
+        assert window.appearance_state() == base
 
 
 def test_the_spin_boxs_own_arrow_button_lets_cmd_z_through(qtbot):
@@ -172,11 +178,13 @@ def test_a_stepped_detection_spin_box_lets_cmd_z_reach_edit_undo(make_window):
     QTest.qWait(20)
     fired: list[int] = []
     w._act_undo.triggered.connect(lambda *_: fired.append(1))
+    # 2026-11-11: the Analysis page opens on Preprocess, which since 8661d35 is the workspace
+    # overview and holds no spin box. Raise Detection and step the named field.
     panel = w._analysis_panel.detection_panel
-    spins = [s for s in panel.findChildren(QtWidgets.QAbstractSpinBox)
-             if s.isVisible() and s.isEnabled()]
-    assert spins, "a Detection setting to step"
-    spin = spins[0]
+    panel.show_detection_tab()
+    QTest.qWait(20)
+    spin = panel.k_in
+    assert spin.isVisible() and spin.isEnabled(), "a Detection setting to step"
     spin.setFocus(Qt.OtherFocusReason)
     QTest.qWait(10)
     before = spin.value()
@@ -200,8 +208,12 @@ def test_a_detection_spin_box_the_user_typed_in_keeps_cmd_z(make_window):
     w._act_undo.triggered.connect(lambda *_: fired.append(1))
     event_id = int(_frame(w)["event_id"].iloc[1])
     _reject(w, event_id)                              # Edit ▸ Undo has a step to take
-    spin = [s for s in w._analysis_panel.detection_panel.findChildren(QtWidgets.QAbstractSpinBox)
-            if s.isVisible() and s.isEnabled()][0]
+    # 2026-11-11: as above, the field is named; Preprocess holds no spin box since 8661d35.
+    panel = w._analysis_panel.detection_panel
+    panel.show_detection_tab()
+    QTest.qWait(20)
+    spin = panel.k_in
+    assert spin.isVisible() and spin.isEnabled(), "a Detection setting to type in"
     spin.setFocus(Qt.OtherFocusReason)
     QTest.qWait(10)
     before = spin.text()

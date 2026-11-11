@@ -15,11 +15,13 @@ import nanoscope  # noqa: F401  -> Qt plugin-path bootstrap, must precede any Qt
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+from PySide6 import QtCore
 
 from nanoscope.analysis.events import EventSet
 from nanoscope.core.analysis import AnalysisResult
@@ -418,7 +420,15 @@ def test_C10_reopening_a_file_shows_no_phantom_detection(qapp, qtbot, tmp_path):
 # =====================================================================
 def test_C11_a_re_detection_reaches_an_open_plots_window(qapp, qtbot, tmp_path):
     """ORIGINAL: curation appeared to flow only because the panel mutates the shared frame
-    in place. A re-detection REPLACES the frame, and the window never heard about it."""
+    in place. A re-detection REPLACES the frame, and the window never heard about it.
+
+    2026-11-11: since 8661d35 (plotting redesign) the Plots window is a managed Distributions
+    figure: it no longer redraws by itself and ``_refresh_plots`` is not its route any more, so
+    the spy this test used to hang on that method is gone. The promise is asserted where the
+    user meets it: a replaced table marks the plotted figure STALE (a notice stages nothing)
+    and the next Update plot draws the NEW rows (before
+    ``MainWindow._stage_changed_distribution_sources`` it redrew the old ones and said
+    CURRENT)."""
     csv = tmp_path / "pl.csv"
     arr = _trace(11)
     _write_csv(csv, arr)
@@ -428,13 +438,46 @@ def test_C11_a_re_detection_reaches_an_open_plots_window(qapp, qtbot, tmp_path):
 
     w._open_plots()
     qtbot.wait(20)
-    seen = []
-    orig = w._refresh_plots
-    w._refresh_plots = lambda *a, **k: (seen.append(1), orig(*a, **k))[1]
+    owner = w._figure_workspace
+    key = owner.current_id()
+    update = w._analysis_explorer.toolbar().update_action
+
+    def held_rows() -> int:
+        source = next(s for s in w._plots_window.sources()
+                      if s.doc_id == doc_id and s.channel == ch)
+        return len(source.df)
+
+    def drawn_rows() -> int:
+        """The ``n`` the Details pane states for the recording: what the picture shows."""
+        hit = re.search(r"pl\.csv: n = (\d+)", w._plots_window.details_text())
+        assert hit, w._plots_window.details_text()
+        return int(hit.group(1))
+
+    def chip() -> str:
+        """The freshness word the user reads in the Explorer's header."""
+        QtCore.QCoreApplication.processEvents()
+        return w._analysis_explorer._status_label.text()
+
+    update.trigger()
+    qtbot.wait(20)
+    assert owner.get(key).spec.result.status == "current" and chip() == "CURRENT"
+    assert held_rows() == 3 and drawn_rows() == 3
 
     w._session.add_result(_result(w, doc_id, ch, payload=_events(7)))
     qtbot.wait(30)
-    assert seen, "the Plots window was never told the results changed"
+    assert owner.get(key).spec.result.status == "stale", (
+        "the Plots window was never told the results changed")
+    assert w._analysis_explorer_status(key, w._plots_window) == ("STALE", "stale")
+    assert chip() == "STALE"
+    assert w._plots_window._figure_pending_sources is None      # the notice staged nothing
+    # the drawn figure is not touched behind the user's back
+    assert held_rows() == 3 and drawn_rows() == 3
+
+    update.trigger()
+    qtbot.wait(20)
+    assert held_rows() == 7, "Update plot redrew the superseded detection's rows"
+    assert drawn_rows() == 7
+    assert owner.get(key).spec.result.status == "current" and chip() == "CURRENT"
     _quit(w)
 
 

@@ -144,7 +144,9 @@ def test_a_form_change_that_clamps_differently_is_stale_says_so_and_a_re_measure
     assert not banner.isHidden() and banner.kind == "baseline"
     msg = banner.message()
     assert "changed since this detection ran" in msg
-    assert "CLAMPED to this recording's 0.08 s length" in msg, msg
+    # 2026-11-11: the clamp is quoted in ms like every other displayed time (8661d35, "Declared
+    # time quantities display in ms"): 80 ms, no longer "0.08 s".
+    assert "CLAMPED to this recording's 80 ms length" in msg, msg
     assert "rough 80 ms / base 32 ms" in msg, msg
     assert banner._btn.isEnabled() and banner.action_text() == "Re-measure depths"
 

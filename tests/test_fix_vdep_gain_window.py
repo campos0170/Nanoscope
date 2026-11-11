@@ -273,11 +273,15 @@ def test_median_depth_carries_its_unit_on_every_surface(qapp, qtbot, tmp_path):
     assert "Median depth (pA)" in w.details_text(), WHERE
 
 
-def test_the_other_metrics_keep_the_units_they_had(qapp, qtbot):
+def test_the_other_metrics_state_their_own_units(qapp, qtbot):
+    """2026-11-11: the other metrics still state the units they had, except that a declared
+    time quantity is displayed in ms since 8661d35 (plotting redesign, Phase 4: "Declared
+    time quantities display in ms across inputs, axes, tables, readouts"), so the dwell
+    metric is "Median dwell (ms)" (``test_p4_vdep_duration_display`` pins the numbers)."""
     w = VDepWindow(Session())
     qtbot.addWidget(w)
     labels = [w._metric_combo.itemText(i) for i in range(w._metric_combo.count())]
-    assert labels == ["Capture rate (Hz)", "Median dwell (s)", "Median depth (pA)",
+    assert labels == ["Capture rate (Hz)", "Median dwell (ms)", "Median depth (pA)",
                       "Median dI/I₀", "Event count"], f"{labels} {WHERE}"
 
 
@@ -373,7 +377,9 @@ def test_the_title_wraps_instead_of_dropping_its_last_segment(qapp, qtbot, tmp_p
 
     session = _ladder(tmp_path, THREE_WINDOWS, warnings={-700.0: (CAVEAT_700,)})
     w = _window(qtbot, session, metric="median_depth", fit="exponential")
-    for segment in ("V₀ = ", "R² = ", "unmerged"):
+    # 2026-11-11: the exponential fit's R² names its objective, "R² (log response)" (8661d35,
+    # "log-response objectives are identified in Voltage dependence").
+    for segment in ("V₀ = ", "R² (log response) = ", "unmerged"):
         assert segment in _title(w), f"{segment!r} lost from {_title(w)!r} {WHERE}"
     assert "UNCALIBRATED" in w.details_text() and CAVEAT_700 in w.details_text(), WHERE
     w._set_title(LONG_FIGURE_TITLE, "#9aa5b1")

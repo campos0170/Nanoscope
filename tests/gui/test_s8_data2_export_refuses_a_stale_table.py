@@ -71,6 +71,14 @@ N = 100_000
 T0 = 0.05
 _EVENTS = [(10_000, 10_300), (30_000, 30_250), (50_000, 50_400),
            (70_000, 70_200), (85_000, 85_350)]
+#: The same five blockades for the recording that is MISREAD as 100 Hz, at 8-16 samples each (0.08
+#: to 0.16 s at that reading). 2026-11-11: the 200-400 sample blockades above last 2-4 s at 100 Hz,
+#: far longer than the default open-pore windows (0.5 s / 0.1 s = 50 / 10 samples), and since
+#: 8661d35 (stronger baseline and noise-threshold handling) Detect at the defaults no longer finds
+#: them as blockades on that reading -- it returned two short UPWARD noise events -- so the
+#: precondition "the table exists at the rate it was read at" failed before any export was tried.
+_BARE_MS_EVENTS = [(10_000, 10_012), (30_000, 30_010), (50_000, 50_016),
+                   (70_000, 70_008), (85_000, 85_014)]
 
 #: door -> the Analysis menu action a click on it triggers.
 DOORS = {
@@ -83,19 +91,19 @@ DOORS = {
 # ================================================================================================
 # builders
 # ================================================================================================
-def _trace(seed: int = 0) -> np.ndarray:
+def _trace(seed: int = 0, events=_EVENTS) -> np.ndarray:
     """A quiet 100 pA baseline with five unmistakable 30 pA blockades -- enough for Detect, and
     for CUSUM to find a level in each."""
     rng = np.random.default_rng(seed)
     x = np.full(N, 100.0) + rng.normal(0.0, 1.5, N)
-    for s, e in _EVENTS:
+    for s, e in events:
         x[s:e] -= 30.0
     return np.ascontiguousarray(x, dtype=np.float32)
 
 
 def _doc(path: Path, *, rate: float = FS, prov: Provenance = Provenance.FILE_META,
-         fmt: str = "synthetic") -> TraceDocument:
-    arr = _trace()
+         fmt: str = "synthetic", events=_EVENTS) -> TraceDocument:
+    arr = _trace(events=events)
     info = ChannelInfo(index=0, name="current", raw_units="pA", kind=ChannelKind.CURRENT)
     meta = RecordingMeta(path=path, format_name=fmt, n_samples=arr.size, sample_rate_hz=rate,
                          rate_provenance=prov, channels=(info,), t0_s=T0)
@@ -105,7 +113,8 @@ def _doc(path: Path, *, rate: float = FS, prov: Provenance = Provenance.FILE_MET
 def _bare_ms_doc(path: Path) -> TraceDocument:
     """A 100 kHz trace whose time column was in MILLISECONDS under a bare header: it reads as
     100 Hz with its start 0.05 s, until the user declares the unit."""
-    return _doc(path, rate=100.0, prov=Provenance.MEASURED, fmt="Text trace")
+    return _doc(path, rate=100.0, prov=Provenance.MEASURED, fmt="Text trace",
+                events=_BARE_MS_EVENTS)
 
 
 @pytest.fixture
@@ -177,6 +186,17 @@ def _open(window, qtbot, doc: TraceDocument, *, door: str = "events") -> str:
     return key
 
 
+def _open_bare_ms(window, qtbot, path: Path) -> str:
+    """``_open`` on the misread recording, plus the check that what Detect found at that reading
+    is the five blockades (polarity -1) and not the short upward noise events a misread trace
+    can also give: ``len(df) >= 3`` alone would let a table of noise stand in for it."""
+    key = _open(window, qtbot, _bare_ms_doc(path))
+    res = window._analysis_panel.current_detection()
+    assert res.payload.provenance["polarity"] == -1, (
+        "precondition: the table holds the blockades, not upward noise events")
+    return key
+
+
 def _declare_rate(window, key: str, hz: float) -> None:
     window._session.set_sample_rate_declaration(
         key, SampleRateDeclaration("sample_rate", sample_rate_hz=hz))
@@ -238,7 +258,7 @@ def test_export_events_refuses_a_table_a_declared_time_unit_made_stale(window, q
     rate; declaring the unit moves the rate to 100 kHz AND the start time (0.05 s -> 0.05 ms).
     Before the fix the same CSV came out with a different t0_s and the old fs -- two exports of
     one table that disagree about where the recording starts."""
-    key = _open(window, qtbot, _bare_ms_doc(tmp_path / "bare_ms.csv"))
+    key = _open_bare_ms(window, qtbot, tmp_path / "bare_ms.csv")
     first = tmp_path / "as_read.csv"
     _fire(window, "events", rig, first)
     assert first.exists(), "precondition: the table exports at the rate it was detected at"
@@ -342,7 +362,7 @@ def test_handing_the_time_base_back_lifts_the_refusal_and_restores_the_same_expo
     """The refusal follows the live judgement, so it is not sticky: 'Use the file's own time
     base' makes the table current again, and the export is then byte-for-byte the one made
     before the declaration."""
-    key = _open(window, qtbot, _bare_ms_doc(tmp_path / "bare_ms.csv"))
+    key = _open_bare_ms(window, qtbot, tmp_path / "bare_ms.csv")
     before = tmp_path / "before.csv"
     _fire(window, "events", rig, before)
     _declare_unit(window, key, "ms")

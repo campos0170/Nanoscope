@@ -175,12 +175,19 @@ def test_detection_with_degenerate_detrend_warns_and_stamps_honest_provenance(
 
 def test_detection_with_working_detrend_stays_clean(window, qtbot, tmp_path):
     """A many-block detrend keeps effective=True and adds no drift warning — the
-    honest-provenance stamp must not cry wolf on a stage that worked."""
+    honest-provenance stamp must not cry wolf on a stage that worked.
+
+    2026-11-11: the Direction is set to Blockade, which is what this fixture's events are.
+    8661d35 added measured QC to the detrend stage (``Detrend health: ...`` warnings, judged in
+    the frame the polarity sets); on Direction = Auto the polarity is derived from the RAW
+    trace, where this fixture's 25 pA of drift hides the blockades from the probe and it falls
+    back to +1 (see the next test)."""
     _install(window, _synth_doc(tmp_path))
     det = window._analysis_panel._detection
     det.detrend_enabled.setChecked(True)
     det.detrend_window_s.setValue(0.1)
     det.min_dwell_s.setValue(5e-4)
+    det.set_polarity(-1)                    # the blockades point down
     with qtbot.waitSignal(window._analysis_controller.finished, timeout=30_000):
         window._analysis_panel.trigger_detection()
     qtbot.wait(20)
@@ -192,3 +199,35 @@ def test_detection_with_working_detrend_stays_clean(window, qtbot, tmp_path):
     assert prov["detrend_enabled"] is True
     assert prov["detrend_effective"] is True
     assert prov["detrend_warnings"] == ()
+    assert prov["detrend_amplified"] is False
+
+
+def test_a_working_detrend_on_auto_direction_carries_the_health_overshoot_note(
+        window, qtbot, tmp_path):
+    """The same detection with Direction on Auto, pinned as the app's current behaviour.
+
+    2026-11-11: the detrend did its job (``detrend_effective``), and the stage's measured QC
+    nevertheless reports "Detrend health: overshoot" -- one warning, in the Stats warnings and
+    in ``detrend_warnings`` -- because Auto derives the polarity from the raw trace, the drift
+    outweighs the blockades there, and the probe falls back to +1, in which frame the 950 event
+    samples read as "above +4 sigma". The check's own message says its counts are only
+    meaningful in the right frame. OWNER QUESTION: should the health check take its direction
+    from the detrended trace instead (``baseline_wander_result``, ``derive_polarity(out)``)?
+    Recordings whose blockades point up (negative bias) are not affected."""
+    _install(window, _synth_doc(tmp_path))
+    det = window._analysis_panel._detection
+    det.detrend_enabled.setChecked(True)
+    det.detrend_window_s.setValue(0.1)
+    det.min_dwell_s.setValue(5e-4)
+    with qtbot.waitSignal(window._analysis_controller.finished, timeout=30_000):
+        window._analysis_panel.trigger_detection()
+    qtbot.wait(20)
+
+    res = window._analysis_panel._stored_detection()
+    assert res is not None
+    prov = res.payload.provenance
+    assert prov["detrend_effective"] is True
+    assert not any("cannot track drift" in w for w in res.warnings)
+    assert len(prov["detrend_warnings"]) == 1
+    assert prov["detrend_warnings"][0].startswith("Detrend health: overshoot")
+    assert any(w.startswith("Detrend health: overshoot") for w in res.warnings)

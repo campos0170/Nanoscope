@@ -690,7 +690,7 @@ Three decisions in it are load-bearing:
   reopened load's token is by construction a different one. The values `persistent_key` returns are
   exactly what they were before that token existed, so projects written by either build read
   identically.
-- **The version is a RANGE, and every extension is additive.** This build writes `VERSION = 12` and
+- **The version is a RANGE, and every extension is additive.** This build writes `VERSION = 13` and
   reads back to `MIN_READ_VERSION = 1`; older formats are strict subsets. v2 added `segments`, v3
   each result's `params` and `calibration_fingerprint`, v4 each document's `source` fingerprint, v5
   each calibration's `note` — the one field a project could not carry, which is why committing a
@@ -725,7 +725,11 @@ Three decisions in it are load-bearing:
   band/alignment/counts (`builtin.event-plots`), and the PlotConfig version 3 sections, KDE overlay
   and Event-count heatmap (`builtin.plots`). v11's opaque carry-through keeps unknown artifacts and
   fields, but a v11 build restores its OWN artifacts from the keys it knows and re-captures them from
-  its widgets on save, so it would show a heatmap as a histogram and strip the rest. Each missing key
+  its widgets on save, so it would show a heatmap as a histogram and strip the rest. v13 replaced the
+  eight singleton analytical pages with independent, named live `FigureSpec` artifacts. An older build
+  cannot interpret their ownership, pending/applied recipes or frozen resources, so every new save is
+  v13 even with one figure; v1–v12 files still open here, and converting one in memory does not
+  rewrite the source file. Each missing key
   has a defined reading:
   absent `params` is `{}`, an absent
   calibration fingerprint falls back to the restored calibration, an absent `source` reads as
@@ -749,7 +753,8 @@ Three decisions in it are load-bearing:
   `fits/<i>.parquet` members, and DROPS THEM ON ITS NEXT SAVE — silently, because it never knew they
   were there. That is why every one of v6 / v7 / v8 / v9 / v10 / v11 / v12 bumps `VERSION` even though each is
   purely additive: the bump converts a silent strip into `ProjectVersionError`'s clean refusal, and costs
-  nothing in the other direction, since `MIN_READ_VERSION` is still 1.
+  nothing in the other direction, since `MIN_READ_VERSION` is still 1. v13 bumps it for the same
+  protective reason, though it replaces the singleton pages with named figures rather than adding a key.
 - **`load_project` promises exactly ONE exception type.** It kept that promise for the failures
   somebody had thought of — missing manifest, bad JSON, absent parquet member — and broke it for
   every other malformation of the same file: a `layers` entry without `color` raised a bare
@@ -856,9 +861,14 @@ guarantee moved to where every export must pass: **the path a GUI export writes 
 `ask_export_path`**, which is handed an `outputs` callable that enumerates the REAL output set
 (`figures.figure_output_paths`, `scoring.training_export_paths`, …) and confirms whatever part of
 that set already exists. `outputs=None` is the honest declaration "this export writes exactly the
-chosen path and nothing else". Seven GUI modules and ten call sites go through it. An AST guard in
-`tests/gui/test_export_overwrite.py` fails the build if any module under `nanoscope/gui` calls
-`getSaveFileName` outside this file — that guard, not the docstring, is what keeps the seam.
+chosen path and nothing else". Every GUI export that asks for a file name gets it from
+`ask_export_path`; an AST guard in `tests/gui/test_export_overwrite.py` fails the build if any
+module in `nanoscope/gui` calls `getSaveFileName` outside this file — that guard, not the
+docstring, is what keeps the seam. An export into a chosen folder has no file name to ask for: the
+batch figure export picks its folder with this module's `ask_export_directory` and confirms its own
+file list with `existing_of` and `confirm_overwrite`; Manual Study's prepared-recording and
+event-table exports pick theirs with a plain folder dialog and refuse to replace a file that is
+already there.
 
 Three details are deliberate:
 

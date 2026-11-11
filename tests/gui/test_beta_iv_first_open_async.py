@@ -155,15 +155,22 @@ def test_deferred_initial_refresh_still_gathers_nothing_up_front(qapp, qtbot, tm
         f"defer_initial_refresh=True gathered anyway {WHERE}")
 
 
-def test_reset_analytical_workspace_retires_an_in_flight_gather_before_deleting_the_window(
-        qtbot, tmp_path):
-    """A project reset/switch (MainWindow._reset_analytical_workspace) deletes the IV
-    window directly, bypassing the teardown sweep's _stop_holders discovery. Without
-    calling IVWindow.abort() first, a gather still in flight is orphaned: its QThread
-    keeps running with nothing left to deliver its `done` signal to once the window's
-    C++ object is gone -- the exact class of hazard app.py's own docstring documents at
-    length for a worker outliving what it reports back to."""
+def test_reset_analytical_workspace_never_deletes_an_iv_page_under_its_running_gather(
+        qtbot, tmp_path, monkeypatch):
+    """A project reset/switch (MainWindow._reset_analytical_workspace) must not delete the IV
+    page while a gather is still in flight: its QThread would keep running with nothing left to
+    deliver its `done` signal to once the page's C++ object is gone -- the exact class of hazard
+    app.py's own docstring documents at length for a worker outliving what it reports back to.
+
+    2026-11-11: since 8661d35 (plotting redesign) the page lives in the Analysis Explorer's
+    figure workspace and is built with ``defer_initial_refresh=True``: opening it gathers
+    nothing, and the reset no longer deletes it directly. ``FigureWorkspace.clear`` retires it
+    (hidden, unmounted, parked) and deletes it only once ``can_suspend`` says no calculation is
+    running, retrying on a timer -- the promise is kept by WAITING for the gather, where it used
+    to be kept by abort(). The gather is held on a gate here so the race is deterministic."""
     import shiboken6
+    import threading
+    from PySide6 import QtCore
 
     window = MainWindow()
     qtbot.addWidget(window)
@@ -181,15 +188,41 @@ def test_reset_analytical_workspace_retires_an_in_flight_gather_before_deleting_
 
     iv.forget_channel_medians()
     window._open_iv()
-    iv_window = window._iv_window
-    assert iv_window._gather_worker is not None, (
-        f"fixture sanity: {n} samples must trigger the async gather {WHERE}")
-    thread_ref = iv_window._gather_thread
+    page = window._iv_window
+    assert page._gather_worker is None and page.points() == [], (
+        f"opening a figure must gather nothing {WHERE}")
 
-    window._reset_analytical_workspace()
+    # The page's own large-channel gather, held open on a gate (always released below, so a
+    # failing assertion cannot leave a worker blocked behind it).
+    gate = threading.Event()
+    real = iv.compute_channel_medians
+    monkeypatch.setattr(iv, "compute_channel_medians",
+                        lambda items: (gate.wait(20), real(items))[1])
+    try:
+        page._refresh_maybe_async()
+        assert page._gather_worker is not None, (
+            f"fixture sanity: {n} samples must trigger the async gather {WHERE}")
+        thread_ref = page._gather_thread
+        owner = window._figure_workspace
 
-    assert window._iv_window is None
-    assert not thread_ref.isRunning(), (
-        "the gather's QThread was still running after the window that owned it was "
-        f"deleted -- reset_analytical_workspace must abort() before deleteLater() {WHERE}")
-    qtbot.waitUntil(lambda: not shiboken6.isValid(iv_window), timeout=2_000)
+        window._reset_analytical_workspace()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        QtCore.QCoreApplication.processEvents()
+
+        assert window._iv_window is None
+        assert shiboken6.isValid(page), (
+            "the page was deleted while its gather was still running -- the reset must wait "
+            f"for it {WHERE}")
+        assert thread_ref.isRunning()
+        assert len(owner._retiring) == 1
+        assert not page.isVisible()
+    finally:
+        gate.set()                     # the gather finishes; nothing is left to wait for
+    # What this waits for: the median pass over the 2 M samples above, then the next tick of
+    # ``FigureWorkspace``'s retiring timer (200 ms), which deletes the page. Measured on
+    # 2026-11-11 from ``gate.set()`` to the page being gone: 0.14 s (the pass itself 0.03 s) on
+    # a machine at load average 10. 5 s is 35 times that, for a loaded run; ``waitUntil``
+    # returns the moment the page is gone, so the bound costs nothing when the test passes.
+    qtbot.waitUntil(lambda: not shiboken6.isValid(page), timeout=5_000)
+    assert len(owner._retiring) == 0
+    assert not shiboken6.isValid(thread_ref) or not thread_ref.isRunning()

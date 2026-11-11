@@ -61,6 +61,9 @@ L = QtTest.QTest
 
 def test_summaries_after_the_undo_of_a_recall_the_commit_records_a_step_that_names_what_it_took(
         summaries):
+    """R1 x G6B. 2026-11-11: the page of the project window shows no Templates combo, so ``_recall``
+    reaches the recall through the page's template bar (see the module docstring of
+    ``test_p0_template_promise``)."""
     window, page, explorer = summaries
     plot, widget = _summaries_with_a_depth_box_template(page)
     page.activateWindow()
@@ -147,10 +150,17 @@ def test_a_project_saved_with_pins_on_a_density_histogram_and_an_ensemble_resets
     window._open_event_plots()
     events = window._event_plot_window
     events.activateWindow()
+    # 2026-11-11: a page in the project window computes nothing until Update plot, and Normalize
+    # time and Align are drafts until it too (the figure workflow, 8661d35).
+    bar = window._analysis_explorer.toolbar()
+    _click_button(bar.update_button)
+    assert events.density_counts() is not None
     _tab(events, 1)
     _section(events, "Analysis")
     _click_button(events._normalize)                       # seconds, so Align is enabled
     _pick(events._align_combo, text="center")
+    _click_button(bar.update_button)
+    assert events.inspector_adapter().pending().count == 0, "the saved figure is the centred ensemble"
     _type_event_words(events, plot=events._ensemble_plot)
     x_pin = _pin_inside(events._ensemble_plot, "bottom")
     project = tmp_path / "pinned.nanoscope"
@@ -199,13 +209,17 @@ def test_a_project_saved_with_pins_on_a_density_histogram_and_an_ensemble_resets
     before, depth = _axes_of(events), _depth(widget)
     _section(events, "Analysis")
 
-    _pick(events._align_combo, text="extremum")
+    _pick(events._align_combo, text="extremum")             # a draft: nothing moves until Update plot
+    assert _depth(widget) == depth and widget.state().title == "Dwell vs depth"
+    assert _said(events, explorer)[0] == ""
+    _click_button(explorer.toolbar().update_button)
 
     assert _depth(widget) == (depth[0] + 1, 0)
     assert widget.state().title is None and "ensemble.bottom" not in _axes_of(events)
     assert _said(events, explorer)[0] == (
-        "Title, X label, Y label and X range reset: the plot now shows the ensemble with t = 0 at "
-        "each event's deepest sample.")
+        "Title, X label, Y label and X range reset: the plot now shows the updated event-count map "
+        "and ensemble.")
+    assert widget.undo_button.toolTip() == "Undo: reset title, X label, Y label and X range"
     _press_undo(events)
     assert _axes_of(events) == before and widget.state().title == "Dwell vs depth"
     _stays_pinned(ens, "bottom", x_pin)
@@ -256,16 +270,30 @@ def test_an_svg_after_a_metric_change_on_a_computer_with_only_the_liberation_fon
 
 def test_opening_a_second_project_after_a_reset_leaves_nothing_of_the_first_on_subpopulations(
         qapp, qtbot, monkeypatch, tmp_path, subpop_report):
+    """2026-11-11: figures belong to the project since 8661d35. Opening another project does not
+    keep and blank the one Subpopulations page, as it once did: it drops the outgoing project's
+    figures and the page alias with them, and the next report gets a NEW page. The promise is the
+    same: nothing of the outgoing project's words, ranges, look or standing sentence reaches the
+    next project's first report. A new page starts from the look the app gives every figure
+    (``fresh``, a style binding and its sizes), not from ``{}``."""
     other = tmp_path / "other.nanoscope"
     save_project(str(other), ProjectState())                 # a project that holds no report
     window = _main_window(qtbot, monkeypatch)
-    window._open_subpop_window(subpop_report, source_result=None, source_recipe=None,
-                               accepted_event_ids=None)
-    page = window._subpop_window
-    explorer = _explorer_of(window)
-    page.activateWindow()
-    scatter = page.embedding_view()
-    plot, widget = scatter._plot.getPlotItem(), page._appearance_widget
+
+    def open_report():
+        window._open_subpop_window(subpop_report, source_result=None, source_recipe=None,
+                                   accepted_event_ids=None)
+        QtWidgets.QApplication.processEvents()
+        page = window._subpop_window
+        explorer = _explorer_of(window)
+        page.activateWindow()
+        scatter = page.embedding_view()
+        return page, explorer, scatter, page._appearance_widget
+
+    page, explorer, scatter, widget = open_report()
+    fresh = page.appearance_state()
+    assert not {"title", "x_label", "y_label", "axes", "text"} & set(fresh), fresh
+    plot = scatter._plot.getPlotItem()
     _type_subpop_words(page)
     _pin_inside(plot, "bottom")
     _section(page, "Analysis")
@@ -280,28 +308,29 @@ def test_opening_a_second_project_after_a_reset_leaves_nothing_of_the_first_on_s
     # (1) The sentence is standing when the next project is opened: it must not outlive the page.
     with qtbot.waitSignal(window.projectRestored, timeout=20_000):
         window._open_project(str(other))
-    assert window._subpop_window is page and page.report() is None
-    assert "reset:" not in page.live_note()
-    window._open_subpop_window(subpop_report, source_result=None, source_recipe=None,
-                               accepted_event_ids=None)
-    QtWidgets.QApplication.processEvents()
-    assert page.appearance_state() == {} and "reset:" not in page.live_note()
+    assert window._subpop_window is None, "the outgoing project's page is not kept"
+    assert not list(window._figure_workspace.records())
+    second, explorer, scatter, widget = open_report()
+    assert second is not page
+    assert second.appearance_state() == fresh and second.report() is not None
+    assert "reset:" not in second.live_note() and "reset:" not in _standing_line(second, explorer)[0]
+    assert scatter.embedding() == "t-SNE"
+    assert not widget.undo_button.isEnabled() and not widget.redo_button.isEnabled()
 
     # (2) Words and a range typed on the second project's first report do not reach a third.
+    plot = scatter._plot.getPlotItem()
     _add_title(plot, "Pore B in t-SNE")
     _pin_through_axis_properties(plot, "bottom", -3.0, 3.0)
-    assert page.appearance_state().get("title") == "Pore B in t-SNE"
-    assert "reset:" not in _standing_line(page, explorer)[0]
+    assert second.appearance_state().get("title") == "Pore B in t-SNE"
+    assert "reset:" not in _standing_line(second, explorer)[0]
     window._dirty = False
     with qtbot.waitSignal(window.projectRestored, timeout=20_000):
         window._open_project(str(other))
-    assert page.report() is None
-    assert page.appearance_state() == {} and widget.title.text() == ""
+    assert window._subpop_window is None
+    third, explorer, scatter, widget = open_report()
+    assert third is not second and third is not page
+    assert third.appearance_state() == fresh and widget.title.text() == ""
     assert not widget.undo_button.isEnabled() and not widget.redo_button.isEnabled()
-    window._open_subpop_window(subpop_report, source_result=None, source_recipe=None,
-                               accepted_event_ids=None)
-    QtWidgets.QApplication.processEvents()
-    assert page.appearance_state() == {}
     assert _drawn_title(scatter._plot.getPlotItem())[0] == ""
     lo, hi = scatter._plot.getPlotItem().getViewBox().viewRange()[0]
     assert (round(lo, 3), round(hi, 3)) != (-3.0, 3.0)

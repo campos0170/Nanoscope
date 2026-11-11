@@ -27,7 +27,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import zipfile
 from pathlib import Path
 
 import nanoscope  # noqa: F401  -> runs bootstrap.py, fixes the plugin path
@@ -38,7 +37,7 @@ import pytest
 import shiboken6
 from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
-from nanoscope.core.analysis_workspace import PLOTS_ARTIFACT_ID, capture_plots, restore_plots
+from nanoscope.core.analysis_workspace import capture_plots, restore_plots
 from nanoscope.core.figure_library import make_figure
 from nanoscope.core.project import WorkspaceArtifact
 from nanoscope.gui import figure_composition as fc
@@ -301,9 +300,23 @@ def test_a_saved_family_that_is_empty_or_longer_than_400_characters_is_not_repla
 
 def _click_through_window(button) -> None:
     """A real left click on ``button``, sent to the window it is in (a button the Explorer's
-    toolbar has replaced is clicked on the toolbar)."""
+    toolbar has replaced is clicked on the toolbar).
+
+    2026-11-11: in a PROJECT window the toolbar's own Reset figure button is hidden on purpose
+    (8661d35: it has New and Duplicate beside it) and the same command is the entry "Reset
+    figure" of the Update plot menu, which is opened and chosen instead."""
     if not button.isVisible() and (stand_in := _on_the_toolbar(button)) is not None:
         button = stand_in
+        if button.objectName() == "analysisResetFigure" and not button.isVisible():
+            bar = button.parentWidget()
+            while bar is not None and not hasattr(bar, "_update_menu"):
+                bar = bar.parentWidget()
+            assert bar is not None, "the hidden Reset figure button is not in the Explorer's toolbar"
+            entry = bar._reset_from_menu
+            assert entry.isVisible() and entry.isEnabled() and entry.text() == "Reset figure"
+            bar._update_menu.popup(bar.mapToGlobal(QtCore.QPoint(20, 20)))
+            _choose(bar._update_menu, "Reset figure")
+            return
     assert button.isVisible() and button.isEnabled(), button.text()
     QtTest.QTest.mouseClick(window_handle(button), QtCore.Qt.MouseButton.LeftButton,
                             QtCore.Qt.KeyboardModifier.NoModifier,
@@ -312,18 +325,29 @@ def _click_through_window(button) -> None:
 
 
 def _saved_plots(path) -> dict:
-    """What the project file holds for Distributions: ``{plot_type, title, font_family}``."""
-    with zipfile.ZipFile(path) as archive:
-        from nanoscope.core import project as project_format
+    """What the project file holds for Distributions: ``{plot_type, title, font_family}``.
 
-        manifest = json.loads(archive.read(project_format.MANIFEST_NAME))
-    for artifact in manifest["workspace"]["artifacts"]:
-        if artifact["artifact_id"] == PLOTS_ARTIFACT_ID:
-            fields = artifact["payload"]["config"]["fields"]
-            style = fields["style"]["fields"]
-            return {"plot_type": fields["plot_type"], "title": style["title"],
-                    "font_family": style.get("font_family", "")}
-    raise AssertionError("the project holds no Distributions artifact")
+    2026-11-11: since project format 13 (8661d35) Distributions is one native figure record of the
+    figure workspace, not the ``builtin.plots`` artifact this once looked for. It is read the way
+    ``test_p0_distributions_switches_and_reset_figure`` reads an old file: the file is loaded, the
+    figure record decoded, and its configuration taken in the shape the Distributions window keeps."""
+    from nanoscope.core import project as project_format
+    from nanoscope.core.figure_codecs import encode_legacy, record_from_artifact
+    from nanoscope.core.figure_spec import FIGURE_ARTIFACT_KIND
+
+    found = []
+    for artifact in project_format.load_project(path).workspace.artifacts:
+        if artifact.kind != FIGURE_ARTIFACT_KIND:
+            continue
+        record = record_from_artifact(artifact)
+        if record.spec.kind != "distributions":
+            continue
+        fields = encode_legacy(record.spec, record.resources).payload["config"]["fields"]
+        style = fields["style"]["fields"]
+        found.append({"plot_type": fields["plot_type"], "title": style["title"],
+                      "font_family": style.get("font_family", "")})
+    assert len(found) == 1, f"the project holds {len(found)} Distributions figures"
+    return found[0]
 
 
 def _opened_distributions(qtbot, tmp_path, *, old_format=False):
@@ -741,7 +765,12 @@ def test_the_composers_label_font_list_has_no_row_for_a_private_application_font
     dialog = FigureComposerDialog(entries, current_id=entries[0].artifact_id)
     qtbot.addWidget(dialog)
     label_font = dialog._label_font
-    assert isinstance(label_font, font_picker.FontPicker) and label_font.value() == ""
+    # 2026-11-11: a composition has a style of its own since 8661d35, so the picker is always
+    # given the style's explicit family ("Arial"), not the empty default of a figure with no
+    # style. The first row still reads "Arial (default)" and is the one on screen.
+    assert isinstance(label_font, font_picker.FontPicker)
+    assert label_font.currentIndex() == 0 and label_font.currentText() == font_picker.DEFAULT_ROW_LABEL
+    assert dialog.label_family() == "Arial"
     rows = [label_font.itemText(i) for i in range(label_font.count())]
     assert not [row for row in rows if "AppleSystemUIFont" in row], rows
     other = font_picker.FontListDialog()
@@ -1034,21 +1063,31 @@ def test_the_documents_say_what_the_fixes_do():
     assert "(Reset figure leaves the name alone)" in guide and "source names" in guide
     assert "(**Reset figure** takes it back)" in guide and "(Reset figure takes it back)" in changelog
 
-    # F2: Comparison figures' keys answer in every Section; only the study editor is the exception.
+    # F2: Comparison figures' keys answer in every Section. 2026-11-11: the study editor was the
+    # one exception; its redesign (8661d35) took that away, so the guide says the keys answer
+    # whatever the inspector shows, the retained Study/Report editor included, and the sentences
+    # that made it an exception are gone.
     assert "In Comparison figures and the study figure editor the keys answer" not in guide
-    assert "(In the study figure editor the keys answer while the Appearance controls are on screen.)" in guide
-    assert "(the study figure editor: while the Appearance controls are on screen)" in guide
+    assert "(In the study figure editor the keys answer while the Appearance controls are on screen.)" not in guide
+    assert ("in the retained Study/Report editor's Figure toolbar. ⌘Z / ⇧⌘Z do the same whenever the "
+            "page is in front, whatever its inspector shows") in guide
+    assert "(the study figure editor: while the Appearance controls are on screen)" not in guide
+    assert "whatever the page's inspector shows (including the retained Study/Report editor)" in guide
     assert "Comparison figures and the study figure editor: while the Appearance controls" not in guide
 
     # F4 / F2 (documents): the compose bullet is true for figures saved by this build; an old
     # entry keeps its font, and only where the application font is a private face (a Mac) does the
-    # list have no row for it; a Mac's matplotlib reads one face of Helvetica.
+    # list have no row for it. 2026-11-11: the guide no longer says a Mac's matplotlib reads one
+    # face of Helvetica; since 8661d35 it says Comparison figures and the study figure editor keep
+    # font-backed text in PDF with their supported bold and italic faces. The changelog, which is
+    # history, still carries the old sentence.
     assert "so they match the panels of figures saved by this build" in changelog
     assert "A figure saved to the Library by an earlier version is a frozen picture" in guide
     for text in (guide, changelog):
         assert "on a Mac, where the application font is a private face, the list has no row for it" in text
         assert "the list has no row for the application font" not in text
-    assert "a study figure's bold title, y tick labels and bar text" in guide
+    assert "On a Mac matplotlib reads only one face of Helvetica" not in guide
+    assert "font-backed text in PDF, including supported bold/italic faces" in guide
     assert "a study figure's bold title, y tick labels and bar text" in changelog
 
     # F5 and the symbol faces: what a picker row says, and what Other font… leaves out.

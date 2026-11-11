@@ -2663,6 +2663,26 @@ PCA/clustering results are cleared when new source tables are supplied. Refreshi
 analytical snapshot explicitly returns that view to current inputs. Save a Figure Library copy
 first if you need to retain the old picture and numbers.
 
+A change in the session (a re-detection, a merge, curation, a recording closed) marks a plotted
+Distributions figure **Stale** (one reopened from a project goes on reading **Saved result**) and
+changes nothing on it. Its next **Update plot** draws the current event tables of the recordings it
+ticks. When one of those tables is no longer the session's (it was replaced by a re-detection or a
+merge, the recording was calibrated again, or nothing is left of it: a detection with no events, or
+manual measurements all removed), the figure takes the session's tables as **Refresh from
+recordings** does: PCA and clustering are cleared with them. A table that is gone leaves the figure:
+if the Sources list holds another table, that one is ticked and drawn in its place; if not, the
+figure reads **No data**, its typed title and that recording's legend name are reset (one Undo
+step), and it stays so until **Refresh from recordings** finds something. Accepting or rejecting
+events does not replace the table of a figure that has stayed open: **Update plot** redraws from
+that table and leaves PCA and clustering as they were (run them again to include the change); a
+figure reopened from a project, duplicated or opened later holds its own copy and takes the curated
+table like a replaced one. A ticked recording that is no longer open keeps the table the figure
+holds for it, in the same row of Sources; an unticked one leaves the list when the figure takes new
+tables. A detection on a recording the figure does not tick leaves the figure, its PCA and its
+clustering as they were. A figure that has never been plotted takes the session's current list at
+its first **Update plot**, new recordings included; on a plotted one, **Refresh from recordings** is
+the explicit way to bring in a new recording.
+
 Not every numerical control waits for Plot: bin count, normalization and some log/geometry
 controls redraw an already active plot. Source, plot-type, column and fit proposals, and the
 histogram's **KDE overlay**, use the explicit commit described above; a bin, normalization or log

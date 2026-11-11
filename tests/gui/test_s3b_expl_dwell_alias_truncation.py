@@ -24,6 +24,12 @@ for a frame that fits perfectly well the moment its column is renamed ``dwell_ti
 The invariant is one shared list of dwell spellings (:data:`stats.DWELL_QUANTITY_NAMES`)
 and one predicate over it, so the window and the fitter cannot disagree about which
 columns the detector's dwell provenance describes.
+
+2026-11-11: the window is no longer put in seconds. Since 8661d35 the Explore window's
+Time unit holds only "ms" (disabled), and only the DECLARED time columns
+(``plots_panel._TIME_COLUMNS``: ``dwell_s`` among them) are shown in it. The aliases keep
+the form they are stored in, so the same 0.05 s ceiling now reads "50 ms" under ``dwell_s``
+and stays "0.05" under ``dwell`` and "0.05 s" under ``dwell_time_s``.
 """
 
 from __future__ import annotations
@@ -67,7 +73,10 @@ def _window(qtbot, duration_col: str) -> PlotsWindow:
                         "fs": 50_000.0}})
     w.set_plot_type("Histogram")
     w.set_histogram_column(duration_col)
-    w.set_time_unit("s")
+    # 2026-11-11: this used to call ``w.set_time_unit("s")``, which now raises -- the combo
+    # offers only "ms" since 8661d35. The unit is pinned instead of set: the quoted
+    # ceilings below depend on it.
+    assert w.time_unit() == "ms"
     w.set_fit("exponential")
     return w
 
@@ -101,7 +110,12 @@ def test_the_detector_ceiling_is_credited_to_the_detector_under_every_spelling(
     """The bound IS ``max_dwell_s`` here, so the note must say so -- not hedge, not raise."""
     w = _window(qtbot, duration_col)
     line = _modelled(w)
-    assert f"t_max={DET_MAX_S:g}" in line, line
+    # The same 0.05 s, in the form each spelling is shown in (see the module docstring):
+    # only the declared time column reads in the Time unit's ms.
+    shown = {"dwell_s": "t_max=50 ms is MODELLED",
+             "dwell": "t_max=0.05 is MODELLED",
+             "dwell_time_s": "t_max=0.05 s is MODELLED"}[duration_col]
+    assert shown in line, line
     assert "detector max_dwell_s" in line, line
     assert "NOT a detector limit" not in line, line
     assert w.fit_result().meta["t_max_source"] == stats.T_MAX_FROM_DETECTOR

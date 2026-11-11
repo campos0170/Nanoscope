@@ -148,14 +148,16 @@ def test_signal_conditioning_is_in_the_window_menu(private_settings, qtbot, monk
     monkeypatch.setattr(MainWindow, "_open_signal_conditioning",
                         lambda self, *a: (opened.append("sc"), real(self, *a))[1])
     window = build_window(qtbot, detection=False)
-    assert _entries(window)["Signal Conditioning"] == (False, True)
+    # 2026-11-11: the window is listed as "Preprocess workspace" since 8661d35 (it was "Signal
+    # Conditioning"); its entry key and the window attribute keep the old name.
+    assert _entries(window)["Preprocess workspace"] == (False, True)
     window._window_menu_entries["signal_conditioning"].trigger()
     settle()
     assert opened == ["sc"]
-    assert _entries(window)["Signal Conditioning"][0]
+    assert _entries(window)["Preprocess workspace"][0]
     window._signal_conditioning.hide()
     settle()
-    assert not _entries(window)["Signal Conditioning"][0]
+    assert not _entries(window)["Preprocess workspace"][0]
     close_window(window)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import struct
 import weakref
@@ -41,11 +42,12 @@ from ..core.analysis_workspace import (
     VOLTAGE_DEPENDENCE_ARTIFACT_ID,
     artifact_source_recipe,
     capture_analysis_workspace,
+    fingerprint_frame,
     resolve_result_recipe,
     result_recipe,
     restore_analysis_workspace,
 )
-from ..core.project import AnalyticalWorkspace
+from ..core.project import AnalyticalWorkspace, _json_safe
 from ..core.project_guard import (
     ProjectDiskStamp,
     ProjectSaveConflict,
@@ -884,6 +886,20 @@ def _stored_baseline_fingerprint(provenance: object) -> str | None:
         return None
     fp = provenance.get("baseline_fingerprint")
     return str(fp) if isinstance(fp, str) and fp else None
+
+
+def _canonical_stamp(value: object) -> str:
+    """``value`` (a detection's provenance, a calibration fingerprint) in one canonical
+    spelling, so that two copies of the same stamp compare equal.
+
+    The spelling is the project file's own (``core.project._json_safe``: numpy scalars and
+    arrays become plain numbers and lists, tuples become lists, keys become text) with the keys
+    sorted. It has to be canonical because a figure saved in a project and the session that
+    reopens that project have each been through a different codec, and the same stamp comes
+    back as a tuple on one side and a list on the other, a numpy float on one and a float on
+    the other, a NaN that is not equal to itself, a dict in another key order. The JSON text
+    compares NaN with NaN."""
+    return json.dumps(_json_safe(value), sort_keys=True)
 
 
 class _InfoBar(QtWidgets.QFrame):
@@ -5979,7 +5995,18 @@ class MainWindow(QtWidgets.QMainWindow):
         page._nanoscope_figure_managed = True
         adapter = page.inspector_adapter()
         update = adapter.update
-        adapter.update = lambda: self._update_figure(figure_id, update)
+
+        def update_figure():
+            if kind == PAGE_DISTRIBUTIONS:
+                try:
+                    self._stage_changed_distribution_sources(figure_id)
+                except Exception as exc:
+                    # Said in the status bar like a failure of the update itself (see
+                    # `_update_figure`); the figure is not updated and not marked CURRENT.
+                    self._figure_workspace._fail(figure_id, exc)
+                    return
+            self._update_figure(figure_id, update)
+        adapter.update = update_figure
         return page
 
     def _mount_figure_surface(self, figure_id, page):
@@ -6031,11 +6058,11 @@ class MainWindow(QtWidgets.QMainWindow):
             with QtCore.QSignalBlocker(follow):
                 follow.setChecked(False)
 
-    def _bind_figure_sources(self, page, record, binding, compute=False):
+    def _bind_figure_sources(self, page, record, binding, compute=False, sources=None):
         kind = record.spec.kind
         if kind == PAGE_DISTRIBUTIONS:
             page.set_active_detection(self.active_detection_key())
-            page.set_data(self._plots_sources(), catalog_only=True)
+            page.set_data(self._plots_sources() if sources is None else sources, catalog_only=True)
         elif kind in (PAGE_DISTRIBUTION_SUMMARIES, PAGE_COMPARISON_FIGURES):
             page.set_sources(self._plots_sources(), analyze=False)
         elif kind in (PAGE_EVENT_WAVEFORMS, PAGE_NOISE) and compute:
@@ -6138,6 +6165,81 @@ class MainWindow(QtWidgets.QMainWindow):
         if record is not None and page is not None:
             self._bind_figure_sources(page, record, owner.binding(figure_id), False)
 
+    def _stage_changed_distribution_sources(self, figure_id):
+        """Update plot on a Distributions figure takes the session's current event tables, but
+        only when a table the figure uses is no longer the session's.
+
+        A session notice only marks figures stale (``FigureWorkspace.sources_changed``) and
+        stages nothing: installing a catalog clears PCA and clustering, as Refresh from
+        recordings does, and most notices are not about this figure. The judgement is made
+        here, at the user's own Update, and by content, so a page built later from its record
+        (a dormant figure, a duplicate, a reopened project's saved result) is judged like a
+        resident one: its inputs are copies, never the session's frames, and an equal copy is
+        no change. A table is the session's while its rows, its detection provenance and its
+        calibration are: a re-detection under other settings is another table although it
+        found the same events. The two stamps are compared in :func:`_canonical_stamp`'s
+        spelling, because a saved figure and the session that reopens its project spell them
+        differently. Frames are compared by identity first, because the frame a curation edits
+        in place is the very frame the page holds.
+
+        A plotted page is judged on the tables it uses (the ticked ones), each of which is one
+        of three things. The session offers it: it is compared as above. Its recording is
+        closed, so that the page's own copy is all there is of it: the figure keeps that copy,
+        in its row, and it is never a reason to stage. Its recording is open but the session
+        offers no table for it (a re-detection that found no events, a removed result), or it
+        is the manual measurements and none are left: that is a replaced table, and the Update
+        ends where Refresh from recordings ends, in NO DATA when nothing is left. A page that
+        was never plotted is judged on the whole offer, in keys and in tables: nothing is drawn
+        yet and this is the user's own press.
+
+        What is staged is the session's catalog together with the page's copies of the closed
+        recordings (in the page's row order), and ``PlotsWindow._run_plot`` installs it. A
+        plotted page is staged too when an earlier Update left its catalog uninstalled (the
+        page refused it, and the session may have moved back since)."""
+        owner = self._figure_workspace
+        record, page = owner.get(figure_id), owner.page(figure_id)
+        if record is None or page is None:
+            return
+        from .plots_panel import _normalize_sources
+        sources = self._plots_sources()
+        offered = _normalize_sources(sources)
+        held = {source.key: source for source in page.sources()}
+
+        def same(key):
+            mine, theirs = held[key], offered[key]
+            return (_canonical_stamp(mine.provenance) == _canonical_stamp(theirs.provenance)
+                    and (_canonical_stamp(mine.calibration_fingerprint)
+                         == _canonical_stamp(theirs.calibration_fingerprint))
+                    and (mine.df is theirs.df
+                         or fingerprint_frame(mine.df) == fingerprint_frame(theirs.df)))
+
+        used = page.selected_source_keys()
+        kept, gone = {}, False
+        for key in used:
+            if key in offered:
+                continue
+            source = held[key]
+            if source.kind != "manual" and (
+                    source.doc_id is None or not self._session.has_document(source.doc_id)):
+                kept[key] = source
+            else:
+                gone = True
+        if page._plot_armed:
+            changed = (getattr(page, "_figure_pending_sources", None) is not None or gone
+                       or not all(same(key) for key in used if key in offered))
+        else:
+            changed = ((set(offered) | set(kept)) != set(held)
+                       or not all(same(key) for key in offered))
+        if not changed:
+            return
+        catalog = list(sources)
+        if kept:
+            # The rows keep the page's order, so a closed recording's copy stays in its row;
+            # what the page does not hold yet follows, in the session's order.
+            rank = {key: i for i, key in enumerate(held)}
+            catalog = sorted([*catalog, *kept.values()], key=lambda s: rank.get(s.key, len(rank)))
+        self._bind_figure_sources(page, record, owner.binding(figure_id), False, catalog)
+
     def _update_figure(self, figure_id, update):
         owner = self._figure_workspace
         record, page = owner.get(figure_id), owner.page(figure_id)
@@ -6154,6 +6256,9 @@ class MainWindow(QtWidgets.QMainWindow):
             owner._fail(figure_id, exc)
             return
         if result is False:
+            return
+        # The page refused (unreadable fit range) before taking its staged tables: status unchanged; the page said why.
+        if record.spec.kind == PAGE_DISTRIBUTIONS and getattr(page, "_figure_pending_sources", None) is not None:
             return
         if entry.busy or getattr(page, "_gather_worker", None) is not None:
             return  # The result callback commits freshness when its work finishes.

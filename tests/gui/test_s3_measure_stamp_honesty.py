@@ -12,6 +12,11 @@ trace"* and *"t_start_s + t0_s is that row's start on the trace axis"* — while
 clock each sentence lands on (the drawn axis vs the INSTRUMENT clock, which is what a
 saved stamp records) and states the nudge that separates them.
 
+2026-11-11: the tooltip now speaks milliseconds, the unit the table shows ``t_start_s`` in
+(8661d35): "add t₀ = 66303.4 ms", "shifted +5000.0 ms". The stored ``t_start_s`` / ``t0_s``
+columns stay in seconds. The same commit put the column's own quantity entry ahead of the
+pooled sentence, so the tests pick a paragraph by what it says, not by its position.
+
 MEAS3-03 — A MARK THAT STOPPED BEING CHECKABLE. ``_refresh_stale_rows`` classifies a row
 whose recording is not open as *unknown*, correctly and per the panel's own docstring —
 but the model rendered only two states, so "nobody can check this" was drawn exactly
@@ -25,6 +30,7 @@ from __future__ import annotations
 
 # --- Qt bootstrap MUST precede any Qt import. --------------------------------------------------
 import os
+import re
 
 import nanoscope  # noqa: F401  -> runs bootstrap.py, fixes the plugin path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -117,10 +123,14 @@ def test_a_nudged_layer_does_not_make_one_tooltip_give_two_conversions(window, t
     tip = _header(mp, "t_start_s", Qt.ToolTipRole)
     row = mp.measurements_df.iloc[0]
 
-    # the drawn-axis half still names the offset the curve is drawn through...
-    assert f"{T0_APO + NUDGE:.4f}" in tip
-    # ...and the pooled half no longer claims t_start_s + t0_s reaches that axis.
-    pooled = tip.split("\n\n")[1]
+    # the drawn-axis half still names the offset the curve is drawn through (2026-11-11:
+    # in ms, 66303.4 where it said 66.3034 s)...
+    assert f"add t₀ = {(T0_APO + NUDGE) * 1e3:.1f} ms" in tip
+    # ...and the pooled half no longer claims t_start_s + t0_s reaches that axis. (It is
+    # found by its content: since 8661d35 the column's quantity entry sits ahead of it.)
+    pooled_paras = [para for para in tip.split("\n\n") if "t_start_s + t0_s" in para]
+    assert len(pooled_paras) == 1, tip
+    pooled = pooled_paras[0]
     assert "t0_s" in pooled
     assert "trace axis" not in pooled, \
         f"the pooled sentence still promises the drawn axis: {pooled!r}"
@@ -128,6 +138,13 @@ def test_a_nudged_layer_does_not_make_one_tooltip_give_two_conversions(window, t
     # the arithmetic the pooled sentence promises is true:
     assert float(row["t_start_s"]) + float(row["t0_s"]) == pytest.approx(
         _BLOCKADE[0] / FS + T0_APO)
+    # ...and the nudge is named, in the unit the conversion above is in, so the three
+    # numbers the user is asked to reconcile by hand do reconcile: the drawn offset the
+    # tooltip quotes, less the shift it names, is the row's own t0_s.
+    assert f"{NUDGE * 1e3:+.1f} ms" in tip
+    drawn_ms = float(re.search(r"add t₀ = (\d+(?:\.\d+)?) ms", tip).group(1))
+    named_ms = float(re.search(r"shifted ([+-]\d+(?:\.\d+)?) ms", tip).group(1))
+    assert drawn_ms - named_ms == pytest.approx(float(row["t0_s"]) * 1e3, abs=0.1), tip
 
 
 def test_the_nudge_is_named_rather_than_left_as_the_difference(window, tmp_path):
@@ -141,11 +158,11 @@ def test_the_nudge_is_named_rather_than_left_as_the_difference(window, tmp_path)
 
     _nudge(window, doc_id, NUDGE)
     tip = _header(mp, "t_start_s", Qt.ToolTipRole)
-    assert "+5.0000" in tip
+    assert f"{NUDGE * 1e3:+.1f} ms" in tip           # 2026-11-11: "+5000.0 ms", was "+5.0000"
     assert "alignment" in tip.lower()
 
     _nudge(window, doc_id, -2.5)
-    assert "-2.5000" in _header(mp, "t_start_s", Qt.ToolTipRole)
+    assert "-2500.0 ms" in _header(mp, "t_start_s", Qt.ToolTipRole)   # was "-2.5000"
 
 
 def test_the_t0_column_tooltip_promises_the_clock_the_stamp_is_actually_on(
@@ -175,7 +192,7 @@ def test_a_nudge_that_exactly_cancels_t0_does_not_produce_an_agreement_claim(
     _nudge(window, doc_id, -T0_APO)
 
     tip = _header(mp, "t_start_s", Qt.ToolTipRole)
-    assert f"{-T0_APO:+.4f}" in tip, \
+    assert f"{-T0_APO * 1e3:+.1f} ms" in tip, \
         "the shift that made the two clocks coincide on screen is not named"
     assert "alignment" in tip.lower()
 

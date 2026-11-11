@@ -13,10 +13,20 @@ is then an ordinary change of quantity and the rule runs (one Undo step, the sen
 flag that nothing but the commit ever cleared kept the OLD figure's words and ranges over the new
 quantity, with no step and no sentence.
 
-Every gesture is a real one: the template is picked in its combo, the Undo is the key, words are
-typed on the figure or in the Appearance boxes, ranges are pinned in Axis properties, Generate and
-Apply fit are the buttons, and a save is a real ``_write_project`` reopened by ``_open_project``.
-Synthetic data only; offscreen.
+Every gesture is a real one: the template is picked in its combo where the page shows one, the
+Undo is the key, words are typed on the figure or in the Appearance boxes, ranges are pinned in
+Axis properties, Generate and Apply fit are the buttons, and a save is a real ``_write_project``
+reopened by ``_open_project``. Synthetic data only; offscreen.
+
+2026-11-11: a page of the main window's Figures workspace shows no Templates combo (8661d35: saved
+templates live under New figure, and the Explorer drops the Recipes group of every figure). The
+Summaries tests, which run on such a page, therefore reach the recall through the page's template
+bar (``TemplateBar.recall_template``, the operation the combo calls): no person can do that on that
+page. ``_recall`` asserts the combo is not on screen, so the day it comes back those tests say so.
+Whether this code (``_words_for``, ``promise_stands``) stays is an owner decision that is still
+pending; until it is made, the Summaries tests pin the mechanism the guide documents, not a gesture
+of the app. The pages in a bare Explorer (Voltage dependence, Comparison figures here) still show
+the combo, and their tests pick in it.
 """
 from __future__ import annotations
 
@@ -69,8 +79,19 @@ def _generate(page):
 
 
 def _recall(page, name):
-    """Pick ``name`` in the Templates combo of the Export section: the template's door."""
+    """Pick ``name`` in the Templates combo of the Export section: the template's door.
+
+    A page of the Figures workspace has no such door (saved templates are recalled with New figure
+    there). With the Export section open, where a person would look for it, the combo is asserted
+    off screen, and the template bar's own operation, which the combo calls, recalls the template.
+    If the door ever comes back to those pages this fails, and the helper goes back to picking in
+    the combo for them too."""
     _section(page, "Export")
+    if getattr(page, "_nanoscope_figure_managed", False):
+        assert not page._templates.combo.isVisible()
+        assert page._templates.recall_template(name)
+        QtWidgets.QApplication.processEvents()
+        return
     _pick(page._templates.combo, text=name)
 
 

@@ -6,7 +6,7 @@ resizing, another pane does nothing and says so, a right-click or a rebuild canc
 one started on the mask body), a 20-frame draw costs the Measure panel at most two recomputes, and
 the mode survives rebuilds and view-mode changes while the target pane exists.
 
-Everything runs on a synthetic recording (see ``test_trace_rig``) with real mouse events sent to
+Everything runs on a synthetic recording (see ``trace_rig``) with real mouse events sent to
 the trace's viewport, so pyqtgraph's own scene delivers the drags.
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ from PySide6 import QtCore, QtWidgets
 from nanoscope.core.layer import ViewMode
 from nanoscope.gui import measure_panel as measure_panel_module
 
-from .test_trace_rig import (  # noqa: F401  (fixtures are used by name)
+from .trace_rig import (  # noqa: F401  (fixtures are used by name)
     CURRENT, FS, N, Qt, Recorder, build_rig, double_click, drag, drag_move, free_mouse, hover,
     point_at, press, release, rig, send_mouse, zoom_middle)
 

@@ -42,7 +42,7 @@ from nanoscope.gui.trace_view import TraceView
 
 from ._inspector_hosting import (  # noqa: F401  (fixtures are used by name)
     SPANS, build_window, close_window, docked, private_settings, settle)
-from .test_trace_rig import drag, free_mouse, point_at, rig, zoom  # noqa: F401  (fixtures)
+from .trace_rig import drag, free_mouse, point_at, rig, zoom  # noqa: F401  (fixtures)
 
 Qt = QtCore.Qt
 
@@ -262,7 +262,7 @@ def test_on_a_recording_without_a_rate_the_index_is_given_once(qapp):
         assert lines[-1] == "file sample 1,012,345", lines
         assert len(lines) == 3 and "12345 sample" not in text, lines
     finally:
-        view.hide()   # not close(): see test_trace_rig's rig fixture
+        view.hide()   # not close(): see trace_rig's rig fixture
 
 
 def test_a_drag_that_starts_on_the_readout_still_draws_a_zoom_box(rig):
@@ -293,7 +293,7 @@ def test_a_partial_load_also_names_the_files_own_sample(qapp):
         assert "sample 250 (event-table index)" in text, text
         assert "file sample 30,250" in text, text
     finally:
-        view.hide()   # not close(): see test_trace_rig's rig fixture
+        view.hide()   # not close(): see trace_rig's rig fixture
 
 
 def test_a_segment_also_names_its_parents_sample(qapp):
@@ -310,12 +310,15 @@ def test_a_segment_also_names_its_parents_sample(qapp):
         (text,) = _crosshair_texts(view)
         assert "sample 100 (event-table index)" in text, text
         assert "parent sample 4,100" in text, text
-        # The time line agrees with the parent sample: 100 / 10 kHz into the cut, and the
-        # cut's origin (4,000 / 10 kHz = 0.4 s) added for the instrument clock.
-        assert "0.0100 s in" in text, text
-        assert "0.4100 s instrument" in text, text
+        # The time line agrees with the parent sample: 100 / 10 kHz = 10.0 ms into the cut,
+        # and the cut's origin (4,000 / 10 kHz = 400.0 ms) added for the instrument clock.
+        # 2026-11-11: the readout is in ms with one decimal since 8661d35 (it read
+        # "0.0100 s in" / "0.4100 s instrument"). The whole line is compared, not two
+        # substrings: "10.0 ms in" is itself a substring of "410.0 ms instrument", so the
+        # first half of a substring pair could not fail.
+        assert text.split("\n")[0] == "10.0 ms in  ·  410.0 ms instrument", text
     finally:
-        view.hide()   # not close(): see test_trace_rig's rig fixture
+        view.hide()   # not close(): see trace_rig's rig fixture
 
 
 # ================================================================================================

@@ -43,7 +43,7 @@ from nanoscope.analysis.scoring import hand_made_mask
 
 from ._inspector_hosting import (  # noqa: F401  (fixtures are used by name)
     accepted, build_window, close_window, docked, private_settings, settle)
-from .test_trace_rig import free_mouse, hover  # noqa: F401
+from .trace_rig import free_mouse, hover  # noqa: F401
 
 
 # ================================================================================================
@@ -215,14 +215,30 @@ def test_a_keyless_holder_in_the_inspector_panel_gives_way_to_the_pointer(
     close_window(window)
 
 
+@pytest.mark.parametrize("page", ["detection", "preprocess"])
 def test_a_click_on_empty_inspector_panel_space_gives_way_to_the_pointer(
-        private_settings, qtbot, free_mouse):
+        private_settings, qtbot, free_mouse, page):
     """A click on a label or a frame of the Analysis page gives the keyboard to the panel's
-    scroll area (StrongFocus on every style): nothing there takes C, S, F or D."""
+    scroll area (StrongFocus on every style): nothing there takes C, S, F or D.
+
+    2026-11-11: the page's scroll area is named, not "the first visible InspectorScrollArea".
+    Two pages are pinned: Detection, whose settings scroll in ``page_scrolls``, and Preprocess,
+    which since 8661d35 is the workspace overview and scrolls in ``preprocess_overview_scroll``.
+    The overview's scroll area takes the same StrongFocus as the Detection, ML and Measure
+    pages, so a click on its blank space now lands the keyboard on it (the released page had no
+    scroll area and a click there changed nothing). That is kept, and the [preprocess] id pins
+    it; it is the id to change if the owner chooses NoFocus for that page."""
     window = build_window(qtbot)
     tv, vb = _arm(window, qtbot)
-    area = next(a for a in window._inspector.findChildren(QtWidgets.QScrollArea)
-                if a.isVisible() and type(a).__name__ == "InspectorScrollArea")
+    det = window._analysis_panel.detection_panel
+    if page == "detection":
+        det.show_detection_tab()
+        area = det.page_scrolls[det._detection_page]
+    else:
+        det.show_preprocess_tab()
+        area = det.preprocess_overview_scroll
+    settle()
+    assert area.isVisible() and window._inspector.isAncestorOf(area)
     viewport = area.viewport()
     target = local = None
     for y in range(5, viewport.height() - 5, 7):
@@ -239,7 +255,7 @@ def test_a_click_on_empty_inspector_panel_space_gives_way_to_the_pointer(
     QTest.mouseClick(target, Qt.LeftButton, Qt.NoModifier, local)
     settle()
     holder = QtWidgets.QApplication.focusWidget()
-    assert isinstance(holder, QtWidgets.QAbstractScrollArea) and _inside(window._inspector, holder)
+    assert holder is area, "the click should leave the keyboard on the page's scroll area"
 
     _cross_onto(tv, vb)
 
@@ -260,6 +276,10 @@ def test_the_inspector_panels_fields_and_tables_keep_their_keys(
     tv, vb = _arm(window, qtbot)
     tabs = window._inspector_tabs
     tabs.setCurrentIndex(next(i for i in range(tabs.count()) if tabs.tabText(i) == page))
+    if page == "Analysis":
+        # 2026-11-11: the page opens on Preprocess, which since 8661d35 is the workspace
+        # overview and holds no spin box; Detection does.
+        window._analysis_panel.detection_panel.show_detection_tab()
     settle()
     field = next(w for w in window._inspector.findChildren(kind)
                  if w.isVisible() and w.isEnabled() and not isinstance(w, QtWidgets.QHeaderView))

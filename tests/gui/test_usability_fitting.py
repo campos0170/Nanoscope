@@ -241,8 +241,10 @@ def test_save_dialog_keeps_result_identified_when_export_was_clicked(qapp,qtbot,
     replacement=copy.deepcopy(original);replacement['source']['key']='replacement'
     replacement['source']['label']='Replacement source'
     path=tmp_path/f'clicked-result.{suffix}'
-    def choose_destination(*args):
+    def choose_destination(*args,**kwargs):
         # Simulate a worker completion during QFileDialog's nested event loop.
+        # 2026-11-11: the export now asks through export_paths.ask_export_path, which also
+        # passes options=DontConfirmOverwrite, so the stand-in takes the real call's keywords.
         dialog._result=replacement;dialog._show_result()
         return str(path),''
     monkeypatch.setattr(QtWidgets.QFileDialog,'getSaveFileName',choose_destination)

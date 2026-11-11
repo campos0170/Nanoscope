@@ -362,8 +362,13 @@ def _relative_sibling_imports(module) -> list[str]:
 
 def test_file_dock_imports_no_sibling_gui_panel():
     """FileDock gained a segment button + signal but stays a pure dock: it imports only core
-    (level-2 relative) — never another gui panel. MainWindow wires createSegmentRequested to
-    Session.create_segment."""
+    (level-2 relative) and the one shared duration spin box (``time_controls``, a leaf that
+    reaches only ``numeric_text``) — never another gui panel. MainWindow wires
+    createSegmentRequested to Session.create_segment.
+
+    2026-11-11: the spin box joined in 8661d35 (each layer's time-shift field is a
+    ``SecondsSpinBox``, as every duration field is, so it reads in ms); it replaces the
+    empty list this guard used to expect."""
     import nanoscope.gui.file_dock as fd
 
-    assert _relative_sibling_imports(fd) == []
+    assert _relative_sibling_imports(fd) == ["time_controls"]

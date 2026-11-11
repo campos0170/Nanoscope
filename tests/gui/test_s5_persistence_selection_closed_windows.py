@@ -108,9 +108,38 @@ def _open_all(w):
     w._open_event_gallery()
 
 
+def _stage_spies(w, monkeypatch) -> dict[str, list[str]]:
+    """Record the source every Explorer figure is STAGED with (the only thing a selection
+    change may do to a Noise or Event waveforms figure), as the recording's file name."""
+    staged: dict[str, list[str]] = {"psd": [], "event_plots": []}
+
+    def spy(name, page):
+        real = page.stage_source
+
+        def wrapped(recipe, *a, **k):
+            staged[name].append(str((recipe or {}).get("source_key", "")).rsplit("/", 1)[-1])
+            return real(recipe, *a, **k)
+        monkeypatch.setattr(page, "stage_source", wrapped)
+
+    spy("psd", w._psd_window)
+    spy("event_plots", w._event_plot_window)
+    return staged
+
+
+def _press_update(w, qtbot):
+    """The user's Update plot: the Explorer toolbar's own button."""
+    w._analysis_explorer.toolbar().update_action.trigger()
+    qtbot.wait(10)
+
+
 def _close_all(w):
-    for win in (w._psd_window, w._event_plot_window, w._event_inspector,
-                w._event_gallery):
+    """The user closes every analysis window. The Noise and Event waveforms figures are pages
+    of the Analysis Explorer (2026-11-11, 8661d35): they are closed by closing the Explorer,
+    which hides them and resets nothing; the curation windows close themselves."""
+    w._analysis_explorer.close()
+    for win in (w._psd_window, w._event_plot_window):
+        assert not win.isVisible()
+    for win in (w._event_inspector, w._event_gallery):
         win.close()
         assert not win.isVisible()
 
@@ -130,51 +159,105 @@ def test_switching_recordings_feeds_no_closed_window(two, monkeypatch):
         f"(each False is a synchronous recompute nothing on screen shows)")
 
 
-def test_visible_explorer_page_is_fed_and_hidden_page_refreshes_on_activation(two, monkeypatch):
-    """Only the selected tab is on screen; a hidden tab catches up before its next paint."""
-    w, a, b = two
-    _open_all(w)
-    fed = _spies(w, monkeypatch)
+def test_a_selection_switch_stages_followers_and_never_recomputes_an_open_page(
+        two, monkeypatch, qtbot):
+    """Only the selected tab is on screen, and neither tab is recomputed by a switch.
 
+    2026-11-11: this test used to pin that the visible Event plots page was FED on every
+    switch and the hidden PSD tab refreshed when its tab was activated. Since 8661d35
+    (plotting redesign) Noise and Event waveforms are managed figures: a selection change
+    reaches only the figures that opted in with Follow selection, STAGES the new source on
+    them (a pending change, shown as "Update plot (n)") and leaves the displayed result alone
+    until Update plot; showing a tab computes nothing."""
+    w, a, b = two
+    w._on_selection(a, 0)          # the fixture leaves B selected
+    _open_all(w)
+    owner = w._figure_workspace
+    kpsd = owner.id_for_page(w._psd_window)
+    kep = owner.id_for_page(w._event_plot_window)
+    for key in (kpsd, kep):        # each figure has its result for recording A
+        assert owner.activate(key)
+        _press_update(w, qtbot)
+        assert owner.get(key).spec.result.status == "current"
+    fed = _spies(w, monkeypatch)
+    staged = _stage_spies(w, monkeypatch)
+    drawn = w._event_plot_window.density_counts().copy()
+
+    # 1. The default figures do not follow the selection: nothing fed, nothing staged.
     w._on_selection(b, 0)
     w._on_selection(a, 0)
+    assert fed["event_plots"] == [] and fed["psd"] == []
+    assert staged == {"psd": [], "event_plots": []}
 
-    # Event plots is the last Explorer page opened by _open_all and therefore the
-    # selected/visible analytical page. PSD is an installed but deliberately hidden tab.
-    assert fed["event_plots"] and all(fed["event_plots"])
-    assert fed["psd"] == [], "a hidden tab must not pay a synchronous recompute"
+    # 2. A follower is told, in order, and stages; its drawn result stays what it was.
+    owner.set_follow_selection(kpsd, True)
+    owner.set_follow_selection(kep, True)
+    for record in (*fed.values(), *staged.values()):
+        record.clear()
+    w._on_selection(b, 0)
+    assert staged == {"psd": ["pore_B.dat"], "event_plots": ["pore_B.dat"]}
+    for page in (w._psd_window, w._event_plot_window):      # the visible tab AND the hidden one
+        assert page.inspector_adapter().pending().count >= 1
+    w._on_selection(a, 0)
+    assert staged == {"psd": ["pore_B.dat", "pore_A.dat"],
+                      "event_plots": ["pore_B.dat", "pore_A.dat"]}
+    assert fed["event_plots"] == [] and fed["psd"] == [], (
+        "a selection change recomputed a figure instead of staging its source")
+    np.testing.assert_array_equal(w._event_plot_window.density_counts(), drawn)
 
-    w._analysis_explorer._tabs.setCurrentWidget(w._psd_window)
-    assert fed["psd"] and all(fed["psd"]), (
-        "activating the PSD tab must refresh it while it is visible")
+    # 3. Showing the hidden tab is not a refresh either.
+    w._on_selection(b, 0)
+    assert owner.activate(kpsd)
+    assert w._psd_window.isVisible() and not w._event_plot_window.isVisible()
+    assert fed["psd"] == [], "activating the PSD tab recomputed it"
+
+    # 4. Update plot is the one route that moves the figure to the staged recording.
+    _press_update(w, qtbot)
+    assert fed["psd"] and all(fed["psd"]), "Update plot must feed the page while it is visible"
+    assert w._psd_window.curves()[0].doc_id == b
+    assert owner.get(kpsd).spec.result.status == "current"
 
 
-def test_a_reopened_window_is_fed_on_its_way_back_up(two, monkeypatch):
+def test_a_reopened_window_is_fed_on_its_way_back_up(two, monkeypatch, qtbot):
     """The property the skip leans on, pinned: every opener refreshes immediately before
-    show(), so no switch that happened while the window was closed is ever missed."""
+    show(), so no switch that happened while the window was closed is ever missed.
+
+    2026-11-11: that still holds for the two curation windows (Event inspector, Event
+    gallery), which are fed on the way back up. The Noise and Event waveforms figures are
+    Explorer pages now (8661d35): reopening raises the SAME saved figure and computes nothing,
+    and "no switch is missed" means the figure that follows the selection kept staging while
+    the Explorer was closed, so its binding names the recording selected last."""
     w, a, b = two
     _open_all(w)
+    owner = w._figure_workspace
+    kpsd = owner.id_for_page(w._psd_window)
+    kep = owner.id_for_page(w._event_plot_window)
+    owner.set_follow_selection(kpsd, True)
+    owner.set_follow_selection(kep, True)
+    psd, events = w._psd_window, w._event_plot_window
     _close_all(w)
     w._on_selection(b, 0)          # switches while everything is closed
     w._on_selection(a, 0)
+    assert owner.binding(kpsd)["source"]["source_key"].endswith("pore_A.dat")
 
     fed = _spies(w, monkeypatch)
     _open_all(w)                   # reopen through the real openers
 
-    assert fed["psd"], "the opener must feed the window it is about to show"
-    assert fed["event_plots"]
-    assert fed["inspector"]
+    assert fed["inspector"], "the opener must feed the window it is about to show"
     assert fed["gallery"]
-    # ...and both analytical pages are installed; only the selected tab is on screen.
-    explorer = w._analysis_explorer
-    assert explorer.page("noise") is w._psd_window
-    assert explorer.page("event_waveforms") is w._event_plot_window
+    # ...the two figures come back as themselves, computing nothing ...
+    assert w._psd_window is psd and w._event_plot_window is events
+    assert len(owner.records()) == 2
+    assert fed["psd"] == [] and fed["event_plots"] == [], (
+        "reopening the Explorer recomputed a saved figure")
+    # ...and no switch was missed while they were closed.
+    assert owner.binding(kpsd)["source"]["source_key"].endswith("pore_A.dat")
+    assert owner.binding(kep)["source"]["source_key"].endswith("pore_A.dat")
+    # Only the selected tab is on screen; the hidden one is still installed.
     assert w._event_plot_window.isVisible() and not w._psd_window.isVisible()
-
-    # Direct tab activation is itself a refresh route, so the hidden page cannot be stale.
-    explorer._tabs.setCurrentWidget(w._psd_window)
+    assert owner.activate(kpsd)
     assert w._psd_window.isVisible() and not w._event_plot_window.isVisible()
-    assert fed["psd"] and fed["psd"][-1] is True
+    assert fed["psd"] == [], "showing a tab is not a refresh"
 
 
 def test_subpop_views_stay_unconditional(two, monkeypatch):

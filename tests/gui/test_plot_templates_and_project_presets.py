@@ -18,6 +18,7 @@ import pytest
 from PySide6 import QtCore, QtWidgets
 
 from nanoscope.analysis import voltage_dep
+from nanoscope.core.figure_quantity_basis import read_quantity_bases
 from nanoscope.core.plot_preset_state import (
     APPEARANCE_PRESETS, DISTRIBUTIONS_TEMPLATES, WINDOW_TEMPLATES, WORKSPACE_KEY,
 )
@@ -116,6 +117,25 @@ def _appearance_history(window) -> tuple[int, int]:
     return window._appearance_widget._history.depth()
 
 
+#: 2026-11-11: a page that presents units (Voltage dependence, Distribution summaries, Noise
+#: spectrum) always carries the witness of the quantity each axis shows (8661d35, quantity
+#: display). It is not look: a template keeps it, because the axis pins it keeps are numbers in
+#: the display unit, and Reset figure keeps it. A preset takes it away.
+WITNESS = "quantity_display"
+
+
+def _look(appearance: dict) -> dict:
+    """An appearance mapping without the witness of the quantity each axis shows."""
+    return {key: value for key, value in appearance.items() if key != WITNESS}
+
+
+def _bases(appearance: dict) -> dict[str, tuple[str, str]]:
+    """The quantity each axis shows according to the witness, as ``{axis: (quantity key,
+    display unit)}``; empty for a page that records none (Comparison figures, Event waveforms)."""
+    return {axis: (basis.quantity.key, basis.quantity.display_unit)
+            for axis, basis in read_quantity_bases(appearance.get(WITNESS)).items()}
+
+
 # ================================================================================================
 # F2: one shared control, in each window's Export section
 # ================================================================================================
@@ -143,8 +163,17 @@ def test_a_template_keeps_settings_and_appearance_never_sources(qtbot, kind):
     assert window._templates.save_template("Mine")
     (payload,) = pt.load_window_templates(kind).values()
     assert payload["format"] == pt.TEMPLATE_FORMAT and payload["window"] == kind
-    assert payload["appearance"] == {"title_size": 17.0, "grid": True}
-    text = json.dumps(payload)
+    saved = payload["appearance"]
+    assert _look(saved) == {"title_size": 17.0, "grid": True}, "the look, and no source's look"
+    witness = window.appearance_state().get(WITNESS)
+    assert saved.get(WITNESS) == witness, "the quantity its pins are numbers of, as drawn"
+    if witness is not None:
+        assert set(witness) == {"version", "axes"} and witness["axes"]
+        assert all(set(axis) == {"coordinate_frame", "extra", "quantity"}
+                   for axis in witness["axes"].values()), "a quantity per axis, never a source"
+    text = json.dumps({**payload, "appearance": _look(saved)})      # (the witness is keyed by view)
+    if witness is not None:      # its values are read too, without the view-keyed axis names
+        text += json.dumps(list(saved[WITNESS]["axes"].values()))
     for word in ("source_keys", "measurements", "start_s", "end_s", "target", "compare",
                  "snapshot", "series", "curves", "points\": [", "density_counts"):
         assert word not in text, f"a template carries {word!r}"
@@ -183,7 +212,11 @@ def test_summaries_recall_is_a_draft_that_waits_for_generate(qtbot, monkeypatch)
     assert config["source_keys"] == sources == ["measurements", "other"], "sources stay"
     assert json.dumps(window._snapshot, default=str) == committed, "no number changed"
     assert window._stale and "Unapplied" in window._status.text()
-    assert window.appearance_state() == {"axis_size": 15.0}
+    state = window.appearance_state()
+    assert _look({key: value for key, value in state.items() if key != "source_appearance"}) == {
+        "axis_size": 15.0}
+    assert not state.get("source_appearance"), "a template never carries a source's look"
+    assert _bases(state)["bottom"] == ("dwell_s", "ms"), "the figure drawn is still the dwell ECDF"
     assert _appearance_history(window)[0] == steps + 1, "the look is one Undo step"
     assert changed, "the project is told the draft changed"
     assert window._templates.selected() == "Box depth"
@@ -380,8 +413,10 @@ def test_an_appearance_only_recall_keeps_the_zoom_and_computes_nothing(
     monkeypatch.setattr(vdep, "_redraw", lambda: pytest.fail("points redrawn"))
     for window, _viewbox, _compute in targets:
         steps = _appearance_history(window)[0]
+        drawn = window.appearance_state().get(WITNESS)
         assert window._templates.recall_template("Same settings")
-        assert window.appearance_state() == {}, "the template's look arrived"
+        assert _look(window.appearance_state()) == {}, "the template's look arrived"
+        assert window.appearance_state().get(WITNESS) == drawn, "and what is drawn is still what it was"
         assert _appearance_history(window)[0] == steps + 1
     qtbot.wait(10)
     assert [_zoom(viewbox()) for _window, viewbox, _compute in targets] == zooms

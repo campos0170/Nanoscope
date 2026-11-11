@@ -180,10 +180,13 @@ def test_no_shortcut_in_the_docked_inspector_shadows_one_of_the_main_window(priv
 def test_a_click_in_the_docked_inspector_takes_the_keyboard(private_settings, qtbot):
     window, insp = _open(qtbot, "dock")
     ids = _ids(window)
-    spins = [s for s in window._analysis_panel.findChildren(QtWidgets.QAbstractSpinBox)
-             if s.isVisible() and s.isEnabled()]
-    assert spins, "a detection parameter to type into"
-    spin = spins[0]
+    # 2026-11-11: the Analysis page opens on Preprocess, which since 8661d35 is the workspace
+    # overview (route buttons and one door, no spin box). Raise Detection and name the field.
+    det = window._analysis_panel.detection_panel
+    det.show_detection_tab()
+    settle()
+    spin = det.k_in
+    assert spin.isVisible() and spin.isEnabled(), "a detection parameter to type into"
     before = spin.text()
     # A focusable button, two no-focus buttons, the selectable readout, and a plain label
     # whose press propagates up to the window.
@@ -223,9 +226,12 @@ def test_clicking_the_inspectors_tab_takes_the_keyboard_from_the_panel_behind_it
     window, insp = _open(qtbot, "dock")
     window.activateWindow()
     window._inspector.raise_()
+    # 2026-11-11: as above, Preprocess holds no spin box since 8661d35; the field is named.
+    det = window._analysis_panel.detection_panel
+    det.show_detection_tab()
     settle()
-    spin = next(s for s in window._analysis_panel.findChildren(QtWidgets.QDoubleSpinBox)
-                if s.isEnabled() and not s.visibleRegion().isEmpty())
+    spin = det.k_in
+    assert spin.isEnabled() and not spin.visibleRegion().isEmpty()
     spin.setFocus(Qt.MouseFocusReason)
     settle()
     before = spin.value()

@@ -2,7 +2,7 @@
 each (docs/CURSOR_ERGONOMICS_DESIGN.md §4).
 
 Driven through a real, shown MainWindow with real mouse events sent to the trace's viewport, so
-pyqtgraph's own scene delivers the drag (the helpers are ``test_trace_rig``'s). Synthetic
+pyqtgraph's own scene delivers the drag (the helpers are ``trace_rig``'s). Synthetic
 recording only: a ``TraceDocument`` whose path does not exist.
 """
 
@@ -26,7 +26,7 @@ from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, Recording
 from nanoscope.gui.main_window import MainWindow
 from nanoscope.gui.trace_view import annotate_cursor
 
-from .test_trace_rig import (  # noqa: F401  (free_mouse is a fixture used by name)
+from .trace_rig import (  # noqa: F401  (free_mouse is a fixture used by name)
     Qt, drag, drag_move, free_mouse, hover, point_at, press, release, send_mouse)
 
 FS = 50_000.0

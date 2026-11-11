@@ -115,3 +115,36 @@ def test_native_dormant_contract_uses_applied_summary_not_pending_metric():
                                         payload, 'distribution_summaries')
     assert current['axes']['bottom']['min'] == 1.
     assert current['quantity_display']['axes']['bottom']['quantity']['key'] == 'dwell_s'
+
+
+def test_a_change_of_log_frame_carries_the_spacing_as_the_number_it_is_and_never_raises():
+    """2026-11-11: this raised ``QuantityError`` ('its owner must handle tick spacing') inside the
+    slot of every redraw that came before the owner -- the Event-count map's Log boxes -- and left
+    the page half drawn. The spacing now crosses as the number it is (no unit factor turns decades
+    into a unit or back), and its owner, the Log box or Axis properties, decides what it means.
+
+    The unit is the same on both sides of every crossing here: no caller changes the unit and the
+    frame together (the legacy basis of a page is always built with the frame of the new one), and
+    a test that did would pin a spacing of 20 s coming out as 20 ms as the contract."""
+    def bases(frame, unit):
+        return {'map.left': AxisDisplayBasis(quantity_for('dwell_s', display_unit=unit), frame)}
+
+    seconds = migrate_appearance_basis({'axes': {'map.left': {'min': 1., 'max': 100., 'tick_major': 20.}}},
+                                       bases('linear', 's'), legacy_axes=bases('linear', 's'))
+    # Linear seconds -> linear milliseconds: on a linear axis a spacing is a length in the unit,
+    # so it takes the unit's factor with the range (the spacing now typed is 20000 ms).
+    typed = migrate_appearance_basis(seconds, bases('linear', 'ms'))
+    assert typed['axes']['map.left'] == {'min': 1000., 'max': 100000., 'tick_major': 20000.}
+    # The same axis on a log scale, in the same unit: the range is a display value and stays, the
+    # spacing stays the number it is.
+    crossed = migrate_appearance_basis(typed, bases('log10', 'ms'))
+    assert crossed['axes']['map.left'] == typed['axes']['map.left']
+    assert read_quantity_bases(crossed['quantity_display'])['map.left'].coordinate_frame == 'log10'
+    back = migrate_appearance_basis(crossed, bases('linear', 'ms'))
+    assert back['axes']['map.left'] == typed['axes']['map.left'], "nothing is lost on the way back"
+    # An Undo history that holds the spacing crosses the same way: the states kept on the other
+    # frame are carried to the log one with their spacing as it is.
+    capsule = HistoryCapsule('nanoscope.appearance-history/1', crossed, past=(typed,), future=(back,))
+    moved = migrate_appearance_history(capsule, bases('log10', 'ms'))
+    for state in (moved.past[0], moved.base, moved.future[0]):
+        assert state['axes']['map.left'] == {'min': 1000., 'max': 100000., 'tick_major': 20000.}

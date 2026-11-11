@@ -49,8 +49,8 @@ from .test_p0_integration import (
 from .test_p0_pins_clear_with_the_words import (
     _axes_of, _depth, _is_automatic, _pin_inside, _press_redo, _stays_pinned)
 from .test_p0_reset_on_quantity_change import (  # noqa: F401  (the fixtures build the pages)
-    _generate, _pick, _said, _section, _type_comparison_words, _type_summary_words,
-    _type_vdep_words, _user_picks, comparison, summaries, vdep)
+    _click_button, _generate, _pick, _said, _section, _type_comparison_words,
+    _type_summary_words, _type_vdep_words, _user_picks, comparison, summaries, vdep)
 from .test_plot_window_routes import (
     _add_title, _edit_double_click, _install_series, _main_window, _press_undo,
     _restored_main_window)
@@ -138,10 +138,12 @@ def test_a_shared_axes_composition_made_after_a_quantity_reset_keeps_the_font_an
 # 2. Distributions: restored, a change that takes the words and the pins, then Undo / Redo / save
 # ================================================================================================
 
-def _pinned_distributions_project(qtbot, tmp_path):
+def _pinned_distributions_project(qtbot, tmp_path, residual_strip=False):
     """A project saved with a Distributions histogram fit styled the way a lab would (a typed
     title, Times New Roman) and BOTH axes pinned in Axis properties, opened in a fresh main
-    window. Returns ``(writer window, opened window, its page, x pin, y pin)``."""
+    window. ``residual_strip`` ticks the Residual strip before the pins, which changes what the
+    file holds (the strip is a second plot, X-linked to the histogram, and its view is saved
+    with the figure's). Returns ``(writer window, opened window, its page, x pin, y pin)``."""
     window, plots = _recordings(qtbot, tmp_path)
     explorer = window._analysis_explorer
     explorer.resize(1280, 880)
@@ -150,7 +152,10 @@ def _pinned_distributions_project(qtbot, tmp_path):
     plots.set_fit("exponential")
     plots.set_title("Dwell, pore A")
     plots.set_font_family(TIMES)
+    if residual_strip:
+        plots._residual_check.setChecked(True)
     QtWidgets.QApplication.processEvents()
+    assert plots._resid_widget.isHidden() != residual_strip, "the strip is shown exactly when ticked"
     plots.activateWindow()
     x_pin = _pin_inside(plots._plot, "bottom")
     y_pin = _pin_inside(plots._plot, "left")
@@ -181,19 +186,24 @@ def _as_drawn(page) -> dict:
             "ranges": config.axes.ranges()}
 
 
+@pytest.mark.parametrize("residual_strip", [False, True], ids=["strip-off", "strip-on"])
 def test_a_restored_distributions_project_undoes_and_redoes_a_change_that_took_the_words_and_the_pins(
-        qapp, qtbot, tmp_path):
+        qapp, qtbot, tmp_path, residual_strip):
     """The history of an opened project starts at the state it was saved in (G6A R1); a pin is
     part of that state (G5). So the first change after opening -- here a new plot type, which
     takes the title and both pinned ranges and says so -- is one step that Undo takes back to
     the saved title, font AND ranges (drawn pinned again), Redo takes again, and a project saved
-    after an Undo holds what is on screen, pins included."""
-    window, again, page, x_pin, y_pin = _pinned_distributions_project(qtbot, tmp_path)
+    after an Undo holds what is on screen, pins included. With the Residual strip ticked or not:
+    the strip's X is linked to the histogram's, and a saved project holds a view for it."""
+    window, again, page, x_pin, y_pin = _pinned_distributions_project(
+        qtbot, tmp_path, residual_strip)
     explorer = again._analysis_explorer
     plot = page._plot
     saved = _as_drawn(page)
     assert saved == {"plot": "Histogram", "title": "Dwell, pore A", "font": TIMES,
                      "ranges": ("X range", "Y range")}
+    assert page._residual_check.isChecked() is residual_strip, "the strip is as it was saved"
+    assert page._resid_widget.isHidden() != residual_strip
     _stays_pinned(plot, "bottom", x_pin)
     _stays_pinned(plot, "left", y_pin)
     assert page._history.depth() == (0, 0) and not page._undo_btn.isEnabled()
@@ -262,6 +272,11 @@ def test_voltage_dependence_a_reopened_project_undoes_a_metric_change_to_the_sav
     window._analysis_explorer.resize(1280, 860)
     QtWidgets.QApplication.processEvents()
     page.activateWindow()
+    # 2026-11-11: a page opened in the project window computes nothing until Update plot (the
+    # figure workflow, 8661d35), so the series is drawn by pressing it, as a person does. The
+    # reopened page below restores the saved series and needs no Update.
+    _click_button(window._analysis_explorer.toolbar().update_button)
+    assert len(page.points()) == 3, "one point per recording: the page computed before anything was typed"
     plot = page.plot_item()
     _add_title(plot, "Capture vs voltage")
     _edit_double_click(plot, plot.getAxis("left").label, "Rate (Hz)")
@@ -599,20 +614,27 @@ def test_the_changelog_carries_each_phase_0_change_once_and_the_inventory_agrees
         "docs/USER_GUIDE.md")
 
 
-def test_every_explorer_page_binds_the_undo_keys_to_the_whole_page_and_the_study_editor_does_not():
+def test_every_explorer_page_and_the_study_editor_bind_the_undo_keys_to_the_whole_page():
     """The CHANGELOG and the guide say the Undo and Redo keys of a plot window answer whatever the
-    page's Section shows, except in the study figure editor, which has no Sections and answers
-    while its Appearance controls are on screen. That is what the pages are built with: seven of
-    the Explorer's eight pages hand their own root to the widget as ``shortcut_parent`` (G6A
-    added the seventh, Comparison figures); the eighth, Distributions, has no widget history (its
-    Configuration Undo is the page's); the study figure editor, which is not an Explorer page,
-    hands nothing. That makes nine ``PlotAppearanceWidget`` calls in all."""
+    page's Section shows. That is what the pages are built with: seven of the Explorer's eight
+    pages hand their own root to the widget as ``shortcut_parent`` (G6A added the seventh,
+    Comparison figures); the eighth, Distributions, has no widget history (its Configuration Undo
+    is the page's).
+
+    2026-11-11: this test was ``..._and_the_study_editor_does_not``, and the study figure editor
+    was the one window that handed nothing. Since 8661d35 it does not build the plain widget at
+    all: it builds ``_StudyAppearanceWidget``, which leaves the history to the whole Study style
+    envelope (``history=False``) and hands the editor window as ``shortcut_parent``, and the window
+    binds the platform's Undo and Redo keys itself, so they answer whatever its inspector tab shows
+    (the guide's shortcut table says so). The key itself is pressed in test_p0_integration."""
     import ast
 
+    def parse(module: str) -> ast.Module:
+        return ast.parse((REPO / "nanoscope" / "gui" / f"{module}.py").read_text(encoding="utf-8"))
+
     def keywords(module: str) -> list[dict]:
-        tree = ast.parse((REPO / "nanoscope" / "gui" / f"{module}.py").read_text(encoding="utf-8"))
         return [{k.arg: ast.unparse(k.value) for k in node.keywords if k.arg}
-                for node in ast.walk(tree)
+                for node in ast.walk(parse(module))
                 if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", ""))
                 == "PlotAppearanceWidget"]
 
@@ -620,7 +642,25 @@ def test_every_explorer_page_binds_the_undo_keys_to_the_whole_page_and_the_study
                    "iv_panel", "psd_panel", "subpop_window", "voltage_dep_panel"):
         built = keywords(module)
         assert len(built) == 1 and built[0].get("shortcut_parent") == "self", (module, built)
-    (study,) = keywords("study_figure_window")
-    assert "shortcut_parent" not in study, study
+
+    assert keywords("study_figure_window") == [], "the study editor builds the widget through its own subclass"
+    study = parse("study_figure_window")
+
+    def the_class(name: str) -> ast.ClassDef:
+        (found,) = [node for node in ast.walk(study)
+                    if isinstance(node, ast.ClassDef) and node.name == name]
+        return found
+
+    def calls(tree: ast.AST, name: str) -> list[ast.Call]:
+        return [node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and ast.unparse(node.func) == name]
+
+    widget = the_class("_StudyAppearanceWidget")
+    assert [ast.unparse(base) for base in widget.bases] == ["PlotAppearanceWidget"]
+    (handed,) = calls(widget, "super().__init__")
+    handed = {k.arg: ast.unparse(k.value) for k in handed.keywords if k.arg}
+    assert handed.get("history") == "False" and handed.get("shortcut_parent") == "owner", handed
+    made = calls(the_class("StudyFigureWindow"), "_StudyAppearanceWidget")
+    assert len(made) == 1 and ast.unparse(made[0].args[0]) == "self", "the window hands itself as the owner"
     (plots,) = keywords("plots_panel")
     assert plots.get("history") == "False", plots

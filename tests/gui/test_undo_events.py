@@ -637,6 +637,55 @@ def test_the_history_module_imports_no_gui():
         assert "gui" not in mod.split("."), f"core/history.py must not import gui: {mod}"
 
 
+# The three recorders MainWindow builds (``self._history``, ``self._measure_history``,
+# ``self._settings_history``): nothing outside it may checkpoint them.
+_RECORDER_ATTRS = ("_history", "_measure_history", "_settings_history")
+
+
+#: Modules named for a history that are NOT the undo stack, imported by gui modules on purpose.
+#: ``figure_history_state`` is the plain-value look history of a figure that has no resident
+#: view. Any other module whose name says "history" is a second recorder until someone has
+#: looked at it and added it here.
+_LOOK_HISTORY = {"figure_history_state"}
+
+
+def _core_then_history(parts: list[str]) -> bool:
+    """``core`` directly followed by ``history`` anywhere in a dotted path: the recorder
+    module, or whatever sits inside it should it become a package."""
+    return any(parts[i:i + 2] == ["core", "history"] for i in range(len(parts) - 1))
+
+
+def _history_offences(src: str) -> list[str]:
+    """Each way ``src`` reaches the undo recorders: an import of ``core.history`` in any
+    spelling (or of anything inside it), a ``from`` import of any other module whose name says
+    "history" and that is not a named look history (:data:`_LOOK_HISTORY`), or a ``checkpoint``
+    / ``checkpoint_all`` call on one of the recorder attributes.
+
+    2026-11-11: 8661d35 added ``core.figure_history_state`` (a plain-value look history for a
+    figure that has no resident view -- it is not the undo stack) and five gui modules import
+    it on purpose, so the rule ``"history" in module`` called each of them a second recorder.
+    That module is a named exemption (:data:`_LOOK_HISTORY`). The rule is not narrowed to
+    ``core.history`` alone, which would let a recorder through under another name (``from
+    .undo_history import X``) or inside a package (``from ..core.history.events import X``)."""
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom):
+            parts = (node.module or "").split(".")
+            if _core_then_history(parts):                    # from ..core.history[.events] import X
+                out.append(f"from {'.' * node.level}{node.module} import ...")
+            elif parts[-1] == "core" and any(a.name == "history" for a in node.names):
+                out.append(f"from {'.' * node.level}{node.module} import history")
+            elif "history" in parts[-1] and parts[-1] not in _LOOK_HISTORY:  # from .undo_history import X
+                out.append(f"from {'.' * node.level}{node.module} import ...")
+        elif isinstance(node, ast.Import):                           # import nanoscope.core.history[.x]
+            out += [f"import {a.name}" for a in node.names if _core_then_history(a.name.split("."))]
+        elif (isinstance(node, ast.Attribute) and node.attr in ("checkpoint", "checkpoint_all")
+              and isinstance(node.value, ast.Attribute)
+              and node.value.attr in _RECORDER_ATTRS):
+            out.append(f"....{node.value.attr}.{node.attr}(...)")
+    return out
+
+
 def test_main_window_is_the_only_gui_module_that_touches_the_history():
     """MainWindow is the sole wirer, for undo exactly as for everything else. It is the
     one object that already receives all four mutation announcements, so nothing else
@@ -647,16 +696,34 @@ def test_main_window_is_the_only_gui_module_that_touches_the_history():
     for path in sorted(gui_dir.glob("*.py")):
         if path.name == "main_window.py":
             continue
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and "history" in (node.module or ""):
-                offenders.append(f"{path.name}: from {node.module} import ...")
-            if isinstance(node, ast.Attribute) and node.attr in (
-                    "checkpoint", "checkpoint_all"):
-                value = node.value
-                if isinstance(value, ast.Attribute) and value.attr == "_history":
-                    offenders.append(f"{path.name}: ...._history.{node.attr}(...)")
+        offenders += [f"{path.name}: {o}" for o in _history_offences(path.read_text())]
     assert offenders == [], offenders
+    # The matcher must see the real thing: MainWindow does what every other module may not.
+    assert _history_offences((gui_dir / "main_window.py").read_text()), (
+        "the matcher finds nothing in MainWindow, which owns the recorders: it can no longer "
+        "see what it guards")
+
+
+def test_the_history_guard_would_actually_catch_a_violation():
+    """A guard nobody has seen fail is a guard nobody has tested. Every spelling of "reach
+    the recorders" is caught; the figure look history and a plain ``checkpoint`` are not."""
+    for src in ("from ..core.history import EventHistory",
+                "from nanoscope.core.history import describe_change",
+                "from ..core import history",
+                "import nanoscope.core.history as h",
+                "from ..core.history.events import EventHistory",         # core.history as a package
+                "import nanoscope.core.history.recorders",
+                "from .undo_history import Recorder",                    # a second recorder module
+                "class P:\n    def f(self):\n        self._window._history.checkpoint('x')\n",
+                "self._measure_history.checkpoint()",
+                "self._settings_history.checkpoint_all()"):
+        assert _history_offences(src), src
+    for src in ("from ..core.figure_history_state import HistoryCapsule",
+                "from .plot_interaction import reset_plot_history",
+                "from ..core.session import Session",
+                "self.checkpoint()",
+                "owner.checkpoint(key)"):
+        assert _history_offences(src) == [], src
 
 
 def test_every_eventset_mutation_announcement_reaches_the_recorder():

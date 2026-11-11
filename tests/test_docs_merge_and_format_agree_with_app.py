@@ -192,12 +192,50 @@ def test_architecture_states_the_project_version_the_app_writes():
 # ---------------------------------------------------------------------------------------------
 # 6. The other controls whose documented behaviour had reversed
 # ---------------------------------------------------------------------------------------------
-def test_docs_do_not_claim_a_fit_draws_itself_on_selection(inventory):
-    """Choosing a family is a proposal now; "Apply fit" is what draws it."""
-    for group in ("Plot ▸ Histogram", "Plot ▸ Scatter", "Voltage dependence ▸ controls row"):
+def _row_label(field) -> str:
+    """The words the app puts beside ``field``: its form row's label (the Plots window), or
+    the QLabel laid out just before it in a one-line strip (Voltage dependence)."""
+    from PySide6 import QtWidgets
+
+    parent = field.parentWidget()
+    while parent is not None:
+        for form in (parent.layout(), *parent.findChildren(QtWidgets.QFormLayout)):
+            if isinstance(form, QtWidgets.QFormLayout) and form.labelForField(field) is not None:
+                return form.labelForField(field).text()
+        parent = parent.parentWidget()
+    strip = field.parentWidget().layout()
+    items = [strip.itemAt(i).widget() for i in range(strip.count())]
+    assert field in items, "the control is in neither a form row nor a one-line strip"
+    labels = [w.text() for w in items[:items.index(field)] if isinstance(w, QtWidgets.QLabel)]
+    assert labels, "the app puts no label beside this control"
+    return labels[-1]
+
+
+def test_docs_do_not_claim_a_fit_draws_itself_on_selection(inventory, qapp, qtbot):
+    """Choosing a family is a proposal now; "Apply fit" is what draws it.
+
+    2026-11-11: 8661d35 renamed the Scatter and Voltage-dependence combos "Fit" -> "Quick fit",
+    to set them apart from the new "Curve fit…" button, and renamed their inventory entries
+    with them (the Histogram combo is still "Fit"). The test looked all three up as "Fit" and
+    found none on two pages. It now reads each combo's label off the live window and looks THAT
+    up, so the next rename fails here until the control reference follows it.
+    """
+    from nanoscope.core.session import Session
+    from nanoscope.gui.plots_panel import PlotsWindow
+    from nanoscope.gui.voltage_dep_panel import VDepWindow
+
+    plots = PlotsWindow(Session())
+    qtbot.addWidget(plots)
+    vdep = VDepWindow(Session())
+    qtbot.addWidget(vdep)
+    for group, combo, button in (
+            ("Plot ▸ Histogram", plots._fit_combo, plots._fit_apply_btn),
+            ("Plot ▸ Scatter", plots._scatter_fit, plots._scatter_fit_apply_btn),
+            ("Voltage dependence ▸ controls row", vdep._fit_combo, vdep._fit_apply_btn)):
+        assert button.text().startswith("Apply fit"), f"{group}: the button is no longer 'Apply fit'"
         _control(inventory, "Apply fit", group)          # the button must be documented at all
-        notes = _control(inventory, "Fit", group)["notes"]
-        assert "Apply fit" in notes, f"{group}: the Fit combo does not mention its Apply button"
+        notes = _control(inventory, _row_label(combo), group)["notes"]
+        assert "Apply fit" in notes, f"{group}: the fit combo does not mention its Apply button"
 
 
 def test_kde_is_documented_as_a_plot_type_beside_the_others(inventory, manual):

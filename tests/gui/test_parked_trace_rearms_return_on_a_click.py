@@ -43,7 +43,7 @@ from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, Recording
 
 from ._inspector_hosting import (  # noqa: F401  (fixtures are used by name)
     FS, N, SPANS, build_window, close_window, private_settings, settle, signal)
-from .test_trace_rig import drag_move, free_mouse, hover, lerp, point_at  # noqa: F401
+from .trace_rig import drag_move, free_mouse, hover, lerp, point_at  # noqa: F401
 
 #: The event every test catches: the widest of the six.
 EVENT = SPANS[2]

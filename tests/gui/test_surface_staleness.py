@@ -154,19 +154,50 @@ def _drawn_tau(pw) -> float | None:
     return float(hit.group(1)) if hit else None
 
 
+def _figure_status(window) -> str:
+    """The front figure's freshness record: empty / current / stale / frozen."""
+    owner = window._figure_workspace
+    return owner.get(owner.current_id()).spec.result.status
+
+
+def _press_update(window, qtbot) -> None:
+    """The user's Update plot: the Explorer toolbar's own button."""
+    window._analysis_explorer.toolbar().update_action.trigger()
+    qtbot.wait(10)
+
+
+def _chip(window) -> str:
+    """The freshness word the user reads in the Explorer's header, once Qt has run what the
+    change queued: the record's status and the status provider are only what it is made from."""
+    QtCore.QCoreApplication.processEvents()
+    return window._analysis_explorer._status_label.text()
+
+
 # ================================================================================================
 # the measured defect
 # ================================================================================================
 
-def test_rejecting_events_moves_the_populations_fit_with_no_refresh_click(detected, qtbot):
+def test_rejecting_events_marks_the_populations_figure_stale_and_update_moves_the_fit(
+        detected, qtbot):
     """THE headline. Reject the long events through the table — the commonest edit in the
-    app — and the drawn n AND the fitted tau must follow, with nothing else clicked.
+    app — and the drawn n AND the fitted tau must follow, with no Refresh click.
 
     Before the fix both were frozen at their pre-curation values and only the window's own
     Refresh button repaired them.
-    """
+
+    2026-11-11: since 8661d35 (plotting redesign) Analysis ▸ Plots is a managed figure, and
+    "follow" means: curation marks the plotted figure STALE at once (so the picture on screen
+    says it is the pre-curation one) and the plain Update plot — not Refresh from recordings —
+    brings n and tau to the curated table. Nothing redraws behind the user's back, and the
+    stale mark is what keeps the old numbers from passing for current ones."""
     window, doc_id, channel = detected
     pw = _open_populations(window, qtbot)
+    owner = window._figure_workspace
+    key = owner.current_id()
+    # ``_open_populations`` configures the page through setters, which draw it without
+    # committing a result: the user's Update is what makes this a plotted figure.
+    _press_update(window, qtbot)
+    assert _figure_status(window) == "current" and _chip(window) == "CURRENT"
 
     n_before = _drawn_n(pw)
     tau_before = _drawn_tau(pw)
@@ -182,40 +213,131 @@ def test_rejecting_events_moves_the_populations_fit_with_no_refresh_click(detect
         window._analysis_panel.set_event_accepted(int(ev), False)
     qtbot.wait(10)
 
+    # The figure on screen is still the pre-curation one, and it says so.
+    assert _figure_status(window) == "stale"
+    assert window._analysis_explorer_status(key, pw) == ("STALE", "stale")
+    assert _chip(window) == "STALE"
+    assert _drawn_n(pw) == n_before
+
+    _press_update(window, qtbot)
     n_after = _drawn_n(pw)
     tau_after = _drawn_tau(pw)
     assert n_after == n_before - 6, (
-        f"the Populations window is still drawing n = {n_after} after six rejections "
+        f"Update plot is still drawing n = {n_after} after six rejections "
         f"(was {n_before}); it is showing the pre-curation figure")
     assert tau_after is not None and tau_after < tau_before, (
         f"tau did not follow the curation: {tau_before} -> {tau_after}. Rejecting the "
         "longest events must shorten the fitted dwell constant")
+    assert _figure_status(window) == "current"
+    assert window._analysis_explorer_status(key, pw) == ("CURRENT", "current")
+    assert _chip(window) == "CURRENT"
 
-    # ...and the window's own Refresh now finds nothing left to repair. That is the whole
-    # claim: the drawn scene already IS the current one.
-    window._refresh_plots()
-    qtbot.wait(5)
+    # ...and a second Update, or Refresh from recordings (the old window's own Refresh),
+    # now finds nothing left to repair. That is the whole claim: the drawn scene already IS
+    # the current one.
+    _press_update(window, qtbot)
+    assert _drawn_n(pw) == n_after
+    assert _drawn_tau(pw) == pytest.approx(tau_after, rel=1e-12)
+    window._analysis_explorer.refresh_current()
+    qtbot.wait(10)
     assert _drawn_n(pw) == n_after
     assert _drawn_tau(pw) == pytest.approx(tau_after, rel=1e-12)
 
 
-def test_the_event_plots_window_follows_curation_too(detected, qtbot):
-    """The density / ensemble window is explicitly accepted-only and rode the same blind
-    refresher. Affected set = {Populations, Event Plots}."""
+def _spy_on_set_source(epw) -> list[int]:
+    """Record the row count of every table handed to the Event waveforms page."""
+    seen: list[int] = []
+    real = epw.set_source
+    epw.set_source = lambda d, c, es, *args, _r=real, _s=seen, **kw: (   # noqa: E731
+        _s.append(0 if es is None else len(es.df)), _r(d, c, es, *args, **kw))[1]
+    return seen
+
+
+def test_curation_marks_the_event_waveforms_figure_stale_and_a_follower_updates_to_it(
+        detected, qtbot):
+    """The density / ensemble figure is explicitly accepted-only and rode the same blind
+    refresher. Affected set = {Populations, Event Plots}.
+
+    2026-11-11: since 8661d35 (plotting redesign) Analysis ▸ Event waveforms opens a managed
+    figure. One accept/reject no longer feeds it a table (the old per-click ``set_source`` is
+    gone on purpose): it marks the figure STALE and leaves the drawn result alone until
+    Update plot. The figure that tracks the live detection (Follow selection on) is the one
+    whose Update then draws the curated table."""
     window, doc_id, channel = detected
     window._act_event_plots.trigger()
     epw = window._event_plot_window
     assert epw is not None
-
-    seen: list[int] = []
-    real = epw.set_source
-    epw.set_source = lambda d, c, es, _r=real, _s=seen: (      # noqa: E731
-        _s.append(0 if es is None else len(es.df)), _r(d, c, es))
-
+    owner = window._figure_workspace
+    key = owner.current_id()
+    assert owner.set_follow_selection(key, True)
+    _press_update(window, qtbot)
     df = window._analysis_panel.current_detection().payload.df
+    accepted = int(df["accepted"].sum())
+    assert _figure_status(window) == "current" and _chip(window) == "CURRENT"
+    assert int(epw.density_counts().sum()) == accepted
+
+    seen = _spy_on_set_source(epw)
     window._analysis_panel.set_event_accepted(int(df["event_id"].iloc[0]), False)
     qtbot.wait(10)
-    assert seen, "a single accept/reject never reached the Event Plots window"
+    assert _figure_status(window) == "stale", (
+        "a single accept/reject never reached the Event waveforms figure")
+    assert window._analysis_explorer_status(key, epw) == ("STALE", "stale")
+    assert _chip(window) == "STALE"
+    assert seen == [], "curation recomputed the figure behind the user's back"
+    assert int(epw.density_counts().sum()) == accepted      # the drawn result is untouched
+
+    _press_update(window, qtbot)
+    assert _figure_status(window) == "current" and _chip(window) == "CURRENT"
+    assert int(epw.density_counts().sum()) == accepted - 1, (
+        "Update plot did not draw the curated table")
+
+
+# 2026-11-11, reported to the owner as a DEFECT (not a neutral question): the test below pins what
+# the app does today, and what it does is wrong. The Event waveforms figure the Analysis menu
+# opens (Follow selection off) refuses Update plot after ANY accept, reject or flag, and so does
+# Refresh from recordings, with a sentence that names no way out; the way out (tick Follow
+# selection, Update, untick) must be repeated after every further curation, and a follower
+# retargets when another recording is selected, so a figure cannot stay on recording A while A is
+# curated. Subpopulations carries a curation-independent stamp for exactly this
+# (``MainWindow._subpop_result_recipe``); Event waveforms was left out. Do not read this test as
+# the rule: when the owner decides, flip it to "Update takes the curated table, and a
+# re-detection is still refused".
+def test_a_pinned_event_waveforms_figure_keeps_its_result_when_curation_changes_its_table(
+        detected, qtbot):
+    """What the DEFAULT Event waveforms figure (Follow selection off) does today when an
+    event is accepted or rejected: it is pinned to the exact event table it was made from,
+    so curation marks it STALE and Update plot is refused — the figure keeps the result it
+    shows, nothing is recomputed, and the status bar names the reason.
+
+    2026-11-11: pinned as the app's current behaviour, not endorsed. OWNER QUESTION: should
+    a pin survive curation, as the Subpopulations figure's does (its binding carries a
+    curation-independent detection stamp, ``_subpop_result_recipe``)? Today the way to get
+    the curated table back is Follow selection (previous test) or a new figure."""
+    window, doc_id, channel = detected
+    window._act_event_plots.trigger()
+    epw = window._event_plot_window
+    owner = window._figure_workspace
+    key = owner.current_id()
+    assert not owner.binding(key)["follow"]
+    _press_update(window, qtbot)
+    df = window._analysis_panel.current_detection().payload.df
+    accepted = int(df["accepted"].sum())
+    assert _figure_status(window) == "current" and _chip(window) == "CURRENT"
+    assert int(epw.density_counts().sum()) == accepted
+
+    seen = _spy_on_set_source(epw)
+    window._analysis_panel.set_event_accepted(int(df["event_id"].iloc[0]), False)
+    qtbot.wait(10)
+    assert _figure_status(window) == "stale"
+    assert window._analysis_explorer_status(key, epw) == ("STALE", "stale")
+    assert _chip(window) == "STALE"
+    assert seen == [], "curation recomputed the figure behind the user's back"
+
+    _press_update(window, qtbot)
+    assert _figure_status(window) == "stale" and _chip(window) == "STALE"
+    assert int(epw.density_counts().sum()) == accepted      # the saved result is retained
+    assert "no longer has the same event-table content" in window.statusBar().currentMessage()
+    assert seen == []
 
 
 def test_a_mask_edit_and_a_batch_curation_and_a_label_all_reach_the_refresher(detected, qtbot):

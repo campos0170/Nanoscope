@@ -724,7 +724,13 @@ def test_iv_sees_every_open_recording(win, qtbot, tmp_path):
     assert _shown(win) == {ids[-1]}
     win._open_iv()
     qtbot.addWidget(win._iv_window)
+    # 2026-11-11: since 8661d35 (plotting redesign) the I-V figure opens as an empty draft and
+    # gathers when the user presses Update plot; what it gathers is still EVERY open recording,
+    # not just the shown one.
+    assert win._iv_window.points() == []
+    win._analysis_explorer.toolbar().update_action.trigger()
     assert len(win._iv_window.points()) == len(ids)
+    assert {point.doc_id for point in win._iv_window.points()} == set(ids)
 
 
 def test_the_noise_spectrum_window_sees_every_open_recording(win, qtbot, tmp_path):

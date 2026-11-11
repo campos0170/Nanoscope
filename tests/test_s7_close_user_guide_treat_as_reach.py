@@ -14,14 +14,18 @@ Calibration-panel combo and a real *Apply*, on a synthetic recording whose heade
 channel 0 VOLTAGE and channel 1 nothing (sidecar lands under ``tmp_path``): treating channel 1
 as *current* moves every surface the bullet credits — Detect False->True, Analysis ▸ Run
 detection False->True, Batch detect False->True, Noise spectrum False->True, I-V False->True,
-the "Measure this recording" gate False->True ("Detection runs on CURRENT channels; this is a
+the "Estimate window settings" gate False->True ("Detection runs on CURRENT channels; this is a
 unknown channel." -> runnable), the status-bar chip "No current channel" -> "✓ Gain set: ×1 →
 pA", and the workflow strip's DETECT stage locked -> available.
 
 Note for anyone re-measuring: ``BaselinePanel`` never calls ``setEnabled(False)`` (a disabled
 button cannot answer "why not?"), so ``probe_button.isEnabled()`` is True on both sides and is
 NOT the gate — read ``BaselinePanel._gate_ok``. Reading the button instead is how a first pass
-here concluded, wrongly, that the guide over-credited "Measure this recording".
+here concluded, wrongly, that the guide over-credited "Estimate window settings".
+
+2026-11-11: that button was called "Measure this recording" until 8661d35 renamed it (and the
+guide's clause with it). The name is now read off the live button, never copied, as ``_NOISE``
+is below.
 """
 from __future__ import annotations
 
@@ -133,7 +137,8 @@ def _surfaces(window) -> dict[str, object]:
         "I-V": window._act_iv.isEnabled(),
         # NOT probe_button.isEnabled(): the baseline panel gates by styling, never by
         # setEnabled(False), so the button is enabled on both sides. This is the gate.
-        "Measure this recording": panel._baseline._gate_ok,
+        # Keyed by the button's own label, which only changes while a probe is running.
+        panel._baseline.probe_button.text(): panel._baseline._gate_ok,
         "calibration chip": window._calibration_chip._label.text(),
         "workflow strip": window._workflow_status.stage(Stage.DETECT).available,
     }
@@ -163,11 +168,12 @@ def moved(window, qtbot, tmp_path) -> list[str]:
     return [k for k in before if before[k] != after[k]]
 
 
-def test_the_override_moves_every_surface_the_bullet_credits_it_with(moved):
+def test_the_override_moves_every_surface_the_bullet_credits_it_with(moved, window):
     """The premise the guide's sentence rests on, measured first: one *Apply* on the combo
     turns the whole analysis on for a channel the file declared nothing about."""
+    probe = window._analysis_panel._baseline.probe_button.text()   # "Estimate window settings"
     assert set(moved) == {"Detect", "Run detection", "Batch detect", _NOISE, "I-V",
-                          "Measure this recording", "calibration chip", "workflow strip"}, moved
+                          probe, "calibration chip", "workflow strip"}, moved
 
 
 def test_the_clause_that_ends_at_apply_commits_it_names_what_apply_commits(

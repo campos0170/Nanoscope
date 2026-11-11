@@ -14,6 +14,11 @@ from nanoscope.gui.main_window import MainWindow
 from nanoscope.gui.plot_export import write_live_plot_image
 from .test_s7_plots_rejected_fit_on_figure import rejected  # noqa: F401
 
+#: What Details says of a fit the KS test rejected, and what no figure may carry. 2026-11-11: this
+#: read "KS REJECTED" until 8661d35 made the verdict descriptive (the threshold describes the
+#: mismatch, it is not a decision), as ``test_s7_plots_rejected_fit_on_figure`` already says.
+TAG = "CDF mismatch (descriptive)"
+
 
 def test_warning_free_capture_export_and_bundle_retain_fit_and_details(
         rejected, qtbot, monkeypatch, tmp_path):
@@ -34,7 +39,8 @@ def test_warning_free_capture_export_and_bundle_retain_fit_and_details(
                            *window._resid.listDataItems())]
     ranges = np.asarray(window._plot.viewRange()).copy()
     details = window.details_text()
-    assert "KS REJECTED" in details
+    assert TAG in details
+    assert "CDF mismatch" not in window._fit_label_item.text
     assert "REJECTED" not in window._fit_label_item.text
 
     def forbid(*args, **kwargs):
@@ -43,12 +49,13 @@ def test_warning_free_capture_export_and_bundle_retain_fit_and_details(
         monkeypatch.setattr(window, name, forbid)
     owner = SimpleNamespace(
         _session=window._session,
+        _figure_workspace=None,  # the legacy page adapter: this page is not in a project's workspace
         _figure_page=lambda _page_id: (PLOTS_ARTIFACT_ID, window),
         _workspace_kwarg=MainWindow._workspace_kwarg,
         _analysis_explorer_status=lambda *_args: ("CURRENT", "current"))
     _, snapshot, *_ = MainWindow._capture_figure(owner, "plots", include_residual=True)
     assert snapshot.includes_residual
-    assert "KS REJECTED" not in snapshot.svg_bytes.decode()
+    assert TAG not in snapshot.svg_bytes.decode()
     assert "Apo-ferritin dwell times" in snapshot.svg_bytes.decode()
     assert snapshot.provenance()["details"] == details
     pd.testing.assert_frame_equal(snapshot.dataframe(), frame, check_exact=True)
@@ -59,7 +66,7 @@ def test_warning_free_capture_export_and_bundle_retain_fit_and_details(
     bundle = tmp_path / "clean-fit.zip"
     write_figure_bundle(bundle, snapshot)
     with zipfile.ZipFile(bundle) as archive:
-        assert "KS REJECTED" not in archive.read("figure.svg").decode()
+        assert TAG not in archive.read("figure.svg").decode()
         assert json.loads(archive.read("provenance.json"))["details"] == details
     assert window._last_fit is fit
     assert fit.params == params and fit.meta == meta
@@ -77,4 +84,4 @@ def test_warning_free_capture_export_and_bundle_retain_fit_and_details(
 def test_authored_warning_word_is_not_removed(rejected):
     rejected.set_title("Warning threshold comparison")
     assert rejected._plot.titleLabel.text == "Warning threshold comparison"
-    assert "KS REJECTED" in rejected.details_text()
+    assert TAG in rejected.details_text()

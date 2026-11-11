@@ -51,7 +51,10 @@ def migrate_appearance_basis(appearance, axes, *, legacy_axes=None, legacy_view_
     ``axes`` and ``legacy_axes`` use the actual native pin keys: primary bare sides or
     namespaced view.side. Every unmarked pin to be migrated requires explicit legacy
     evidence. Other views/unknown fields are carried unchanged. Log tick spacing is in
-    decades and therefore never receives a linear unit factor.
+    decades and therefore never receives a linear unit factor, and a spacing carried across a
+    change of log frame stays the number it is (no factor turns decades into a unit or back):
+    what it means on the new axis is for its owner to say, the Log box that takes it with the
+    range or Axis properties that drops the one it opened with.
     """
     raw = thaw_json(FrozenMap(appearance or {}))
     desired = {str(key): _basis(value) for key, value in axes.items()}
@@ -68,15 +71,14 @@ def migrate_appearance_basis(appearance, axes, *, legacy_axes=None, legacy_view_
         if pin:
             if not isinstance(pin, Mapping):
                 raise QuantityError(f'Axis pin {key} must be an object')
-            if old.coordinate_frame != new.coordinate_frame and pin.get('tick_major') is not None:
-                raise QuantityError(f'Axis {key} changed log frame; its owner must handle tick spacing')
+            crossed = old.coordinate_frame != new.coordinate_frame
             if key not in previous and key in legacy_view_pins:
                 pin = dict(pin)
                 for field in ('min', 'max'):
                     if pin.get(field) is not None:
                         pin[field] = view_to_display(pin[field], old)
             field_bases = {field: ('display' if field in ('min', 'max') or
-                (field == 'tick_major' and old.coordinate_frame != 'log10') else 'data')
+                (field == 'tick_major' and old.coordinate_frame != 'log10' and not crossed) else 'data')
                 for field in pin}
             pins[key] = convert_pin(pin, old.quantity, new.quantity, value_unit_basis=field_bases)
     if 'axes' in raw or pins:

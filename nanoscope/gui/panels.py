@@ -3805,11 +3805,17 @@ class DetectionPanel(QWidget):
             note.setStyleSheet("color:#8b9199;")
             layout.addWidget(note)
             layout.addStretch(1)
-            self._preprocess_page.layout().addWidget(self._preprocess_overview, 1)
+            # Scrolled, never bare: a bare overview floors the whole Inspector (its button
+            # alone is ~195 px wide) -- INVARIANT in MainWindow._build_docks.
+            self.preprocess_overview_scroll = InspectorScrollArea(self._preprocess_overview)
+            # The page keeps the tab pane's colour, as released: the scroll area paints nothing.
+            self._preprocess_overview.setAutoFillBackground(False)
+            self.preprocess_overview_scroll.viewport().setAutoFillBackground(False)
+            self._preprocess_page.layout().addWidget(self.preprocess_overview_scroll, 1)
         self._preprocess_workspace_hosted = bool(hosted)
         for widget in self._preprocess_legacy_widgets:
             widget.setVisible(not hosted)
-        self._preprocess_overview.setVisible(hosted)
+        self.preprocess_overview_scroll.setVisible(hosted)
         self._refresh_preprocess_summary()
 
     def current_preprocess_section(self) -> str:

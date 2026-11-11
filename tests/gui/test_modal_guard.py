@@ -60,6 +60,10 @@ _PROBE = r'''
 import os, sys, time
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 root = sys.argv[1]
+# 2026-11-11: this script lives in tmp_path and runs from there, so nothing put the tree under
+# test on its import path and it imported whichever nanoscope is INSTALLED -- the owner's
+# checkout, which is the same folder only when the suite runs from it. Name the tree first.
+sys.path.insert(0, root)
 
 import nanoscope
 print("NANOSCOPE_FROM", os.path.dirname(os.path.abspath(nanoscope.__file__)), flush=True)

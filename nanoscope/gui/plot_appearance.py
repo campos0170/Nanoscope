@@ -609,10 +609,15 @@ def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
     that, not a reset. Several fields that only took typed words and pinned ranges back to
     automatic are named by them (what a change of quantity records), several that land
     exactly on a shipped preset are that preset, several that land on no override at all are a
-    reset, and any other several are counted.
+    reset, and any other several are counted. ``quantity_display`` is the renderer's record of
+    which quantity each axis draws, not a gesture: a step that moved it with something else is
+    named by the something else, and a Reset figure (which keeps it) still lands on no override.
     """
     moved = [f.name for f in fields(PlotAppearance)
              if getattr(before, f.name) != getattr(after, f.name)]
+    if "quantity_display" in moved and moved != ["quantity_display"]:
+        moved.remove("quantity_display")
+        after = replace(after, quantity_display=before.quantity_display)
     if moved == ["style_binding"]:
         binding = after.style_binding
         if not binding:
@@ -657,7 +662,7 @@ def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
         # A preset keeps the figure's wording, so the step lands on the preset's LOOK.
         if after.style_only() == preset and before.style_only() != preset:
             return f"{name} preset"
-    if not after.to_dict():
+    if not replace(after, quantity_display=None).to_dict():
         return "reset figure"
     return f"{len(moved)} appearance changes"
 
@@ -1911,16 +1916,19 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
     ranges = [list(axis) for axis in view.viewRange()]
     auto = list(view.autoRangeEnabled())
     view.disableAutoRange()
-    elements = dict(state.text or ())
+    explicit = dict(state.text or ())
+    elements = explicit
     if state.style_binding:
         keys = {"title", *(f"axis.{side}.{role}" for side in AXIS_SIDES for role in ("label", "ticks"))}
         legend = getattr(plot, "legend", None)
         if legend is not None:
             keys.update(f"legend.entry.{plain_text(getattr(label, '_nanoscope_auto_text', label.text))}"[:213]
                         for _sample, label in legend.items)
-        elements = {key: state.effective_text_style(key) for key in keys | elements.keys()}
-    # Read by figure_composition: a style its model cannot replay makes a frozen panel.
-    plot._nanoscope_text_elements = elements
+        elements = {key: state.effective_text_style(key) for key in keys | explicit.keys()}
+    # Read by figure_composition: a style its model cannot replay makes a frozen panel. That is
+    # what the author set per element. The roles a bound figure style fills in are nobody's
+    # choice and are in ``elements`` only for drawing: the model replays them from what is drawn.
+    plot._nanoscope_text_elements = explicit
     try:
         foreground = {"light": "#20242b", "dark": "#e6e9ef"}.get(state.background)
         apply_plot_frame(plot, state.frame, foreground=foreground)

@@ -173,7 +173,12 @@ def test_heatmap_has_precise_visible_label_and_legacy_workspace_key(qtbot, tmp_p
     assert window._tabs.currentIndex() == 0
     window.set_view(DENSITY_LABEL)
     assert window.current_view() == "Density"
-    assert "count" in window._colorbar.getAxis("left").labelText.lower()
+    # 2026-11-11: the colour bar lies under the map since 8661d35 (horizontal), so its label is
+    # drawn on the bar's bottom axis, which the page's own lookup names; the left axis has none.
+    bar = window._colorbar
+    axis = window._density_labels()["colorbar.label"][0]
+    assert bar.horizontal and axis is bar.getAxis("bottom")
+    assert axis.labelText == "Event count" and axis.label.isVisible() and axis.isVisible()
 
 
 def test_subpopulation_colours_and_caveats_survive_shared_preset(qtbot, report):

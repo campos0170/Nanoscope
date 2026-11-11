@@ -122,13 +122,14 @@ def _polarity(window: MainWindow) -> str:
 
 
 def _t_start_header(window: MainWindow) -> str:
-    """The event table's ``t_start_s`` header AS DISPLAYED — where the clock note lives."""
+    """The event table's ``t_start_s`` header AS DISPLAYED — where the clock note lives.
+
+    2026-11-11: the headers are friendly labels since 8661d35 (plotting redesign, Phase 4:
+    times in ms), e.g. "Start time (ms) (t₀=0)", so the column is found by its key and no
+    longer by the header text starting with it."""
     model = window._analysis_panel._table._model
-    for section in range(model.columnCount()):
-        text = str(model.headerData(section, Qt.Horizontal, Qt.DisplayRole) or "")
-        if text.startswith("t_start_s"):
-            return text
-    raise AssertionError("the event table has no t_start_s column")
+    section = model._columns.index("t_start_s")
+    return str(model.headerData(section, Qt.Horizontal, Qt.DisplayRole) or "")
 
 
 @pytest.fixture

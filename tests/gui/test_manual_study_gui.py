@@ -1,4 +1,5 @@
 """Independent manual-stage controls, truthful drafts and owned worker lifetimes."""
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 import threading
@@ -7,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from PySide6 import QtGui
+from pytestqt.exceptions import TimeoutError as SignalTimeout
 
 from nanoscope.analysis import incubation_study
 from nanoscope.analysis import manual_workspace as checkpoint
@@ -14,6 +16,7 @@ from nanoscope.analysis import manual_detection as detection
 from nanoscope.analysis.cancel import check_cancelled
 from nanoscope.analysis.incubation_detection import RecordingAnalysis
 from nanoscope.analysis.manual_preparation import RawPreparedRecording
+from nanoscope.analysis.ml_preprocess import MLPreprocessConfig
 from nanoscope.gui import manual_study_window as gui
 from nanoscope.gui.worker_thread import drain_detached
 
@@ -28,8 +31,13 @@ def window(qtbot):
 
 def complete(qtbot,window,action):
     previous=len(window.test_failures)
-    with qtbot.waitSignal(window.operationFinished,timeout=5000):
-        assert action()
+    try:
+        with qtbot.waitSignal(window.operationFinished,timeout=5000):
+            assert action()
+    except SignalTimeout:
+        # A failed operation never finishes: say what the window reported, not only that 5 s passed.
+        assert window.test_failures[previous:]==[]
+        raise
     qtbot.waitUntil(lambda:not window.is_busy(),timeout=3000)
     assert window.test_failures[previous:]==[]
 
@@ -109,6 +117,52 @@ def test_drafts_survive_selection_save_and_reopen(window,tmp_path,monkeypatch,qt
     window._selector.setCurrentIndex(1)
     assert window._measure_form.controls['min_depth_sigma'].value()==7
     assert window.state['records'][0]['preparation_settings']['masked_base_s']!=.321
+
+
+def test_stamped_preparation_settings_pass_workspace_validation_and_stay_untouched(window,tmp_path,monkeypatch,qtbot):
+    # 2026-11-11 (commit 8661d35): MLPreprocessConfig.to_dict() stamps its baseline policies into the
+    # preparation settings every recording stores, and the open-time validator rebuilt them with the
+    # constructor, which takes no stamp -- so no workspace that held a recording could be opened again.
+    add_sources(window,tmp_path,monkeypatch,qtbot)
+    stamped=deepcopy(window.state['records'][0]['preparation_settings'])
+    masked=MLPreprocessConfig(notch_enabled=False,notch_freqs=(),baseline_method='masked_median',
+                              baseline_decim=10,normalize=False).to_dict()
+    assert 'baseline_sample_count_policy' in stamped and 'baseline_mask_noise_policy' in masked
+    def validate(preparation):
+        state=deepcopy(window.state);state['records'][0]['preparation_settings']=deepcopy(preparation)
+        saved=gui._validated_workspace_state(state)['records'][0]['preparation_settings']
+        assert state['records'][0]['preparation_settings']==preparation   # checked, never rewritten
+        return saved
+    unstamped={k:v for k,v in stamped.items() if not k.endswith('_policy')}   # what builds before 8661d35 wrote
+    no_notch_freqs={k:v for k,v in stamped.items() if k!='notch_freqs'}   # left out: the constructor's default, no refusal
+    for accepted in (stamped,masked,unstamped,no_notch_freqs):
+        assert validate(accepted)==accepted
+    # Every refusal is a ValueError that says what is wrong. An unknown setting is NAMED, and so is a notch_freqs
+    # that is no list of numbers: from_dict turns it into floats before it can word a failure, so None reached the
+    # window as "TypeError: 'NoneType' object is not iterable" and ['abc'] as "ValueError: could not convert
+    # string to float: 'abc'", each without the setting's name.
+    notch_said='Invalid saved preparation settings: notch_freqs must be a list of numbers.'
+    for refused,said in (({**stamped,'baseline_sample_count_policy':'future-v9'},'future-v9'),
+                         ({**masked,'baseline_mask_noise_policy':'future-v9'},'future-v9'),
+                         ({**stamped,'not_a_setting':1},'unknown setting(s) not_a_setting'),
+                         ({**stamped,'notch_q':-1},'notch_q'),
+                         # the mask-noise stamp is saved with masked_median alone: on another method it is not a setting
+                         ({**stamped,'baseline_mask_noise_policy':'global-mad-v1'},'unknown setting(s) baseline_mask_noise_policy'),
+                         ({**stamped,'notch_freqs':None},notch_said),
+                         ({**stamped,'notch_freqs':['abc']},notch_said),
+                         (None,'Invalid saved preparation settings')):
+        with pytest.raises(ValueError) as caught:validate(refused)
+        assert said in str(caught.value),(refused,str(caught.value))
+
+
+def test_a_bare_typeerror_out_of_the_preparation_reader_is_still_said_as_a_refusal(window,tmp_path,monkeypatch,qtbot):
+    # The validator words notch_freqs itself; this is the net under that check, for any other TypeError that
+    # leaves MLPreprocessConfig.from_dict: it is raised again as the ValueError the check promises.
+    add_sources(window,tmp_path,monkeypatch,qtbot)
+    def unreadable(cls,data): raise TypeError('cannot read these settings')
+    monkeypatch.setattr(MLPreprocessConfig,'from_dict',classmethod(unreadable))
+    with pytest.raises(ValueError,match=r'^Invalid saved preparation settings: cannot read these settings\.$'):
+        gui._validated_workspace_state(deepcopy(window.state))
 
 
 def test_pending_source_and_upstream_inference_cannot_run_downstream(window,tmp_path,monkeypatch,qtbot):
@@ -223,9 +277,15 @@ def test_renderers_receive_committed_custom_settings_and_refuse_changed_drafts(w
 def test_paired_event_export_rolls_back_on_second_output_failure(tmp_path,monkeypatch,failure_stage):
     output=tmp_path/'export';output.mkdir();frame=catalog('sample')
     if failure_stage=='second_write':
+        # 2026-11-11 (commit 8661d35): tables are written through write_staged, so to_csv gets a
+        # hidden temporary beside the target ('.sample_accepted.csv.saving-<pid>-<hex>.csv'), never
+        # the '..._accepted.csv' name. The fake finds the table by name inside that, and fails
+        # after the bytes exist (a write that dies half way), which the folder must not keep.
         real=pd.DataFrame.to_csv
         def fail(self,path,*args,**kwargs):
-            if Path(path).name.endswith('_accepted.csv'):raise OSError('simulated second output write failure')
+            if '_accepted.csv' in Path(path).name:
+                real(self,path,*args,**kwargs)
+                raise OSError('simulated second output write failure')
             return real(self,path,*args,**kwargs)
         monkeypatch.setattr(pd.DataFrame,'to_csv',fail)
     else:

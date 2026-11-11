@@ -2,7 +2,7 @@
 
 The former whole-column scroll was replaced by page-owned scroll areas and pinned
 commands. Test the same visible/clickable guarantees in that current hierarchy,
-including the real Signal Conditioning door and the smallest supported window.
+including the real Preprocess workspace door and the smallest supported window.
 """
 import pytest
 from PySide6 import QtCore, QtWidgets
@@ -103,8 +103,10 @@ def test_response_design_has_a_visible_door_and_opens_the_actual_plot(make_windo
     window = make_window(size)
     show_page(window, 'Preprocess')
     detection = window._analysis_panel.detection_panel
-    button = detection.open_conditioning_button
-    assert 'Signal Conditioning' in button.text()
+    # 2026-11-11: the Preprocess page is the workspace overview now (8661d35); its door is
+    # preprocess_open_button. The old open_conditioning_button is a hidden legacy widget.
+    button = detection.preprocess_open_button
+    assert button.text() == 'Open Preprocess workspace…'
     assert_whole(button, detection._preprocess_page)
     before = detection.params()
     button.click()
@@ -112,8 +114,10 @@ def test_response_design_has_a_visible_door_and_opens_the_actual_plot(make_windo
     workspace = window._signal_conditioning
     assert workspace is not None and workspace.isVisible()
     workspace.preview_tabs.setCurrentIndex(2)
+    assert workspace.preview_tabs.tabText(2) == 'Response'
     settle(workspace)
     assert_whole(detection.response_plot)
+    assert detection.response_plot.window() is workspace
     assert detection.params() == before
 
 
@@ -129,18 +133,24 @@ def test_noise_controls_and_policy_text_do_not_floor_the_inspector(make_window):
         assert_whole(detection.detect_button)
 
 
-def test_the_gate_banner_does_not_move_the_pinned_preprocess_actions(make_window):
+def test_the_gate_banner_does_not_move_the_preprocess_route_buttons_or_the_door(make_window):
     window = make_window()
     show_page(window, 'Preprocess')
     detection = window._analysis_panel.detection_panel
-    names = ('preprocess_section_selector', 'open_conditioning_button', 'filter_preview')
+    # 2026-11-11: renamed from "..._the_pinned_preprocess_actions". The Preprocess page's
+    # actions are the three route buttons and the door (8661d35); the section combo, the old
+    # door and the filter preview, which were pinned, are hidden legacy widgets or live in the
+    # workspace window now. These four sit in the scrolled overview, not in a pinned strip.
+    widgets = [*detection.preprocess_route_buttons.values(), detection.preprocess_open_button]
     geometries = []
     for runnable, reason in ((False, _LONG_REASON), (True, ''), (False, _SHORT_REASON)):
         detection.set_runnable(runnable, reason)
         settle(window)
-        geometries.append([rectangle(getattr(detection, n), window) for n in names])
-        for name in names:
-            assert_whole(getattr(detection, name))
+        if not runnable:
+            assert detection._gate_label.isVisible(), 'the banner must be up while the actions are compared'
+        geometries.append([rectangle(w, window) for w in widgets])
+        for w in widgets:
+            assert_whole(w, detection._preprocess_page)
     assert geometries[0] == geometries[1] == geometries[2]
 
 

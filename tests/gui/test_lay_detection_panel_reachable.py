@@ -4,10 +4,11 @@ The old fixture assumed one ancestor scroll containing DetectionPanel and Stats.
 That topology was retired: parameters now scroll per page, commands are pinned,
 Stats/Fits live in Results and the protocol editor lives in Signal Conditioning.
 These checks retain full-rectangle geometry and actual Qt visibility assertions
-at narrow widths instead of accepting a hidden or clipped control.
+at narrow widths instead of accepting a hidden or clipped control. One test pins the look the
+Preprocess overview's scroll area has to leave alone (it paints nothing of its own).
 """
 import pytest
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from nanoscope.gui.panels import _ElidingCheckBox
 from .inspector_layout_rig import build, settle, show_page, rectangle, assert_whole, reveal, close_window
 
@@ -40,11 +41,70 @@ def test_current_parameter_pages_have_no_horizontal_scrollbar(window, width, pag
     assert area.widget().minimumSizeHint().width() <= area.viewport().width()
 
 
+@pytest.mark.parametrize('width', [320, 460, 560])
+def test_the_preprocess_overview_scrolls_in_a_viewport_that_floors_nothing(window, width):
+    """2026-11-11: the hosted Preprocess page is the workspace overview (8661d35). It sits in a
+    bounded scroll area like every other page: its door (about 195 px wide) must not floor the
+    Inspector, and at the usual widths the page needs no horizontal scroll. show_page hands back
+    this same scroller for the hosted page, so the test above measures it too (it used to
+    measure the hidden legacy one); what only this test says is that the area imposes no width
+    floor of its own and holds the door, whole."""
+    window.resizeDocks([window._inspector], [width], QtCore.Qt.Horizontal)
+    detection = window._analysis_panel.detection_panel
+    area = show_page(window, 'Preprocess')
+    assert area is detection.preprocess_overview_scroll, (
+        'the rig must hand back the scroller on screen')
+    assert area.isVisible() and area.viewport().width() > 0
+    assert area.isAncestorOf(detection.preprocess_open_button)
+    assert area.minimumSizeHint().width() == 0, 'the viewport may not impose a width floor'
+    assert area.horizontalScrollBar().maximum() == 0
+    assert not area.horizontalScrollBar().isVisible()
+    assert area.widget().minimumSizeHint().width() <= area.viewport().width()
+    assert_whole(detection.preprocess_open_button, area.viewport())
+
+
+def test_the_preprocess_overview_keeps_the_tab_panes_colour(window, qapp):
+    """The scroll area around the overview paints nothing, so the page looks as released.
+
+    QScrollArea.setWidget turns the overview's autofill on and its viewport fills with the
+    window colour, so a bare wrap repaints the whole page. In the app's theme that was the
+    window's near-black (#16181c) in place of the tab pane's #2f3238, with a 4 px frame of the
+    pane left around it, and the unselected route buttons (their circles are 6 levels off that
+    black) almost vanished. The two setAutoFillBackground(False) calls in
+    set_preprocess_workspace_hosted keep the released page; this pins both, and the picture
+    they keep: a pixel inside the overview is the pane's colour, the colour of the page's own
+    margin. The suite runs without the app's theme, where pane and window colours are closer
+    but still apart, which the last assertion requires so that the comparison can tell."""
+    detection = window._analysis_panel.detection_panel
+    area = show_page(window, 'Preprocess')
+    overview, viewport = area.widget(), area.viewport()
+    assert not overview.autoFillBackground()
+    assert not viewport.autoFillBackground()
+    spot = QtCore.QPoint(viewport.width() - 3, viewport.height() - 3)
+    assert viewport.childAt(spot) is overview, 'the sampled spot must be the overview itself'
+    tabs, page = detection.mode_tabs, detection._preprocess_page
+    picture = tabs.grab().toImage()
+
+    def colour(point):
+        return picture.pixelColor(int(point.x() * picture.devicePixelRatio()),
+                                  int(point.y() * picture.devicePixelRatio()))
+
+    inside = colour(viewport.mapTo(tabs, spot))
+    margin = colour(page.mapTo(tabs, QtCore.QPoint(1, 1)))
+    assert inside == margin, (
+        f'the overview paints {inside.name()} where the page shows the tab pane, {margin.name()}')
+    assert margin != qapp.palette().color(QtGui.QPalette.Window), (
+        'the palette does not tell the tab pane from the window colour, so this proves nothing')
+
+
 def test_protocol_verbs_are_reachable_in_the_real_conditioning_workspace(window):
     detection = window._analysis_panel.detection_panel
     show_page(window, 'Preprocess')
-    assert_whole(detection.open_conditioning_button)
-    detection.open_conditioning_button.click()
+    # 2026-11-11: the Preprocess page's door is preprocess_open_button since 8661d35 (the old
+    # open_conditioning_button is a hidden legacy widget); the workspace is what it opens.
+    assert_whole(detection.preprocess_open_button, detection._preprocess_page)
+    detection.preprocess_open_button.click()
+    settle(window)
     workspace = window._signal_conditioning
     workspace.resize(workspace.minimumWidth(), workspace.minimumHeight())
     settle(workspace)

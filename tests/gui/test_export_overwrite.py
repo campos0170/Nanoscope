@@ -18,6 +18,7 @@ from __future__ import annotations
 
 # --- Qt bootstrap MUST precede any Qt import. --------------------------------------------------
 import ast
+import csv
 import json
 import os
 import pathlib
@@ -342,6 +343,52 @@ def test_project_save_as_confirms_the_suffixed_name(tmp_path, dialog, qapp):
         outputs=lambda p: (pathlib.Path(_with_project_suffix(str(p))),))
     assert got == tmp_path / "study"
     assert [p.name for p in d.asked_about] == ["study.nanoscope"]
+
+
+@pytest.mark.parametrize("suffix", ["json", "csv"])
+def test_curve_fit_export_confirms_before_it_replaces_an_earlier_file(
+        tmp_path, dialog, qapp, qtbot, suffix):
+    """2026-11-11: the curve-fit dialog (8661d35) asked for its output path with a direct
+    ``getSaveFileName``, outside the seam the guard above protects, so an earlier fit was
+    replaced on the strength of the system panel's own prompt. It now goes through
+    ``ask_export_path``: refusing the confirmation keeps the earlier file, and accepting it
+    writes the completed fit over it.
+
+    Both formats the dialog writes, chosen by the suffix of the file picked: the file the
+    confirmation names must be the one that is written on each arm, so a confirmation that
+    named the ``.json`` while a ``.csv`` was replaced would be caught on the second."""
+    from nanoscope.analysis.curve_fitting import fit_curve
+    from nanoscope.gui.nonlinear_fit_dialog import (
+        CurveDataset, NonlinearFitDialog, parameter_units)
+
+    x = np.linspace(.001, .009, 80)
+    data = CurveDataset("apo", "Apo", x, 2 + 7 * np.exp(-.5 * ((x - .005) / .0008) ** 2),
+                        "dwell_s", "depth_pA", "s", "pA")
+    result = fit_curve(data.x, data.y, {"model": "gaussian"}).to_dict()
+    dlg = NonlinearFitDialog([data])
+    qtbot.addWidget(dlg)
+    dlg._result = dict(schema_version=1, source=data.source(), result=result,
+                       parameter_units=parameter_units("gaussian", result["parameters"],
+                                                       "s", "pA"))
+    target = tmp_path / f"fit.{suffix}"
+    target.write_text("PRECIOUS")
+
+    refused = dialog(target, answer=False)
+    assert dlg.export_result() is None
+    assert refused.asked_about == [target]
+    assert target.read_text() == "PRECIOUS"
+
+    accepted = dialog(target, answer=True)
+    assert dlg.export_result() == target
+    assert accepted.asked_about == [target]
+    if suffix == "json":
+        written = json.loads(target.read_text())
+        assert written["result"]["config"]["model"] == "gaussian"
+        assert written["source"]["label"] == "Apo"
+    else:
+        with target.open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        assert rows and all(row["source_key"] == "apo" for row in rows)
 
 
 # ================================================================================================

@@ -25,9 +25,11 @@ and null while the app knew the number, which is exactly the failure this pins:
 * and all three scoring exports — events, training, sub-state levels — are wired, not
   just the one the report named.
 
-The note in the file is compared against the on-screen event-table header tooltip
-verbatim: one clock, one sentence, whether it is read on the screen or in the folder a
-co-author receives.
+The note in the file is compared against the on-screen event-table header tooltip: one
+clock, one sentence, whether it is read on the screen or in the folder a co-author
+receives -- each in the unit its surface shows. 2026-11-11: since 8661d35 the table reads
+in milliseconds while the file keeps seconds, the unit of the CSV columns it describes, so
+the two are no longer character-for-character equal; they are one wording in two units.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from PySide6 import QtCore, QtWidgets
 from nanoscope.analysis import scoring
 from nanoscope.analysis.detect import detect_events
 from nanoscope.analysis.events import EventSet
+from nanoscope.core import clock
 from nanoscope.core.analysis import AnalysisResult
 from nanoscope.core.document import TraceDocument
 from nanoscope.core.segment import build_segment_document
@@ -163,11 +166,30 @@ def test_the_exported_time_plus_the_stamp_is_the_instant_the_trace_showed(win, t
 
 
 def test_the_file_and_the_screen_say_the_same_sentence(win, tmp_path, monkeypatch):
-    """ONE CLOCK, ONE WORDING. The app annotated the column on screen and stripped the
-    annotation on the way out; the sentence in the file is now the table header's own."""
-    _adopt(win, _doc(tmp_path, t0_s=T0_APO))
+    """ONE CLOCK, ONE WORDING, EACH IN THE UNIT ITS SURFACE SHOWS. The app annotated the
+    column on screen and stripped the annotation on the way out; the sentence in the file
+    is now the table header's own -- 2026-11-11: said in seconds in the file (the unit of
+    the CSV columns it describes) and in milliseconds on screen (the unit the table shows
+    them in), both from ``core.clock.field_note``."""
+    doc_id = _adopt(win, _doc(tmp_path, t0_s=T0_APO))
     meta = _fire(win, win._act_export_events, tmp_path / "events.csv", monkeypatch)
-    assert meta[scoring.CLOCK_BLOCK_KEY]["note"] == _table_tooltip(win)
+    note = meta[scoring.CLOCK_BLOCK_KEY]["note"]
+    offset = clock.clock_offset_s(win._session.document(doc_id).meta)
+
+    # the file speaks the CSV's unit: seconds
+    assert note == clock.field_note(clock.RECORDING, offset)
+    assert "add t₀ = 1154.9909 s " in note
+
+    # the screen speaks the table's unit: milliseconds, as the tooltip's last paragraph
+    # (the first is the column's own quantity entry, which declares both units)
+    tooltip = _table_tooltip(win)
+    assert "stored unit: s; displayed unit: ms" in tooltip
+    screen = tooltip.split("\n\n")[-1]
+    assert screen == clock.field_note(clock.RECORDING, offset, display_unit="ms")
+    assert "add t₀ = 1154990.9 ms " in screen
+
+    # ...and it is ONE wording: the screen's sentence is the file's under the other unit
+    assert screen.replace("milliseconds", "seconds").replace("1154990.9 ms", "1154.9909 s") == note
 
 
 # ================================================================================================

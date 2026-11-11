@@ -77,10 +77,12 @@ HIDDEN_TEXT = " "
 AXIS_SIDES = ("bottom", "left", "top", "right")
 
 #: The element keys a style may be stored under. Anything else in a saved map is dropped,
-#: as ``PlotAppearance.from_mapping`` drops any other bad field.
+#: as ``PlotAppearance.from_mapping`` drops any other bad field. A legend row of
+#: Distributions is keyed by its source's key, which is the recording's full path: the bound
+#: is the one a series key has in ``core.figure_series`` (4096), not a legend name's length.
 _ELEMENT_KEY = re.compile(
     r"^(title|view\.[\w-]{1,40}\.title|axis\.(bottom|left|top|right)\.(label|ticks)"
-    r"|legend\.entry\..{1,200}|colorbar\.label|marginal\.(bottom|left|top|right)\.label"
+    r"|legend\.entry\..{1,4096}|colorbar\.label|marginal\.(bottom|left|top|right)\.label"
     r"|annotation\.[\w.-]{1,60})$", re.DOTALL)
 
 #: Colours offered in the popovers: the Okabe-Ito set the presets already use, so a

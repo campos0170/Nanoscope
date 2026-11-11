@@ -1,11 +1,18 @@
-"""The three views added to the power-spectrum window, driven the way the owner drives them.
+"""The three views added to the power-spectrum page, driven the way the owner drives them.
 
 Not "the widget exists". Every assertion below runs against a REAL
 :class:`~nanoscope.gui.main_window.MainWindow` built through
-:func:`nanoscope.gui.app.create_app`, sized to the owner's 1512x900 display, with the PSD
-window opened from the Analysis menu action and the view changed by KEYBOARD on the combo
-— because a control whose row runs past ~1100 px on that screen is not reachable and is
-therefore not done, and because a view that only ``set_view()`` can reach is not a view.
+:func:`nanoscope.gui.app.create_app`, sized to the owner's 1512x900 display, with the Noise
+page opened from the Analysis menu action and the view changed by KEYBOARD on the combo
+— because a control that runs off that screen is not reachable and is therefore not done,
+and because a view that only ``set_view()`` can reach is not a view.
+
+2026-11-11: the Noise page is no longer a free-standing window that computes when it opens.
+Since 8661d35 the Analysis menu opens it as a managed figure HOSTED in the Analysis
+Explorer: its controls live in the Explorer's inspector, and every analysis control -- the
+View selector included -- is a draft until Update plot is pressed. So the fixture presses
+Update plot once, a view is chosen by keyboard on the combo AND applied with Update plot,
+and geometry is measured in the Explorer, on the controls that are on screen.
 
 The three:
 
@@ -52,10 +59,15 @@ from nanoscope.gui.psd_panel import (
     VIEWS,
 )
 
+from . import p1_hosting as H
+
 FS = 50_000.0
 SCREEN = (1512, 900)
 #: A control whose row needs more than this is off the owner's screen. See the campaign note.
 REACHABLE_PX = 1100
+#: What the toolbar's Update button reads with nothing pending, and with one change waiting.
+UPDATE_IDLE = "Update plot"
+UPDATE_ONE_PENDING = "Update plot (1)"
 
 OPEN_PA = 100.0
 BLOCKED_PA = 60.0
@@ -90,7 +102,8 @@ def _doc(tmp_path, sig: np.ndarray, name: str = "pore.dat") -> TraceDocument:
 
 @pytest.fixture
 def opened(qapp, qtbot, tmp_path):
-    """A real MainWindow at 1512x900 with the PSD window opened from the Analysis action."""
+    """A real MainWindow at 1512x900 with the Noise page opened from the Analysis action,
+    hosted in the Analysis Explorer, and its first spectrum computed with Update plot."""
     create_app([])                       # the shipped app's own QApplication setup
     win = MainWindow()
     qtbot.addWidget(win)
@@ -105,19 +118,32 @@ def opened(qapp, qtbot, tmp_path):
 
     win._act_psd.trigger()               # the user's own route in
     psd = win._psd_window
-    qtbot.addWidget(psd)
-    psd.resize(1080, 720)                # its own default, which fits 1512x900
-    psd.show()
+    explorer = win._analysis_explorer
     qapp.processEvents()
+    # 2026-11-11 (8661d35): the page is hosted in the Explorer (it used to be its own
+    # 1080x720 window, which this fixture resized and showed) and computes nothing until
+    # Update plot is pressed -- which is what the user does next.
+    assert psd.window() is explorer
+    assert not psd.has_data()
+    assert explorer.toolbar().update_button.text() == UPDATE_ONE_PENDING
+    H.press_update(explorer)
+    assert psd.has_data()
+    assert explorer.toolbar().update_button.text() == UPDATE_IDLE
     return win, psd, doc_id
 
 
 def _select_view_by_keyboard(qapp, psd, view: str) -> None:
-    """Walk the View combo with the Down/Up key until ``view`` is current.
+    """Walk the View combo with the Down/Up key until ``view`` is chosen, then apply it.
 
     Keyboard rather than ``set_view`` on purpose: this is the path a user has, and it also
     proves the combo is focusable and enabled rather than merely present.
+
+    2026-11-11 (8661d35): on the hosted page the keys only move the combo. The choice is a
+    DRAFT -- the page keeps showing the view it had and the toolbar says one change is
+    waiting -- until Update plot is pressed, which is the second half of this gesture.
     """
+    explorer = psd.window()
+    shown = psd.current_view()
     want = next(i for i, (key, _) in enumerate(VIEWS) if key == view)
     psd._view_combo.setFocus()
     guard = 0
@@ -126,21 +152,73 @@ def _select_view_by_keyboard(qapp, psd, view: str) -> None:
         QtTest.QTest.keyClick(psd._view_combo, key)
         guard += 1
     qapp.processEvents()
+    assert psd._view_combo.currentIndex() == want        # the keys moved the combo
+    if view != shown:
+        assert psd.current_view() == shown               # ...and nothing else
+        assert explorer.toolbar().update_button.text() == UPDATE_ONE_PENDING
+        H.press_update(explorer)
     assert psd.current_view() == view
+    assert explorer.toolbar().update_button.text() == UPDATE_IDLE
+
+
+def _on_screen(psd, widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
+    """The Explorer ``widget`` is shown (not hidden) in -- asserted, because only then is a
+    position measured in it a measurement. A control that is hidden (another view's option, a
+    collapsed group, the Save button a hosted page does not show) keeps whatever geometry
+    its layout last gave it, an unlaid 640 px row among them, and says nothing true.
+
+    Shown is all this proves. A shown row can still sit below the bottom, or past the right
+    edge, of the scroll area that holds it, where nobody sees it:
+    :func:`_visible_right_edge` is what bounds a row on the right."""
+    explorer = psd.window()
+    assert widget.window() is explorer, f"{widget} is not in the Explorer the page is hosted in"
+    assert widget.isVisible(), f"{widget} is not on screen"
+    return explorer
 
 
 def _row_right_edge(psd, widget: QtWidgets.QWidget) -> int:
-    """Where this control's row ENDS in the window, in px from the window's left edge."""
-    return widget.mapTo(psd, widget.rect().topRight()).x()
+    """Where this control's row ENDS in the Explorer, in px from the Explorer's left edge
+    (2026-11-11: it used to be measured from the page's own window)."""
+    explorer = _on_screen(psd, widget)
+    return widget.mapTo(explorer, widget.rect().topRight()).x()
+
+
+def _visible_right_edge(psd, widget: QtWidgets.QWidget) -> int:
+    """The last pixel column, in the Explorer's px, at which the inspector shows ``widget``.
+
+    The hosted controls sit in a scroll area (the Data & analysis tab's, or the Format tab's)
+    whose horizontal scroll bar is always off: a row laid out past its viewport is clipped
+    and cannot be scrolled to, even while it is still inside the Explorer's own window.
+    Measured on the same footing as :func:`_row_right_edge` (``topRight``), so a row is whole
+    exactly when its edge is no greater than this."""
+    explorer = _on_screen(psd, widget)
+    area = widget.parentWidget()
+    while area is not None and not isinstance(area, QtWidgets.QAbstractScrollArea):
+        area = area.parentWidget()
+    assert area is not None, f"{widget} is not inside a scroll area"
+    viewport = area.viewport()
+    return viewport.mapTo(explorer, viewport.rect().topRight()).x()
 
 
 def _control_ys(psd) -> dict:
-    return {name: getattr(psd, attr).mapTo(psd, getattr(psd, attr).rect().topLeft()).y()
-            for name, attr in (("segment start", "_start_spin"),
-                               ("welch nperseg", "_nperseg_combo"),
-                               ("log-log", "_loglog_check"),
-                               ("rms low edge", "_rms_lo_spin"),
-                               ("save button", "_save_btn"))}
+    """Each control's top edge in the Explorer, in px from its top.
+
+    2026-11-11: the rows shown in the hosted inspector (the Estimator rows may be below the
+    fold; their layout position is still compared). The View selector joins the list, as the
+    row the choice is made on; the Save button leaves it, because a hosted page hides it (its
+    verbs are the Explorer's Export menu). Of the five, the segment start and the View
+    selector sit above the per-view options stack and the other three below it.
+    """
+    ys = {}
+    for name, attr in (("segment start", "_start_spin"),
+                       ("view selector", "_view_combo"),
+                       ("welch nperseg", "_nperseg_combo"),
+                       ("log-log", "_loglog_check"),
+                       ("rms low edge", "_rms_lo_spin")):
+        widget = getattr(psd, attr)
+        explorer = _on_screen(psd, widget)
+        ys[name] = widget.mapTo(explorer, widget.rect().topLeft()).y()
+    return ys
 
 
 # ================================================================================================
@@ -150,28 +228,81 @@ def _control_ys(psd) -> dict:
 def test_every_added_control_is_reachable_on_the_1512x900_display(opened, qapp):
     """Each new control's row ends far inside the 1100 px an unreachable control needs.
 
-    The View selector and all three views' options live in the same 300-430 px control
-    column the Segment and Welch groups already use, so none of them can run off the screen
-    the way a hardcoded 1600 px window does.
+    The View selector and all three views' options live in the same inspector column the
+    Sources and Estimator groups already use, so none of them can run off the screen the
+    way a hardcoded 1600 px window does.
+
+    2026-11-11: that column is the Analysis Explorer's, so what is asked is that the
+    Explorer needs no more than those 1100 px (its minimum width is 840), fits the display,
+    and has every control INSIDE it. The edge is measured in the Explorer, each control
+    while the view that shows it is applied -- the options page follows the applied view --
+    and the spectrogram's colour-map combo, which moved to the Format tab's Colour map
+    panel, in that tab. (The Explorer's own size is not the bound: it is clamped to the
+    screen it is on, so it is what the environment makes it.)
+
+    "Inside" is the scroll area's viewport, not only the Explorer's window: the inspector's
+    horizontal scroll bar is always off, so a row that ends between the viewport's right
+    edge and the window's is clipped, and nobody can scroll to the rest of it.
     """
     _win, psd, _doc_id = opened
-    controls = [psd._view_combo, psd._spec_nperseg_combo, psd._spec_cmap_combo,
-                psd._hist_bins_combo, psd._hist_clip_check, psd._hist_levels_check]
-    for widget in controls:
+    explorer = psd.window()
+    assert explorer.minimumWidth() <= REACHABLE_PX
+    covered = set()
+
+    def check(name: str, view: str) -> None:
+        widget = getattr(psd, name)
         edge = _row_right_edge(psd, widget)
-        assert 0 < edge <= REACHABLE_PX, f"{widget} row ends at {edge} px"
-    assert psd.width() <= SCREEN[0] and psd.height() <= SCREEN[1]
+        assert 0 < edge <= explorer.width(), \
+            f"{name} row ends at {edge} px, outside the {explorer.width()} px Explorer ({view} view)"
+        shown_to = _visible_right_edge(psd, widget)
+        assert edge <= shown_to, (
+            f"{name} row ends at {edge} px, past the {shown_to} px where the inspector stops "
+            f"showing it ({view} view)")
+        covered.add(name)
+
+    for view, names in ((VIEW_PSD, ("_view_combo",)),
+                        (VIEW_FFT, ("_view_combo",)),
+                        (VIEW_SPECTROGRAM, ("_view_combo", "_spec_nperseg_combo")),
+                        (VIEW_ALLPOINTS, ("_view_combo", "_hist_bins_combo",
+                                          "_hist_clip_check", "_hist_levels_check"))):
+        _select_view_by_keyboard(qapp, psd, view)
+        for name in names:
+            check(name, view)
+
+    _select_view_by_keyboard(qapp, psd, VIEW_SPECTROGRAM)
+    H.show_format(explorer, "colour_map")
+    assert psd._spec_cmap_combo.isEnabled()              # live in the view it belongs to
+    check("_spec_cmap_combo", VIEW_SPECTROGRAM)
+    H.show_data(explorer)
+
+    # none of the six the test has always covered was dropped on the way
+    assert covered == {"_view_combo", "_spec_nperseg_combo", "_spec_cmap_combo",
+                       "_hist_bins_combo", "_hist_clip_check", "_hist_levels_check"}
+    assert explorer.width() <= SCREEN[0] and explorer.height() <= SCREEN[1]
 
 
 def test_changing_the_view_moves_no_control_under_the_pointer(opened, qapp):
-    """The five control rows below the View group sit at the SAME y in all four views.
+    """The three rows below the per-view options stack sit at the SAME y in all four views.
 
     Both stacks (the plot area and the per-view options) reserve their tallest page, and the
     options stack's height is pinned to a measured maximum — a word-wrapped note whose
     one-line size hint became three laid-out lines had already pushed these rows 20 px down
     in the FFT view before the height was fixed.
+
+    2026-11-11: measured in the Explorer, on the rows shown there (see :func:`_control_ys`).
+    Three rows lie below the stack and can be moved by it: the log-log box, the Welch
+    segment length and the RMS low edge. (The stand-alone window had five rows below
+    the View group.) The segment start and the View selector sit ABOVE the stack, so it
+    cannot move them: they are controls, there to show that the measurement itself holds
+    still. The Welch and RMS rows sit in the Estimator group, which opens collapsed, so it
+    is opened first; they may lie below the fold of the inspector's scroll area, and it is
+    their position in the layout that is compared, not whether they are in view. The
+    log-log box sits directly under the options stack and is the one that moves if the
+    stack stops reserving its tallest page.
     """
     _win, psd, _doc_id = opened
+    psd.window().reveal("estimator")
+    qapp.processEvents()
     baseline = None
     for key, _label in VIEWS:
         _select_view_by_keyboard(qapp, psd, key)
@@ -300,6 +431,11 @@ def test_the_spectrogram_time_resolution_control_changes_the_picture(opened, qap
 
     psd._spec_nperseg_combo.setCurrentText("4096")
     qapp.processEvents()
+    # 2026-11-11: choosing it is a draft; the picture on screen is still the old one until
+    # Update plot is pressed.
+    assert psd.spectrogram().nperseg == auto.nperseg
+    assert psd.window().toolbar().update_button.text() == UPDATE_ONE_PENDING
+    H.press_update(psd.window())
     fine_in_frequency = psd.spectrogram()
 
     assert fine_in_frequency.nperseg == 4096 != auto.nperseg
@@ -388,6 +524,10 @@ def test_the_bin_count_control_regrids_the_histogram(opened, qapp):
     assert psd.all_points().counts.size == 512
     psd._hist_bins_combo.setCurrentText("2048")
     qapp.processEvents()
+    # 2026-11-11: a draft until Update plot is pressed; the histogram still has its 512 bins.
+    assert psd.all_points().counts.size == 512
+    assert psd.window().toolbar().update_button.text() == UPDATE_ONE_PENDING
+    H.press_update(psd.window())
     assert psd.all_points().counts.size == 2048
     assert psd.all_points().n_binned == 250_000      # still every sample
 

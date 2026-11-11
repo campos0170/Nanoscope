@@ -114,16 +114,23 @@ def _install(session, doc_id, df, *, duration_s, fingerprint, merged_window_s=No
         params={}, calibration_fingerprint=(1.0, 0.0), payload=EventSet(df, prov)))
 
 
-def _ladder(tmp_path, fingerprints, *, rates=None, merged_window_s=None) -> Session:
+def _ladder(tmp_path, fingerprints, *, rates=None, merged_window_s=None,
+            counts=None) -> Session:
+    """``counts`` gives a rung its own number of events (default 40 on every rung), the
+    duration following so that the capture rate stays ``rates[mV]``. A ladder whose count is
+    the same on every rung has a CONSTANT event-count response, which the exponential fit
+    refuses (see ``test_a_constant_response_is_refused_by_the_exponential_fit``)."""
     session = Session()
     rates = rates or RAW_RATES
+    counts = counts or {}
     for mV, fp in fingerprints.items():
         doc_id = session.add_document(_doc(tmp_path, nominal_mV=mV, name=f"apo_{int(-mV)}.dat"))
         v = mV / 1000.0
+        n = counts.get(mV, 40)
         _install(session, doc_id,
-                 _constant_df(n=40, dwell_s=(v + 1.2) * 1e-3, depth_pA=-100.0 * v,
+                 _constant_df(n=n, dwell_s=(v + 1.2) * 1e-3, depth_pA=-100.0 * v,
                               frac_depth=-0.1 * v),
-                 duration_s=40.0 / rates[mV], fingerprint=fp,
+                 duration_s=n / rates[mV], fingerprint=fp,
                  merged_window_s=merged_window_s)
     return session
 
@@ -217,11 +224,36 @@ def test_window_within_one_fingerprint_is_quiet_except_about_the_gain(
 
 @pytest.mark.parametrize("metric", ["capture_rate_hz", "median_dwell_s", "n_events"])
 def test_rate_and_dwell_are_quiet_across_three_baselines(qapp, qtbot, tmp_path, metric):
-    """Per metric, not blanket -- the panel is not disabled, it is qualified."""
-    w = _window(qtbot, _ladder(tmp_path, _THREE_FINGERPRINTS), metric=metric, fit="exponential")
+    """Per metric, not blanket -- the panel is not disabled, it is qualified.
+
+    2026-11-11: the event-count rungs now differ (30, 40, 60). With the same 40 on every rung the
+    response is constant and the exponential fit refuses it (8661d35 made that guard a tolerance
+    test on the log-response slope) -- an unrelated refusal that hid what this test is about:
+    the comparability verdict never withholds a fit."""
+    counts = {-500.0: 30, -600.0: 40, -700.0: 60} if metric == "n_events" else None
+    w = _window(qtbot, _ladder(tmp_path, _THREE_FINGERPRINTS, counts=counts), metric=metric,
+                fit="exponential")
     assert w.warning_text() == ""
     assert "MIXED baselines" not in _title(w)
     assert w.fit() is not None                    # the trend is still drawn and fitted
+
+
+def test_a_constant_response_is_refused_by_the_exponential_fit(qapp, qtbot, tmp_path):
+    """2026-11-11: the refusal the two tests above ran into, pinned on its own. A metric that
+    does not vary with V (40 events on every rung) has no exponential trend and no V0: the
+    window says so in Details and draws no fit (8661d35 widened this guard to a tolerance
+    test on the log-response slope; CHANGELOG: "Constant exponential responses are refused")."""
+    w = _window(qtbot, _ladder(tmp_path, _THREE_FINGERPRINTS), metric="n_events",
+                fit="exponential")
+    assert w.fit() is None
+    assert ("Fit unavailable: degenerate exponential fit: the metric does not vary with V"
+            in w.details_text())
+    # The same ladder, its response now varying, is fitted.
+    varied = _window(qtbot, _ladder(tmp_path, _THREE_FINGERPRINTS,
+                                    counts={-500.0: 30, -600.0: 40, -700.0: 60}),
+                     metric="n_events", fit="exponential")
+    assert varied.fit() is not None
+    assert "Fit unavailable" not in varied.details_text()
 
 
 def test_switching_metric_raises_and_clears_the_banner(qapp, qtbot, tmp_path):
@@ -267,12 +299,16 @@ def test_the_headline_v0_moves_with_the_merge_and_the_window_now_records_which(
 
 
 def test_a_merged_set_pooled_with_an_unmerged_one_warns(qapp, qtbot, tmp_path):
+    """2026-11-11: the three recordings capture 30, 40 and 60 events in 10 s (3, 4 and 6 Hz). With
+    40 in all three the capture rate was constant and the exponential fit refuses a constant
+    response (8661d35: a tolerance test on the log-response slope), which is not what this test
+    is about."""
     session = Session()
-    for mV, window in ((-500.0, 0.010), (-600.0, None), (-700.0, 0.010)):
+    for mV, window, n in ((-500.0, 0.010, 30), (-600.0, None, 40), (-700.0, 0.010, 60)):
         doc_id = session.add_document(_doc(tmp_path, nominal_mV=mV, name=f"apo_{int(-mV)}.dat"))
         v = mV / 1000.0
         _install(session, doc_id,
-                 _constant_df(n=40, dwell_s=(v + 1.2) * 1e-3, depth_pA=-100.0 * v,
+                 _constant_df(n=n, dwell_s=(v + 1.2) * 1e-3, depth_pA=-100.0 * v,
                               frac_depth=-0.1 * v),
                  duration_s=10.0, fingerprint=FP_600, merged_window_s=window)
     w = _window(qtbot, session, metric="capture_rate_hz", fit="exponential")

@@ -72,11 +72,46 @@ def _install_events(window: MainWindow, target: tuple[str, int]) -> AnalysisResu
     frame = frame.astype({name: spec[0] for name, spec in SCHEMA.items()})
     result = AnalysisResult(
         module_id="detect.schmitt", module_version="1", doc_id=doc_id,
-        channel=channel, params={}, calibration_fingerprint=None,
+        channel=channel, params={},
+        # 2026-11-11: the recording's own fingerprint, not None. ``AnalysisPanel`` compares
+        # the stamp with the live calibration on every selection and raised a TypeError in
+        # its slot for a result that carried none.
+        calibration_fingerprint=window._session.calibration(doc_id, channel).fingerprint(),
         payload=EventSet(frame, {}))
     window._session.add_result(result)
     window._on_selection(doc_id, channel)
     return result
+
+
+def _events_recording(window: MainWindow, tmp_path: Path,
+                      name: str = "events.dat") -> tuple[tuple[str, int], AnalysisResult]:
+    """One recording with three real blockades and their stored detection."""
+    rng = np.random.default_rng(23)
+    signal = 100.0 + rng.normal(0.0, 0.5, 4096)
+    for start, end, depth in ((300, 340, 20.0), (900, 960, 35.0),
+                              (1600, 1680, 50.0)):
+        signal[start:end] -= depth
+    target = _add_trace(window, tmp_path / name, signal)
+    return target, _install_events(window, target)
+
+
+def _figure_status(window: MainWindow) -> str:
+    """The front figure's freshness record: empty / current / stale / frozen."""
+    owner = window._figure_workspace
+    return owner.get(owner.current_id()).spec.result.status
+
+
+def _press_update(window: MainWindow, qtbot) -> None:
+    """The user's Update plot: the Explorer toolbar's own button."""
+    window._analysis_explorer.toolbar().update_action.trigger()
+    qtbot.wait(10)
+
+
+def _close_explorer(window: MainWindow, qtbot) -> None:
+    """The user closes the Analysis Explorer (its pages are hidden, not reset)."""
+    window._analysis_explorer.close()
+    qtbot.wait(10)
+    QtCore.QCoreApplication.processEvents()
 
 
 def test_analysis_form_edit_creates_workspace_only_unsaved_work(qapp, qtbot):
@@ -129,6 +164,10 @@ def test_navigation_does_not_recompute_visible_frozen_snapshots(
 
 
 def test_first_psd_result_is_immediately_project_work(qapp, qtbot, tmp_path):
+    """2026-11-11: since 8661d35 (plotting redesign) Analysis ▸ Noise spectrum opens an EMPTY
+    draft figure and computes nothing until Update plot. Both steps are project work at once:
+    the new figure is part of the project the moment it exists, and its first committed
+    result is a further edit, never a silent one."""
     window = _window(qtbot)
     rng = np.random.default_rng(17)
     target = _add_trace(
@@ -139,8 +178,18 @@ def test_first_psd_result_is_immediately_project_work(qapp, qtbot, tmp_path):
 
     window._open_psd()
 
-    assert window._psd_window.has_data()
+    assert not window._psd_window.has_data(), "opening a figure must not compute it"
+    assert _figure_status(window) == "empty"
     assert window._workspace_has_artifact(PSD_ARTIFACT_ID)
+    assert window._session_revision > before
+    assert window._dirty
+
+    window._mark_clean()
+    before = window._session_revision
+    _press_update(window, qtbot)
+
+    assert window._psd_window.has_data()
+    assert _figure_status(window) == "current"
     assert window._session_revision > before
     assert window._dirty
 
@@ -208,64 +257,94 @@ def test_saved_surface_gates_stay_open_when_live_inputs_are_unavailable(qapp, qt
         assert gate()[0], f"{artifact_id} cannot open its self-contained saved view"
 
 
-def test_plots_close_snapshots_before_its_deliberate_reset_and_reopens(qapp, qtbot):
+def test_closing_the_explorer_keeps_the_plots_figure_and_reopening_raises_the_same_one(
+        qapp, qtbot):
+    """2026-11-11: the Plots page is a managed figure in the one Analysis Explorer now
+    (8661d35). Closing the Explorer HIDES its pages and resets nothing, so the user's title is
+    still on the page, and reopening raises the same figure rather than building a second one.
+    (What the project file holds of a hidden page is the next-but-one test's concern.)"""
     window = _window(qtbot)
     window.show()
     window._open_plots()
     plots = window._plots_window
+    owner = window._figure_workspace
+    key = owner.current_id()
     plots.set_title("Durable publication title")
     qtbot.wait(5)
 
-    plots.close()
+    window._analysis_explorer.close()
     qtbot.waitUntil(lambda: not plots.isVisible())
 
     assert window._workspace_has_artifact(PLOTS_ARTIFACT_ID)
-    assert PLOTS_ARTIFACT_ID in window._workspace_pending
-    assert plots.style().title == "", "the widget itself no longer has the saved title"
+    assert owner.page(key) is plots
+    assert plots.style().title == "Durable publication title", (
+        "closing the Explorer reset the page it only had to hide")
 
     window._open_plots()
     qtbot.wait(5)
     assert window._plots_window is plots
+    assert plots.isVisible()
     assert plots.style().title == "Durable publication title"
-    assert PLOTS_ARTIFACT_ID in window._workspace_frozen
+    assert owner.current_id() == key
+    assert len(owner.records()) == 1
 
 
 def test_style_edit_does_not_turn_a_restored_snapshot_back_into_live_refresh(
-        qapp, qtbot):
+        qapp, qtbot, tmp_path):
+    """2026-11-11: a project reopens a committed figure as a SAVED RESULT (record status
+    ``frozen``, 8661d35), no longer through ``_workspace_frozen``. A cosmetic edit is durable
+    but is not the explicit Update boundary that lets later session changes replace the
+    snapshot's numerical result, so the figure stays frozen through the edit, its checkpoint
+    and a surface refresh, and keeps the edit."""
     window = _window(qtbot)
     window.show()
+    _events_recording(window, tmp_path)
     window._open_plots()
-    plots = window._plots_window
-    plots.set_title("saved snapshot")
-    plots.close()
-    qtbot.waitUntil(lambda: not plots.isVisible())
-    window._open_plots()
-    assert PLOTS_ARTIFACT_ID in window._workspace_frozen
+    owner = window._figure_workspace
+    key = owner.current_id()
+    _press_update(window, qtbot)
+    assert _figure_status(window) == "current"
 
-    # A cosmetic edit is durable but is not the explicit Refresh/Run boundary that
-    # permits future session navigation to replace the snapshot's numerical result.
+    # What opening the saved project does with the committed figure.
+    owner.install_workspace(owner.capture_workspace())
+    assert owner.get(key).spec.result.status == "frozen"
+    assert owner.activate(key)
+    plots = owner.page(key)
+    assert window._analysis_explorer_status(key, plots) == ("SAVED RESULT", "snapshot")
+
     plots.set_title("restyled snapshot")
+    assert owner.checkpoint(key)
+    window._refresh_surface_windows()
 
-    assert PLOTS_ARTIFACT_ID in window._workspace_frozen
+    assert owner.get(key).spec.result.status == "frozen"
     artifact = window._workspace_artifact(PLOTS_ARTIFACT_ID)
     restored_config = _decode_like(plots.config(), artifact.payload["config"], artifact)
     assert restored_config.style.title == "restyled snapshot"
 
 
 def test_closing_an_already_checkpointed_plot_is_not_a_project_edit(qapp, qtbot):
+    """2026-11-11: the user's close is the Explorer's (8661d35); a page's own ``close()`` is
+    not a gesture, and a title nobody had captured yet is a real change at its checkpoint."""
     window = _window(qtbot)
     window.show()
     window._open_plots()
-    window._plots_window.set_title("Already saved")
+    plots = window._plots_window
+    owner = window._figure_workspace
+    key = owner.current_id()
+    plots.set_title("Already saved")
+    assert owner.checkpoint(key)
     window._mark_clean()
     before = window._session_revision
 
-    window._plots_window.close()
-    qtbot.waitUntil(lambda: not window._plots_window.isVisible())
+    _close_explorer(window, qtbot)
+    qtbot.waitUntil(lambda: not plots.isVisible())
 
     assert window._session_revision == before
     assert not window._dirty
-    assert window._workspace_artifact(PLOTS_ARTIFACT_ID) is not None
+    artifact = window._workspace_artifact(PLOTS_ARTIFACT_ID)
+    assert artifact is not None
+    assert _decode_like(plots.config(), artifact.payload["config"],
+                        artifact).style.title == "Already saved"
 
 
 def test_real_save_open_keeps_closed_plot_and_panel_draft_lazy_and_clean(
@@ -327,15 +406,30 @@ def test_lazy_iv_restore_does_not_gather_or_refit(qapp, qtbot, monkeypatch):
     window = _window(qtbot)
     window._analytical_workspace = AnalyticalWorkspace(artifacts=[artifact])
     window._workspace_pending.add(IV_ARTIFACT_ID)
-    monkeypatch.setattr(source_iv.iv, "iv_points",
-                        lambda *_: (_ for _ in ()).throw(AssertionError("gather ran")))
-    monkeypatch.setattr(source_iv.iv, "iv_fit",
-                        lambda *_: (_ for _ in ()).throw(AssertionError("fit ran")))
+    ran = []
+
+    def forbidden(name):
+        def refuse(*_args, **_kwargs):
+            ran.append(name)        # also recorded: a route that swallows the error still shows
+            raise AssertionError(f"{name} ran")
+        return refuse
+
+    monkeypatch.setattr(source_iv.iv, "iv_points", forbidden("gather"))
+    monkeypatch.setattr(source_iv.iv, "iv_fit", forbidden("fit"))
 
     window._open_iv()
 
+    # 2026-11-11: the saved snapshot is one figure record, a SAVED RESULT (8661d35), no
+    # longer a member of ``_workspace_frozen``; raising it still computed nothing.
+    assert ran == []
+    owner = window._figure_workspace
+    assert len(owner.records()) == 1
+    key = owner.current_id()
+    assert owner.get(key).spec.result.status == "frozen"
     assert window._iv_window is not None
-    assert IV_ARTIFACT_ID in window._workspace_frozen
+    assert window._iv_window is owner.page(key)
+    assert window._analysis_explorer_status(key, window._iv_window) == (
+        "SAVED RESULT", "snapshot")
 
 
 def test_lazy_event_plot_restore_binds_source_without_analysis_kernels(
@@ -344,13 +438,7 @@ def test_lazy_event_plot_restore_binds_source_without_analysis_kernels(
     from nanoscope.gui.event_plot_panel import EventPlotWindow
 
     window = _window(qtbot)
-    rng = np.random.default_rng(23)
-    signal = 100.0 + rng.normal(0.0, 0.5, 4096)
-    for start, end, depth in ((300, 340, 20.0), (900, 960, 35.0),
-                              (1600, 1680, 50.0)):
-        signal[start:end] -= depth
-    target = _add_trace(window, tmp_path / "events.dat", signal)
-    result = _install_events(window, target)
+    target, result = _events_recording(window, tmp_path)
     source = EventPlotWindow(window._session)
     qtbot.addWidget(source)
     source.set_source(result.doc_id, result.channel, result.payload)
@@ -359,27 +447,46 @@ def test_lazy_event_plot_restore_binds_source_without_analysis_kernels(
 
     window._analytical_workspace = AnalyticalWorkspace(artifacts=[artifact])
     window._workspace_pending.add(EVENT_PLOTS_ARTIFACT_ID)
+    reran = []
+
+    def forbidden(name):
+        def refuse(*_args, **_kwargs):
+            reran.append(name)      # also recorded: a route that swallows the error still shows
+            raise AssertionError(f"{name} reran")
+        return refuse
+
     for name in ("density_2d", "event_ensemble", "charge_deficit"):
-        monkeypatch.setattr(
-            event_shape, name,
-            lambda *_a, _name=name, **_k: (_ for _ in ()).throw(
-                AssertionError(f"{_name} reran")))
+        monkeypatch.setattr(event_shape, name, forbidden(name))
 
     window._open_event_plots()
 
-    assert EVENT_PLOTS_ARTIFACT_ID in window._workspace_frozen
+    # 2026-11-11: as above, the saved snapshot is a frozen figure record (8661d35).
+    assert reran == []
+    owner = window._figure_workspace
+    assert len(owner.records()) == 1
+    key = owner.current_id()
+    assert owner.get(key).spec.result.status == "frozen"
+    assert window._analysis_explorer_status(key, window._event_plot_window) == (
+        "SAVED RESULT", "snapshot")
     np.testing.assert_array_equal(window._event_plot_window.density_counts(), expected)
 
 
-def test_hiding_cached_surface_makes_its_project_copy_pending(qapp, qtbot):
+def test_a_hidden_figure_page_is_still_taken_by_the_save_gather(qapp, qtbot):
+    """2026-11-11: the old rule ("hiding a surface makes its project copy pending") belonged
+    to the standalone windows. A figure page is hidden, not reset, when the Explorer closes
+    (8661d35), and what the user typed on it must still be in the project: the save gather
+    captures every figure, visible or not."""
     window = _window(qtbot)
     window.show()
     window._open_plots()
     plots = window._plots_window
     plots.set_title("cached")
-    plots.close()
+    _close_explorer(window, qtbot)
     qtbot.waitUntil(lambda: not plots.isVisible())
 
-    # Exercise the event-loop edge explicitly: Hide is the point after Plots reset.
-    QtCore.QCoreApplication.processEvents()
-    assert PLOTS_ARTIFACT_ID in window._workspace_pending
+    window._gather_project_state()
+
+    artifact = window._workspace_artifact(PLOTS_ARTIFACT_ID)
+    assert artifact is not None
+    assert _decode_like(plots.config(), artifact.payload["config"],
+                        artifact).style.title == "cached"

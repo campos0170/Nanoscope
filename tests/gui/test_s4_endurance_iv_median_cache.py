@@ -126,26 +126,43 @@ def test_repeated_iv_refreshes_do_not_re_median_anything(qapp, qtbot, tmp_path):
 
 
 def test_a_curation_gesture_re_medians_nothing(qapp, qtbot, tmp_path):
-    """The shipped gesture: the Inspector/Gallery checkbox path, through MainWindow."""
+    """The shipped gesture: the Inspector/Gallery checkbox path, through MainWindow.
+
+    2026-11-11: since 8661d35 (plotting redesign) a curation click no longer refreshes the
+    I-V figure by itself. It reaches ``FigureWorkspace.sources_changed`` and the gather runs
+    when the user presses Update plot. END-003's promise is pinned on BOTH sides of that
+    Update: neither the clicks nor the Update that follows them re-median a channel."""
     win = _wired_window(qtbot, tmp_path)
     w = win._iv_window
+    owner = win._figure_workspace
+    key = owner.current_id()
     ap = win._analysis_panel
-    w.refresh()
+    iv.forget_channel_medians()
+    w.inspector_adapter().update()                  # the user's first Update plot
+    assert owner.get(key).spec.result.status == "current"
     baseline = iv.channel_median_stats()["misses"]
+    assert baseline > 0, "nothing was computed at all -- the fixture is wrong"
     before = [(p.doc_id, p.v_volts, p.i_open) for p in w.points()]
     excl_before = [(e.doc_id, e.reason) for e in w.exclusions()]
 
-    # Count the refreshes, so a test that passes because NOTHING happened fails
-    # instead: the point is that the refresh runs and costs nothing, not that the
-    # wiring quietly stopped reaching this window.
+    # Count what the gesture reaches, so a test that passes because NOTHING happened fails
+    # instead: curation must still reach the figure (``sources_changed``), and the gather
+    # must not run until the Update -- not that the wiring quietly stopped reaching it.
     refreshes = {"n": 0}
+    notices = {"n": 0}
     real_refresh = w.refresh
+    real_changed = owner.sources_changed
 
     def counted() -> None:
         refreshes["n"] += 1
         real_refresh()
 
+    def noticed(*args, **kwargs):
+        notices["n"] += 1
+        return real_changed(*args, **kwargs)
+
     w.refresh = counted                     # type: ignore[method-assign]
+    owner.sources_changed = noticed         # type: ignore[method-assign]
     try:
         ids = [int(i) for i in ap.current_events().df["event_id"].tolist()[:3]]
         assert ids, "no events to curate -- the fixture is wrong"
@@ -153,16 +170,28 @@ def test_a_curation_gesture_re_medians_nothing(qapp, qtbot, tmp_path):
             ap.set_event_accepted(eid, False)
         for eid in ids:
             ap.set_event_accepted(eid, True)
+        assert notices["n"] >= len(ids), (
+            f"only {notices['n']} notice(s) reached the I-V figure for {2 * len(ids)} curation "
+            f"clicks -- the gesture no longer reaches the figure this test is about {WHERE}")
+        assert refreshes["n"] == 0, (
+            f"{refreshes['n']} I-V gather(s) ran behind the user's back for "
+            f"{2 * len(ids)} curation clicks {WHERE}")
+        assert iv.channel_median_stats()["misses"] == baseline, (
+            f"{iv.channel_median_stats()['misses'] - baseline} whole-channel median(s) were "
+            f"recomputed by {2 * len(ids)} accept/reject clicks, for numbers curation cannot "
+            f"move {WHERE}")
+
+        w.inspector_adapter().update()      # ...and the Update that follows costs nothing either
     finally:
         del w.refresh
-    assert refreshes["n"] >= len(ids), (
-        f"only {refreshes['n']} I-V refresh(es) for {2 * len(ids)} curation clicks -- "
-        f"the gesture no longer reaches the window this test is about {WHERE}")
-
+        del owner.sources_changed
+    assert refreshes["n"] == 1, WHERE
     after = iv.channel_median_stats()
     assert after["misses"] == baseline, (
-        f"{after['misses'] - baseline} whole-channel median(s) were recomputed by "
-        f"{2 * len(ids)} accept/reject clicks, for numbers curation cannot move {WHERE}")
+        f"{after['misses'] - baseline} whole-channel median(s) were recomputed by the "
+        f"Update after {2 * len(ids)} accept/reject clicks, for numbers curation cannot "
+        f"move {WHERE}")
+    assert owner.get(key).spec.result.status == "current"
     # ...and the numbers are the same numbers, which is the whole reason it is safe.
     assert [(p.doc_id, p.v_volts, p.i_open) for p in w.points()] == before, WHERE
     assert [(e.doc_id, e.reason) for e in w.exclusions()] == excl_before, WHERE

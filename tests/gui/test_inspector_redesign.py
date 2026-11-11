@@ -50,12 +50,21 @@ def test_navigation_and_primary_actions_stay_visible_while_scrolling(window, wid
     window.resizeDocks([window._inspector], [width], QtCore.Qt.Horizontal)
     panel = window._analysis_panel
     detection = panel.detection_panel
-    for index, button in ((0, panel.baseline_workspace.refresh_button),
+    # 2026-11-11: the Preprocess page's primary action is the door to the workspace (8661d35
+    # made the page an overview; "Update comparison" moved into the workspace window), and the
+    # overview scrolls in a scroll area of its own, not the page's legacy one (hidden).
+    # Pages 1-3 pin their action in a strip above the scroller, so it never moves. The door is
+    # inside the scrolled overview, and at this window size that has nothing to scroll (range
+    # 0), which is the only reason it does not move here; the short-window leg below is the
+    # one that scrolls it.
+    for index, button in ((0, detection.preprocess_open_button),
                           (1, detection.detect_button), (2, detection.ml_detect_button),
                           (3, panel._measure._toggle)):
         detection.mode_tabs.setCurrentIndex(index)
         settle()
-        scroll = detection.page_scrolls[detection.mode_tabs.currentWidget()]
+        scroll = (detection.preprocess_overview_scroll if index == 0
+                  else detection.page_scrolls[detection.mode_tabs.currentWidget()])
+        assert scroll.isVisible(), 'the scroll area under test must be the one on screen'
         before = button.mapTo(window, QtCore.QPoint())
         for position in (scroll.verticalScrollBar().maximum(), 0):
             scroll.verticalScrollBar().setValue(position)
@@ -63,6 +72,31 @@ def test_navigation_and_primary_actions_stay_visible_while_scrolling(window, wid
             assert button.mapTo(window, QtCore.QPoint()) == before
             assert_button_reachable(button)
             assert not detection.mode_tabs.tabBar().visibleRegion().isEmpty()
+
+    # The Preprocess page where it really scrolls: the smallest window the app allows (Results
+    # closed; 775x450 is asked for and the window stops at its floor). The door scrolls with
+    # the overview here, so scrolling to the end may take it off screen; what holds is that it
+    # is whole at the top of the page, that the page's own scroll brings it back, and that the
+    # tab bar above the page never leaves.
+    window._results_dock.close()
+    settle()
+    window.resize(775, 450)
+    settle()
+    detection.mode_tabs.setCurrentIndex(0)
+    settle()
+    door, scroll = detection.preprocess_open_button, detection.preprocess_overview_scroll
+    bar = scroll.verticalScrollBar()
+    assert scroll.isVisible() and bar.maximum() > 0, (
+        'the overview must scroll in the smallest window, or this leg proves nothing')
+    bar.setValue(0)
+    settle()
+    assert_button_reachable(door)
+    bar.setValue(bar.maximum())
+    settle()
+    assert not detection.mode_tabs.tabBar().visibleRegion().isEmpty()
+    scroll.ensureWidgetVisible(door)
+    settle()
+    assert_button_reachable(door)
 
 
 def test_layout_navigation_and_disclosures_do_not_change_scientific_inputs(window, qtbot):
@@ -120,19 +154,39 @@ def test_the_results_tabs_are_direct_and_live_in_the_results_dock(window):
 
 
 def test_baseline_buttons_fit_without_scrollbar_occlusion(window):
+    """2026-11-11: the open-pore reference form and the background comparison are not in the
+    Inspector any more (8661d35): "Event reference…" opens the Preprocess workspace on its
+    reference route, which hosts both. So the buttons are checked where they live, at the
+    smallest size that window allows -- each scrolled into view by its own scroll area where it
+    has one, and painted at its full width (a scroll bar over a button would narrow it)."""
     panel = window._analysis_panel
     detection = panel.detection_panel
-    for width in (320, 460):
-        window.resizeDocks([window._inspector], [width], QtCore.Qt.Horizontal)
-        detection.show_open_pore_baseline()
-        scroll = detection.page_scrolls[detection._preprocess_page]
-        for button in (panel.baseline_panel.probe_button, panel.baseline_panel.apply_button,
-                       panel.baseline_panel.reset_button, panel.baseline_workspace.export_button,
-                       panel.baseline_workspace.expand_button):
-            settle()
-            scroll.ensureWidgetVisible(button)
+    detection.show_open_pore_baseline()
+    settle()
+    workspace = window._signal_conditioning
+    assert workspace is not None and workspace.isVisible()
+    assert workspace.current_workspace_section() == 'reference'
+    workspace.resize(workspace.minimumWidth(), workspace.minimumHeight())
+    settle()
+    routes = (('reference', (panel.baseline_panel.probe_button, panel.baseline_panel.apply_button,
+                             panel.baseline_panel.reset_button)),
+              ('comparison', (panel.baseline_workspace.refresh_button,
+                              panel.baseline_workspace.export_button,
+                              panel.baseline_workspace.expand_button)))
+    for route, buttons in routes:
+        assert workspace.show_workspace_section(route)
+        settle()
+        for button in buttons:
+            assert button.window() is workspace, button.text()
+            scroll = button.parentWidget()
+            while scroll is not None and not isinstance(scroll, QtWidgets.QScrollArea):
+                scroll = scroll.parentWidget()
+            if scroll is not None:
+                scroll.ensureWidgetVisible(button)
             settle()
             assert_button_reachable(button)
+            assert button.visibleRegion().boundingRect().width() >= button.width() - 2, button.text()
+    workspace.hide()
 
 
 def test_expanded_comparison_is_the_same_live_plot_and_preserves_inputs(window, qtbot):

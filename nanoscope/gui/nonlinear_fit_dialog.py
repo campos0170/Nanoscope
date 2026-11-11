@@ -21,6 +21,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core.atomic_write import staged_write
+from .export_paths import ask_export_path
 
 
 @dataclass
@@ -547,7 +548,7 @@ class NonlinearFitDialog(QtWidgets.QDialog):
         # finish there. Export the completed record identified when clicked.
         completed=copy.deepcopy(self._result)
         if not isinstance(path,(str,Path)):
-            path,_=QtWidgets.QFileDialog.getSaveFileName(self,'Export last completed fit','nonlinear-fit.json','Fit record (*.json);;Fit observations and curves (*.csv)')
+            path=ask_export_path(self,title='Export last completed fit',suggestion='nonlinear-fit.json',filters='Fit record (*.json);;Fit observations and curves (*.csv)')
         if not path:return None
         p=Path(path)
         try:

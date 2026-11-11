@@ -17,7 +17,7 @@ from PySide6 import QtWidgets
 from nanoscope.core.layer import ViewMode
 from nanoscope.core.sample_rate import SampleRateDeclaration
 
-from .test_trace_rig import (  # noqa: F401  (fixtures are used by name)
+from .trace_rig import (  # noqa: F401  (fixtures are used by name)
     CURRENT, FS, Recorder, double_click, free_mouse, point_at, rig, zoom_middle)
 
 

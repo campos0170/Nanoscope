@@ -381,7 +381,12 @@ def test_contract_params_key_set_is_unchanged(qtbot):
     GREW (never changed) when the hard-coded kernel parameters were exposed: the low-pass
     and high-pass design (order/kind) and the baseline-drift methods' shape parameters are
     now the user's, and again when the Normalize stage landed. Every addition defaults to
-    the value that used to be frozen, and Normalize defaults OFF."""
+    the value that used to be frozen, and Normalize defaults OFF.
+
+    2026-11-11: it grew once more with the Schmitt noise-threshold policy (8661d35):
+    ``noise_policy`` and ``noise_window_s``. They default to ``detect_events``' own defaults,
+    Automatic (which keeps the global threshold on stationary noise) and a 0.25 s window; a
+    saved run from before the policy existed keeps Global (CHANGELOG)."""
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     got: list[dict] = []
@@ -408,7 +413,11 @@ def test_contract_params_key_set_is_unchanged(qtbot):
                            "detrend_rough_s", "detrend_base_s", "detrend_mask_sigma",
                            "detrend_dilate_ms", "detrend_decim", "detrend_sg_poly",
                            "detrend_sg_decim",
-                           "notch_freqs", "normalize_clip_sigma"}
+                           "notch_freqs", "normalize_clip_sigma",
+                           # 2026-11-11 (8661d35): the Schmitt noise-threshold policy.
+                           "noise_policy", "noise_window_s"}
+    assert got[0]["noise_policy"] == "auto"
+    assert got[0]["noise_window_s"] == pytest.approx(0.25)
 
 
 def test_contract_off_sentinels_and_defaults(qtbot):

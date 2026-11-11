@@ -219,7 +219,11 @@ def test_the_window_reached_by_its_own_menu_action_carries_both(qapp, qtbot, tmp
                                      write_sidecar=False)
     win._act_iv.trigger()
     w = win._iv_window
-    assert w is not None and w.fit() is not None and w.fit().n == 2, WHERE
+    # 2026-11-11: since 8661d35 (plotting redesign) the action opens an empty draft figure; the
+    # fit and its wording exist once the user presses Update plot.
+    assert w is not None and w.fit() is None, WHERE
+    win._analysis_explorer.toolbar().update_action.trigger()
+    assert w.fit() is not None and w.fit().n == 2, WHERE
     assert "exact by construction" in _title(w), f"{_title(w)} {WHERE}"
     assert "slope" in w._headline.text().lower(), f"{w._headline.text()} {WHERE}"
     assert "G = I₀ / V" in w.details_text(), WHERE

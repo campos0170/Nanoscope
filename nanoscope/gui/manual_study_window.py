@@ -200,7 +200,28 @@ def _validated_workspace_state(state):
         values = [row[k] for k in ('incubation_h', 'pore_diameter_nm', 'concentration_pm', 'voltage_mv')]
         if not all(isinstance(v, (int, float)) and np.isfinite(v) for v in values) or values[0] < 0 or values[1] <= 0 or values[2] < 0:
             raise ValueError('Invalid recording conditions.')
-        MLPreprocessConfig(**row['preparation_settings'])
+        # to_dict() stamps the baseline policies into what Prepare saves; the constructor
+        # does not take them. from_dict reads (and checks) the stamps but drops unknown
+        # keys, so those are refused here, by name. Validate only: the saved dict stays as it is.
+        preparation = row['preparation_settings']
+        if not isinstance(preparation, dict):
+            raise ValueError('Invalid saved preparation settings.')
+        # from_dict turns notch_freqs into floats before __post_init__ can word a failure, so a
+        # value that is no list of numbers reaches the window as Python's own text ("'NoneType'
+        # object is not iterable", "could not convert string to float"): name the setting first.
+        try:
+            [float(freq) for freq in preparation.get('notch_freqs', ())]
+        except (TypeError, ValueError):
+            raise ValueError('Invalid saved preparation settings: notch_freqs must be a list of numbers.') from None
+        try:
+            config = MLPreprocessConfig.from_dict(preparation) or MLPreprocessConfig()
+        except TypeError as exc:
+            # A net: any other bare TypeError that leaves from_dict is said as the ValueError this
+            # check promises, not as Python's own text.
+            raise ValueError(f'Invalid saved preparation settings: {exc}.') from exc
+        unknown = sorted(map(str, preparation.keys() - config.to_dict().keys()))
+        if unknown:
+            raise ValueError('Invalid saved preparation settings: unknown setting(s) ' + ', '.join(unknown) + '.')
         detect.InferenceSettings(**row['inference_settings'])
         detect.DecodeSettings(**row['decode_settings'])
         detect.MeasurementSettings(**row['measurement_settings'])

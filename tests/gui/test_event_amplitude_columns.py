@@ -83,7 +83,9 @@ def test_table_materializes_amplitude_columns_and_keeps_selection(amplitudes, qt
     assert table.view.isColumnHidden(table._model._columns.index("amplitude_provenance_json"))
     assert not table.view.isColumnHidden(table._model._columns.index("amplitude_pA"))
     depth = table._model._columns.index("depth_pA")
-    assert "median depth" in table._model.headerData(depth, QtCore.Qt.Horizontal)
+    # 2026-11-11: the header reads the quantity label since 8661d35 (it used to carry the raw
+    # column name, "median depth (depth_pA)"); the quantity and its unit are what is pinned.
+    assert table._model.headerData(depth, QtCore.Qt.Horizontal) == "Median depth (pA)"
     table.set_stale_columns(("depth_pA",), "baseline changed")
     assert "amplitude_pA" in table.stale_columns
 

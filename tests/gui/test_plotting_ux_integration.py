@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,8 @@ from nanoscope.gui.iv_panel import IVWindow
 from nanoscope.gui.plot_appearance import PlotAppearance
 from nanoscope.gui.plot_export import apply_png_resolution
 from nanoscope.gui.plot_export_options import resolve_export_options
-from .test_shared_plot_appearance import scientific_window, _forbid_analysis
+from .test_shared_plot_appearance import (
+    scientific_window, _bases, _drawn_quantity, _forbid_analysis)
 from .test_event_plot import _fed_window as event_window
 from .test_psd import _fed_window as psd_window
 from .test_population_plot_presentation_updates import window as population_window
@@ -33,7 +35,11 @@ def test_style_project_roundtrip_has_no_refit_or_edit_signal(scientific_window, 
     _forbid_analysis(monkeypatch, window)
     changes = QtTest.QSignalSpy(window.workspaceChanged)
     assert not restore(window, artifact).skipped
-    assert window._appearance.to_dict() == state
+    # 2026-11-11: Voltage dependence's appearance also holds the witness of the quantity it shows
+    # (8661d35, quantity display), which is not in ``state``: the look is what was saved, and the
+    # witness is what the restored page draws.
+    assert replace(window._appearance, quantity_display=None).to_dict() == state
+    assert _bases(window) == _drawn_quantity(window)
     assert window.fit() == saved_fit
     if isinstance(window, IVWindow):
         # These synthetic sources are deliberately not in the Session. Restore
@@ -48,7 +54,8 @@ def test_style_project_roundtrip_has_no_refit_or_edit_signal(scientific_window, 
     for malformed in (None, "invalid", [1, 2]):
         container["appearance"] = malformed
         assert not restore(window, artifact).skipped
-        assert window._appearance == PlotAppearance()
+        assert replace(window._appearance, quantity_display=None) == PlotAppearance()
+        assert _bases(window) == _drawn_quantity(window)
     container.pop("appearance")
     assert not restore(window, artifact).skipped
     assert changes.count() == 0

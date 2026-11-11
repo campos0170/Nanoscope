@@ -2,7 +2,7 @@
 tabs near the bottom, a ring on a fitted edge's sample, and one look per state (fitted, placed,
 drawn, start only, being drawn). The hit areas are the ones they always were.
 
-On the shared synthetic rig (``test_trace_rig``) with the pane set to the app's dark ``#111316``
+On the shared synthetic rig (``trace_rig``) with the pane set to the app's dark ``#111316``
 explicitly: offscreen, `TraceView` inherits a light background. Pixels are read from a grab of
 the viewport at the places `TraceView.mask_look` reports.
 """
@@ -14,7 +14,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from nanoscope.gui.trace_view import ANNOTATION_INK
 
-from .test_trace_rig import (  # noqa: F401  (fixtures are used by name)
+from .trace_rig import (  # noqa: F401  (fixtures are used by name)
     FS, Qt, drag, drag_move, free_mouse, hover, point_at, press, release, rig, zoom_middle)
 
 INK = QtGui.QColor(ANNOTATION_INK)

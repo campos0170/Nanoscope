@@ -58,7 +58,7 @@ from nanoscope.core.types import ChannelInfo, ChannelKind, Provenance, Recording
 from nanoscope.gui.main_window import MainWindow
 
 from ._inspector_hosting import settle
-from .test_trace_rig import double_click, free_mouse, hover, point_at  # noqa: F401
+from .trace_rig import double_click, free_mouse, hover, point_at  # noqa: F401
 
 FS = 50_000.0
 N = 120_000

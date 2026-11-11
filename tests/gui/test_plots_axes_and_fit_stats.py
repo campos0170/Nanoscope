@@ -36,7 +36,7 @@ import pytest
 from nanoscope.core.session import Session
 from nanoscope.core.sources import PlotSource
 from nanoscope.gui.fit_label import FitLabelState
-from nanoscope.gui.plots_panel import KdeConfig, PlotConfig, PlotsWindow
+from nanoscope.gui.plots_panel import KdeConfig, PlotConfig, PlotsWindow, _KS_REJECTED_TAG
 
 
 # ================================================================================================
@@ -337,7 +337,14 @@ def test_leaving_KS_out_of_the_Numbers_row_cannot_hide_a_REJECTION(qapp, qtbot, 
     with no verdict anywhere on the figure (S7-JRN2): the builder's output went only into
     the values box, which a switch kept off by default. So this drives the real window over
     a narrow peak, and reads the drawn TITLE, the drawn LEGEND entry and the fit label, with
-    the KS statistic in the Numbers row and without it."""
+    the KS statistic in the Numbers row and without it.
+
+    2026-11-11: since 8661d35 the verdict is descriptive (``_KS_REJECTED_TAG``, "CDF mismatch
+    (descriptive)") and is written in Details and the warning summary, never on the figure: the
+    title, the legend row and the fit label carry no tag, with the KS number in the Numbers row
+    or without it. The three negatives below used to look for "KS REJECTED", a string the app no
+    longer holds, and could not fail; they read the live tag now, and Details is asserted to
+    carry it."""
     win = PlotsWindow(Session())
     qtbot.addWidget(win)
     win.set_data([PlotSource(key="doc0:0", label="apo −600 mV", df=_narrow_peak_events(),
@@ -358,11 +365,14 @@ def test_leaving_KS_out_of_the_Numbers_row_cannot_hide_a_REJECTION(qapp, qtbot, 
         f"premise: the exponential is REJECTED on a narrow peak -- {gof}")
 
     label = _drawn_fit_label(win)
-    assert "τ =" in label and "KS REJECTED" not in label, label
-    assert "KS REJECTED" not in _drawn_title(win)
+    assert "τ =" in label and _KS_REJECTED_TAG not in label, label
+    assert _KS_REJECTED_TAG not in _drawn_title(win)
     fit_rows = [t for t in _drawn_legend(win) if t.startswith("fit (")]
-    assert fit_rows and "KS REJECTED" not in fit_rows[0]
+    assert fit_rows and _KS_REJECTED_TAG not in fit_rows[0]
+    assert not any(_KS_REJECTED_TAG in str(offered) for offered in win._legend_offered.values()), (
+        "the offer, before a long row is middle-elided")
     assert ("KS =" in label) is ks_ticked, label
+    assert _KS_REJECTED_TAG in win.details_text()       # the tag exists, and is where it belongs
     assert "DOES NOT DESCRIBE THESE DATA" in win.details_text()
 
 

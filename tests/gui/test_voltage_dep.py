@@ -329,10 +329,21 @@ def test_vdep_action_gated_and_opens_single_window(qapp, qtbot, tmp_path):
     win._open_vdep()
     first = win._vdep_window
     assert first is not None
+    # 2026-11-11: since 8661d35 (plotting redesign) the figure opens as an empty draft inside
+    # the one Analysis Explorer and gathers its points only when the user presses Update plot.
+    assert not first.isWindow()
+    assert first.points() == []
+    owner = win._figure_workspace
+    key = owner.current_id()
+    assert owner.page(key) is first
+    win._analysis_explorer.toolbar().update_action.trigger()
     assert len(first.points()) == 2
+    assert owner.get(key).spec.result.status == "current"
     # re-opening focuses the SAME instance (never a second window)
     win._open_vdep()
     assert win._vdep_window is first
+    assert owner.current_id() == key
+    assert len(owner.records()) == 1
 
 
 def test_vdep_action_lights_for_an_ml_only_series_and_names_the_detector(qapp, qtbot, tmp_path):
@@ -349,6 +360,11 @@ def test_vdep_action_lights_for_an_ml_only_series_and_names_the_detector(qapp, q
     assert win._act_vdep.isEnabled()
 
     win._open_vdep()
+    # 2026-11-11: the opened figure is an empty draft until Update plot (8661d35).
+    assert win._vdep_window.points() == []
+    win._analysis_explorer.toolbar().update_action.trigger()
+    owner = win._figure_workspace
+    assert owner.get(owner.current_id()).spec.result.status == "current"
     assert len(win._vdep_window.points()) == 2
     assert any("Detector:" in line and "Keras" in line
                for line in win._vdep_window._provenance_lines(win._vdep_window._series))
@@ -367,6 +383,12 @@ def test_workspace_capture_records_the_detector_the_series_pooled(qapp, qtbot, t
             n=6, dwell_s=1e-3, depth_pA=20.0, frac_depth=0.02), duration_s=1.0,
             module_id="detect.keras")
     win._open_vdep()
+    # 2026-11-11: the opened figure is an empty draft until Update plot (8661d35); a draft
+    # has no pooled series to record, so the capture is of the plotted figure.
+    assert win._vdep_window.points() == []
+    win._analysis_explorer.toolbar().update_action.trigger()
+    owner = win._figure_workspace
+    assert owner.get(owner.current_id()).spec.result.status == "current"
 
     artifact = workspace.capture_voltage_dependence(win._vdep_window)
 

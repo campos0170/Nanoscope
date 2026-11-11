@@ -246,10 +246,22 @@ def test_no_new_sibling_import():
         from test_measure_navigation import _gui_modules_reached
     finally:
         sys.path.pop(0)
+    # 2026-11-11: baseline_view_worker joined (8661d35, the Preprocess workspace: the main
+    # trace's baseline drawing is delivered from a worker thread). It is not on
+    # test_measure_navigation's allow-list of non-panel modules, so it is pinned here
+    # instead: below, it must stay a widgetless leaf that reaches only the two worker seams.
     assert _gui_modules_reached(AP) == {
-        "analysis_worker", "baseline_panel", "baseline_workspace", "categorical",
-        "export_paths", "hand_row_preview", "inspector_widgets", "measure_panel",
-        "merge_panel", "open_pore_preview", "overlays", "panels", "trace_view"}
+        "analysis_worker", "baseline_panel", "baseline_view_worker", "baseline_workspace",
+        "categorical", "export_paths", "hand_row_preview", "inspector_widgets",
+        "measure_panel", "merge_panel", "open_pore_preview", "overlays", "panels",
+        "trace_view"}
+    import inspect
+
+    import nanoscope.gui.baseline_view_worker as bvw
+    assert _gui_modules_reached(bvw) == {"analysis_worker", "worker_thread"}
+    assert not [n for n, obj in vars(bvw).items()
+                if inspect.isclass(obj) and issubclass(obj, QtWidgets.QWidget)
+                and obj.__module__ == bvw.__name__], "baseline_view_worker must define no widget"
 
 
 # ================================================================================================

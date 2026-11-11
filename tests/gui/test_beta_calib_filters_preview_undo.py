@@ -159,10 +159,16 @@ def test_preview_on_rate_unknown_recording_says_why_instead_of_silently_drawing_
 
     det.notch_enabled.setChecked(True)
     qtbot.wait(10)
-    # Analysis opens Preprocess on "Open-pore baseline". The box, and the card that holds
-    # the error line, live in "Signal chain", so the user picks that section first.
-    det.show_signal_chain()
-    assert det.filter_preview.isVisibleTo(det)
+    # 2026-11-11: the Inspector's Preprocess tab is a navigation page since 8661d35. The box
+    # ("Processed overlay") and the error line beside it live in the Preprocess workspace's
+    # "Display and processing state" bar, so the user opens that workspace on Filters & drift
+    # (the route test_preprocess_navigation pins) before asking for the overlay.
+    det.show_preprocess_tab()
+    det.preprocess_route_buttons["filters"].click()
+    det.preprocess_open_button.click()
+    workspace = window._signal_conditioning
+    assert workspace is not None and workspace.isVisible()
+    assert det.filter_preview.isVisibleTo(workspace)
     assert det.filter_preview.isEnabled()
     det.filter_preview.setChecked(True)   # the user asks to see the processed trace
     qtbot.wait(20)
@@ -170,9 +176,10 @@ def test_preview_on_rate_unknown_recording_says_why_instead_of_silently_drawing_
     text = det.preview_error_label.text()
     assert "sample rate" in text.lower(), (
         f"rate-unknown preview refused with no reason (or the wrong one): {text!r}")
-    assert det.preview_error_label.isVisibleTo(det)
+    assert det.preview_error_label.isVisibleTo(workspace)
     # No curve was fabricated from a nonexistent time base.
     assert window._trace_view._filter_preview is None
+    workspace.close()
 
 
 def test_rate_unknown_refusal_lifecycles_like_any_other_preview_error(window, qtbot, tmp_path):

@@ -104,10 +104,22 @@ def _restore_views(page, kind, raw):
     for key, plot in _plots(page, kind).items():
         value = raw["plots"][key]
         view = plot.getViewBox()
-        view.setRange(xRange=value["range"][0], yRange=value["range"][1], padding=0,
-                      disableAutoRange=True)
+        # A view whose X is linked to another (the Distributions Residual strip follows the
+        # histogram) is given its saved Y only. pyqtgraph passes a linked view's new X range on to
+        # the view it is linked to, lined up by SCREEN geometry, so the strip, restored after the
+        # histogram, would hand the histogram the X it was saved with in the layout of the window
+        # that saved it, and a typed range came back about 1 % of its width off. The strip's X is
+        # its partner's. Its own X auto-range flag (pyqtgraph's A button on the strip can turn it
+        # on, and a file may hold it) is not replayed: the histogram's saved X already is what the
+        # strip framed. No restored view is linked on Y (the Event map's marginal plots are, but
+        # they are not among ``_plots``; see test_p2_figure_surface_adapters), so a view's Y is
+        # always its own.
+        follows_x = view.linkedView(0) is not None
+        view.setRange(xRange=None if follows_x else value["range"][0], yRange=value["range"][1],
+                      padding=0, disableAutoRange=True)
         for axis, enabled in enumerate(value["auto"]):
-            view.enableAutoRange(axis=axis, enable=enabled)
+            if not (axis == 0 and follows_x):
+                view.enableAutoRange(axis=axis, enable=enabled)
     if kind == "comparison_figures":
         page._restore_view(thaw_json(raw["canvas"]))
 

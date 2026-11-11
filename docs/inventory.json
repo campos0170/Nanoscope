@@ -5901,7 +5901,7 @@
       "Increasing ensemble padding can exclude events whose required window extends beyond the loaded trace; edge-skipped counts and other warnings are retained in Details/provenance, not added alongside clean plot artwork.",
       "In the Open-pore baseline panel the buttons are never truly disabled — a dim button still takes the click and answers with the reason. Do not read 'greyed' as 'broken'.",
       "'Base window' cannot be raised above 'Rough window'; if the spin box refuses to go higher, raise the rough window first.",
-      "Measuring proposes; it never applies. Nothing changes until you press 'Use these values'.",
+      "Measuring proposes; it never applies. Nothing changes until you press 'Use proposed windows'.",
       "Confirmed reference settings are scoped to recording/channel. Returning to a stored result restores its recorded reference context; an unrun draft is not a saved analysis result. Check source and mode after switching targets.",
       "There is no universal baseline setting. Automatic 0.5 / 0.1 s windows are defaults for an unseen recording, not a certified physical reference. Inspect the recording, compare candidate estimators, and use known current or demonstrably open intervals only when justified.",
       "Changing the baseline windows after a detection has run does not re-measure the table; use Analysis ▸ Compare baseline estimators… first to see what would change, because it installs nothing.",
@@ -6447,24 +6447,24 @@
         "kind": "readout",
         "group": "Open-pore baseline",
         "what_it_does": "Where the values above came from. This travels with the analysis, so a stored result says whether anyone ever looked at this recording.",
-        "notes": "One of six, verbatim (BaselinePanel._SOURCE_LABELS, in the order the module lists them): 'app default (this recording was not measured)', 'measured on this recording, and confirmed', 'set by hand', 'restored from the stored analysis', 'COPIED from the batch form: set for a DIFFERENT recording -- the one selected when the batch form was filled in -- and this recording was never measured', or 'restored from an older analysis whose estimator fell back on this trace (legacy stamp; the windows were not chosen by anyone)'. This is the whole staleness story in one line — a row still reading 'app default' was never looked at, the batch line means the numbers were confirmed for SOME OTHER recording, and the fall-back line is a legacy stamp only: a probe that cannot run on the trace today stamps 'app default' and the panel prints the CLAMPED line instead. When the windows in the form were accepted over a failing check the line turns amber and carries the standing mark '— ACCEPTED OVER N FAILED HEALTH CHECKS (<the checks>). Depths and dI/I0 measured with these windows are not certifiable — see Baseline health below.' That mark survives navigating to another recording and back; it ends when the windows themselves change (a hand edit, Back to default, or a clean re-proposal)."
+        "notes": "One of six, verbatim (BaselinePanel._SOURCE_LABELS, in the order the module lists them): 'app default (this recording was not measured)', 'measured on this recording, and confirmed', 'set by hand', 'restored from the stored analysis', 'COPIED from the batch form: set for a DIFFERENT recording -- the one selected when the batch form was filled in -- and this recording was never measured', or 'restored from an older analysis whose estimator fell back on this trace (legacy stamp; the windows were not chosen by anyone)'. This is the whole staleness story in one line — a row still reading 'app default' was never looked at, the batch line means the numbers were confirmed for SOME OTHER recording, and the fall-back line is a legacy stamp only: a probe that cannot run on the trace today stamps 'app default' and the panel prints the CLAMPED line instead. When the windows in the form were accepted over a failing check the line turns amber and carries the standing mark '— ACCEPTED OVER N FAILED HEALTH CHECKS (<the checks>). Depths and dI/I0 measured with these windows are not certifiable — see Baseline health below.' That mark survives navigating to another recording and back; it ends when the windows themselves change (a hand edit, Reset automatic windows, or a clean re-proposal)."
       },
       {
-        "label": "Measure this recording",
+        "label": "Estimate window settings",
         "kind": "button",
         "group": "Open-pore baseline",
-        "what_it_does": "Look at this recording and propose a rough and base window from its own timescales, then run the health checks on what it proposes. Usually a few seconds -- measured 2 s on a 3 M-sample recording and 6 s on 9 M samples (the button says Measuring... meanwhile; it has not missed the click). Nothing is applied until you press Use these values.",
+        "what_it_does": "Look at this recording and propose a rough and base window from its own timescales, then run the health checks on what it proposes. Usually a few seconds -- measured 2 s on a 3 M-sample recording and 6 s on 9 M samples (the button says Measuring... meanwhile; it has not missed the click). Nothing is applied until you press Use proposed windows.",
         "notes": "The column above is BaselinePanel.probe_button.toolTip() byte for byte, '--' and 'Measuring...' included — tests/gui/test_s7_fixup_docs_inventory_quotes_live_surfaces.py compares the two, because the string here was once written from a fix report rather than from the widget and quoted a tooltip the button never had. On the button itself the label changes to 'Measuring…' (an ellipsis, where the tooltip spells three dots) while the probe runs off-thread, and a second click is refused. The button is never Qt-disabled: when it cannot run it is dimmed and clicking it posts the reason in the amber line beneath — 'Select a current channel to measure its baseline.', 'Detection runs on CURRENT channels; this is a <kind> channel.', 'Sample rate unknown — dwell time is undefined without a time base, so detection is disabled for this recording.', or 'Still measuring this recording — one moment.'"
       },
       {
-        "label": "Use these values",
+        "label": "Use proposed windows",
         "kind": "button",
         "group": "Open-pore baseline",
         "what_it_does": "Accept the proposed windows. This is the confirmation step — the app never applies a measured parameter on its own. If the health block below condemns what was proposed, the first press explains what is wrong instead of applying it, and the second press accepts it anyway — with the panel saying so from then on. (Verbatim tooltip.)",
-        "notes": "Dimmed until a probe has produced a proposal; clicking it before then posts 'Nothing has been proposed yet. Press Measure this recording first, then this button applies what it found.' Over a condemned proposal the first click posts the REFUSED notice naming the checks that condemn it and arms the override; the button then relabels itself 'Use these values anyway' and turns amber, and the second click applies — after which the source line above carries the standing ACCEPTED OVER … FAILED HEALTH CHECKS mark. A new proposal disarms the override. Once applied, the values are marked confirmed and are protected from being overwritten when a stored detection is loaded — that protection ends only when you select a different recording/channel."
+        "notes": "Dimmed until a probe has produced a proposal; clicking it before then posts 'Nothing has been proposed yet. Press Estimate window settings first, then this button applies what it found.' Over a condemned proposal the first click posts the REFUSED notice naming the checks that condemn it and arms the override; the button then relabels itself 'Use proposed windows anyway' and turns amber, and the second click applies — after which the source line above carries the standing ACCEPTED OVER … FAILED HEALTH CHECKS mark. A new proposal disarms the override. Once applied, the values are marked confirmed and are protected from being overwritten when a stored detection is loaded — that protection ends only when you select a different recording/channel."
       },
       {
-        "label": "Back to default",
+        "label": "Reset automatic windows",
         "kind": "button",
         "group": "Open-pore baseline",
         "what_it_does": "Return to the app default (0.5 s / 0.1 s). A defensible floor for an unseen recording, and provably wrong for some — measure instead where you can.",
@@ -6482,7 +6482,7 @@
         "kind": "group",
         "group": "Open-pore baseline",
         "what_it_does": "The finished probe's findings, as a small table: 'Noise (robust sigma)', 'Longest state' (with a state count), 'Median state (base_s floor)' (the median state the base window is floored against, e.g. '20.7 ms -> base_s >= 100 ms'), 'Pore stepping (gating)' (yes/no with a ×noise score), 'Level dwell' when one was found, then 'Proposed rough window', 'Proposed base window' and 'Decimation (derived)'. Under those, one 'Ranked: <window>' row per window the probe actually ESTIMATED — each naming both criteria it was judged on, the MEDIAN share of each state's depth the baseline follows and the WORST single state it rides into — with the winner marked '— CHOSEN'. Then a plain-language reason that says why that window was taken and where the search stopped.",
-        "notes": "Hidden until a probe finishes, and cleared the moment you select a different recording — a proposal belongs to the recording it was measured on. If the probe could not measure, the reason line turns amber and is prefixed 'Could not measure -- '. Nothing here is applied until 'Use these values' is pressed."
+        "notes": "Hidden until a probe finishes, and cleared the moment you select a different recording — a proposal belongs to the recording it was measured on. If the probe could not measure, the reason line turns amber and is prefixed 'Could not measure -- '. Nothing here is applied until 'Use proposed windows' is pressed."
       },
       {
         "label": "Baseline health",
@@ -6673,7 +6673,7 @@
         "label": "Measuring…",
         "kind": "button",
         "group": "Open-pore baseline",
-        "what_it_does": "What the Measure this recording button renames itself to while the probe is running. It stays clickable, but a second click is refused with 'Still measuring this recording — one moment.' in the amber line; the button reverts once the proposal arrives.",
+        "what_it_does": "What the Estimate window settings button renames itself to while the probe is running. It stays clickable, but a second click is refused with 'Still measuring this recording — one moment.' in the amber line; the button reverts once the proposal arrives.",
         "from_crosscheck": true
       },
       {
@@ -6708,7 +6708,7 @@
         "label": "Proposed rough window",
         "kind": "readout",
         "group": "Open-pore baseline ▸ Proposed for this recording",
-        "what_it_does": "The pass-1 window the probe suggests, in milliseconds. Nothing changes in the form until you press Use these values.",
+        "what_it_does": "The pass-1 window the probe suggests, in milliseconds. Nothing changes in the form until you press Use proposed windows.",
         "from_crosscheck": true
       },
       {

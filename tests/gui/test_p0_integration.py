@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 
 import nanoscope  # noqa: F401  -> runs bootstrap.py, fixes the plugin path
@@ -41,6 +42,7 @@ import pandas as pd
 import pytest
 from PySide6 import QtCore, QtTest, QtWidgets
 
+from nanoscope.core.figure_quantity_basis import read_quantity_bases
 from nanoscope.core.session import Session
 from nanoscope.gui import figure_text, plot_export
 from nanoscope.gui import plots_panel as pp
@@ -56,6 +58,7 @@ from .test_p0_distributions_switches_and_reset_figure import (
     OLD_KEYS, _df, _label, _manifest_text, _old_style, _with_old_keys_added)
 from .test_p0_figure_font_picker import (  # noqa: F401 -- ``arial`` is a fixture
     OTHER, arial, drawn_families, in_family, pdf_font_names, picking, settle, tick_family)
+from .test_p0_pins_clear_with_the_words import _press_redo
 from .test_p0_reset_on_quantity_change import (  # noqa: F401 -- the fixtures build the pages
     _boxes, _click_button, _in_explorer, _pick, _said, _type_dist_words,
     _type_in_box, _type_vdep_words, _user_picks, comparison, dist, events, noise, subpop,
@@ -159,6 +162,14 @@ def _export_through_the_menu(page, monkeypatch, target: Path, extension: str = "
     return target
 
 
+def _bases(appearance: PlotAppearance) -> dict[str, tuple[str, str]]:
+    """The quantity each axis shows, as the appearance's display witness records it:
+    ``{axis: (quantity key, display unit)}``. 2026-11-11: a page that presents units carries this
+    witness since 8661d35 (quantity display); it is not look, and Reset figure keeps it."""
+    return {axis: (basis.quantity.key, basis.quantity.display_unit)
+            for axis, basis in read_quantity_bases(appearance.quantity_display).items()}
+
+
 # ===============================================================================================
 # (a) a font picked in the picker x the reset rule x Reset figure
 # ===============================================================================================
@@ -195,7 +206,10 @@ def test_a_picked_font_survives_a_quantity_change_and_reset_figure_puts_arial_ba
     _click_button(page._workflow.reset_button)                      # Reset figure, in the toolbar
 
     assert widget._history.depth() == (steps + 1, 0), "one gesture, one step"
-    assert widget.state() == PlotAppearance()
+    # 2026-11-11: everything but the witness of the quantity the axis shows (8661d35) is back to a
+    # figure's defaults.
+    assert replace(widget.state(), quantity_display=None) == PlotAppearance()
+    assert _bases(widget.state()) == {"left": ("median_depth", "")}, "Reset figure keeps what is drawn"
     assert widget.font_family.value() == "" and widget.font_family.currentText() == "Arial (default)"
     _all_drawn_in(plot, "Arial")
     assert in_family(drawn_families(page._fit_label), "Arial")
@@ -282,7 +296,13 @@ def test_the_study_editors_picker_and_buttons_drive_its_matplotlib_figure(qtbot,
     """The study figure editor, through its real widgets: pick Times New Roman, press Apply
     appearance, then Reset all figure styling. The figure is Arial before, Times New Roman after
     the first, and Arial (not the study's own DejaVu Sans) after the second -- the real buttons
-    that G4's own tests call as slots."""
+    that G4's own tests call as slots.
+
+    2026-11-11: the editor has two inspector tabs since 8661d35: Format, in front, where the figure
+    font picker lives and a pick is applied at once, and Study details, which holds the two
+    buttons. So the pick is made in Format, where the Undo and Redo KEYS also answer (the window
+    binds them, see test_p0_final_seams), and the Study details tab is clicked before the buttons
+    are pressed."""
     from matplotlib.figure import Figure
 
     from nanoscope.gui.study_figure_window import StudyFigureWindow
@@ -305,8 +325,24 @@ def test_the_study_editors_picker_and_buttons_drive_its_matplotlib_figure(qtbot,
         return next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == text)
 
     widget = page._appearance_widget
+    (tabs,) = [t for t in page.findChildren(QtWidgets.QTabWidget)
+               if [t.tabText(i) for i in range(t.count())] == ["Format", "Study details"]]
+    assert tabs.currentIndex() == 0 and widget.font_family.isVisible()
+    assert family_of_the_drawn_text() == "Arial"
     _pick_font(widget.font_family, TIMES)
     assert widget.state().font_family == TIMES
+    assert family_of_the_drawn_text() == TIMES, "a pick in Format is applied at once"
+    assert page.style()["appearance"]["font_family"] == TIMES
+    _press_undo(page)                                       # the keys answer with Format in front
+    assert family_of_the_drawn_text() == "Arial" and "font_family" not in page.style()["appearance"]
+    _press_redo(page)
+    assert family_of_the_drawn_text() == TIMES and page.style()["appearance"]["font_family"] == TIMES
+
+    bar = tabs.tabBar()
+    QtTest.QTest.mouseClick(bar, L, NOMOD, bar.tabRect(1).center())     # Study details
+    QtWidgets.QApplication.processEvents()
+    assert tabs.currentIndex() == 1
+    assert button("Apply appearance").isVisible() and button("Reset all figure styling").isVisible()
     _click_button(button("Apply appearance"))
     assert family_of_the_drawn_text() == TIMES
     assert page.style()["appearance"]["font_family"] == TIMES
@@ -342,7 +378,8 @@ def test_reset_figure_and_the_rules_sentence_share_the_status_line_in_voltage_de
     assert widget.redo()
 
     depth = widget._history.depth()
-    _pick(page._metric_combo, text="Median dwell (s)")             # nothing is typed any more
+    # 2026-11-11: this metric reads "(ms)", not "(s)", since 8661d35 shows dwell in milliseconds.
+    _pick(page._metric_combo, text="Median dwell (ms)")            # nothing is typed any more
     assert widget._history.depth() == depth, "no step"
     assert _said(page, explorer)[0] == "", "the old sentence outlived the next change"
 
@@ -539,9 +576,12 @@ def test_every_explorer_page_opens_draws_and_exports_svg_and_pdf_with_the_defaul
         kind, request, tmp_path):
     """The eight pages of the Analysis Explorer, each in a real Explorer, untouched: it draws, it
     exports an SVG whose every text element names Arial first and the stack after it, and a PDF
-    that embeds Arial with no Type 3 drawing and no private system face. Comparison figures
-    export their text as outlines, so theirs have no fonts to name."""
-    outlined = kind == "comparison"
+    that embeds Arial with no Type 3 drawing and no private system face.
+
+    2026-11-11: Comparison figures were the exception, because their SVG held outlines and had no
+    fonts to name. Since 8661d35 their SVG keeps literal text with the fallback families
+    (``svg.fonttype`` is ``none``, then ``editable_font_stacks``) and their PDF embeds the font, so
+    they are held to the same rule as the other seven pages."""
     if kind == "distributions":
         page, _explorer = request.getfixturevalue("dist")
         writer = page.save_image
@@ -576,14 +616,10 @@ def test_every_explorer_page_opens_draws_and_exports_svg_and_pdf_with_the_defaul
         writer(str(target))
         assert target.is_file() and target.stat().st_size > 500, f"{target.name} was not written"
     families = _svg_families(svg)
-    if outlined:
-        assert families == [], "Comparison figures export outlines, not text"
-    else:
-        assert families and set(families) == {ARIAL_STACK}, (kind, set(families))
-        assert "AppleSystemUIFont" not in svg.read_text(encoding="utf-8")
+    assert families and set(families) == {ARIAL_STACK}, (kind, set(families))
+    assert "AppleSystemUIFont" not in svg.read_text(encoding="utf-8")
     names = _pdf_is_clean(pdf)
-    if not outlined:
-        assert any("Arial" in n for n in names), (kind, names)
+    assert any("Arial" in n for n in names), (kind, names)
 
 
 # ===============================================================================================
@@ -632,6 +668,14 @@ LEGACY_KEY_FILES = {
     "nanoscope/gui/fit_label.py",            # FitLabelState.from_mapping(legacy=...), no caller
     "tests/gui/test_fit_label.py", "tests/gui/test_plots_fit_label.py",   # old payloads, written out
     "tests/gui/fixtures/plot_config_v1_pre_rename.json",                   # a file an old build wrote
+    # 2026-11-11: project format 13 (8661d35) reads the older files at its restore boundary and
+    # folds these keys away; its fixtures and tests write the old files out and check they are gone.
+    "nanoscope/core/figure_codecs.py",       # the v12 restore boundary: _fold_v12_legacy_style
+    "tools/make_phase2_legacy_fixture.py",   # builds a file as an older build wrote it
+    "tests/core/test_p2_figure_codecs.py", "tests/core/test_p2_historical_dialects.py",  # old payloads
+    "tests/core/fixtures/phase2/legacy/d1-provenance.json",    # provenance of old-format fixtures
+    "tests/core/fixtures/phase2/legacy/d2-provenance.json",
+    "tests/core/fixtures/phase2/legacy/v11-provenance.json",
 }
 SKIPPED = ("docs/sweep", "docs/RELEASE_", "docs/MANUAL_REVISION", ".git/", "__pycache__")
 

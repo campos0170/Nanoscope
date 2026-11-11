@@ -8,6 +8,7 @@ import json
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
+from nanoscope.core.figure_style import builtin_styles, style_binding
 from nanoscope.gui import plot_appearance
 from nanoscope.gui.figure_composition import capture_cartesian_model
 from nanoscope.gui.figure_text import AxisPin, TextStyle
@@ -186,6 +187,29 @@ def test_composition_refuses_styles_its_model_cannot_replay(qtbot):
     assert capture_cartesian_model(plot) is None
     apply_plot_appearance(plot, PlotAppearance().with_axis_pin("left", AxisPin(tick_major=1)))
     assert capture_cartesian_model(plot) is None
+
+    # The same rule for a figure bound to a figure style, as every figure of a project is. The
+    # style's family and sizes fill in every role, and composition asks only what the AUTHOR set
+    # per element: the style alone, or a legend row the author made bold, is replayed from what is
+    # drawn; a row given its own font family, or a style on the colour bar's label, is not.
+    legend_widget = pg.PlotWidget()
+    qtbot.addWidget(legend_widget)
+    legend_widget.resize(500, 400)
+    legend_widget.show()
+    qtbot.waitExposed(legend_widget)
+    framed = legend_widget.getPlotItem()
+    framed.addLegend()
+    framed.plot([0, 1, 2], [1, 3, 2], name="apo")
+    bound = PlotAppearance(style_binding=style_binding(builtin_styles()[0]))
+    row = "legend.entry.apo"
+    apply_plot_appearance(framed, bound)
+    assert capture_cartesian_model(framed) is not None, "a figure style alone is nothing to replay"
+    apply_plot_appearance(framed, bound.with_text_style(row, TextStyle(bold=True)))
+    assert capture_cartesian_model(framed) is not None
+    apply_plot_appearance(framed, bound.with_text_style(row, TextStyle(family="Times New Roman")))
+    assert capture_cartesian_model(framed) is None
+    apply_plot_appearance(framed, bound.with_text_style("colorbar.label", TextStyle(bold=True)))
+    assert capture_cartesian_model(framed) is None
 
 
 def test_the_text_rows_come_first(qtbot):
