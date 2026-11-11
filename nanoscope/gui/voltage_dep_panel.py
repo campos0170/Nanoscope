@@ -1415,9 +1415,13 @@ class VDepWindow(QtWidgets.QMainWindow):
     def _provenance_lines(self, series: voltage_dep.VDepSeries) -> list[str]:
         """The 'Pooled provenance' block: what measured every point on this plot."""
         lines = ["Pooled provenance"]
-        if self._series_module_id != DEFAULT_DETECTION_MODULE_ID:
-            name = DETECTOR_NAMES.get(self._series_module_id, self._series_module_id)
-            lines.append(f"  {'Detector:':<10}{name}")
+        # ALWAYS, Schmitt included. The series pools one detector's tables, chosen by
+        # `voltage_dep.series_module_id`, and Batch detect can now make either threshold
+        # detector's: a block that named the detector only when it was not Schmitt left a
+        # Schmitt plot drawn after a CUSUM pass (or the reverse) saying nothing about which
+        # tables it read.
+        name = DETECTOR_NAMES.get(self._series_module_id, self._series_module_id)
+        lines.append(f"  {'Detector:':<10}{name}")
 
         def block(label: str, groups, note: str = "") -> None:
             if len(groups) == 1:

@@ -28,7 +28,7 @@ from __future__ import annotations
 import math
 import threading
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 
 from PySide6 import QtCore
@@ -37,6 +37,7 @@ import numpy as np
 from ..analysis.baseline import BATCH_SCOPE_KEY
 from ..analysis.cancel import OperationCancelled, cancel_scope
 from ..analysis.context import SimpleAnalysisContext
+from ..core.acquisition import AcquisitionBandwidth
 from ..core.analysis import ANALYSIS_REGISTRY, AnalysisModule, AnalysisResult
 from ..core.document import CalibratedChannel
 from ..core.calibration import ChannelCalibration
@@ -472,18 +473,28 @@ class FrozenChannelSource:
     The read-only view shares the application's immutable loaded samples. Metadata
     and calibration are frozen at dispatch, so UI edits cannot change queued jobs.
     Materialization is deliberately a worker operation, one recording at a time.
+
+    ``acquisition_bandwidth`` is the channel's EFFECTIVE acquisition bandwidth at dispatch
+    (`Session.acquisition_bandwidth`: the user's declaration when there is one, else the
+    file header's), which `Session.calibrated` puts on the channel a single run is handed.
+    ``meta`` holds the header alone, so without it a batch-made table recorded the low-pass
+    at detection as unknown on a recording whose user had declared one. ``None`` (a caller
+    that has no Session to ask) keeps the header's.
     """
 
     raw: np.ndarray
     meta: RecordingMeta
     channel: int
     calibration: ChannelCalibration
+    acquisition_bandwidth: AcquisitionBandwidth | None = None
 
     @classmethod
-    def capture(cls, document, channel: int, calibration: ChannelCalibration):
+    def capture(cls, document, channel: int, calibration: ChannelCalibration, *,
+                acquisition_bandwidth: AcquisitionBandwidth | None = None):
         raw = np.asarray(document.raw(int(channel))).view()
         raw.setflags(write=False)
-        return cls(raw, deepcopy(document.meta), int(channel), deepcopy(calibration))
+        return cls(raw, deepcopy(document.meta), int(channel), deepcopy(calibration),
+                   deepcopy(acquisition_bandwidth))
 
     def materialize(self) -> CalibratedChannel:
         """Use the existing affine kernel, preserving Session's damage disclosure."""
@@ -492,6 +503,9 @@ class FrozenChannelSource:
         cal = self.calibration
         data = cal.apply(self.raw)
         info = self.meta.channels[self.channel]
+        if self.acquisition_bandwidth is not None:
+            # The same snapshot `Session.calibrated` makes; ``meta`` keeps the header.
+            info = replace(info, acquisition_bandwidth=self.acquisition_bandwidth)
         issues: tuple[str, ...] = ()
         if cal.fingerprint() != (1.0, 0.0):
             # This is the same reporting predicate as Session.calibration_issues,
@@ -638,11 +652,26 @@ def _swallow_progress(frac: float, msg: str = "") -> None:
 _CONFIRMED_STAMPS = frozenset({"proposed", "user"})
 
 
+#: The detectors whose stored result can vouch for a recording's open-pore windows in a
+#: batch: the two a batch can run. They share ONE baseline form, so a confirmation recorded
+#: on either's table is a confirmation of those windows on that recording.
+_STAMP_KEEPING_MODULES = ("detect.schmitt", "detect.cusum")
+
+
 def _stored_stamp_to_keep(
     session: Any, doc_id: str, channel: int, module_id: str, base: Mapping[str, Any]
 ) -> str | None:
     """The stored result's confirmed baseline stamp, when ``base`` holds the windows it
     was confirmed AT -- else ``None``.
+
+    EITHER THRESHOLD DETECTOR'S STORED RESULT COUNTS, the one being run first. The stamp
+    is a claim about a pair of open-pore widths on a recording, and the baseline form is
+    shared by Schmitt and CUSUM, so it does not belong to one detector's table. Asked of
+    the running detector alone, a recording measured and confirmed under Schmitt was told
+    by its first CUSUM batch, launched from another recording, that its windows were
+    "COPIED FROM THE BATCH FORM ... set for a DIFFERENT recording" -- false of a recording
+    whose own Schmitt table records those very windows as confirmed. A module that is
+    neither of the two is asked of its own stored result only.
 
     THE GATE IS THE WINDOWS, NOT THE RECORDING THE BATCH WAS LAUNCHED FROM. A stamp is
     a claim about a pair of open-pore widths, so it survives only while the batch is
@@ -684,22 +713,27 @@ def _stored_stamp_to_keep(
             at_home = scope == (doc_id, int(channel))
         if at_home:
             return None
-    stored = session.results.get(doc_id, channel, module_id)
-    if stored is None:
-        return None
-    prov = getattr(stored.payload, "provenance", None) or {}
-    src = prov.get("baseline_param_source")
-    if src not in _CONFIRMED_STAMPS:
-        return None
-    try:
-        same = (
-            math.isclose(float(prov["baseline_rough_s"]), float(base["baseline_rough_s"]),
-                         rel_tol=1e-9, abs_tol=1e-12)
-            and math.isclose(float(prov["baseline_base_s"]), float(base["baseline_base_s"]),
-                             rel_tol=1e-9, abs_tol=1e-12))
-    except (KeyError, TypeError, ValueError):
-        return None
-    return src if same else None
+    asked = ((module_id, *(m for m in _STAMP_KEEPING_MODULES if m != module_id))
+             if module_id in _STAMP_KEEPING_MODULES else (module_id,))
+    for stored_module in asked:
+        stored = session.results.get(doc_id, channel, stored_module)
+        if stored is None:
+            continue
+        prov = getattr(stored.payload, "provenance", None) or {}
+        src = prov.get("baseline_param_source")
+        if src not in _CONFIRMED_STAMPS:
+            continue
+        try:
+            same = (
+                math.isclose(float(prov["baseline_rough_s"]), float(base["baseline_rough_s"]),
+                             rel_tol=1e-9, abs_tol=1e-12)
+                and math.isclose(float(prov["baseline_base_s"]), float(base["baseline_base_s"]),
+                                 rel_tol=1e-9, abs_tol=1e-12))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if same:
+            return src
+    return None
 
 
 class BatchDetectController(QtCore.QObject):
@@ -748,8 +782,13 @@ class BatchDetectController(QtCore.QObject):
         would get; ``pore_id`` defaults to the document's ``stem_key`` so batch
         results identify their pore exactly as an interactive detection does.
 
+        ``module`` is the detector the pass runs on every target (``detect.schmitt`` by
+        default, ``detect.cusum`` when the Detection panel has CUSUM selected); the new
+        results are stored under that module's id alone.
+
         Each target's params also carry the ONE thing the batch form cannot know: when
-        THIS recording's stored ``detect.schmitt`` result was confirmed by a human at
+        THIS recording's stored result -- of either threshold detector, since they share
+        the baseline form -- was confirmed by a human at
         the very windows the form now holds, that stamp is kept
         (`_stored_stamp_to_keep` -> a per-target `BATCH_SCOPE_KEY` and
         ``baseline_param_source``, which is all `baseline.resolve_param_source` needs
@@ -782,7 +821,11 @@ class BatchDetectController(QtCore.QObject):
         for doc_id, channel in targets:
             doc = self._session.document(doc_id)
             calibration = self._session.calibration(doc_id, channel)
-            source = FrozenChannelSource.capture(doc, channel, calibration)
+            # The EFFECTIVE acquisition bandwidth, as a single run's channel carries it
+            # (`Session.calibrated`), so a batch-made table records the same low-pass.
+            source = FrozenChannelSource.capture(
+                doc, channel, calibration,
+                acquisition_bandwidth=self._session.acquisition_bandwidth(doc_id, channel))
             fingerprint = source.calibration.fingerprint()
             merged = deepcopy(base)
             merged["_calibration_fingerprint"] = tuple(fingerprint)

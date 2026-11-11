@@ -151,6 +151,7 @@ __all__ = [
     "NO_TMIN_WARNING",
     "detector_kwargs",
     "opposite_direction_warning",
+    "raises_opposite_direction_advisory",
     "OPPOSITE_ADVISORY_MIN",
     "OPPOSITE_ADVISORY_FRACTION",
     "OPPOSITE_EVENTS_ADVISORY_FRACTION",
@@ -1348,6 +1349,17 @@ def _opposite_direction_advisory(prov: Mapping[str, Any]) -> str | None:
         shown = n_before_guard
     return opposite_direction_warning(
         shown, n_reference, highpass=bool(prov.get("hp_enabled")))
+
+
+def raises_opposite_direction_advisory(provenance: Mapping[str, Any] | None) -> bool:
+    """Does a run with this provenance raise the opposite-direction advisory?
+
+    The decision itself (`_opposite_direction_advisory`, which `_build_warnings` asks),
+    for a caller that COUNTS the runs that raised it -- the Batch detect summary -- so the
+    count follows the trigger and not the wording of the sentence. False for a provenance
+    that carries no opposite-direction count (a Schmitt or ML run, an older CUSUM table).
+    """
+    return _opposite_direction_advisory(provenance or {}) is not None
 
 
 def _build_warnings(prov: dict[str, Any], df: pd.DataFrame) -> tuple[str, ...]:

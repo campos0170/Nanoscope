@@ -13,7 +13,7 @@
       "A segment is not a file. It lives only in this session, so closing it (or its parent) without saving a project destroys it and everything detected on it — there is nothing on disk to reopen.",
       "File > Create segment from selection…, View > Centre selection in view and the merge-in-selection command all need the Measure region: turn on Analysis > Measure event (Ctrl+M's companion) and DRAG a region on the trace, or they stay greyed.",
       "Ctrl+M (Add measurement to list) stays enabled even with no region drawn — press it and the status bar names what is actually missing rather than leaving you with a dead key.",
-      "Analysis > Batch detect with \"Re-run all\" wipes existing curation on every recording it re-detects. \"Only missing\" (the default) is the safe answer.",
+      "Analysis > Batch detect with \"Re-run all\" wipes existing curation on every recording it re-detects. \"Only missing\" (the default) is the safe answer. The batch runs the detector selected in the Detection panel (Schmitt or CUSUM) and re-detects only that detector's tables; the other detector's tables and curation are left alone. Edit ▸ Undo on each recording (\"Undo Re-run detection\") brings back the table a re-run replaced, with its curation.",
       "Substate fitting runs in the background from frozen inputs. Selecting another source does not erase a completed per-source fit; fits are saved in projects. A completed background result is discarded if its source, calibration, event frame or recorded analysis context changed. Cancel preserves the previous valid fit.",
       "Generate Report figures… creates the standard report set from the selected detection, not the styled Explorer canvas. Export current figure exports that canvas; Save figure bundle preserves the image with plotted data, configuration and provenance. Read export success/failure messages before relying on a same-named file.",
       "Calibration warnings must be reviewed, but gain=1 alone does not establish physical validity. Check source units, acquisition gain, offset and reference provenance. Fractional ΔI/I₀ is not a universal workaround: offsets, ambiguous open-pore levels and incompatible references can invalidate its interpretation too.",
@@ -262,8 +262,8 @@
         "label": "Batch detect (all open recordings)…",
         "kind": "menu-action",
         "group": "Analysis > Detect",
-        "what_it_does": "Run the current Schmitt detection parameters on every open recording that has a current channel and a known sample rate, in the background. Detect the whole -1000..-200 mV series in one pass, then plot the voltage dependence. (ML detection is not offered here — it is too slow to batch over many full recordings.) (Verbatim tooltip.)",
-        "notes": "DISABLED until at least one open recording has both a current channel and a known sample rate; re-checked every time you open the Analysis menu. If some recordings already have a Schmitt detection it asks \"Re-run all of them, or only the ones that are missing one?\" with \"Only missing\" (default), \"Re-run all\" and \"Cancel\" — \"Re-run all\" discards existing curation on those recordings. Progress and Cancel appear in the status bar; when it finishes the status bar reports how many recordings and events were installed, how many were dropped because their recording was closed mid-run, how many were skipped for lack of a current channel/rate, and any failures."
+        "what_it_does": "Run the selected detector (Schmitt or CUSUM) with its current parameters on every open recording that has a current channel and a known sample rate, in the background. Detect the whole -1000..-200 mV series in one pass, then plot the voltage dependence. (ML detection is not offered here — it is too slow to batch over many full recordings.) (Verbatim tooltip.)",
+        "notes": "DISABLED until at least one open recording has both a current channel and a known sample rate; re-checked every time you open the Analysis menu. Runs the detector selected in the Detection panel, Schmitt or CUSUM, whatever table is on screen; ML is not offered. REFUSED in the status bar, before any question is asked, in three cases: under an open-pore reference you supplied (\"Batch detect refused: this open-pore reference belongs to the selected recording and channel. Run Detect there, or explicitly choose Automatic reference.\"); while any analysis is running, another batch included (during a batch: \"A batch detection is already running. This app runs one analysis job at a time, so the request for a batch detection was refused; nothing was started. Use Cancel in the window running that job, or wait for it to finish.\"); and when the maximum dwell is on and does not exceed the minimum dwell (\"Batch detect refused — maximum dwell (0.5 ms) must exceed minimum dwell (1 ms). Increase the maximum or set it to 0 (off).\"). If some recordings already have a detection of that detector it says \"N of M recording(s) already have a Schmitt detection.\" (or \"… a CUSUM detection.\") and asks \"Re-run all of them, or only the ones that are missing one?\" with \"Only missing\" (default), \"Re-run all\" and \"Cancel\" — \"Re-run all\" discards existing curation on those recordings; Edit ▸ Undo on each recording (\"Undo Re-run detection\") brings the replaced table back with its curation, hand rejections made just before the batch included. A recording that has only the other detector's table counts as missing, and that table and its curation are left alone. After the batch each recording it detected shows the table the batch made, with the detector box on that detector, as after a single Detect there (on the recording on screen a Manual table you chose, or a Reconciled table built from that detector's table, stays). Progress and Cancel appear in the status bar; when it finishes the status bar reports how many recordings and events were installed, how many were dropped because their recording was closed mid-run, how many were skipped for lack of a current channel/rate, and any failures. With CUSUM the texts name it: \"Batch detecting N recording(s) with CUSUM…\", \"Batch detect (CUSUM): N recording(s), E event(s).\" and \"Batch detect (CUSUM): nothing to do — every recording already has a CUSUM detection.\"; the Schmitt texts do not name the detector (\"Batch detect: N recording(s), E event(s).\"). After a CUSUM batch the summary also says how many recordings raised the opposite-direction advisory, when any did: \"K recording(s) raised the opposite-direction advisory.\""
       },
       {
         "label": "Load ML model…",
@@ -378,7 +378,7 @@
         "kind": "menu-action",
         "group": "Analysis > Compare recordings",
         "what_it_does": "Plot how an event metric (capture rate, dwell, depth, dI/I₀, count) varies with the applied voltage across your detected recordings, and fit the trend (linear or the A·exp(V/V₀) capture-rate model). The classic nanopore voltage series — batch-detect first, then open this. (Verbatim tooltip.)",
-        "notes": "DISABLED until at least TWO recordings each have a known applied voltage AND a stored Schmitt detection — one point is not a trend. The greyed reason carries the live count: \"Needs at least 2 detected recordings with a known applied voltage — N so far. Open the voltage series and run Analysis ▸ Batch detect.\""
+        "notes": "DISABLED until at least TWO recordings each have a known applied voltage AND a stored detection of the detector the series pools — one point is not a trend. The series pools one detector's tables (Schmitt, CUSUM or ML): the detector stored on the most recordings that can become a point and, on a tie, the one whose tables were made most recently (Schmitt, then CUSUM, then ML when the detection times cannot settle it). The greyed reason carries the live count: \"Needs at least 2 detected recordings with a known applied voltage — N so far. Open the voltage series and run Analysis ▸ Batch detect.\""
       },
       {
         "label": "Export",
@@ -449,7 +449,7 @@
         "label": "progress bar",
         "kind": "list",
         "group": "Status bar (right, permanent)",
-        "what_it_does": "Shows how far a background job has got, with a label saying what it is: \"Opening <file>…\", \"Analysing (<module>)…\" or \"Batch detecting N recording(s)…\".",
+        "what_it_does": "Shows how far a background job has got, with a label saying what it is: \"Opening <file>…\", \"Analysing (<module>)…\" or \"Batch detecting N recording(s)…\" (\"Batch detecting N recording(s) with CUSUM…\" when the batch runs CUSUM).",
         "notes": "Hidden whenever no job is running. Max width 240 px."
       },
       {
@@ -575,14 +575,14 @@
         "label": "Only missing",
         "kind": "button",
         "group": "\"Batch detect\" conflict dialog (raised by Analysis ▸ Batch detect (all open recordings)…)",
-        "what_it_does": "When some open recordings already have a Schmitt detection, this runs detection only on the ones that do not, leaving existing tables (and their curation) untouched. This is the pre-selected default button.",
+        "what_it_does": "When some open recordings already have a detection of the detector selected in the Detection panel (Schmitt or CUSUM), this runs detection only on the ones that do not, leaving existing tables (and their curation) untouched. A recording that has only the other detector's table counts as missing; that table is left alone too. This is the pre-selected default button.",
         "from_crosscheck": true
       },
       {
         "label": "Re-run all",
         "kind": "button",
         "group": "\"Batch detect\" conflict dialog (raised by Analysis ▸ Batch detect (all open recordings)…)",
-        "what_it_does": "Re-runs detection on every eligible recording, replacing the detections that already exist. Marked destructive — replacing a table discards the curation on it (Edit ▸ Undo can put it back). Cancel abandons the batch.",
+        "what_it_does": "Re-runs detection on every eligible recording, replacing the detections of the selected detector that already exist; the other detector's tables and their curation are left alone. Marked destructive — replacing a table discards the curation on it (Edit ▸ Undo on each recording, \"Undo Re-run detection\", puts the replaced table back with its curation). Cancel abandons the batch.",
         "from_crosscheck": true
       },
       {
@@ -5931,7 +5931,7 @@
         "kind": "menu-action",
         "group": "Analysis menu ▸ Compare recordings",
         "what_it_does": "Plot how an event metric (capture rate, dwell, depth, dI/I₀, count) varies with the applied voltage across your detected recordings, and fit the trend (linear or the A·exp(V/V₀) capture-rate model). The classic nanopore voltage series — batch-detect first, then open this.",
-        "notes": "Disabled until at least 2 recordings each have a known applied voltage AND a stored threshold (Schmitt) detection — one point is not a trend. The locked reason counts live: 'Needs at least 2 detected recordings with a known applied voltage — N so far. Open the voltage series and run Analysis ▸ Batch detect.'"
+        "notes": "Disabled until at least 2 recordings each have a known applied voltage AND a stored detection of the detector the series pools — one point is not a trend. The series pools one detector's tables (Schmitt, CUSUM or ML): the detector stored on the most recordings that can become a point and, on a tie, the one whose tables were made most recently (Schmitt, then CUSUM, then ML when the detection times cannot settle it). The locked reason counts live: 'Needs at least 2 detected recordings with a known applied voltage — N so far. Open the voltage series and run Analysis ▸ Batch detect.'"
       },
       {
         "label": "Event waveforms…",
@@ -6239,7 +6239,7 @@
         "kind": "readout",
         "group": "Voltage dependence",
         "what_it_does": "Names the metric and axis and the number of recordings, then spells out the fitted model — 'Exponential: value = A · exp(V / V0)' with A and V₀, or 'Linear: value = slope · V + intercept' — and closes with 'Goodness of fit: R² = … · n = N recording(s)'. Over two recordings that line adds the caveat that R² = 1 is exact by construction (both trends have two free parameters, so any two recordings score the same), and the short form '(exact by construction)' rides with the R² in the plot title. When the metric is identical across the pool the line reads instead 'Goodness of fit: R² undefined — the metric is identical across the pooled recording(s), so a trend explains nothing and no goodness-of-fit exists to report · n = N recording(s)'.",
-        "notes": "Also carries the log-y drop count and any 'Fit unavailable: …' message."
+        "notes": "Also carries the log-y drop count and any 'Fit unavailable: …' message. Its 'Pooled provenance' block always starts by naming the detector whose tables the series pools: 'Detector: Schmitt', 'Detector: CUSUM' or 'Detector: Keras'."
       },
       {
         "label": "Per recording",

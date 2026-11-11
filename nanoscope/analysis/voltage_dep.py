@@ -95,6 +95,7 @@ and said out loud.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple
 
@@ -1014,22 +1015,60 @@ def series_module_id(session: "Session", doc_ids: "Iterable[str] | None" = None)
     ML): a reconciled or study-candidate table is a derived catalogue, not a detector, and
     pooling one should be a deliberate act. When ``doc_ids`` is given, only those recordings
     count (callers pass the ones that can become a point, so the choice agrees with what the
-    plot will place; see :func:`placeable_doc_ids`). Ties go to
-    Schmitt, the app's default engine, then CUSUM, then ML; a session with no qualifying
-    table keeps reading Schmitt, so the "no stored detection" exclusions name the usual detector.
+    plot will place; see :func:`placeable_doc_ids`).
+
+    A TIE GOES TO THE LATEST PASS. When two or more detectors are stored on the same,
+    largest number of recordings, the one whose tables in the series were made most
+    recently wins: the newest ``detected_at`` stamp among each tied detector's counted
+    tables is compared, and the detector holding the single newest one is pooled. Batch
+    detect can run either threshold detector, so a series that already has Schmitt on
+    every recording and is then batch-detected with CUSUM is exactly such a tie, and the
+    plot has to read the pass just made (and the reverse). When that cannot be decided --
+    a tied detector with no readable stamp at all, or the newest stamps equal -- the tie
+    goes, as it always did, to Schmitt, the app's default engine, then CUSUM, then ML. A
+    session with no qualifying table keeps reading Schmitt, so the "no stored detection"
+    exclusions name the usual detector.
     """
     allowed = None if doc_ids is None else set(doc_ids)
     holders: dict[str, set[str]] = {}
+    newest: dict[str, float] = {}
     for doc in session.documents():
         if allowed is not None and doc.doc_id not in allowed:
             continue
         for res in session.results.for_doc(doc.doc_id):
             if res.module_id in _SERIES_DETECTORS and isinstance(res.payload, EventSet):
                 holders.setdefault(res.module_id, set()).add(doc.doc_id)
+                made = _detected_at_s((res.payload.provenance or {}).get("detected_at"))
+                if made is not None and made > newest.get(res.module_id, float("-inf")):
+                    newest[res.module_id] = made
     if not holders:
         return _DETECT_MODULE_ID
     best = max(len(docs) for docs in holders.values())
-    return next(mid for mid in _SERIES_DETECTORS if len(holders.get(mid, ())) == best)
+    tied = [mid for mid in _SERIES_DETECTORS if len(holders.get(mid, ())) == best]
+    if len(tied) > 1 and all(mid in newest for mid in tied):
+        latest = max(newest[mid] for mid in tied)
+        made_last = [mid for mid in tied if newest[mid] == latest]
+        if len(made_last) == 1:
+            return made_last[0]
+    return tied[0]
+
+
+def _detected_at_s(stamp: Any) -> float | None:
+    """A provenance ``detected_at`` stamp as seconds since the epoch, or ``None`` when it is
+    missing or cannot be read. The detectors write ``datetime.now(timezone.utc).isoformat()``;
+    a stamp with no zone is taken as UTC, which is what they all write."""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        made = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if made.tzinfo is None:
+        made = made.replace(tzinfo=timezone.utc)
+    try:
+        return made.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def vdep_series(

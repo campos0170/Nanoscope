@@ -432,6 +432,85 @@ def test_series_module_id_breaks_a_tie_toward_schmitt(tmp_path):
     assert voltage_dep.series_module_id(session) == "detect.schmitt"
 
 
+def _series_with_both(tmp_path: Path, stamps: dict[str, list]) -> Session:
+    """A two-recording series with a Schmitt AND a CUSUM table on each recording (the state a
+    Batch detect with each detector leaves): ``stamps[module_id][i]`` is the ``detected_at``
+    of that detector's table on recording ``i``, ``None`` for a table that records none."""
+    session = Session()
+    for i in range(2):
+        doc_id = session.add_document(
+            _doc(tmp_path, nominal_mV=-500.0 - 100.0 * i, name=f"both_{i}.dat"))
+        for module_id, made in stamps.items():
+            prov: dict = {"analyzed_duration_s": 10.0, "recording": "rec"}
+            if made[i] is not None:
+                prov["detected_at"] = made[i]
+            session.add_result(AnalysisResult(
+                module_id=module_id, module_version="1.0", doc_id=doc_id, channel=0,
+                params={}, calibration_fingerprint=(1.0, 0.0),
+                payload=EventSet(_constant_df(n=10, dwell_s=1e-3, depth_pA=-50.0,
+                                              frac_depth=-0.05), prov)))
+    return session
+
+
+_MORNING = ["2026-11-10T09:00:00.000001+00:00", "2026-11-10T09:00:02.500000+00:00"]
+_NOON = ["2026-11-10T12:00:00+00:00", "2026-11-10T12:00:03.250000+00:00"]
+
+
+def test_a_tie_goes_to_the_detector_whose_tables_were_made_last(tmp_path):
+    """Schmitt on every recording, then a CUSUM pass over the same recordings: a tie, and the
+    series pools the pass just made. The same the other way round."""
+    cusum_last = _series_with_both(
+        tmp_path / "c", {"detect.schmitt": _MORNING, "detect.cusum": _NOON})
+    assert voltage_dep.series_module_id(cusum_last) == "detect.cusum"
+    schmitt_last = _series_with_both(
+        tmp_path / "s", {"detect.schmitt": _NOON, "detect.cusum": _MORNING})
+    assert voltage_dep.series_module_id(schmitt_last) == "detect.schmitt"
+
+
+def test_a_tie_compares_each_detectors_newest_table(tmp_path):
+    """One CUSUM table re-made after everything else is enough: the newest stamp among each
+    detector's tables is what is compared, not the oldest and not every one."""
+    session = _series_with_both(tmp_path, {
+        "detect.schmitt": _NOON,
+        "detect.cusum": [_MORNING[0], "2026-11-10T12:00:03.250001+00:00"]})
+    assert voltage_dep.series_module_id(session) == "detect.cusum"
+    # A stamp with no zone is read as UTC, as the detectors write it.
+    session = _series_with_both(tmp_path / "naive", {
+        "detect.schmitt": _MORNING, "detect.cusum": ["2026-11-10T12:00:00", None]})
+    assert voltage_dep.series_module_id(session) == "detect.cusum"
+
+
+@pytest.mark.parametrize("cusum_stamps", [
+    [None, None],                                         # missing
+    ["not a time", "yesterday"],                          # unparseable
+    [20261110, 3.5],                                      # not even text
+    list(reversed(_MORNING)),                             # equal newest stamps
+])
+def test_a_tie_that_the_stamps_cannot_decide_still_goes_to_schmitt(tmp_path, cusum_stamps):
+    session = _series_with_both(
+        tmp_path, {"detect.schmitt": _MORNING, "detect.cusum": cusum_stamps})
+    assert voltage_dep.series_module_id(session) == "detect.schmitt"
+
+
+def test_a_tie_with_no_schmitt_stamp_goes_to_schmitt_however_new_the_cusum_tables(tmp_path):
+    session = _series_with_both(
+        tmp_path, {"detect.schmitt": [None, None], "detect.cusum": _NOON})
+    assert voltage_dep.series_module_id(session) == "detect.schmitt"
+
+
+def test_the_majority_still_wins_whatever_the_stamps_say(tmp_path):
+    """The tie rule is only a tie rule: a newer table on fewer recordings does not outvote."""
+    session = _series_with_both(
+        tmp_path, {"detect.schmitt": _MORNING, "detect.cusum": _NOON})
+    extra = session.add_document(_doc(tmp_path, nominal_mV=-900.0, name="third.dat"))
+    session.add_result(AnalysisResult(
+        module_id="detect.schmitt", module_version="1.0", doc_id=extra, channel=0,
+        params={}, calibration_fingerprint=(1.0, 0.0),
+        payload=EventSet(_constant_df(n=10, dwell_s=1e-3, depth_pA=-50.0, frac_depth=-0.05),
+                         {"analyzed_duration_s": 10.0, "detected_at": _MORNING[0]})))
+    assert voltage_dep.series_module_id(session) == "detect.schmitt"   # 3 against 2
+
+
 def test_an_ml_only_series_pools_every_recording_once_its_module_is_named(tmp_path):
     session = _session_with(tmp_path, ["detect.keras"] * 3)
     module_id = voltage_dep.series_module_id(session)

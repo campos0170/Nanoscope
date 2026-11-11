@@ -110,6 +110,66 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **Batch detect runs the detector selected in the Detection panel, Schmitt or CUSUM.** Until now
+  it ran Schmitt whatever the detector box showed. This supersedes the earlier Schmitt-only rule
+  (*Batch detect records the detector it ran*, under the 13.4 answers below). ML is still not
+  offered.
+  - With CUSUM selected, each recording is detected as a single CUSUM Detect with the same form
+    would detect it, and gets a CUSUM table. With Schmitt selected the detector gets the same
+    parameters and finds the same events as before, and the prompt and status texts are
+    unchanged. The rules below hold for both detectors.
+  - A recording that has only the other detector's table counts as missing, and that table and
+    its curation are left alone. *Only missing* and *Re-run all* count and replace tables of the
+    selected detector only.
+  - The form's detector decides, whatever table is on screen.
+  - **Each recording then shows the table the batch made.** On every recording it detects that
+    is not on screen, the batch's table becomes the remembered table, as a single Detect's does:
+    select the recording and that table is shown, with the detector box on its detector.
+    *Export density figure…* therefore reads one detector across the recordings. Until now a
+    recording that had already shown the other detector's table went on showing it. The recording
+    on screen follows the single run's rule, so a Manual table you chose, or a Reconciled table
+    built from that detector's table, stays on screen.
+  - **Undo after a batch re-run restores the earlier tables with their curation.** Everything is
+    committed to the undo history just before the batch starts, as before a single Detect.
+    *Undo Re-run detection* on a recording brings back the table the batch replaced there, hand
+    rejections made just before the batch included; those used to come back accepted.
+  - **Voltage dependence follows the latest pass on a tie, and always names its detector.** The
+    series still pools the detector stored on the most recordings that can become a point. When
+    two are stored on equally many, it now pools the one whose tables were made most recently
+    (the newest `detected_at` among each detector's tables in the series). A series with Schmitt
+    on every recording that is then batch-detected with CUSUM plots CUSUM, and the reverse.
+    Missing, unreadable or equal stamps fall back to Schmitt, then CUSUM, then ML. The Pooled
+    provenance block prints its *Detector:* line always, *Detector: Schmitt* included.
+  - The prompt, progress and summary name CUSUM when it is the detector: *N of M recording(s)
+    already have a CUSUM detection.*, *Batch detecting N recording(s) with CUSUM…*, *Batch detect
+    (CUSUM): N recording(s), E event(s).* and *Batch detect (CUSUM): nothing to do — every
+    recording already has a CUSUM detection.* The Schmitt texts are unchanged. **Cancel** reads
+    *Cancelled.* for either detector.
+  - After a CUSUM batch the summary says how many recordings raised the opposite-direction
+    advisory, when any did: *K recording(s) raised the opposite-direction advisory.* The count
+    comes from the numbers each run recorded, by the rule that decides the advisory.
+  - **Two new refusals, both before the prompt.** A Batch detect while a batch is running is
+    refused in the run gate's sentence, *A batch detection is already running. This app runs one
+    analysis job at a time, so the request for a batch detection was refused; nothing was
+    started. Use Cancel in the window running that job, or wait for it to finish.* It used to
+    replace the running batch without saying so. A maximum dwell that is on and does not exceed
+    the minimum dwell is refused in the single run's sentence, *Batch detect refused — maximum
+    dwell (0.5 ms) must exceed minimum dwell (1 ms). Increase the maximum or set it to 0 (off).*
+    It used to fail every recording inside the detector.
+  - **Provenance of a batch-made table.** It records the recording's effective acquisition
+    bandwidth, one you declared included, as a single Detect does; it used to record the file
+    header's. A recording whose open-pore windows were measured and confirmed under one detector
+    keeps that confirmation when a batch of the other detector runs it at the same windows,
+    instead of being marked as copied from the batch form.
+  - The menu tooltip reads *Run the selected detector (Schmitt or CUSUM) with its current
+    parameters on every open recording that has a current channel and a known sample rate, in the
+    background. Detect the whole -1000..-200 mV series in one pass, then plot the voltage
+    dependence. (ML detection is not offered here — it is too slow to batch over many full
+    recordings.)*
+  - The refusal under an open-pore reference you supplied and the refusal while another analysis
+    is running still apply. Single-run Detect, the detection arithmetic and the project format
+    are unchanged. The generated manuals are not rebuilt.
+
 - **Plotting redesign, Phases 3–4 and full reference workflow (2026-11-03 development source).**
   Project Figures now expose New/Duplicate, multiple figures per type, freshness/dormant states,
   recipe input requirements and optional wording recall. Shared styles are pinned by revision and
@@ -570,10 +630,12 @@ tags identify tested development baselines and do not promise a stable file or A
     fit that records one. The report uses the table's saved whole-column fit if it can, or fits
     that histogram afresh, and the window's FIT RANGE line says which. A project saved by an
     earlier version keeps the fit it saved.
-  - **Batch detect records the detector it ran (Schmitt),** not the one the detector box showed. A
-    batch made while the box showed CUSUM recorded `detect.cusum`, which moved the box when that
-    table came on screen. The stale line's Re-run now always replays the table's own detector, so
-    projects saved before this are safe too.
+  - **Batch detect records the detector it ran,** which is now the one the detector box shows,
+    Schmitt or CUSUM (see *Batch detect runs the detector selected in the Detection panel*
+    above). A batch then always ran Schmitt, and before this fix one made while the box showed
+    CUSUM recorded `detect.cusum` on its Schmitt table, which moved the box when that table came
+    on screen. The stale line's Re-run always replays the table's own detector, so projects saved
+    before this are safe too.
 
 - **A recording's samples are read-only in memory.** Every channel array is flagged read-only when
   the recording is built (the flag, not a copy), and so is each calibrated array the session
@@ -1628,9 +1690,12 @@ tags identify tested development baselines and do not promise a stable file or A
   verification; the median's arithmetic now also depends on
   `acid_incubation_numerics.median_filter_1d`, which has its own tests.
 - Voltage dependence and its menu gate read tables from any primary detector (Schmitt, CUSUM,
-  ML): the one stored on the most recordings that can become a point (Schmitt on a tie) is
-  pooled for the whole series, recorded in saved workspaces, and named in the Pooled provenance
-  block when it is not Schmitt. An ML-only project previously had the action greyed out.
+  ML): the one stored on the most recordings that can become a point is pooled for the whole
+  series, recorded in saved workspaces, and named in the Pooled provenance block. An ML-only
+  project previously had the action greyed out. As first made, this fix sent a tie to Schmitt
+  and named the detector only when it was not Schmitt; a tie now goes to the latest pass and the
+  block always names the detector (see *Batch detect runs the detector selected in the Detection
+  panel* under Changed).
 - Event inspector: opens on the event selected in the table (and, re-opened, where you were)
   instead of event 0; keyboard focus starts on the waveform instead of the "Event N" spin box,
   so A/R/T and label digits reach their shortcuts; the first event no longer draws against a

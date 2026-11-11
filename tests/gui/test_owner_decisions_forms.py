@@ -9,8 +9,10 @@ What is pinned here:
 * the detector combo's re-seed of min dwell and merge gap is no undo step: Undo goes to the
   edit before it and leaves the knobs where the detector put them, an edit still in its pause
   becomes a step of its own, and an edit after the switch is a step (13.4 Q3);
-* a batch run records the detector it ran, not the one the combo names, and a stored table's
-  Re-run replays its own detector whatever its params say (13.6).
+* a batch run records the detector it ran. Batch detect now runs the detector the combo names,
+  so in the window the two agree; at the controller the stored params name the module that
+  ran whatever the params dict it was handed said. A stored table's Re-run replays its own
+  detector whatever its params say (13.6).
 
 Synthetic recordings only, each with ``meta.path`` under ``tmp_path``.
 """
@@ -312,6 +314,9 @@ def test_carry_amends_every_state_of_one_scope_and_keeps_the_labels():
 # ================================================================================================
 
 def test_a_batch_run_records_the_detector_it_ran(window, tmp_path, qtbot):
+    """Batch detect now runs the detector the combo names (it ran Schmitt whatever the combo
+    said when 13.6 was answered), so the detector a table records is still the one that made
+    it: CUSUM under a CUSUM combo, Schmitt under a Schmitt one."""
     doc_a = _install(window, tmp_path, "a.dat")
     doc_b = _install(window, tmp_path, "b.dat")
     _combo(window, C)                                  # the combo names CUSUM
@@ -319,13 +324,51 @@ def test_a_batch_run_records_the_detector_it_ran(window, tmp_path, qtbot):
         window._batch_detect()
     qtbot.wait(100)
 
+    cusum = {}
+    for doc_id in (doc_a, doc_b):
+        res = cusum[doc_id] = window._session.results.get(doc_id, 0, C)
+        assert res is not None, "the batch made no CUSUM table"
+        assert res.module_id == C and res.params["detector"] == C, res.params["detector"]
+        assert window._session.results.get(doc_id, 0, S) is None
+    assert _det(window).detector_choice() == C
+    assert window._analysis_panel.current_detection().module_id == C
+
+    _combo(window, S)                                  # ...and now Schmitt
+    with qtbot.waitSignal(window._batch_controller.finished, timeout=30_000):
+        window._batch_detect()
+    qtbot.wait(100)
     for doc_id in (doc_a, doc_b):
         res = window._session.results.get(doc_id, 0, S)
-        assert res is not None, "setup: the batch made no Schmitt table"
-        assert res.params["detector"] == S, res.params["detector"]
-        assert window._session.results.get(doc_id, 0, C) is None
+        assert res is not None, "the batch made no Schmitt table"
+        assert res.module_id == S and res.params["detector"] == S, res.params["detector"]
+        assert window._session.results.get(doc_id, 0, C) is cusum[doc_id]
     assert _det(window).detector_choice() == S
     assert window._analysis_panel.current_detection().module_id == S
+
+
+@pytest.mark.parametrize("ran, named", [(C, S), (S, C)])
+def test_a_batch_tables_params_name_the_detector_that_ran_whatever_the_dict_said(
+        window, tmp_path, qtbot, ran, named):
+    """13.6 at the controller, where it is implemented: the pass is handed a params dict that
+    names the OTHER detector, and every table it stores records the module that ran. (In the
+    window the combo and the module agree, so the test above cannot see this line go.) A
+    table stamped with a detector that did not make it sends its seed and the stale banner's
+    Re-run to the wrong detector."""
+    doc_a = _install(window, tmp_path, "a.dat")
+    doc_b = _install(window, tmp_path, "b.dat")
+    params = {**window._analysis_panel.batch_detection_params(), "detector": named}
+    how = {} if ran == S else {"module": ran}          # Schmitt is the controller's default
+    with qtbot.waitSignal(window._batch_controller.finished, timeout=30_000):
+        assert window._batch_controller.start([(doc_a, 0), (doc_b, 0)], params, **how)
+    qtbot.wait(100)
+
+    for doc_id in (doc_a, doc_b):
+        res = window._session.results.get(doc_id, 0, ran)
+        assert res is not None, "the pass stored no table of the module it ran"
+        assert res.module_id == ran
+        assert res.params["detector"] == ran, (
+            f"a {ran} table records detector {res.params['detector']}")
+        assert window._session.results.get(doc_id, 0, named) is None
 
 
 def test_a_stored_tables_rerun_replays_its_own_detector(window, tmp_path):

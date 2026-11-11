@@ -1470,6 +1470,8 @@ How to read it:
   `n_opposite_reference`, with `n_opposite_events` (the count before the 2 ms rule) and
   `opposite_guard_s`.
 - A table detected by an older build has no count and no advisory until you run Detect again.
+- **A CUSUM Batch detect counts the recordings that raised it.** Its status-bar summary says how
+  many did (see *Batch detect* below); the advisory itself is in each recording's Summary.
 
 ### Seeing the thresholds on the trace
 
@@ -1674,13 +1676,83 @@ The three studies:
   A map that finishes while the table on screen is not a Schmitt table is kept, and the status bar
   says *"Recovery map finished for Schmitt; it is used for fits of a Schmitt table."*
 
+### Batch detect: every open recording at once
+
+**Analysis ▸ Batch detect (all open recordings)…** runs the detector selected in the Detection
+panel, **Schmitt** or **CUSUM**. Its tooltip reads: *"Run the selected detector (Schmitt or CUSUM)
+with its current parameters on every open recording that has a current channel and a known sample
+rate, in the background. Detect the whole -1000..-200 mV series in one pass, then plot the voltage
+dependence. (ML detection is not offered here — it is too slow to batch over many full
+recordings.)"* The detector on the form decides, whatever table is on screen. A CUSUM batch
+detects each recording as a single CUSUM **Detect** with the same form would, and gives it a CUSUM
+table. A Schmitt batch hands Schmitt the same parameters and finds the same events as before.
+
+A recording counts as detected only when it has a table of the selected detector. One that has
+only the other detector's table counts as missing, and that table and its curation are left alone:
+a CUSUM batch adds a CUSUM table beside the Schmitt one, and the reverse. When some recordings
+already have one, the batch asks first: *"3 of 5 recording(s) already have a CUSUM detection."*
+(or *"… a Schmitt detection."*), then *"Re-run all of them, or only the ones that are missing
+one?"*, with **Only missing** (the default), **Re-run all** and **Cancel**. **Re-run all**
+replaces those tables; when any of them hold hand curation, the prompt says how much before you
+choose. **Edit ▸ Undo** (*"Undo Re-run detection"*, §9b) then brings back the table the batch
+replaced, with its curation as it stood when the batch started, hand rejections made just before
+it included. Undo works on the recording on screen, so select each recording and undo there.
+
+**Each recording then shows the table the batch made.** Select any recording the batch detected
+and its new table is on screen, with the detector box on that detector, as after a single
+**Detect** there. That holds for a recording that last showed the other detector's table too;
+that table stays in the **Table** selector. A figure that draws one table per recording, such as
+**Analysis ▸ Export density figure…**, therefore reads the batch's tables. The recording on screen
+follows a single Detect's rule, exceptions included: a **Manual** table you chose stays on screen,
+and so does a Reconciled table built from that detector's table. The batch's table is then in the
+**Table** selector.
+
+The status bar names CUSUM when it is the detector: *"Batch detecting 5 recording(s) with
+CUSUM…"* while it runs, then *"Batch detect (CUSUM): 5 recording(s), 412 event(s)."*, or
+*"Batch detect (CUSUM): nothing to do — every recording already has a CUSUM detection."* A
+Schmitt batch reads as before: *"Batch detecting 5 recording(s)…"*, *"Batch detect: 5
+recording(s), 412 event(s)."* **Cancel** stops a batch of either detector and installs nothing;
+the status bar then reads *"Cancelled."*, or *"Cancelling — the run is finishing in the
+background. Its result is discarded."* while the run is still winding down. After a CUSUM batch
+the summary also says how many recordings raised the opposite-direction advisory (above), when
+any did: *"2 recording(s) raised the opposite-direction advisory."* It does not name them; open
+each recording and read its Summary.
+
+**Then the voltage series.** **Voltage dependence** pools one detector's tables for the whole
+series: the detector stored on the most recordings that can become a point. When two detectors
+are stored on equally many, it pools the one whose tables were made most recently. So a series
+that already had a Schmitt table on every recording and is then batch-detected with CUSUM plots
+the CUSUM tables, and the reverse. A tie that the tables' detection times cannot settle goes to
+Schmitt, then CUSUM, then ML. The window always names the detector it pooled: the *Pooled
+provenance* block under **Fit details** begins *"Detector: Schmitt"* or *"Detector: CUSUM"*
+(*"Detector: Keras"* for ML tables). If the window was open during the batch, press its
+**Refresh** to gather the new tables.
+
+A batch is refused in three cases, each before it asks anything. The status bar says why, and
+nothing is started or replaced:
+
+- **The Baseline form holds an open-pore reference you supplied** (§5a). That reference belongs
+  to one recording: *"Batch detect refused: this open-pore reference belongs to the selected
+  recording and channel. Run Detect there, or explicitly choose Automatic reference."*
+- **An analysis is already running, another batch included** (below). A second Batch detect
+  during a batch reads: *"A batch detection is already running. This app runs one analysis job at
+  a time, so the request for a batch detection was refused; nothing was started. Use Cancel in
+  the window running that job, or wait for it to finish."* The running batch carries on with the
+  detector it started with.
+- **The maximum dwell is on and does not exceed the minimum dwell.** No recording could be
+  detected with that pair, so the batch says what a single **Detect** says: *"Batch detect refused
+  — maximum dwell (0.5 ms) must exceed minimum dwell (1 ms). Increase the maximum or set it to 0
+  (off)."* The detector box can cause it: CUSUM's default minimum dwell is 1 ms, which is above a
+  0.5 ms maximum that was legal for Schmitt.
+
 ### One analysis at a time
 
 Only one background analysis runs at a time, across the whole app. Press **Detect** while a
 **Batch detect** is running and the status bar says which run is in the way and that nothing was
 started — press **Cancel** to stop the batch, or wait. It works in both directions, and it covers
 Detect, Run ML, the three validation studies, the open-pore probe, a re-measure, an estimator
-comparison (§9a) and a batch pass.
+comparison (§9a) and a batch pass. A second **Batch detect** while one is running is refused the
+same way; the running batch is not dropped for it.
 
 The button is left enabled on purpose. A control greyed out by the batch could not tell you it was
 the batch — you would be left with a dead button and a guess. The click is allowed to land, and it
@@ -1775,7 +1847,8 @@ Results panel's **Table** selector names for this channel: Schmitt, CUSUM, a stu
 first event you add creates it. A Reconciled table is derived, so with it on screen an add is refused
 and the status bar says to show a source table or Manual and add there. Each channel remembers the
 table on screen, however it got there (the selector, a new detector run, Reconcile), and a saved
-project reopens on it. A detector run does not take the screen from **Manual**.
+project reopens on it. A **Batch detect** also makes its table the remembered one on each recording
+it detects that is not on screen (§6). A detector run does not take the screen from **Manual**.
 
 **One event, three gestures.**
 

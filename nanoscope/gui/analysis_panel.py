@@ -3233,8 +3233,23 @@ class AnalysisPanel(QtWidgets.QWidget):
         ``'proposed'`` on all of them (S7-DET1). `baseline.resolve_param_source`
         reads the scope inside each detector run and stamps every other recording
         ``'batch'`` -- with its own never-measured advisory, its own panel label and
-        the truthful source in the exported ``.meta.json``."""
+        the truthful source in the exported ``.meta.json``.
+
+        The dict is the same for either threshold detector: it carries both detectors'
+        thresholds and ``"detector"``, exactly as a single Detect's does, and the module
+        that runs strips the other detector's keys (`modules._detect_kwargs`). Which
+        module a batch starts is :meth:`batch_detector`."""
         return {**self._detection.params(), **self._baseline.batch_params()}
+
+    def batch_detector(self) -> str:
+        """The module id Analysis ▸ Batch detect runs: the detector THE FORM names
+        (``detect.schmitt`` or ``detect.cusum``), which is also the ``"detector"`` of
+        :meth:`batch_detection_params` and what a single Detect would start
+        (:meth:`_run_detection`). The form decides, not the table on screen: with an ML,
+        Manual or Reconciled table shown the combo still names one of the two threshold
+        detectors. Anything else falls back to Schmitt; ML is never batched."""
+        module_id = str(self._detection.detector_choice() or _MODULE_ID)
+        return module_id if module_id in (_MODULE_ID, _CUSUM_MODULE_ID) else _MODULE_ID
 
     def _form_params(self) -> dict[str, Any]:
         """The detection form's params WITH the open-pore baseline block merged in.
@@ -3515,17 +3530,10 @@ class AnalysisPanel(QtWidgets.QWidget):
             return False
         # Reject an impossible finite dwell interval before a worker or progress
         # indicator is started. Other kernel validations keep their normal path.
-        try:
-            minimum = float(params.get("min_dwell_s"))
-            maximum = float(params.get("max_dwell_s"))
-        except (TypeError, ValueError):
-            pass  # None means the maximum is disabled.
-        else:
-            if np.isfinite(minimum) and np.isfinite(maximum) and 0 < maximum <= minimum:
-                self.runRefused.emit(
-                    f"Detection refused — maximum dwell ({maximum * 1000:g} ms) must exceed "
-                    f"minimum dwell ({minimum * 1000:g} ms). Increase the maximum or set it to 0 (off).")
-                return False
+        problem = self.dwell_interval_problem(params)
+        if problem:
+            self.runRefused.emit(f"Detection refused — {problem}")
+            return False
         # The Schmitt half of the notch-line cap (S7-NOTCH1; mirror of `_launch_ml`).
         # The DetectionPanel's box refuses an over-cap or illegal list itself, so
         # ``params()`` can never carry one -- but the stale banner's Re-run replays the
@@ -3557,6 +3565,23 @@ class AnalysisPanel(QtWidgets.QWidget):
         self._pending, self._pending_sel = "detect", self._sel
         self._form_run_from = self.form_key()
         return True
+
+    @staticmethod
+    def dwell_interval_problem(params: Mapping[str, Any]) -> str | None:
+        """Why ``params`` hold an impossible dwell interval (a maximum dwell that is on and
+        not above the minimum), or ``None``. ONE sentence for the two doors that refuse it
+        before anything starts: a single Detect (``Detection refused — ``) and Batch detect
+        (``Batch detect refused — ``), which would otherwise fail every recording inside the
+        kernel. A maximum of ``None`` or 0 is off."""
+        try:
+            minimum = float(params.get("min_dwell_s"))
+            maximum = float(params.get("max_dwell_s"))
+        except (TypeError, ValueError):
+            return None  # None means the maximum is disabled.
+        if np.isfinite(minimum) and np.isfinite(maximum) and 0 < maximum <= minimum:
+            return (f"maximum dwell ({maximum * 1000:g} ms) must exceed "
+                    f"minimum dwell ({minimum * 1000:g} ms). Increase the maximum or set it to 0 (off).")
+        return None
 
     @staticmethod
     def _notch_replay_refusal(params: Mapping[str, Any]) -> str | None:
@@ -5614,7 +5639,7 @@ class AnalysisPanel(QtWidgets.QWidget):
         """Whether the table landing now ran the form ``draft`` holds: a batch launched from
         that very form (`_landing_batch_form`), every part of it -- the ML form, the frequency
         intents and the baseline reference as much as the detection settings, which is all a
-        Schmitt pass records. A batch made from another form, a hand-made table and an undo's
+        Schmitt or CUSUM pass records. A batch made from another form, a hand-made table and an undo's
         install ran no draft (13.4 Q6); the form's own run is `_landing_form_run`'s."""
         launched = self._landing_batch_form
         plain = self._plain_form_state

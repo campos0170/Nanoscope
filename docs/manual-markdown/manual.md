@@ -424,6 +424,25 @@ bar says *Recovery map finished for Schmitt; it is used for fits of a Schmitt ta
 selected, `Null control…` needs high-pass off; with it on nothing runs and the status bar says
 why. Study results are not saved in the project.
 
+`Analysis › Batch detect (all open recordings)…` runs the detector selected in `Detection`,
+Schmitt or CUSUM, with its current parameters on every open recording that has a current channel
+and a known sample rate. ML is not offered there. A recording that has only the other detector's
+table counts as missing, and that table and its curation are left alone. With CUSUM the prompt,
+the progress label and the summary name it (*Batch detect (CUSUM): N recording(s), E event(s).*),
+and the summary says how many recordings raised the opposite-direction advisory, when any did:
+*K recording(s) raised the opposite-direction advisory.*
+
+After a batch each recording it detected shows the table that batch made, with the detector box
+on that detector, as after a single `Detect` there. `Re-run all` replaces the selected detector's
+tables, and `Edit › Undo` on a recording (*Undo Re-run detection*) brings back the table it
+replaced there with its curation, hand rejections made just before the batch included. A batch is
+refused, before it asks anything, while another analysis is running, another batch included (*A
+batch detection is already running. This app runs one analysis job at a time, so the request for
+a batch detection was refused; nothing was started. Use Cancel in the window running that job, or
+wait for it to finish.*), and when the maximum dwell is on and does not exceed the minimum dwell
+(*Batch detect refused — maximum dwell (0.5 ms) must exceed minimum dwell (1 ms). Increase the
+maximum or set it to 0 (off).*).
+
 ![The Detection tab on real data, with the event table docked beneath it. Polarity is measured, not assumed — here, on the −700 mV recording at that file's then-proposed 0.1 s / 30 ms baseline, enhancement (down): 1969 down / 0 up, confidence 1.00, meaning these events increase the current magnitude rather than block it. The vote is taken against the baseline in force: the same recording reads 2047 down / 1 up at the app default and 2184 down / 2 up at the 1 s / 300 ms window now proposed for it. Note the read-only `range` row: the Schmitt detector always runs over the whole recording.](images/panel_detection.webp)
 
 *The Detection tab on real data, with the event table docked beneath it. Polarity is measured, not assumed — here, on the −700 mV recording at that file's then-proposed 0.1 s / 30 ms baseline, enhancement (down): 1969 down / 0 up, confidence 1.00, meaning these events increase the current magnitude rather than block it. The vote is taken against the baseline in force: the same recording reads 2047 down / 1 up at the app default and 2184 down / 2 up at the 1 s / 300 ms window now proposed for it. Note the read-only `range` row: the Schmitt detector always runs over the whole recording.*
@@ -1035,8 +1054,8 @@ changing an optional event amplitude does not redetect the recording.
 
 Supplied-reference modes currently support Schmitt and CUSUM on pA channels. Explicitly disable
 incompatible high-pass, runtime baseline subtraction and normalization; NanoScope does not silently
-change the signal chain to accommodate the mode. Batch detection, Automatic-window proposals,
-randomized null controls, threshold sweeps, recovery studies and ML do not accept this reference
+change the signal chain to accommodate the mode. Batch detection (with either detector),
+Automatic-window proposals, randomized null controls, threshold sweeps, recovery studies and ML do not accept this reference
 mode. Noise remains the existing whole-residual estimate, not a new selected-interval/local noise model.
 
 A draft reference is saved separately from a detector result's applied recipe. Restoring a malformed,
@@ -2949,6 +2968,13 @@ app now says so in both places.
 
 `Analysis › Voltage dependence…` is the aggregate: one point per recording, an event metric
 against applied voltage, with a linear or A·exp(V/V₀) trend. Like Distributions, it checks documented comparability contracts. Current warnings appear in the warning summary, Details and provenance rather than exported titles.
+
+The series pools one detector's tables: the detector stored on the most recordings that can
+become a point. When two detectors are stored on equally many, it pools the one whose tables were
+made most recently, so a series that had Schmitt tables and is then batch-detected with CUSUM
+plots the CUSUM tables, and the reverse. A tie the tables' detection times cannot settle goes to
+Schmitt, then CUSUM, then ML. The `Pooled provenance` block in `Fit details` always names the
+pooled detector: *Detector: Schmitt*, *Detector: CUSUM* or *Detector: Keras*.
 
 ![The Voltage dependence window warning that these recordings should not be pooled: an amber NOT COMPARABLE banner naming two different baseline fingerprints.](images/vdep.webp)
 

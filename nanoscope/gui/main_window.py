@@ -1072,6 +1072,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._batch_controller = BatchDetectController(self._session, self)
         self._batch_skipped = 0                  # recordings skipped this batch (no current/rate)
         self._batch_form: dict | None = None     # the form this batch was launched from
+        #: The detector the batch in flight runs (a module id), for its progress and summary
+        #: texts: the one the Detection panel had selected when the batch was launched.
+        self._batch_module: str = "detect.schmitt"
         #: The progress-bar label of the analysis/batch job currently running, exactly as
         #: its started-slot painted it. The bar is SHARED chrome: a load that finishes
         #: mid-run has to hand it back to the surviving job, and a sweep started without
@@ -1856,17 +1859,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_run_detection.setEnabled(False)
         self._act_run_detection.triggered.connect(self._run_detection)
 
-        # Batch detection: the SAME Schmitt params over every open recording at once,
-        # off-thread with progress + cancel. Schmitt-only on purpose — running a Keras
-        # model over many full recordings is far too slow to batch.
+        # Batch detection: the form's params over every open recording at once, off-thread
+        # with progress + cancel, run by the detector the Detection panel has selected
+        # (Schmitt or CUSUM). Never ML, on purpose — running a Keras model over many full
+        # recordings is far too slow to batch.
         self._act_batch_detect = analysis_menu.addAction(
             "&Batch detect (all open recordings)…")
         self._act_batch_detect.setToolTip(
-            "Run the current Schmitt detection parameters on every open recording that "
-            "has a current channel and a known sample rate, in the background. Detect "
-            "the whole -1000..-200 mV series in one pass, then plot the voltage "
-            "dependence. (ML detection is not offered here — it is too slow to batch "
-            "over many full recordings.)")
+            "Run the selected detector (Schmitt or CUSUM) with its current parameters "
+            "on every open recording that has a current channel and a known sample "
+            "rate, in the background. Detect the whole -1000..-200 mV series in one "
+            "pass, then plot the voltage dependence. (ML detection is not offered here "
+            "— it is too slow to batch over many full recordings.)")
         self._act_batch_detect.setEnabled(False)
         self._act_batch_detect.triggered.connect(self._batch_detect)
 
@@ -3284,7 +3288,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # ...and the same for the subpopulation run, for the same reason: ``abort()``
         # emits nothing, so a cancelled report would otherwise leave its claim standing.
         self._on_subpop_stopped()
+        # A batch stopped HERE never reaches a batch slot (`abort_stopped` detaches the worker,
+        # so its `cancelled` is dropped), and what the pass was launched with must not outlive
+        # it: the form it ran and the detector its texts name, beside the skipped count.
         self._batch_skipped = 0
+        self._batch_form = None
+        self._batch_module = "detect.schmitt"
         self._set_progress_visible(False)
         # A multi-file open is ONE gesture to the user, so Cancel abandons ALL of it —
         # the load in flight AND the files still waiting their turn. ``_finish_active``
@@ -3433,9 +3442,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -- batch detection -------------------------------------------------------------------------
     def _detectable_targets(self) -> list[tuple[str, int, str]]:
-        """Every open recording that CAN be Schmitt-detected: a live CURRENT channel and
-        a known sample rate. Returns ``(doc_id, channel, display_name)`` per recording,
-        the channel being the document's first live current channel."""
+        """Every open recording that CAN be batch-detected (by either threshold detector):
+        a live CURRENT channel and a known sample rate. Returns
+        ``(doc_id, channel, display_name)`` per recording, the channel being the
+        document's first live current channel."""
         out: list[tuple[str, int, str]] = []
         for doc in self._session.documents():
             meta = doc.meta
@@ -3457,14 +3467,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_batch_detect.setEnabled(bool(self._detectable_targets()))
 
     def _batch_detect(self) -> None:
-        """Analysis ▸ Batch detect… — run the current Schmitt params over every open
-        recording that has a current channel + known rate, off-thread.
+        """Analysis ▸ Batch detect… — run the form's params over every open recording that
+        has a current channel + known rate, off-thread, with THE DETECTOR THE DETECTION
+        PANEL HAS SELECTED (Schmitt or CUSUM; `AnalysisPanel.batch_detector`). The form
+        decides, whatever table is on screen; ML is never batched.
 
-        Recordings already carrying a ``detect.schmitt`` result prompt a choice:
-        re-run all, or only detect the missing ones (default). Recordings with no
-        current channel / no rate are not targets and are counted as skipped for the
-        summary. Delegates the run to :class:`BatchDetectController`; the results are
-        installed on the main thread in :meth:`_on_batch_finished`."""
+        Recordings already carrying a result OF THAT DETECTOR prompt a choice: re-run
+        all, or only detect the missing ones (default). The other detector's table on a
+        recording is neither counted nor touched: results are stored per detector.
+        Recordings with no current channel / no rate are not targets and are counted as
+        skipped for the summary. Delegates the run to :class:`BatchDetectController`;
+        the results are installed on the main thread in :meth:`_on_batch_finished`.
+
+        Refused, before any question is asked: under an open-pore reference the user
+        supplied; while any analysis job is running, ANOTHER BATCH INCLUDED (one batch at
+        a time); and when the form's maximum dwell is on and not above its minimum dwell
+        (the single run's check and sentence). Everything is committed to the undo
+        history just before the pass starts, as before a single run."""
+        from ..core.sources import detector_name
         if (self._analysis_panel.baseline_panel.reference_mode() != "automatic"
                 or self._analysis_panel.baseline_panel.reference_error()):
             self.statusBar().showMessage(
@@ -3477,7 +3497,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # make a decision that cannot be honoured. The controller refuses it again on
         # its own account — that is the invariant; this is only the courtesy of not
         # wasting a click on the way there.
-        blocker = blocking_job(JOB_ANALYSIS, self._batch_controller)
+        #
+        # NO OWNER IS EXEMPTED HERE, so a batch already running refuses this one too. The
+        # controller exempts its own job because its ``start`` replaces a predecessor, and
+        # that replacement says nothing: while every batch ran Schmitt it was a restart, but
+        # a running CUSUM "Re-run all" could now be dropped for a Schmitt pass (or the
+        # reverse) with no line naming the tables that were never re-made. Cancel, or wait.
+        blocker = blocking_job(JOB_ANALYSIS)
         if blocker is not None:
             self._on_run_refused(
                 refusal_text(blocker, BatchDetectController.JOB_LABEL))
@@ -3490,15 +3516,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 "No open recording has a current channel with a known sample rate.")
             return
 
+        # A maximum dwell that is on and not above the minimum fails every recording inside
+        # the kernel, so it is refused here in the single run's own sentence, BEFORE the
+        # "Only missing / Re-run all" question: a question about a run that cannot succeed
+        # cannot be honoured. The detector box can make this state by itself (moving it to
+        # CUSUM re-seeds min dwell to 1 ms under a 0.5 ms maximum that was legal for Schmitt).
+        problem = self._analysis_panel.dwell_interval_problem(
+            self._analysis_panel.batch_detection_params())
+        if problem:
+            self._on_run_refused(f"Batch detect refused — {problem}")
+            return
+
+        # WHICH detector this batch runs: the one the form names. Everything below that
+        # asks "does this recording have one already" asks it of THIS detector's table.
+        module_id = self._analysis_panel.batch_detector()
+        name = detector_name(module_id)
         already = {doc_id for (doc_id, ch, _name) in targets
-                   if self._session.results.get(doc_id, ch, "detect.schmitt") is not None}
+                   if self._session.results.get(doc_id, ch, module_id) is not None}
         run_targets = targets
         if already:
             box = QtWidgets.QMessageBox(self)
             box.setIcon(QtWidgets.QMessageBox.Question)
             box.setWindowTitle("Batch detect")
             box.setText(f"{len(already)} of {len(targets)} recording(s) already have a "
-                        f"Schmitt detection.")
+                        f"{name} detection.")
             # NAME THE CURATION AT STAKE, the way the four single-run doors do. This dialog
             # counted RECORDINGS and never said that some of those tables hold events the user
             # rejected or added by hand — the one sentence
@@ -3516,7 +3557,7 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             docs_with_stake = 0
             for (doc_id, ch, _name) in targets:
-                res = self._session.results.get(doc_id, ch, "detect.schmitt")
+                res = self._session.results.get(doc_id, ch, module_id)
                 if res is None or not hasattr(res.payload, "df"):
                     continue
                 work = self._analysis_panel.hand_work_at_stake(res.payload.df)
@@ -3559,7 +3600,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if not run_targets:
             self.statusBar().showMessage(
-                "Batch detect: nothing to do — every recording already has a detection.", 6000)
+                f"{self._batch_title(module_id)}: nothing to do — every recording already "
+                f"has a {self._batch_detection_noun(module_id)}.", 6000)
             return
 
         # `batch_detection_params`, not `detection_params`: the batch applies ONE
@@ -3574,14 +3616,43 @@ class MainWindow(QtWidgets.QMainWindow):
         # A first table this pass gives a recording ran its un-run edit only when the edit IS
         # this form, ML and baseline reference included (13.4 Q6, `AnalysisPanel._landing_ran`).
         self._batch_form = self._analysis_panel.form_state()
-        self._batch_controller.start([(d, c) for (d, c, _n) in run_targets], params)
+        self._batch_module = module_id
+        # Commit everything the user can lose work in BEFORE the pass replaces a table, as a
+        # single run does through `willReplaceEvents` (see the wiring in `_wire`): the
+        # checkpoint an arriving table triggers pushes the last COMMITTED state, so hand
+        # rejections made in place and not yet announced -- the very ones the prompt above
+        # counted -- were jumped past, and Undo of the re-run brought the tables back with
+        # every row accepted. Free when nothing moved.
+        self._checkpoint_everything()
+        self._batch_controller.start(
+            [(d, c) for (d, c, _n) in run_targets], params, module=module_id)
+
+    @staticmethod
+    def _batch_title(module_id: str) -> str:
+        """What a batch's status texts start with: ``Batch detect`` for Schmitt (the wording
+        from before the batch could run another detector), ``Batch detect (CUSUM)`` else."""
+        from ..core.sources import detector_name
+        if module_id == "detect.schmitt":
+            return "Batch detect"
+        return f"Batch detect ({detector_name(module_id)})"
+
+    @staticmethod
+    def _batch_detection_noun(module_id: str) -> str:
+        """``detection`` for Schmitt (unchanged wording), ``CUSUM detection`` otherwise."""
+        from ..core.sources import detector_name
+        if module_id == "detect.schmitt":
+            return "detection"
+        return f"{detector_name(module_id)} detection"
 
     @QtCore.Slot(int)
     def _on_batch_started(self, n: int) -> None:
         self._set_progress_visible(True)
         self._progress.setValue(0)
         # Remembered so a load finishing mid-run can repaint it (_release_load_chrome).
-        self._busy_job_format = f"Batch detecting {n} recording(s)…"
+        from ..core.sources import detector_name
+        self._busy_job_format = (
+            f"Batch detecting {n} recording(s)…" if self._batch_module == "detect.schmitt"
+            else f"Batch detecting {n} recording(s) with {detector_name(self._batch_module)}…")
         self._progress.setRange(0, 0 if len(self._active_job_descriptions()) > 1 else 100)
         self._progress.setFormat(self._progress_description(self._busy_job_format))
 
@@ -3590,6 +3661,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Install every batch result on the MAIN THREAD, then summarise. The
         resulting resultsChanged refreshes the panel + re-gates the plot actions."""
         from ..analysis.events import EventSet
+        from ..analysis.modules import raises_opposite_direction_advisory
 
         self._release_load_chrome()
         results = getattr(outcome, "results", ())
@@ -3598,6 +3670,8 @@ class MainWindow(QtWidgets.QMainWindow):
         n_installed = 0
         n_stale = 0
         n_kept = 0
+        n_opposite = 0
+        title = self._batch_title(self._batch_module)
         for res in results:
             # Same rule as the interactive detection sink: a result whose document is no
             # longer open is a result about nothing (close_document already dropped the store
@@ -3609,13 +3683,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             report = self._analysis_panel.install_detection_result(
                 res, announce=False, batch_form=self._batch_form)
+            # THE BATCH'S TABLE IS THE ONE ITS RECORDING SHOWS FROM NOW ON, as a single
+            # Detect's is. On the recording on screen the panel's own landing has done that
+            # already (`AnalysisPanel._on_results_changed`, the single run's rule, with its
+            # exceptions). Everywhere else nothing arrives at the table, and a recording that
+            # had already shown another detector's table went on showing it: after a Schmitt
+            # pass, a look at each recording and a CUSUM pass, only the selected recording
+            # showed CUSUM, the detector box went back to Schmitt on the others, and the
+            # multi-recording density figure (`_density_results`) read one CUSUM table beside
+            # N-1 Schmitt ones. Recorded as that channel's remembered table; quiet, nothing on
+            # screen moves. The same for either detector.
+            if (res.doc_id, int(res.channel)) != self._analysis_panel.current_target():
+                self._analysis_panel.apply_chosen_table(res.doc_id, res.channel, res.module_id)
             if report is not None:
                 n_kept += len(report.kept) + len(report.moved)
             n_installed += 1
             if isinstance(res.payload, EventSet):
                 total_events += len(res.payload.df)
+                # A CUSUM run reports its own opposite-direction firings as an advisory on
+                # the result; count the recordings that raised it with the function that
+                # DECIDES the advisory, on the run's own stamped numbers, never by matching
+                # the sentence's wording. A Schmitt run stamps no such count: never counted.
+                if raises_opposite_direction_advisory(res.payload.provenance):
+                    n_opposite += 1
 
-        parts = [f"Batch detect: {n_installed} recording(s), {total_events} event(s)."]
+        parts = [f"{title}: {n_installed} recording(s), {total_events} event(s)."]
+        if n_opposite:
+            parts.append(f"{n_opposite} recording(s) raised the opposite-direction advisory.")
         if n_kept:
             parts.append(f"Kept {n_kept} hand-made event(s) from the tables it replaced.")
         if n_stale:
@@ -3628,16 +3722,28 @@ class MainWindow(QtWidgets.QMainWindow):
                          + "; ".join(f"{lbl} ({msg})" for lbl, msg in errors[:3]))
         self._batch_skipped = 0
         self._batch_form = None
+        self._batch_module = "detect.schmitt"
         self.statusBar().showMessage(" ".join(parts), 12000)
         self._sync_export_action()
         self._sync_plots_action()
 
     @QtCore.Slot()
     def _on_batch_cancelled(self) -> None:
+        """The controller's ``cancelled``. NOTHING IN THE APP REACHES THIS: the only thing
+        that sets a batch worker's cancel flag is `BatchDetectController.abort_stopped`,
+        which detaches the worker in the same call, so the worker's ``cancelled`` is dropped
+        by the controller's sender guard. What a user sees when a batch is cancelled is
+        `_cancel_load`'s line ("Cancelled."), and `_cancel_load` resets what is reset here.
+
+        Kept wired so that a controller which one day does announce a cancel leaves the
+        chrome and the launch records clean, and it says that same one line: the texts
+        this slot used to carry ("Batch detect cancelled.", "Batch detect (CUSUM)
+        cancelled.") were never shown to anyone, and a guide that quoted them was wrong."""
         self._release_load_chrome()
         self._batch_skipped = 0
         self._batch_form = None
-        self.statusBar().showMessage("Batch detect cancelled.", 6000)
+        self._batch_module = "detect.schmitt"
+        self.statusBar().showMessage("Cancelled.", 6000)
 
     # -- layer + selection policy ----------------------------------------------------------------
     #
