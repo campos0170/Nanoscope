@@ -1870,12 +1870,18 @@ def apply_plot_frame(plot: pg.PlotItem, frame: bool | None, *, foreground=None) 
 
 def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
                           plot_widget=None, data_items: Sequence = (),
-                          fit_items: Sequence = (), title_prefix: str = "") -> None:
+                          fit_items: Sequence = (), title_prefix: str = "",
+                          title_suffix: str = "") -> None:
     """Style existing items, without ``clear``, ``setData``, fitting, or autoRange.
 
     Original graphical properties are recorded on first opt-in so Reset restores
     them. Data/fit items replaced by explicit analysis refresh acquire their own
     original styles. Existing manual zoom is retained.
+
+    ``title_suffix`` is plain text the window keeps behind a TYPED title (the Noise page's
+    marker of a processed result): appended unless the typed title already ends with it.
+    The window's automatic title is the window's own and is drawn as it is; a hidden
+    title stays hidden.
     """
     from .figure_series import prepare_pg_series_items, apply_pg_series_styles
     data_items, fit_items = tuple(data_items), tuple(fit_items)
@@ -1978,7 +1984,11 @@ def apply_plot_appearance(plot: pg.PlotItem, state: PlotAppearance, *,
         if foreground:
             title.opts["color"] = foreground
         title.opts.update(label_args(elements.get("title", TextStyle())))
-        title.setText(title_prefix + rich_text(state.title) if state.title else defaults["title_text"])
+        typed = rich_text(state.title) if state.title else ""
+        if (typed.strip() and title_suffix
+                and not plain_text(typed).rstrip().endswith(title_suffix.strip())):
+            typed = typed.rstrip() + rich_text(title_suffix)
+        title.setText(title_prefix + typed if state.title else defaults["title_text"])
         # setTitle(None) hides the row. An authored title must make it visible
         # again; Reset to an empty automatic title, or a hidden one, must hide it
         # without a gap.

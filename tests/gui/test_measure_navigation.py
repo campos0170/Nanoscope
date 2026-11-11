@@ -1334,7 +1334,12 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
         "plot_templates", "figure_text", "fit_label",
         "figure_adapter_pages", "figure_series", "pending_analysis", "quantity_axis", "time_controls",
         # 2026-11-02 (Phase 0, G2): the spectrogram colour bar's label CSS.
-        "font_picker"}
+        "font_picker",
+        # 2026-11-10: the Noise page's Processed signal runs the Preprocess chain over the
+        # whole recording, so it shows busy feedback through the one wait-cursor helper
+        # (never ``QApplication.setOverrideCursor`` directly: the macOS guard lives there).
+        # On the allowlist above, proven widgetless and gui-free by the guard.
+        "busy_cursor"}
     # The report window is the third standalone window and is held to the same rule.
     # It has its own allow-list guard in ``test_subpop_gui``; this one is stronger,
     # because ``_gui_modules_reached`` catches every spelling of the import and that

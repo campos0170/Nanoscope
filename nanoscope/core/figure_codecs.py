@@ -821,7 +821,7 @@ _ROOT_FIELDS = {
     "comparison_figures": {"schema_version", "draft", "applied", "appearance", "source_appearance", "source_recipes", "snapshot", "stale", "canvas_view", "table_resources"},
     "iv": {"points", "exclusions", "appearance", "fit", "details_text", "headline"},
     "event_waveforms": {"source", "units", "accepted_event_count", "config", "density_counts", "amplitude_warnings", "amplitude_snapshot_units", "density_edges", "ensemble", "ensemble_band", "ensemble_alignment", "ensemble_input_count", "ensemble_unalignable_count", "pending_analysis"},
-    "noise": {"config", "curves", "fft", "spectrogram", "all_points", "histogram_levels", "compute_notes", "pending_analysis"},
+    "noise": {"config", "curves", "fft", "spectrogram", "all_points", "histogram_levels", "compute_notes", "pending_analysis", "signal"},
     "voltage_series": {"config", "series", "series_excluded", "point_sources", "fit", "not_in_fit", "details_text", "warning_text", "headline"},
     "subpopulations": {"source", "accepted_event_ids", "report", "report_features_fingerprint", "subtitle", "view", "assignment_state", "assignment_reason", "curation_note", "appearance"},
 }
@@ -830,7 +830,7 @@ _FIT_LABEL_FIELDS = {"visible", "fields", "template", "placement", "offset", "si
 _LEGACY_STYLE_FIELDS = {"fit_values_on_plot", "show_r2", "show_gof", "title_bold", "title_italic"}
 _CONFIG_FIELDS = {
     "event_waveforms": {"view", "x_metric", "y_metric", "log_x", "log_y", "bins", "colormap", "density_title", "density_x_label", "density_y_label", "normalize_time", "align", "n_points", "pad_percent", "ensemble_subset", "ensemble_band", "ensemble_title", "appearance"},
-    "noise": {"target_key", "compare_keys", "target_source", "compare_sources", "start_s", "end_s", "nperseg", "window", "overlap_percent", "log_log", "asd", "rms_lo_hz", "rms_hi_hz", "view", "spectrogram_nperseg", "spectrogram_colormap", "spectrogram_levels_mode", "spectrogram_level_low", "spectrogram_level_high", "spectrogram_log_frequency", "histogram_bins", "histogram_clip", "histogram_levels", "appearance", "style"},
+    "noise": {"target_key", "compare_keys", "target_source", "compare_sources", "signal_basis", "start_s", "end_s", "nperseg", "window", "overlap_percent", "log_log", "asd", "rms_lo_hz", "rms_hi_hz", "view", "spectrogram_nperseg", "spectrogram_colormap", "spectrogram_levels_mode", "spectrogram_level_low", "spectrogram_level_high", "spectrogram_log_frequency", "histogram_bins", "histogram_clip", "histogram_levels", "appearance", "style"},
     "voltage_series": {"metric", "selected_fit", "applied_fit", "absolute_voltage", "log_y", "accepted_only", "appearance"},
 }
 

@@ -31,7 +31,40 @@ labelled "(units unknown)" on every read-out and on the axis: this window report
 the units it was given and never supplies one of its own.
 
 The spectrum defaults to the RAW calibrated trace: noise characterisation wants
-the unfiltered signal, so no filter chain is applied here.
+the unfiltered signal, so no filter chain is applied unless the *Signal* choice asks for
+the PROCESSED one (see "THE SIGNAL CHOICE" below).
+
+THE SIGNAL CHOICE (raw or processed)
+------------------------------------
+*Signal* is a compute setting like the segment and the Welch parameters. *Processed* is
+:func:`~nanoscope.analysis.conditioning.conditioned_trace` of the calibrated channel under
+the Detection panel's current Preprocess form: the array Schmitt/CUSUM detection, Measure's
+"Processed signal" and Export processed trace use. The form arrives through
+:meth:`PSDWindow.set_processing_provider` (a page reaches no sibling panel) and is read
+once per computation, for the primary and every compared recording alike.
+
+The chain runs over the WHOLE recording and the window is sliced afterwards, as Measure and
+the export do, so the analysed window carries no filter start-up and the whole-recording
+stages (baseline drift) see the recording they see everywhere else. That pass is made on the
+GUI thread, before anything on screen is cleared (:meth:`PSDWindow._prepare_signal`), under
+the app's wait cursor and a status line; a recording over :data:`_PROCESSED_MAX_SAMPLES` is
+refused instead. Moving the pass to a worker, with progress and cancel, is left for later.
+Each recording's processed trace is kept for the life of the result it belongs to, so an
+Update that moves no compute input runs the chain zero times; a trace is dropped when its
+recording closes, when the page is suspended and when the result goes back to Raw.
+
+NORMALIZE IS LEFT OUT. The page's axes and read-outs are in the channel's units, and
+Normalize only rescales and re-centres, so with Normalize on in the form the processed
+signal is built without that stage and the result says so (chain text, a note). The
+Normalize settings are therefore no part of the chain's signature: editing them never marks
+a processed result out of date.
+
+A chain that cannot be built is a message, never the raw trace; on a page that already shows
+a result the Update is refused and the picture stays. The result remembers its basis and
+chain (``_result_basis`` / ``_result_chain``); a chain edited afterwards makes the page
+pending (:meth:`PSDWindow._pending_state`) and nothing is recomputed until Update. That
+judgement is no edit: it is announced through ``chainJudgementChanged``, which the Update
+button hears and the save prompt does not.
 
 COMPARING PORES (why this window holds more than one curve)
 -----------------------------------------------------------
@@ -63,6 +96,7 @@ there for the PSD goes with the words, while the frequency axis keeps its pin.
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -72,12 +106,16 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEventLoop, Qt, Signal
 
 from PySide6.QtCore import QRectF
 
 from ..analysis import allpoints as ap_mod
 from ..analysis import psd as psd_mod
+from ..analysis.baseline import collect_baseline_warnings
+from ..analysis.conditioning import (BASIS_PROCESSED, BASIS_RAW, conditioned_trace,
+                                     conditioning_enabled, conditioning_params)
+from ..analysis.conditioning_recipes import STAGE_PARAM_KEYS, chain_signature, stage_rows
 from ..analysis.filters import noise_rms
 from ..core import clock
 from ..core.segment import SegmentDocument, persistent_key
@@ -86,6 +124,7 @@ from ..core.sources import disambiguate_labels, gains_comparable, source_colour
 from ..plot.style import OKABE_ITO
 from .analysis_catalog import ANALYSIS_LABELS
 from .axes import ReadableLogAxis
+from .busy_cursor import begin_wait_cursor, end_wait_cursor
 from .combos import choose_combo_item
 from .export_paths import ask_export_path
 from .figure_text import SHARED_LABELS_REASON, appearance_text_host, figure_text_for
@@ -100,8 +139,8 @@ from .plot_templates import WindowTemplateControls
 from .pending_analysis import (PendingAnalysis, committed_analysis, combo_value,
                                spin_value, check_value)
 from .plot_workflow import (DEFAULT_REVEAL, ExportEntry, FormatSpec, InspectorGroup,
-                            PageAdapter, WarningSummary, control_group, form_rows,
-                            install_plot_workflow)
+                            PageAdapter, PendingState, WarningSummary, control_group,
+                            form_rows, install_plot_workflow)
 from .plot_export import (
     DATA_FILTERS,
     IMAGE_FILTERS,
@@ -281,6 +320,25 @@ class _Span:
     i0: int               # first sample index within the recording
     i1: int               # one past the last
     note: str             # "" or why the requested window was clipped
+    basis: str = BASIS_RAW        # which signal ``seg`` is a window of
+    chain: str = ""               # the Preprocess chain in words (processed only)
+    chain_key: tuple = ()         # that chain's exact parameters, for the view caches
+
+
+@dataclass(frozen=True)
+class _Chain:
+    """The Preprocess chain one computation runs every recording through.
+
+    Normalize is never part of it (see "NORMALIZE IS LEFT OUT" at the top of this module):
+    ``params`` is the form narrowed to the chain with the Normalize keys removed, and the
+    signature, the key and the exported parameters are all of that dict."""
+    params: dict          # what conditioned_trace is given
+    signature: str        # what changes the array (chain_signature): the freshness test
+    text: str             # short, for titles, details and exports
+    key: tuple            # every parameter, for the kept traces and the view caches
+    enabled: bool         # False: no stage is on, the processed trace IS the raw one
+    normalize_left_out: bool = False    # the form had Normalize on
+    params_json: str = ""               # ``params`` as compact JSON, for exports
 
 
 @dataclass
@@ -364,6 +422,118 @@ _UNKNOWN_UNITS = "(units unknown)"
 def _unit_or_unknown(units: str) -> str:
     """The channel's units, or the named undeclared state. Never a guess."""
     return units or _UNKNOWN_UNITS
+
+
+#: The Signal choice, as the combo offers it. The data is what a project saves.
+_SIGNAL_CHOICES = (("Raw (calibrated)", BASIS_RAW),
+                   ("Processed (Preprocess chain)", BASIS_PROCESSED))
+_SIGNAL_TIP = (
+    "Raw: the calibrated trace.\n"
+    "Processed: the trace after the Detection panel's Preprocess chain as it is set now, "
+    "applied to every compared recording. Normalize is left out.")
+#: What a chain with no stage on is called (the processed trace is then the raw one).
+_NO_STAGE = "no stage enabled"
+_NO_STAGE_NOTE = ("No Preprocess stage is enabled, so Processed is the same as Raw. Measure "
+                  "and Export may still use the stored detection's chain.")
+#: A chain longer than this is counted in a title instead of spelled out.
+_TITLE_CHAIN_CHARS = 48
+#: The Normalize stage's keys: never run here, and no part of the chain's identity.
+_NORMALIZE_KEYS = frozenset(STAGE_PARAM_KEYS["normalize"])
+#: What the chain text ends with when the form has Normalize on.
+_NORMALIZE_LEFT_OUT = " · Normalize left out"
+#: Processed is refused for a recording longer than this: the chain runs over the whole
+#: recording, on the GUI thread, and its working memory is several times the trace.
+_PROCESSED_MAX_SAMPLES = 30_000_000
+#: From this many samples the chain pass shows busy feedback (Measure's own threshold:
+#: below it the pass takes a few ms and a flickering status line is all anyone would see).
+_BUSY_SAMPLES = 2_000_000
+
+
+def _noise_chain_params(params) -> dict:
+    """``params`` narrowed to the chain the Noise page runs: Normalize left out."""
+    return {key: value for key, value in conditioning_params(params).items()
+            if key not in _NORMALIZE_KEYS}
+
+
+def noise_chain_signature(params) -> str:
+    """What identifies the processed signal the Noise page builds from a Detection form.
+
+    The freshness test for a processed result, here and for a figure that is not resident
+    (the owner reads it from the record). The Normalize settings are no part of it."""
+    return chain_signature(_noise_chain_params(params))
+
+
+def _chain_from_params(params) -> _Chain:
+    """The chain of a Detection-form ``params`` dict (which may be wider than the chain)."""
+    left_out = bool(conditioning_params(params).get("normalize_enabled"))
+    used = _noise_chain_params(params)
+    try:
+        rows = [row for row in stage_rows(used) if row.enabled]
+        text = " → ".join(f"{row.title} {row.summary}".strip() for row in rows)
+    except Exception:  # noqa: BLE001 — a label must never stop a computation
+        text = ""
+    enabled = conditioning_enabled(used)
+    text = text or (_NO_STAGE if not enabled else "Preprocess chain")
+    return _Chain(params=used, signature=chain_signature(used),
+                  text=text + (_NORMALIZE_LEFT_OUT if left_out else ""),
+                  key=tuple(sorted((str(k), repr(v)) for k, v in used.items())),
+                  enabled=enabled, normalize_left_out=left_out,
+                  params_json=json.dumps(used, sort_keys=True, separators=(",", ":"),
+                                         default=_plain_json))
+
+
+def _plain_json(value):
+    """numpy scalars and arrays as plain JSON values; anything else as its text."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return str(value)
+
+
+def _basis_suffix(basis: str, chain: str) -> str:
+    """What a title adds for a processed result; nothing for a raw one."""
+    if basis != BASIS_PROCESSED:
+        return ""
+    if len(chain) > _TITLE_CHAIN_CHARS:
+        stages, marker = chain, ""
+        if chain.endswith(_NORMALIZE_LEFT_OUT):
+            stages, marker = chain[:-len(_NORMALIZE_LEFT_OUT)], _NORMALIZE_LEFT_OUT
+        chain = _plural(stages.count(" → ") + 1, "stage") + marker
+    return f" (processed: {chain})"
+
+
+def _with_basis(title: str, suffix: str) -> str:
+    """A TYPED title with the basis marker of a processed result behind it, so the marker
+    stays on the figure whoever worded the title. A title that already ends with it (an
+    automatic one edited in place) is left as typed."""
+    title = str(title)
+    if not suffix or not title.strip() or title.rstrip().endswith(suffix.strip()):
+        return title
+    return title.rstrip() + suffix
+
+
+def _too_long_reason(label: str, n_samples: int) -> str:
+    """Why Processed is refused for a recording over :data:`_PROCESSED_MAX_SAMPLES`."""
+    return (f"{label}: Processed needs the Preprocess chain run over the whole recording, "
+            f"and this one is too long for the Noise page ({n_samples / 1e6:.0f} M samples; "
+            f"the limit is {_PROCESSED_MAX_SAMPLES / 1e6:.0f} M). Use the Preprocess "
+            f"workspace's Spectrum preview on a window instead.")
+
+
+def _chain_failure_reason(label: str, exc: BaseException) -> str:
+    """A kernel's refusal of the chain, in a sentence. The two common ones are worded
+    here; any other keeps the kernel's own message."""
+    if isinstance(exc, MemoryError):
+        return f"{label}: not enough memory to run the Preprocess chain over this recording."
+    if "padlen" in str(exc):
+        return f"{label}: this recording is too short for the Preprocess chain's filters."
+    return f"{label}: the Preprocess chain could not be applied: {exc}"
+
+
+def _first_sentence(text) -> str:
+    """``text`` up to the end of its first sentence (a kernel advisory, for a note)."""
+    return re.split(r"(?<=[.!?])\s+", " ".join(str(text).split()), maxsplit=1)[0]
 
 
 def _sq_units(units: str) -> str:
@@ -606,6 +776,16 @@ class PSDWindow(QtWidgets.QMainWindow):
     workspaceChanged = Signal()
     pendingChanged = Signal()
     sourceSelected = Signal(str, int)
+    #: The answer to "is the processed result still the Detection form's?" changed. A
+    #: JUDGEMENT, not an edit: the owner refreshes the figure's status, and nothing arms
+    #: the save prompt (``pendingChanged`` is the signal an edit sends).
+    chainJudgementChanged = Signal()
+    #: Either of the two: what Update plot would do may have changed. The toolbar's signal.
+    pendingStateChanged = Signal()
+
+    #: Template / recipe settings :meth:`template_settings` writes only when they are not
+    #: the default, so a recipe's owner must allow them by name.
+    TEMPLATE_OPTIONAL_KEYS = ("signal_basis",)
 
     def __init__(self, session: Session, parent: QtWidgets.QWidget | None = None, *,
                  defer_initial_refresh: bool = False) -> None:
@@ -625,6 +805,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         # Automatic captions belong to the rendered result, not the current source.
         # Keep them so clearing a custom title can restyle even an orphan snapshot.
         self._view_titles: dict[str, str] = {}
+        #: The basis marker each drawn view's title carries (``""`` for a raw result),
+        #: kept beside the title so a TYPED title keeps the marker too.
+        self._view_suffix: dict[str, str] = {}
         # What the figures on screen show, for the reset rule (quantity_reset): the typed
         # words belong to it, so a change is measured against THIS and not against the
         # controls. ``_view_shown`` is the page in front; ``_asd_shown`` is whether the
@@ -679,10 +862,35 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._hist: ap_mod.AllPointsHistogram | None = None
         self._hist_levels: list[dict] = []
 
+        # The Signal choice (see "THE SIGNAL CHOICE" at the top of this module).
+        #: The owner's reader of the Detection panel's Preprocess form, or None.
+        self._chain_provider = None
+        #: The chain the computation in flight (or the last one) ran, read once per run.
+        self._chain: _Chain | None = None
+        #: The whole-recording processed traces of the result on screen, the primary's and
+        #: every compared recording's: ``key -> (array, note)``, the key naming the
+        #: recording, its length, rate and calibration, and the chain. Kept for the life
+        #: of that result (see :meth:`_prepare_signal`, :meth:`release_processed_traces`).
+        self._processed_traces: dict[tuple, tuple[np.ndarray, str]] = {}
+        #: Why a recording has no processed trace, for the computation that asked.
+        self._processed_failures: dict[tuple, str] = {}
+        #: What the result on screen was computed from, and its chain in words and as
+        #: the signature a later form is compared with.
+        self._result_basis = BASIS_RAW
+        self._result_chain = ""
+        self._result_chain_signature = ""
+        #: The parameters that chain ran with, Normalize excluded, as compact JSON.
+        self._result_chain_params = ""
+        #: Whether the page already said the chain moved under the result.
+        self._chain_outdated_seen = False
+        self.pendingChanged.connect(self.pendingStateChanged)
+        self.chainJudgementChanged.connect(self.pendingStateChanged)
+
         self._build_ui()
         self._pending_analysis = PendingAnalysis(self, {
             'target_key': (self._rec_combo, self._pending_target_key, self._pending_target),
             'compare_keys': (self._compare_list, self.compare_keys, self._pending_compares),
+            'signal_basis': combo_value(self._signal_combo, data=True),
             'start_s': spin_value(self._start_spin), 'end_s': spin_value(self._end_spin),
             'nperseg': combo_value(self._nperseg_combo), 'window': combo_value(self._window_combo),
             'overlap_percent': spin_value(self._overlap_spin),
@@ -693,7 +901,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             'histogram_bins': combo_value(self._hist_bins_combo),
             'histogram_clip': check_value(self._hist_clip_check),
             'histogram_levels': check_value(self._hist_levels_check),
-        }, has_result=self.has_data)
+        }, has_result=self.has_data, additive=('signal_basis',))
         if defer_initial_refresh:
             self._repopulate(None)
             self._pending_analysis.commit()
@@ -880,8 +1088,8 @@ class PSDWindow(QtWidgets.QMainWindow):
                     axis_log_target=self._inspector_log_target,
                     series_provider=self.series_descriptors),
                 update=self._refresh_from_button,
-                pending=self._pending_analysis.state,
-                pending_changed=self.pendingChanged,
+                pending=self._pending_state,
+                pending_changed=self.pendingStateChanged,
                 update_tooltip="Re-gather the open recordings (pick up any opened since) and "
                                "recompute the spectrum.",
                 exports=lambda: [ExportEntry(text, run, kind=kind) for (text, run), kind
@@ -1063,10 +1271,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._templates = WindowTemplateControls(
             "noise-spectrum", capture=self.template_settings,
             recall=self.apply_template_settings,
-            note="A template keeps the Welch settings, PSD/ASD and log axes, the RMS band, the "
-                 "view shown and its options, and the style and appearance. It never keeps the "
-                 "recordings, the compared curves or the time span. Recalling one recomputes "
-                 "the spectrum only if its Welch settings differ, as changing them does.")
+            note="A template keeps the Signal choice, the Welch settings, PSD/ASD and log axes, "
+                 "the RMS band, the view shown and its options, and the style and appearance. It "
+                 "never keeps the recordings, the compared curves or the time span. Recalling one "
+                 "recomputes the spectrum only if its Signal or Welch settings differ, as "
+                 "changing them does.")
         self._export_info.layout().addWidget(self._templates)
 
         self._save_btn = QtWidgets.QPushButton("Export current figure…")
@@ -1102,6 +1311,22 @@ class PSDWindow(QtWidgets.QMainWindow):
             "noise summary and band-RMS are reported per curve.")
         self._compare_list.itemChanged.connect(self._on_compare_changed)
         form.addRow("Compare with", self._compare_list)
+
+        self._signal_combo = QtWidgets.QComboBox()
+        for label, basis in _SIGNAL_CHOICES:
+            self._signal_combo.addItem(label, basis)
+        self._signal_combo.setToolTip(_SIGNAL_TIP)
+        # On a row of its own, under its label: beside a label the 290 px column this
+        # group is hosted in leaves 140 px of text, and the longer entry needs 175. It may
+        # still shrink (and elide) rather than widen a narrower column.
+        self._signal_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._signal_combo.setMinimumContentsLength(14)
+        signal_label = QtWidgets.QLabel("Signal")
+        signal_label.setBuddy(self._signal_combo)
+        signal_label.setToolTip(_SIGNAL_TIP)
+        form.addRow(signal_label)
+        form.addRow(self._signal_combo)
 
         self._refresh_btn = QtWidgets.QPushButton("Refresh")
         self._refresh_btn.setToolTip(
@@ -1407,6 +1632,7 @@ class PSDWindow(QtWidgets.QMainWindow):
     def _wire_signals(self) -> None:
         # Recording / segment / Welch params change the PSD itself -> full recompute.
         self._rec_combo.currentIndexChanged.connect(self._on_recording_changed)
+        self._signal_combo.currentIndexChanged.connect(self._on_param_changed)
         self._start_spin.valueChanged.connect(self._on_param_changed)
         self._end_spin.valueChanged.connect(self._on_param_changed)
         self._nperseg_combo.currentTextChanged.connect(self._on_param_changed)
@@ -1516,11 +1742,13 @@ class PSDWindow(QtWidgets.QMainWindow):
         for key in sorted(keep - offered):
             self._add_unavailable_compare(key)
 
-    def refresh(self) -> None:
-        """Re-gather the open recordings and recompute, keeping the current selection."""
+    def refresh(self):
+        """Re-gather the open recordings and recompute, keeping the current selection.
+
+        ``False`` when the computation was refused and the result on screen was kept."""
         self._repopulate(self._current_target())
         self._reconfigure_for_recording()
-        self._recompute()
+        return self._recompute()
 
     def _refresh_from_button(self) -> None:
         """A deliberate refresh replaces the durable numerical snapshot."""
@@ -1530,7 +1758,8 @@ class PSDWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage('; '.join(warnings))
                 self.pendingChanged.emit()
                 return False
-        self.refresh()
+        if self.refresh() is False:
+            return False        # refused (Signal ▸ Processed): the picture and drafts stand
         self.workspaceChanged.emit()
 
     def set_target(self, doc_id: str, channel: int, *, recompute: bool = True) -> None:
@@ -2048,8 +2277,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         for key, widget, plot in views:
             self._apply_view_background(widget, plot)
             if key in self._view_titles:
-                plot.setTitle(self._style.title or self._view_titles[key],
-                              color=self._fg_hex())
+                plot.setTitle(self._titled(key), color=self._fg_hex())
             for name in ("bottom", "left"):
                 axis = plot.getAxis(name)
                 axis.labelStyle.update(self._label_style())
@@ -2154,7 +2382,9 @@ class PSDWindow(QtWidgets.QMainWindow):
             if plot is self._plot and binding is not None and 'data_color' not in binding.get('overrides', {}):
                 # Inherited single-ink defaults cannot erase recording identities.
                 appearance = replace(appearance, data_color=None)
-            apply_plot_appearance(plot, appearance, plot_widget=widget, data_items=data, fit_items=fits)
+            apply_plot_appearance(plot, appearance, plot_widget=widget, data_items=data,
+                                  fit_items=fits,
+                                  title_suffix=self._view_suffix.get(self._pin_view(plot), ""))
             controller = figure_text_for(plot)
             if controller is not None:
                 controller.refresh()        # a legend may be new since the last draw
@@ -2369,6 +2599,11 @@ class PSDWindow(QtWidgets.QMainWindow):
                  "histogram_bins": self._hist_bins_combo.currentText(),
                  "histogram_clip": self._hist_clip_check.isChecked(),
                  "histogram_levels": self._hist_levels_check.isChecked(),
+                 # Written only when it is not Raw, so a Raw template is the one it always
+                 # was. A template without it leaves the page's choice alone, like any
+                 # other key a template does not carry.
+                 **({"signal_basis": self._signal_basis()}
+                    if self._signal_basis() != BASIS_RAW else {}),
                  "style": {"title": str(style.title), "data_color": str(style.data_color),
                            "fit_color": str(style.fit_color),
                            "background": str(style.background),
@@ -2393,6 +2628,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         current, _appearance = self.template_settings()
         merged = {**current, **{key: settings[key] for key in current
                                 if key in settings and key != "style"}}
+        # The one optional key (absent from ``current`` on Raw): a template that carries
+        # it sets it, one that does not keeps the page's choice.
+        merged["signal_basis"] = settings.get("signal_basis", self._signal_basis())
         raw_style = settings.get("style", {})
         style = {**current["style"], **(raw_style if isinstance(raw_style, dict) else {})}
 
@@ -2407,6 +2645,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                 or not offered(self._spec_cmap_combo, merged["spectrogram_colormap"])
                 or not offered(self._hist_bins_combo, merged["histogram_bins"])
                 or merged["view"] not in {key for key, _label in VIEWS}
+                or merged["signal_basis"] not in (BASIS_RAW, BASIS_PROCESSED)
                 or type(merged["overlap_percent"]) is not int
                 or not 0 <= merged["overlap_percent"] <= 95
                 or merged["spectrogram_levels_mode"] not in (_SPEC_LEVELS_AUTO,
@@ -2432,6 +2671,8 @@ class PSDWindow(QtWidgets.QMainWindow):
                 self._nperseg_combo.addItem(nperseg)
             self._nperseg_combo.setCurrentText(nperseg)
             self._window_combo.setCurrentText(merged["window"])
+            self._signal_combo.setCurrentIndex(
+                self._signal_combo.findData(merged["signal_basis"]))
             self._overlap_spin.setValue(merged["overlap_percent"])
             self._loglog_check.setChecked(merged["log_log"])
             self._asd_check.setChecked(merged["asd"])
@@ -2466,7 +2707,8 @@ class PSDWindow(QtWidgets.QMainWindow):
         # What moved, read back from the controls (a spin box may have clamped a value), and
         # each group sent where its own signal sends a hand edit (_wire_signals).
         after, _appearance = self.template_settings()
-        moved = {key for key in after if after[key] != current[key]}
+        moved = {key for key in after.keys() | current.keys()
+                 if after.get(key) != current.get(key)}
         if self._pending_analysis.managed:
             analytical = moved & self._pending_analysis.controls.keys()
             if analytical:
@@ -2484,7 +2726,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         refresh_view = (display or "view" in moved
                         or bool(moved & view_inputs.get(after["view"], set())))
         refreshed = False
-        if moved & {"nperseg", "window", "overlap_percent"}:
+        if moved & {"nperseg", "window", "overlap_percent", "signal_basis"}:
             self._recompute()                       # _on_param_changed (draws the new flags)
             # It ends in _refresh_view only when the primary computed; otherwise a moved
             # view would leave the combo naming one page and the stack showing another.
@@ -2544,18 +2786,27 @@ class PSDWindow(QtWidgets.QMainWindow):
         calibration it returns the document's own array by reference, so no copy of the
         recording is made here either.)
 
+        That is the RAW signal, unchanged. With *Signal* on Processed the window is cut
+        from the whole recording's processed trace (:meth:`_processed_for`): a filter
+        has memory, so the chain cannot be run on the cut alone.
+
         Returns the span, or a human-readable reason there is none.
         """
         label = rec["label"]
-        try:
-            chan = self._session.calibrated(rec["doc_id"], rec["channel"])
-        except (KeyError, TypeError, ValueError):
-            return f"{label}: could not read the calibrated current."
-        fs = chan.sample_rate_hz
-        if not fs:
-            return f"{label}: no known sample rate — a spectrum needs a time base."
-
-        data = np.asarray(chan.data)
+        source = self._calibrated_source(rec)
+        if isinstance(source, str):
+            return source
+        chan, fs, data = source
+        chain, chain_note = None, ""
+        if self._signal_basis() == BASIS_PROCESSED:
+            # The WHOLE recording through the chain, sliced below like the raw trace: the
+            # window then has no filter start-up in it. A chain that cannot be built is a
+            # reason, never the raw samples under a processed name.
+            built = self._processed_for(rec, data, fs)
+            if isinstance(built, str):
+                return built
+            data, chain_note = built
+            chain = self._chain_in_force()
         n_total = data.size
         want0, want1 = self._start_spin.value(), self._end_spin.value()
         i0 = int(np.clip(int(round(want0 * fs)), 0, n_total))
@@ -2568,7 +2819,248 @@ class PSDWindow(QtWidgets.QMainWindow):
         if i1 < int(round(want1 * fs)):
             note = (f"window clipped to this recording's length "
                     f"({i0 / fs*1000.:.4g}–{i1 / fs*1000.:.4g} ms)")
-        return _Span(chan=chan, seg=seg, fs=float(fs), i0=int(i0), i1=int(i1), note=note)
+        if chain is None:
+            return _Span(chan=chan, seg=seg, fs=float(fs), i0=int(i0), i1=int(i1), note=note)
+        return _Span(chan=chan, seg=seg, fs=float(fs), i0=int(i0), i1=int(i1),
+                     note="; ".join(part for part in (note, chain_note) if part),
+                     basis=BASIS_PROCESSED, chain=chain.text, chain_key=chain.key)
+
+    def _calibrated_source(self, rec: dict):
+        """``(channel, fs, samples)`` of one recording's calibrated current, or the reason
+        there is none. The raw signal; nothing is copied."""
+        label = rec["label"]
+        try:
+            chan = self._session.calibrated(rec["doc_id"], rec["channel"])
+        except (KeyError, TypeError, ValueError):
+            return f"{label}: could not read the calibrated current."
+        fs = chan.sample_rate_hz
+        if not fs:
+            return f"{label}: no known sample rate — a spectrum needs a time base."
+        return chan, float(fs), np.asarray(chan.data)
+
+    # -- the Signal choice: raw or processed -------------------------------------------------------
+    def set_processing_provider(self, provider) -> None:
+        """Install the owner's reader of the Detection panel's Preprocess form.
+
+        ``provider()`` returns the form's params (wider than the chain is fine). It is read
+        once per computation and when the page is asked whether its processed result is
+        still the form's; a page reaches no sibling panel, so this is how the chain
+        arrives. ``None`` leaves *Processed* with nothing to build (it then says so)."""
+        self._chain_provider = provider
+        self.processing_chain_changed()
+
+    def signal_basis(self) -> str:
+        """The basis of the result on screen: ``'raw'`` or ``'processed'``."""
+        return self._result_basis
+
+    def signal_chain(self) -> str:
+        """The Preprocess chain the result on screen used, in words (``''`` for raw)."""
+        return self._result_chain
+
+    def set_signal_basis(self, basis: str) -> None:
+        """Choose ``'raw'`` or ``'processed'`` as the combo would (owner + tests)."""
+        index = self._signal_combo.findData(str(basis))
+        if index < 0:
+            raise ValueError(f"unknown signal basis {basis!r}")
+        self._signal_combo.setCurrentIndex(index)
+
+    def _signal_basis(self) -> str:
+        """The basis the CONTROL names (a draft until Update on a managed page)."""
+        return str(self._signal_combo.currentData() or BASIS_RAW)
+
+    def _read_chain(self) -> _Chain | None:
+        """The Detection panel's Preprocess form as it stands now, or None without one."""
+        provider = self._chain_provider
+        if provider is None:
+            return None
+        try:
+            return _chain_from_params(provider())
+        except Exception:  # noqa: BLE001 — an unreadable form is "no chain", said out loud
+            return None
+
+    def _chain_in_force(self) -> _Chain | None:
+        """The chain this result is built with: read at the start of a computation and
+        kept, so the four views and every compared recording run the same one."""
+        if self._chain is None:
+            self._chain = self._read_chain()
+        return self._chain
+
+    def _trace_key(self, rec: dict, data: np.ndarray, fs: float, chain: _Chain) -> tuple:
+        """What one kept processed trace is the trace OF: the recording, its length, rate
+        and calibration, and the chain. Any of them moving is another trace."""
+        cal = self._session.calibration(rec["doc_id"], rec["channel"]).fingerprint()
+        return (str(rec["doc_id"]), int(rec["channel"]), int(data.size), float(fs),
+                tuple(cal), chain.key)
+
+    def _processed_for(self, rec: dict, data: np.ndarray, fs: float):
+        """``(samples, note)`` for one recording's processed trace, or the reason there is
+        none.
+
+        :func:`~nanoscope.analysis.conditioning.conditioned_trace` over the whole calibrated
+        channel: the array Measure's "Processed signal" and Export processed trace build,
+        with Normalize left out. A trace is built once and kept with the result it belongs
+        to (:meth:`_prepare_signal` lets go of the ones a new result does not use), so the
+        four views and an Update that moves no compute input read it again. A recording
+        longer than :data:`_PROCESSED_MAX_SAMPLES` is refused before the chain is tried."""
+        label = rec["label"]
+        chain = self._chain_in_force()
+        if chain is None:
+            return (f"{label}: the Preprocess chain is not available, so the processed "
+                    f"signal cannot be built.")
+        if not chain.enabled:
+            return data, ""                 # no stage on: the processed trace is the raw one
+        key = self._trace_key(rec, data, fs, chain)
+        kept = self._processed_traces.get(key)
+        if kept is not None:
+            return kept
+        failed = self._processed_failures.get(key)
+        if failed is not None:
+            return failed
+        if data.size > _PROCESSED_MAX_SAMPLES:
+            built = _too_long_reason(label, int(data.size))
+        else:
+            built = self._run_chain(label, data, fs, chain)
+        if isinstance(built, str):
+            self._processed_failures[key] = built
+        else:
+            self._processed_traces[key] = built
+        return built
+
+    def _run_chain(self, label: str, data: np.ndarray, fs: float, chain: _Chain):
+        """One pass of the chain over a whole recording: ``(samples, note)``, or the reason
+        the kernels refused it.
+
+        On the GUI thread (a worker with progress and cancel is left for later), so a pass
+        long enough to notice says what it is doing first: the app's own wait cursor
+        (:mod:`.busy_cursor`, which pushes none on macOS) and the status line, painted
+        before the pass starts. Only the repaint is pumped: no click or key is delivered
+        into a computation that is already running.
+
+        The note is every baseline advisory the kernels raised for this recording, each
+        cut to its first sentence."""
+        busy = int(data.size) >= _BUSY_SAMPLES
+        bar = self.statusBar()
+        message = f"Applying the Preprocess chain to {label}…"
+        cursor = False
+        if busy:
+            cursor = begin_wait_cursor()
+            bar.showMessage(message)
+            QtWidgets.QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        try:
+            with collect_baseline_warnings() as advisories:
+                out = np.asarray(conditioned_trace(data, fs, chain.params))
+        except Exception as exc:  # noqa: BLE001 — a kernel's refusal is a message
+            return _chain_failure_reason(label, exc)
+        finally:
+            end_wait_cursor(cursor)
+            if busy and bar.currentMessage() == message:
+                bar.clearMessage()
+        notes = dict.fromkeys(_first_sentence(advisory) for advisory in advisories)
+        return out, " ".join(note for note in notes if note)
+
+    def _wanted_recordings(self):
+        """``(primary, [(recording, colour), …])``: the primary (None when the control
+        names no open recording) and every curve this page would compute, primary first."""
+        target = self._current_target()
+        primary = (None if target is None else
+                   next((r for r in self._recordings
+                         if (r["doc_id"], r["channel"]) == target), None))
+        if primary is None:
+            return None, []
+        wanted = [(primary, OKABE_ITO[0])]
+        compare_keys = self.compare_keys()
+        colour_index = _COMPARE_COLOUR_START
+        for rec in self._recordings:
+            if rec["key"] in compare_keys and (rec["doc_id"], rec["channel"]) != target:
+                wanted.append((rec, source_colour(colour_index)))
+                colour_index += 1
+        return primary, wanted
+
+    def _prepare_signal(self) -> str:
+        """Everything a computation needs of the Signal choice, gathered BEFORE anything on
+        screen is cleared. Returns ``""``, or why the PRIMARY has no processed trace.
+
+        The Preprocess form is read here, once: every curve and every view of the result
+        runs the same chain. On Processed the whole-recording trace of the primary and of
+        every compared recording is built (or found kept); the traces the new result does
+        not use are let go. A raw result holds no chain and no processed trace.
+
+        A refusal (no form to read, a recording over the size limit, a chain the kernels
+        will not run) lets go of nothing: the traces of the result on screen stay, so the
+        caller may leave that result where it is (and then puts its chain back)."""
+        if self._signal_basis() != BASIS_PROCESSED:
+            self._chain = None
+            self.release_processed_traces()
+            return ""
+        self._chain = chain = self._read_chain()
+        self._processed_failures = {}
+        primary, wanted = self._wanted_recordings()
+        used = set()
+        for rec, _colour in wanted:
+            source = self._calibrated_source(rec)
+            if isinstance(source, str):
+                continue                    # said when this recording's curve is computed
+            _chan, fs, data = source
+            built = self._processed_for(rec, data, fs)
+            if isinstance(built, str):
+                if rec is primary:
+                    return built            # nothing let go: the caller may keep its result
+                continue                    # a compared recording: left out, with its reason
+            if chain is not None and chain.enabled:
+                used.add(self._trace_key(rec, data, fs, chain))
+        self._processed_traces = {key: kept for key, kept in self._processed_traces.items()
+                                  if key in used}
+        return ""
+
+    def release_processed_traces(self, doc_id: str | None = None) -> None:
+        """Let go of the kept processed traces: one recording's (it closed), or all of them
+        (the page left the screen, or its result is raw again). The result on screen is
+        not touched; the next Update that needs a trace builds it again."""
+        if doc_id is None:
+            self._processed_traces = {}
+            self._processed_failures = {}
+            return
+        doc_id = str(doc_id)
+        self._processed_traces = {key: kept for key, kept in self._processed_traces.items()
+                                  if key[0] != doc_id}
+        self._processed_failures = {key: why for key, why in self._processed_failures.items()
+                                    if key[0] != doc_id}
+
+    def _processed_result_outdated(self) -> bool:
+        """Whether the processed result on screen was made with a chain the form no longer
+        names. A raw result never is; neither is one this page cannot compare. Normalize
+        is no part of the comparison (it is left out of the processed signal)."""
+        provider = self._chain_provider
+        if self._result_basis != BASIS_PROCESSED or not self._curves or provider is None:
+            return False
+        try:
+            # The signature alone: this is asked on every form signal.
+            live = noise_chain_signature(provider())
+        except Exception:  # noqa: BLE001 — a form that cannot be read judges nothing
+            return False
+        return live != self._result_chain_signature
+
+    def processing_chain_changed(self) -> bool:
+        """The Preprocess form may have moved (the owner calls this on every form change).
+
+        Nothing is computed. When the answer to "is the result still the form's?" changes,
+        the page says so through ``chainJudgementChanged`` (the Update button follows it)
+        and returns True, so the owner can refresh the figure's status. It is a judgement,
+        not an edit: ``pendingChanged`` is not sent, and nothing arms the save prompt."""
+        outdated = self._processed_result_outdated()
+        if outdated == self._chain_outdated_seen:
+            return False
+        self._chain_outdated_seen = outdated
+        self.chainJudgementChanged.emit()
+        return True
+
+    def _pending_state(self) -> PendingState:
+        """The pending inputs, plus a Preprocess chain edited under a processed result."""
+        state = self._pending_analysis.state()
+        if not self._pending_analysis.managed or not self._processed_result_outdated():
+            return state
+        return replace(state, count=state.count + 1,
+                       reasons=tuple(state.reasons) + ("Preprocess chain changed",))
 
     def _compute_curve(self, rec: dict, colour: str) -> PSDCurve | str:
         """Welch-estimate ONE recording over the current time window.
@@ -2616,7 +3108,9 @@ class PSDWindow(QtWidgets.QMainWindow):
             calibration_fingerprint=tuple(self._session.calibration(doc_id, channel).fingerprint()),
         )
 
-    def _recompute(self) -> None:
+    def _recompute(self):
+        """Compute the result the controls name. ``False`` when it was refused and the
+        result on screen was kept (a managed page only)."""
         pending = getattr(self, '_pending_analysis', None)
         if pending is None:
             return self._recompute_current()
@@ -2628,7 +3122,18 @@ class PSDWindow(QtWidgets.QMainWindow):
                 return False
         old_view, old_asd = self._view_shown, self._asd_shown
         with pending.applying():
-            self._recompute_current()
+            # SIGNAL ▸ PROCESSED IS SETTLED FIRST, before anything is cleared: the chain is
+            # read and run here. If the primary's processed trace cannot be had, a page
+            # with an Update button keeps the picture it has, with its numbers and its
+            # drafts, and says why; nothing was computed, so nothing is committed.
+            chain_before = self._chain
+            refusal = self._prepare_signal()
+            if refusal and pending.managed and self._curves:
+                self._chain = chain_before
+                self.statusBar().showMessage(refusal)
+                return False
+            self._recompute_current(prepared=True)
+            self._chain_outdated_seen = self._processed_result_outdated()
             pending.commit()
         if pending.managed:
             if old_view != self._view_shown:
@@ -2637,17 +3142,25 @@ class PSDWindow(QtWidgets.QMainWindow):
                 self._reset_words('the amplitude spectral density' if self._asd_shown
                                   else 'the power spectral density', ((VIEW_PSD, 'left'),))
 
-    def _recompute_current(self) -> None:
+    def _recompute_current(self, *, prepared: bool = False) -> None:
         """Welch-estimate the primary recording and every ticked comparison.
 
         The primary's result is mirrored onto the single-curve fields (``_freqs`` /
         ``_psd`` / ``_summary`` / ``_fs`` / ``_units``) so a one-pore session — and
         every accessor built on it — behaves exactly as before.
+
+        ``prepared``: the caller has already settled the Signal choice
+        (:meth:`_prepare_signal`); otherwise it is settled here, first.
         """
+        if not prepared:
+            self._prepare_signal()
         self._freqs = self._psd = self._summary = None
         self._nperseg_used = self._noverlap_used = self._nseg_used = 0
         self._curves = []
         self._compute_notes: list[str] = []
+        self._result_basis, self._result_chain, self._result_chain_signature = BASIS_RAW, "", ""
+        self._result_chain_params = ""
+        processed = self._signal_basis() == BASIS_PROCESSED
 
         target = self._current_target()
         if target is None:
@@ -2663,13 +3176,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._update_rms_readout()
             return
 
-        wanted = [(primary, OKABE_ITO[0])]
-        compare_keys = self.compare_keys()
-        colour_index = _COMPARE_COLOUR_START
-        for rec in self._recordings:
-            if rec["key"] in compare_keys and (rec["doc_id"], rec["channel"]) != target:
-                wanted.append((rec, source_colour(colour_index)))
-                colour_index += 1
+        _primary, wanted = self._wanted_recordings()
 
         curves: list[PSDCurve] = []
         for rec, colour in wanted:
@@ -2689,6 +3196,21 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._units, self._fs = head.units, head.fs
         self._nperseg_used, self._noverlap_used = head.nperseg, head.noverlap
         self._nseg_used = head.nseg
+        if processed and self._chain is not None:
+            self._result_basis = BASIS_PROCESSED
+            self._result_chain = self._chain.text
+            self._result_chain_signature = self._chain.signature
+            self._result_chain_params = self._chain.params_json
+            if not self._chain.enabled:
+                self._compute_notes.append(_NO_STAGE_NOTE)
+            if self._chain.normalize_left_out:
+                # Named when every curve declares the same unit; never guessed otherwise.
+                units = {curve.units for curve in curves}
+                stays_in = (units.pop() if len(units) == 1 and "" not in units
+                            else "the channel's units" if len(curves) == 1
+                            else "each channel's own units")
+                self._compute_notes.append(
+                    f"Normalize is left out here, so the spectrum stays in {stays_in}.")
 
         self._update_seg_label(head.i0, head.i0 + head.n_samples, head.n_samples)
         self._redraw()
@@ -3047,6 +3569,12 @@ class PSDWindow(QtWidgets.QMainWindow):
         for curve in self._curves:
             blocks.append(self._curve_details(curve, header=len(self._curves) > 1))
         text = "\n\n".join(blocks)
+        if self._result_basis == BASIS_PROCESSED:
+            # Which signal these numbers describe, before any of them: one chain, the
+            # Detection panel's, for the primary and every compared recording.
+            text = (f"Signal: processed — {self._result_chain}\n"
+                    f"The Detection panel's Preprocess chain, applied to every curve.\n\n"
+                    + text)
         notes = list(getattr(self, "_compute_notes", [])) + self._comparison_cautions()
         if notes:
             text += "\n\n" + "\n".join(f"NOTE  {n}" for n in notes)
@@ -3326,11 +3854,25 @@ class PSDWindow(QtWidgets.QMainWindow):
             shown = " vs ".join(labels[:3]) + f" (+{len(labels) - 3} more)"
         else:
             shown = " vs ".join(labels)
-        return f"{yq} — {shown}"
+        # A processed spectrum says so where the figure is read: in its own title.
+        suffix = _basis_suffix(self._result_basis, self._result_chain) if self._curves else ""
+        return f"{yq} — {shown}{suffix}"
+
+    def _titled(self, view: str) -> str:
+        """What ``view``'s title row says before the shared appearance is applied: the
+        Style title when one is typed, else the view's automatic title. A processed
+        result's basis marker is part of the automatic title and is kept behind a typed
+        one, so no wording of the title takes it off the figure."""
+        typed = self._style.title
+        if typed:
+            return _with_basis(typed, self._view_suffix.get(view, ""))
+        return self._view_titles.get(view, "")
 
     def _apply_title(self, auto: str | None) -> None:
         self._view_titles[VIEW_PSD] = auto or ""
-        text = self._style.title or auto
+        self._view_suffix[VIEW_PSD] = (_basis_suffix(self._result_basis, self._result_chain)
+                                       if self._curves else "")
+        text = self._titled(VIEW_PSD)
         if not text:
             self._plot.setTitle(None)
             self._plot.titleLabel.setText("")
@@ -3352,6 +3894,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._plot.setTitle(None)
         self._plot.titleLabel.setText("")
         self._view_titles.pop(VIEW_PSD, None)
+        self._view_suffix.pop(VIEW_PSD, None)
         self._asd_shown = None
         self._drop_legend()
         self._curve_item = self._fit_item = self._message_item = None
@@ -3364,6 +3907,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._clear_plot()
         self._curves = []
         self._freqs = self._psd = self._summary = None
+        self._result_basis, self._result_chain, self._result_chain_signature = BASIS_RAW, "", ""
+        self._result_chain_params = ""
+        self._processed_traces = {}         # no result on screen: no trace is kept for one
         self._apply_background()
         self._plot.setLogMode(x=False, y=False)
         self._plot.setLabel("bottom", "")
@@ -3479,6 +4025,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         reset_plot_history(self._fft_plot, self._spec_plot, self._hist_plot)
         for view in (VIEW_FFT, VIEW_SPECTROGRAM, VIEW_ALLPOINTS):
             self._view_titles.pop(view, None)
+            self._view_suffix.pop(view, None)
             self._captions[view].setPlainText(message)
 
     def _clear_spectrogram_image(self) -> None:
@@ -3583,7 +4130,8 @@ class PSDWindow(QtWidgets.QMainWindow):
         span = _Span(
             chan=SimpleNamespace(units=(head.units if head is not None else self._units)),
             seg=np.empty(0, dtype=np.float64), fs=fs, i0=i0, i1=i0 + n_samples,
-            note=head.note if head is not None else "")
+            note=head.note if head is not None else "",
+            basis=self._result_basis, chain=self._result_chain)
 
         if view == VIEW_FFT and isinstance(self._fft, psd_mod.FFTSpectrum):
             self._draw_fft(rec, span, self._fft)
@@ -3626,6 +4174,10 @@ class PSDWindow(QtWidgets.QMainWindow):
         # the same silent-stale-figure failure _reconfigure_for_recording documents.
         cal = self._session.calibration(rec["doc_id"], rec["channel"]).fingerprint()
         base = (rec["key"], span.i0, span.i1, span.fs, cal)
+        if span.basis == BASIS_PROCESSED:
+            # A raw view and a processed one of the same span are different numbers, and
+            # so are two chains.
+            base += (BASIS_PROCESSED, span.chain_key)
         if view == VIEW_FFT:
             return base + (self._window_combo.currentText(),)
         if view == VIEW_SPECTROGRAM:
@@ -3648,6 +4200,13 @@ class PSDWindow(QtWidgets.QMainWindow):
         plot.setXRange(0, 1, padding=0)
         plot.setYRange(0, 1, padding=0)
         item.setPos(0.5, 0.5)
+
+    @staticmethod
+    def _span_signal_lines(span: _Span) -> list[str]:
+        """The caption line naming a processed span's signal; nothing for a raw one."""
+        if span.basis != BASIS_PROCESSED:
+            return []
+        return [f"Signal: processed — {span.chain}."]
 
     # -- (1) single-shot FFT ----------------------------------------------------------------------
     def _draw_fft(self, rec: dict, span: _Span, cached: object | None) -> None:
@@ -3689,9 +4248,9 @@ class PSDWindow(QtWidgets.QMainWindow):
         self._fft_plot.setLabel("bottom", "Frequency (Hz)", **self._label_style())
         self._fft_plot.setLabel("left", f"|X(f)| — peak amplitude ({units})",
                                 **self._label_style())
-        self._view_titles[VIEW_FFT] = f"FFT — {rec['label']}"
-        self._fft_plot.setTitle(self._style.title or self._view_titles[VIEW_FFT],
-                                color=self._fg_hex())
+        self._view_suffix[VIEW_FFT] = _basis_suffix(span.basis, span.chain)
+        self._view_titles[VIEW_FFT] = f"FFT — {rec['label']}" + self._view_suffix[VIEW_FFT]
+        self._fft_plot.setTitle(self._titled(VIEW_FFT), color=self._fg_hex())
         self._fft_plot.showGrid(x=True, y=True, alpha=0.15)
         self._restyle_existing_views()
         self._frame(self._fft_plot)
@@ -3749,6 +4308,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         if spec.n_nonfinite:
             lines.append(f"WARNING: {spec.n_nonfinite:,} non-finite sample(s) — every bin "
                          f"is NaN.")
+        lines += self._span_signal_lines(span)
         if span.note:
             lines.append(span.note)
         return "\n".join(lines)
@@ -3813,9 +4373,10 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._spec_plot.setLabel("bottom", "Time (ms from the start of this recording)",
                                      **self._label_style())
             self._spec_plot.setLabel("left", "Frequency (Hz)", **self._label_style())
-            self._view_titles[VIEW_SPECTROGRAM] = f"Spectrogram — {rec['label']}"
-            self._spec_plot.setTitle(self._style.title or self._view_titles[VIEW_SPECTROGRAM],
-                                     color=self._fg_hex())
+            self._view_suffix[VIEW_SPECTROGRAM] = _basis_suffix(span.basis, span.chain)
+            self._view_titles[VIEW_SPECTROGRAM] = (
+                f"Spectrogram — {rec['label']}" + self._view_suffix[VIEW_SPECTROGRAM])
+            self._spec_plot.setTitle(self._titled(VIEW_SPECTROGRAM), color=self._fg_hex())
             self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(sg, span, None))
             self._restyle_existing_views()
             return
@@ -3846,9 +4407,10 @@ class PSDWindow(QtWidgets.QMainWindow):
                                                  **self._label_style())
         self._spec_plot.setLabel("bottom", "Time (ms from the start of this recording)",
                                  **self._label_style())
-        self._view_titles[VIEW_SPECTROGRAM] = f"Spectrogram — {rec['label']}"
-        self._spec_plot.setTitle(self._style.title or self._view_titles[VIEW_SPECTROGRAM],
-                                 color=self._fg_hex())
+        self._view_suffix[VIEW_SPECTROGRAM] = _basis_suffix(span.basis, span.chain)
+        self._view_titles[VIEW_SPECTROGRAM] = (
+            f"Spectrogram — {rec['label']}" + self._view_suffix[VIEW_SPECTROGRAM])
+        self._spec_plot.setTitle(self._titled(VIEW_SPECTROGRAM), color=self._fg_hex())
         self._restyle_existing_views()
         self._frame(self._spec_plot)
         self._captions[VIEW_SPECTROGRAM].setPlainText(self._spec_caption(sg, span, levels))
@@ -4051,6 +4613,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                 + " Export data (CSV) keeps the original linear-frequency grid.")
         if sg.n_nonfinite:
             lines.append(f"WARNING: {sg.n_nonfinite:,} non-finite sample(s) in this span.")
+        lines += self._span_signal_lines(span)
         if span.note:
             lines.append(span.note)
         return "\n".join(lines)
@@ -4109,9 +4672,10 @@ class PSDWindow(QtWidgets.QMainWindow):
         units = _unit_or_unknown(span.chan.units)
         self._hist_plot.setLabel("bottom", f"Current ({units})", **self._label_style())
         self._hist_plot.setLabel("left", "Samples per bin (log)", **self._label_style())
-        self._view_titles[VIEW_ALLPOINTS] = f"All-points histogram — {rec['label']}"
-        self._hist_plot.setTitle(self._style.title or self._view_titles[VIEW_ALLPOINTS],
-                                 color=self._fg_hex())
+        self._view_suffix[VIEW_ALLPOINTS] = _basis_suffix(span.basis, span.chain)
+        self._view_titles[VIEW_ALLPOINTS] = (f"All-points histogram — {rec['label']}"
+                                             + self._view_suffix[VIEW_ALLPOINTS])
+        self._hist_plot.setTitle(self._titled(VIEW_ALLPOINTS), color=self._fg_hex())
         self._hist_plot.showGrid(x=True, y=True, alpha=0.15)
         self._restyle_existing_views()
         self._frame(self._hist_plot)
@@ -4146,6 +4710,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         if hist.n_nonfinite:
             lines.append(f"{hist.n_nonfinite:,} non-finite sample(s) have no amplitude and "
                          f"are excluded from every bin rather than piled on an edge.")
+        lines += self._span_signal_lines(span)
         if span.note:
             lines.append(span.note)
         return "\n".join(lines)
@@ -4284,6 +4849,12 @@ class PSDWindow(QtWidgets.QMainWindow):
                 default=self._json_default),
             "details": self.details_text(),
             "caption": self.caption_text(view),
+            # Only a processed result adds columns: a raw export is the one it always was.
+            # ``signal_chain_params`` is the chain exactly: the conditioning parameters the
+            # result was built with (Normalize excluded, as it was left out), compact JSON.
+            **({"signal_basis": self._result_basis, "signal_chain": self._result_chain,
+                "signal_chain_params": self._result_chain_params}
+               if self._result_basis == BASIS_PROCESSED else {}),
         }
 
     def _psd_plot_data(self) -> pd.DataFrame:

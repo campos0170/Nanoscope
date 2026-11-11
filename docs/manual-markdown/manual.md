@@ -359,8 +359,10 @@ high-pass, baseline drift, running mean, Savitzky-Golay, normalize, then the low
 detection; tick a stage to enable it and select it to edit it below. Leave the chain off unless you
 know why you are turning it on: filtering changes the dwell times you are about to measure, and
 the app reports the resulting rise time so you can see the cost. The chain feeds Schmitt/CUSUM
-detection, Measure ‘Processed signal’ and Export processed trace — not the ML detector, which has
-its own model preprocessing.
+detection, Measure ‘Processed signal’, Export processed trace and the Noise page's Processed
+signal — not the ML detector, which has its own model preprocessing. The Noise spectrum page
+reads the chain only when its `Signal` is `Processed (Preprocess chain)`, and leaves Normalize
+out (Step 8).
 
 The stages can be saved as a named **protocol** (`Protocol: Save as…` at the top of the window):
 one pick sets every stage — enable flags and parameters, notch lines included, and any stage the
@@ -658,8 +660,8 @@ and the inspector to reach the remaining text and controls.
 
 ### Noise summary and fitting context
 
-In **Noise spectrum**, inspect the source, range and estimator, then press **Update
-plot** to commit analytical changes. The 1/f exponent **α**, fit **R²** and
+In **Noise spectrum**, inspect the source, **Signal** (raw or processed, Step 8), range and
+estimator, then press **Update plot** to commit analytical changes. The 1/f exponent **α**, fit **R²** and
 **descriptive fit only** qualification remain visible when **Full details** is
 collapsed. Open Full details for the complete report. A descriptive slope is not a
 calibrated test of a physical noise model. Keep the same calibration, bandwidth,
@@ -2484,6 +2486,55 @@ The diagnostic distinguished these historical fits. A non-rejection does not pro
 ### Step 8 · Check the noise
 
 Open **Analysis → Noise spectrum** (formerly `Power spectrum (noise / PSD)`). The spectrum describes the selected signal segment, including any events or artifacts left in it; a carefully chosen quiet segment can inform noise/bandwidth assessment but cannot certify every detected event.
+
+**Raw by default, processed if you ask**
+
+`Signal`, in the `Recording` group, starts at `Raw (calibrated)`: the calibrated trace with no
+filter chain, unchanged from earlier builds. Every number in this step is of the raw trace.
+
+`Processed (Preprocess chain)` analyses the trace after the Detection panel's Preprocess chain as
+it is set now, low-pass included — the chain detection, Measure ‘Processed signal’ and Export
+processed trace use, with `Normalize` left out. The chain runs over the whole recording and the
+`Start`/`End` window is cut out afterwards, so the window holds no filter start-up, and the one
+chain is applied to every `Compare with` recording. The choice takes effect on `Update plot`, for
+all four views. The chain runs when you press it, once per recording; an Update that changes only
+the view, the display, the time span or the Welch settings does not run it again. On a recording
+of 2 million samples or more the page's status line reads `Applying the Preprocess chain to
+A.dat…` while it runs, and the page does not respond until it has finished. With baseline drift
+enabled a long recording can take several seconds or more.
+
+A recording over 30 million samples is not processed. The page says
+`A.dat: Processed needs the Preprocess chain run over the whole recording, and this one is too
+long for the Noise page (45 M samples; the limit is 30 M). Use the Preprocess workspace's
+Spectrum preview on a window instead.` The limit counts the whole recording, not the
+`Start`/`End` window.
+
+A processed figure says what it is. Its title ends with the chain, as in
+`PSD — A.dat (processed: Low-pass Bessel 8 · 2 kHz)`, and the ending is kept behind a title you
+typed (`Pore 7 (processed: Low-pass Bessel 8 · 2 kHz)`). The details open with
+`Signal: processed — Low-pass Bessel 8 · 2 kHz`, and `Export data (CSV)…` adds the columns
+`signal_basis`, `signal_chain` and `signal_chain_params` (the chain's parameters as compact
+JSON). Edit the chain afterwards and the figure is marked stale, with `Preprocess chain changed`
+in the `Update plot` tooltip, until you update; nothing recomputes on its own, and a raw figure
+is not affected.
+
+With `Normalize` on in the chain, the processed signal is built without that stage, so the
+spectrum keeps the channel's units. The chain text ends `· Normalize left out` and the details
+note `Normalize is left out here, so the spectrum stays in pA.` Editing the Normalize settings
+does not mark the figure stale. With no stage enabled, the details note
+`No Preprocess stage is enabled, so Processed is the same as Raw. Measure and Export may still
+use the stored detection's chain.` A chain that cannot be built is a sentence that names the
+recording, never the raw trace under a processed name: when the figure already shows a result,
+`Update plot` leaves it in place and the sentence is on the page's status line. Baseline
+advisories the chain raises are added to the recording's NOTE in the details, each cut to its
+first sentence.
+
+The choice is saved with the figure, and in a Noise template or recipe when it is Processed; one
+without it leaves the page's choice as it is. The project format is still v13. A v13 build from
+before this choice opens such a project and shows the saved spectrum, but without the `processed`
+label. After a project is reopened, only the view that was on screen when it was saved is shown
+from the file; the other views are computed again by the next `Update plot` that shows them. The
+ML detector's preprocessing is separate and is not offered here.
 
 **Choose the segment first, or you will measure your events**
 

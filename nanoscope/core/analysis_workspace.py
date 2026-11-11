@@ -1568,6 +1568,23 @@ def _restore_pending_analysis(window, artifact, restore):
     return report
 
 
+def _psd_curves_fingerprint(curves: Any) -> str:
+    """What identifies the spectra a ``signal`` record describes: every curve's PSD values.
+
+    A build without the Signal choice keeps that record untouched when it saves, and
+    rewrites the curves when it recomputes them (from the raw trace). The fingerprint is how
+    a reader tells the two apart, so a recomputed raw spectrum is never called processed.
+    """
+    digest = hashlib.sha256()
+    for curve in curves:
+        values = np.asarray(curve.psd, dtype=np.float64).ravel()
+        finite = np.isfinite(values)
+        digest.update(np.int64(values.size).tobytes())
+        digest.update(np.packbits(finite).tobytes())
+        digest.update(np.ascontiguousarray(values[finite]).tobytes())
+    return digest.hexdigest()[:32]
+
+
 def capture_psd(window: Any) -> WorkspaceArtifact:
     return _capture_pending_analysis(window, _capture_psd)
 
@@ -1677,6 +1694,21 @@ def _capture_psd(window: Any) -> WorkspaceArtifact:
         "histogram_levels": _encode(window.hist_levels(), resources, "histogram_levels"),
         "compute_notes": [str(v) for v in getattr(window, "_compute_notes", ())],
     }
+    # THE SIGNAL CHOICE. Both keys are written only when they are not Raw, so a raw figure
+    # is saved exactly as it was before the choice existed. ``config.signal_basis`` is the
+    # control; ``signal`` is what the spectra on record were computed from.
+    basis = str(_widget_value(window, "_signal_combo", "currentData", "raw") or "raw")
+    if basis != "raw":
+        payload["config"]["signal_basis"] = basis
+    if curves and getattr(window, "_result_basis", "raw") == "processed":
+        payload["signal"] = {
+            "basis": "processed",
+            "chain": str(getattr(window, "_result_chain", "")),
+            "chain_signature": str(getattr(window, "_result_chain_signature", "")),
+            # The chain exactly: the parameters it ran with (Normalize excluded), as JSON.
+            "chain_params": str(getattr(window, "_result_chain_params", "")),
+            "curves_fingerprint": _psd_curves_fingerprint(window.curves()),
+        }
     return _artifact(PSD_ARTIFACT_ID, payload, resources)
 
 
@@ -1803,6 +1835,15 @@ def _restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
         _set_combo_text(window, "_hist_bins_combo", config.get("histogram_bins", "256"))
         _set_checked(window, "_hist_clip_check", config.get("histogram_clip", False))
         _set_checked(window, "_hist_levels_check", config.get("histogram_levels", True))
+        # A figure saved before the Signal choice existed has no ``signal_basis``: Raw.
+        basis = str(config.get("signal_basis", "raw"))
+        signal_combo = getattr(window, "_signal_combo", None)
+        if signal_combo is not None:
+            index = signal_combo.findData(basis)
+            if index < 0:
+                warnings.append("saved Noise signal choice is not known; Raw is used")
+                basis = "raw"
+            signal_combo.setCurrentIndex(max(index, 0))
         _restore_appearance(window, config)
 
         wanted_compare: set[str] = set()
@@ -1908,6 +1949,32 @@ def _restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
 
         window._curves = curves
         window._compute_notes = [str(v) for v in payload.get("compute_notes", ())]
+        # WHAT THE SAVED SPECTRA WERE COMPUTED FROM. ``signal`` describes them only while
+        # its fingerprint still matches: a build without the Signal choice carries the
+        # record forward untouched but recomputes the curves from the raw trace.
+        signal = payload.get("signal")
+        processed = bool(
+            curves and isinstance(signal, Mapping) and signal.get("basis") == "processed"
+            and signal.get("curves_fingerprint") == _psd_curves_fingerprint(curves))
+        window._result_basis = "processed" if processed else "raw"
+        window._result_chain = str(signal.get("chain", "")) if processed else ""
+        window._result_chain_signature = (str(signal.get("chain_signature", ""))
+                                          if processed else "")
+        window._result_chain_params = str(signal.get("chain_params", "")) if processed else ""
+        window._chain = None
+        # A restore computes nothing and holds no processed trace of an earlier result.
+        release = getattr(window, "release_processed_traces", None)
+        if callable(release):
+            release()
+        if curves and signal_combo is not None and basis != window._result_basis:
+            # The control follows the spectra on record (a draft is restored after this).
+            warnings.append(
+                "the saved Noise spectrum is of the "
+                + ("processed" if processed else "raw")
+                + " signal; Signal is set to match it")
+            basis = window._result_basis
+            _blocked(signal_combo,
+                     lambda: signal_combo.setCurrentIndex(max(signal_combo.findData(basis), 0)))
         if curves:
             head = curves[0]
             window._freqs, window._psd, window._summary = head.freqs, head.psd, head.summary
@@ -1927,17 +1994,28 @@ def _restore_psd(window: Any, artifact: WorkspaceArtifact) -> RestoreReport:
         saved_levels = _decode(payload.get("histogram_levels", []), artifact.tables, artifact.blobs)
         window._hist_levels = list(saved_levels)
 
-        # Seed each view's existing cache signature with the saved result.  `_refresh_view`
-        # then performs drawing only; none of fft_magnitude/spectrogram_psd/
-        # all_points_histogram is called.
+        # Seed the cache signature of THE VIEW THAT WAS ON SCREEN AT SAVE with its saved
+        # result.  `_refresh_view` then performs drawing only for it; none of
+        # fft_magnitude/spectrogram_psd/all_points_histogram is called.
+        #
+        # Only that view. It was drawn by the Update that computed the saved curves, so it
+        # is a view of the same signal, chain and span. The other two saved results are
+        # whatever each view last computed, possibly under another Signal choice, another
+        # chain or another span, and re-keying them under the restored span would serve
+        # them as this figure's on the next Update. They stay on the window (a re-save
+        # keeps them) and are recomputed by the Update that shows them.
         window._view_cache = {}
         record = target_record
-        span = window._span_for(record) if record is not None else None
+        # A processed span is the Preprocess chain run over the whole recording, and a
+        # restore computes nothing: its views are drawn from the saved results and are
+        # not seeded (the next Update computes them).
+        span = (window._span_for(record)
+                if record is not None and basis != "processed" else None)
         if span is not None and not isinstance(span, str):
             for name, result in ((VIEW_FFT, window._fft),
                                  (VIEW_SPECTROGRAM, window._spec),
                                  (VIEW_ALLPOINTS, window._hist)):
-                if result is not None:
+                if result is not None and name == view_name:
                     window._view_cache[name] = (window._view_signature(name, record, span), result)
         render = getattr(window, "_render_workspace_snapshot", None)
         if callable(render):

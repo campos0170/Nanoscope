@@ -5837,8 +5837,14 @@ class MainWindow(QtWidgets.QMainWindow):
             setattr(self, name, owner.page(key))
         self._sync_subpop_window()
         owner.refresh_table_staleness()
+        # A figure that just became resident hands its chain judgement to its page.
+        self._push_noise_chain()
 
     def _figure_table_staleness(self, record, page):
+        if record.spec.kind == PAGE_NOISE:
+            # A resident Noise page says so itself (its pending state); a suspended one
+            # is judged from what its record says the spectrum was computed with.
+            return page is None and self._noise_record_chain_changed(record)
         if record.spec.kind != PAGE_DISTRIBUTIONS:
             return False
         if page is not None:
@@ -5851,6 +5857,53 @@ class MainWindow(QtWidgets.QMainWindow):
             self._figure_workspace.refresh_table_staleness()
         elif self._plots_window is not None:
             self._plots_window.schedule_stale_redraw()
+
+    def _noise_record_chain_changed(self, record) -> bool:
+        """Whether a Noise figure's PROCESSED spectrum was computed with a Preprocess chain
+        the Detection form no longer names. A raw spectrum never is."""
+        signal = record.spec.result.payload.get("signal")
+        if not isinstance(signal, Mapping) or signal.get("basis") != "processed":
+            return False
+        # The page's own signature (Normalize is left out of the processed signal, so its
+        # settings are no part of it).
+        from .psd_panel import noise_chain_signature
+        try:
+            live = noise_chain_signature(self._analysis_panel.detection_params())
+        except Exception:  # noqa: BLE001 — a form that cannot be read judges nothing
+            return False
+        return live != signal.get("chain_signature")
+
+    def _push_noise_chain(self) -> None:
+        """The Preprocess form may have moved: every Noise figure whose spectrum is of the
+        PROCESSED signal is re-judged, and none is recomputed. A resident page turns
+        pending (Update plot); a suspended figure's record turns stale. Cheap when no
+        Noise figure exists, which is why every form change may call it.
+
+        A JUDGEMENT, routed like table staleness: the figure's status is refreshed and
+        ``recordChanged`` is sent, and that is all. The form may have moved only because
+        another recording's table came on screen, or because a reopened figure was looked
+        at; neither is an edit of the figure, so neither arms the save prompt."""
+        owner = self._figure_workspace
+        if owner is None:
+            return
+        for key, entry in tuple(owner._entries.items()):
+            if entry.record.spec.kind != PAGE_NOISE:
+                continue
+            if entry.page is not None:
+                if entry.page.processing_chain_changed():
+                    owner._refresh_pending_status(entry)
+                    owner.recordChanged.emit(key)
+            elif owner._refresh_table_staleness(entry):
+                owner.recordChanged.emit(key)
+
+    def _drop_noise_traces(self, doc_id: str) -> None:
+        """A closed recording leaves no processed trace behind on a Noise page."""
+        owner = self._figure_workspace
+        if owner is None:
+            return
+        for entry in tuple(owner._entries.values()):
+            if entry.record.spec.kind == PAGE_NOISE and entry.page is not None:
+                entry.page.release_processed_traces(doc_id)
 
     def _open_figure_kind(self, kind):
         owner = self._ensure_figure_workspace()
@@ -5896,6 +5949,9 @@ class MainWindow(QtWidgets.QMainWindow):
             page = PSDWindow(self._session, self, defer_initial_refresh=True)
             page.sourceSelected.connect(lambda doc_id, channel, page=page:
                 self._pin_figure_source(figure_id, page, doc_id, channel))
+            # Signal ▸ Processed runs the Detection panel's Preprocess form; the page
+            # reads it at Update and is told when it moves (:meth:`_push_noise_chain`).
+            page.set_processing_provider(self._analysis_panel.detection_params)
         elif kind == PAGE_IV:
             from .iv_panel import IVWindow
             page = IVWindow(self._session, self, defer_initial_refresh=True)
@@ -5927,6 +5983,11 @@ class MainWindow(QtWidgets.QMainWindow):
             refresh=lambda: self._refresh_figure(figure_id))
 
     def _unmount_figure_surface(self, figure_id, page):
+        # A page that leaves the screen (suspended, or cleared with its project) keeps no
+        # whole-recording processed trace while it waits to be deleted.
+        release = getattr(page, "release_processed_traces", None)
+        if callable(release):
+            release()
         if self._analysis_explorer is not None:
             self._analysis_explorer.remove_page(figure_id)
         for name in self._figure_aliases().values():
@@ -6045,7 +6106,8 @@ class MainWindow(QtWidgets.QMainWindow):
             native = native_adapter.capture_native()
             payload = deepcopy(native.payload)
             path = "draft" if kind in (PAGE_DISTRIBUTION_SUMMARIES, PAGE_COMPARISON_FIGURES) else "config"
-            allowed = set(page.template_settings()[0]) - {"style", "source_keys"}
+            allowed = (set(page.template_settings()[0])
+                       | set(getattr(page, "TEMPLATE_OPTIONAL_KEYS", ()))) - {"style", "source_keys"}
             payload[path] = {**payload.get(path, {}), **{
                 key: value for key, value in native_settings.items() if key in allowed}}
             report = native_adapter.restore_native(replace(native, payload=payload))
@@ -9370,6 +9432,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ap.statusMessage.connect(lambda msg: self.statusBar().showMessage(msg, 8000))
         ap.conditioningStateChanged.connect(self._push_conditioning_status)
         det.paramsChanged.connect(lambda *_: self._push_conditioning_chain())
+        det.paramsChanged.connect(lambda *_: self._push_noise_chain())
         # The panel re-gates Detect on its own (e.g. an open-pore reference edit); the
         # menu action and the window's Run detection… must move with it, not on the
         # next menu open.
@@ -9377,6 +9440,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._trace_view.sigVisibleRangeChanged.connect(
             lambda *_: self._push_conditioning_window())
         self._session.documentClosed.connect(self._drop_conditioning_document)
+        self._session.documentClosed.connect(self._drop_noise_traces)
         self._session.calibrationChanged.connect(
             lambda *_: self._push_conditioning_source()
             if _on_screen(self._signal_conditioning) else None)
@@ -17196,6 +17260,7 @@ class MainWindow(QtWidgets.QMainWindow):
         the run was launched with, which is where that step's Redo led, so the menu would
         offer a named Redo that writes nothing — the item `_form_edit_waits` withholds. An
         event undo or redo installs a run too, but its press keeps the form's branch."""
+        self._push_noise_chain()        # the form on screen is the Noise page's chain
         scope = self._form_scope()
         if scope is None:
             return
@@ -17224,6 +17289,7 @@ class MainWindow(QtWidgets.QMainWindow):
         A table born on screen also leaves an :data:`_UNDO_BREAK` behind the form steps
         before it: its first run is no undo step, so nothing else would stop the NEXT run's
         press from taking those steps too (:meth:`_break_behind_form_steps`)."""
+        self._push_noise_chain()        # another table's form is the Noise page's chain now
         if new is None:
             self._sync_undo_actions()
             return

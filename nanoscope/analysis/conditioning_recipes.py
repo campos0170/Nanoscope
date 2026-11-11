@@ -208,8 +208,9 @@ _LINEAR_STAGES = frozenset({"notch", "highpass", "rmean", "savgol", "lowpass"})
 
 #: Where this chain applies, said on the card, in the window and on the stage list.
 SCOPE_SENTENCE = (
-    "Used by Schmitt/CUSUM detection, Measure ‘Processed signal’ and Export processed "
-    "trace — not by the ML detector (ML tab ▸ Model preprocessing).")
+    "Used by Schmitt/CUSUM detection, Measure ‘Processed signal’, Export processed trace "
+    "and the Noise page's Processed signal — not by the ML detector (ML tab ▸ Model "
+    "preprocessing).")
 
 #: The protocol combo's no-protocol entry.
 MANUAL_PROTOCOL = "— manual —"

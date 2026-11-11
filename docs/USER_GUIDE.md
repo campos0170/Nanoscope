@@ -218,8 +218,8 @@ and the inspector to reach the remaining text and controls.
 
 ### Noise summary and fitting context
 
-In **Noise spectrum**, inspect the source, range and estimator, then press **Update
-plot** to commit analytical changes. The 1/f exponent **α**, fit **R²** and
+In **Noise spectrum**, inspect the source, **Signal** (raw or processed, §11), range and
+estimator, then press **Update plot** to commit analytical changes. The 1/f exponent **α**, fit **R²** and
 **descriptive fit only** qualification remain visible when **Full details** is
 collapsed. Open Full details for the complete report. A descriptive slope is not a
 calibrated test of a physical noise model. Keep the same calibration, bandwidth,
@@ -873,8 +873,11 @@ recipe does not make an old plot current.
 
 These are the same authoritative controls, moved into the workspace rather than copied.
 Detection, **Measure ‘Processed signal’**, **Export processed trace** and saved projects read the
-same classical chain. Its scope remains *Schmitt/CUSUM detection, Measure ‘Processed signal’ and
-Export processed trace*. **ML preprocessing…** opens the model's separate preprocessing in **ML**; the
+same classical chain. Its scope line reads *Used by Schmitt/CUSUM detection, Measure ‘Processed
+signal’, Export processed trace and the Noise page's Processed signal — not by the ML detector
+(ML tab ▸ Model preprocessing).* The **Noise spectrum** page reads the chain only when its
+**Signal** is *Processed (Preprocess chain)*, and leaves Normalize out (§11).
+**ML preprocessing…** opens the model's separate preprocessing in **ML**; the
 classical filters do not process ML model input. The shared event reference still applies to
 ML event characterization, so “separate ML preprocessing” does not mean every reference setting
 is ignored by ML.
@@ -3093,7 +3096,7 @@ page-specific controls. In the scientific descriptions below, **Generate**, **Pl
 | Voltage dependence | Sources, Plot, Fit | Applies a waiting fit without gathering again; otherwise refreshes the points. A waiting fit counts as 1 |
 | I-V / conductance | Estimator | Refreshes the observations and fit; no pending count, and disabled while gathering |
 | Event waveforms | Sources, Plot · Event-count map or Plot · Ensemble | Commits pending analytical choices against the figure's bound events; appearance and existing-view navigation stay immediate |
-| Noise spectrum | Sources, View, Estimator | Commits pending source, range, estimator and view choices using the figure's own source binding |
+| Noise spectrum | Sources, View, Estimator | Commits pending source, Signal (raw or processed, §11), range, estimator and view choices using the figure's own source binding. A Preprocess chain edited after a processed result counts as 1 (its Normalize settings excepted) |
 | Subpopulations | Sources, View, Report | Recomputes the pinned detection with model-search defaults; a curation-change notice counts as 1. A missing or mismatched source is refused |
 
 **Format** shows an element list above one properties panel: **Figure**, **Title**, **X axis**
@@ -3178,7 +3181,7 @@ settings kept and the hosted editor's commit behavior when those settings are re
 | Distribution summaries | Measurement, summary type, violin grid points, accepted-only, appearance | A draft, marked unapplied, until **Update plot** |
 | Comparison figures | Figure type, measurements, pair features, bins, columns, layout, log axes, box, accepted-only, appearance | A draft, marked unapplied, until **Update plot** |
 | Voltage dependence | Metric, chosen fit, \|V\|, log y, accepted-only, appearance | The fit arrives selected and waits for **Apply fit**. A changed metric or accepted-only re-gathers the points, as picking it does |
-| Noise spectrum | Welch length, window and overlap, PSD/ASD, log axes, RMS band, the view shown and its options (the spectrogram's colour limits and log-frequency axis included), style, appearance | Analytical choices, including the selected view, wait for **Update plot**; spectral colormap, levels and log-frequency formatting restyle immediately |
+| Noise spectrum | The Signal choice (a template without it leaves the page's choice as it is), Welch length, window and overlap, PSD/ASD, log axes, RMS band, the view shown and its options (the spectrogram's colour limits and log-frequency axis included), style, appearance | Analytical choices, including the Signal choice and the selected view, wait for **Update plot**; spectral colormap, levels and log-frequency formatting restyle immediately |
 | Event waveforms | Heatmap metrics, log axes, bins and colormap; ensemble normalisation, alignment (extremum included), points, padding, Events subset and band; the view shown; appearance | Metrics, bins, normalization, alignment, subset, points, padding and band wait for **Update plot**; colormap and title formatting, and navigation between existing views, remain immediate |
 
 In standalone legacy Noise/Event windows, template recall retains the original immediate behavior.
@@ -3745,8 +3748,9 @@ label on the PSD view; with an overlay it stays in the legend row.
 
 **Analysis ▸ Noise spectrum…** opens the **Noise spectrum** page of the Analysis Explorer: the
 log-log current-noise spectrum every
-nanopore paper uses to grade a pore. It runs on the **raw calibrated trace** (no detection needed,
-no filter chain applied), over a chosen quiet open-pore segment, and separates the three noise
+nanopore paper uses to grade a pore. By default it runs on the **raw calibrated trace** (no
+detection needed, no filter chain applied; **Signal** can choose the processed trace instead, see
+*Raw or processed signal* below), over a chosen quiet open-pore segment, and separates the three noise
 regimes: the low-frequency **1/f (flicker)** power law (α and the 1 Hz magnitude are fit and the
 line overlaid), a **mid-log-frequency median proxy** (a heuristic summary band, not proof
 of a white-noise plateau), and the high-frequency **dielectric /
@@ -3775,12 +3779,112 @@ seconds. A range pinned in Axis properties belongs to one view, so switching **S
 axis shows, so it takes the PSD's Y range in the same step and leaves its frequency range. The
 log-log toggle, the Welch settings and the choice of recording keep them.
 
+### Raw or processed signal
+
+**Signal**, in the **Recording** group, chooses the trace the page analyses:
+
+- **Raw (calibrated)**, the default: the calibrated trace, with no filter chain. Its curves,
+  numbers, exports and saved project content are the same as before this choice existed.
+- **Processed (Preprocess chain)**: the trace after the Detection panel's Preprocess chain (§5)
+  as it is set now, low-pass included. It is the chain detection, **Measure ‘Processed signal’**
+  and **Export processed trace** use, applied the way they apply it: over the whole recording,
+  with the *Start*/*End* window cut out afterwards, so the window holds no filter start-up.
+  **Normalize** is the one stage this page leaves out (below). One chain, the form as it stands
+  when you update, is applied to the primary and to every **Compare with** recording.
+
+The control's tooltip says the same: *Raw: the calibrated trace.* and *Processed: the trace after
+the Detection panel's Preprocess chain as it is set now, applied to every compared recording.
+Normalize is left out.*
+
+The choice is a compute setting. Changing it makes the page pending (the **Update plot** tooltip
+says *signal basis*) and it takes effect on **Update plot**, for all four views: PSD/ASD, FFT
+magnitude, spectrogram and all-points histogram. The chain runs when Update plot is pressed, once
+per recording, and each recording's processed trace is kept with the result: an Update that
+changes only the view, the display, the time span or the Welch settings does not run the chain
+again. On a recording of 2 million samples or more the page's status line reads *Applying the
+Preprocess chain to A.dat…* while it runs (with a wait cursor on Windows and Linux); the page does not
+respond until the chain has finished, and it cannot be cancelled. A low-pass alone is quick; with
+baseline drift enabled a long recording can take several seconds or more.
+
+**A recording over 30 million samples is not processed.** The chain runs over the whole
+recording and needs several times the trace's size in working memory, so above the limit
+Processed is refused for that recording before the chain is tried: *A.dat: Processed needs the
+Preprocess chain run over the whole recording, and this one is too long for the Noise page (45 M
+samples; the limit is 30 M). Use the Preprocess workspace's Spectrum preview on a window
+instead.* The limit counts the whole recording, not the *Start*/*End* window, and applies only
+while at least one stage is enabled.
+
+**A processed result names its basis.** The title of every view ends by naming the chain, for
+example *PSD — A.dat (processed: Low-pass Bessel 8 · 2 kHz)*; a chain longer than 48 characters
+is counted instead (*(processed: 3 stages)*). The ending is kept behind a title you typed: *Pore
+7* is drawn, and exported, as *Pore 7 (processed: Low-pass Bessel 8 · 2 kHz)*. A title you hid
+stays hidden, and the PSD view's picture then carries no marker. **Noise details** opens with
+*Signal: processed — Low-pass Bessel 8 · 2 kHz* and *The Detection panel's Preprocess chain,
+applied to every curve.* The FFT, spectrogram and histogram captions carry the same *Signal:
+processed — …* line. **Export data (CSV)…** adds the columns `signal_basis`, `signal_chain` and
+`signal_chain_params`; the last holds the chain's parameters as they were used (Normalize
+excluded) as compact JSON, so an exported spectrum can be tied to an exact chain. A raw result
+adds none of these.
+
+**Normalize is left out.** Normalize only rescales and re-centres the trace, so it does not
+change the shape of a spectrum, and the page's axes and read-outs are in the channel's units.
+With Normalize on in the form, Processed is built without that stage. The chain text then ends
+*· Normalize left out* (*Low-pass Bessel 8 · 2 kHz · Normalize left out*, or *(processed: 3
+stages · Normalize left out)* when counted), and **Noise details** adds the note *Normalize is
+left out here, so the spectrum stays in pA.* The note names the unit every curve declares;
+otherwise it says *the channel's units* or, for several curves, *each channel's own units*.
+
+**A later chain edit marks the figure; nothing recomputes.** Change the chain after a processed
+result (which stages are on, or an enabled stage's values) and the figure is marked **Stale**,
+with *Preprocess chain changed* in the **Update plot** tooltip, until you update or put the chain
+back. Selecting another event table can do this too, because each table has its own form. The
+Normalize settings are no part of this: editing them marks nothing. The mark is a judgement, not
+an edit, so it does not count as an unsaved change to the project. A raw result is not affected.
+
+**Processed never falls back to raw silently.**
+
+- With no stage enabled, Processed is the raw trace: the title ends *(processed: no stage
+  enabled)* and the details note *No Preprocess stage is enabled, so Processed is the same as
+  Raw. Measure and Export may still use the stored detection's chain.* This page reads only the
+  form.
+- A recording whose processed trace cannot be built gets a sentence that names it: the size
+  limit above; *this recording is too short for the Preprocess chain's filters.*; *not enough
+  memory to run the Preprocess chain over this recording.*; or, for any other failure, *the
+  Preprocess chain could not be applied:* and the reason.
+- Where that sentence appears depends on what the figure shows. When it already shows a result
+  and the primary recording is refused, **Update plot** changes nothing (the curves, the
+  details, the title and your pending choices stay) and the sentence is on the page's status
+  line. When nothing is drawn yet, the sentence is the page's message. A **Compare with**
+  recording that is refused is left out, with the sentence in a NOTE line. In a standalone legacy
+  Noise window, which has no Update plot button, a refused primary is always the window's message.
+- Baseline advisories the chain raises for a recording, such as a detrend that amplified the
+  wander it should remove, are added to that recording's NOTE in **Noise details** and to the
+  FFT, spectrogram and histogram captions, each cut to its first sentence.
+
+**Saved with the figure.** The choice and the basis of the saved spectrum are kept in the
+project, in a **Duplicate** and in a **Snapshot**; the figure's Undo and Redo step its look and
+leave the choice alone. A Noise template or recipe keeps the choice when it is Processed. One
+without it (every template saved before this choice existed, and any saved on Raw) leaves the
+page's choice as it is, like any other setting a template does not carry. A figure saved without
+it is Raw. The project format is unchanged (v13). A v13 build from before this choice opens such
+a project and shows the saved spectrum, but without the *processed* label; if it recomputes, it
+does so from the raw trace.
+
+**After reopening, only the view that was on screen comes from the file.** A reopened project, a
+**Duplicate** and an inactive figure whose editor was unloaded all show the saved spectrum and
+the view that was on screen when it was saved, without computing anything. The other views are
+not taken from the file: the next **Update plot** that shows one computes it again, so a view
+never shows a result made under another Signal choice, chain or time span. This holds for raw
+figures too.
+
+The ML detector's preprocessing (**ML preprocessing…**, §5) is separate and is not offered here.
+
 ### Comparing two pores
 
 Pick the **primary** recording in *Source*, then tick any other open recordings (segments included)
 in **Compare with**. Their spectra are overlaid on the same axes, each in its own colour with a
-**legend** giving its name and total RMS. Every curve uses the same Welch settings, so the
-comparison is like-for-like, and every curve is **reported separately**: its own noise summary
+**legend** giving its name and total RMS. Every curve uses the same Welch settings and the same
+**Signal** choice, so the comparison is like-for-like, and every curve is **reported separately**: its own noise summary
 (α, mid-log median proxy, band RMS), its own sample rate and Nyquist, its own units, and its own band-RMS
 read-out. A comparison recording shorter than the chosen window is analysed over what it has, and
 says so.

@@ -7,6 +7,43 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Added
 
+- The Noise spectrum page has a **Signal** choice. **Raw (calibrated)** is the default and is
+  unchanged in curves, numbers, exports and saved project content. **Processed (Preprocess
+  chain)** analyses the trace after the Detection panel's Preprocess chain as it is set now,
+  low-pass included: the chain detection, Measure ‘Processed signal’ and Export processed trace
+  use, with Normalize left out. The chain is applied over the whole recording before the window
+  is cut, and the same chain serves every compared recording. The choice takes effect on
+  **Update plot** for all four views (PSD/ASD, FFT magnitude, spectrogram, all-points
+  histogram).
+  A processed result names its basis: the title ends *(processed: Low-pass Bessel 8 · 2 kHz)*,
+  also behind a title you typed; Noise details opens with *Signal: processed — …*; and the CSV
+  gains the columns `signal_basis`, `signal_chain` and `signal_chain_params` (the chain's
+  parameters as compact JSON). A chain edited afterwards marks the figure stale (*Preprocess
+  chain changed*); nothing recomputes on its own, the mark is not an unsaved change, and a raw
+  result is not affected.
+  With Normalize on in the form the stage is left out, so the spectrum keeps the channel's
+  units: the chain text ends *· Normalize left out*, the details note *Normalize is left out
+  here, so the spectrum stays in pA.*, and editing the Normalize settings marks nothing stale.
+  With no stage enabled Processed is the raw trace and says so: *No Preprocess stage is enabled,
+  so Processed is the same as Raw. Measure and Export may still use the stored detection's
+  chain.* A recording over 30 M samples is refused: *Processed needs the Preprocess chain run
+  over the whole recording, and this one is too long for the Noise page (45 M samples; the limit
+  is 30 M). Use the Preprocess workspace's Spectrum preview on a window instead.* A chain that
+  cannot be built is a sentence, never the raw trace; when the figure already shows a result,
+  the refused Update plot leaves it in place and the sentence is on the page's status line.
+  Baseline advisories raised by the chain appear in the recording's notes.
+  The choice is saved with the figure, and in templates and recipes when it is Processed; a
+  template or recipe without it leaves the page's choice as it is. Project format unchanged
+  (v13); a v13 build from before this choice opens such a project and shows the saved spectrum
+  without the *processed* label. After a project is reopened, a Noise figure (raw or processed)
+  takes only the view that was on screen from the file; the other views are computed again by
+  the next Update plot that shows them. The chain runs when Update plot is pressed, with
+  *Applying the Preprocess chain to …* on the status line for long recordings, and is not run
+  again by an Update that changes only the view, the display, the time span or the Welch
+  settings. The Preprocess scope line now names the Noise page's Processed signal. ML
+  preprocessing is separate and not offered. Conditioning and detection arithmetic are
+  unchanged. The generated manuals are not rebuilt.
+
 - Schmitt detection offers Automatic, Local and Global noise thresholds with a visible noise
   window, versioned bounded local profiles, matching threshold overlays, and export metadata.
   Legacy saved runs retain their global policy; local thresholds do not masquerade as one

@@ -9,8 +9,13 @@ from .plot_workflow import PendingState
 
 
 class PendingAnalysis:
-    def __init__(self, page, controls, *, has_result):
+    def __init__(self, page, controls, *, has_result, additive=()):
         self.page, self.controls, self.has_result = page, controls, has_result
+        #: Controls added after saved drafts existed. A draft is written with their values
+        #: beside ``inputs`` (and only when they differ from the applied ones), so a build
+        #: without the control still reads the draft, and a draft saved without them reads
+        #: as "unchanged" here.
+        self.additive = tuple(additive)
         self.depth = 0
         self.applied = self.read()
 
@@ -45,8 +50,25 @@ class PendingAnalysis:
 
     def saved_draft(self):
         draft = self.read()
-        return ({'version': 1, 'inputs': draft}
-                if self.managed and draft != self.applied else None)
+        if not self.managed or draft == self.applied:
+            return None
+        if not self.additive:
+            return {'version': 1, 'inputs': draft}
+        saved = {'version': 1, 'inputs': {key: value for key, value in draft.items()
+                                          if key not in self.additive}}
+        later = {key: draft[key] for key in self.additive if draft[key] != self.applied[key]}
+        if later:
+            saved['additive_inputs'] = later
+        return saved
+
+    def _saved_inputs(self, raw):
+        """A saved draft's inputs with every additive control filled in."""
+        inputs = raw.get('inputs')
+        if not self.additive or not isinstance(inputs, dict):
+            return inputs
+        later = raw.get('additive_inputs')
+        later = later if isinstance(later, dict) else {}
+        return {**inputs, **{key: later.get(key, self.applied[key]) for key in self.additive}}
 
     @contextmanager
     def applying(self):
@@ -114,7 +136,7 @@ class PendingAnalysis:
                 raise ValueError('Unsupported pending analytical controls.')
             with self._blocked():
                 try:
-                    self._write(raw.get('inputs'))
+                    self._write(self._saved_inputs(raw))
                 except (ValueError, TypeError, KeyError):
                     self._write(self.applied)
                     raise
