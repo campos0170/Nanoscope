@@ -121,14 +121,14 @@ def render(source:Path, output:Path):
     class ManualDoc(BaseDocTemplate):
         def __init__(self,path):
             super().__init__(str(path),pagesize=A4,leftMargin=15*mm,rightMargin=15*mm,
-                topMargin=16*mm,bottomMargin=17*mm,title='NanoScope User Manual - 5 November 2026 - build 45.37.98',
-                author='NanoScope',subject='Plotting and analysis controls for build 45.37.98; retained scientific workflows and control reference')
+                topMargin=16*mm,bottomMargin=17*mm,title='NanoScope User Manual - 11 November 2026 - build 46.31.52',
+                author='NanoScope',subject='Controls for build 46.31.52; retained scientific workflows and control reference')
             self.addPageTemplates(PageTemplate(id='manual',frames=[Frame(15*mm,17*mm,width,
                 A4[1]-33*mm,leftPadding=0,rightPadding=0,topPadding=0,bottomPadding=0)],
                 onPage=self.page_footer))
         def page_footer(self,canvas,doc):
             canvas.setFont('Manual',7.5); canvas.setFillColor(colors.HexColor('#61717d'))
-            canvas.drawString(15*mm,10*mm,'NanoScope 45.37.98 | Manual edition 2026-11-05')
+            canvas.drawString(15*mm,10*mm,'NanoScope 46.31.52 | Manual edition 2026-11-11')
             canvas.drawRightString(A4[0]-15*mm,10*mm,str(doc.page))
         def afterFlowable(self,flow):
             if hasattr(flow,'_toc_title'):
@@ -141,10 +141,12 @@ def render(source:Path, output:Path):
     story=[Spacer(1,28*mm),Paragraph('NANOSCOPE',styles['h1']),
         Paragraph('Specialist user manual',styles['h2']),
         Paragraph('Analysis and plotting, step by step.<br/>Recording-specific references. Event characterization. Reproducible figures.',styles['body']),
-        Spacer(1,10*mm),Paragraph('Edition 5 November 2026<br/>NanoScope build 45.37.98',styles['body']),
-        Paragraph('This edition documents current plotting and analysis controls in installed NanoScope 45.37.98: '
-                  'Figures navigation, source ownership, curve fitting, Generate UMAP and completed-result export. '
-                  'New control illustrations use synthetic validation data. The incubation chapter retains its '
+        Spacer(1,10*mm),Paragraph('Edition 11 November 2026<br/>NanoScope build 46.31.52',styles['body']),
+        Paragraph('This edition documents the controls in installed NanoScope 46.31.52, adding CUSUM\'s '
+                  'opposite-direction count, validation studies that follow the selected detector, Batch detect '
+                  'with Schmitt or CUSUM, the Noise page\'s Raw/Processed signal choice and the run buttons\' '
+                  'pending marks. Illustrations were not re-captured and keep the build named in their captions '
+                  '(most from the 5 November edition, build 45.37.98). The incubation chapter retains its '
                   '29 September review; other historical chapters and figures retain their stated dates, '
                   'scientific settings and original scope.',styles['body']),
         PageBreak(),Paragraph('Contents',styles['h2'])]

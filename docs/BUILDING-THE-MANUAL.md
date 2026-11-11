@@ -1,12 +1,12 @@
 # Rebuilding the manual
 
-Documentation edition **2026-11-05** describes the plotting and analysis controls in
-installed **NanoScope build 45.37.98**, build ID
-`20261105T043813486839Z-nogit-5447ddda145a`. Its source SHA-256 is
-`5447ddda145a83c1e898dab5d309da3a703739fd339745d340cb473f5c498813`.
-This is a documentation update, not an application rebuild. Earlier scientific chapters,
+Documentation edition **2026-11-11** describes the controls in installed **NanoScope build
+46.31.52**, build ID `20261111T163237642239Z-36aa140fa2b2-dirty-8c6f5e37d549`. Its source SHA-256 is
+`8c6f5e37d54985a5869391c104f783eb55b29b1ec3b29bf91492254c2894209c`.
+The prose covers the changes since the 2026-11-05 edition; the illustrations were not
+re-captured and keep the build named in their captions. Earlier scientific chapters,
 apo-ferritin outputs and capture manifests retain their original dates and limitations.
-See `MANUAL_REVISION_2026-11-05.md` for the current scope.
+See `MANUAL_REVISION_2026-11-11.md` for the current scope.
 
 ## Authoritative sources
 

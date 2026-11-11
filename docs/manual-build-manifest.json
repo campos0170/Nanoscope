@@ -1,13 +1,18 @@
 {
-  "edition": "2026-11-05",
-  "application_build": "45.37.98",
-  "build_id": "20261105T043813486839Z-nogit-5447ddda145a",
-  "source_sha256": "5447ddda145a83c1e898dab5d309da3a703739fd339745d340cb473f5c498813",
-  "executable_sha256": "d4c89fed8124f7726c1145bd0940a7e3191e25cdf394dc572dbb44de3b89c1c9",
-  "source_status": "Current plotting and analysis controls checked against the installed build; historical chapters retain their dated scope",
+  "edition": "2026-11-11",
+  "application_build": "46.31.52",
+  "build_id": "20261111T163237642239Z-36aa140fa2b2-dirty-8c6f5e37d549",
+  "source_sha256": "8c6f5e37d54985a5869391c104f783eb55b29b1ec3b29bf91492254c2894209c",
+  "executable_sha256": "85e81d18dc66b6caf128273931335b83f342f4da32a63526716aedbf2ecb38e1",
+  "source_status": "Prose updated for the changes since the 2026-11-05 edition and checked against the installed build; illustrations were not re-captured and keep their captioned builds; historical chapters retain their dated scope",
   "usability_capture_manifest": "manual-usability-captures.json",
-  "scope": "Figures visibility and direct comparison entries; analytical draft and completed-result ownership; pinned Subpopulations source, curation update and Generate UMAP; Curve fit setup, constraints, diagnostics, application and completed-fit export; visible descriptive Noise summary; retained independent Figures, v13 projects, styles, composition and scientific chapters",
+  "scope": "CUSUM opposite-direction count and advisory; validation studies follow the selected detector; Batch detect runs the selected Schmitt or CUSUM detector; Noise page Raw/Processed signal choice; run-button pending marks and Ctrl/Cmd+Return; retained 2026-11-05 plotting and analysis chapters and illustrations",
   "retained_prior_review": [
+    {
+      "date": "2026-11-05",
+      "application_build": "45.37.98",
+      "scope": "Figures, analytical drafts, Subpopulations, UMAP, Curve fitting and the current illustrations"
+    },
     {
       "date": "2026-09-29",
       "application_build": "40.15.59",
@@ -33,9 +38,9 @@
     "23 top-level sections, all in the contents rail (34 rail entries)"
   ],
   "sha256": {
-    "manual-markdown/manual.md": "00615a8548696a1dc21a9336ddb344f957c8bd075584475ca763b469f35117ed",
-    "inventory.json": "40c87e5a4221e1a2d673dbdd1a259d93e96515a576ee1e38963898dd73c04080",
-    "USER_GUIDE.md": "670994b1abbacbadfe1f370752a2e5a71cf40e70ea98f85f93b8138aa14e51c9",
+    "manual-markdown/manual.md": "23953b8f9037f0f754a652ed56800c3cecbc76435e5d394d979dc62cd8ddccca",
+    "inventory.json": "40397daece0a9ab078e9a2ee6309de01ebc12f0f668377196d85d61b031fa0fc",
+    "USER_GUIDE.md": "695d46771f943d84956a17deb14fb4cbf5a3211722f86c6817124f704d33eb13",
     "INCUBATION_STUDIES.md": "ed70d7fc73b7b7070362846845fc8794d7fc4676febc59933e9f9024efb053f4",
     "MANUAL_ZN_WORKFLOW.md": "92c4a219941ba5044d7f58dfce29af4c512d4521916eec899104f8312f7cb2de",
     "MANUAL_CU_WORKFLOW.md": "76c5c07cce1ddbf2f807067a42fea71a9adcff0b26bb435d0da6e39b1730cc8c",
@@ -44,19 +49,20 @@
     "manual-incubation-captures.json": "1e2b0e6cc936e7f2944335d80b68f7b8a72baa7076ca56267fafb30ee502aba3",
     "MANUAL_REVISION_2026-11-03.md": "15b435d5b2c38c8bbee52800bad6835cecba8d7047a50ee61a5da02968bce536",
     "MANUAL_REVISION_2026-11-05.md": "aa9cc922846c97f84c5226a6b63e417f5f7348e8586f29d49bb9f4fd9a38a57a",
+    "MANUAL_REVISION_2026-11-11.md": "3d51a52ee5ad3253f255790c6f61427e4eb80ef980ec9cb01db2fe27b2ff9a4a",
     "manual-usability-captures.json": "b6f75c8f2a6a7c52241131ca8220c5e6802f65aa94fc1b87c37c77717daea396",
-    "BUILDING-THE-MANUAL.md": "ba1faeb323d2b8c7836c1dbefd6480b408a833b3846c0b33506510ad18a92fd1",
+    "BUILDING-THE-MANUAL.md": "9c9037b981adb730024bd0e50cc9fd7ab4e3f56147cd4553d188670f7e221b6d",
     "manual-phase4-captures.json": "eae20ce74dbf89712e27e980f8ea3e82fe2ddd4612abecfafdff1ee61caa7b60",
     "manual-phase4-capture-plan.json": "3fee20c000614805ab92b4469dbbd3245a48fd289d98f51626eaf9ecd144c794",
     "manual-design-connections-captures.json": "7f21226ae77fce177aca111c66373e0822c8ceb8972685f1c763c7dff1bce663",
     "manual-design-connections-capture-plan.json": "f0f23a7a3c5acbea607d045d3bf6cc199b075d3678571ab75bade5ec1f3ccda9",
-    "gen_page.py": "2f724fd58964f6b70ba5ca8df3debf44b68de43b437705023806eee15d984196",
+    "gen_page.py": "926eda5f2e232c9df9ccd2adcca03d80e2dfa36b1b1ada74f4ed7e06542ce1e2",
     "gen_manual.py": "e21db7ec9db8b5c222fd6683299a65c75eaeaf4032bedf9f37b97fd3cb43813b",
-    "render_manual_pdf.py": "153f43ed5f72bd99ccf22349aa5baa7072915b3b2d0b3cf816bd3797ec734624",
+    "render_manual_pdf.py": "5d1d3f79769a51ecd9abf4de57799fffe8110e33f5beec6e07c70f90e7bd3fc2",
     "markdown_backend.py": "491503e1fb6893012d9ec174b1fdc6176fe3ff4f5f360f8b76645e661749ffbf",
     "render_markdown.mjs": "35789406770e1a220782db6324d8d60321529c45c0d54261e0971f41f51b37c2",
-    "manual.html": "a491395860129def797d2136493ae144b8318ed421543b3c552079510c6a1099",
-    "manual-markdown/manual.html": "a491395860129def797d2136493ae144b8318ed421543b3c552079510c6a1099",
-    "nanoscope-manual.pdf": "42745f01266096c599b7ec948f44a25692830d464dd10d3545d366fc2fe4cada"
+    "manual.html": "07a039cf9e27d616f48b31c3539f2c5332235e123fdde70debfd46184c237b07",
+    "manual-markdown/manual.html": "07a039cf9e27d616f48b31c3539f2c5332235e123fdde70debfd46184c237b07",
+    "nanoscope-manual.pdf": "a07d2b81b4904d4e984bf6034ac1abed96cdc205c1821ddc50a6775aa2afe0dc"
   }
 }

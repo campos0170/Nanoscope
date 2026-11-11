@@ -1,12 +1,12 @@
 # NanoScope — User Manual
 
-*Manual edition 2026-11-05, current plotting and analysis controls in installed NanoScope build 45.37.98 (build ID `20261105T043813486839Z-nogit-5447ddda145a`). Current control illustrations are offscreen captures using synthetic validation fixtures. The incubation workflow retains its 2026-09-29 review against build 40.15.59, and other chapters retain their 2026-09-11 source review (703a96a) unless dated otherwise. Retained screenshots may show earlier control locations; current paths are given in the text. Historical apo-ferritin results retain their original recipes and are not detector-performance or calibration guarantees.*
+*Manual edition 2026-11-11, current controls in installed NanoScope build 46.31.52 (build ID `20261111T163237642239Z-36aa140fa2b2-dirty-8c6f5e37d549`). Illustrations keep the build named in their captions; the changes since the 2026-11-05 edition are described in text only. Current control illustrations are offscreen captures using synthetic validation fixtures. The incubation workflow retains its 2026-09-29 review against build 40.15.59, and other chapters retain their 2026-09-11 source review (703a96a) unless dated otherwise. Retained screenshots may show earlier control locations; current paths are given in the text. Historical apo-ferritin results retain their original recipes and are not detector-performance or calibration guarantees.*
 
 > Images live in `images/`. `manual.html` beside this file is the same text as a single self-contained page. Open the distributed HTML or PDF directly. For a background rebuild, see `BUILDING-THE-MANUAL.md`; the offline ReportLab route does not use the screen.
 
 ---
 
-User manual · edition 2026-11-05 · NanoScope build 45.37.98
+User manual · edition 2026-11-11 · NanoScope build 46.31.52
 
 # NanoScope
 
@@ -3600,4 +3600,4 @@ The Event waveforms **Event-count heatmap** currently shows an empty **Format > 
 
 The September 11 gallery audit confirmed an image-orientation/bin-mapping defect in **Event waveforms → event-count heatmap**, including its saved-figure rendering path, on source/build `703a96a6a50a`. The count matrix and marginal histograms can be correct while the displayed hotspot is placed at the wrong x/y coordinates. In the audited −700 mV example the 34-event peak belongs near log₁₀(dwell/s) = −1.689 and depth = 90.48 pA, but the image displayed it near −2.780 and 156.42 pA. This is a presentation defect, not a changed event table, but it can cause a wrong scientific reading. The illustrated historical gallery therefore used a separately verified 40-bin depth histogram whose counts sum to 984. The November 3 development gate on source `9ddafefa` passed all eight `test_event_heatmap_coordinates.py` cases: asymmetric bins, both global image-order settings, live/frozen rectangular project restoration, PNG peak pixels, and CSV/SVG/PDF coordinates. The September defect is therefore a historical caveat rather than a current-code limitation established by this edition. These checks do not recapture the older picture or validate its scientific interpretation.
 
-NanoScope build 45.37.98 · Manual edition 2026-11-05. This manual distinguishes updated plotting navigation, earlier reviewed workflows, historical real-recording walkthroughs, dated native screenshots/exports and explicitly synthetic or programmatic illustrations. Historical numerical results retain their original settings and caveats; screenshots are not proof of calibration, accuracy or publication readiness. Check the installed build identity and each figure's provenance when reproducing an example.
+NanoScope build 46.31.52 · Manual edition 2026-11-11. This manual distinguishes updated plotting navigation, earlier reviewed workflows, historical real-recording walkthroughs, dated native screenshots/exports and explicitly synthetic or programmatic illustrations. Historical numerical results retain their original settings and caveats; screenshots are not proof of calibration, accuracy or publication readiness. Check the installed build identity and each figure's provenance when reproducing an example.

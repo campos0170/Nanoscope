@@ -475,7 +475,7 @@ def build_page() -> str:
 <div class="wrap">{rail}<main>
 {body}
 <footer>
-<p>NanoScope build 45.37.98 &middot; Manual edition 2026-11-05. This manual documents {total} controls across {len(ref_toc)} areas.</p>
+<p>NanoScope build 46.31.52 &middot; Manual edition 2026-11-11. This manual documents {total} controls across {len(ref_toc)} areas.</p>
 {prov}
 <p>Built from <code>docs/manual-markdown/manual.md</code> and <code>docs/inventory.json</code> by
 <code>docs/gen_page.py</code>. {body.count('<img ')} illustrations are embedded in this file; it loads nothing
@@ -581,6 +581,7 @@ def build_zip(zip_path: Path) -> None:
                      'MANUAL_ACID_WORKFLOW.md',
                      'MANUAL_REVISION_2026-09-11.md', 'MANUAL_REVISION_2026-09-29.md',
                      'MANUAL_REVISION_2026-11-03.md', 'MANUAL_REVISION_2026-11-05.md',
+                     'MANUAL_REVISION_2026-11-11.md',
                      'manual-usability-captures.json', 'BUILDING-THE-MANUAL.md', 'manual-phase1-captures.json',
                      'manual-phase4-captures.json', 'manual-phase4-capture-plan.json',
                      'manual-design-connections-captures.json', 'manual-design-connections-capture-plan.json',
@@ -624,14 +625,16 @@ def main() -> None:
                              '--pdf-python PATH_TO_PYTHON_WITH_REPORTLAB for offline rendering.')
         print(f"wrote {OUT_PDF.relative_to(HERE.parent)}  "
               f"({OUT_PDF.stat().st_size / 1e6:.2f} MB)")
-    manifest = dict(edition='2026-11-05', application_build='45.37.98',
-                    build_id='20261105T043813486839Z-nogit-5447ddda145a',
-                    source_sha256='5447ddda145a83c1e898dab5d309da3a703739fd339745d340cb473f5c498813',
-                    executable_sha256='d4c89fed8124f7726c1145bd0940a7e3191e25cdf394dc572dbb44de3b89c1c9',
-                    source_status='Current plotting and analysis controls checked against the installed build; historical chapters retain their dated scope',
+    manifest = dict(edition='2026-11-11', application_build='46.31.52',
+                    build_id='20261111T163237642239Z-36aa140fa2b2-dirty-8c6f5e37d549',
+                    source_sha256='8c6f5e37d54985a5869391c104f783eb55b29b1ec3b29bf91492254c2894209c',
+                    executable_sha256='85e81d18dc66b6caf128273931335b83f342f4da32a63526716aedbf2ecb38e1',
+                    source_status='Prose updated for the changes since the 2026-11-05 edition and checked against the installed build; illustrations were not re-captured and keep their captioned builds; historical chapters retain their dated scope',
                     usability_capture_manifest='manual-usability-captures.json',
-                    scope='Figures visibility and direct comparison entries; analytical draft and completed-result ownership; pinned Subpopulations source, curation update and Generate UMAP; Curve fit setup, constraints, diagnostics, application and completed-fit export; visible descriptive Noise summary; retained independent Figures, v13 projects, styles, composition and scientific chapters',
+                    scope='CUSUM opposite-direction count and advisory; validation studies follow the selected detector; Batch detect runs the selected Schmitt or CUSUM detector; Noise page Raw/Processed signal choice; run-button pending marks and Ctrl/Cmd+Return; retained 2026-11-05 plotting and analysis chapters and illustrations',
                     retained_prior_review=[
+                        dict(date='2026-11-05', application_build='45.37.98',
+                             scope='Figures, analytical drafts, Subpopulations, UMAP, Curve fitting and the current illustrations'),
                         dict(date='2026-09-29', application_build='40.15.59',
                              scope='Unified incubation entry, metadata, curation and staged recalculation'),
                         dict(date='2026-09-11', source_revision='703a96a',
@@ -652,6 +655,7 @@ def main() -> None:
                  HERE/'MANUAL_ZN_WORKFLOW.md', HERE/'MANUAL_CU_WORKFLOW.md', HERE/'MANUAL_ACID_WORKFLOW.md',
                  HERE/'MANUAL_REVISION_2026-09-29.md', HERE/'manual-incubation-captures.json',
                  HERE/'MANUAL_REVISION_2026-11-03.md', HERE/'MANUAL_REVISION_2026-11-05.md',
+                 HERE/'MANUAL_REVISION_2026-11-11.md',
                  HERE/'manual-usability-captures.json', HERE/'BUILDING-THE-MANUAL.md', HERE/'manual-phase1-captures.json',
                  HERE/'manual-phase4-captures.json', HERE/'manual-phase4-capture-plan.json',
                  HERE/'manual-design-connections-captures.json', HERE/'manual-design-connections-capture-plan.json',
