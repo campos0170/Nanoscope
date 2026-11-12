@@ -22,9 +22,10 @@ Build **46.45.9** of NanoScope 0.1.0 for Apple Silicon, built from commit `46a69
   as sub- and superscripts on Comparison, study and report figures; Reset figure keeps the
   figure's style; incubation time is shown and typed in hours.
 - **Usability pass (`0b8eada`).** Analysis ▸ Export submenu, advisory headlines with Show full
-  text, plainer Detection row labels, the Preprocess workspace name, a first run that opens in
-  the Essential controls with the guide, and Help ▸ User guide… / Keyboard shortcuts… with the
-  guide inside the app.
+  text, plainer Detection row labels, the Preprocess workspace name, and Help ▸ User guide… /
+  Keyboard shortcuts… with the guide inside the app. A brand-new installation (no saved
+  settings) starts in the Essential controls and opens the Guided first analysis once; an
+  installation that has been used is unchanged.
 - **Defects found while clearing the failing tests (`a05de0a`).** Manual Study workspaces with a
   recording open again; Update plot on a Distributions figure no longer redraws superseded
   tables; opening a project no longer shifts a typed X range on a Distributions histogram; Log x
@@ -85,7 +86,9 @@ plotting fixes. The written guide that Help ▸ User guide… opens is current.
 ## Not verified or not updated for this build
 
 - The SanDisk kits: the drive was not mounted.
-- A GitHub Release: none has been made for this build; v46.31.52 is the latest one published.
+- A GitHub Release: a draft, `v46.45.9`, was uploaded on 2026-11-12 (DMG, `INSTALL.txt`,
+  `SHA256SUMS.txt`; GitHub's SHA-256 of each equals the local file's) and was not published when
+  this was written; v46.31.52 is the latest one published.
 - The Windows ZIP, which GitHub Actions builds: not checked from here.
 - Notarization: not done (ad-hoc signature only; users click Open Anyway).
 - Interactive use on the real display: the checks ran offscreen and through the self-test.
