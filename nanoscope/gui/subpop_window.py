@@ -1739,7 +1739,9 @@ class SubpopReportWindow(QtWidgets.QWidget):
                   if isinstance(item, pg.PlotDataItem)]
         for curve in curves:
             column, n_events = curve._nanoscope_waveform_series
-            times, values = curve.getData()
+            # What the curve was GIVEN, not ``getData()``'s display coordinates: pyqtgraph clips
+            # those when the view is zoomed in far enough (its dynamic range limit).
+            times, values = curve.getOriginalDataset()
             for i, (xv, yv) in enumerate(zip(times, values)):
                 rows.append({"part": "waveform", "point_index": i, "x": xv, "y": yv,
                              "series": column, "n_events": n_events, **common})

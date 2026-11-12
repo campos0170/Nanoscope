@@ -1,4 +1,5 @@
 """Study setup, saved review and owned-worker boundaries without model inference."""
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -81,24 +82,30 @@ def test_duplicate_tags_are_refused_and_saved_output_is_preserved(window, tmp_pa
 
 
 def test_recipe_roundtrip_captures_edits_with_resolved_sources(window, tmp_path):
-    # 2026-11-11 (commit 8661d35): the recordings table shows and takes incubation in milliseconds
-    # (header "Incubation (ms)"); the recipe still stores hours, so every cell value is converted
-    # both ways: 18 h is typed as 64800000 ms.
+    # The recordings table shows and takes incubation in hours, the unit the recipe stores
+    # (header "Incubation (h)"): the 30 h loaded reads 30 and 18 h is typed as 18.
     configure(window, tmp_path)
-    assert window._recordings.horizontalHeaderItem(1).text() == "Incubation (ms)"
-    assert float(window._recordings.item(0, 1).text()) == 108000000.0       # the 30 h loaded
+    assert window._recordings.horizontalHeaderItem(1).text() == "Incubation (h)"
+    assert float(window._recordings.item(0, 1).text()) == 30.0              # the 30 h loaded
     window._name_edit.setText("Edited study")
-    window._recordings.item(0, 1).setText("64800000")
+    window._recordings.item(0, 1).setText("18")
     recipe = tmp_path / "recipe.json"
     window.save_recipe(recipe)
+    assert json.loads(recipe.read_text())["recordings"][0]["incubation_h"] == 18
     loaded = study.load_spec(recipe)
     assert loaded.name == "Edited study"
     assert loaded.recordings[0].incubation_h == 18
     assert Path(loaded.recordings[0].trace_path).is_absolute()
     window.load_recipe(recipe)
-    assert float(window._recordings.item(0, 1).text()) == 64800000.0
+    assert float(window._recordings.item(0, 1).text()) == 18.0
     assert window.capture_spec().recordings[0].incubation_h == 18
     assert window.capture_spec().mixture_tag == "sample_30h"
+
+
+def test_a_fraction_of_an_hour_is_typed_and_kept_as_hours(window, tmp_path):
+    configure(window, tmp_path)
+    window._recordings.item(0, 1).setText("0.25")
+    assert window.capture_spec(check_files=False).recordings[0].incubation_h == 0.25
 
 
 def test_saved_result_load_displays_saved_values_without_inference(window, tmp_path, monkeypatch):

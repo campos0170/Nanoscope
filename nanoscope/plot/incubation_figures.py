@@ -212,7 +212,7 @@ def comparison_figures(events, summary, tables, folder, *, cancel=None, settings
     if len(events):
         axes[2].set_yscale("log")
     for ax in axes:
-        time_axis(ax, "bottom", "incubation_h", stored_unit="h", label="Incubation (ms)"); ax.grid(alpha=.2)
+        time_axis(ax, "bottom", "incubation_h", stored_unit="h", label="Incubation (h)"); ax.grid(alpha=.2)
     axes[0].legend(fontsize=7)
     fig.suptitle(caption, fontsize=11)
     paths.append(_save(fig, folder, "incubation_rates_and_medians", summary, cancel=cancel))
@@ -276,9 +276,9 @@ def clustering_figures(table, folder, prefix="original12", *, cancel=None, setti
                 fig.colorbar(points, ax=ax)
             else:
                 for i, (value, rows) in enumerate(table.groupby(column, sort=True)):
-                    ax.scatter(rows[x], rows[y], s=8, alpha=.5, color="0.65" if value == -1 else f"C{i%10}", label=(f"{float(value) * 3600000:.3g} ms (n={len(rows)})" if column == "incubation_h" else f"{value} (n={len(rows)})"))
+                    ax.scatter(rows[x], rows[y], s=8, alpha=.5, color="0.65" if value == -1 else f"C{i%10}", label=(f"{float(value):g} h (n={len(rows)})" if column == "incubation_h" else f"{value} (n={len(rows)})"))
                 ax.legend(fontsize=6)
-            ax.set(title="Incubation (ms)" if column == "incubation_h" else column, xlabel=x, ylabel=y)
+            ax.set(title="Incubation (h)" if column == "incubation_h" else column, xlabel=x, ylabel=y)
         title = ("Original notebook 12-feature" if settings is None else
                  f"Selected {len(settings.feature_columns)}-feature")
         sources = table.drop_duplicates("tag") if "tag" in table else pd.DataFrame(index=[0, 1])

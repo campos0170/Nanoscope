@@ -1211,7 +1211,7 @@ def test_the_non_panel_allowlist_holds_no_panel():
             "matplotlib_series": {"_SeriesOutline"},
             "nonlinear_fit_dialog": {"NonlinearFitDialog"},
             "quantity_selectors": {"ScientificColumnCombo"},
-            "time_controls": {"SecondsSpinBox", "HoursSpinBox"},
+            "time_controls": {"SecondsSpinBox"},
         }
         if name in named_controls:
             assert set(widgets) == named_controls[name]

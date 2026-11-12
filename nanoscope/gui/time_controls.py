@@ -53,12 +53,6 @@ class SecondsSpinBox(QtWidgets.QDoubleSpinBox):
         return state, text, position
 
 
-class HoursSpinBox(SecondsSpinBox):
-    """Millisecond presentation over an explicitly hours-valued incubation API."""
-    _factor = 3600000.
-    _decimal_shift = 5
-
-
 def rescale_time_text(text, factor, *, intervals=False):
     """Scale finite numeric tokens while retaining blank and invalid draft tokens.
 

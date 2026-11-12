@@ -236,7 +236,9 @@ windows label their local run control **Analyze / refresh**.
 ### Time presentation and stored units
 
 Declared durations and clocks display **ms** in controls, axes, Results/measurement tables,
-readouts, Study and report figures. Friendly labels keep stable scientific column keys. A stored
+readouts, Study and report figures. The one exception is **incubation time**: it is stored, shown
+and typed in **hours** (2 h reads `2`, never `7200000`) in the Incubation study tables and forms and
+on the study figures. Friendly labels keep stable scientific column keys. A stored
 `dwell_s=0.01` appears as `Dwell (ms)=10`; ms-labelled inputs convert back to seconds. A clock still
 has an origin: instrument time and time from the first loaded sample must not be interchanged.
 Unknown-rate data remains in samples; normalized time is dimensionless. Frequency/rates and charge
@@ -2900,7 +2902,12 @@ tool. Clustering runs on the **first ticked** source.
   two): the title you type replaces the automatic title of the figure or figures on screen and goes
   back to automatic when the view changes (see *When a figure's quantity changes*, below).
   Each change is one Undo step. Typed text is shown literally (`I < 5 pA & τ > 1 ms` stays as
-  typed); write `x_{0}` for a subscript and `x^{2}` for a superscript. In Distributions a legend
+  typed); write `x_{0}` for a subscript and `x^{2}` for a superscript (in the title, axis labels and
+  legend entries of Comparison figures and of the study and report figure editors too: there the
+  scripts are text in the SVG and the PDF, and a `$`, `%`, lone `_` or `^`, brace or backslash is
+  still drawn as typed; a line with a script that also holds a character that neither its font nor
+  the fonts that come with NanoScope can draw, such as a Chinese character beside Arial, is shown as
+  typed, `_{…}` and all, and so are the other lines of that label). In Distributions a legend
   entry is named after its source: renaming a source's row, or double-clicking its fit's row (*Apo
   fit (exponential)*), renames the source, and the legend, the fit's row, the fit label and the
   Sources list all follow. **Text style…** and **Hide entry** act on the one row you clicked; a
@@ -3214,7 +3221,7 @@ Format controls, and their style menus include computer styles as well as built-
 
 **Reset figure** puts the title, axis labels, fit-label wording, any caption or other annotation
 text you typed (Voltage dependence's caption, for one) and the look (fonts, sizes, colours, element
-styles) back to the plot's defaults as one Undo step, and ⌘Z brings them back. It is in the page
+styles) back to the plot's defaults as one Undo step, and ⌘Z brings them back. In a project the look goes back to the style the figure is bound to (the project's default when the figure was made, or the one you chose in **Style ▾**), as **Reset look** returns it; a figure with no style (made from a recipe, or from an older project) is bound to the project's default style first, as a new figure is, and takes that style's look. Distributions keeps its **Font size (body)** either way (see below). **Reset figure** is in the page
 toolbar's **Update plot ▾** menu regardless of the inspector tab. Study/Report editors offer
 **Reset all figure styling** in **Study details** or **Figure details**. It leaves the data, fits and analysis settings alone. On every page that has
 Axis properties except Distributions, a range or tick spacing typed there goes with the look, and
@@ -3725,8 +3732,9 @@ generation path. Checkmarked sources are included; simply highlighting a row doe
    The figure's text is drawn in the font chosen in **Format ▸ Figure**, followed by that font's installed
    stand-ins, matplotlib's own sans-serif, serif or monospace face and DejaVu Sans (in Arial when none
    is chosen); a character the font lacks, such as a subscript digit in Arial, is drawn from the next
-   of them that has it. Current SVG export retains literal text with fallback font families;
-   PDF retains font-backed text. Older frozen snapshots retain their original outline content.
+   of them that has it (on a line that holds a typed sub- or superscript, from DejaVu Sans). Current
+   SVG export retains literal text with fallback font families; PDF retains font-backed text. Older
+   frozen snapshots retain their original outline content.
    **Export plotted values CSV…** writes committed drawing values with primitive type, source and
    measurement labels. Use **Snapshot to Figures…** or **Save figure bundle…** to retain source
    observations, panel exclusions, exact geometry, configuration and full provenance together.
@@ -4339,8 +4347,9 @@ bundle's frozen native geometry.
   above: it keeps your current view and styling. Distributions exports its main axes by default;
   explicitly enable **Include residual panel** in the preview dialog to include the displayed
   residual strip. Physical PNG exports embed resolution metadata, PDF uses a vector page, and SVG
-  records mm dimensions without changing its viewBox. In an SVG the text stays text (Comparison
-  figures and the study figure editor are the exception: their text is outlines) and no font is
+  records mm dimensions without changing its viewBox. In an SVG the text stays text (in Comparison
+  figures and the study figure editor too, where a typed sub- or superscript is written glyph by
+  glyph) and no font is
   embedded: every text element names the font the figure is drawn in, followed by stand-ins (for
   Arial: Helvetica, Liberation Sans, Arimo, TeX Gyre Heros, Nimbus Sans, then the generic
   sans-serif; Times New Roman and Courier New have lists of their own that end in serif and
@@ -4368,6 +4377,10 @@ bundle's frozen native geometry.
   the `nanoscope.figure_table_codec` Parquet schema metadata; NanoScope reconstructs their exact
   types. Python users can use `nanoscope.core.figure_tables.decode_figure_table` on the Parquet
   bytes to restore tagged fields without starting the GUI. The CSV remains directly readable.
+  A number JSON cannot hold (the detection's polarity ratio is infinite for a recording with no
+  upward events) is written in `provenance.json` as `{"__nanoscope_workspace_value__": "float",
+  "value": "inf"}` (`"-inf"` and `"nan"` likewise), the spelling a project uses inside its saved
+  figures, so the file stays valid JSON.
   A checksummed `rendering/figure.qpic` preserves the
   frozen vector drawing commands for faithful PNG/PDF rendering, including clipping and backgrounds.
   Additional analytical tables/resources referenced by the configuration are included. Nothing
@@ -4399,7 +4412,10 @@ The numeric-data export commands remain separate:
   spectrograms are exact long-form tables; above 250,000 rows NanoScope refuses the interactive
   export before allocating it, explains the event×point or frequency×time size, and tells you to
   lower **Ensemble › Points** or shorten the analysed **Segment**. It never silently samples the
-  displayed result. The Distributions page calls this **Export plot data…** under **Export ▾**.
+  displayed result. On Event waveforms the detection's whole provenance is the `provenance_json`
+  column; it is the same on every row and tens of kilobytes long, so it is written on the table's
+  first row only and every other row's cell is empty. The Distributions page calls this
+  **Export plot data…** under **Export ▾**.
 
 Every export replaces its target the same way a project save does: staged beside it and moved into
 place, so a failure leaves the previous file whole rather than truncated.

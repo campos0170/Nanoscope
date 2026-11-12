@@ -1067,7 +1067,10 @@ class IVWindow(QtWidgets.QMainWindow):
             })
 
         if self._fit_item is not None:
-            x, y = self._fit_item.getData()
+            # The line as it was GIVEN to the curve. ``getData()`` answers in DISPLAY coordinates,
+            # and pyqtgraph clips those when the view is zoomed in far enough (its dynamic range
+            # limit), so the exported rows would stop being the fitted line.
+            x, y = self._fit_item.getOriginalDataset()
             for xv, yv in zip(np.asarray(x), np.asarray(y)):
                 rows.append({
                     "part": "fit", "source_identity_available": False,

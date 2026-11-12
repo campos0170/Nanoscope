@@ -59,6 +59,8 @@ import shiboken6
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..plot import figure_fonts as ff
+# The sub/superscript markup is read in one place, which the matplotlib pages share.
+from ..plot.typed_text import SUBSUP as _SUBSUP
 from .font_picker import FontPicker, html_font_family
 from .widget_transfer import prepare_widget_move
 
@@ -155,9 +157,6 @@ def shown_text(style: TextStyle, auto: str) -> str:
     if style.text is None:
         return auto
     return "" if style.text == HIDDEN_TEXT else style.text
-
-
-_SUBSUP = re.compile(r"([_^])\{([^{}]*)\}")
 
 
 def rich_text(user_text: str) -> str:

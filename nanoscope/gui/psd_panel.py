@@ -541,6 +541,36 @@ def _sq_units(units: str) -> str:
     return f"{_unit_or_unknown(units)}²/Hz"
 
 
+def _plotted_xy(item) -> tuple[np.ndarray, np.ndarray]:
+    """What a curve was GIVEN, in real units: frequency, power or amplitude as computed.
+
+    ``PlotDataItem.getData()`` answers in DISPLAY coordinates, and with the log-log box
+    ticked (the default) those are the log10 of both axes, so Export data wrote exponents
+    under ``frequency_hz``, ``psd_value`` and ``peak_amplitude``."""
+    x, y = item.getOriginalDataset()
+    return np.asarray(x), np.asarray(y)
+
+
+def _recording_key(doc, channel: int) -> str:
+    """A recording's identity on this page: its persistent key and the channel.
+
+    Unlike ``doc_id`` (one per LOAD) it is the same after the file is closed and opened
+    again, and after a project is saved and reopened: the identity a figure's Source and
+    comparison choices, and the stamp of its segment and band, are kept under."""
+    return f"{persistent_key(doc)}#{int(channel)}"
+
+
+def _same_recording(held, now) -> bool:
+    """Whether control values stamped ``held`` were set for the recording stamped ``now``.
+
+    Both are ``(key, duration, Nyquist)``. The key must be the same, and so must the
+    duration and the Nyquist wherever ``held`` knows them: a figure restored without its
+    recording knows only the key (``None`` for the other two), exactly as much as a project
+    stores of it."""
+    return (held is not None and held[0] == now[0]
+            and all(was is None or was == is_now for was, is_now in zip(held[1:], now[1:])))
+
+
 def _level_boundaries(levels: list[dict]) -> list[float]:
     """Midpoints between neighbouring level centres — where one level's share stops."""
     cs = sorted(float(lv["center"]) for lv in levels)
@@ -839,11 +869,14 @@ class PSDWindow(QtWidgets.QMainWindow):
         # accessors above mirror it so a one-pore session reads exactly as before.
         self._curves: list[PSDCurve] = []
         self._recordings: list[dict] = []            # every offerable recording
-        #: The ``(doc_id, channel)`` the segment + RMS spin boxes were last DEFAULTED for,
-        #: with the duration and Nyquist those defaults were derived from. See
+        #: The recording the segment + RMS spin boxes were last DEFAULTED for: its
+        #: :func:`_recording_key` (the persistent key and channel, so it is the same after
+        #: the recording is closed and opened again; never the per-load ``doc_id``), with the
+        #: duration and Nyquist those defaults were derived from, or ``None`` for the two
+        #: when only the name is known (a figure restored without its recording). See
         #: :meth:`_reconfigure_for_recording`: the four control values are the user's
         #: choice, and they are only overwritten when the recording under them changes.
-        self._configured_for: tuple[str, int, float, float] | None = None
+        self._configured_for: tuple[str, float | None, float | None] | None = None
 
         #: Last result per added view, with the signature it was computed for, so flipping
         #: between the four pages is free and only a real parameter change recomputes.
@@ -1699,7 +1732,7 @@ class PSDWindow(QtWidgets.QMainWindow):
             out.append({
                 "doc_id": doc.doc_id,
                 "channel": int(cur.index),
-                "key": f"{persistent_key(doc)}#{int(cur.index)}",
+                "key": _recording_key(doc, cur.index),
                 "label": doc.display_name,
                 "channel_name": cur.name,
                 "is_segment": isinstance(doc, SegmentDocument),
@@ -1785,7 +1818,11 @@ class PSDWindow(QtWidgets.QMainWindow):
         unresolved = self._rec_combo.currentData(Qt.UserRole + 1)
         if unresolved:
             return str(unresolved)
-        target = self._current_target()
+        # What the control names, not what is still open: once its recording has closed
+        # ``_current_target()`` answers None, and the page would stop naming the recording
+        # its result came from (a blank draft against the applied key).
+        chosen = self._rec_combo.currentData()
+        target = None if chosen is None else tuple(chosen)
         return next((rec['key'] for rec in self._recordings
                      if (rec['doc_id'], rec['channel']) == target), '')
 
@@ -1807,8 +1844,54 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._pending_analysis._write(values)
         self._pending_analysis.defer()
 
+    def recording_closed(self, doc_id: str) -> None:
+        """``doc_id`` has closed (its owner says so): list what is open now, and nothing else
+        moves.
+
+        A figure pinned to its recording is not re-gathered when that recording closes, so its
+        Source box went on offering a row that looked live, and a ticked comparison kept an
+        enabled row. Both lists are rebuilt from what is open and the controls written back as
+        they were: the recording the figure is pinned to becomes the one disabled
+        'Unavailable recording' row a saved figure with a missing recording has, and a ticked
+        comparison the same. Nothing is recomputed and no value changes. No signal is sent
+        either: what is pending reads the same before and after (it was judged against a fresh
+        gather all along), and closing a recording is not an edit of the figure."""
+        if any(rec['doc_id'] == doc_id for rec in self._recordings):
+            self._relist_recordings()
+
+    def recording_opened(self, doc_id: str) -> None:
+        """``doc_id`` has opened (its owner says so): when this page named that recording as
+        unavailable, offer it again, and nothing else moves.
+
+        The mirror of :meth:`recording_closed`: a recording closed and opened again went on
+        reading 'Unavailable recording' in the Source box (and a ticked comparison in the
+        comparison list) until Update re-gathered. Only a recording the page names as
+        unavailable is listed here; any other one opened since still waits for Update, as it
+        always did. The controls are written back as they were, and what the four values were
+        set for is not touched (:meth:`_pending_target`): Update still says whether this load
+        is that recording. (The ranges are those of the recording now named, so a typed End or
+        band that a same-named file of another length or rate cannot hold is held to it until
+        Update, which gives that file its defaults.)"""
+        unavailable = {str(self._rec_combo.currentData(Qt.UserRole + 1) or ''), *self.compare_keys()}
+        unavailable -= {'', *(rec['key'] for rec in self._recordings)}
+        if unavailable and any(rec['doc_id'] == doc_id and rec['key'] in unavailable
+                               for rec in self._gather_recordings()):
+            self._relist_recordings()
+
+    def _relist_recordings(self) -> None:
+        """List the recordings that are open now and write the controls back as they were."""
+        values = self._pending_analysis.read()
+        with self._pending_analysis._blocked():
+            self._repopulate(self._current_target())
+            self._pending_analysis._write(values)
+
     def _pending_target(self, key):
         record = next((rec for rec in self._recordings if rec['key'] == key), None)
+        if record is not None and not self._session.has_document(record['doc_id']):
+            # ``_recordings`` is the last gather, and nothing re-gathers it when a recording
+            # closes: it is as unavailable as one a saved figure names that was never opened,
+            # and reading its document would raise.
+            record = None
         if record is None:
             if key:
                 index = self._rec_combo.findData(key, role=Qt.UserRole + 1)
@@ -1825,7 +1908,14 @@ class PSDWindow(QtWidgets.QMainWindow):
                 self._rec_combo.setCurrentIndex(index)
             else:
                 self._rec_combo.setCurrentIndex(-1)
-            self._configured_for = None
+            # The four values keep the stamp of the recording they were set for while it is
+            # away, so another load of the same file finds them as they were; for a recording
+            # this page never measured (a restored figure's) the stamp is the key alone.
+            held = self._configured_for
+            if not key:
+                self._configured_for = None
+            elif held is None or held[0] != key:
+                self._configured_for = (key, None, None)
             self._clock_offset_s = None
             # Its duration/rate are unknown, so preserve the saved draft values
             # rather than clipping them to whichever recording is still open.
@@ -1835,9 +1925,15 @@ class PSDWindow(QtWidgets.QMainWindow):
         else:
             self._select_combo_target((record['doc_id'], record['channel']))
             meta = self._session.document(record['doc_id']).meta
-            self._configured_for = (record['doc_id'], int(record['channel']),
-                                    float(meta.duration_s or 0.0),
-                                    float(meta.sample_rate_hz or 0.0) / 2.0)
+            # Pointing the box at the recording the four values were set for does not change
+            # what they were set for, even when this load of it is not the one they were set
+            # on (another length or rate, listed since): the next Update must still be able to
+            # say so (see _reconfigure_for_recording). Only another recording takes the stamp:
+            # the values written next are its own.
+            held = self._configured_for
+            if held is None or held[0] != record['key']:
+                self._configured_for = (record['key'], float(meta.duration_s or 0.0),
+                                        float(meta.sample_rate_hz or 0.0) / 2.0)
             self._clock_offset_s = clock.clock_offset_s(meta)
             for spin in (self._start_spin, self._end_spin):
                 spin.setRange(0.0, float(meta.duration_s or 0.0))
@@ -1927,11 +2023,24 @@ class PSDWindow(QtWidgets.QMainWindow):
         or length, the defaults are the honest answer again. The rule the app already keeps
         one window over — ``PlotsWindow.set_data``: "Sources still present after a refresh
         keep their checked state, so re-pulling data doesn't yank the user off their view."
+
+        "The same recording" is the persistent key and channel (:func:`_recording_key`), not
+        the per-load ``doc_id``: a figure whose recording was closed and opened again, or
+        whose project was reopened without it and the recording opened afterwards, is
+        looking at the same recording, and its segment and band stand through Update.
+        A figure restored without its recording knows its key and, from its saved spectrum,
+        the rate and how far into the recording it reached (:meth:`_measured`): a file of
+        that key and rate that ends before that is another recording.
+        And a Source row that names a recording which is not open chooses nothing: it
+        leaves the four values alone.
         """
         target = self._current_target()
         self._updating = True
         try:
             if target is None:
+                if (self._rec_combo.currentData() is not None
+                        or self._rec_combo.currentData(Qt.UserRole + 1)):
+                    return      # the Source box names a recording that is not open: no choice
                 for sb in (self._start_spin, self._end_spin, self._rms_lo_spin, self._rms_hi_spin):
                     sb.setRange(0.0, 1.0)
                     sb.setValue(0.0)
@@ -1941,7 +2050,8 @@ class PSDWindow(QtWidgets.QMainWindow):
                 self._configured_for = None
                 return
             doc_id, channel = target
-            meta = self._session.document(doc_id).meta
+            doc = self._session.document(doc_id)
+            meta = doc.meta
             self._clock_offset_s = clock.clock_offset_s(meta)
             self._label_segment_clock()
             fs = meta.sample_rate_hz or 0.0
@@ -1953,10 +2063,10 @@ class PSDWindow(QtWidgets.QMainWindow):
                 sb.setRange(0.0, float(dur))
             for sb in (self._rms_lo_spin, self._rms_hi_spin):
                 sb.setRange(0.0, float(nyq))
-            stamp = (doc_id, int(channel), float(dur), float(nyq))
-            if stamp == self._configured_for:
+            stamp = (_recording_key(doc, channel), float(dur), float(nyq))
+            held, self._configured_for = self._configured_for, stamp
+            if _same_recording(self._measured(held, int(meta.n_samples)), stamp):
                 return          # same recording: the user's segment and band stand
-            self._configured_for = stamp
             # Segment spans [0, duration]; default = whole trace.
             self._start_spin.setValue(0.0)
             self._end_spin.setValue(float(dur))
@@ -1965,6 +2075,24 @@ class PSDWindow(QtWidgets.QMainWindow):
             self._rms_hi_spin.setValue(float(nyq))
         finally:
             self._updating = False
+
+    def _measured(self, held, n_samples: int):
+        """``held``, with what the spectrum on screen says of the recording filled in when
+        ``held`` knows only the key and that spectrum is of that recording.
+
+        A project stores no length: all a saved figure says of its recording's extent is the
+        rate its spectrum was computed at and the stretch of samples it used. So the Nyquist is
+        filled in, and a recording of ``n_samples`` samples that ends before that stretch does
+        is not the one the spectrum was computed from: ``None``, which no recording is the same
+        as. (A longer one cannot be told apart.)"""
+        if held is None or held[2] is not None or not self._curves:
+            return held
+        head = self._curves[0]
+        if head.key != held[0] or not head.fs:
+            return held
+        if head.i0 + head.n_samples > n_samples:
+            return None
+        return (held[0], held[1], head.fs / 2.0)
 
     def _use_full_trace(self) -> None:
         target = self._current_target()
@@ -4864,8 +4992,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         for curve in self._curves:
             if curve.item is None:
                 continue
-            x, y = curve.item.getData()
-            xs, ys = np.asarray(x), np.asarray(y)
+            xs, ys = _plotted_xy(curve.item)
             common = {
                 **self._export_common(VIEW_PSD, curve),
                 "value_kind": "ASD" if asd else "PSD",
@@ -4891,7 +5018,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                 })
 
         if rows and self._fit_item is not None and self._curves:
-            x, y = self._fit_item.getData()
+            x, y = _plotted_xy(self._fit_item)
             head = self._curves[0]
             common = {
                 **self._export_common(VIEW_PSD, head),
@@ -4907,7 +5034,7 @@ class PSDWindow(QtWidgets.QMainWindow):
                 "spectral_underflow": head.underflow,
                 "time_domain_rms": head.time_rms,
             }
-            for index, (frequency, value) in enumerate(zip(np.asarray(x), np.asarray(y))):
+            for index, (frequency, value) in enumerate(zip(x, y)):
                 rows.append({
                     "part": "flicker_fit", "point_index": index,
                     "frequency_hz": float(frequency),
@@ -4921,7 +5048,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         spec = self._fft
         if spec is None or self._fft_item is None:
             return pd.DataFrame()
-        x, y = self._fft_item.getData()
+        x, y = _plotted_xy(self._fft_item)
         common = {
             **self._export_common(VIEW_FFT),
             "fft_n_samples": spec.n_samples, "fft_raw_bin_count": spec.n_bins,
@@ -4933,7 +5060,7 @@ class PSDWindow(QtWidgets.QMainWindow):
         return pd.DataFrame([
             {"part": "fft_curve", "point_index": index,
              "frequency_hz": float(frequency), "peak_amplitude": float(value), **common}
-            for index, (frequency, value) in enumerate(zip(np.asarray(x), np.asarray(y)))
+            for index, (frequency, value) in enumerate(zip(x, y))
         ])
 
     def _spectrogram_plot_data(self) -> pd.DataFrame:

@@ -55,6 +55,51 @@ def _json_bytes(value: Any) -> bytes:
                       separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def tag_nonfinite_floats(value: Any) -> Any:
+    """A copy of a JSON-shaped value with every NaN and infinity written as the project writes one.
+
+    Strict JSON has no NaN or infinity, and ``allow_nan`` stays off: it writes a bare ``Infinity``,
+    which most JSON readers refuse. The project's workspace layer already has a strict spelling for
+    such a float, a tagged object that ``core.analysis_workspace._encode`` writes and ``_decode``
+    reads back. This asks that encoder for the float itself, so a NaN or an infinity has one spelling
+    wherever the project keeps it and the two cannot drift apart. Dicts, lists, tuples and arrays are
+    walked; any other value is left as it is, for ``json``'s ``default`` to meet as it always has.
+    """
+    from ..core.analysis_workspace import _Resources, _encode
+    resources = _Resources()
+
+    def walk(item):
+        if isinstance(item, np.floating):
+            item = float(item)
+        if isinstance(item, float):
+            return item if math.isfinite(item) else _encode(item, resources, "provenance")
+        if isinstance(item, np.ndarray):
+            return walk(item.tolist())
+        if isinstance(item, Mapping):
+            return {key: walk(part) for key, part in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [walk(part) for part in item]
+        return item
+
+    return walk(value)
+
+
+def _provenance_json_bytes(value: Any) -> bytes:
+    """A figure's provenance as strict JSON, a NaN or an infinity in it included.
+
+    Such a number is a fact about the source, not a fault in the figure: a detection on a recording
+    with no upward events records ``polarity_evidence.ratio = n_down / 0 = inf``, and every standard
+    report figure carries that record. It is written in the project's spelling
+    (:func:`tag_nonfinite_floats`) instead of making the figure impossible to save or bundle. Only
+    the provenance is read this way: a NaN in a figure's *configuration* is a setting that cannot be
+    applied again, and is still refused.
+    """
+    try:
+        return _json_bytes(value)
+    except ValueError:
+        return _json_bytes(tag_nonfinite_floats(value))
+
+
 def _resource_name(name: str) -> str:
     if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.\-/]+", name)
             or name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/"))
@@ -309,6 +354,8 @@ class FigureSnapshot:
         return json.loads(self.config_json_bytes)
 
     def provenance(self):
+        """The source record as stored. A NaN or an infinity in it is the project's tagged float
+        (:func:`tag_nonfinite_floats`); ``core.analysis_workspace._decode`` turns it back."""
         return json.loads(self.provenance_json_bytes)
 
     def figure_spec(self):
@@ -442,7 +489,7 @@ def capture_figure_snapshot(item, *, data: pd.DataFrame, config=None, provenance
         raise TypeError("A figure snapshot requires its exact plotted DataFrame.")
     config_json = _json_bytes({} if config is None else config)
     provenance_values = {} if provenance is None else dict(provenance)
-    _json_bytes(provenance_values)  # Refuse invalid source metadata before rendering.
+    _provenance_json_bytes(provenance_values)  # Refuse invalid source metadata before rendering.
     resources = tuple((name, value) for name, value in (additional_resources or {}).items())
     if applied_spec is not None:
         if any(name.casefold() == "figure-spec.json" for name, _value in resources):
@@ -464,7 +511,7 @@ def capture_figure_snapshot(item, *, data: pd.DataFrame, config=None, provenance
         item, residual_item=residual_item, include_residual=include_residual)
     provenance_values["nanoscope_capture_rendering"] = _capture_rendering_metadata(
         item, svg, residual_item=residual_item, include_residual=include_residual)
-    provenance_json = _json_bytes(provenance_values)
+    provenance_json = _provenance_json_bytes(provenance_values)
     resources += ((_PICTURE_RESOURCE, capture_figure_picture(
         item, residual_item=residual_item, include_residual=include_residual)),)
     snapshot = FigureSnapshot(png, svg, csv, parquet, config_json,

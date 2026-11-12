@@ -3,8 +3,9 @@
 Only ``update_figure`` visits the supplied artists. Display, capture, composition
 and export replay immutable vector commands, never an estimator. SVG is retained
 from Matplotlib itself; PNG/PDF and composition use QPicture, not QtSvg's lossy
-SVG Tiny clipping implementation. Literal text retains editable font commands;
-mathematical glyph layout retains its exact vector-path fallback.
+SVG Tiny clipping implementation. Literal text retains editable font commands, and so
+does mathematical text, glyph by glyph where mathtext placed it; what Qt cannot draw as
+text (a fraction bar, a face it cannot retain) keeps its exact vector-path fallback.
 """
 from __future__ import annotations
 
@@ -54,18 +55,23 @@ def _color(value, gc):
 _QT_FONT_FAMILIES = {}
 
 
+def _file_families(filename):
+    """The Qt family names of one font file, which is registered with the application."""
+    if filename not in _QT_FONT_FAMILIES:
+        identifier = QtGui.QFontDatabase.addApplicationFont(str(filename))
+        names = tuple(QtGui.QFontDatabase.applicationFontFamilies(identifier)) if identifier >= 0 else ()
+        if not names:
+            raise ValueError('The resolved figure font could not be retained for editable export.')
+        _QT_FONT_FAMILIES[filename] = names
+    return _QT_FONT_FAMILIES[filename]
+
+
 def _font_families(prop):
     """Register the exact faces Matplotlib resolved, including bundled fallback fonts."""
     from matplotlib import font_manager
     families = []
     for filename in font_manager.fontManager._find_fonts_by_props(prop):
-        if filename not in _QT_FONT_FAMILIES:
-            identifier = QtGui.QFontDatabase.addApplicationFont(str(filename))
-            names = tuple(QtGui.QFontDatabase.applicationFontFamilies(identifier)) if identifier >= 0 else ()
-            if not names:
-                raise ValueError('The resolved figure font could not be retained for editable export.')
-            _QT_FONT_FAMILIES[filename] = names
-        families.extend(name for name in _QT_FONT_FAMILIES[filename] if name not in families)
+        families.extend(name for name in _file_families(filename) if name not in families)
     return families
 
 
@@ -156,46 +162,105 @@ class _PictureRenderer(RendererBase):
         finally:
             painter.restore()
 
-    def draw_text(self, gc, x, y, text, prop, angle, ismath=False, mtext=None):
-        if ismath:
-            text_gc = self.new_gc()
-            text_gc.copy_properties(gc)
-            self._draw_text_as_path(text_gc, x, y, text, prop, angle, ismath)
-            return
-        # Store text commands, so QPdfWriter embeds fonts rather than glyph outlines.
-        # The renderer's coordinates are figure pixels; QFont sizes are device points.
+    def _qt_font(self, families, style, weight, stretch, size):
+        """The Qt font of one retained face; the face is recorded for a faithful replay."""
         from matplotlib.font_manager import weight_dict, stretch_dict
-        families = _font_families(prop)
+        families = list(families)
         self.qt_font_families.update(families)
-        descriptor = {'families': families, 'style': prop.get_style(),
-                      'weight': prop.get_weight(), 'stretch': prop.get_stretch()}
+        descriptor = {'families': families, 'style': style, 'weight': weight, 'stretch': stretch}
         self.qt_font_faces[repr(descriptor)] = descriptor
         font = QtGui.QFont()
         font.setFamilies(families)
         font.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
-        stretch = prop.get_stretch()
         # Matplotlib's CSS selection scale is100..900 (normal500); Qt takes
         # percentages (normal100). Passing500 stretches all literal text fivefold.
         numeric_stretch = stretch_dict[stretch] if isinstance(stretch, str) else float(stretch)
         font.setStretch(round(float(np.interp(numeric_stretch,
             [100, 200, 300, 400, 500, 600, 700, 800, 900],
             [50, 62, 75, 87, 100, 112, 125, 150, 200]))))
-        font.setPointSizeF(float(prop.get_size_in_points()) * self.dpi / self.painter.device().logicalDpiY())
-        weight = prop.get_weight()
+        # The renderer's coordinates are figure pixels; QFont sizes are device points.
+        font.setPointSizeF(float(size) * self.dpi / self.painter.device().logicalDpiY())
         font.setWeight(QtGui.QFont.Weight(int(weight_dict.get(weight, weight) if isinstance(weight, str) else weight)))
-        font.setItalic(prop.get_style() in ('italic', 'oblique'))
+        font.setItalic(style in ('italic', 'oblique'))
+        return font
+
+    def _math_glyphs(self, text, prop):
+        """Mathtext's layout of ``text`` as ``(font, character, dx, dy)`` per glyph, in pixels from the
+        left end of its baseline, dy downward as a painter counts; None when it is not glyphs alone
+        (a fraction bar, a root) or a face cannot be retained, and the outlines draw it.
+
+        One text command per glyph, each where mathtext put it: Qt's own layout of a run of them is
+        a little narrower than mathtext's, which would pull a script away from its letter.
+
+        The layout is the one the outlines of a mathtext line were drawn from: at ``FONT_SCALE`` (100
+        points at 72 dpi, a unit being a hundredth of an em), scaled down to the Text's size. Laid out
+        at the figure's own size it is rounded to whole pixels instead: mathtext measures every glyph from
+        the top of its box rounded UP to a whole unit, so a glyph on the baseline comes back up to a unit
+        above it (a pixel here, a hundredth of an em there), and kerning is rounded to whole units too.
+        That one rounding is taken out below, so a glyph of the line's own size stands exactly on the
+        baseline, where the plain text beside it does (Qt puts a text's baseline on a whole pixel, and a
+        mathtext glyph a hair above it lands a whole pixel above it, six at a 600 dpi export)."""
+        from matplotlib.font_manager import ttfFontProperty
+        text2path = self._text2path
+        sized = prop.copy()
+        sized.set_size(text2path.FONT_SCALE)
+        _width, _height, _depth, glyphs, rects = text2path.mathtext_parser.parse(text, text2path.DPI, sized)
+        if rects:
+            return None
+        try:
+            faces = {font.fname: (ttfFontProperty(font), _file_families(font.fname))
+                     for font, *_rest in glyphs}
+        except ValueError:
+            return None
+        points = prop.get_size_in_points() / text2path.FONT_SCALE          # points in a unit of the layout
+        pixels = self.points_to_pixels(points)                              # figure pixels in a unit
+        # A glyph of the line's own (largest) size is on the baseline; its height above it is the rounding.
+        body = max((size for _font, size, *_rest in glyphs), default=0.)
+        lift = min((y for _font, size, _code, _x, y in glyphs if size == body), default=0.)
+        if not 0. <= lift < 1.:        # no such glyph (a line of scripts alone), or one that was set off the baseline
+            lift = 0.
+        fonts, runs = {}, []
+        for font, size, code, x, y in glyphs:
+            if (font.fname, size) not in fonts:
+                face, families = faces[font.fname]
+                fonts[font.fname, size] = self._qt_font(families, face.style, face.weight,
+                                                        face.stretch, size * points)
+            runs.append((fonts[font.fname, size], chr(code), x * pixels, -(y - lift) * pixels))   # mathtext counts y upward
+        return runs
+
+    def _draw_runs(self, gc, x, y, angle, runs):
+        """Draw ``(font, text, dx, dy)`` runs from the baseline point ``x, y``, turned by ``angle``."""
         painter = self.painter
         painter.save()
         try:
             self._clip(gc)
             painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
-            painter.setFont(font)
             painter.setPen(_color(gc.get_rgb(), gc))
             painter.translate(float(x), self.height - float(y))
             painter.rotate(-float(angle))
-            painter.drawText(QtCore.QPointF(0., 0.), str(text))
+            current = None
+            for font, text, dx, dy in runs:
+                if font is not current:
+                    painter.setFont(font)
+                    current = font
+                painter.drawText(QtCore.QPointF(float(dx), float(dy)), str(text))
         finally:
             painter.restore()
+
+    def draw_text(self, gc, x, y, text, prop, angle, ismath=False, mtext=None):
+        if ismath:
+            glyphs = self._math_glyphs(text, prop)
+            if glyphs is not None:
+                self._draw_runs(gc, x, y, angle, glyphs)
+                return
+            text_gc = self.new_gc()
+            text_gc.copy_properties(gc)
+            self._draw_text_as_path(text_gc, x, y, text, prop, angle, ismath)
+            return
+        # Store text commands, so QPdfWriter embeds fonts rather than glyph outlines.
+        font = self._qt_font(_font_families(prop), prop.get_style(), prop.get_weight(),
+                             prop.get_stretch(), prop.get_size_in_points())
+        self._draw_runs(gc, x, y, angle, [(font, text, 0., 0.)])
 
     def draw_tex(self, *args, **kwargs):
         raise ValueError("External TeX rendering is not supported in comparison figures.")
@@ -396,7 +461,8 @@ class MatplotlibFigureItem(QtWidgets.QGraphicsObject):
             "requested_font_families": sorted({family for text in figure.findobj(Text)
                                                 for family in text.get_fontfamily()}),
             "svg_text_policy": "editable text with fallback families",
-            "picture_text_policy": "literal text commands; mathematical glyph paths",
+            "picture_text_policy": "literal and mathematical text as glyph text commands; "
+                                   "outlines only where Qt cannot draw it as text",
         }
         self._targets, self._axes = targets, axes
         self._legend_rects = legend_rects

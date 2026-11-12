@@ -6096,6 +6096,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
             lambda *_: self._push_conditioning_window())
         self._session.documentClosed.connect(self._drop_conditioning_document)
         self._session.documentClosed.connect(self._drop_noise_traces)
+        self._session.documentOpened.connect(self._offer_reopened_recording)
         self._session.calibrationChanged.connect(
             lambda *_: self._push_conditioning_source()
             if _on_screen(self._signal_conditioning) else None)

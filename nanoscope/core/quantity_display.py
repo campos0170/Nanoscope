@@ -70,6 +70,9 @@ _FIELDS = MappingProxyType({
     'filter_limited': ('Filter limited', '-', 'categorical', ''),
     'flag': ('Flags', '-', 'categorical', ''),
 })
+# Durations are shown in ms unless the quantity has a unit of its own here. Incubation is hours
+# long (2 h would read 7,200,000 ms): it is typed, measured and written in hours.
+_DISPLAY_UNITS = MappingProxyType({'incubation_h': 'h'})
 
 
 def _unit(value):
@@ -153,12 +156,14 @@ def _schema_kind(unit, fallback):
 
 
 def quantity_for(key, *, schema=None, declared_unit=None, quantity=None, clock_basis=None,
-                 display_unit='ms', label=None):
+                 display_unit=None, label=None):
     """Resolve a known key or existing schema declaration; never infer units by suffix.
 
     ``schema[key]`` accepts existing (dtype, unit, description) tuples or explicit
     metadata with unit/quantity/label/clock_basis. ``declared_unit=''`` is an explicit
     unknown source unit and overrides a historical column spelling such as depth_pA.
+    A duration or clock is shown in ``display_unit``; left out, that is ms, except for
+    the one quantity that has a unit of its own (incubation time, in hours).
     """
     if type(key) is not str or not key:
         raise QuantityError('A quantity key must be nonempty text')
@@ -198,7 +203,7 @@ def quantity_for(key, *, schema=None, declared_unit=None, quantity=None, clock_b
     known = kind != 'unknown' and bool(unit)
     shown, factor = ('' if unit == '-' else unit), 1.
     if kind in ('duration', 'clock'):
-        target = _unit(display_unit)
+        target = _unit(_DISPLAY_UNITS.get(key, 'ms') if display_unit is None else display_unit)
         if unit not in _TIME_SECONDS or target not in _TIME_SECONDS:
             raise QuantityError('Time conversion requires declared supported time units')
         shown, factor = target, _TIME_SECONDS[unit] / _TIME_SECONDS[target]

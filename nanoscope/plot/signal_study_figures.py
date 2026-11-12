@@ -42,6 +42,16 @@ def _envelope(a,values,budget=10000):
     indices=np.sort(np.r_[lo,hi,len(values)-1]); return _source_time(a,indices),np.asarray(values)[indices]
 
 
+def _upright_if_crowded(fig):
+    """Stand every panel's x tick labels on end when level ones would touch on any panel."""
+    fig.canvas.draw()
+    for ax in fig.axes:
+        boxes=sorted((t.get_window_extent() for t in ax.get_xticklabels() if t.get_text()),key=lambda b:b.x0)
+        if any(a.x1>b.x0 for a,b in zip(boxes,boxes[1:])):
+            for other in fig.axes: other.tick_params(axis='x',labelrotation=90)
+            return
+
+
 def recording_figures(a,nulls,folder,*,cancel=None,study_metadata=None):
     from .study_figure_style import bind_event_panel
     folder=Path(folder); folder.mkdir(parents=True,exist_ok=True); paths=[]
@@ -125,7 +135,7 @@ def recording_figures(a,nulls,folder,*,cancel=None,study_metadata=None):
 
 def comparison_figures(result,records,folder,*,cancel=None,study_metadata=None):
     folder=Path(folder); folder.mkdir(parents=True,exist_ok=True); paths=[]
-    s=result.summary; ev=result.events; x=np.arange(len(s)); labels=[f'{v * 3600000:.3g} ms' for v in s.incubation_h]
+    s=result.summary; ev=result.events; x=np.arange(len(s)); labels=[f'{v:g} h' for v in s.incubation_h]
     def save(fig,name,data):
         _label_study(fig,study_metadata)
         paths.append(_save(fig,folder,'signal_comparison_'+name,data,cancel=cancel))
@@ -134,7 +144,7 @@ def comparison_figures(result,records,folder,*,cancel=None,study_metadata=None):
         ax.plot(x,s[col],'o-',color='#147D92'); ax.set_xticks(x,labels); ax.set_ylabel(label)
         if col == 'dwell_med': time_axis(ax, 'left', 'dwell_ms', stored_unit='ms')
     fig.suptitle('Accepted-event summaries\n'+_pore_caveat(s))
-    save(fig,'summary',s)
+    _upright_if_crowded(fig); save(fig,'summary',s)
     pairs=result.tables['nominal_pairs']; fig=_figure(height=5); ax=fig.subplots()
     px=np.arange(len(pairs)); width=.25
     for offset,col,label,color in zip((-width,0,width),('rate_ratio_b_over_a','conductance_ratio_b_over_a','duty_ratio_b_over_a'),('Event-rate ratio','Conductance ratio','Duty ratio'),('#147D92','#CA7627','#646B85')):
@@ -144,7 +154,7 @@ def comparison_figures(result,records,folder,*,cancel=None,study_metadata=None):
     fig=_figure(height=5); axes=fig.subplots(1,3)
     for ax,col,label in zip(axes,('dwell_ms','depth_sust_pA','f_sust'),('Dwell (ms)','Sustained current change (pA)','Local fractional current change')):
         for i,row in enumerate(s.itertuples()):
-            vals=np.sort(ev.loc[ev.tag==row.tag,col]); ax.step(vals,np.arange(1,len(vals)+1)/max(1,len(vals)),where='post',label=f'{row.incubation_h * 3600000:.3g} ms; n={len(vals)}',color=f'C{i}')
+            vals=np.sort(ev.loc[ev.tag==row.tag,col]); ax.step(vals,np.arange(1,len(vals)+1)/max(1,len(vals)),where='post',label=f'{row.incubation_h:g} h; n={len(vals)}',color=f'C{i}')
         ax.set(xlabel=label,ylabel='Cumulative accepted-event fraction')
         if col=='dwell_ms':
             ax.set_xscale('log')
@@ -156,7 +166,7 @@ def comparison_figures(result,records,folder,*,cancel=None,study_metadata=None):
         axes[0].bar(x+i*.35,table.n_accepted,.35,label=kind,color=COLORS[kind]); axes[1].plot(x,table.rate_per_s,'o-',label=kind,color=COLORS[kind])
     for ax in axes: ax.set_xticks(x+.175 if ax is axes[0] else x,labels); ax.legend()
     axes[0].set_ylabel('Accepted count'); axes[1].set_ylabel('Accepted events / s')
-    fig.suptitle('Spike and plateau contributions; shallow-long crossings retained for review'); save(fig,'event_types',result.tables['signal_types'])
+    fig.suptitle('Spike and plateau contributions; shallow-long crossings retained for review'); _upright_if_crowded(fig); save(fig,'event_types',result.tables['signal_types'])
     supplementary=[r for r in records if r.get('comparison_only') and 'analysis' in r]
     fig=_figure(height=5); axes=fig.subplots(1,3); rows=[]
     for r in records:

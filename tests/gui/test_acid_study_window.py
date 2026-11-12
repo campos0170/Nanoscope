@@ -48,6 +48,16 @@ def test_current_engine_defaults_roundtrip_in_real_controls(qtbot):
         assert form.values()=={k:defaults[k] for k in keys if k in defaults}
 
 
+def test_incubation_time_is_shown_and_typed_in_hours(window,tmp_path):
+    seeded(window,tmp_path)
+    box=window._source_form.controls['incubation_h']
+    assert type(box) is QtWidgets.QDoubleSpinBox and not box.suffix()
+    assert box.accessibleName()=='Incubation time (h)'
+    assert box.value()==30. and float(box.text())==30.      # the 30 h saved with the recording
+    box.lineEdit().setText('18');box.interpretText()
+    assert window._source_form.values()['incubation_h']==18.
+
+
 def test_new_workspace_has_staged_controls_and_unknown_diameter(window,tmp_path):
     seeded(window,tmp_path);window._assert_no_drafts()
     assert window._stages.count()==6

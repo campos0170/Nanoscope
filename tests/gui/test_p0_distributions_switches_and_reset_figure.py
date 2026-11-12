@@ -975,13 +975,17 @@ def test_in_the_explorer_the_toolbars_reset_figure_resets_the_page_in_front(
     assert not button.isVisible()
     assert "Undo" in action.toolTip() and "defaults" in action.toolTip()
     assert button.toolTip() == iv._appearance_widget.reset_button.toolTip()
+    # A figure made in a project is bound to the project's figure style; Reset figure returns it
+    # to that look, as a new figure has it, with the words gone (and not to a figure with no style).
+    new_look = iv.appearance_state()
+    assert new_look["style_binding"] and "title" not in new_look
     iv._appearance_widget.apply_appearance(
         replace(iv._appearance_widget.state(), title="Pore 3", x_label="Bias"))
     steps = _depth("iv", iv)
     assert iv._plot.titleLabel.item.toPlainText() == "Pore 3"
     bar._update_menu.popup(bar.mapToGlobal(QtCore.QPoint(20, 20)))
     _choose(bar._update_menu, "Reset figure")
-    assert iv.appearance_state() == {} and iv._plot.titleLabel.item.toPlainText() == ""
+    assert iv.appearance_state() == new_look and iv._plot.titleLabel.item.toPlainText() == ""
     assert _depth("iv", iv) == (steps[0] + 1, 0)
     _press_undo(iv)
     assert iv._plot.titleLabel.item.toPlainText() == "Pore 3"

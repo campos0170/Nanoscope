@@ -1797,7 +1797,10 @@ class VDepWindow(QtWidgets.QMainWindow):
             })
 
         if self._fit_item is not None:
-            x, y = self._fit_item.getData()
+            # The curve as it was GIVEN: real volts and real metric values. ``getData()`` answers
+            # in DISPLAY coordinates, and with Log y ticked the plot is in log mode, so it holds
+            # the log10 of the fitted value (and ``metric_value_display`` followed that exponent).
+            x, y = self._fit_item.getOriginalDataset()
             for xv, yv in zip(np.asarray(x), np.asarray(y)):
                 rows.append({
                     "part": "fit", "source_identity_kind": "",

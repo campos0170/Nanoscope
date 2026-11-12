@@ -192,13 +192,26 @@ class _FiguresMixin:
                 owner.recordChanged.emit(key)
 
     def _drop_noise_traces(self, doc_id: str) -> None:
-        """A closed recording leaves no processed trace behind on a Noise page."""
+        """A closed recording leaves no processed trace behind on a Noise page, and the page's
+        Source box shows it as unavailable instead of offering it."""
         owner = self._figure_workspace
         if owner is None:
             return
         for entry in tuple(owner._entries.values()):
             if entry.record.spec.kind == PAGE_NOISE and entry.page is not None:
                 entry.page.release_processed_traces(doc_id)
+                entry.page.recording_closed(doc_id)
+
+    def _offer_reopened_recording(self, doc_id: str) -> None:
+        """A recording that opens is offered again by a Noise page whose Source box or
+        comparison list named it as unavailable (it was closed, or the project was opened
+        without it), instead of reading 'Unavailable recording' until Update."""
+        owner = self._figure_workspace
+        if owner is None:
+            return
+        for entry in tuple(owner._entries.values()):
+            if entry.record.spec.kind == PAGE_NOISE and entry.page is not None:
+                entry.page.recording_opened(doc_id)
 
     def _open_figure_kind(self, kind):
         owner = self._ensure_figure_workspace()

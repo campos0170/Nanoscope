@@ -4,14 +4,14 @@ from copy import deepcopy
 import numpy as np
 import pandas as pd
 import pytest
-from PySide6 import QtCore
+from PySide6 import QtCore, QtWidgets
 
 from nanoscope.gui.baseline_panel import BaselinePanel, _OpenPoreReferenceEditor
 from nanoscope.gui.incubation_window import _FrameModel
 from nanoscope.gui.manual_study_window import _Form
 from nanoscope.gui.measure_panel import _MeasurementsModel, _SORT_ROLE as MEASURE_SORT
 from nanoscope.gui.panels import DetectionPanel, _EventTableModel, _SORT_ROLE as EVENT_SORT
-from nanoscope.gui.time_controls import SecondsSpinBox, HoursSpinBox
+from nanoscope.gui.time_controls import SecondsSpinBox
 
 
 def test_detection_windows_show_ms_but_params_and_programmatic_values_stay_seconds(qtbot):
@@ -109,8 +109,14 @@ def test_study_frame_metadata_uses_actual_ms_us_hours_and_unknown_basis(qtbot):
                           'incubation_h': [1.], 'onset_s': [.05], 'mystery_s': [9.]})
     model = _FrameModel()
     model.set_frame(frame)
-    assert [model.data(model.index(0, i)) for i in range(5)] == ['2', '2', '3600000', '50', '9']
+    # Incubation is the one duration shown in its own unit: 1 h reads 1, not 3600000 ms.
+    assert [model.data(model.index(0, i)) for i in range(5)] == ['2', '2', '1', '50', '9']
     assert model.data(model.index(0, 2), QtCore.Qt.UserRole) == 1.
+    header = [model.headerData(i, QtCore.Qt.Horizontal) for i in range(5)]
+    assert header == ['Dwell time (ms)', 'Median dwell (ms)', 'Incubation time (h)', 'Onset time (ms)',
+                      'Mystery s (units unknown)']
+    assert model.headerData(2, QtCore.Qt.Horizontal, QtCore.Qt.ToolTipRole) == \
+        'incubation_h — stored unit: h; displayed unit: h'
     pd.testing.assert_frame_equal(model.frame, frame)
 
 
@@ -122,9 +128,15 @@ def test_study_numeric_and_interval_forms_keep_seconds_and_hours_recipes(qtbot):
                   ('merge_ms', 'Merge (ms)', float, 3.)])
     qtbot.addWidget(form)
     assert isinstance(form.controls['keep_start_s'], SecondsSpinBox)
-    assert isinstance(form.controls['incubation_h'], HoursSpinBox)
-    assert form.controls['incubation_h'].text().endswith(' ms')
-    assert form.controls['incubation_h'].valueFromText(form.controls['incubation_h'].text()) == 1.
+    # Incubation is typed in hours, the unit it is stored in: a plain number box, no ms conversion.
+    incubation = form.controls['incubation_h']
+    assert type(incubation) is QtWidgets.QDoubleSpinBox and not incubation.suffix()
+    assert incubation.accessibleName() == 'Incubation (h)'
+    assert incubation.value() == 1. and float(incubation.text()) == 1.
+    incubation.lineEdit().setText('18')
+    incubation.interpretText()
+    assert incubation.value() == 18. and form.values()['incubation_h'] == 18.
+    incubation.setValue(1.)
     assert form.values()['keep_start_s'] == .05
     assert form.values()['incubation_h'] == 1.
     assert form.values()['CUSUM_MAX_EVENT_S'] == ''
@@ -136,7 +148,7 @@ def test_study_numeric_and_interval_forms_keep_seconds_and_hours_recipes(qtbot):
     assert second.split(':')[0].strip() == 'invalid' and float(second.split(':')[1]) == .2
     form.set_values(values)
     assert form.controls['exclude_s'].text() == '50:100; invalid:200'
-    assert np.isclose(form.controls['incubation_h'].valueFromText('1800000 ms'), .5)
+    assert form.controls['incubation_h'].valueFromText('0.5') == .5
 
 
 def test_trace_tick_unit_changes_without_moving_geometry_or_sample_hit(qtbot, tmp_path):

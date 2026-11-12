@@ -4390,7 +4390,7 @@
         "kind": "control",
         "group": "Time widgets, axes, tables and readouts",
         "what_it_does": "Displays declared durations/clocks in ms and inversely converts typed entries.",
-        "notes": "Stored seconds, historical µs/hour bases and sample indices retain their canonical units. Clock origins remain distinct. Density gets an inverse unit factor; raw and display-valued export columns are distinguished."
+        "notes": "Stored seconds, historical µs/hour bases and sample indices retain their canonical units. Clock origins remain distinct. Density gets an inverse unit factor; raw and display-valued export columns are distinguished. Incubation time is the one exception to milliseconds: it is stored, shown and typed in hours."
       },
       {
         "label": "Save and convert / Save a copy / Cancel",

@@ -1520,6 +1520,20 @@ def _psd_record_recipe(window: Any, record: Mapping[str, Any]) -> dict[str, Any]
                           None if record.get("channel") is None else int(record["channel"]))
 
 
+def _recipe_from_key(key: str) -> dict[str, Any] | None:
+    """What a PSD recording key, ``<persistent key>#<channel>``, says of the recording.
+
+    All a page can still name of a recording that has closed: the persistent key and the
+    channel's position (not its name or kind, which only an open document can give). With no
+    name or kind ``resolve_channel`` finds the channel by position, as it does for a project
+    written before channels carried an identity, which is what finding it again needs."""
+    source_key, separator, channel = str(key).rpartition("#")
+    if not (source_key and separator and channel.isdecimal()):
+        return None
+    return {"source_key": source_key, "channel": int(channel),
+            "channel_name": None, "channel_kind": None}
+
+
 def _psd_record_for_recipe(window: Any, recipe: Mapping[str, Any]) -> tuple[Any | None, str | None]:
     doc_id, channel, note = _resolve_source(window, recipe)
     if doc_id is None or channel is None:
@@ -1639,21 +1653,36 @@ def _capture_psd(window: Any) -> WorkspaceArtifact:
         carried_target = getattr(window, "_nanoscope_workspace_psd_target", None)
         if isinstance(carried_target, Mapping):
             target_source = _clone_plain(dict(carried_target))
-    compare_sources = [
-        _psd_record_recipe(window, records_by_key[key])
-        for key in window.compare_keys() if key in records_by_key
-    ]
+    compare_keys = list(window.compare_keys())
+    compare_sources = []
+    for key in compare_keys:
+        # The page's last gather can still list a recording that has closed since: it has
+        # no source key to read (an empty identity no reopen could resolve), so it is left
+        # to the carried and key-derived recipes below.
+        recipe = (_psd_record_recipe(window, records_by_key[key])
+                  if key in records_by_key else None)
+        if recipe is not None and recipe["source_key"]:
+            compare_sources.append(recipe)
     for carried in getattr(window, "_nanoscope_unresolved_psd_compare", ()) or ():
         if isinstance(carried, Mapping):
             if callable(getattr(window, '_pending_compares', None)):
                 key = f"{carried.get('source_key')}#{carried.get('channel')}"
-                if key not in window.compare_keys():
+                if key not in compare_keys:
                     continue  # Deliberately unchecked; do not resurrect it on reopen.
             compare_sources.append(_clone_plain(dict(carried)))
+    # A ticked comparison with no recipe yet (its recording closed since this page was last
+    # restored, so no earlier save carried an identity for it) is still named by its key.
+    # Without a recipe the next reopen forgets the tick while the saved figure keeps its curve.
+    named = {f"{recipe.get('source_key')}#{recipe.get('channel')}" for recipe in compare_sources}
+    for key in compare_keys:
+        if key not in named:
+            recipe = _recipe_from_key(key)
+            if recipe is not None:
+                compare_sources.append(recipe)
     payload = {
         "config": {
             "target_key": _psd_target_key(window),
-            "compare_keys": list(window.compare_keys()),
+            "compare_keys": compare_keys,
             "target_source": target_source,
             "compare_sources": compare_sources,
             "start_s": float(_widget_value(window, "_start_spin", "value", 0.0)),

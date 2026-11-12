@@ -161,7 +161,7 @@ def test_incubation_log_dwell_and_per_decade_density_are_not_converted_twice(tmp
     fig.clear()
 
 
-def test_incubation_hours_are_only_converted_at_axes(tmp_path, monkeypatch):
+def test_incubation_hours_are_drawn_and_labelled_in_hours(tmp_path, monkeypatch):
     captured = _capture(monkeypatch, incubation_figures)
     monkeypatch.setattr(incubation_figures, '_distribution_set', lambda *a, **k: tmp_path / 'distribution.png')
     events = pd.DataFrame({'condition': ['Apo'] * 4, 'tag': ['one'] * 4, 'dwell_ms': [1., 2., 3., 4.],
@@ -173,9 +173,10 @@ def test_incubation_hours_are_only_converted_at_axes(tmp_path, monkeypatch):
     incubation_figures.comparison_figures(events, summary, tables, tmp_path)
     fig, data = captured['incubation_rates_and_medians']
     assert fig.axes[0].lines[0].get_xdata()[0] == 2.
-    assert fig.axes[0].xaxis.get_major_formatter()(2.) == '7.2e+06'
-    assert fig.axes[0].get_xlabel() == 'Incubation (ms)'
-    assert display_to_view(7200000., fig.axes[0]._nanoscope_quantity_axes['bottom']) == 2.
+    assert fig.axes[0].xaxis.get_major_formatter()(2.) == '2'
+    assert fig.axes[0].get_xlabel() == 'Incubation (h)'
+    assert display_to_view(2., fig.axes[0]._nanoscope_quantity_axes['bottom']) == 2.
+    assert fig.axes[2].get_ylabel() == 'Dwell (ms)'
     assert fig.axes[0].get_ylabel() == 'Accepted event rate (/s)'
     pd.testing.assert_frame_equal(data, summary)
     for figure, _ in captured.values(): figure.clear()

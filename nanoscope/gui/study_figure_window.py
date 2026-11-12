@@ -22,7 +22,7 @@ from .plot_appearance import PlotAppearance, PlotAppearanceWidget
 from .format_inspector import FormatPane, SelectionHub
 from .plot_workflow import FormatSpec
 from .matplotlib_text_controller import synchronize_controllers
-from .figure_bundle import capture_figure_snapshot, write_figure_bundle
+from .figure_bundle import capture_figure_snapshot, tag_nonfinite_floats, write_figure_bundle
 from .plot_export import choose_live_plot_export, write_live_plot_image
 
 
@@ -478,7 +478,7 @@ class StudyFigureWindow(QtWidgets.QMainWindow):
             snapshot=self.snapshot();metadata,blobs=snapshot.to_storage()
             artifact_kind = 'manual-study.figure' if self._owner_kind == 'study' else 'report.figure'
             analysis=WorkspaceArtifact(artifact_id=artifact_kind,kind=artifact_kind,schema_version=1,
-                payload={'figure':self._name,'style':self.style(),'provenance':deepcopy(self._provenance)},
+                payload={'figure':self._name,'style':self.style(),'provenance':tag_nonfinite_floats(deepcopy(self._provenance))},
                 tables={'plotted_data':self._data.copy(deep=True)})
             entry=make_figure(name=name,page_id='manual-study' if self._owner_kind == 'study' else 'report',
                 source_label=str(self._provenance.get('study', 'Study' if self._owner_kind == 'study' else 'Report')),

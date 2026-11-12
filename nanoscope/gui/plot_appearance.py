@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 import functools
+import hashlib
 import math
 import json
 import re
@@ -601,7 +602,63 @@ def _describe_reset(before: PlotAppearance, after: PlotAppearance) -> str | None
     return f"reset {name_list(took)}" if took else None
 
 
-def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
+def _fingerprint(state: PlotAppearance) -> str:
+    """A short identity of ``state``'s value, the drawn-quantity record aside (it is moved by the
+    renderer without a step, and by a restore): what ties a step's hint to its value in a capsule."""
+    raw = json.dumps(replace(state, quantity_display=None).to_dict(), sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def note_dormant_step(capsule, state: PlotAppearance, *, reset: bool | None):
+    """``capsule`` (the appearance history a figure keeps as plain values while it has no widget)
+    with ``state`` noted as its next step and how that step was made: what
+    :meth:`_AppearanceHistory.note` does after :meth:`~_AppearanceHistory.hint_next`, for a figure
+    that is asleep. ``reset`` is :func:`_describe_step`'s: ``False`` for a style applied from
+    Style ▾, which the figure then names as it names the same pick made while it is awake.
+
+    The hints a capsule carries (``extra["step_hints"]``) are positions in the order of its values,
+    so they have to follow the values. The step that ends the redo branch takes the place of a
+    step that is gone, and it must not inherit that step's name though it lands on an equal value;
+    and a step the ceiling drops takes its hint with it."""
+    noted = capsule.note(state.to_dict())
+    if noted is capsule:
+        return capsule
+    lost = noted.dropped - capsule.dropped
+    hints = []
+    for entry in thaw_json(capsule.extra.get("step_hints")) or ():
+        at = entry.get("at") if isinstance(entry, dict) else None
+        if type(at) is int and 0 <= at - lost < len(noted.past):
+            hints.append({**entry, "at": at - lost})
+    if reset is not None:
+        hints.append({"at": len(noted.past), "of": _fingerprint(state), "reset": reset})
+    extra = {key: value for key, value in thaw_json(noted.extra).items() if key != "step_hints"}
+    return replace(noted, extra={**extra, "step_hints": hints} if hints else extra)
+
+
+def _style_of(state: PlotAppearance):
+    """The style ``state`` is bound to (its reference and its pinned definition), or None."""
+    binding = state.style_binding
+    return None if not binding else (binding.get("ref"), binding.get("snapshot"))
+
+
+def _is_plain(state: PlotAppearance) -> bool:
+    """Whether ``state`` is nothing but its look: no words, element style, axis pin, annotation
+    place, series style or fit label, and none of the look's own fields set by hand. Bound to a
+    style, the look is that style's; unbound, the plain defaults. The drawn-quantity record
+    and the source names go through a Reset figure, so they do not count."""
+    from .figure_style_binding import NATIVE_LOOK_KEYS
+
+    state = replace(state, quantity_display=None, source_appearance=None)
+    if state.style_binding:
+        if set(NATIVE_LOOK_KEYS.values()) & set(state.style_binding.get("overrides", {})):
+            return False
+        # What the style puts in the look fields is the style's, not the figure's.
+        state = replace(state, style_binding=None, **dict.fromkeys(NATIVE_LOOK_KEYS))
+    return not state.to_dict()
+
+
+def _describe_step(before: PlotAppearance, after: PlotAppearance, *,
+                   reset: bool | None = None) -> str:
     """Name the step from ``before`` to ``after`` for its Undo or Redo tooltip.
 
     Read off the two VALUES, so the stack holds nothing but appearances. A single field is
@@ -612,12 +669,25 @@ def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
     reset, and any other several are counted. ``quantity_display`` is the renderer's record of
     which quantity each axis draws, not a gesture: a step that moved it with something else is
     named by the something else, and a Reset figure (which keeps it) still lands on no override.
+    "No override" of a figure bound to a style is that style with nothing of the figure's own on
+    it (:func:`_is_plain`): the step that binds another style is not a reset. A look control
+    edited on a bound figure moves two fields, the look and the binding's record of the override
+    (its style stays the same): that is the control's own step, named as such in both directions.
+
+    ``reset`` is how the step was made, when whoever made it knows. A Reset figure binds a figure
+    that has no style to the project's default, which a style picked in Style ▾ does as well and
+    to the same values, so the two cannot be told apart from the values: ``True`` (the Reset
+    figure button) lets that landing be the reset it is, ``False`` (Style ▾) never calls a step
+    a reset, and ``None`` (a step read from saved history) is read from the values alone.
     """
     moved = [f.name for f in fields(PlotAppearance)
              if getattr(before, f.name) != getattr(after, f.name)]
     if "quantity_display" in moved and moved != ["quantity_display"]:
         moved.remove("quantity_display")
         after = replace(after, quantity_display=before.quantity_display)
+    if "style_binding" in moved and moved != ["style_binding"] \
+            and _style_of(before) == _style_of(after):
+        moved.remove("style_binding")
     if moved == ["style_binding"]:
         binding = after.style_binding
         if not binding:
@@ -655,14 +725,16 @@ def _describe_step(before: PlotAppearance, after: PlotAppearance) -> str:
             elif old is not None:
                 said_old += " pt"
         return f"{_STEP_WORDS[key][0]} {said_old} → {said_new}"
-    reset = _describe_reset(before, after)
-    if reset is not None:
-        return reset
+    took = _describe_reset(before, after)
+    if took is not None:
+        return took
     for name, preset in _BUILTIN_PRESETS.items():
         # A preset keeps the figure's wording, so the step lands on the preset's LOOK.
         if after.style_only() == preset and before.style_only() != preset:
             return f"{name} preset"
-    if not replace(after, quantity_display=None).to_dict():
+    if reset is not False and _is_plain(after) and (
+            not after.style_binding or _style_of(before) == _style_of(after)
+            or (reset and not before.style_binding)):
         return "reset figure"
     return f"{len(moved)} appearance changes"
 
@@ -676,9 +748,15 @@ class _AppearanceHistory:
     stepped off. :meth:`note` records by DIFF, so a caller that says "something may have
     moved" too often costs one comparison, and walking a combo away and back pushes
     nothing. Qt-free.
+
+    Beside each value the stack keeps HOW the step that arrived at it was made, when its maker
+    said so (:meth:`hint_next`): the one fact two steps with the same pair of values can differ
+    in (:func:`_describe_step`'s ``reset``). The hints travel with their values through Undo and
+    Redo, and a value restored from saved history has none.
     """
 
-    __slots__ = ("base", "_past", "_future", "dropped")
+    __slots__ = ("base", "_past", "_future", "dropped", "base_hint", "_past_hints",
+                 "_future_hints", "_next_hint")
 
     def __init__(self, base: PlotAppearance) -> None:
         self.base = base
@@ -687,6 +765,12 @@ class _AppearanceHistory:
         #: Steps thrown away at :data:`APPEARANCE_HISTORY_DEPTH`. Counted rather than
         #: merely dropped, because a silent bound looks exactly like a broken Undo button.
         self.dropped = 0
+        #: How the step that arrived at ``base`` was made (None: nobody said), and the same for
+        #: each value of the two stacks, in step with them.
+        self.base_hint: bool | None = None
+        self._past_hints: list[bool | None] = []
+        self._future_hints: list[bool | None] = []
+        self._next_hint: bool | None = None
 
     def depth(self) -> tuple[int, int]:
         """``(steps back, steps forward)``."""
@@ -700,17 +784,34 @@ class _AppearanceHistory:
         """``(before, after)`` of the step a redo would replay."""
         return (self.base, self._future[-1]) if self._future else None
 
+    def last_hint(self) -> bool | None:
+        """How the step :meth:`last_step` names was made."""
+        return self.base_hint if self._past else None
+
+    def next_hint(self) -> bool | None:
+        """How the step :meth:`next_step` names was made."""
+        return self._future_hints[-1] if self._future else None
+
+    def hint_next(self, reset: bool | None) -> None:
+        """Say how the step the next :meth:`note` records is made (``reset``: see
+        :func:`_describe_step`). Used up by that call, whether or not it records one."""
+        self._next_hint = reset
+
     def note(self, now: PlotAppearance) -> bool:
         """Record that the controls moved from :attr:`base` to ``now``. True if they had."""
+        hint, self._next_hint = self._next_hint, None
         if now == self.base:
             return False
         self._past.append(self.base)
-        self.base = now
+        self._past_hints.append(self.base_hint)
+        self.base, self.base_hint = now, hint
         # A new step ends the redo branch: "forward" would lead somewhere no longer
         # reachable from here.
         self._future.clear()
+        self._future_hints.clear()
         while len(self._past) > APPEARANCE_HISTORY_DEPTH:
             del self._past[0]
+            del self._past_hints[0]
             self.dropped += 1
         return True
 
@@ -718,26 +819,49 @@ class _AppearanceHistory:
         if not self._past:
             return None
         self._future.append(self.base)
-        self.base = self._past.pop()
+        self._future_hints.append(self.base_hint)
+        self.base, self.base_hint = self._past.pop(), self._past_hints.pop()
         return self.base
 
     def redo(self) -> PlotAppearance | None:
         if not self._future:
             return None
         self._past.append(self.base)
-        self.base = self._future.pop()
+        self._past_hints.append(self.base_hint)
+        self.base, self.base_hint = self._future.pop(), self._future_hints.pop()
         return self.base
 
     def rebase(self, state: PlotAppearance) -> None:
-        """Move the base WITHOUT recording a step."""
+        """Move the base WITHOUT recording a step. A base that is another value than the one its
+        step arrived at (the drawn-quantity record aside, which the renderer moves on its own)
+        is no longer what that step's maker said it was."""
+        if replace(state, quantity_display=None) != replace(self.base, quantity_display=None):
+            self.base_hint = None
         self.base = state
+
+    def sequence(self) -> tuple[list[PlotAppearance], list[bool | None]]:
+        """Every value in the order the steps made them (the past, the base, then the future as
+        Redo replays it), with how the step that arrived at each was made."""
+        return ([*self._past, self.base, *reversed(self._future)],
+                [*self._past_hints, self.base_hint, *reversed(self._future_hints)])
+
+    def restore(self, base: PlotAppearance, past: list[PlotAppearance],
+                future: list[PlotAppearance], dropped: int,
+                hints: Sequence[bool | None] = ()) -> None:
+        """Install a whole stack read from saved history. ``hints`` are how its steps were made,
+        in the order of :meth:`sequence` (nothing, where saved history does not say)."""
+        total = len(past) + 1 + len(future)
+        hints = [*hints][:total]
+        hints += [None] * (total - len(hints))
+        self.base, self._past, self._future, self.dropped = base, past, future, dropped
+        self._past_hints = hints[:len(past)]
+        self.base_hint = hints[len(past)]
+        self._future_hints = hints[len(past) + 1:][::-1]
+        self._next_hint = None
 
     def reset(self, base: PlotAppearance) -> None:
         """Forget every step, and the ceiling count with them (``_ConfigHistory.reset``)."""
-        self.base = base
-        self._past.clear()
-        self._future.clear()
-        self.dropped = 0
+        self.restore(base, [], [], 0)
 
 
 def set_projected_spin_value(spin, value):
@@ -880,6 +1004,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         self.style_vocabulary = style_vocabulary
         self._state = self._project_state(state or PlotAppearance())
         self._reset_keeps = reset_keeps
+        #: What Reset figure binds a figure with no style to (:meth:`set_new_figure_look`).
+        self._new_figure_look: Callable[[], PlotAppearance | None] | None = None
         self._reset_taken = False       # see take_reset_button
         #: The sentence the last quantity change put on the host's status bar ("" for none).
         self._reset_said = ""
@@ -1482,7 +1608,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
                 self._burst.start()
                 self._sync_history_buttons()
 
-    def _apply(self, state: PlotAppearance, *, always: bool = False) -> None:
+    def _apply(self, state: PlotAppearance, *, always: bool = False,
+               reset: bool | None = None) -> None:
         """A one-gesture change -- a preset, a saved appearance, a colour, Reset: one step.
 
         Recorded after the host has answered ``changed``, so the step holds what the host
@@ -1490,6 +1617,10 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         a built-in preset always has: the Plots window installs whole configurations
         without writing them back here, so its controls can lag the window, and the preset
         must still reach it. Announcing an unchanged state records no step.
+
+        ``reset`` says how the step is made, for the Undo and Redo tooltips that name it
+        (:func:`_describe_step`): True for Reset figure, False for a style applied from Style ▾,
+        None for any other gesture, which is named from its values alone.
         """
         self._close_burst()      # a run of edits still open is its own, earlier step
         state = self._edited_state(state)
@@ -1497,6 +1628,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
             return
         self._write(state)
         self._announce(state)
+        if self._history is not None:
+            self._history.hint_next(reset)
         self._close_burst()
 
     def _announce(self, state: PlotAppearance) -> None:
@@ -1514,14 +1647,39 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         if color.isValid():
             self._apply(PlotAppearance.from_mapping({**self._state.to_dict(), field: color.name()}))
 
+    def set_new_figure_look(self, provider: Callable[[], PlotAppearance | None] | None) -> None:
+        """Say what a NEW figure of this page's kind looks like in the project it belongs to.
+
+        ``provider()`` returns that appearance, bound to the project's CURRENT default figure
+        style (``FigureWorkspace.new_figure_look``), or None when the project's styles cannot be
+        read. Reset figure binds it to a figure that has no style (made from a recipe, or left so
+        by an older Reset figure), so that figure goes back to the look every new one has; a
+        figure that has a style keeps its own. A page in no project is given none, and its Reset
+        figure goes back to the plain defaults."""
+        self._new_figure_look = provider
+
     def _reset(self):
+        # A figure in a project is bound to a figure style, as a new one is, and Reset look (the
+        # Format tab's) already returns it to that style. Reset figure keeps the binding too, so
+        # the look it takes off goes back to the style's: unbound, the figure drew the old dark,
+        # gridded look that no new figure has. Every look field is left out of the new state, and
+        # ``_edited_state`` reads that as the controls' own "Default" for each one: it takes the
+        # figure's override of that field out of the binding, and leaves an override these
+        # controls do not own (Distributions' Font size (body)). A figure with no style, in a
+        # project, is bound to what a new figure of its kind is bound to there, and the same
+        # step projects that style's look; a window in no project keeps the plain defaults.
+        binding = self._state.style_binding
+        if not binding and self._new_figure_look is not None:
+            look = self._new_figure_look()
+            binding = None if look is None else look.style_binding
         state = PlotAppearance(quantity_display=self._state.quantity_display,
-                               source_appearance=self._state.source_appearance)
+                               source_appearance=self._state.source_appearance,
+                               style_binding=binding)
         if self._reset_keeps is not None:
             for key, style in self._state.text or ():
                 if self._reset_keeps(key):
                     state = state.with_text_style(key, style)
-        self._apply(state)
+        self._apply(state, reset=True)
 
     def take_reset_button(self) -> QtWidgets.QPushButton:
         """Hand the Reset figure button to the page's toolbar: the SAME button, out of this
@@ -1551,10 +1709,17 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         history = self._history
         if history is None:
             return None
+        # How each step was made rides along, beside the values, tied to the value it arrived at
+        # (a capsule can be moved or extended while the figure is asleep, and a hint whose value
+        # is no longer where it was is dropped on the way back).
+        values, hints = history.sequence()
+        named = [{"at": at, "of": _fingerprint(values[at]), "reset": hint}
+                 for at, hint in enumerate(hints) if hint is not None]
         return HistoryCapsule(
             "nanoscope.appearance-history/1", history.base.to_dict(),
             tuple(state.to_dict() for state in history._past),
-            tuple(state.to_dict() for state in history._future), history.dropped)
+            tuple(state.to_dict() for state in history._future), history.dropped,
+            {"step_hints": named} if named else {})
 
     def adopt_quantity_bases(self, axes):
         """Adopt a different drawn measurement without closing an author edit.
@@ -1624,11 +1789,16 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         future = [decode(state) for state in capsule.future]
         if base != self._state:
             raise FigureValidationError("Appearance history does not match the restored figure")
+        values = [*past, base, *reversed(future)]
+        hints: list[bool | None] = [None] * len(values)
+        named = thaw_json(capsule.extra.get("step_hints"))
+        for entry in named if isinstance(named, list) else ():
+            at = entry.get("at") if isinstance(entry, dict) else None
+            if (type(at) is int and 0 <= at < len(values) and type(entry.get("reset")) is bool
+                    and entry.get("of") == _fingerprint(values[at])):
+                hints[at] = entry["reset"]
         self._burst.stop()
-        self._history.base = base
-        self._history._past = past
-        self._history._future = future
-        self._history.dropped = capsule.dropped
+        self._history.restore(base, past, future, capsule.dropped, hints)
         self._sync_history_buttons()
 
     def apply_look(self, look: PlotAppearance, *, keep_hand: bool = True) -> bool:
@@ -1637,7 +1807,7 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         text styles set by hand survive (:meth:`PlotAppearance.restyled`)."""
         before = self._state
         self._apply(before.restyled(look, keep_hand=keep_hand,
-                                    vocabulary=self.style_vocabulary), always=True)
+                                    vocabulary=self.style_vocabulary), always=True, reset=False)
         return self._state != before
 
     def reset_figure(self) -> None:
@@ -1767,7 +1937,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
                    f"ceiling ({lost} step{plural} lost).") if lost else ""
         step = (history.base, self._state) if pending else history.last_step()
         if step is not None:
-            self.undo_button.setToolTip(f"Undo: {_describe_step(*step)}{ceiling}")
+            hint = None if pending else history.last_hint()      # an open run is typed edits
+            self.undo_button.setToolTip(f"Undo: {_describe_step(*step, reset=hint)}{ceiling}")
         elif lost:
             self.undo_button.setToolTip(
                 f"Nothing left to undo — this plot's oldest appearance history was dropped "
@@ -1777,7 +1948,8 @@ class PlotAppearanceWidget(QtWidgets.QWidget):
         step = history.next_step()
         self.redo_button.setToolTip(
             "Redo is cleared by a new change." if pending and step else
-            f"Redo: {_describe_step(*step)}" if step else "Nothing to redo.")
+            f"Redo: {_describe_step(*step, reset=history.next_hint())}" if step
+            else "Nothing to redo.")
         self.historyChanged.emit()
 
     def history_mark(self) -> int:

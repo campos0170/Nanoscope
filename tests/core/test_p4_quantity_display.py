@@ -27,6 +27,27 @@ def test_declared_time_units_have_an_exact_inverse(unit, value, shown):
     assert from_display(shown, descriptor) == pytest.approx(value)
 
 
+def test_incubation_time_is_presented_in_hours_while_every_other_duration_stays_in_ms():
+    # Incubation is hours long (2 h would read 7,200,000 ms): the one duration shown in its own unit.
+    hours = quantity_for('incubation_h')
+    assert (hours.stored_unit, hours.display_unit, hours.factor, hours.offset) == ('h', 'h', 1., 0.)
+    assert column_entry('incubation_h', hours)[1:] == ('Incubation time (h)',
+                                                       'incubation_h — stored unit: h; displayed unit: h')
+    assert to_display(18., hours) == 18. and from_display(18., hours) == 18.
+    assert parse_display_number('18', hours) == 18.
+    assert format_quantity(2., hours) == '2 h'
+    # The stored-unit declaration a figure axis supplies changes nothing: still its own unit.
+    assert quantity_for('incubation_h', declared_unit='h', quantity='duration').display_unit == 'h'
+    # A caller can still ask for a unit, and the conversion stays exact both ways.
+    ms = quantity_for('incubation_h', display_unit='ms')
+    assert (ms.display_unit, ms.factor) == ('ms', 3600000.)
+    assert to_display(.5, ms) == 1800000. and from_display(1800000., ms) == .5
+    # Nothing else moved: it is this quantity, not the unit hour, that is shown in hours.
+    for key in ('dwell_s', 'dwell_ms', 'median_dwell_us', 'duration_s', 'analyzed_duration_s'):
+        assert quantity_for(key).display_unit == 'ms', key
+    assert quantity_for('t_start_s').display_unit == 'ms'
+
+
 def test_actual_event_and_measurement_schemas_keep_clock_duration_charge_and_sample_roles():
     from nanoscope.analysis.events import SCHEMA
     from nanoscope.analysis.measure import MEASUREMENT_SCHEMA

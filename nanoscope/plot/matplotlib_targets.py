@@ -15,6 +15,7 @@ from matplotlib.ticker import MultipleLocator
 
 from ..core.figure_style import resolve_bound_text
 from .style import font_family_list
+from .typed_text import retype_text, set_typed_text
 
 
 def panel_view(panel: str) -> str:
@@ -147,13 +148,17 @@ def apply_text_overrides(figure, appearance: Mapping, *, binding: Mapping | None
                 artist.set_color(style["color"])
             if "align" in caps and style.get("align") is not None:
                 artist.set_horizontalalignment(style["align"])
+            # User input is literal: a dollar in a sample name is not mathtext. Only the
+            # sub/superscript markup draws, as mathtext made at draw time (typed_text).
             if "edit" in caps and style.get("text") is not None:
-                artist.set_text(str(style["text"]).strip())
-                # User input is literal. A dollar in a sample name is not mathtext.
-                artist.set_parse_math(False)
+                set_typed_text(artist, str(style["text"]).strip())
             elif key == "title" and panel == "figure" and appearance.get("title"):
-                artist.set_text(appearance["title"].strip())
-                artist.set_parse_math(False)
+                set_typed_text(artist, appearance["title"].strip())
+            else:
+                # Words typed while the figure was built (the Comparison label boxes, a study panel's
+                # words) were spelled for the face the Text had then: the family, weight and slant
+                # set just above may be another one.
+                retype_text(artist)
     for index, axis in enumerate(figure.axes):
         panel = panel_identity(axis, index)
         for side, mpl_axis, setter in (("bottom", axis.xaxis, axis.set_xlim), ("left", axis.yaxis, axis.set_ylim)):

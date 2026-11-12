@@ -3,6 +3,7 @@ import io
 import json
 import math
 from dataclasses import replace
+from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -141,6 +142,75 @@ def test_nonfinite_metadata_refused_before_capturing_live_items(plots, monkeypat
     with pytest.raises(ValueError):
         F.capture_figure_snapshot(main.getPlotItem(), data=pd.DataFrame({"x": [1.0]}),
                                   config={"bad": math.nan})
+
+
+def _workspace_spelling(value: float) -> dict:
+    """How the project's workspace layer writes a NaN or an infinity: the ONE spelling."""
+    from nanoscope.core.analysis_workspace import _Resources, _encode
+    return _encode(value, _Resources(), "provenance")
+
+
+def test_nonfinite_provenance_is_kept_in_the_workspace_spelling_and_reads_back(plots, tmp_path):
+    """A recording with no upward events has ``polarity_evidence.ratio = n_down / 0 = inf`` in its
+    detection provenance. That is a fact about the source, so it is saved, as strict JSON, in the
+    spelling ``core.analysis_workspace`` already uses -- and the project's own decoder reads it."""
+    from nanoscope.core.analysis_workspace import _decode
+    main, *_ = plots
+    provenance = {"polarity_evidence": {"ratio": math.inf, "confidence": math.nan, "margin": -math.inf,
+                                        "counts": [1, np.float32("inf"), np.float64("nan"), (math.inf,)],
+                                        "profile": np.array([1.0, np.inf, np.nan])},
+                  "fs": np.float64(50_000.0), "label": "kept"}
+    snapshot = F.capture_figure_snapshot(main.getPlotItem(), data=pd.DataFrame({"x": [1.0]}),
+                                         provenance=provenance)
+    stored = snapshot.provenance()
+    evidence = stored["polarity_evidence"]
+    assert evidence["ratio"] == _workspace_spelling(math.inf)
+    assert evidence["margin"] == _workspace_spelling(-math.inf)
+    assert evidence["confidence"] == _workspace_spelling(math.nan)
+    assert evidence["counts"] == [1, _workspace_spelling(math.inf), _workspace_spelling(math.nan),
+                                  [_workspace_spelling(math.inf)]]
+    assert evidence["profile"] == [1.0, _workspace_spelling(math.inf), _workspace_spelling(math.nan)]
+    assert stored["fs"] == 50_000.0 and stored["label"] == "kept"
+
+    def refuse(token):
+        raise AssertionError(f"provenance.json is not valid JSON: the bare constant {token}")
+    json.loads(snapshot.provenance_json_bytes, parse_constant=refuse)
+
+    restored = _decode(stored, {}, {})["polarity_evidence"]
+    assert restored["ratio"] == math.inf and restored["margin"] == -math.inf
+    assert math.isnan(restored["confidence"])
+    assert restored["counts"][1] == math.inf and math.isnan(restored["counts"][2])
+
+    metadata, blobs = snapshot.to_storage()
+    assert F.FigureSnapshot.from_storage(metadata, blobs) == snapshot
+    path = F.write_figure_bundle(tmp_path / "figure.zip", snapshot)
+    with zipfile.ZipFile(path) as archive:
+        assert archive.read("provenance.json") == snapshot.provenance_json_bytes
+        json.loads(archive.read("manifest.json"), parse_constant=refuse)
+
+
+def test_provenance_without_a_nonfinite_number_is_written_exactly_as_before(plots):
+    main, *_ = plots
+    snapshot = F.capture_figure_snapshot(
+        main.getPlotItem(), data=pd.DataFrame({"x": [1.0]}),
+        provenance={"b": 1.5, "a": [np.int64(2), "x é", (1, 2)], "path": Path("run")})
+    parsed = json.loads(snapshot.provenance_json_bytes)
+    assert parsed["a"] == [2, "x é", [1, 2]] and parsed["b"] == 1.5 and parsed["path"] == "run"
+    assert snapshot.provenance_json_bytes == json.dumps(
+        parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    assert b"__nanoscope_workspace_value__" not in snapshot.provenance_json_bytes
+
+
+def test_nonfinite_configuration_is_still_refused_but_nonfinite_provenance_is_not(plots):
+    """A setting that is NaN cannot be applied again, so it stays refused before anything renders;
+    the same value in the provenance describes the source and is kept."""
+    main, *_ = plots
+    with pytest.raises(ValueError):
+        F.capture_figure_snapshot(main.getPlotItem(), data=pd.DataFrame({"x": [1.0]}),
+                                  config={"bad": math.inf}, provenance={"fine": math.inf})
+    ok = F.capture_figure_snapshot(main.getPlotItem(), data=pd.DataFrame({"x": [1.0]}),
+                                   config={"fit": {"parameters": [1.0]}}, provenance={"fine": math.inf})
+    assert ok.provenance()["fine"] == _workspace_spelling(math.inf)
 
 
 def test_bundle_failure_preserves_previous_file(plots, tmp_path, monkeypatch):

@@ -29,6 +29,7 @@ from ..core.figure_style import resolve_series_color
 from ..core.figure_style_mapping import project_legacy_style
 from .matplotlib_targets import apply_text_overrides, remember_automatic_text
 from .style import font_family_list
+from .typed_text import set_typed_text
 
 
 _local = threading.local()
@@ -491,7 +492,7 @@ retain categorical identities on the multi-panel scientific figures.
             # every plot window (design 13.4 Q1).
             for field, setter in (('title', ax.set_title), ('x_label', ax.set_xlabel), ('y_label', ax.set_ylabel)):
                 if panel.get(field):
-                    setter(panel[field].strip()).set_parse_math(False)
+                    set_typed_text(setter(panel[field].strip()), panel[field].strip())
             if 'axis_size' in state:
                 ax.xaxis.label.set_fontsize(state['axis_size'])
                 ax.yaxis.label.set_fontsize(state['axis_size'])
@@ -508,7 +509,11 @@ retain categorical identities on the multi-panel scientific figures.
                 if state['grid']: ax.grid(True, alpha=.2)
                 else: ax.grid(False)
         if state.get('title'):
-            self.figure.suptitle(state['title'].strip()).set_parse_math(False)
+            # A title the figure did not have has no automatic text to go back to (set_typed_text
+            # remembers the empty words it starts from), and it is typed over once it has its font.
+            title = self.figure.suptitle('')
+            title.set_fontfamily(family)
+            set_typed_text(title, state['title'].strip())
         if self.figure._suptitle is not None:
             if 'title_size' in state:
                 self.figure._suptitle.set_fontsize(state['title_size'])

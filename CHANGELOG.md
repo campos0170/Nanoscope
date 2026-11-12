@@ -73,6 +73,79 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Fixed
 
+- **Noise ▸ Export data writes the spectrum's real values.** With **Log-log axes** ticked, which is
+  the default, the file held the base-10 logarithms of the frequency, the PSD or ASD value, the 1/f
+  fit line and (FFT view) the peak amplitude under their usual column names. It now holds the real
+  values whether or not the box is ticked. A Snapshot, a Figure Library entry and a figure bundle
+  store the same table. Anything exported, snapshotted or bundled earlier with **Log-log axes**
+  ticked still holds the logarithms: its `log_x` and `log_y` columns read True, but so do a new
+  file's, which holds real values, so only the file's date tells the two apart (a file whose `log_x`
+  reads False always held real values). Export or snapshot it again.
+- **Voltage dependence ▸ Export data writes the fitted values with Log y ticked.** The fit rows held
+  the base-10 logarithm of each fitted value (a fitted 100 pA read 2.0), in the exported file and in
+  the table a Snapshot, Figure Library entry or bundle stores; they now hold the real values, as
+  with **Log y** unticked. Export or snapshot again anything written with **Log y** ticked. I-V and
+  Subpopulations write their fitted line and median waveforms exactly as computed even when the view
+  is zoomed in very far, where the rows could come out flattened.
+- **Closing the recording a Noise figure is pinned to no longer blocks Save Project.** After **File
+  ▸ Close document** on that recording, **Save Project** failed with *A figure could not be
+  checkpointed; the previous project was not replaced*, and with the Noise figure in front neither
+  switching figure nor **Delete** worked. The figure now keeps its saved spectrum, its Source box
+  shows the recording as a greyed *Unavailable recording* row, a ticked comparison becomes an
+  *Unavailable recording* row that stays ticked (untick it to drop it), and the project saves. When
+  the recording is opened again it is offered at once, and **Update plot** keeps the figure's Start,
+  End and RMS band. A file at the same path with another sample rate or length is another recording
+  and gets the whole-trace defaults when the figure can tell: a project stores no recording length,
+  so a figure restored from a project, or one that was not loaded when the file came back, can keep
+  the saved values. A comparison recording closed before **Save Project** is still a comparison when
+  the project is reopened.
+- **Report figures can be saved to the Figure Library and bundled again.** All four standard report
+  figures answered *Figure was not added: Out of range float values are not JSON compliant* when the
+  detection's provenance held an infinity or a NaN (a recording with no upward events has an
+  infinite polarity ratio). Such a value is now written in the tagged spelling a project uses inside
+  its saved figures, so `provenance.json` stays valid JSON and the saved record reads back with the
+  same value.
+- **Event waveforms can be snapshotted, bundled, batch-exported and composed again.** Its data table
+  repeated the detection's whole provenance text (about 60 KB) on every row, so a 172-event Ensemble
+  was 1.45 GB and **Snapshot** was refused with *exceeds the 512 MiB storage limit*. The text is now
+  written once, in `provenance_json` on the first row, and the same table is about 8 MB (the
+  Event-count heatmap's about 1 MB, from 125 MB). A reader that filters the rows must take the
+  provenance from the first row before filtering.
+- **The shipped *Publication figure (light)* template carries only a look.** Recalled over an
+  existing plot it replaced the analysis with a 30-bin linear count histogram and no fit. It now
+  sets nine look settings (white background, no grid, the four text sizes, line width 2 and a 1600 ×
+  1200 export) and leaves the plot type, columns, bins, axis scaling, normalisation, fit, typed
+  ranges and typed words alone. The Analysis Explorer does not show the Template box, so the app's
+  only route to this template is **New figure ▸ From recipe…**, and that is unchanged: a new figure
+  with the default analysis and that look, bound to no style until **Reset figure** or **Style ▾**
+  gives it one. Your own saved templates recall as before.
+- **Sub- and superscripts work on Comparison, study and report figures.** `_{…}` and `^{…}` typed in
+  a title, axis label or legend entry were printed as typed, although the text editor's tooltip
+  promised scripts; they now draw as sub- and superscripts in the figure's font, as on the other
+  pages. The stored text stays as typed, SVG and PDF exports keep it as text, and words without that
+  markup draw exactly as before, `$`, `%`, a lone `_` or `^`, braces and backslashes included. On a
+  line that holds a script, a character the label's font lacks (the subscript zero of ΔI/I₀, the
+  superscript minus of s⁻¹, ℃) is drawn from DejaVu Sans and a hyphen between two letters in a
+  script stays a hyphen; a label with a script on a line that also holds a character neither its
+  font nor the fonts that come with NanoScope can draw (a Chinese character beside Arial) is shown
+  as typed, markup and all. Mathematical text on these figures (log-axis tick labels included) is
+  now text in the PDF rather than outlines, wherever it holds no fraction bar or root.
+- **Reset figure keeps the figure's style.** On a figure in a project it dropped the style and left
+  a dark, gridded figure bound to none, a look no new figure has. It now returns the look to the
+  style the figure is bound to, and binds a figure that has no style (made from a recipe, or left so
+  by the old Reset figure) to the project's default style, as a new figure is. Typed words and
+  element styles still go, and so do pinned ranges on every page but Distributions, and one Undo
+  brings everything back. Distributions keeps its Axis range and its **Font size (body)**, as its
+  tooltip says. A window outside a project resets to the plain defaults as before.
+- **Undo and Redo name a single look control on a styled figure.** One look control edited on a
+  figure bound to a style read *2 appearance changes*; it now reads as that control (*Undo: title
+  size 7 → 20 pt*), in both directions. *reset figure* names a step that takes several things off
+  and leaves nothing of the figure's own: **Reset figure**, and **Reset look** on a figure with no
+  typed words. A style chosen in **Style ▾** reads as a count of changes, never as *reset figure*.
+  Distributions' own Undo counts its steps, as before.
+- **Distributions: a style whose sizes are not whole pixels no longer leaves overrides.** Choosing
+  the 8 pt or 9 pt journal style left a line-width and a marker-size override on the figure and a
+  dot on the Style button; the style's own values now stand.
 - **A Manual Study workspace that holds a recording opens again.** A workspace saved by 46.31.52
   with a recording in it was refused when opened (a `TypeError` naming
   `baseline_sample_count_policy`; the previous workspace stayed active and the saved files were
@@ -238,6 +311,13 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **Incubation time is shown and typed in hours.** Study figure axes and labels, the signal-study
+  summary, and the Incubation Study table and its entry form showed incubation as milliseconds (2 h
+  read 7.2e+06 ms on an axis labelled *Incubation (ms)*, and typing 18 in the table meant 18 ms).
+  They now read and take hours (*Incubation (h)*), the one exception to the millisecond display.
+  Stored values and saved files are unchanged, so a workspace saved earlier opens with the same
+  values. Crowded recording labels under the signal-study summary and event-type figures turn
+  upright instead of running together.
 - **Analysis ▸ Export is a submenu.** The fourteen export commands (the exports, the
   hand-made-event commands and the figure commands) moved into it in three groups; no command was
   renamed and no shortcut changed. With the fourteen commands behind one row the menu is 27 rows

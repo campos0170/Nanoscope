@@ -2071,6 +2071,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
         if _M_AMPLITUDE in (x_id, y_id):
             common["amplitude_warnings_json"] = json.dumps(self._amplitude_warnings)
             common["amplitude_units"] = self._amplitude_snapshot_units
+        # The same on every row, and tens of kilobytes: written once, on the first row.
+        provenance = common["provenance_json"]
+        common["provenance_json"] = ""
         rows: list[dict] = []
         for i in range(counts.shape[0]):
             for j in range(counts.shape[1]):
@@ -2126,7 +2129,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                     "x_value": xv, "y_value": yv,
                     "included_in_view": bool(kept), **common, **amplitude_audit,
                 })
-        return pd.DataFrame(rows)
+        return _provenance_on_first_row(pd.DataFrame(rows), provenance)
 
     def _ensemble_kept_identities(self, n_rows: int) -> list[dict]:
         """Source identities for ensemble rows in exact input POSITION order.
@@ -2228,6 +2231,9 @@ class EventPlotWindow(QtWidgets.QMainWindow):
             "align_polarity_source": (alignment[1] if extremum and alignment else ""),
             "band_kind": {"sd": "mean_pm_1sd", "iqr": "median_iqr_25_75"}.get(kind, "none"),
         }
+        # The same on every row, and tens of kilobytes: written once, on the first row.
+        provenance = common["provenance_json"]
+        common["provenance_json"] = ""
         rows: list[dict] = []
         for trace_i, trace in enumerate(matrix):
             identity = identities[trace_i] if identity_available else {}
@@ -2249,7 +2255,7 @@ class EventPlotWindow(QtWidgets.QMainWindow):
                     "n_events_at_point": int(n_at_point[sample_i]),
                     **common,
                 })
-        return pd.DataFrame(rows)
+        return _provenance_on_first_row(pd.DataFrame(rows), provenance)
 
     @committed_analysis
     def _plot_data(self) -> pd.DataFrame:
@@ -2293,6 +2299,21 @@ class EventPlotWindow(QtWidgets.QMainWindow):
 # ================================================================================================
 # small pyqtgraph helpers
 # ================================================================================================
+
+def _provenance_on_first_row(frame: pd.DataFrame, text: str) -> pd.DataFrame:
+    """``frame`` with the detection's provenance on its first row and an empty cell on every other.
+
+    ``provenance_json`` is the detection's whole provenance, the same on every row: 58 KB for a
+    190-event detection, 63 KB once a CSV has quoted it. Written on every row of the 22,800-row
+    ensemble that detection gives, it was a 1.4 GB table (the heatmap's 1,790 rows, 113 MB), which no
+    snapshot, bundle or batch export could hold (512 MiB) and no composition could be made from. So
+    it is written once. The column keeps its name and its place, so a CSV still carries the
+    provenance; every other column of every row is what it always was.
+    """
+    if len(frame) and text:
+        frame.iat[0, frame.columns.get_loc("provenance_json")] = text
+    return frame
+
 
 def _subset_text(mode: str) -> str:
     """The Events combo's text for a curation filter: every subset is WITHIN accepted."""

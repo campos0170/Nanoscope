@@ -399,6 +399,52 @@ class FigureWorkspace(QtCore.QObject):
         if not self._installing:
             self._dirty()
 
+    def new_figure_look(self, kind, style=None, *, body_size_pt=None):
+        """The appearance a NEW figure of ``kind`` starts with in this project: bound to the
+        project's current default figure style (or to ``style``), with that style's look.
+
+        What :meth:`create` gives a new figure, and what Reset figure gives a figure that has no
+        style (a page's ``PlotAppearanceWidget.set_new_figure_look``), so the two cannot differ.
+        ``body_size_pt`` is the Font size (body) a Distributions figure already has, which Reset
+        figure leaves as it is: unless the style gives that size anyway, it rides on the binding
+        as the figure's own override, as it does on a figure that was made with the style.
+        Raises ``ValueError`` when the project's styles cannot be read."""
+        from .figure_style_binding import bind_native_style
+        default_style = self.default_style() if style is None else style
+        vocabulary = "matplotlib_appearance" if kind == "comparison_figures" else "plot_appearance"
+        native_look = bind_native_style({}, default_style, vocabulary)
+        if kind == "distributions" and inherits_native_defaults(default_style):
+            # The old project default used axis/title as the body's fallback. This is
+            # native figure state, not an addition to the exact imported definition.
+            if "body_size_pt" not in default_style.look:
+                native_look["style_binding"]["overrides"]["body_size_pt"] = float(
+                    default_style.look.get("axis_size_pt", default_style.look.get("title_size_pt", 7)))
+        if kind == "distributions" and body_size_pt is not None:
+            overrides = native_look["style_binding"]["overrides"]
+            if resolve_look(default_style, overrides).values.get("body_size_pt") != float(body_size_pt):
+                overrides["body_size_pt"] = float(body_size_pt)
+        return PlotAppearance.from_mapping(native_look)
+
+    def _adopt_new_figure_look(self, figure_id, page, kind):
+        """Give a page of this workspace its Reset figure's look: what a new figure of its kind is
+        given here, read when the button is pressed (the project's default may have changed since),
+        with the Font size (body) a Distributions figure keeps through every Reset figure."""
+        adopt = getattr(getattr(page, "_appearance_widget", None), "set_new_figure_look", None)
+        if not callable(adopt):
+            return
+
+        def look():
+            # The page is looked up when asked, not held: this function lives on the page's own
+            # widget, and holding the page would make a reference cycle that outlasts its sleep.
+            shown = self.page(figure_id)
+            body = shown.style().font_size_pt if kind == "distributions" and shown is not None else None
+            try:
+                return self.new_figure_look(kind, body_size_pt=body)
+            except ValueError:
+                return None     # the project's styles cannot be read: no look to go back to
+
+        adopt(look)
+
     def create(self, kind, initial_recipe=None, binding=None):
         if self._read_only:
             self._fail("", "This analytical workspace was written by a newer build and is read-only.")
@@ -414,21 +460,12 @@ class FigureWorkspace(QtCore.QObject):
         number = 1
         while f"{label} {number}" in names:
             number += 1
-        from .figure_style_binding import bind_native_style
         try:
             default_style = self.default_style()
         except ValueError as exc:
             self._fail("", exc)
             return None
-        vocabulary = "matplotlib_appearance" if kind == "comparison_figures" else "plot_appearance"
-        native_look = bind_native_style({}, default_style, vocabulary)
-        if kind == "distributions" and inherits_native_defaults(default_style):
-            # The old project default used axis/title as the body's fallback. This is
-            # native figure state, not an addition to the exact imported definition.
-            if "body_size_pt" not in default_style.look:
-                native_look["style_binding"]["overrides"]["body_size_pt"] = float(
-                    default_style.look.get("axis_size_pt", default_style.look.get("title_size_pt", 7)))
-        look = PlotAppearance.from_mapping(native_look)
+        look = self.new_figure_look(kind, default_style)
         payload = {}
         if kind == "distributions":
             from ..core.figure_codecs import V12_PLOT_DEFAULTS
@@ -553,6 +590,7 @@ class FigureWorkspace(QtCore.QObject):
                     adapter = adapter_for(page, entry.record.spec.kind)
                 else:
                     adapter = self._adapter_factory(page, entry.record.spec.kind)
+                self._adopt_new_figure_look(figure_id, page, entry.record.spec.kind)
                 meta = self._metadata(entry)
                 if meta.get("uninitialized"):
                     self._initialize(page, entry.record, meta.get("initial_recipe", {}), self.binding(figure_id))

@@ -475,7 +475,11 @@ def test_reset_figure_then_undo_then_save_keeps_the_look_of_a_restored_page(
         assert saved["bold/italic"] == (True, True), "the older build's title weight came across"
     _click_through_window(page._appearance_widget.reset_button)
     _settle()
-    assert page.config().style.title == "" and page.config().style.font_family == ""
+    # The page is in a project, so its figure is bound to the project's figure style: Reset
+    # figure takes the title and the figure's own font off and leaves it drawn in the style's
+    # (Arial), still bound, as a new figure is (not unbound, with no font at all).
+    style = page.config().style
+    assert style.title == "" and style.font_family == "Arial" and style.style_binding
     assert page._history.depth() == (1, 0)
     _press_undo(page)
     _settle()

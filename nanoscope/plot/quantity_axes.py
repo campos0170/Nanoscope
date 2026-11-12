@@ -63,7 +63,7 @@ def time_axis(axis, side, key, *, stored_unit='s', clock_basis='', coordinate_fr
     """Use a builder's declared artist-coordinate units, never its label text."""
     quantity = quantity_for(key, declared_unit=stored_unit,
                             quantity='clock' if clock_basis else 'duration',
-                            clock_basis=clock_basis, display_unit='ms')
+                            clock_basis=clock_basis)
     return set_quantity_axis(axis, side, quantity, coordinate_frame=coordinate_frame, label=label)
 
 

@@ -1797,9 +1797,10 @@ class PlotConfig:
           log-x dwell histogram under an exponential fit" is not a template without
           them. A blank one means "keep what the window has" and a column the recording
           does not offer is resolved back to the window's own, both at install time
-          (:meth:`PlotsWindow._installable`), so a presentational-only template can be
-          saved by leaving the pickers alone and neither kind can leave the identity
-          anchor pointing at a column that is not on screen.
+          (:meth:`PlotsWindow._installable`), so neither kind can leave the identity
+          anchor pointing at a column that is not on screen. (Blank columns do not make
+          a template presentational-only: what does is a blank PLOT TYPE, see
+          :meth:`with_template`.)
         * ``selection.accepted_only`` and ``histogram.include_filter_limited``. Neither
           names a row; both are POLICIES about rows ("accepted events only", "include the
           filter-limited ones") that mean the same thing on any recording. Dropping
@@ -1822,6 +1823,14 @@ class PlotConfig:
                               legend_include=_NO_ENTRIES, series_styles=_NO_ENTRIES,
                               text_styles=_legend_styles(self.style.text_styles, False)))
 
+    @property
+    def carries_analysis(self) -> bool:
+        """Whether this config, used as a TEMPLATE, names an analysis. A blank plot type says it
+        does not: the template is a LOOK, and :meth:`with_template` takes only the style
+        settings it names. Not a field, so it is neither saved nor compared; the shipped
+        "Publication figure (light)" is the one config in the app that has it blank."""
+        return bool(self.plot_type)
+
     def with_template(self, template: "PlotConfig") -> "PlotConfig":
         """``template`` recalled onto this config: the template's everything, over THIS
         window's data selection and legend memory.
@@ -1832,13 +1841,24 @@ class PlotConfig:
         recalling a template would install that field's DEFAULT -- unticking every source
         -- rather than leaving it alone.
 
-        A BLANK COLUMN MEANS "KEEP WHAT YOU HAVE", not "no column". That is what makes a
-        purely presentational template possible: save one from a window whose pickers you
-        never touched and it carries a look and nothing else. It also keeps the identity
+        A BLANK COLUMN MEANS "KEEP WHAT YOU HAVE", not "no column". It keeps the identity
         anchor honest, because a config naming a column the pickers cannot select is
         exactly the stale-anchor shape :meth:`PlotsWindow._set_config` warns about.
+
+        A BLANK PLOT TYPE MEANS THE TEMPLATE IS A LOOK, and that is what makes a purely
+        presentational template possible. Blank columns were never enough: the plot type,
+        the bins, the normalisation, the log axes, the fit, the Time unit and the typed
+        ranges have no blank, so a template that left only the columns blank installed the
+        dataclass defaults for all of them (the shipped "Publication figure (light)" turned
+        a fitted log-log scatter into a 30-bin count histogram with no fit). A template
+        with no plot type names no analysis at all: it is recalled as the style settings it
+        names (:meth:`_with_look`), and every other field is the window's own. A saved
+        template always has a plot type (the combo is never blank), so it is recalled whole,
+        as it always was.
         """
         tpl = template.as_template()    # idempotent, and it sanitises a hand-edited file
+        if not tpl.carries_analysis:
+            return self._with_look(tpl.style)
         hist = tpl.histogram if tpl.histogram.column else _dc_replace(
             tpl.histogram, column=self.histogram.column)
         scatter = _dc_replace(tpl.scatter, x=tpl.scatter.x or self.scatter.x,
@@ -1861,6 +1881,31 @@ class PlotConfig:
                               text_styles=FrozenMap({
                                   **_legend_styles(tpl.style.text_styles, False),
                                   **_legend_styles(self.style.text_styles, True)})))
+
+    def _with_look(self, look: StyleSettings) -> "PlotConfig":
+        """This config with the style settings ``look`` NAMES, and nothing else changed.
+
+        A setting is named when ``look`` moves it off its default: a look is a sparse
+        value, and what it leaves at a default it leaves to the window. (So a look cannot
+        say "back to the default" for a setting; the shipped one has no need to.) Only
+        the single-valued settings are taken. The maps -- the element text styles, the fit
+        label, the legend memory and the shared-style binding -- are the figure's own and
+        stay, and the shipped look names no words either, as an appearance preset names none
+        (``PlotAppearance.style_only``).
+
+        A PAGE BOUND TO A SHARED STYLE resolves its look from the binding, so a setting
+        written under it would be put straight back by the next projection. It is written
+        the way every look gesture is (:meth:`PlotsWindow._presentation_changed`): as an
+        override the binding then resolves, so the figure stays bound to its style.
+        """
+        blank = StyleSettings()
+        named = {f.name: getattr(look, f.name) for f in _dc_fields(blank)
+                 if not isinstance(getattr(blank, f.name), FrozenMap)
+                 and getattr(look, f.name) != getattr(blank, f.name)}
+        if all(getattr(self.style, name) == value for name, value in named.items()):
+            return self
+        return _dc_replace(self, style=_project_style_settings(
+            _dc_replace(self.style, **named), edit=True))
 
 
 # ================================================================================================
@@ -2140,7 +2185,16 @@ def plot_config_to_json(cfg: PlotConfig) -> dict:
         "plot_type": cfg.plot_type,
         "norm_user_set": bool(cfg.norm_user_set),
     }
+    # A LOOK (:attr:`PlotConfig.carries_analysis`) names no analysis, so it is stored without
+    # one: the style, and any analysis section it was given away from the defaults. The reader
+    # takes a missing section as the defaults, so nothing stored has to be read differently.
+    sparse = not cfg.carries_analysis
+    blank = PlotConfig() if sparse else cfg
+    if sparse and not cfg.norm_user_set:
+        del payload["norm_user_set"]
     for name in _CONFIG_SECTIONS:
+        if sparse and name != "style" and getattr(cfg, name) == getattr(blank, name):
+            continue
         payload[name] = _encode_dc(getattr(cfg, name))
     return payload
 
@@ -6166,15 +6220,21 @@ class PlotsWindow(
     #: analysis shape this window ALREADY defaults to, so none of them asserts anything
     #: about data.
     #:
-    #: The first names no column at all, which is the point: a blank column means "keep
-    #: what you have" (:meth:`PlotConfig.with_template`), so it restyles whatever is on
-    #: screen without touching the analysis. The second and third carry the fit as a
-    #: PROPOSAL only -- ``applied`` stays ``none`` -- so recalling one arms Apply and
-    #: waits, exactly as picking the model by hand does.
+    #: The first names no plot type at all, which is the point: a template without one is
+    #: a LOOK (:meth:`PlotConfig.with_template`), recalled as the nine style settings it
+    #: names and nothing more, so it restyles whatever is on screen -- a fitted log-log
+    #: scatter, a log-x density histogram -- without touching its analysis or its words. (Blank
+    #: columns alone were not enough: the other analysis fields have no blank, and were
+    #: installed as defaults.) The second and third are analyses and are recalled whole;
+    #: they carry the fit as a PROPOSAL only -- ``applied`` stays ``none`` -- so recalling
+    #: one arms Apply and waits, exactly as picking the model by hand does. They also
+    #: carry the default look, which a recall puts on the window like any saved template's.
     _BUILTIN_TEMPLATES: dict[str, PlotConfig] = {
         # Appearance only: a white canvas, no grid, text sized for a printed column, a
-        # heavier curve, and a 1600x1200 export. Every analysis field is left blank.
+        # heavier curve, and a 1600x1200 export. The blank plot type says it names no
+        # analysis; the other analysis fields are inert defaults that are never read.
         "Publication figure (light)": PlotConfig(
+            plot_type="",
             style=StyleSettings(
                 background="light", show_grid=False, font_size_pt=11,
                 title_font_size_pt=13, axis_label_font_size_pt=12, tick_font_size_pt=11,

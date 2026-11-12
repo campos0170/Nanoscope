@@ -366,7 +366,10 @@ def apply_look_to_record(record, look, transient, *, keep_hand=True):
     if after == before:
         return record, transient
     result = merge_native_capture(_with_native_appearance(artifact, record.spec.kind, after), record)
-    return _preserve_view(result, record), transient.note(after.to_dict())
+    from .plot_appearance import note_dormant_step
+    # A look is a style applied from Style ▾, never a Reset figure: the step is named for it when
+    # the figure wakes, as the same look applied to a figure that is awake is.
+    return _preserve_view(result, record), note_dormant_step(transient, after, reset=False)
 
 
 def history_state(capsule):

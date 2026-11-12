@@ -112,10 +112,17 @@ class _PlotsStyleMixin:
         self._presentation_changed()
 
     def _on_style_point_size(self, value: float) -> None:
+        # Not while a style is written onto the controls: the box keeps three decimals and
+        # says its size back rounded, and a line of 1 pt (1.3333 px) would come back 1.333 and
+        # read, at the next edit, as the figure's own override of the style's line.
+        if self._updating:
+            return
         self._style = _dc_replace(self._style, point_size=float(value))
         self._presentation_changed()
 
     def _on_style_line_width(self, value: float) -> None:
+        if self._updating:      # see _on_style_point_size
+            return
         self._style = _dc_replace(self._style, line_width=float(value))
         self._presentation_changed()
 

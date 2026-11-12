@@ -19,7 +19,7 @@ import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
-from .time_controls import SecondsSpinBox, HoursSpinBox, rescale_time_text
+from .time_controls import SecondsSpinBox, rescale_time_text
 
 from ..analysis import manual_preparation as prep
 from ..analysis import manual_detection as detect
@@ -325,8 +325,6 @@ class _Form(QtWidgets.QWidget):
         self.controls, self.kinds = {}, {}
         for key, label, kind, default in fields:
             seconds = key in _FORM_SECONDS_FIELDS
-            if key == "incubation_h":
-                label = label.replace("(h)", "(ms)")
             if seconds:
                 label = label.replace("(s)", "(ms)").replace("(s;", "(ms;")
             if isinstance(kind, tuple):
@@ -334,8 +332,6 @@ class _Form(QtWidgets.QWidget):
                 for title, value in kind: widget.addItem(title, value)
             elif kind is bool:
                 widget = QtWidgets.QCheckBox()
-            elif key == "incubation_h" and kind in (int, float):
-                widget = HoursSpinBox(); widget.setRange(-1e9, 1e9); widget.setDecimals(6)
             elif seconds and kind in (int, float):
                 widget = SecondsSpinBox(); widget.setRange(-1e9, 1e9); widget.setDecimals(6)
             elif kind is int:

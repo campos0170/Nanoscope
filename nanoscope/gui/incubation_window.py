@@ -139,7 +139,7 @@ class IncubationStudyWindow(QtWidgets.QMainWindow):
     studyFailed = QtCore.Signal(str)
     studyCancelled = QtCore.Signal()
     _COLUMNS = (
-        "Tag", "Incubation (ms)", "Pore ID", "Pore diameter (nm)",
+        "Tag", "Incubation (h)", "Pore ID", "Pore diameter (nm)",
         "Concentration (pM)", "Voltage (mV)", "Prepared CSV", "Metadata JSON",
     )
 

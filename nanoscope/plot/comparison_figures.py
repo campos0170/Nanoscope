@@ -666,6 +666,7 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
     state = appearance.to_dict() if hasattr(appearance, "to_dict") else dict(appearance or {})
     from ..core.figure_style_mapping import project_legacy_style
     from .matplotlib_targets import apply_text_overrides, bind_panel, remember_automatic_text
+    from .typed_text import set_typed_text
     if state.get("style_binding"):
         state = project_legacy_style(state["style_binding"], "matplotlib_appearance", state)
     dark = state.get("background") == "dark"
@@ -789,8 +790,8 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
             ax.title._nanoscope_automatic_text = panel_title
             ax.xaxis.label._nanoscope_automatic_text = auto_labels["bottom"]
             ax.yaxis.label._nanoscope_automatic_text = auto_labels["left"]
-            if state.get("x_label") and cfg["kind"] != "pairs": ax.xaxis.label.set_parse_math(False)
-            if state.get("y_label") and cfg["kind"] != "pairs": ax.yaxis.label.set_parse_math(False)
+            if state.get("x_label") and cfg["kind"] != "pairs": set_typed_text(ax.xaxis.label, state["x_label"].strip())
+            if state.get("y_label") and cfg["kind"] != "pairs": set_typed_text(ax.yaxis.label, state["y_label"].strip())
             if state.get("grid", False):
                 ax.grid(True, alpha=.2)
             else:
@@ -808,7 +809,7 @@ def render_comparison(snapshot, tables, appearance=None, *, source_appearance=No
         if title:
             figure.suptitle(title, fontsize=title_size)
             figure._suptitle._nanoscope_automatic_text = {"facets": "Recording comparisons", "pairs": "Event-feature pair matrix", "events": "Individual-event comparison"}[cfg["kind"]]
-            if state.get("title"): figure._suptitle.set_parse_math(False)
+            if state.get("title"): set_typed_text(figure._suptitle, title)
         if state.get("legend_visible", True) and cfg["kind"] != "facets" and visible_sources:
             handles = [Line2D([], [], linestyle="none", marker="o",
                               markersize=styles[source['key']].get('marker_size_pt', marker_size),

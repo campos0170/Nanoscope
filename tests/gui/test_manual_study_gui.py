@@ -7,7 +7,7 @@ import threading
 import numpy as np
 import pandas as pd
 import pytest
-from PySide6 import QtGui
+from PySide6 import QtGui, QtWidgets
 from pytestqt.exceptions import TimeoutError as SignalTimeout
 
 from nanoscope.analysis import incubation_study
@@ -383,6 +383,24 @@ def test_unchanged_source_apply_preserves_results_but_changed_conditions_invalid
     assert all(window.state[k] is None for k in ('comparison','features','clustering','mixture'))
     assert window.state['figures']==[] and window.state['records'][0]['analysis'] is analysis
     assert window.state['records'][0]['recording_id']==record_id
+
+
+def test_incubation_is_shown_typed_and_stored_in_hours(window,tmp_path,monkeypatch,qtbot):
+    # Hours are what the recording's incubation is stored in and what a person measures it in: typing 18
+    # means 18 h (it once meant 18 ms), and the saved workspace holds the same number as before.
+    add_sources(window,tmp_path,monkeypatch,qtbot)
+    box=window._source_form.controls['incubation_h']
+    assert type(box) is QtWidgets.QDoubleSpinBox and not box.suffix()
+    assert box.accessibleName()=='Incubation (h)'
+    box.lineEdit().setText('18');box.interpretText()
+    assert box.value()==18.
+    complete(qtbot,window,window.apply_recording_details)
+    assert window.state['records'][0]['incubation_h']==18.
+    complete(qtbot,window,window.save)
+    assert checkpoint.load_workspace(window.folder)['records'][0]['incubation_h']==18.
+    complete(qtbot,window,lambda:window.open_workspace(window.folder))
+    reopened=window._source_form.controls['incubation_h']
+    assert reopened.value()==18. and float(reopened.text())==18.
 
 
 @pytest.mark.parametrize('damage',['empty_state','duplicate_tag','invalid_source','display_failure'])
