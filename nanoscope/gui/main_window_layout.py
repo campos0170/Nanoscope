@@ -254,7 +254,7 @@ class _LayoutMixin:
             self._window_menu_pages.append((page_id, act))
         entry("figure_library", "Figure Library",
               "Open this project's Figure Library or bring it forward — the same as "
-              "Analysis ▸ Figure Library….", self._open_figure_library)
+              "Analysis ▸ Export ▸ Figure Library….", self._open_figure_library)
         entry("signal_conditioning", "Preprocess workspace",
               "Open the Preprocess workspace or bring it forward — the same as "
               "Analysis ▸ Preprocess workspace… (⇧⌘F).", self._open_signal_conditioning)

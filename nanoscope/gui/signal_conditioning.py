@@ -595,7 +595,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent, QtCore.Qt.Window)
         self.setObjectName("SignalConditioningWindow")
-        self.setWindowTitle("Signal Conditioning")
+        self.setWindowTitle("Preprocess workspace")
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self._installed = False
         self._preprocess_installed = False
@@ -647,7 +647,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
         root.setSpacing(4)
 
         # -- toolbar: overflows into its extension menu, never floors the width -------------
-        self.toolbar = QtWidgets.QToolBar("Signal conditioning")
+        self.toolbar = QtWidgets.QToolBar("Preprocess workspace")
         self.toolbar.setObjectName("signalConditioningToolbar")
         self.toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.toolbar.setMovable(False)
@@ -1654,7 +1654,7 @@ class SignalConditioningWindow(QtWidgets.QWidget):
 
     def set_source_label(self, label: str) -> None:
         self._source_label = str(label or "")
-        title = "Preprocess workspace" if self._preprocess_installed else "Signal Conditioning"
+        title = "Preprocess workspace"
         self.setWindowTitle(f"{title} — {label}" if label else title)
         self._refresh_workspace_target()
 

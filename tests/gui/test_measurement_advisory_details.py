@@ -19,6 +19,7 @@ from nanoscope.analysis.measurement_quality import build_measurement_quality
 from nanoscope.core.acquisition import acquisition_snapshot_messages
 from nanoscope.core.analysis import AnalysisResult
 from nanoscope.core.session import Session
+from nanoscope.gui.advisory_text import advisory_headline
 from nanoscope.gui.analysis_panel import AnalysisPanel
 from nanoscope.gui.analysis_worker import AnalysisController
 from nanoscope.gui.trace_view import TraceView
@@ -99,5 +100,12 @@ def test_clearing_recorded_warnings_does_not_suppress_quality_or_acquisition_det
     shown = panel._stats.warnings_text()
     assert "SENTINEL" not in shown
     assert "Advisory checks only" in shown
-    assert all(message in panel._result_notice.toolTip()
-               for message in acquisition_snapshot_messages(result.payload.provenance))
+    messages = acquisition_snapshot_messages(result.payload.provenance)
+    # The toolbar tooltip lists each advisory by its headline now...
+    assert all(f"• {advisory_headline(message)}" in panel._result_notice.toolTip()
+               for message in messages)
+    # ...and the whole message is where the headline's switch leads: on the Summary tab,
+    # in the tooltip of the block and, once opened, in the block itself.
+    assert all(message in panel._stats.warnings_label.toolTip() for message in messages)
+    panel._stats.warnings_toggle.click()
+    assert all(message in panel._stats.warnings_shown_text() for message in messages)

@@ -250,11 +250,14 @@ def test_no_new_sibling_import():
     # trace's baseline drawing is delivered from a worker thread). It is not on
     # test_measure_navigation's allow-list of non-panel modules, so it is pinned here
     # instead: below, it must stay a widgetless leaf that reaches only the two worker seams.
+    # ...and advisory_text (2026-11-11): the pure helper that cuts an advisory to its headline for
+    # the toolbar link's tooltip. A widgetless, gui-free leaf on test_measure_navigation's
+    # allow-list of non-panel modules, whose own guard proves both.
     assert _gui_modules_reached(AP) == {
-        "analysis_worker", "baseline_panel", "baseline_view_worker", "baseline_workspace",
-        "categorical", "export_paths", "hand_row_preview", "inspector_widgets",
-        "measure_panel", "merge_panel", "open_pore_preview", "overlays", "panels",
-        "trace_view"}
+        "advisory_text", "analysis_worker", "baseline_panel", "baseline_view_worker",
+        "baseline_workspace", "categorical", "export_paths", "hand_row_preview",
+        "inspector_widgets", "measure_panel", "merge_panel", "open_pore_preview", "overlays",
+        "panels", "trace_view"}
     import inspect
 
     import nanoscope.gui.baseline_view_worker as bvw

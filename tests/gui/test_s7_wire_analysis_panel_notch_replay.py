@@ -113,8 +113,10 @@ def test_a_replayed_dict_over_the_cap_is_refused_by_name_and_nothing_starts(sele
     msg = refused.args[0]
     assert f"{CAP + 1} lines" in msg and f"at most {CAP}" in msg, msg
     # 2026-11-11: the chain editor moved into the Preprocess workspace (8661d35), and the
-    # refusal names that route: Filters & drift, Notch stage.
-    assert "Preprocess workspace ▸ Filters & drift" in msg and "Notch stage" in msg, msg
+    # refusal names that route: Filters & drift, Notch stage. It names the window once, by its
+    # one name (it used to say "Signal Conditioning (Preprocess workspace ▸ Filters & drift, ...").
+    assert "in the Preprocess workspace (Filters & drift ▸ Notch stage" in msg, msg
+    assert "Signal Conditioning" not in msg, msg
     assert panel._pending is None
     assert not list(window._session.results.for_doc(did))
     qtbot.wait(20)

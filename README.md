@@ -82,7 +82,7 @@ external. The complete contract is documented in
 2. Set units in the **Calibration** tab if needed (see the note on current gain below).
 3. Press **Ctrl+D** (Analysis ▸ Run detection) to detect events. They appear in the event table and
    as shaded spans on the trace.
-4. **Analysis ▸ Event inspector…** to browse and curate events; **Analysis ▸ Plots…** to plot
+4. **Analysis ▸ Event inspector…** to browse and curate events; **Analysis ▸ Distributions…** to plot
    dwell/amplitude distributions, scatter, clusters, and fits.
 
 ### High-pass and quantitative measurements
@@ -113,7 +113,7 @@ can be deduplicated. Add misses to that **source detector table** first, then ch
 Reconcile detector results…**. Preview an overlap rule and the required detector support, create the
 separate **Reconciled** table, and use the **Event table** selector to move between it and the
 unchanged sources. Accept/reject and apply structured labels in the Event Inspector or Event Gallery.
-Resolve any reported label or contradictory accept/reject conflicts before choosing **Analysis ▸
+Resolve any reported label or contradictory accept/reject conflicts before choosing **Analysis ▸ Export ▸
 Export events for training…**; an unresolved review decision is excluded from Reviewed export until
 you explicitly accept or reject it.
 

@@ -714,6 +714,8 @@ def test_a_project_saved_before_fits_named_their_table_still_opens_and_is_not_tr
         f"a fit that records no table is printed beside a table as if it matched: {shown!r}")
     assert "table" in shown and "record" in shown and _says_press_fit(shown), (
         f"nothing says why the saved fit is not shown: {shown!r}")
+    # The window that files a fit with no table is named by its one name, Distributions.
+    assert "(an earlier NanoScope, or the Distributions page, saved them)" in shown, shown
     # Kept, not discarded: still in the store and still usable by the figure export.
     kept = _stored(w2, live, channel, "fit.dwell")
     assert kept is not None and LINEAGE_KEY not in kept.payload.meta
@@ -744,3 +746,5 @@ def test_a_fit_filed_without_a_table_is_not_shown_beside_one(window, qtbot, tmp_
 
     assert _shows_no_fit(shown), f"a fit with no recorded table is printed: {shown!r}"
     assert "record" in shown and _says_press_fit(shown)
+    # The note names that window by its one name, Distributions (it used to say "the Plots window").
+    assert "(an earlier NanoScope, or the Distributions page, saved it)" in shown, shown

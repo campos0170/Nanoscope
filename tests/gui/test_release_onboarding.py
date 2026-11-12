@@ -1,5 +1,6 @@
 """First-use visibility choices and keyboard navigation never run science."""
 from contextlib import ExitStack
+from pathlib import Path
 
 import pytest
 from PySide6 import QtCore, QtWidgets
@@ -88,6 +89,23 @@ def test_guide_teaches_all_reference_modes_and_non_install_preview():
                    "signed current", "recording start", "Preview reference and detection",
                    "without changing stored results", "fresh detection", "not independently verified"):
         assert phrase in text
+
+
+def test_the_guide_and_the_docs_call_the_reference_button_what_the_app_does(qtbot):
+    """Step 3 sends the reader to the open-pore reference, and the user guide and the control
+    reference say the same button is a direct route to it. The button reads "Event reference…";
+    nothing in the app is called "Baseline reference"."""
+    panel = DetectionPanel()
+    qtbot.addWidget(panel)
+    label = panel.baseline_reference_button.text()
+    assert label == "Event reference…", "precondition: this is the button the step means"
+    assert f"Open {label.rstrip('…')} and choose a reference" in STEPS[2].instructions
+    docs = Path(__file__).resolve().parents[2] / "docs"
+    guide = " ".join((docs / "USER_GUIDE.md").read_text(encoding="utf-8").split())
+    assert f"**{label}** remains a direct route to the open-pore reference controls" in guide
+    assert f'"label": "{label}"' in (docs / "inventory.json").read_text(encoding="utf-8")
+    for where in (STEPS[2].instructions, guide, (docs / "inventory.json").read_text(encoding="utf-8")):
+        assert "Baseline reference" not in where
 
 
 def test_about_dialog_copy_is_explicit_and_local(qtbot, monkeypatch):

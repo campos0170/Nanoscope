@@ -148,10 +148,10 @@ def test_every_merge_entry_point_says_a_merge_can_be_refused(inventory, manual):
     for label, group in (("Merge all", "Merge sub-events"),
                          ("Merge events in selection", "Merge sub-events"),
                          ("Merge with next", "Event Inspector — curation"),
-                         ("merge gap", "Detection ▸ Detection")):
+                         ("Merge gap", "Detection ▸ Detection")):
         notes = _control(inventory, label, group)["notes"]
         assert "open pore" in notes, f"{label}: no mention of the occupancy refusal"
-    assert "the detector's own `merge gap` during a detection run" in manual
+    assert "the detector's own `Merge gap` during a detection run" in manual
 
 
 # ---------------------------------------------------------------------------------------------
@@ -164,11 +164,12 @@ def test_docs_give_the_detection_merge_gap_in_milliseconds(manual, inventory, qa
     try:
         lo, hi = panel.merge_gap_ms.minimum(), panel.merge_gap_ms.maximum()
         suffix = panel.merge_gap_ms.suffix()
+        label = _row_label(panel.merge_gap_ms)    # the words on the form, so the entry follows them
     finally:
         panel.deleteLater()
     assert "ms" in suffix and "0 = off" in suffix
 
-    notes = _control(inventory, "merge gap", "Detection ▸ Detection")["notes"]
+    notes = _control(inventory, label, "Detection ▸ Detection")["notes"]
     assert f"Range {lo:.4f}–{hi:.4f} ms" in notes
     assert "1.0000000 s" not in notes
     assert "in\n**seconds** (15 ms is `0.015`)" not in manual

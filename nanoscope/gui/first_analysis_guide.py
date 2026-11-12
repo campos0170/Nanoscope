@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
+from .first_run_state import FIRST_RUN_DONE, FIRST_RUN_KEY, FIRST_RUN_PENDING, first_run_guide_due
+
 CONTROL_LEVEL_CHOICE_KEY = "onboarding/control_level_choice_v1"
 EXISTING_CONTROL_LEVEL_KEY = "inspector/detection_control_level"
 
@@ -33,7 +35,7 @@ STEPS = (
         "I understand the time base and have checked the meaning of the current values.",
         (("Show Calibration", "calibration"),)),
     GuideStep("3 · Inspect noise and baseline",
-        "Open Baseline reference and choose a reference for THIS recording. Automatic retains the existing "
+        "Open Event reference and choose a reference for THIS recording. Automatic retains the existing "
         "estimator: Estimate window settings proposes windows; Use proposed windows confirms them. The overlay "
         "before confirmation still uses the old windows. Known open-pore current accepts a signed current "
         "in calibrated pA, for example −120 pA, not its positive magnitude. Selected open-pore intervals "
@@ -268,3 +270,55 @@ def write_practice_recording(path):
         np.savetxt(handle, np.column_stack((time, current)), delimiter=",", header="time,current",
                    comments="", fmt="%.17g")
     return target
+
+
+def claim_first_run(settings: QtCore.QSettings) -> bool:
+    """Make the first-run claim on a brand-new settings store; say whether this launch owes the
+    user the Guided first analysis.
+
+    ``gui.app.main`` asks this before it builds the window, and nothing else does: a bare
+    ``MainWindow()`` or ``DetectionPanel()`` (a script, a probe, a test) never reaches it, so none of
+    them is a first run.
+
+    Brand new means the store holds no key at all and is not damaged. Fallbacks are switched off
+    first, because on macOS ``allKeys()`` otherwise includes the keys shared by every application;
+    ``main()`` hands in a temporary ``QSettings()``, so that switch stays local. Any key counts, not
+    only the few this build reads: an earlier build writes many keys at the moment of a gesture
+    (a child window's place, the plot templates, the curation options) and ``geometry`` only at a
+    clean quit, so a store left by a session that never quit cleanly still belongs to someone who
+    has used the app. A damaged store only looks empty, because its keys were dropped, not never
+    written.
+
+    The claim has two steps. This call writes ``FIRST_RUN_KEY`` = "pending" and syncs it before it
+    returns; the Detection panel treats "pending" like "essential", so the first launch starts in
+    Essential. ``finish_first_run`` turns it into "essential" once the guide has opened. The answer
+    is True on the launch that made the claim and on every later launch that still finds it
+    pending, so a first launch that died before its guide opened (a crash while the window was
+    built, a force-quit, a window closed at once) still gets the guide next time. It is a key of its
+    own because writing either control-level key would hide the "Start with Advanced" button in the
+    guide's first-use box. If the claim cannot be kept (a store that cannot be written) it is
+    withdrawn and the answer is False: a first run that cannot be remembered would otherwise repeat
+    on every launch.
+    """
+    from .main_window_shared import _settings_store_damaged
+
+    settings.setFallbacksEnabled(False)
+    if first_run_guide_due(settings):
+        return True
+    if settings.allKeys() or _settings_store_damaged(settings):
+        return False
+    settings.setValue(FIRST_RUN_KEY, FIRST_RUN_PENDING)
+    settings.sync()
+    if settings.status() != QtCore.QSettings.Status.NoError:
+        settings.remove(FIRST_RUN_KEY)
+        return False
+    return True
+
+
+def finish_first_run(settings: QtCore.QSettings) -> None:
+    """The Guided first analysis has opened: a pending claim becomes final, and the guide is not
+    opened by itself again. Synced at once, like the claim. Nothing happens for a store that holds no
+    pending claim."""
+    if first_run_guide_due(settings):
+        settings.setValue(FIRST_RUN_KEY, FIRST_RUN_DONE)
+        settings.sync()

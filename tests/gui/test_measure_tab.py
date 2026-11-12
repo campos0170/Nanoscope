@@ -754,8 +754,15 @@ def test_panels_module_still_imports_no_sibling_gui_panel():
     # panels: functions / a spin box over supplied values, neither reaching a panel. They
     # are on test_measure_navigation's _NON_PANEL_GUI_MODULES list, whose own guard proves
     # that, so this one is widened by exactly those two names.
+    # advisory_text (2026-11-11): the pure helper that cuts an advisory to its headline for the
+    # Summary's advisory block. Plain Python (`re` only): no widget, nothing imported from gui;
+    # it is on the same list, so it is one more exactly-named leaf here.
+    # first_run_state (2026-11-11): the first-run claim's key and the question the Detection panel
+    # asks of it (plain Python over a QSettings: no widget, nothing imported from gui). It took the
+    # place of ``first_analysis_guide``, a window module, which panels.py reached for the same
+    # key; the guard still bars that one. It is on the same list too.
     assert reached <= {'inspector_widgets', 'numeric_text', 'column_checklist',
-                       'widget_transfer', 'time_controls'}, (
+                       'widget_transfer', 'time_controls', 'advisory_text', 'first_run_state'}, (
         f"panels.py imported a sibling panel: {reached}")
     # ...and the checker above really would catch the import it is standing guard over.
     guarded = ast.parse("from .measure_panel import MeasurePanel")

@@ -250,8 +250,11 @@ lines — they are quoted verbatim in the health block printed in Walkthrough 1,
 
 **The open pore is chosen, not certified.** Every detection carries a standing advisory saying so,
 and after a detection the `Detection` tab renders it under the `Summary` table in an amber block
-headed `⚠ About these numbers`. It opens *“The open pore here is NOT CERTIFIED, only chosen”*, names
-both candidate currents and how much of the recording each holds, and prints ΔI/I₀ **both ways** —
+headed `⚠ About these numbers`. The block lists each caveat by its first sentence (a very long one
+is cut short, ending in “…”), and **Show full text** under it opens every caveat in full (the project
+and the exports store the full text either way). This one opens *“The open pore here is NOT
+CERTIFIED, only chosen”*; in full it names both candidate currents and how much of the recording each
+holds, and prints ΔI/I₀ **both ways** —
 against the tracked baseline and against the other level. It fires whenever the trace holds a second
 conductance level for at least 2.5% of the recording, which is true of all four of the reference apo
 files (their other level holds 0.054 / 0.099 / 0.087 / 0.077), or whenever the tracked level holds
@@ -354,8 +357,8 @@ neither does what was true about them.
 
 ### 3 · Filter (optional)
 
-In the **Signal Conditioning** window: `Analysis › Signal conditioning…` (`Ctrl+Shift+F`), the
-`Open Signal Conditioning…` button pinned on `Preprocess › Signal chain`, or the `Filter` step of
+In the **Preprocess workspace**: `Analysis › Preprocess workspace…` (`Ctrl+Shift+F`), the
+`Open Preprocess workspace…` button pinned on `Preprocess › Signal chain`, or the `Filter` step of
 the workflow strip. Its `Stages, in execution order` list holds the eight stages — notch, median,
 high-pass, baseline drift, running mean, Savitzky-Golay, normalize, then the low-pass applied inside
 detection; tick a stage to enable it and select it to edit it below. Leave the chain off unless you
@@ -395,7 +398,7 @@ Choose a detector in `Detection`, then press `Detect` (or Ctrl/⌘+Return in the
 Detection tab). The button reads `Detect ●` while the form differs from the run of the Schmitt or
 CUSUM table on screen: settings take effect only when you run them, while accepting, rejecting
 and labelling events is immediate and Edit ▸ Undo takes it back. **Schmitt trigger (hysteresis)** uses
-`k_in (enter)` and `k_out (exit)` are thresholds in noise multiples, with the
+`Start (k_in)` and `End (k_out)` are thresholds in noise multiples, with the
 exit lower than the entry so a noisy event is less readily chopped into fragments. **Sequential
 CUSUM** is also available, with different parameters and defaults; it is not the same operation as
 fitting sub-state levels inside already detected events. The `ML` tab runs a compatible loaded model.
@@ -701,6 +704,9 @@ The home catalog's **Refresh availability** only rechecks whether required input
 The **Guided first analysis** is optional navigation assistance, not a preset detector. It can
 show Essential or Advanced controls without changing their values. Experienced users can go
 directly to the appropriate page. Stages show workflow progress, not a scientific validation score.
+The first time NanoScope runs, with no saved preferences, it opens this guide once by itself and
+starts in the Essential controls. **Help › User guide…** and **Help › Keyboard shortcuts…** open
+the user guide in a window of its own.
 
 | Task | Current surface | Required input and key distinction |
 |---|---|---|
@@ -1144,7 +1150,7 @@ the stale job is not installed; review the message and deliberately start anothe
 
 The current example has **2,246 fitted segments across 984 accepted −700 mV events**, with three
 segments in event 146. The original table's `n_levels` characterization is separate from this fitted
-table and can disagree. Export with `Analysis › Export sub-state levels…` and retain its provenance.
+table and can disagree. Export with `Analysis › Export › Export sub-state levels…` and retain its provenance.
 Level counts depend on noise, correlation, bandwidth and model assumptions; they do not identify
 conformations by themselves. Optional amplitude editing does not require a sub-state refit.
 
@@ -1539,7 +1545,7 @@ density remains a different analysis from an event-count heatmap.
 ### Find a saved figure and understand its actions
 
 Use **File > Open Project...**, then select a row under **Figures ▸ Snapshots** or **Compositions**.
-**Analysis > Figure Library...** and **Snapshot details…** remain compatibility routes to this same
+**Analysis > Export > Figure Library...** and **Snapshot details…** remain compatibility routes to this same
 Explorer view; they do not open another inventory. Expand **Analysis settings and provenance** to
 inspect the captured sources and recipe. **Event gallery** remains the separate event-curation tool.
 
@@ -1703,7 +1709,7 @@ population model, statistical test or independent replicate definition.
 | Intention | Action | What to retain |
 |---|---|---|
 | Export the figure currently shown | Export ▾ on the selected live or saved figure | PNG for raster; SVG/PDF for vector where supported |
-| Create a standard set of report outputs | Analysis › Generate Report figures… | Explicit report recipe; this can calculate new figures |
+| Create a standard set of report outputs | Analysis › Export › Generate Report figures… | Explicit report recipe; this can calculate new figures |
 | Preserve the figure plus its numerical context | Save figure bundle… | Image, plotted data, configuration and provenance together |
 
 For publication export choose **Physical dimensions**. A single- or double-column preset is
@@ -2179,12 +2185,12 @@ Everything from Step 3 on is quoted at the historical **untouched default** 0.5 
 
 | Parameter | Default, and what it means |
 |---|---|
-| k_in (enter) | 5.00 — an excursion must exceed 5× the noise to start an event. Raise it to reject marginal events, lower it to catch shallow ones. |
-| k_out (exit) | 2.00 — the excursion must fall back below 2× the noise to end the event. Deliberately lower than the entry, so a noisy event is not chopped into fragments. |
-| min dwell | 0.0000200 s (20 µs = one sample at 50 kHz). Events shorter than this are not reported — and this value becomes the fits' truncation limit. |
-| max dwell | 0.000000 s (0 = off). Set it and the fits model the right-hand cut too, rather than being biased short by it. |
-| merge gap | 0.0000 ms (0 = off). Milliseconds, like the Merge panel's window — 15 ms is `15`. See walkthrough 2. |
-| range | `whole recording` — read-only. The Schmitt detector always runs over the whole recording and records that in its provenance; to detect over less, cut a `Segment` and detect on that. |
+| Start (k_in) | 5.00 — an excursion must exceed 5× the noise to start an event. Raise it to reject marginal events, lower it to catch shallow ones. |
+| End (k_out) | 2.00 — the excursion must fall back below 2× the noise to end the event. Deliberately lower than the entry, so a noisy event is not chopped into fragments. |
+| Min dwell | 0.0000200 s (20 µs = one sample at 50 kHz). Events shorter than this are not reported — and this value becomes the fits' truncation limit. |
+| Max dwell | 0.000000 s (0 = off). Set it and the fits model the right-hand cut too, rather than being biased short by it. |
+| Merge gap | 0.0000 ms (0 = off). Milliseconds, like the Merge panel's window — 15 ms is `15`. See walkthrough 2. |
+| Runs over | `whole recording` — read-only. The Schmitt detector always runs over the whole recording and records that in its provenance; to detect over less, cut a `Segment` and detect on that. |
 
 Press `Detect`. On this recording it took 3.5 s; the two longer files in the reference set
 (9.1 M and 12.5 M samples) took 11.4 s and 10.3 s. That is of order a second per million samples,
@@ -2192,8 +2198,8 @@ but it did not scale cleanly across the three, so treat any timing here as an or
 reading the events, read the polarity line the app prints above the button:
 
 ```
-measured   enhancement (down): 916 down / 2 up (confidence 1.00, measured)
-override   auto (measure)
+Found in data   enhancement (down): 916 down / 2 up (confidence 1.00, measured)
+Override        auto (measure)
 ```
 
 This is the app estimating excursion polarity relative to the reference in force. **Enhancement** means the measured current magnitude increases relative to that reference. It does not certify that the selected level is the physical open pore or establish a molecular mechanism. This interpretation is consistent with ΔI/I₀ above 1 here, but an incorrect reference can change the classification. The two counts are the *polarity vote* — candidate excursions, counted each way —
@@ -2273,7 +2279,7 @@ the next step reports 3.1 sub-states per event.
 
 To cull: drag a rubber band over a run of bad tiles and press `R`, or double-click a
 single tile to jump to it in the trace and judge it full size. Rejections land in the same event
-table the Plots window and the exports read. Keys `1`–`9` write the first nine
+table that Distributions and the exports read. Keys `1`–`9` write the first nine
 entries of the label palette onto the selected tiles (`Analysis › Event labels…` defines it);
 the `Label` combo with `Apply` and `Clear` beside it does the same by mouse. Those three sit in
 the toolbar between `Tiles` and `Same depth scale`; they are newer than the screenshot above,
@@ -2355,7 +2361,7 @@ can see the event go down, up, down again. And the app reports its own disagreem
 `BIC count says 4; CUSUM is the fitted estimate` — two criteria differ on how many
 levels there are, and rather than pick silently it shows both.
 
-`Analysis › Export sub-state levels…` writes the long-form table (one row per
+`Analysis › Export › Export sub-state levels…` writes the long-form table (one row per
 level) plus a sidecar recording the CUSUM parameters — 235 KB and 6 KB here (file sizes from the
 original run; not re-measured).
 
@@ -2607,7 +2613,7 @@ The full trace also supports a mains-line check. Historically, at Δf = 0.7629 H
 
 ### Step 9 · Export
 
-`Analysis › Export events…` writes two files together: the event table and a
+`Analysis › Export › Export events…` writes two files together: the event table and a
 `.meta.json` sidecar carrying the detector settings, the baseline estimator, the
 calibration, the app version and the clock the table's `t_start_s` is on — the recording's
 instrument-clock origin, so the CSV can be lined up with the `figs_trace.csv` the figure export
@@ -2619,7 +2625,7 @@ A CSV of dwell times with no record of the threshold,
 the baseline window or the gain cannot be compared with one exported next month. The pair is written
 all-or-nothing — you never get the table without its provenance.
 
-`Analysis › Export events for training…` offers three row sets. **Reviewed decisions** is the
+`Analysis › Export › Export events for training…` offers three row sets. **Reviewed decisions** is the
 recommended default and includes human positives and negatives; untouched candidates and automatic
 rejects are withheld. **Accepted candidates** may include rows nobody reviewed, while **All raw
 candidates** also includes automatic rejects. If any selected row contains an unresolved label such
@@ -2664,7 +2670,7 @@ makes one event spanning A to C.
 is `15`. The field accepts 0.01–100 ms and starts at 0.15 ms — a few samples at 50 kHz,
 a possible starting point for investigating brief threshold recrossings, not a guarantee that distinct events remain separate. There is no `0` here: the smallest window is `0.01`, which still stitches
 fragments that touch exactly. `0` looked like the `0 = off` sentinel the `Detection` tab spells
-out on `merge gap` and was never one — at `0` the window is 0 samples, exactly-touching rows
+out on `Merge gap` and was never one — at `0` the window is 0 samples, exactly-touching rows
 still satisfy the rule, and `Merge all` merged them — so the field now floors at a window that
 is honestly a window. The button beside it only ever means merge; there is nothing for “off”
 to mean on this panel.
@@ -2750,11 +2756,11 @@ smaller one, or drag over exactly the fragments you mean and use `Merge events i
 The check applies wherever a merge happens: `Merge all`, `Merge events in selection` — an
 explicit drag overrides the *window*, not this check, and a selection that fails it says so
 (*"That selection is mostly open pore between its events…"*) — `Merge with next` in the Event
-inspector, and the detector's own `merge gap` during a detection run.
+inspector, and the detector's own `Merge gap` during a detection run.
 
 ### Doing it at detection time
 
-`merge gap` on the `Detection` tab does the same thing during detection, and it now reads
+`Merge gap` on the `Detection` tab does the same thing during detection, and it now reads
 **milliseconds** too — 15 ms is `15`, over a 0–1000 ms range. Both routes give identical
 results — verified on all three recordings — including the open-pore check: a run whose merged
 span would be mostly open pore is left as separate events there as well.
@@ -2767,7 +2773,7 @@ button whose only meaning is merge — which is why that field floors at 0.01 ms
 **Which to use**
 
 The `Merge sub-events` panel, when you want to try a window and
-see the effect without re-running detection. `merge gap`, when you have settled on a value
+see the effect without re-running detection. `Merge gap`, when you have settled on a value
 and want it recorded in the detection provenance and re-applied on every re-run.
 
 ### What 15 ms did to these three recordings
@@ -2954,7 +2960,7 @@ bandwidth factor. Style and Save image apply as on any other plot type.
 
 **As a publication export** (with marginal distributions):
 
-- Open `Analysis › Export density figure…`.
+- Open `Analysis › Export › Export density figure…`.
 - Answer the amplitude question. `depth (pA)` is the absolute blockade;
 `fractional ΔI/I₀` divides by each event's estimated open-pore current. Choose an amplitude only after evaluating the calibration/reference caveats above; fractional amplitude does not automatically make these recordings comparable.
 - Choose a path. Three files land together: `.png`, `.pdf` and a
@@ -2968,11 +2974,11 @@ Each recording gets its own contour set, normalised to itself so a sparse group 
 to a dense one, with marginal distributions on both axes. The legend labels come from the applied
 voltage — read from the file header or the filename when there is no voltage channel.
 
-`Analysis › Density figure style…` controls contour levels, line width, font
+`Analysis › Export › Density figure style…` controls contour levels, line width, font
 scale, legend position and size, and whether counts appear in the legend. `none` removes
 the legend entirely.
 
-In the Plots window, the Style group now also carries **X label** / **Y label**
+In Distributions, the Style group now also carries **X label** / **Y label**
 overrides (text only — tick scaling still applies), a **Show legend** toggle, and
 the fit label's **Numbers** row; the **Axis range** fields read in the unit the axis
 displays, so a declared time axis uses ms and you type the number you
@@ -3263,7 +3269,7 @@ caveats.](images/ex_scatter.webp)
 
 ### Step 6 · KDE — fractional blockade vs dwell, all three
 
-**Analysis ▸ Export density figure…**, choose *fractional ΔI/I₀* at the amplitude prompt. The figure
+**Analysis ▸ Export ▸ Export density figure…**, choose *fractional ΔI/I₀* at the amplitude prompt. The figure
 overlays one KDE contour set per recording with marginals and n in the legend. Evaluate the fractional-amplitude caveats before comparing sources. The in-app KDE is **Analysis → Distributions → KDE (density)**. **Event waveforms** instead offers a binned event-count heatmap and ensemble view; it is not this KDE, and its historical coordinate-mapping caveat is dated in Known limits.
 
 ![The exported density figure: ΔI/I₀ vs dwell, one colour per recording.](images/ex_kde_all3.webp)
@@ -3399,7 +3405,7 @@ warns again and defaults to `Cancel` if any selected row still has a conflict.
 
 ### 4 · Export the training regions
 
-Choose `Analysis › Export events for training…`. Its first dialog offers three different datasets:
+Choose `Analysis › Export › Export events for training…`. Its first dialog offers three different datasets:
 
 - `Reviewed decisions (recommended)` — human-reviewed positives **and negatives** only. Untouched
   candidates and automatic detector rejects are withheld. This is the supervised-learning-safe

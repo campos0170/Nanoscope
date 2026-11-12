@@ -119,7 +119,7 @@ def test_a_signal_conditioning_geometry_from_another_display_is_used(private_set
     window._open_signal_conditioning()
     settle()
     ws = window._signal_conditioning
-    assert "Ignored saved Signal Conditioning" not in window.statusBar().currentMessage()
+    assert "Ignored saved Preprocess workspace" not in window.statusBar().currentMessage()
     assert (ws.width(), ws.height()) == (780, 700), ws.geometry()
     ws.hide()
     close_window(window)

@@ -571,6 +571,12 @@ def test_quitting_with_an_unstoppable_worker_does_not_abort_the_process(tmp_path
         import nanoscope
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6 import QtCore, QtWidgets
+        # main() reads the preferences and, on a brand-new store, writes its first-run claim
+        # there. This process is a quit probe, never the owner's launch: the store is a throwaway
+        # folder, set BEFORE nanoscope.gui.app is imported (the same two lines as
+        # test_rk_teardown_and_prefs_green2._EXIT_PROBE).
+        QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
+        QtCore.QSettings.setPath(QtCore.QSettings.IniFormat, QtCore.QSettings.UserScope, sys.argv[2])
         from nanoscope.gui import app as appmod
         from nanoscope.gui import main_window as mw
         from nanoscope.gui.analysis_worker import AnalysisController
@@ -582,15 +588,19 @@ def test_quitting_with_an_unstoppable_worker_does_not_abort_the_process(tmp_path
             while time.monotonic() - t0 < 8.0:
                 pass
 
-        class _Window:
+        class _Window(QtCore.QObject):          # a QObject: main() hangs a timer on the window
             """Stands in for MainWindow: one uncancellable job, then quit."""
 
             def __init__(self, **_kwargs):      # main() passes recovery_enabled=True
+                super().__init__()
                 self.ctrl = AnalysisController(session=None)
                 self.ctrl.run_callable(burn, label="sweep_threshold")
 
             def show(self):
                 QtCore.QTimer.singleShot(700, self._quit)
+
+            def _open_first_analysis_guide(self):
+                pass                # the throwaway store is brand new, so main() asks for the guide
 
             def _quit(self):
                 self.ctrl.abort()                       # what _teardown does
@@ -607,10 +617,15 @@ def test_quitting_with_an_unstoppable_worker_does_not_abort_the_process(tmp_path
     path = tmp_path / "quit_probe.py"
     path.write_text(script)
 
-    control = subprocess.run([sys.executable, str(path), "control"],
+    prefs = {"control": tmp_path / "prefs-control", "real": tmp_path / "prefs-real"}
+    control = subprocess.run([sys.executable, str(path), "control", str(prefs["control"])],
                              capture_output=True, timeout=180)
-    real = subprocess.run([sys.executable, str(path), "real"],
+    real = subprocess.run([sys.executable, str(path), "real", str(prefs["real"])],
                           capture_output=True, timeout=180)
+
+    # The preferences main() touched went to the throwaway folders and nowhere else.
+    for arm, folder in prefs.items():
+        assert list(folder.glob("*/NanoScope.ini")), f"the {arm} arm kept no store in {folder}"
 
     # -6 from subprocess (SIGABRT), which a shell reports as 134. Both spellings, one signal.
     assert control.returncode in (-6, 134), (

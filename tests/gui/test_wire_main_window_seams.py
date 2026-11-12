@@ -111,15 +111,26 @@ def _analysis_menu(window: MainWindow) -> QtWidgets.QMenu:
     return menus[0]
 
 
+def _analysis_rows(window: MainWindow) -> list:
+    """Every row a user can reach from the Analysis menu: its own, then its submenus' (Export
+    is one). Submenus are found with ``findChildren`` — ``QAction.menu()`` would hand the
+    live menu to Python, which then deletes it."""
+    menu = _analysis_menu(window)
+    rows = list(menu.actions())
+    for sub in menu.findChildren(QtWidgets.QMenu):
+        rows += sub.actions()
+    return rows
+
+
 def _processed_action(window: MainWindow):
     """The menu item this round exists to add — found the way a user finds it: by reading
-    the Analysis menu, not by knowing an attribute name."""
-    hits = [a for a in _analysis_menu(window).actions()
+    the Analysis menu and the Export submenu in it, not by knowing an attribute name."""
+    hits = [a for a in _analysis_rows(window)
             if "processed trace" in a.text().replace("&", "").lower()]
     assert len(hits) == 1, (
         "Analysis offers no 'Export processed trace…' item, so the conditioned samples "
         "have no browsable door: "
-        + ", ".join(a.text() for a in _analysis_menu(window).actions() if a.text()))
+        + ", ".join(a.text() for a in _analysis_rows(window) if a.text()))
     return hits[0]
 
 

@@ -475,6 +475,21 @@ def _run_checks(argv: list[str], tmp: Path) -> int:
             raise AssertionError("nanoscope dist-info missing from the bundle")
         return v
 
+    @check("user guide is in the bundle (Help > User guide)")
+    def _user_guide():
+        # Both specs add docs/USER_GUIDE.md to the bundle's nanoscope folder, and the Help menu
+        # reads it from there. Without it the app starts and shows its window, and the two Help
+        # entries are greyed out, which nothing else would notice.
+        from nanoscope.gui.user_guide_window import SHORTCUTS_HEADING, read_guide
+
+        text = read_guide()
+        if text is None:
+            raise AssertionError(
+                "nanoscope/USER_GUIDE.md is missing: Help > User guide would be greyed out")
+        if f"\n## {SHORTCUTS_HEADING}\n" not in text:
+            raise AssertionError("the bundled user guide has no section 13 heading")
+        return f"{len(text):,} characters"
+
     # -- 2. readers ----------------------------------------------------------------------------
     @check("all four readers register")
     def _readers():

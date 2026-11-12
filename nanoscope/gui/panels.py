@@ -94,12 +94,14 @@ from PySide6.QtWidgets import (
     QTableView,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 import pyqtgraph as pg
 
+from .advisory_text import advisory_headline
 from .column_checklist import ColumnChecklist, ColumnChooserPopup
 from .inspector_widgets import (
     PENDING_MARK, Disclosure, InspectorScrollArea, PinnedActions, host_layout, install_run_key)
@@ -1931,8 +1933,8 @@ class DetectionPanel(QWidget):
             lambda: self.noise_window_s.setEnabled(self.noise_policy.currentData() != "global"))
         schmitt_form.addRow("Noise thresholds", self.noise_policy)
         schmitt_form.addRow("Noise window", self.noise_window_s)
-        schmitt_form.addRow("k_in (enter)", self.k_in)
-        schmitt_form.addRow("k_out (exit)", self.k_out)
+        schmitt_form.addRow("Start (k_in)", self.k_in)
+        schmitt_form.addRow("End (k_out)", self.k_out)
         self.detector_stack.addWidget(schmitt_page)
 
         # -- CUSUM page ----------------------------------------------------
@@ -1984,17 +1986,17 @@ class DetectionPanel(QWidget):
             "detector's own 0.50 ms / 1.00 ms rather than the Schmitt values.")
         _cusum_note.setWordWrap(True)
         _cusum_note.setStyleSheet("color:#8b9199;")
-        cusum_form.addRow("k (drift)", self.cusum_k)
-        cusum_form.addRow("h (threshold)", self.cusum_h)
+        cusum_form.addRow("Drift (k)", self.cusum_k)
+        cusum_form.addRow("Threshold (h)", self.cusum_h)
         cusum_form.addRow(_cusum_note)
         self.detector_stack.addWidget(cusum_page)
 
-        det_form.addRow("detector", self.detector_combo)
+        det_form.addRow("Detector", self.detector_combo)
         det_form.addRow(self.detector_note)
         det_form.addRow(self.detector_stack)
-        det_form.addRow("min dwell", self.min_dwell_s)
-        det_form.addRow("max dwell", self.max_dwell_s)
-        det_form.addRow("merge gap", self.merge_gap_ms)
+        det_form.addRow("Min dwell", self.min_dwell_s)
+        det_form.addRow("Max dwell", self.max_dwell_s)
+        det_form.addRow("Merge gap", self.merge_gap_ms)
 
         # -- range: the ASYMMETRY WITH THE ML TAB, said out loud ------------
         #
@@ -2024,7 +2026,7 @@ class DetectionPanel(QWidget):
             "baseline_fingerprint — which is what makes its depths meaningful. "
             "Detecting a sub-range under the parent's baseline windows would measure "
             "it against a different open pore than the one it reports.")
-        det_form.addRow("range", self.range_readout)
+        det_form.addRow("Runs over", self.range_readout)
         detection_layout.addWidget(det_box)
 
         # -- Polarity -----------------------------------------------------
@@ -2037,8 +2039,8 @@ class DetectionPanel(QWidget):
         self.polarity_override.addItems(
             ["auto (measure)", "blockade (down, -1)", "enhancement (up, +1)"]
         )
-        pol_form.addRow("measured", self.polarity_readout)
-        pol_form.addRow("override", self.polarity_override)
+        pol_form.addRow("Found in data", self.polarity_readout)
+        pol_form.addRow("Override", self.polarity_override)
         detection_layout.addWidget(pol_box)
 
         # -- Buttons ------------------------------------------------------
@@ -2597,9 +2599,12 @@ class DetectionPanel(QWidget):
         self.ml_range.currentIndexChanged.connect(self._refresh_control_level_summary)
         # A first-use guide choice changes visibility only. Explicit existing
         # inspector preferences always win; simply opening the guide writes neither.
+        # The first-run claim (gui.app.main, on a brand-new store only) comes last.
+        from .first_run_state import first_run_control_level
         settings = QSettings()
         saved = str(settings.value(self._CONTROL_LEVEL_SETTINGS_KEY,
-                    settings.value("onboarding/control_level_choice_v1", "advanced")))
+                    settings.value("onboarding/control_level_choice_v1",
+                                   first_run_control_level(settings, "advanced"))))
         self.set_control_level(saved if saved in {"essential", "advanced"} else "advanced")
 
     def control_level(self) -> str:
@@ -2660,9 +2665,9 @@ class DetectionPanel(QWidget):
         active = [label for label, check in self._filter_specs if check.isChecked()]
         retained = []
         if self.max_dwell_s.value() > 0:
-            retained.append(f"max dwell {self.max_dwell_s.value() * 1000:g} ms")
+            retained.append(f"Max dwell {self.max_dwell_s.value() * 1000:g} ms")
         if self.merge_gap_ms.value() > 0:
-            retained.append(f"merge {self.merge_gap_ms.value():g} ms")
+            retained.append(f"Merge gap {self.merge_gap_ms.value():g} ms")
         if self.normalize_enabled.isChecked():
             retained.append(self._NORMALIZE_CRITICAL)
         if self.hp_enabled.isChecked():
@@ -6606,7 +6611,7 @@ class StatsPanel(QWidget):
             "detection — the same column, the same rows, as the dI/I0 below it.\n\n"
             "Rejecting rows moves it: it used to be taken over ALL rows, so it sat "
             "unchanged directly beneath an 'n accepted' that had moved, and disagreed "
-            "with the Plots window (which filters to accepted events by default) about "
+            "with Distributions (which filters to accepted events by default) about "
             "the same column of the same detection.\n\n"
             "This is an INSTRUMENT number, not a calibrated current: it is only as "
             "physical as the gain in Calibration. The unit in the row label is the "
@@ -6707,6 +6712,26 @@ class StatsPanel(QWidget):
         self.warnings_label.setVisible(False)
         root.addWidget(self.warnings_label)
 
+        # THE BLOCK READS AS HEADLINES, THE SENTENCES ARE ONE CLICK AWAY. The longest
+        # advisories run to several hundred words, and three or four of them under the
+        # table pushed the numbers they qualify out of the dock. The label shows the first
+        # sentence of each (`advisory_headline`) and this switch shows today's whole text
+        # in the same label. It is a view switch and nothing more: the tuple, the tooltip,
+        # `warnings_text()` and everything saved or exported keep the full text, and the
+        # switch is hidden while there is nothing to expand. Not a dismiss control -- the
+        # advisories are on screen, in some form, for as long as they apply.
+        self._warning_items: tuple[str, ...] = ()
+        self._warning_heads: tuple[str, ...] = ()
+        self.warnings_toggle = QToolButton()
+        self.warnings_toggle.setCheckable(True)
+        self.warnings_toggle.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.warnings_toggle.setAccessibleDescription(
+            "Switches the advisories above between their first lines and their full text.")
+        self._sync_warnings_toggle()
+        self.warnings_toggle.setVisible(False)
+        self.warnings_toggle.toggled.connect(self._on_warnings_toggled)
+        root.addWidget(self.warnings_toggle, 0, Qt.AlignLeft)
+
         # -- FDR readout --------------------------------------------------
         self.fdr_label = QLabel(self._NO_FDR_TEXT)
         self.fdr_label.setWordWrap(True)
@@ -6794,6 +6819,14 @@ class StatsPanel(QWidget):
                 }
             )
         )
+
+        # THE SWITCH COMES BEFORE THE SUMMARY TABLE IN THE TAB ORDER, though it sits under
+        # it. The table keeps Tab for its cells, as it always has: Tab there steps down the
+        # rows and wraps from the last to the first, so a switch placed after the table
+        # could never be reached from inside it. The table's own keys are left alone.
+        # Last in __init__ on purpose: called while the switch was still the last widget
+        # made, this changed nothing (measured), and the table stayed ahead of it.
+        QWidget.setTabOrder(self.warnings_toggle, self.summary_table)
 
     #: dI/I0 above this is not a blockade fraction — see :meth:`frac_depth_note`.
     _FRAC_DEPTH_ENHANCEMENT = events_mod.FRAC_DEPTH_ENHANCEMENT
@@ -6887,6 +6920,12 @@ class StatsPanel(QWidget):
         single advisory with no surface, and a fix that special-cased that one string
         would leave the next one just as invisible.
 
+        What the label SHOWS is one headline per caveat -- its first sentence, capped,
+        always a prefix of the stored text (:func:`advisory_headline`) -- with a switch
+        under it that shows the whole sentences in the same label. The tuple is never
+        shortened: :meth:`warnings_text`, the label's tooltip and everything saved or
+        exported carry the full text, whichever way the switch is set.
+
         There is no "don't show again". The block is dismissible only by REMOVING THE
         CONDITION -- measure the recording on the Preprocess tab, confirm the windows,
         detect again, and the re-run's warnings tuple no longer carries the sentence,
@@ -6894,20 +6933,59 @@ class StatsPanel(QWidget):
         while the wrong number stayed on screen, which is the state the advisory exists
         to prevent.
         """
-        items = [t for t in (str(w).strip() for w in (warnings or ())) if t]
+        items = tuple(t for t in (str(w).strip() for w in (warnings or ())) if t)
+        self._warning_items = items
         if not items:
+            self._warning_heads = ()
             self.warnings_label.clear()
             self.warnings_label.setVisible(False)
+            self.warnings_toggle.setVisible(False)
             return
-        self.warnings_label.setText(
-            f"{self.WARNINGS_HEADING}\n• " + "\n• ".join(items))
+        self._warning_heads = tuple(advisory_headline(t) for t in items)
         # The whole block is the tooltip too: the label word-wraps inside a dock that
         # can be dragged narrow, and a hover must be able to recover the full sentence.
         self.warnings_label.setToolTip("\n\n".join(items))
+        self._show_warnings()
         self.warnings_label.setVisible(True)
 
+    #: The two faces of the switch under the block: what pressing it will show.
+    _SHOW_FULL_TEXT = "Show full text"
+    _SHOW_FIRST_LINES = "Show first lines"
+
+    def _warnings_block(self, items: Sequence[str]) -> str:
+        """The block as text: the heading, then one bullet per item."""
+        return f"{self.WARNINGS_HEADING}\n• " + "\n• ".join(items)
+
+    def _show_warnings(self) -> None:
+        """Put the headlines, or the full sentences, in the label as the switch says.
+
+        The switch is offered only when a headline is shorter than its advisory; with
+        nothing cut the two views are the same text and there is nothing to switch."""
+        self.warnings_toggle.setVisible(self._warning_heads != self._warning_items)
+        shown = self._warning_items if self.warnings_toggle.isChecked() else self._warning_heads
+        self.warnings_label.setText(self._warnings_block(shown))
+
+    def _sync_warnings_toggle(self) -> None:
+        """The switch says what pressing it does -- in its text and to a screen reader."""
+        checked = self.warnings_toggle.isChecked()
+        text = self._SHOW_FIRST_LINES if checked else self._SHOW_FULL_TEXT
+        self.warnings_toggle.setText(text)
+        self.warnings_toggle.setAccessibleName(text)
+        self.warnings_toggle.setToolTip(
+            "Show only the opening of each advisory." if checked
+            else "Show every advisory in full.")
+
+    def _on_warnings_toggled(self, _checked: bool) -> None:
+        self._sync_warnings_toggle()
+        if self._warning_items:
+            self._show_warnings()
+
     def warnings_text(self) -> str:
-        """What the advisory block currently READS, or ``""`` when nothing is shown.
+        """The advisory block in FULL, or ``""`` when nothing is shown.
+
+        Always today's complete text -- heading, then every advisory whole, one bullet
+        each -- whichever way the Summary's switch is set; what the label shows right now
+        is :meth:`warnings_shown_text`.
 
         Hidden means empty, so a caller cannot mistake a stale hidden label for a
         warning that is on screen.
@@ -6917,6 +6995,12 @@ class StatsPanel(QWidget):
         realised. ``isVisible()`` is False for every child of an unshown window, which
         would make this read "" for a panel under test that has warnings up.
         """
+        return (self._warnings_block(self._warning_items)
+                if self.warnings_label.isVisibleTo(self) else "")
+
+    def warnings_shown_text(self) -> str:
+        """What the advisory block READS on screen right now, or ``""`` when hidden:
+        the headlines, or the full text once the switch has been pressed."""
         return (self.warnings_label.text()
                 if self.warnings_label.isVisibleTo(self) else "")
 

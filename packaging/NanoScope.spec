@@ -101,6 +101,10 @@ hiddenimports += collect_submodules("keras")
 
 datas = [
     (str(BUILD_RECORD_PATH), "nanoscope"),
+    # The user guide, beside the build record. Help > User guide... and Keyboard shortcuts...
+    # read it through importlib.resources (nanoscope/gui/user_guide_window.py); a bundle without
+    # it has both entries disabled, and a missing source file stops this build.
+    (str(ROOT / "docs" / "USER_GUIDE.md"), "nanoscope"),
     # importlib.metadata.version("nanoscope") in analysis/detect.py stamps the app version onto
     # every detection result's provenance. Without the dist-info it silently degrades to
     # "unknown" and every exported CSV loses its version stamp.

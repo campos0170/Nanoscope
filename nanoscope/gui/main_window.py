@@ -889,6 +889,10 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         #: one hidden dialog per press, and never a delete target of teardown's
         #: close()-sweep touching a wrapper this attribute still holds.
         self._build_info_dialog = None
+        #: The same rule for Help > User guide / Keyboard shortcuts: one window, built on the
+        #: first press and kept. The guide file is read once while the Help menu is built, to
+        #: decide whether the two entries are enabled, and again when the window is built.
+        self._user_guide_window = None
         self._figure_library = None
         self._event_inspector = None   # the single, lazily-built EventInspectorWindow
         self._event_gallery = None     # the single, lazily-built EventGalleryWindow
@@ -1581,8 +1585,8 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         # items 10-14 — a dumping ground you had to read end-to-end to find anything. It is now
         # sectioned along the way the work actually runs: DETECT (make events) · CURATE (judge
         # them) · EXPLORE (look at this recording) · COMPARE (look across recordings) · EXPORT
-        # (take it away). Every action, shortcut and behaviour is unchanged — this is ordering
-        # and separators only.
+        # (take it away, in a submenu). Every action, shortcut and behaviour is unchanged —
+        # this is ordering, separators and one submenu only.
         analysis_menu = menubar.addMenu("&Analysis")
         self._analysis_menu = analysis_menu
 
@@ -1717,6 +1721,10 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self._act_event_plots.setEnabled(False)
         self._act_event_plots.triggered.connect(self._open_event_plots)
 
+        # Lines inside this section split its 13 rows 4 / 3 / 3 / 3: the plot windows · the
+        # gallery, reconcile and labels · the Preprocess workspace and noise spectra · the
+        # sub-state fit and the subpopulations.
+        analysis_menu.addSeparator()
         # Beside "Event plots", not up in *Curate* with the Event inspector, and the
         # grouping is real rather than a concession: these two are the app's "all of your
         # events at once" windows — one reduces them to a density map / ensemble average,
@@ -1760,6 +1768,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
             "and the Event inspector.")
         self._act_labels.triggered.connect(self._edit_labels)
 
+        analysis_menu.addSeparator()
         # After _act_plots (which must stay item 8). ALWAYS enabled: disabled, ⌘⇧F would
         # fall through to the event table, whose curation keys ignore modifiers.
         self._act_signal_conditioning = analysis_menu.addAction("&Preprocess workspace…")
@@ -1809,6 +1818,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self._act_psd_selection.setEnabled(False)
         self._act_psd_selection.triggered.connect(self._open_psd_for_selection)
 
+        analysis_menu.addSeparator()
         # Sub-state level fitting. USER-INITIATED, ALWAYS. It is deliberately not part of
         # detection, not an AnalysisModule, and not triggered by selection or by results
         # changing: it is an added capability with its own parameters, and a second
@@ -1881,8 +1891,15 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
             "and curate its events with the main workspace tools.")
         self._act_incubation_study.triggered.connect(self._open_incubation_study)
 
-        analysis_menu.addSection("Export")
-        self._act_export_events = analysis_menu.addAction("Export &events…")
+        # EXPORT IS ONE SUBMENU, not a fifth run of fourteen rows: none of its commands has a
+        # shortcut, and as a run they made the menu 40 rows long. Three groups, divided by
+        # lines: what is written out (5), the hand-made events (3), the figures (6). The sync
+        # slots below stay on the top menu — it always opens before this one, so they run in
+        # time.
+        analysis_menu.addSeparator()
+        self._analysis_export_menu = analysis_menu.addMenu("E&xport")
+        export_menu = self._analysis_export_menu
+        self._act_export_events = export_menu.addAction("Export &events…")
         self._act_export_events.setToolTip(
             "Export the current detection's events to CSV (the accepted/curated-in "
             "events), for extraction into your own tools.")
@@ -1898,7 +1915,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         # which is the argument the measure_panel round made and it is right — but "the
         # processing should be visible rather than occurring entirely in the background"
         # is not answered by a control only the author can find.
-        self._act_export_processed = analysis_menu.addAction("Export &processed trace…")
+        self._act_export_processed = export_menu.addAction("Export &processed trace…")
         self._act_export_processed.setToolTip(
             "Write the conditioned samples — the Preprocess chain in force, which is the "
             "form's while a stage is enabled on it and otherwise the chain the stored "
@@ -1917,42 +1934,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self._act_export_processed.setEnabled(False)
         self._act_export_processed.triggered.connect(self._export_processed_trace)
 
-        # The scope switch for what LEAVES the app. Default on, which is how every export has
-        # always behaved; off keeps the events people drew out of the events and training
-        # exports (they stay in the table, the gallery and the counts). Disabled on the Manual
-        # table, where every row is hand-made.
-        self._act_include_hand_made = analysis_menu.addAction("Include &hand-made events in exports")
-        self._act_include_hand_made.setCheckable(True)
-        self._act_include_hand_made.setChecked(
-            QtCore.QSettings().value("analysis/include_hand_made", True, type=bool))
-        self._act_include_hand_made.setToolTip(
-            "On (the default): Export events and Export events for training include the "
-            "events you drew by hand, as they always have. Off: those two exports leave them "
-            "out and their .meta.json sidecars say how many were left out. The table, the "
-            "gallery and every count still include them, and Export event statistics always "
-            "writes every event of the tables you choose.")
-        self._act_include_hand_made.toggled.connect(self._on_include_hand_made_toggled)
-
-        self._act_convert_measurements = analysis_menu.addAction(
-            "Convert old &measurements to events…")
-        self._act_convert_measurements.setToolTip(
-            "Turn the manual measurements saved in this project into hand-made events in this "
-            "channel's Manual table, where the gallery, the inspector and every export see "
-            "them. You choose the rows; the measurement list is left as it is and Undo takes "
-            "the conversion back.")
-        self._act_convert_measurements.setEnabled(False)
-        self._act_convert_measurements.triggered.connect(self._convert_measurements)
-
-        self._act_copy_hand_made = analysis_menu.addAction("&Copy hand-made events to…")
-        self._act_copy_hand_made.setToolTip(
-            "Copy the events you drew by hand in the table on screen into another table of this "
-            "channel (Schmitt, CUSUM, Manual...). Each copy is measured the way that table "
-            "measures its own events; running it twice copies nothing twice; the copies are "
-            "independent of the originals.")
-        self._act_copy_hand_made.setEnabled(False)
-        self._act_copy_hand_made.triggered.connect(self._copy_hand_made_events)
-
-        self._act_export_event_statistics = analysis_menu.addAction("Export event &statistics…")
+        self._act_export_event_statistics = export_menu.addAction("Export event &statistics…")
         self._act_export_event_statistics.setToolTip(
             "Write mean, median, standard deviation, variance, minimum, maximum, peak-to-peak, "
             "RMS, skewness, kurtosis, area, amplitude and SNR for every event of the table on "
@@ -1965,7 +1947,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         # Training export: the curated events as a regions/labels table for the
         # StudentModel notebook — one row per event with accepted + added labels, plus
         # a provenance sidecar so the preprocessing that made the regions is recoverable.
-        self._act_export_training = analysis_menu.addAction("Export events for &training…")
+        self._act_export_training = export_menu.addAction("Export events for &training…")
         self._act_export_training.setToolTip(
             "Export the current detection as labelled training data (regions + "
             "accepted/added labels + a provenance sidecar) to improve the model. "
@@ -1973,7 +1955,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self._act_export_training.setEnabled(False)
         self._act_export_training.triggered.connect(self._export_training)
 
-        self._act_export_levels = analysis_menu.addAction("Export sub-state &levels…")
+        self._act_export_levels = export_menu.addAction("Export sub-state &levels…")
         self._act_export_levels.setToolTip(
             "Export the fitted sub-state levels (one row per event level, plus a "
             "provenance sidecar naming the CUSUM parameters). Enabled once a level fit "
@@ -1981,7 +1963,46 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self._act_export_levels.setEnabled(False)
         self._act_export_levels.triggered.connect(self._export_levels)
 
-        self._act_export_density = analysis_menu.addAction("Export &density figure…")
+        export_menu.addSeparator()
+
+        # The scope switch for what LEAVES the app. Default on, which is how every export has
+        # always behaved; off keeps the events people drew out of the events and training
+        # exports (they stay in the table, the gallery and the counts). Disabled on the Manual
+        # table, where every row is hand-made.
+        self._act_include_hand_made = export_menu.addAction("Include &hand-made events in exports")
+        self._act_include_hand_made.setCheckable(True)
+        self._act_include_hand_made.setChecked(
+            QtCore.QSettings().value("analysis/include_hand_made", True, type=bool))
+        self._act_include_hand_made.setToolTip(
+            "On (the default): Export events and Export events for training include the "
+            "events you drew by hand, as they always have. Off: those two exports leave them "
+            "out and their .meta.json sidecars say how many were left out. The table, the "
+            "gallery and every count still include them, and Export event statistics always "
+            "writes every event of the tables you choose.")
+        self._act_include_hand_made.toggled.connect(self._on_include_hand_made_toggled)
+
+        self._act_convert_measurements = export_menu.addAction(
+            "Convert old &measurements to events…")
+        self._act_convert_measurements.setToolTip(
+            "Turn the manual measurements saved in this project into hand-made events in this "
+            "channel's Manual table, where the gallery, the inspector and every export see "
+            "them. You choose the rows; the measurement list is left as it is and Undo takes "
+            "the conversion back.")
+        self._act_convert_measurements.setEnabled(False)
+        self._act_convert_measurements.triggered.connect(self._convert_measurements)
+
+        self._act_copy_hand_made = export_menu.addAction("&Copy hand-made events to…")
+        self._act_copy_hand_made.setToolTip(
+            "Copy the events you drew by hand in the table on screen into another table of this "
+            "channel (Schmitt, CUSUM, Manual...). Each copy is measured the way that table "
+            "measures its own events; running it twice copies nothing twice; the copies are "
+            "independent of the originals.")
+        self._act_copy_hand_made.setEnabled(False)
+        self._act_copy_hand_made.triggered.connect(self._copy_hand_made_events)
+
+        export_menu.addSeparator()
+
+        self._act_export_density = export_menu.addAction("Export &density figure…")
         self._act_export_density.setToolTip(
             "Overlay every open recording's detected events as 2-D KDE contours "
             "(dwell vs amplitude) with marginal densities — the comparison figure for "
@@ -1992,20 +2013,20 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         # Drop QAction.triggered's `checked` bool -- see _export_density's docstring.
         self._act_export_density.triggered.connect(lambda *_a: self._export_density())
 
-        self._act_edit_density = analysis_menu.addAction("Edit density figure…")
+        self._act_edit_density = export_menu.addAction("Edit density figure…")
         self._act_edit_density.setToolTip(
             "Generate the density once, then edit its labels and shared style before exporting.")
         self._act_edit_density.setEnabled(False)
         self._act_edit_density.triggered.connect(lambda *_a: self._edit_density_figure())
 
-        self._act_density_style = analysis_menu.addAction("Density figure st&yle…")
+        self._act_density_style = export_menu.addAction("Density figure st&yle…")
         self._act_density_style.setToolTip(
             "Contour levels, line width, font scale and the legend (size, position, "
             "heading, whether it carries counts). Overlaying several recordings puts the "
             "legend on top of the contours it names, so it is adjustable.")
         self._act_density_style.triggered.connect(self._edit_density_style)
 
-        self._act_export_figure = analysis_menu.addAction("Generate " + ANALYSIS_LABELS["report_figures"] + "…")
+        self._act_export_figure = export_menu.addAction("Generate " + ANALYSIS_LABELS["report_figures"] + "…")
         self._act_export_figure.setToolTip(
             "Generate a standard report (dwell/depth histograms, dwell-vs-depth "
             "scatter, trace preview) for the current detection result, each with a "
@@ -2014,14 +2035,14 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self._act_export_figure.setEnabled(False)
         self._act_export_figure.triggered.connect(self._export_figures)
 
-        self._act_edit_report_figure = analysis_menu.addAction("Edit standard report figure…")
+        self._act_edit_report_figure = export_menu.addAction("Edit standard report figure…")
         self._act_edit_report_figure.setToolTip(
             "Choose a report figure from the current detection, then edit its text and "
             "style before exporting. Existing fits are used when available.")
         self._act_edit_report_figure.setEnabled(False)
         self._act_edit_report_figure.triggered.connect(lambda: self._edit_report_figure())
 
-        self._act_figure_library = analysis_menu.addAction("Figure &Library…")
+        self._act_figure_library = export_menu.addAction("Figure &Library…")
         self._act_figure_library.setToolTip(
             "Named figure snapshots saved in this project, separate from the Event Gallery.")
         self._act_figure_library.triggered.connect(self._open_figure_library)
@@ -2035,6 +2056,21 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self._act_first_analysis_guide.triggered.connect(self._open_first_analysis_guide)
         self._build_window_menu(menubar)
         help_menu = self.menuBar().addMenu("&Help")
+        self._act_user_guide = help_menu.addAction("User guide…")
+        self._act_user_guide.setToolTip("Read the NanoScope user guide in its own window, from the beginning.")
+        self._act_user_guide.triggered.connect(self._open_user_guide)
+        self._act_keyboard_shortcuts = help_menu.addAction("Keyboard shortcuts…")
+        self._act_keyboard_shortcuts.setToolTip("Open the user guide at its table of keyboard shortcuts.")
+        self._act_keyboard_shortcuts.triggered.connect(self._open_keyboard_shortcuts)
+        from .user_guide_window import MISSING_SENTENCE, guide_available
+        if not guide_available():
+            # The reason goes in the label, as Edit > Undo's does: a tooltip on a native macOS
+            # menu item never renders.
+            for act in (self._act_user_guide, self._act_keyboard_shortcuts):
+                act.setEnabled(False)
+                act.setText(act.text().rstrip("…") + " — not included in this copy")
+                act.setToolTip(MISSING_SENTENCE)
+        help_menu.addSeparator()
         help_menu.addAction(self._act_first_analysis_guide)
         help_menu.addAction(self._act_analysis_home)
         help_menu.addSeparator()
@@ -2109,10 +2145,11 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         # over the finished menu bar left `_act_plots` and its six siblings as dead C++
         # objects and `_wire` raised "Internal C++ object (QAction) already deleted" before
         # the window could show. findChildren is recursive and takes no ownership, so it
-        # reaches the three submenus (Open Recent, Open Recent Project, Panels) safely.
-        # Seven menus are wired here. An eighth, untitled one appears under the menu bar
-        # later — Qt's own overflow ("extension") popup, built lazily; it holds copies of the
-        # four top-level titles, which carry no sentences, so nothing is lost by missing it.
+        # reaches the four submenus (Open Recent, Open Recent Project, Panels and Analysis ▸
+        # Export) safely. Ten menus are wired here: the six on the bar and those four. An
+        # eleventh, untitled one appears under the menu bar later — Qt's own overflow
+        # ("extension") popup, built lazily; it holds copies of the four top-level titles,
+        # which carry no sentences, so nothing is lost by missing it.
         for menu in self.menuBar().findChildren(QtWidgets.QMenu):
             menu.setToolTipsVisible(True)
             menu.hovered.connect(self._show_menu_action_help)
@@ -2161,8 +2198,22 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self.statusBar().showMessage(help_text)
 
     def _clear_menu_action_help(self) -> None:
-        """Withdraw the hover sentence — but only while it is still the message on screen."""
-        held, self._menu_help_message = self._menu_help_message, ""
+        """Withdraw the hover sentence — but only while it is still the message on screen, and
+        not while a menu that is still open is on the row it was written for.
+
+        The second condition is for leaving a submenu (Analysis ▸ Export, File ▸ Open Recent)
+        for a row of the menu that opened it. Qt makes that row current and emits ``hovered``,
+        which shows its sentence, and only then hides the submenu, whose ``aboutToHide`` queues
+        this withdrawal; without the check the queued call removes the sentence of the row the
+        pointer is on and the bar stays empty until the pointer moves to another row. When the
+        menus really close none is visible any more, so the sentence is withdrawn as before."""
+        held = self._menu_help_message
+        if held and any(
+                menu.isVisible() and menu.activeAction() is not None
+                and self._menu_action_help(menu.activeAction()) == held
+                for menu in self.menuBar().findChildren(QtWidgets.QMenu)):
+            return
+        self._menu_help_message = ""
         if held and self.statusBar().currentMessage() == held:
             self.statusBar().clearMessage()
 
@@ -3709,7 +3760,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         step("Run ML", self._sync_ml_detection_action)
         step("Measure", self._sync_measure_action)
         step("Export", self._sync_export_action)
-        step("Signal conditioning",
+        step("Preprocess workspace",
              lambda: self._push_conditioning_source()
              if _on_screen(self._signal_conditioning) else None)
         # THE FOUR SURFACE-WINDOW FEEDS FOLLOW THE `_refresh_surface_windows` RULE: a
@@ -3734,7 +3785,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         step("Subpopulation views", self._refresh_subpop_views)  # ...which may now be stale
         if self._figure_workspace is not None and not self._restoring:
             step("Figure sources", lambda: self._figure_workspace.sources_changed(selection_only=True))
-        step("Event plots",
+        step("Event waveforms",
              lambda: self._refresh_event_plots()                # ...as may density / ensemble
              if (self._figure_workspace is None and _on_screen(self._event_plot_window)
                  and EVENT_PLOTS_ARTIFACT_ID not in self._workspace_frozen)
@@ -3943,7 +3994,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         self._act_export_processed.setStatusTip(gate)
 
     def _export_processed_trace(self) -> None:
-        """Analysis ▸ Export processed trace… — the conditioned samples, through the panel.
+        """Analysis ▸ Export ▸ Export processed trace… — the conditioned samples, through the panel.
 
         The panel owns the write (it holds the chain, the target and the cursor bounds) and
         reports into its own status label; that label lives on the Manual-measurement tab,
@@ -4065,7 +4116,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         return dialog.selected_ids()
 
     def _convert_measurements(self) -> None:
-        """Analysis ▸ Convert old measurements to events…"""
+        """Analysis ▸ Export ▸ Convert old measurements to events…"""
         plan = self._analysis_panel.conversion_plan()
         if not plan:
             self.statusBar().showMessage("There are no saved measurements to convert.", 8000)
@@ -4092,7 +4143,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         return targets[labels.index(label)] if ok else None
 
     def _copy_hand_made_events(self) -> None:
-        """Analysis ▸ Copy hand-made events to…"""
+        """Analysis ▸ Export ▸ Copy hand-made events to…"""
         target = self._choose_copy_target()
         if target is None:
             return
@@ -4103,7 +4154,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
             self._keep_curation_place = False
 
     def _include_hand_made(self) -> bool:
-        """The state of Analysis ▸ Include hand-made events in exports."""
+        """The state of Analysis ▸ Export ▸ Include hand-made events in exports."""
         return bool(self._act_include_hand_made.isChecked())
 
     def _on_include_hand_made_toggled(self, on: bool) -> None:
@@ -4137,7 +4188,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
         return dict(offers)[label] if ok else None
 
     def _export_event_statistics(self) -> None:
-        """Analysis ▸ Export event statistics…"""
+        """Analysis ▸ Export ▸ Export event statistics…"""
         scope = self._choose_statistics_scope()
         if scope is None:
             self.statusBar().showMessage("There are no events to export statistics for.", 8000)
@@ -6141,7 +6192,7 @@ class MainWindow(_FiguresMixin, _ExportsMixin, _SurfacesMixin, _SubpopMixin, _Pr
                 ignored.append(self._SC_FOLLOW_KEY)
         if ignored:
             self.statusBar().showMessage(
-                f"Ignored saved Signal Conditioning preference(s) this app could not use "
+                f"Ignored saved Preprocess workspace preference(s) this app could not use "
                 f"({', '.join(ignored)}); their defaults were used.", 8000)
 
     def _place_signal_conditioning_window(self, ws, s: QtCore.QSettings,

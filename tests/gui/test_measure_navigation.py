@@ -927,6 +927,17 @@ def _gui_modules_reached(module) -> set[str]:
 # this module was written to delete.
 _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos", "axes",
                           "categorical", "worker_thread",
+                          # 2026-11-11: advisory_text cuts an advisory down to its headline for
+                          # the Summary's advisory block and the toolbar link's tooltip. Pure
+                          # Python (``re``): no widget, nothing imported from gui -- the guard
+                          # below proves both, so it opens no route from a panel to a panel.
+                          "advisory_text",
+                          # 2026-11-11: first_run_state holds the first-run claim's settings key and
+                          # values and the two questions asked of them, so the Detection panel can
+                          # read the claim without importing the guide window. Plain Python over a
+                          # QSettings handed in: no widget, nothing imported from gui -- the guard
+                          # below proves both.
+                          "first_run_state",
                           # 2026-09-13: subpop_window adopted the shared plot
                           # appearance/workflow-bar/label infrastructure other
                           # analysis windows already use (b21e8ae, 2026-09-06) --

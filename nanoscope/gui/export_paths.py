@@ -6,7 +6,7 @@ WHY THIS MODULE EXISTS
 That confirmation is only truthful for an export that writes exactly that file, and
 several of ours do not:
 
-* *Analysis ▸ Export figure…* proposed ``figures.pdf`` — a file it **never writes** — and
+* *Analysis ▸ Export ▸ Generate Report figures…* proposed ``figures.pdf`` — a file it **never writes** — and
   then wrote ``{stem}_{dwell,depth,scatter,trace}.{pdf,png,csv}``: up to **twelve** files,
   none of them mentioned, silently overwriting whatever was there. The ``.csv`` source-data
   files are the ones a user is most likely to have hand-edited.

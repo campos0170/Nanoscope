@@ -320,7 +320,7 @@ _STALE_ROW_TIP = (
     "Measured under a calibration that has since changed. The row's units / cal_gain / "
     "cal_offset columns hold the gain, offset and units it was measured under; the "
     "Calibration panel holds the current ones. Saved numbers are the record of what was "
-    "measured and are never rescaled. Analysis ▸ Convert old measurements to events… "
+    "measured and are never rescaled. Analysis ▸ Export ▸ Convert old measurements to events… "
     "re-measures the span, as an event, under the current calibration."
 )
 
@@ -347,8 +347,9 @@ _RATE_STALE_ROW_TIP = (
     "time unit…). The row's t_start_s, dwell_s and area_ecd were computed at the recording's "
     "previous sample rate (and its t0_s was read before the column's unit was re-declared, "
     "when that is what changed); its start_idx / end_idx span is still right. Saved numbers "
-    "are the record of what was measured and are never rescaled. Analysis ▸ Convert old "
-    "measurements to events… re-measures the span, as an event, under the declared rate."
+    "are the record of what was measured and are never rescaled. Analysis ▸ Export ▸ "
+    "Convert old measurements to events… re-measures the span, as an event, under the "
+    "declared rate."
 )
 _RATE_LAPSED_ROW_TIP = (
     "Measured under a time base that had already been re-declared when this row was last "
@@ -1331,14 +1332,15 @@ class MeasurePanel(QtWidgets.QWidget):
         # -- the old measurement list ---------------------------------------
         # Measurements saved before an event could be added by hand. Shown only while the list
         # is not empty, labelled old, and no longer added to from here: Ctrl+M files an event.
-        # Go to, Remove, Export CSV and Analysis ▸ Convert old measurements to events stay.
+        # Go to, Remove, Export CSV and Analysis ▸ Export ▸ Convert old measurements to
+        # events stay.
         # A GRID, not one long row: the un-wrappable 3-button row is exactly what used to
         # floor the whole Inspector dock's width.
         self._legacy_box = QtWidgets.QGroupBox("Old measurements (0)")
         self._legacy_box.setToolTip(
             "Measurements saved before events could be added by hand. They are kept and can "
-            "be exported or removed; Analysis ▸ Convert old measurements to events turns "
-            "them into events.")
+            "be exported or removed; Analysis ▸ Export ▸ Convert old measurements to events "
+            "turns them into events.")
         legacy_lay = QtWidgets.QVBoxLayout(self._legacy_box)
         legacy_lay.setContentsMargins(6, 6, 6, 6)
         btn_grid = QtWidgets.QGridLayout()
@@ -3236,7 +3238,7 @@ class MeasurePanel(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.information(
                     self, "Export measurements",
                     "There are no old measurements to export. Events are exported from "
-                    "Analysis ▸ Export events… (every hand-made event included).")
+                    "Analysis ▸ Export ▸ Export events… (every hand-made event included).")
             return None
         if path is None:
             chosen = ask_export_path(

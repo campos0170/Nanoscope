@@ -544,16 +544,35 @@ def test_a_bare_main_window_writes_no_recovery(qapp, qtbot, tmp_path, monkeypatc
     _quiet(opted_in)
 
 
-def test_the_app_launch_path_is_what_turns_recovery_on(qapp, monkeypatch):
+def _launch(qapp, monkeypatch, window_class, *, first_run: bool, run_loop=lambda: 0) -> int:
+    """The real ``gui.app.main`` with a stand-in window class and what it needs of Qt stubbed.
+
+    ``main()`` asks ``claim_first_run`` whether this launch is a first run. These tests are about
+    the launch path, not the claim (``test_first_run_claim.py`` holds that), and the real claim
+    would read, and on an empty store write, the suite's shared preferences, which every later
+    ``DetectionPanel`` in this process then reads: so the answer is given here. ``main()`` imports
+    the name at call time, so the patch is seen. A window that ``main()`` hangs a timer on must be
+    a QObject.
+    """
     import nanoscope.gui.app as app_module
     import nanoscope.gui.main_window as main_window
     import nanoscope.gui.worker_thread as worker_thread
     from PySide6 import QtWidgets
 
-    made: list[dict] = []
     # main() ends by leaving through os._exit when a detached worker survives its drain;
     # an earlier test's leftover must not take this process down with it.
     monkeypatch.setattr(worker_thread, "drain_detached", lambda *_a, **_k: 0)
+    monkeypatch.setattr(main_window, "MainWindow", window_class)
+    monkeypatch.setattr(app_module, "create_app", lambda argv: qapp)
+    monkeypatch.setattr(app_module, "_apply_theme", lambda app: None)
+    monkeypatch.setattr(app_module, "configure_pyqtgraph", lambda: None)
+    monkeypatch.setattr("nanoscope.gui.first_analysis_guide.claim_first_run", lambda settings: first_run)
+    monkeypatch.setattr(QtWidgets.QApplication, "exec", lambda self: run_loop())
+    return app_module.main([])
+
+
+def test_the_app_launch_path_is_what_turns_recovery_on(qapp, monkeypatch):
+    made: list[dict] = []
 
     class _Window:
         def __init__(self, *args, **kwargs):
@@ -562,10 +581,34 @@ def test_the_app_launch_path_is_what_turns_recovery_on(qapp, monkeypatch):
         def show(self):
             pass
 
-    monkeypatch.setattr(main_window, "MainWindow", _Window)
-    monkeypatch.setattr(app_module, "create_app", lambda argv: qapp)
-    monkeypatch.setattr(app_module, "_apply_theme", lambda app: None)
-    monkeypatch.setattr(app_module, "configure_pyqtgraph", lambda: None)
-    monkeypatch.setattr(QtWidgets.QApplication, "exec", lambda self: 0)
-    assert app_module.main([]) == 0
+    assert _launch(qapp, monkeypatch, _Window, first_run=False) == 0
     assert made == [{"recovery_enabled": True}]
+
+
+def test_the_app_launch_path_opens_the_first_run_guide_once_after_the_window_shows(
+        qapp, qtbot, monkeypatch):
+    seen: list[str] = []
+
+    class _Window(QtCore.QObject):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+        def show(self):
+            seen.append("show")
+
+        def _open_first_analysis_guide(self):
+            seen.append("guide")
+
+    def loop(first_run: bool):
+        def run() -> int:
+            if first_run:
+                qtbot.waitUntil(lambda: "guide" in seen, timeout=5000)   # the zero-delay timer
+            qtbot.wait(60)                                              # ...and nothing more
+            return 0
+        return run
+
+    assert _launch(qapp, monkeypatch, _Window, first_run=True, run_loop=loop(True)) == 0
+    assert seen == ["show", "guide"], "once, and only after the window is on screen"
+    seen.clear()
+    assert _launch(qapp, monkeypatch, _Window, first_run=False, run_loop=loop(False)) == 0
+    assert seen == ["show"], "a launch that is not a first run opens no guide"

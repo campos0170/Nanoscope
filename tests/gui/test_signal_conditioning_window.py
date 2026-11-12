@@ -734,6 +734,11 @@ def test_copy_as_python_puts_a_parseable_script_on_the_clipboard(loaded, qtbot):
     assert "conditioned_trace(raw, fs, PARAMS)" in script
     assert "'median_enabled': True" in script and "'filter_cutoff_hz': 8000.0" in script
     assert said[-1].startswith("Copied a ") and "Python script" in said[-1]
+    # The script's own words call the window by its one name (they used to say "Signal Conditioning").
+    assert script.splitlines()[0] == \
+        '"""Rebuild the processed trace NanoScope shows in the Preprocess workspace.'
+    assert "# the Preprocess workspace's view, in samples" in script
+    assert "Signal Conditioning" not in script
 
 
 # -- placement, settings, lifetime ---------------------------------------------------------
@@ -772,7 +777,7 @@ def test_geometry_persists_and_bad_values_fall_back(qapp, qtbot, monkeypatch):
     w._open_signal_conditioning()
     ws = w._signal_conditioning
     assert ws.isVisible() and ws.width() >= ws.minimumWidth()
-    assert "Ignored saved Signal Conditioning" in w.statusBar().currentMessage()
+    assert "Ignored saved Preprocess workspace" in w.statusBar().currentMessage()
     assert ws.follows_main()
     saved_size = (780, ws.minimumHeight() + 20)
     ws.setGeometry(10, 20, *saved_size)   # above the hosted workspace minimum

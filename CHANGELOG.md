@@ -7,6 +7,17 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Added
 
+- **Help ▸ User guide… and Help ▸ Keyboard shortcuts…** open the user guide, now bundled with the
+  app, in a read-only window of its own; the second entry opens it at §13. In a copy without the
+  guide both entries are greyed out and say so. A link that leaves the guide does not open, and
+  says so at the link. The release checks (the bundle self-test, now 23 checks, and
+  `verify_bundle.py`) fail a bundle that does not contain the guide.
+- **A brand-new installation starts in the Essential controls and opens the Guided first analysis
+  once.** Brand new means the settings store holds no saved preference at all, so an installation
+  that has been used is unchanged (with no saved choice it still starts in Advanced). NanoScope
+  keeps starting in Essential until a view is chosen. If the first launch ends before the guide
+  has opened, the next launch opens it, and the guide waits for the crash-recovery question
+  instead of opening over it.
 - The Noise spectrum page has a **Signal** choice. **Raw (calibrated)** is the default and is
   unchanged in curves, numbers, exports and saved project content. **Processed (Preprocess
   chain)** analyses the trace after the Detection panel's Preprocess chain as it is set now,
@@ -227,6 +238,37 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **Analysis ▸ Export is a submenu.** The fourteen export commands (the exports, the
+  hand-made-event commands and the figure commands) moved into it in three groups; no command was
+  renamed and no shortcut changed. With the fourteen commands behind one row the menu is 27 rows
+  instead of 40, and **Explore this recording** is divided by three lines into groups of 4, 3, 3
+  and 3. Messages and guides that name a moved command say *Analysis ▸ Export ▸ <command>*. The
+  status-bar sentence of a menu row now stays while the pointer is on that row after leaving a
+  submenu for it. On Windows and Linux the letter keys of the export commands follow X (Alt+A, X,
+  then the letter), and P and C in the Analysis menu act at once because no other row shares
+  them.
+- **The Summary tab lists each advisory by its first sentence** (up to 230 characters, cut where
+  the sentence pauses), with a **Show full text** / **Show first lines** button under the block.
+  The tooltip of the *⚠ N advisories* link lists the same headlines, and the link opens the
+  Summary tab at the block's heading. The full text is what the button shows, what hovering the
+  block shows, and what the saved project and every export carry; none of it changed. To copy the
+  advisories in full, press Show full text first. The Summary table's Tab key behaves as before;
+  the button comes before the table in the Tab order.
+- **Detection form rows in plain words:** Detector, Start (k_in), End (k_out), Min dwell, Max
+  dwell, Merge gap, Runs over; Drift (k) and Threshold (h) for CUSUM; in the Polarity box, Found
+  in data and Override. Tooltips, Undo text and advisories keep the parameter names.
+- **One name per concept.** The editor window is the **Preprocess workspace** wherever it is
+  named: its title, the Filter step's tooltip, three status lines, the two Re-run refusals, and
+  the first line and one comment of the **Copy as Python** script (the code that script runs is
+  the same). Two sentences that said "the Plots window" say Distributions, a status line says
+  Event waveforms, and the Guided first analysis, the guide and the control reference call the
+  Inspector's reference button **Event reference…**, as it is on screen. Nothing NanoScope saves
+  changes (projects, exports, provenance); the merge warning saved with Comparison figures keeps
+  its wording.
+- **Documentation follows.** The user guide, the control reference source and the manual text
+  name the Export submenu, the new row labels and the Preprocess workspace; the shortcut table
+  lists Quit and the Windows key for Close, and a test checks every menu shortcut against the row
+  of its own action. The manual edition of 2026-11-11 predates these edits.
 - **Internal: `gui/main_window.py` and `gui/plots_panel.py` are each split over several files.
   Nothing a user sees, and nothing a saved project holds, changed.** `main_window.py` went from
   17,874 to 10,015 lines: seven `main_window_<part>.py` mixin modules (7,875 lines: figures,

@@ -80,7 +80,7 @@ dist/NanoScope.app/Contents/MacOS/NanoScope --self-test \
     ~/some_recording.abf ~/some_model.keras
 ```
 
-20 checks, approximately one minute, exit code = number of failures. Both file arguments are optional; the checks
+23 checks, approximately one minute, exit code = number of failures. Both file arguments are optional; the checks
 that need them report `SKIPPED` instead of failing — but pass them when you have them: the ML
 check runs the model over a slice of the REAL recording when a data file is supplied, and falls
 back to synthetic noise (where a detector that finds nothing still looks fine) when it is not.
@@ -109,7 +109,7 @@ event tables remain exactly unchanged.
 | `build_app.sh` | The one command. Preflight → icon → freeze → verify → sign → DMG. |
 | `NanoScope.spec` | PyInstaller spec: hidden imports, excludes, TOC pruning, `Info.plist`. |
 | `nanoscope_app.py` | Frozen entry point. Redirects stdio to a log, shows a crash dialog, handles `--self-test`. |
-| `nanoscope_selftest.py` | The 19 in-bundle checks. One per way this bundle can break. |
+| `nanoscope_selftest.py` | The 23 in-bundle checks. One per way this bundle can break. |
 | `rthooks/rthook_nanoscope_env.py` | Runtime hook: `MPLBACKEND=Agg`, writable `MPLCONFIGDIR`, TF CPU env. |
 | `qt_prefix_fix.py` | Build-time fix that stops PyInstaller shipping Anaconda's **Qt5** plugins. |
 | `verify_bundle.py` | Post-build integrity checks; run automatically by `build_app.sh`. |

@@ -9005,7 +9005,7 @@ class PlotsWindow(
     # so the one vector format the app appeared to offer was the one that could not
     # work. Wave 1 fixed the exporter; this is where it becomes reachable.
     #
-    # AND WHY PDF IS NOT LEFT TO ``Analysis ▸ Export figure…``. That command renders
+    # AND WHY PDF IS NOT LEFT TO ``Analysis ▸ Export ▸ Generate Report figures…``. That command renders
     # six FIXED matplotlib figures (``figures.save_figure``) and cannot draw the live
     # view -- none of the interactive window's choices (the columns, the fit, the
     # clustering colours, the Style group) reach it. "SVG from here, PDF from the

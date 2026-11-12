@@ -173,6 +173,7 @@ from ..core.sources import (
 )
 from ..core.types import ChannelKind
 from ..plot.style import PALETTE
+from .advisory_text import advisory_headline
 from .analysis_worker import AnalysisController
 from .baseline_panel import BaselinePanel
 from .baseline_workspace import BaselineCorrectionWorkspace
@@ -3145,8 +3146,8 @@ class AnalysisPanel(QtWidgets.QWidget):
                         f"{', '.join(f'{f:,.6g}' for f in lines)} Hz) is below the Nyquist "
                         f"frequency of the recording's declared sample rate ({nyquist:,.6g} "
                         f"Hz). Re-run replays this run's STORED list, never the box: fix the "
-                        f"list in Signal Conditioning (Preprocess tab ▸ Open Signal "
-                        f"Conditioning…, Notch stage) and press Detect.")
+                        f"list in the Preprocess workspace (Preprocess tab ▸ Open "
+                        f"Preprocess workspace…, Notch stage) and press Detect.")
         return None
 
     def _sync_stale_action(self, res: AnalysisResult | None = None) -> None:
@@ -3623,8 +3624,8 @@ class AnalysisPanel(QtWidgets.QWidget):
             return None
         body = why[len("Refused: "):] if why.startswith("Refused: ") else why
         return (f"the notch list this run would replay was not accepted: {body} Re-run "
-                f"replays this run's STORED list, never the box: fix the list in Signal "
-                f"Conditioning (Preprocess workspace ▸ Filters & drift, Notch stage, "
+                f"replays this run's STORED list, never the box: fix the list in the "
+                f"Preprocess workspace (Filters & drift ▸ Notch stage, "
                 f"“use an explicit line list”) and press Detect.")
 
     def _on_notch_lines_edited(self, _text: str) -> None:
@@ -5712,7 +5713,25 @@ class AnalysisPanel(QtWidgets.QWidget):
             self.resultsRevealRequested.emit()
             self.results_tabs.setCurrentIndex(1)
             if not self._stats.warnings_label.isHidden():
-                self.results_tabs.widget(1).ensureWidgetVisible(self._stats.warnings_label)
+                area = self.results_tabs.widget(1)
+                label = self._stats.warnings_label
+                area.ensureWidgetVisible(label)
+                # ...and, while it shows headlines, the switch under it: the headlines are
+                # only a way in, and a dock this short would otherwise leave the way to the
+                # full sentences just below the edge. (Not once it is open: the block is long
+                # then, and the switch is at its far end.)
+                toggle = self._stats.warnings_toggle
+                if not toggle.isHidden() and not toggle.isChecked():
+                    area.ensureWidgetVisible(toggle, 50, 4)
+                # THE HEADING WINS when both do not fit. Bringing the switch into view
+                # scrolls the block's top out of it, and a reader sent here by "N
+                # advisories" must land on the heading and the first advisory, not on the
+                # tail of the third. (A block taller than the viewport is also centred by
+                # ensureWidgetVisible; this puts its top at the top.)
+                bar = area.verticalScrollBar()
+                top = label.mapTo(area.widget(), QtCore.QPoint(0, 0)).y()
+                if bar.value() > top:
+                    bar.setValue(top)
 
     def _show_result(self, res: AnalysisResult) -> None:
         events = res.payload
@@ -5822,9 +5841,11 @@ class AnalysisPanel(QtWidgets.QWidget):
             f'<a style="color:#ffb454" href="summary">⚠ {n} advisories</a>'
             if warnings else '')
         self._result_notice.setAccessibleName(f"Analysis advisories ({n})")
+        # One headline bullet per advisory: a tooltip is a glance, and the sentences are on
+        # the Summary tab, behind its "Show full text" switch.
         self._result_notice.setToolTip(
             f"Analysis advisories ({n}) — click to review them on the Summary tab.\n\n"
-            + '\n\n'.join(warnings) if warnings else '')
+            + '\n'.join(f"• {advisory_headline(w)}" for w in warnings) if warnings else '')
         self._result_notice.setVisible(bool(warnings))
 
     def _show_polarity_evidence(self, evidence: Any) -> None:
@@ -8420,8 +8441,8 @@ class AnalysisPanel(QtWidgets.QWidget):
             elif reason == FIT_UNRECORDED:
                 they = "it" if one else "they"
                 notes.append(
-                    f"{subject} record{'s' if one else ''} no table (an earlier NanoScope or "
-                    f"the Plots window saved {'it' if one else 'them'}), so {they} "
+                    f"{subject} record{'s' if one else ''} no table (an earlier NanoScope, or "
+                    f"the Distributions page, saved {'it' if one else 'them'}), so {they} "
                     f"{'is' if one else 'are'} not shown beside {this} — press Fit to fit "
                     f"this one.")
         return notes

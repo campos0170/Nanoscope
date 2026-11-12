@@ -1,6 +1,6 @@
 """Post-build integrity checks on NanoScope.app. Run by build_app.sh before signing.
 
-Six jobs, all of which exist because the failure they catch is invisible until launch or leaks
+Seven jobs, all of which exist because the failure they catch is invisible until launch or leaks
 details of the build machine into the release artifact:
 
 1. QT MAJOR VERSION. This build runs inside an Anaconda env whose qt.conf misdirects Qt's own
@@ -39,6 +39,10 @@ details of the build machine into the release artifact:
 
 6. TENSORFLOW IMAGE IDENTITY. The top-level native dependency and Python extension must
    resolve to one file. Two copied images register the same ops twice and break ML import.
+
+7. USER GUIDE. Help > User guide and Help > Keyboard shortcuts read ``USER_GUIDE.md`` from the
+   bundle's ``nanoscope`` folder, where both specs add it. Without the file the app still builds,
+   signs and starts; the two entries are greyed out and nothing says why.
 """
 from __future__ import annotations
 
@@ -274,6 +278,12 @@ def check_tensorflow_image_identity(app: Path) -> None:
     print("    TensorFlow Python extension and native dependents share one image")
 
 
+def check_user_guide(app: Path) -> None:
+    if not (app / "Contents" / "Frameworks" / "nanoscope" / "USER_GUIDE.md").is_file():
+        raise SystemExit("FATAL: the user guide is not in the bundle; Help > User guide would be greyed out")
+    print("    user guide is bundled where the app reads it")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) == 2 and argv[0] == "--check-tensorflow-image":
         check_tensorflow_image_identity(Path(argv[1]).resolve())
@@ -286,6 +296,7 @@ def main(argv: list[str]) -> int:
         raise SystemExit(f"FATAL: {app} is not a directory")
     check_qt_major(app)
     check_tensorflow_image_identity(app)
+    check_user_guide(app)
     check_deployment_target(app)
     clean_dangling_symlinks(app)
     clean_non_system_absolute_rpaths(app)

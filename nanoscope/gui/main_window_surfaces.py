@@ -720,6 +720,20 @@ class _SurfacesMixin:
         self._build_info_dialog.raise_()
         self._build_info_dialog.activateWindow()
 
+    def _ensure_user_guide(self):
+        """The one user-guide window, built (and its file read again) on the first Help press."""
+        from .user_guide_window import UserGuideWindow
+        if self._user_guide_window is None:
+            self._user_guide_window = UserGuideWindow(self)
+            self._adopt_child_window(self._user_guide_window, "user_guide")
+        return self._user_guide_window
+
+    def _open_user_guide(self) -> None:
+        self._ensure_user_guide().show_guide()
+
+    def _open_keyboard_shortcuts(self) -> None:
+        self._ensure_user_guide().show_shortcuts()
+
     def _first_analysis_action(self, route: str) -> None:
         available, reason = self._first_analysis_availability(route)
         if not available:

@@ -272,7 +272,8 @@ def test_the_two_curation_windows_have_keyboard_shortcuts(win):
     assert win._act_event_inspector.shortcut() == QtCore.QKeyCombination(
         QtCore.Qt.ControlModifier, QtCore.Qt.Key_I)
     # ...and they are not taken from anything else in this window.
-    others = [a.shortcut() for a in win._analysis_menu.actions()
+    others = [a.shortcut() for a in (win._analysis_menu.actions()
+                                     + win._analysis_export_menu.actions())
               if not a.isSeparator()
               and a not in (win._act_event_gallery, win._act_event_inspector)]
     assert win._act_event_gallery.shortcut() not in others
@@ -882,11 +883,39 @@ _ANALYSIS_ACTION_ATTRS = (
 # surfaces, so their position is undisturbed.
 
 
+# Fourteen of the forty live in the Analysis ▸ Export submenu, in three groups divided by
+# lines: what is written out (5), the hand-made events (3), the figures (6). Every other name
+# in the tuple above is a direct row of the Analysis menu.
+_EXPORT_SUBMENU_GROUPS = (
+    ("_act_export_events", "_act_export_processed", "_act_export_event_statistics",
+     "_act_export_training", "_act_export_levels"),
+    ("_act_include_hand_made", "_act_convert_measurements", "_act_copy_hand_made"),
+    ("_act_export_density", "_act_edit_density", "_act_density_style", "_act_export_figure",
+     "_act_edit_report_figure", "_act_figure_library"),
+)
+_EXPORT_SUBMENU_ATTRS = tuple(a for group in _EXPORT_SUBMENU_GROUPS for a in group)
+
+
+def _analysis_commands(win):
+    """The Analysis menu's commands as (its own rows, the Export submenu's rows). The
+    submenu's own row is a menu, not a command, so it is in neither list."""
+    export = win._analysis_export_menu
+    own = [a for a in win._analysis_menu.actions()
+           if not a.isSeparator() and a is not export.menuAction()]
+    return own, [a for a in export.actions() if not a.isSeparator()]
+
+
 def test_analysis_menu_still_contains_every_action(win):
-    items = [a for a in win._analysis_menu.actions() if not a.isSeparator()]
+    own, exported = _analysis_commands(win)
+    items = own + exported
     assert len(items) == len(_ANALYSIS_ACTION_ATTRS)
     for attr in _ANALYSIS_ACTION_ATTRS:
         assert getattr(win, attr) in items, f"{attr} vanished from the Analysis menu"
+    # ...each exactly where it belongs: the fourteen in the Export submenu, the rest direct
+    # rows of the Analysis menu, and the submenu itself reachable from it.
+    assert exported == [getattr(win, a) for a in _EXPORT_SUBMENU_ATTRS]
+    assert len(own) == len(_ANALYSIS_ACTION_ATTRS) - len(_EXPORT_SUBMENU_ATTRS)
+    assert win._analysis_export_menu.menuAction() in win._analysis_menu.actions()
 
 
 def test_analysis_menu_keeps_every_shortcut_and_flag(win):
@@ -913,16 +942,27 @@ def test_analysis_menu_keeps_every_shortcut_and_flag(win):
 
 def test_analysis_menu_is_sectioned_instead_of_one_flat_list(win):
     """Ordering and separators only — but there must actually BE sections, and each one must
-    hold something."""
+    hold something. Export is a submenu rather than a section: it holds the fourteen export
+    commands in three groups."""
     actions = win._analysis_menu.actions()
     sections = [a.text() for a in actions if a.isSeparator() and a.text()]
-    assert sections == ["Detect", "Curate", "Explore this recording",
-                        "Compare recordings", "Export"]
+    assert sections == ["Detect", "Curate", "Explore this recording", "Compare recordings"]
     # every section is followed by at least one real action
     for i, act in enumerate(actions):
         if act.isSeparator() and act.text():
             rest = actions[i + 1:]
             assert any(not a.isSeparator() for a in rest), f"empty section {act.text()}"
+    # the Export submenu holds the fourteen, three groups divided by plain lines
+    export = win._analysis_export_menu
+    assert export.title() == "E&xport" and export.menuAction() in actions
+    groups: list[list] = [[]]
+    for act in export.actions():
+        if act.isSeparator():
+            assert not act.text(), "the lines inside Export are plain, not headings"
+            groups.append([])
+        else:
+            groups[-1].append(act)
+    assert groups == [[getattr(win, a) for a in group] for group in _EXPORT_SUBMENU_GROUPS]
 
 
 def test_the_five_plot_surfaces_are_no_longer_buried_at_the_end(win):

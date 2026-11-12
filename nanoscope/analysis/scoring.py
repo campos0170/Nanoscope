@@ -944,7 +944,7 @@ _WITHHELD_NOTE = (
 #: The same definition, for a file that withheld NOTHING. The sentence above ends with a
 #: claim about THIS file ("holds the accepted rows only") that is false for a full export
 #: -- ``build_training_frame(include_all=True)`` writes one, and so will
-#: ``Analysis > Export events`` once the include-rejected option lands. One note per
+#: ``Analysis > Export > Export events`` once the include-rejected option lands. One note per
 #: case, so the sidecar never describes a table it is not sitting beside.
 _NOTHING_WITHHELD_NOTE = (
     "A withheld row is a row of the source table with accepted=False -- rejected by "
@@ -1024,7 +1024,7 @@ def curation_stamp(
 
     TWO THINGS THE EXPORT USED TO LEAVE UNSAID, both measured on this tree.
 
-    1. ``Analysis > Export events`` writes ``events.accepted.df`` -- the accepted rows
+    1. ``Analysis > Export > Export events`` writes ``events.accepted.df`` -- the accepted rows
        only -- and the sidecar said ``n_rows: 113`` over a detection of 115 with nothing
        anywhere naming the two that did not come. A reader outside this app cannot tell a
        115-event recording exported after curation from a 113-event recording, and the
@@ -1160,7 +1160,7 @@ def write_events_export(
 ) -> dict[str, Path]:
     """Write an events table as CSV, plus the provenance sidecar that describes it.
 
-    ``Analysis > Export events...`` used to write a bare ``to_csv`` with nothing
+    ``Analysis > Export > Export events...`` used to write a bare ``to_csv`` with nothing
     beside it. That is the one place the estimator's identity reaches a consumer
     outside this app, and without it the migration story has no anchor: the 20
     frozen columns carry ``baseline_pA`` and ``depth_pA`` but say nothing about
@@ -1183,7 +1183,7 @@ def write_events_export(
     than implying 0 -- see :func:`clock_stamp`. No new CSV column either way.
 
     ...and so does WHAT IS NOT IN THE TABLE. The caller writes the ACCEPTED rows (that
-    is what ``Analysis > Export events`` hands over), so the CSV is the curated dataset
+    is what ``Analysis > Export > Export events`` hands over), so the CSV is the curated dataset
     and not the detection -- and the sidecar used to give a reader no way to tell those
     apart. :func:`curation_stamp` adds the ``curation`` block: how many rows the source
     table held, how many were withheld, and how the rows that DID come break down by

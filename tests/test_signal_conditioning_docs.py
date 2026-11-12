@@ -1,5 +1,6 @@
-"""The manual and the control inventory describe the Signal Conditioning window, not the
-in-dock editor it replaced (review D6: both still filed every stage under the Preprocess tab)."""
+"""The manual and the control inventory describe the Preprocess workspace (once the Signal
+Conditioning window), not the in-dock editor it replaced (review D6: both still filed every stage
+under the Preprocess tab)."""
 
 from __future__ import annotations
 
@@ -18,8 +19,11 @@ def test_the_inventory_files_the_stage_controls_under_the_window():
     groups = {c.get("group", "") for c in _controls()}
     stale = sorted(g for g in groups if "Signal chain ▸ " in g or "Signal chain → " in g)
     assert stale == [], stale
-    assert {"Signal Conditioning ▸ Low-pass", "Signal Conditioning ▸ Notch",
-            "Signal Conditioning ▸ Normalize", "Signal Conditioning ▸ toolbar"} <= groups
+    assert {"Preprocess workspace ▸ Low-pass", "Preprocess workspace ▸ Notch",
+            "Preprocess workspace ▸ Normalize", "Preprocess workspace ▸ toolbar"} <= groups
+    # One name for the window: no group (and no sentence anywhere in the file) still uses the old one.
+    assert sorted(g for g in groups if "Signal Conditioning" in g) == []
+    assert "Signal Conditioning" not in (DOCS / "inventory.json").read_text(encoding="utf-8")
     text = json.dumps(_controls(), ensure_ascii=False)
     for name in ("openSignalConditioningButton", "signalConditioningStages",
                  "eventTableNoticeChip", "chainStatusNote", "signalConditioningRevert"):
@@ -30,4 +34,6 @@ def test_the_manual_describes_the_window_and_the_protocol_name_rule():
     manual = (DOCS / "manual-markdown" / "manual.md").read_text(encoding="utf-8")
     assert "drops the name back to `— manual —`" not in manual
     assert "On the `Preprocess` tab. Low-pass" not in manual
-    assert "Signal Conditioning" in manual and "Ctrl+Shift+F" in manual
+    # The step that opens the window names its menu item and shortcut under the window's one name.
+    assert "`Analysis › Preprocess workspace…` (`Ctrl+Shift+F`)" in manual
+    assert "Signal Conditioning" not in manual

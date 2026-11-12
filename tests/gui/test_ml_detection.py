@@ -489,6 +489,12 @@ REPO_ROOT, MODEL, ABF = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, REPO_ROOT)
 
 import nanoscope  # noqa: F401  bootstrap
+import tempfile
+from PySide6 import QtCore
+# A throwaway preference store, not the real one: create_app() below names the shipped app.
+QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
+QtCore.QSettings.setPath(QtCore.QSettings.IniFormat, QtCore.QSettings.UserScope,
+                         tempfile.mkdtemp(prefix="ml-qsettings-"))
 import numpy as np
 from pathlib import Path
 from nanoscope.gui.app import create_app

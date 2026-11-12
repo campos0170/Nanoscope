@@ -466,7 +466,8 @@ def compute_status(session: "Session", doc_id: str | None, channel: int | None) 
         stage=Stage.FILTER, label=_STAGE_LABELS[Stage.FILTER],
         done=False, available=has_current, optional=True,
         reason=("Optional: pre-filter the current signal (low-pass, notch, detrend, "
-                "baseline) before detection." if has_current else
+                "baseline) before detection. Opens the Preprocess workspace."
+                if has_current else
                 _no_current_reason("filter", no_current_note)),
     )
 

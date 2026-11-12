@@ -179,11 +179,12 @@ _INSPECTOR_DOCK_AREAS = (QtCore.Qt.LeftDockWidgetArea, QtCore.Qt.RightDockWidget
 #: Every child window whose size and place are remembered ("windows/<key>/geometry"),
 #: in Window-menu order.
 _CHILD_WINDOW_KEYS = ("event_inspector", "event_gallery", "analysis_explorer",
-                      "figure_library", "first_analysis_guide", "about",
+                      "figure_library", "first_analysis_guide", "user_guide", "about",
                       "incubation_launcher", "incubation_reference", "manual_study")
 #: Window-menu names for the windows that are not always listed.
 _CHILD_WINDOW_LABELS = {
     "first_analysis_guide": "Guided first analysis",
+    "user_guide": "User guide",
     "about": "About NanoScope",
     "incubation_launcher": "Incubation study",
     "incubation_reference": "Original Zn reference recipe",

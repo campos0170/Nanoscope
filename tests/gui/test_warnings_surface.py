@@ -115,6 +115,19 @@ def _visible_text(root: QtWidgets.QWidget) -> str:
     return "\n".join(out)
 
 
+def _open_advisories(p: AnalysisPanel) -> None:
+    """Read the advisories the way a user reaches their sentences: raise the Summary tab (what
+    the toolbar link does) and press "Show full text" on the block.
+
+    The block shows headlines now and the toolbar link's tooltip does too, so a sweep that never
+    raised the tab finds only first sentences -- and a "not in" assertion over such a sweep
+    passes for the wrong reason: the sentence it names is not on any tab nobody raised."""
+    p.show_result_summary()
+    toggle = p._stats.warnings_toggle
+    if toggle.isVisibleTo(p._stats) and not toggle.isChecked():
+        toggle.click()
+
+
 # ================================================================================================
 # builders
 # ================================================================================================
@@ -250,12 +263,15 @@ def test_an_unprobed_detection_says_so_beside_the_depth_it_qualifies(panel, qtbo
         "upstream must still put the advisory on the result — if this fails the defect "
         "moved, and the GUI half of this file is testing the wrong thing")
 
+    _open_advisories(p)
     text = _visible_text(p)
     for phrase in _ADVISORY_PHRASES:
         assert phrase in text, (
             f"{phrase!r} is nowhere a user can read it. On the owner's -600 mV file the "
             f"un-caveated Summary reads 85.68 pA where the measured window gives 87.59."
         )
+        # On the label itself, not only in a tooltip: once opened, the whole sentence is on screen.
+        assert phrase in p._stats.warnings_shown_text(), phrase
 
 
 def test_the_advisory_is_beside_the_summary_not_buried_in_a_tooltip(panel, qtbot):
@@ -272,6 +288,18 @@ def test_the_advisory_is_beside_the_summary_not_buried_in_a_tooltip(panel, qtbot
     assert "⚠" in shown, (
         "a glyph as well as a colour — a screenshot of an amber label read by someone "
         "else is a screenshot of a plain sentence")
+
+    # What the label shows as it is first drawn is the headline, and the way to the rest is
+    # there beside it: the first sentence carries the first two phrases, the switch the last.
+    on_screen = p._stats.warnings_shown_text()
+    assert on_screen.startswith("⚠"), "the amber heading leads the block"
+    for phrase in _ADVISORY_PHRASES[:2]:
+        assert phrase in on_screen, f"{phrase!r} is not in the headline of the advisory"
+    assert p._stats.warnings_toggle.isVisibleTo(p._stats), (
+        "the rest of the advisory must be one click away, not hidden")
+    p._stats.warnings_toggle.click()
+    for phrase in _ADVISORY_PHRASES:
+        assert phrase in p._stats.warnings_shown_text(), phrase
 
 
 # ================================================================================================
@@ -407,6 +435,7 @@ def test_probing_and_redetecting_the_real_recording_removes_the_advisory(qapp, q
         assert res is not None and len(res.payload.df), "no detection to caveat"
         assert UNPROBED_DEFAULT_WARNING in res.warnings
 
+        _open_advisories(p)
         text = _visible_text(w)
         for phrase in _ADVISORY_PHRASES:
             assert phrase in text, (
@@ -439,6 +468,7 @@ def test_probing_and_redetecting_the_real_recording_removes_the_advisory(qapp, q
             "the confirmed window produced an identical table, so this run cannot show "
             "that the advisory was worth anything")
 
+        _open_advisories(p)
         text2 = _visible_text(w)
         for phrase in _ADVISORY_PHRASES:
             assert phrase not in text2, (

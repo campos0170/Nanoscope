@@ -575,8 +575,9 @@ class _PlotsNotesMixin:
 
         Prefixed with the source label because an overlay draws several, and an
         un-attributed caveat on a two-source plot is a caveat about nothing in
-        particular. Rendered unfiltered, exactly as
-        :meth:`nanoscope.gui.panels.StatsPanel.set_warnings` does: this must not
+        particular. Taken whole and unfiltered, exactly as
+        :meth:`nanoscope.gui.panels.StatsPanel.set_warnings` takes its list (its label
+        shows one headline per item, the full text behind its switch): this must not
         become a place that decides which of a detector's advisories a plot inherits.
         """
         if sources is None:

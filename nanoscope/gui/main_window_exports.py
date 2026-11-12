@@ -395,7 +395,7 @@ class _ExportsMixin:
         return source_of(doc_id), None
 
     def _export_events(self) -> None:
-        """Analysis ▸ Export events… — write the current detection's events to a CSV,
+        """Analysis ▸ Export ▸ Export events… — write the current detection's events to a CSV,
         honouring curation (the accepted/curated-in events). This is the plain
         'save these detections for extraction' path, distinct from the figure export."""
         from ..analysis.events import EventSet
@@ -536,7 +536,7 @@ class _ExportsMixin:
             self._analysis_panel.redraw_overlays()
 
     def _export_levels(self) -> None:
-        """Analysis ▸ Export sub-state levels… — the fitted level table plus its sidecar.
+        """Analysis ▸ Export ▸ Export sub-state levels… — the fitted level table plus its sidecar.
 
         Long layout (one row per event level). The sidecar carries the CUSUM parameters
         for the same reason the events sidecar carries the baseline estimator: those
@@ -868,7 +868,7 @@ class _ExportsMixin:
             return None
 
     def _export_density(self, *, ycol: str | None = None) -> None:
-        """Analysis ▸ Export density figure… — overlaid KDE contours, one per recording.
+        """Analysis ▸ Export ▸ Export density figure… — overlaid KDE contours, one per recording.
 
         ``ycol`` is KEYWORD-ONLY, and that is load-bearing rather than tidiness.
         ``QAction.triggered`` carries a ``checked`` bool, which Qt passes as the first
@@ -1221,7 +1221,7 @@ class _ExportsMixin:
                 figure.clear()
 
     def _export_figures(self) -> None:
-        """Analysis ▸ Export figure… — write the current detection's publication figures
+        """Analysis ▸ Export ▸ Generate Report figures… — write the current detection's publication figures
         (each as PDF + PNG + a source-data CSV) via nanoscope.plot.figures.
 
         The event-statistics figures are data-model-agnostic (they eat the EventSet); the

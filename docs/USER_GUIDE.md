@@ -428,7 +428,9 @@ Read the displayed source and result state before using it.
 
 Choose **Guided first analysis…** from **Help**, **Analysis**, or the Analysis home catalog.
 The guide is modeless: keep it beside the workspace and move between its seven steps while
-using the normal controls.
+using the normal controls. The first time NanoScope runs, when no preferences have been saved
+yet, it opens this guide once by itself, with the **Essential** controls showing (see below);
+it does not open by itself again.
 
 1. **Open a recording.** Select the current channel and identify the active recording.
 2. **Verify acquisition and units.** Check sampling, gain, offset and current units against
@@ -481,12 +483,15 @@ replace or merge any result.
 
 ### Essential and Advanced controls
 
-The Inspector's **Controls** selector changes presentation complexity only. **Advanced** is
-the default when no preference has been saved; choosing **Essential** hides less-frequent
-tools and collapses advanced settings without resetting, disabling or replacing their values.
+The Inspector's **Controls** selector changes presentation complexity only. NanoScope starts
+in **Essential** the first time it runs with no saved preferences, and keeps starting in
+**Essential** until you choose a view; an installation that was already in use before this
+version, and has no saved choice, starts in **Advanced**. Choosing
+**Essential** hides less-frequent tools and collapses advanced settings without resetting,
+disabling or replacing their values.
 Enabled filters and important retained settings are disclosed in the Essential summary.
 Configured or unresolved ML models remain discoverable. Use **Show advanced tools…** or select
-**Advanced** to inspect the complete controls again. **Baseline reference…** remains a direct
+**Advanced** to inspect the complete controls again. **Event reference…** remains a direct
 route to the open-pore reference controls.
 
 Your explicit selector choice is remembered as a UI preference. Guide navigation can switch
@@ -520,16 +525,22 @@ Panels), and **Analysis**, grouped into **Detect** (Run detection, Batch detect,
 **Curate** (Event inspector, Measure event, Add event from cursors, Compare baseline estimators —
 §9a), **Explore this recording** (Distributions, Distribution summaries, Comparison figures,
 Event waveforms, Event gallery, Reconcile detector results, Event labels, Noise spectrum),
-**Compare recordings** (I-V / conductance, Voltage dependence) and **Export** (events, training
-data, figures). **Analysis home** and **Guided first analysis** also have menu entries; the guide
-is available from **Help**. **Window** lists the windows NanoScope opens — the main window,
+**Compare recordings** (I-V / conductance, Voltage dependence) and the **Export** submenu (events, training
+data, figures). **Analysis home** and **Guided first analysis** also have menu entries, here and
+under **Help**. **Window** lists the windows NanoScope opens — the main window,
 Event inspector, Event gallery, Analysis Explorer (with one indented entry per open page), the
-Figure Library compatibility entry that routes to Explorer, Preprocess workspace, and — once opened this session — Guided first analysis, About
+Figure Library compatibility entry that routes to Explorer, Preprocess workspace, and — once opened this session — Guided first analysis, User guide, About
 NanoScope, the Incubation study launcher and the Original Zn reference recipe — with a check mark
 beside each one on screen; choosing one opens it or brings it forward through the same door as its own menu
 item. It also holds **Bring All to Front**, **Dock Event inspector beside the trace** (§9) and
 **Reset Window Layout…**. Child windows reopen where you last left them (size and place,
 remembered between sessions and brought back onto the screen you have now).
+
+**Help** opens this guide in a window of its own: **User guide…** from the beginning, **Keyboard
+shortcuts…** at §13. Both open the same window, which only shows the guide and can stay open beside
+the workspace; its contents list jumps to a section, and a link to a file or page outside the guide
+does not open (it says so). In a copy of NanoScope that does not include the guide, both entries
+are greyed out and say so.
 
 Closed a dock by accident? Reopen it from **View ▸ Panels ▸ File Manager / Inspector / Results**
 (**⇧⌘R** toggles Results), or put everything back with **Window ▸ Reset Window Layout…**, which
@@ -1275,6 +1286,14 @@ Under the Summary table on the **Detection** tab is an amber block headed **"⚠
 numbers"**. It carries every caveat the detection was produced under, and one of them fires on
 almost every real recording: **"The open pore here is NOT CERTIFIED, only chosen."**
 
+The block lists each caveat by its **first sentence** (a very long one is cut short and ends in
+"…"), so a recording that carries several of them stays readable beside the numbers they qualify.
+Press **Show full text** under the block to read every caveat in full (the button then reads **Show
+first lines**); hovering the block shows the full text too. The button appears only when something
+was cut, and it is not a dismiss button: the block stays up. The saved project and every export carry
+the full text either way; only what is on screen is shortened. To copy the caveats in full,
+press **Show full text** first.
+
 The estimator's whole rule is that the open pore is the level the pore is at *most of the time*.
 Nothing in the health block checks that this is physically the open pore. When the trace holds a
 second conductance level for more than **2.5 %** of the recording — which is true of all four
@@ -1346,7 +1365,7 @@ In **Analysis → Detection**, choose **Schmitt** and review **Noise thresholds*
    conservative thresholds extend into neighboring windows and may hide nearby weak events.
 3. **Global** uses one noise estimate for the recording. Older detections restore this policy
    so restoring their settings does not silently change the noise-policy selection.
-4. Set **k_in (enter)** and **k_out (exit)**, then run detection. Review the result advisories,
+4. Set **Start (k_in)** and **End (k_out)**, then run detection. Review the result advisories,
    especially when a recording is too short to estimate local noise reliably.
 5. Enable **View → Show detection thresholds** to inspect the levels used by the stored run.
    Local results have varying threshold tracks. Their exported provenance records the requested
@@ -1400,11 +1419,11 @@ greyed with an honest reason (e.g. a legacy TDMS file has no rate → dwell woul
 | **Schmitt k_out** (exit, in σ) | Level where an event *starts and ends*; must be `< k_in` (hysteresis). | Keep well below k_in (default 2.0). |
 | **CUSUM k** (drift, in σ) | Minimum sustained deviation that can accumulate evidence. | Raise it to ignore shallow noise; lower it to reach shallow events. |
 | **CUSUM h** (threshold, in σ·samples) | Accumulated evidence required to fire; larger values trade sensitivity for delay. The reported onset is the estimated changepoint, not the crossing sample. `h` assumes the samples are independent. A low-pass filter or 1/f noise makes neighbouring samples move together, so evidence builds up on noise alone and CUSUM fires more often than `h` suggests. | Raise it to require more sustained evidence. Every CUSUM run reports its **opposite-direction count** (below), which shows how often noise is firing at these settings when High-pass is off. |
-| **min dwell** | Events shorter than this are dropped. | Raise it to kill brief noise blips. |
-| **max dwell** | Events longer than this are flagged (kept, not accepted). | Set to exclude clogs/wander. |
-| **merge gap** | Events closer than this are merged into one, transitively along a chain. In **milliseconds** (0–1000 ms; `0` = off, and this is the one merge control where 0 really does mean off). A run whose merged span would be mostly open pore is **refused** rather than merged — see *Merging fragmented events* below. | Raise to combine fragmented events. |
+| **Min dwell** | Events shorter than this are dropped. | Raise it to kill brief noise blips. |
+| **Max dwell** | Events longer than this are flagged (kept, not accepted). | Set to exclude clogs/wander. |
+| **Merge gap** | Events closer than this are merged into one, transitively along a chain. In **milliseconds** (0–1000 ms; `0` = off, and this is the one merge control where 0 really does mean off). A run whose merged span would be mostly open pore is **refused** rather than merged — see *Merging fragmented events* below. | Raise to combine fragmented events. |
 | **Low-pass cutoff** | Smooths before detection. For **Schmitt** this removes brief noise crossings. For **CUSUM** it raises the noise firings, because smoothed samples are no longer independent (see **CUSUM h**). | Schmitt: enable / lower to suppress noise crossings. CUSUM: a low-pass does not reduce over-detection; raise `h` or `k`. |
-| **Polarity** | auto / blockade (−1) / enhancement (+1). Beside it, a **measured** line reports what the last detection actually found — *blockade (down): 18 down / 0 up (confidence 1.00, measured)*, or *not yet measured* on a recording nothing has been run on. | Leave on auto; read the measured line before overriding it. A wrong override does not raise an error, it simply detects almost nothing. |
+| **Polarity** | **Override**: auto / blockade (−1) / enhancement (+1). Beside it, a **Found in data** line reports what the last detection actually found — *blockade (down): 18 down / 0 up (confidence 1.00, measured)*, or *not yet measured* on a recording nothing has been run on. | Leave on auto; read the **Found in data** line before overriding it. A wrong override does not raise an error, it simply detects almost nothing. |
 
 After a run the **Summary** shows counts and rates, the event table fills, and events appear as a
 single batched **span overlay** on the current pane.
@@ -1544,7 +1563,7 @@ detection, so you do not have to re-tune thresholds and lose the genuinely short
 - **Window** — the merge window in **milliseconds** (0.01–100 ms, default 0.15 ms). Two events merge
   when `next.start − current.end ≤ window`, transitively along a chain. There is no `0` here: the
   minimum is 0.01 ms, which still stitches fragments that touch exactly. (`0` on the Detection tab's
-  **merge gap** *does* mean off — merging is an optional step inside a detection run; here the button
+  **Merge gap** *does* mean off — merging is an optional step inside a detection run; here the button
   beside the field only ever means merge.)
 - **Merge all** — every run of fragments in the whole detection, in one click, with the before/after
   counts in the status bar. On a large table it runs in the background with a Cancel.
@@ -1568,7 +1587,7 @@ replaces the whole table and takes every accept/reject with it.
 > *"Nothing merged: N run(s) within X ms are mostly open pore between their events…"*, or, alongside
 > a partial merge, *"…N further run(s) were left alone."* Read that as *this window is too wide for
 > this recording*, not as *the merge is broken*. The check applies on `Merge all`, on a region merge,
-> on `Merge with next`, and inside detection's own `merge gap`.
+> on `Merge with next`, and inside detection's own `Merge gap`.
 
 ### Threshold sweep & controls
 
@@ -1727,7 +1746,7 @@ it included. Undo works on the recording on screen, so select each recording and
 and its new table is on screen, with the detector box on that detector, as after a single
 **Detect** there. That holds for a recording that last showed the other detector's table too;
 that table stays in the **Table** selector. A figure that draws one table per recording, such as
-**Analysis ▸ Export density figure…**, therefore reads the batch's tables. The recording on screen
+**Analysis ▸ Export ▸ Export density figure…**, therefore reads the batch's tables. The recording on screen
 follows a single Detect's rule, exceptions included: a **Manual** table you chose stays on screen,
 and so does a Reconciled table built from that detector's table. The batch's table is then in the
 **Table** selector.
@@ -2013,13 +2032,13 @@ over the trace (around the centre otherwise); **+ / −** adjust the working zoo
   keep every note, joined with `; `), and the status line says what was kept, what is now detected,
   and what was left out because the run did not search there. **Edit ▸ Undo** brings
   the previous table back.
-- **Analysis ▸ Copy hand-made events to…** copies the events you drew in the table on screen into
+- **Analysis ▸ Export ▸ Copy hand-made events to…** copies the events you drew in the table on screen into
   another table of this channel, measured the way that table measures; running it twice copies
   nothing twice.
-- **Analysis ▸ Include hand-made events in exports** (on by default) decides whether the events
+- **Analysis ▸ Export ▸ Include hand-made events in exports** (on by default) decides whether the events
   export and the training export carry them; the export's sidecar records how many were left out,
   and the training sidecar's other counts cover only the rows the export kept.
-- **Analysis ▸ Export event statistics…** writes the unstored statistics above for every event of the
+- **Analysis ▸ Export ▸ Export event statistics…** writes the unstored statistics above for every event of the
   table on screen, every table on the channel, or every Manual table in the project, to one CSV with
   a `signal_basis` column naming each table's signal. A table measured before a calibration change or
   on another sample rate is left out and named in the status line; for the table on screen alone the
@@ -2034,7 +2053,7 @@ accept / reject decisions.
 **Old measurements.** Earlier versions saved measurements to a separate list. If a project holds
 any, the Measure tab shows them as **Old measurements (N)**: you can still go to one, remove one and
 **Export CSV…** (the 32-column measurement schema, provenance stamps included), but they are no longer
-added to or edited. **Analysis ▸ Convert old measurements to events…** turns the ones you tick into
+added to or edited. **Analysis ▸ Export ▸ Convert old measurements to events…** turns the ones you tick into
 accepted, reviewed events in this channel's Manual table (their numbers are re-measured as events, so
 they can differ from the measurement's). Converted originals stay in the list and are hidden from the
 Distributions plot source so nothing is counted twice. **Edit ▸ Undo** reaches both lists (§9b).
@@ -2600,7 +2619,7 @@ invalid or duplicate hotkey and will not save it.
 
 ### Export the labelled examples
 
-Choose **Analysis ▸ Export events for training…**, then choose exactly which population to write:
+Choose **Analysis ▸ Export ▸ Export events for training…**, then choose exactly which population to write:
 
 - **Reviewed decisions (recommended)** writes human-reviewed positives **and negatives**. It
   excludes untouched detector candidates and purely automatic rejections, making it the safest
@@ -2809,7 +2828,7 @@ Three behaviors help organize the comparison; none establishes scientific compar
   **Contours** spinbox sets the lines per source. Each source is contoured against its **own** peak
   density, so a rare population keeps its shape beside an abundant one. It needs at least 5 usable
   points per source; anything dropped is disclosed in **Details**, along with each source's bandwidth
-  factor. (**Analysis ▸ Export density figure…** is still the separate publication export — the same
+  factor. (**Analysis ▸ Export ▸ Export density figure…** is still the separate publication export — the same
   view with marginal distributions, written as PNG + PDF + a CSV of the plotted points.)
 - **Event-count heatmap** — any two numeric columns binned into a two-dimensional grid of **event
   counts**, coloured by count, with a colour bar labelled *Event count*. It uses the same binning
@@ -3468,14 +3487,14 @@ panel-label font of the figure composer uses the same named families.
   and font-backed text in PDF, including supported bold/italic faces. Older frozen captures
   retain their original bytes and may contain outlines. Inspect the actual export on the target
   computer; a fallback font can differ from the requested family. The
-  report figures of **Analysis ▸ Generate Report figures…** are Arial too, their PDFs embed TrueType
+  report figures of **Analysis ▸ Export ▸ Generate Report figures…** are Arial too, their PDFs embed TrueType
   (Type 42) fonts, and Greek they write as math text is set in DejaVu Sans (§12).
 
 ### Snapshots and compositions in Figures
 
 Use **Analysis Explorer ▸ Export ▾ ▸ Snapshot to Figures…** to name and freeze the current figure.
 The saved entry is selected under **Figures ▸ Snapshots** and appears in the same Explorer canvas.
-The shared list is the inventory; there is no second Library list to manage. **Analysis ▸ Figure
+The shared list is the inventory; there is no second Library list to manage. **Analysis ▸ Export ▸ Figure
 Library…** and **Snapshot details…** remain routes to the same saved-figure view. Event gallery
 still curates individual events and is a different tool. **Save Project** retains the saved entry's:
 
@@ -4242,7 +4261,7 @@ numerical context and display metadata together; a preceding image export does n
 bundle's frozen native geometry.
 
 
-- **Analysis ▸ Export events…** — the current detection's events to CSV (accepted rows), plus a
+- **Analysis ▸ Export ▸ Export events…** — the current detection's events to CSV (accepted rows), plus a
   `<name>.meta.json` sidecar naming the detector, the preprocessing chain, the **open-pore
   estimator** (`baseline_method`, its windows, and a `baseline_fingerprint`) that produced the
   amplitudes, **and the clock the times are on.** The 20-column analysis schema is frozen; the
@@ -4271,7 +4290,7 @@ bundle's frozen native geometry.
   saved before the column existed, or a recording with no time base — and never 0. An older list,
   restored from a project written before a column existed, is coerced onto the current header on the
   way out rather than exported short.
-- **Analysis ▸ Export events for training…** — the current event table as regions/labels for the
+- **Analysis ▸ Export ▸ Export events for training…** — the current event table as regions/labels for the
   StudentModel notebook or another external trainer: one row per selected event with accepted,
   added, and structured `label_*` columns, plus a provenance sidecar that records the selection and
   makes the preprocessing that produced the regions recoverable. The first dialog offers **Reviewed
@@ -4279,14 +4298,14 @@ bundle's frozen native geometry.
   include untouched rows), and **All raw candidates** (including automatic detector rejects).
   A Reconciled export carries its membership/matching provenance too, and unresolved `|` label
   conflicts raise a warning whose default is Cancel.
-- **Analysis ▸ Export sub-state levels…** — the fitted sub-state levels, one row per event level,
+- **Analysis ▸ Export ▸ Export sub-state levels…** — the fitted sub-state levels, one row per event level,
   plus a provenance sidecar naming the CUSUM parameters. Enabled once a level fit has been run.
-- **Analysis ▸ Export density figure…** — every open recording's detected events as 2-D KDE contours
+- **Analysis ▸ Export ▸ Export density figure…** — every open recording's detected events as 2-D KDE contours
   (dwell vs amplitude) with marginal densities: the comparison figure for several molecules or
   several voltages on one pair of axes. Amplitude can be depth in pA or fractional blockade ΔI/I₀,
   which is gain-independent and therefore comparable across recordings. It is saved the way the
   report figures below are, with the same fonts.
-- **Analysis ▸ Generate Report figures…** — standard figures (matplotlib) for the current analysis, each as
+- **Analysis ▸ Export ▸ Generate Report figures…** — standard figures (matplotlib) for the current analysis, each as
   PDF + PNG with a source-data CSV sidecar. The PDF's text is embedded as TrueType fonts (Type 42), not
   as matplotlib's default Type 3 glyph drawings. Both files set the text in Arial; a character Arial
   does not have (the subscript zero of ΔI/I₀, the superscript minus of s⁻¹) is taken from the next of
@@ -4309,9 +4328,9 @@ bundle's frozen native geometry.
   under the declared rate first. …*), and a table stale on its calibration or open-pore estimator
   is named on the status line rather than exported in silence.
   A saved fit that no longer describes the table is not drawn: that histogram is refit afresh, and
-  the status line says why (§9a). This includes a fit of another quantity (a Plots-window fit of
+  the status line says why (§9a). This includes a fit of another quantity (a Distributions fit of
   `depth_pA` on the dI/I0 histogram), a fit made on another table of the recording, and a
-  Plots-window fit over a typed Fit range: that histogram gets the table's saved whole-column fit,
+  Distributions fit over a typed Fit range: that histogram gets the table's saved whole-column fit,
   or is fitted afresh. A project saved by an earlier version keeps the ranged fit it saved;
   refitting the column replaces it.
 - **Analysis Explorer ▸ Export ▾ ▸ Export current figure…** — the plot that is actually on screen, including
@@ -4442,7 +4461,8 @@ GUI benchmark; retain the exact input files and unverified instrument-scale qual
 | Ctrl+O | Open file |
 | Ctrl+S | Save project |
 | Ctrl+Shift+S | Save project as… |
-| Ctrl+W | Close current document |
+| Ctrl+W | Close current document (Windows: Ctrl+F4) |
+| Ctrl+Q | Quit NanoScope (on Windows: **File ▸ Quit**) |
 | **Ctrl/⌘+Z** | **Undo the last change — to the event table on screen or its Detection / ML / Baseline settings, the measurement list, or the calibration, time base or acquisition bandwidth of the recording on screen (§9b)** |
 | **Ctrl+Shift+Z / ⇧⌘Z** | **Redo it** |
 | Ctrl+D | Run detection |

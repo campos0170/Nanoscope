@@ -241,9 +241,11 @@ def test_a_flooded_stored_list_withholds_rerun_and_names_detect_which_then_runs_
     assert f"{CAP + 1} lines" in why and f"at most {CAP}" in why, why
     assert "press Detect" in why, why
     # 2026-11-11: the chain editor moved into the Preprocess workspace (8661d35), and the
-    # refusal names that route: Filters & drift, Notch stage.
+    # refusal names that route: Filters & drift, Notch stage. It names the window once, by its
+    # one name (it used to say "Signal Conditioning (Preprocess workspace ▸ Filters & drift, ...").
     assert "STORED list" in why, why
-    assert "Preprocess workspace ▸ Filters & drift" in why and "Notch stage" in why, why
+    assert "in the Preprocess workspace (Filters & drift ▸ Notch stage" in why, why
+    assert "Signal Conditioning" not in why, why
     assert det.detect_button.isEnabled(), "the way out must be open while it is named"
     # The programmatic replay says the same sentence.
     with qtbot.waitSignal(panel.runRefused, timeout=1_000) as refused:

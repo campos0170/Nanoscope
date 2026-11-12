@@ -85,6 +85,9 @@ hiddenimports = [
 
 datas = [
     (str(BUILD_RECORD_PATH), "nanoscope"),
+    # The user guide, beside the build record (see the macOS spec): Help > User guide... and
+    # Keyboard shortcuts... read it through importlib.resources.
+    (str(ROOT / "docs" / "USER_GUIDE.md"), "nanoscope"),
     # importlib.metadata.version("nanoscope") stamps the app version onto every detection's
     # provenance; without the dist-info every exported CSV loses its version stamp.
     *copy_metadata("nanoscope"),

@@ -16,6 +16,9 @@ __all__ = ["configure_pyqtgraph", "create_app", "main"]
 #: has seen the window disappear and is waiting on a Dock icon.
 _FINAL_DRAIN_MS = 1500
 
+#: How long the first-run guide waits before it asks again while a modal question is on screen.
+_FIRST_RUN_GUIDE_RETRY_MS = 300
+
 
 def configure_pyqtgraph() -> None:
     """The three settled pyqtgraph options (contract §14). See the contract for why each is fixed:
@@ -218,6 +221,31 @@ def create_app(argv: list[str]) -> QtWidgets.QApplication:
     return app
 
 
+def _open_first_run_guide(window) -> None:
+    """Open the Guided first analysis for a first run, unless a modal question is on screen or the
+    window has been closed.
+
+    The window's ``showEvent`` has already queued the crash-recovery offer, whose modal box spins a
+    nested event loop; the zero timer ``main()`` posts would fire inside it and put the guide over
+    the box. So ask again shortly, until nothing modal is up. The timer belongs to ``window``, so it
+    never reaches a window that has been destroyed. A main window that was only closed is not
+    destroyed (the real one is hidden on close), so the first thing asked, every time, is whether
+    the window is still visible: a closed one gets no guide, and the claim, still pending, gets its
+    guide on the next launch. Only once the guide has opened is the claim made final.
+    """
+    # ``main()`` shows the window before it posts the first call, so one that is not visible here
+    # has been closed since. A stand-in that is not a QWidget has no visibility to ask about.
+    if isinstance(window, QtWidgets.QWidget) and not window.isVisible():
+        return
+    if QtWidgets.QApplication.activeModalWidget() is not None:
+        QtCore.QTimer.singleShot(_FIRST_RUN_GUIDE_RETRY_MS, window, lambda: _open_first_run_guide(window))
+        return
+    from .first_analysis_guide import finish_first_run
+
+    window._open_first_analysis_guide()
+    finish_first_run(QtCore.QSettings())
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point (`nanoscope` / `python -m nanoscope`)."""
     argv = list(sys.argv if argv is None else argv)
@@ -236,13 +264,25 @@ def main(argv: list[str] | None = None) -> int:
 
     # Imported lazily so this module stays importable (for create_app/configure_pyqtgraph) without
     # constructing the whole widget tree, and so app.py never pulls a panel in at import time.
+    from .first_analysis_guide import claim_first_run
     from .main_window import MainWindow
+
+    # A brand-new settings store starts in Essential and gets the Guided first analysis once.
+    # Decided HERE, before the window exists (the Detection panel reads the control level while
+    # it is built) and nowhere else: a bare MainWindow() never reaches this line, so a script,
+    # probe or test that builds one is never a first run. One that calls main() itself must point
+    # QSettings at a throwaway store first, and say whether it is a first run.
+    first_run = claim_first_run(QtCore.QSettings())
 
     # Crash recovery is asked for HERE, the one launch path the packaged app and
     # ``python -m nanoscope`` share. A bare MainWindow() (a script, a probe, a test) has it
     # off, so it can never leave a fake "crashed session" in the user's Recovery folder.
     window = MainWindow(recovery_enabled=True)
     window.show()
+    if first_run:
+        # After the first show, like the recovery offer: a window opened from __init__ can
+        # appear behind the not-yet-mapped main window on macOS.
+        QtCore.QTimer.singleShot(0, window, lambda: _open_first_run_guide(window))
     rc = int(app.exec())
 
     # THE LAST WORD ON QUITTING WHILE A WORKER IS STILL RUNNING.

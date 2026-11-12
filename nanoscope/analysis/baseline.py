@@ -4328,9 +4328,10 @@ class BaselineResult:
         # property then prepends the very same string. Every short or hand-cut segment
         # -- a legal document; `core.segment.MIN_SEGMENT_SAMPLES` is 2 -- therefore
         # handed `AnalysisResult.warnings` the identical ~300-character paragraph twice,
-        # and `panels.StatsPanel.set_warnings` renders the list it is given WHOLE and
-        # unfiltered (its docstring says so, deliberately: it must not know which
-        # warning it is showing). Measured through the live widget: 2 bullets under
+        # and `panels.StatsPanel.set_warnings` takes the list it is given whole and
+        # unfiltered (its label shows one headline per item, the full text behind its
+        # switch; its docstring says why: it must not know which warning it is
+        # showing). Measured through the live widget: 2 bullets under
         # "About these numbers", 1 distinct. The de-duplication belongs HERE, at the one
         # place that assembles the list, and it is order-preserving so the fallback
         # still leads. It is written against the whole list rather than against the

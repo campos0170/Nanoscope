@@ -66,6 +66,19 @@ def _visible_text(root: QtWidgets.QWidget) -> str:
     return "\n".join(out)
 
 
+def _open_advisories(p: AnalysisPanel) -> None:
+    """Read the advisories the way a user reaches their sentences: raise the Summary tab (what
+    the toolbar link does) and press "Show full text" on the block.
+
+    The block shows headlines now and the toolbar link's tooltip does too, so a sweep that never
+    raised the tab finds only first sentences -- and a "not in" assertion over such a sweep
+    passes for the wrong reason: the sentence it names is not on any tab nobody raised."""
+    p.show_result_summary()
+    toggle = p._stats.warnings_toggle
+    if toggle.isVisibleTo(p._stats) and not toggle.isChecked():
+        toggle.click()
+
+
 def _signal(*, rail: float | None, seed: int = 3) -> np.ndarray:
     """A 1000 pA open pore with 40 blockades of 2 ms, optionally clipped at ``rail``."""
     rng = np.random.default_rng(seed)
@@ -139,10 +152,13 @@ def test_a_railed_event_says_saturated_where_the_user_reads_the_depth(panel, qtb
     assert len(df) > 0
     assert df["flag"].astype(str).str.contains("saturated").all(), df["flag"].unique()
 
+    _open_advisories(p)
     text = _visible_text(p)
     assert "saturated" in text, "the flag never reached a widget"
     assert "flat rail" in text and "LOWER BOUNDS" in text, (
         "the depth is 33% low and nothing on screen says it is a floor")
+    # On the label itself, not only in a tooltip: the sentence is on screen once opened.
+    assert "LOWER BOUNDS" in p._stats.warnings_shown_text()
 
 
 def test_an_unrailed_recording_shows_no_new_caveat(panel, qtbot):
@@ -150,6 +166,7 @@ def test_an_unrailed_recording_shows_no_new_caveat(panel, qtbot):
     p = panel(_signal(rail=None), name="clean.dat")
     res = _detect(p, qtbot)
     assert not res.payload.df["flag"].astype(str).str.contains("saturated").any()
+    _open_advisories(p)
     text = _visible_text(p)
     assert "flat rail" not in text
     assert "smoothed the trace before detection" not in text
@@ -165,11 +182,14 @@ def test_enabling_savgol_puts_its_cost_on_screen(panel, qtbot):
     res = _detect(p, qtbot)
     assert res.payload.provenance["savgol_enabled"] is True
 
+    _open_advisories(p)
     text = _visible_text(p)
     assert "smoothed the trace before detection" in text, (
         "a smoother that eats depth left no trace on screen")
     assert "attenuated" in text
     assert "Savitzky-Golay (3 ms window" in text
+    # On the label itself, not only in a tooltip: the sentence is on screen once opened.
+    assert "attenuated" in p._stats.warnings_shown_text()
 
 
 def test_enabling_the_notch_on_a_full_length_recording_adds_no_events_and_no_caveat(
@@ -191,4 +211,5 @@ def test_enabling_the_notch_on_a_full_length_recording_adds_no_events_and_no_cav
         len(on.payload.df), len(off.payload.df))
     early = on.payload.df[on.payload.df["t_start_s"] < 1.0]
     assert len(early) == len(off.payload.df[off.payload.df["t_start_s"] < 1.0])
+    _open_advisories(p_on)
     assert "startup transient" not in _visible_text(p_on)
