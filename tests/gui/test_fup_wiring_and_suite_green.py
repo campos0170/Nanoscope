@@ -607,22 +607,28 @@ def test_main_window_never_formats_a_class_count_of_its_own():
     """
     from nanoscope.gui import main_window as MW
 
-    tree = ast.parse(pathlib.Path(MW.__file__).read_text())
+    # main_window.py AND the main_window_<part>.py mixins its methods are written in: the rule
+    # is about the window, wherever a method of it lives. The subpopulation methods are in
+    # main_window_subpop.py, so the guard names it rather than going blind if it is renamed.
+    main = pathlib.Path(MW.__file__)
+    sources = [main, *sorted(main.parent.glob("main_window_*.py"))]
+    assert "main_window_subpop.py" in {p.name for p in sources}, sources
+    trees = [(p.name, ast.parse(p.read_text())) for p in sources]
 
-    reads_k = [n for n in ast.walk(tree)
+    reads_k = [(name, n.lineno) for name, tree in trees for n in ast.walk(tree)
                if isinstance(n, ast.Attribute) and n.attr == "k"
                and isinstance(n.value, ast.Attribute) and n.value.attr == "fit"]
     assert reads_k == [], (
-        f"main_window.py reads the raw class count again at line(s) "
-        f"{[n.lineno for n in reads_k]}")
+        f"main_window reads the raw class count again at (file, line) {reads_k}")
 
     # An f-string is a JoinedStr; a docstring or comment is not, so this sees only code.
-    guilty = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)
+    guilty = [(name, n.lineno) for name, tree in trees for n in ast.walk(tree)
+              if isinstance(n, ast.JoinedStr)
               for part in n.values
               if isinstance(part, ast.Constant) and isinstance(part.value, str)
               and ("subpopulation(s)" in part.value or "n_PCs=" in part.value)]
     assert guilty == [], (
-        f"main_window.py composes a sentence about the mixture again at line(s) {guilty}")
+        f"main_window composes a sentence about the mixture again at (file, line) {guilty}")
 
 
 # ================================================================================================

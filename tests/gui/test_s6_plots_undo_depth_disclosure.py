@@ -462,16 +462,25 @@ def test_no_code_in_this_window_moves_the_controls_column(qapp, win):
     nobody did, and it is the check that gives the phrase "by itself" a meaning: Qt will
     still move a scroll area on its own account — following focus off a widget that has
     just been disabled, most notably, which is a residual reported alongside this round
-    and not closed by it — but no line of ``plots_panel`` asks for it. Read past the
-    comments, because the comments discuss the deleted call at length and would answer
-    this question with prose.
+    and not closed by it — but no line of ``plots_panel`` asks for it. "This module" and
+    "``plots_panel``" mean the whole window: ``plots_panel.py`` plus the
+    ``plots_constants.py`` and ``plots_*_mixin.py`` files its constants and methods were
+    split into (2026-11-11). All of them are read, or a scroll request added to a moved
+    method would pass unseen. Read past the comments, because the comments discuss the
+    deleted call at length and would answer this question with prose.
     """
-    code = "\n".join(line for line in inspect.getsource(pp).splitlines()
-                      if not line.lstrip().startswith("#"))
-    for banned in ("ensureWidgetVisible", "ensureVisible", "_reveal_history_note",
-                   "_controls_scroll"):
-        hits = [line.strip() for line in code.splitlines() if banned in line]
-        assert hits == [], f"{banned} is back in the code: {hits}"
+    panel = pathlib.Path(inspect.getsourcefile(pp))
+    files = [panel, panel.with_name("plots_constants.py"),
+             *sorted(panel.parent.glob("plots_*_mixin.py"))]
+    assert {"plots_constants.py", "plots_style_mixin.py", "plots_sources_mixin.py",
+            "plots_annotation_mixin.py"} <= {file.name for file in files}, files
+    for file in files:
+        code = "\n".join(line for line in file.read_text(encoding="utf-8").splitlines()
+                          if not line.lstrip().startswith("#"))
+        for banned in ("ensureWidgetVisible", "ensureVisible", "_reveal_history_note",
+                       "_controls_scroll"):
+            hits = [line.strip() for line in code.splitlines() if banned in line]
+            assert hits == [], f"{banned} is back in the code of {file.name}: {hits}"
 
 
 def test_compact_export_section_stays_put_at_the_undo_floor(qapp, win):

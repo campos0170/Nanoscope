@@ -634,9 +634,23 @@ def test_the_report_window_uses_the_shared_map_too():
     assert "add_category_scatter" in imported
 
 
+#: The Plots window's constants (its colours among them) and methods were split out of plots_panel.py
+#: into plots_constants.py and the plots_<part>_mixin.py files; the palette rule is about every one of
+#: them. Read from the directory, so a part added later is covered without anyone having to remember
+#: to list it (test_the_plots_window_files_were_found pins that the glob finds them).
+_PLOTS_PARTS = {p.stem for p in pathlib.Path(CAT.__file__).parent.glob("plots_*_mixin.py")}
+_PLOTS_WINDOW_FILES = sorted({"plots_constants"} | _PLOTS_PARTS)
+
+
+def test_the_plots_window_files_were_found():
+    assert _PLOTS_PARTS, "no plots_*_mixin.py found: the glob is broken, not the code"
+    assert {"plots_fit_mixin", "plots_sources_mixin", "plots_style_mixin"} <= _PLOTS_PARTS, _PLOTS_PARTS
+
+
 @pytest.mark.parametrize("module_name", [
     "nanoscope.gui.subpop_window",
     "nanoscope.gui.plots_panel",
+    *(f"nanoscope.gui.{stem}" for stem in _PLOTS_WINDOW_FILES),
 ])
 def test_neither_caller_hard_codes_a_categorical_palette(module_name):
     """The failure this module exists to prevent, pinned at the source level: a
@@ -927,20 +941,30 @@ def test_every_categorical_swatch_in_the_app_comes_from_the_one_helper():
     import nanoscope.gui.plots_panel as pp
     import nanoscope.gui.subpop_window as sw
 
-    for mod in (pp, sw):
-        tree = ast.parse(pathlib.Path(mod.__file__).read_text())
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if getattr(node.func, "attr", None) != "ScatterPlotItem":
-                continue
-            brushes = [k.value for k in node.keywords if k.arg == "brush"]
-            for b in brushes:
-                spelled = ast.dump(b)
-                assert "category_colour" not in spelled and "_cluster_color" not in spelled, (
-                    f"{mod.__name__} builds a categorical legend swatch by hand; "
-                    f"call categorical.legend_swatch instead")
-        assert "legend_swatch" in pathlib.Path(mod.__file__).read_text(), mod.__name__
+    # The Plots window is plots_panel.py plus the plots_constants.py and plots_*_mixin.py files
+    # its constants and methods were split into (``_legend_clusters`` now lives in one of
+    # them), so the rule is about all of those files.
+    panel_dir = pathlib.Path(pp.__file__).parent
+    files_of = {
+        pp: [pathlib.Path(pp.__file__), panel_dir / "plots_constants.py",
+             *sorted(panel_dir.glob("plots_*_mixin.py"))],
+        sw: [pathlib.Path(sw.__file__)],
+    }
+    for mod, files in files_of.items():
+        for file in files:
+            tree = ast.parse(file.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if getattr(node.func, "attr", None) != "ScatterPlotItem":
+                    continue
+                brushes = [k.value for k in node.keywords if k.arg == "brush"]
+                for b in brushes:
+                    spelled = ast.dump(b)
+                    assert "category_colour" not in spelled and "_cluster_color" not in spelled, (
+                        f"{file.name} builds a categorical legend swatch by hand; "
+                        f"call categorical.legend_swatch instead")
+        assert "legend_swatch" in "".join(file.read_text() for file in files), mod.__name__
 
 
 def test_the_shared_swatch_really_is_the_object_both_callers_get():

@@ -1014,7 +1014,19 @@ _NON_PANEL_GUI_MODULES = {"trace_view", "export_paths", "plot_export", "combos",
                           # in place of four 180-family lists, plus the QFont/CSS helpers
                           # every window draws its text with. It imports only Qt and
                           # plot.figure_fonts, nothing from gui; the guard below proves it.
-                          "font_picker"}
+                          "font_picker",
+                          # 2026-11-11: plots_panel was split. ``plots_constants`` holds the
+                          # names and pure helpers the Plots window and its parts share, and
+                          # each ``plots_*_mixin`` holds one group of PlotsWindow's methods as
+                          # a plain-Python mixin that plots_panel lists before QMainWindow.
+                          # They are the window's own code moved out of its file, not a way
+                          # to reach another page: none defines a widget, none imports
+                          # plots_panel or another part, and ``plots_constants`` is the one
+                          # sibling every part reaches. Each one's measured reach is pinned
+                          # below, and every module in a pin is a widgetless allowlist member.
+                          "plots_constants", "plots_fit_mixin", "plots_annotation_mixin",
+                          "plots_sources_mixin", "plots_style_mixin", "plots_notes_mixin",
+                          "plots_views_mixin"}
 
 
 # These serializers/adapters operate on the explicitly supplied page or saved values.
@@ -1153,6 +1165,19 @@ def test_the_non_panel_allowlist_holds_no_panel():
         # Pin the leaf itself too: it may not acquire a route to another GUI module.
         "plot_workflow": {"widget_transfer"},
         "widget_transfer": set(),
+        # 2026-11-11: the Plots window's split (see the allowlist above). Each reach is the
+        # MEASURED set; the parts reach ``plots_constants`` and never each other or
+        # plots_panel. quantity_axis, once reached from plots_panel's own lazy imports,
+        # is reached from the three parts that now hold those methods.
+        "plots_constants": {"categorical", "combos", "figure_text", "font_picker"},
+        "plots_fit_mixin": {"fit_label", "nonlinear_fit_dialog", "plots_constants"},
+        "plots_annotation_mixin": {"figure_text", "fit_label", "font_picker", "plot_appearance",
+                                   "plot_lasso", "plots_constants"},
+        "plots_sources_mixin": {"plot_interaction", "plots_constants"},
+        "plots_style_mixin": {"figure_text", "font_picker", "plot_appearance", "plots_constants",
+                              "quantity_axis"},
+        "plots_notes_mixin": {"plots_constants", "quantity_axis"},
+        "plots_views_mixin": {"categorical", "plots_constants", "quantity_axis"},
     }
 
     for name in _NON_PANEL_GUI_MODULES:
@@ -1319,7 +1344,7 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
     assert _gui_modules_reached(plots_mod) == {
         "export_paths", "combos", "axes", "categorical", "worker_thread",
         "analysis_catalog", "plot_export", "plot_appearance", "figure_bundle", "plot_lasso",
-        "figure_style_binding", "quantity_axis", "quantity_selectors", "plots_series",
+        "figure_style_binding", "quantity_selectors", "plots_series",
         "nonlinear_fit_dialog", "figure_adapter_plots",
         # 2026-11-02: the reset rule's status sentence for a plot-type, column or fit change.
         "quantity_reset",
@@ -1328,7 +1353,14 @@ def test_the_overlay_windows_import_no_sibling_gui_panel():
         # Features checklist -- all on the allowlist, proven by the guard above.
         "figure_text", "fit_label", "column_checklist",
         # 2026-11-02 (Phase 0, G2): the Font row's picker and the QFont/CSS helpers.
-        "font_picker"}
+        "font_picker",
+        # 2026-11-11: the window's own parts, split out of this file -- the constants leaf
+        # and one plain mixin per group of PlotsWindow's methods (allowlist above, each
+        # one's reach pinned there). ``quantity_axis`` is no longer in this set: its three
+        # lazy imports sat in methods that now live in the style, notes and views parts,
+        # which are where that reach is pinned.
+        "plots_constants", "plots_fit_mixin", "plots_annotation_mixin", "plots_sources_mixin",
+        "plots_style_mixin", "plots_notes_mixin", "plots_views_mixin"}
     # ``plot_export`` is the shared, non-panel seam for staged PNG/SVG/PDF and
     # exact-CSV export; reaching it preserves the no-sibling-panel boundary.
     # ``figure_text`` and ``fit_label`` (2026-11-01): in-figure text editing, and the 1/f

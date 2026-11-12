@@ -32,6 +32,21 @@ SCROLLING = {"ensureWidgetVisible", "scrollContentsBy"}
 # Shift L) are window actions. The extra toggle does not install a global filter.
 SHORTCUT_ALLOWED = {"analysis_toolbar": {"setShortcuts": 1, "setShortcut": 1,
                                          "setShortcutContext": 2}}
+# main_window.py is split into main_window_<part>.py mixins plus main_window_shared.py and
+# main_window_seams.py. They are the main window, so they are page modules too: a shell module that
+# imported a constant from main_window_shared would otherwise reach the window through a name this
+# set does not hold. Read from the directory, so a part added later is covered without anyone having
+# to remember to list it (test_a_shell_module_cannot_import_a_main_window_part pins that it works).
+PAGE_MODULES |= {p.stem for p in GUI.glob("main_window_*.py")}
+# plots_panel.py is split the same way: plots_constants.py (its constants and pure helpers) and the
+# plots_<part>_mixin.py files (its methods). They are the Plots window and hold what a name imported
+# from plots_panel used to resolve to, so a shell module that imported HISTOGRAM from plots_constants,
+# or a whole mixin, would reach the window through a name this set did not hold. Named by the leaf and
+# the mixin pattern, not by ``plots_*``: plots_series.py is a shared helper that was never part of
+# plots_panel.py. Read from the directory, like the main-window half
+# (test_a_shell_module_cannot_import_a_plots_window_part pins that the glob finds them).
+PLOTS_PARTS = {"plots_constants"} | {p.stem for p in GUI.glob("plots_*_mixin.py")}
+PAGE_MODULES |= PLOTS_PARTS
 
 
 def _is_empty_sequence(node: ast.AST) -> bool:
@@ -137,6 +152,30 @@ def test_each_rule_catches_its_violation(snippet, expected):
     assert expected in scan("analysis_inspector", snippet)
 
 
+def test_a_shell_module_cannot_import_a_main_window_part():
+    """The page-module rule must see the files ``main_window.py`` is split into, or the split
+    would have taken the constants and helpers they hold out of the rule's sight."""
+    parts = sorted(p.stem for p in GUI.glob("main_window_*.py"))
+    assert {"main_window_shared", "main_window_seams"} <= set(parts), parts
+    for part in parts:
+        assert f"imports a page module: {part}" in scan("analysis_inspector", f"from .{part} import x\n"), part
+        assert "imports a page module: {'%s'}" % part in scan("analysis_inspector", f"from . import {part}\n"), part
+
+
+def test_a_shell_module_cannot_import_a_plots_window_part():
+    """The page-module rule must see the files ``plots_panel.py`` is split into, or the split
+    would have taken the constants, helpers and methods they hold out of the rule's sight.
+    Each part is refused in every spelling the rule recognises for a page module."""
+    assert {"plots_constants", "plots_fit_mixin", "plots_sources_mixin"} <= PLOTS_PARTS, sorted(PLOTS_PARTS)
+    assert (GUI / "plots_constants.py").is_file()
+    assert "plots_series" not in PAGE_MODULES      # a shared helper that predates the split, not a part
+    for part in sorted(PLOTS_PARTS):
+        assert f"imports a page module: {part}" in scan("analysis_inspector", f"from .{part} import x\n"), part
+        assert "imports a page module: {'%s'}" % part in scan("analysis_inspector", f"from . import {part}\n"), part
+        assert f"imports a page module: nanoscope.gui.{part}" in scan(
+            "analysis_inspector", f"import nanoscope.gui.{part}\n"), part
+
+
 def test_the_allowed_forms_pass():
     ok = ("class InspectorHost:\n  def reveal(self):\n    a.ensureWidgetVisible(f)\n"
           "    a.verticalScrollBar().setValue(1)\n"
@@ -172,6 +211,11 @@ EDITED_BASELINE = {
     "subpop_window": {"eventFilter": 6, "installEventFilter": 3},
     "plots_panel": {}, "widget_transfer": {},
 }
+# plots_panel's constants and methods were split into plots_constants.py and the plots_*_mixin.py
+# files (the Plots window is all of them): none of the moved code named any of the rules' calls, so
+# none may now. The files are read from the directory (PLOTS_PARTS, above), so a part added later is
+# counted without anyone having to remember to list it.
+EDITED_BASELINE.update({part: {} for part in PLOTS_PARTS})
 _NAMES = {"installEventFilter", "eventFilter", "WA_DeleteOnClose", "windowHandle", "itemAt"}
 
 

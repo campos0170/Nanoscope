@@ -1332,13 +1332,20 @@ def test_the_migration_table_is_read_in_exactly_one_place():
     function."""
     import ast
 
-    tree = ast.parse(Path(pp.__file__).read_text(encoding="utf-8"))
+    # The window is plots_panel.py plus the plots_constants.py and plots_*_mixin.py files
+    # its constants and methods were split into. The rule is about ALL of them: a body moved
+    # out of plots_panel.py must not be able to read the table unseen.
+    panel = Path(pp.__file__)
+    files = [panel, panel.with_name("plots_constants.py"),
+             *sorted(panel.parent.glob("plots_*_mixin.py"))]
     readers = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            for inner in ast.walk(node):
-                if isinstance(inner, ast.Name) and inner.id == "_LEGACY_NORMS":
-                    readers.add(node.name)
+    for file in files:
+        tree = ast.parse(file.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Name) and inner.id == "_LEGACY_NORMS":
+                        readers.add(node.name)
     assert readers == {"_canonical_norm"}, (
         f"_LEGACY_NORMS is read in {sorted(readers)}; it is read in one place")
 

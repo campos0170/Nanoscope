@@ -664,3 +664,28 @@ def test_every_explorer_page_and_the_study_editor_bind_the_undo_keys_to_the_whol
     assert len(made) == 1 and ast.unparse(made[0].args[0]) == "self", "the window hands itself as the owner"
     (plots,) = keywords("plots_panel")
     assert plots.get("history") == "False", plots
+
+
+def test_the_plots_window_builds_exactly_one_plot_appearance_widget_across_its_files():
+    """The Plots window is plots_panel.py plus the plots_constants.py and plots_*_mixin.py files its
+    constants and methods were split into. Its ONE ``PlotAppearanceWidget`` call (with
+    ``history=False``: its own Configuration Undo is the history) stays in plots_panel.py, and
+    nothing split out of that file builds another.
+
+    The last lines of the test above pin the call in plots_panel.py; this test adds the parts.
+    They are read from the directory, so a part added later is covered."""
+    import ast
+
+    def keywords(module: str) -> list[dict]:
+        tree = ast.parse((REPO / "nanoscope" / "gui" / f"{module}.py").read_text(encoding="utf-8"))
+        return [{k.arg: ast.unparse(k.value) for k in node.keywords if k.arg}
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", ""))
+                == "PlotAppearanceWidget"]
+
+    (plots,) = keywords("plots_panel")
+    assert plots.get("history") == "False", plots
+    parts = {"plots_constants"} | {p.stem for p in (REPO / "nanoscope" / "gui").glob("plots_*_mixin.py")}
+    assert {"plots_constants", "plots_fit_mixin", "plots_sources_mixin"} <= parts, parts
+    for part in sorted(parts):
+        assert keywords(part) == [], part

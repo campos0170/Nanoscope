@@ -287,8 +287,15 @@ def test_no_figure_writer_reads_the_raw_override_any_more():
     """The invariant, pinned at the source: ``_legend_label`` is the ROW's text (the rename
     affordance) and the resolver's input; nothing that writes onto or beside the figure
     calls it directly."""
-    src = open(pp.__file__, encoding="utf-8").read()
+    import pathlib
+
+    # PlotsWindow's methods live in plots_panel.py and in the plots_*_mixin.py parts it
+    # inherits from: the invariant is about all of them.
+    panel = pathlib.Path(pp.__file__)
+    src = panel.read_text(encoding="utf-8")
     body = src[src.index("class PlotsWindow"):]
+    for part in sorted(panel.parent.glob("plots_*_mixin.py")):
+        body += "\n" + part.read_text(encoding="utf-8")
     callers = [ln.strip() for ln in body.splitlines()
                if "self._legend_label(src)" in ln and "def " not in ln]
     figure_writers = [ln for ln in callers if " fit: " in ln or "lines.append" in ln

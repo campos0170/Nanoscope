@@ -25,13 +25,45 @@ def test_catalog_contains_every_page_and_support_route_with_canonical_names():
     assert all(surface.label == catalog.ANALYSIS_LABELS[mapping[surface.sid]] for surface in SURFACES)
 
 
+def _plots_parts_imported(tree: ast.AST, parts: set[str]) -> list[str]:
+    """The Plots window's files that ``tree`` imports, in any spelling: ``from .x import y``,
+    ``from . import x``, ``from nanoscope.gui import x`` and ``import nanoscope.gui.x``."""
+    named: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            named |= {(node.module or "").split(".")[-1], *(alias.name for alias in node.names)}
+        elif isinstance(node, ast.Import):
+            named |= {alias.name.split(".")[-1] for alias in node.names}
+    return sorted(named & parts)
+
+
 def test_home_metadata_imports_no_analytical_panel_or_recording_code():
     from nanoscope.gui import analysis_home
+    # plots_panel.py is split into plots_constants.py and the plots_<part>_mixin.py files: they are the
+    # Plots window, and neither name says "panel". Named from the directory, so a part added later is
+    # refused without anyone having to remember to list it.
+    plots_parts = {"plots_constants"} | {p.stem for p in Path(catalog.__file__).parent.glob("plots_*_mixin.py")}
+    assert {"plots_constants", "plots_fit_mixin", "plots_sources_mixin"} <= plots_parts, plots_parts
     for module in (catalog, analysis_home):
         tree = ast.parse(Path(module.__file__).read_text())
         imports = [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
         assert all(not name.startswith(("nanoscope.analysis", "analysis.", "core.", "nanoscope.core")) for name in imports)
         assert not any("panel" in name or "main_window" in name for name in imports)
+        assert _plots_parts_imported(tree, plots_parts) == [], module.__name__
+
+
+@pytest.mark.parametrize("source", [
+    "from .plots_constants import HISTOGRAM\n",
+    "from .plots_views_mixin import _PlotsViewsMixin as Views\n",
+    "from . import plots_fit_mixin\n",
+    "from nanoscope.gui import plots_style_mixin\n",
+    "import nanoscope.gui.plots_sources_mixin\n",
+])
+def test_the_plots_part_import_rule_sees_each_spelling(source):
+    parts = {"plots_constants", "plots_fit_mixin", "plots_views_mixin", "plots_style_mixin",
+             "plots_sources_mixin"}
+    assert _plots_parts_imported(ast.parse(source), parts) != [], source
+    assert _plots_parts_imported(ast.parse("from .plots_series import descriptors\n"), parts) == []
 
 
 def test_home_gates_are_read_only_visible_and_rechecked_at_activation(qtbot):

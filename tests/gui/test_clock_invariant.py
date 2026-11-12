@@ -258,6 +258,10 @@ def test_every_module_cross_reference_in_the_clock_surfaces_resolves():
 
     Checked by IMPORTING each referenced module rather than by grepping for the wrong
     name, so a future reference to any other non-existent module fails here too.
+
+    ``main_window.py`` is split into ``main_window_<part>.py`` files (2026-11-11), and a
+    docstring that moved with its method moved out of the file this test names. So it reads
+    ``main_window.py`` and every ``main_window_*.py``: a reference is checked wherever it lives.
     """
     import importlib
     import re
@@ -267,15 +271,19 @@ def test_every_module_cross_reference_in_the_clock_surfaces_resolves():
     import nanoscope.gui.trace_view as tv
     import nanoscope.gui.baseline_panel as bp
 
+    main_files = sorted(pathlib.Path(mw.__file__).parent.glob("main_window_*.py"))
+    assert {"main_window_seams.py", "main_window_surfaces.py"} <= {path.name for path in main_files}, main_files
+    files = [pathlib.Path(module.__file__) for module in (mw, pn, tv, bp)] + main_files
+
     pattern = re.compile(r"(?::mod:`|``)(nanoscope(?:\.[a-z_]+)+)(?:`)")
     bad: list[str] = []
-    for module in (mw, pn, tv, bp):
-        text = pathlib.Path(module.__file__).read_text()
+    for path in files:
+        text = path.read_text()
         for name in sorted(set(pattern.findall(text))):
             try:
                 importlib.import_module(name)
             except ImportError:
-                bad.append(f"{pathlib.Path(module.__file__).name} -> {name}")
+                bad.append(f"{path.name} -> {name}")
     assert not bad, f"dead module cross-references: {bad}"
 
 

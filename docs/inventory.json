@@ -399,7 +399,7 @@
         "kind": "menu-action",
         "group": "Analysis > Export",
         "what_it_does": "Export the selected source detector table as labelled training regions with review metadata and provenance.",
-        "notes": "The default is Reviewed decisions (recommended): human positives and negatives. Accepted candidates and All raw candidates are explicit alternatives. Detector acceptance is not itself human review. Reconciled unresolved rows are excluded from reviewed export until adjudicated. Source: nanoscope/gui/main_window.py, _export_training."
+        "notes": "The default is Reviewed decisions (recommended): human positives and negatives. Accepted candidates and All raw candidates are explicit alternatives. Detector acceptance is not itself human review. Reconciled unresolved rows are excluded from reviewed export until adjudicated. Source: nanoscope/gui/main_window_exports.py, _export_training."
       },
       {
         "label": "Export sub-state levels…",
@@ -427,7 +427,7 @@
         "kind": "menu-action",
         "group": "Analysis > Export",
         "what_it_does": "Generate the standard dwell/depth histograms, dwell-versus-depth scatter and trace preview from the current detection.",
-        "notes": "Writes report figures with source-data sidecars. Does not export the styled Explorer canvas. Use Export current figure… for that, or Save figure bundle… for a frozen image/data/configuration/provenance package. Source: nanoscope/gui/main_window.py, _export_figures."
+        "notes": "Writes report figures with source-data sidecars. Does not export the styled Explorer canvas. Use Export current figure… for that, or Save figure bundle… for a frozen image/data/configuration/provenance package. Source: nanoscope/gui/main_window_exports.py, _export_figures."
       },
       {
         "label": "cursor readout",
@@ -670,7 +670,7 @@
         "group": "\"Export events for training\" dialog (raised by Analysis ▸ Export events for training…)",
         "what_it_does": "Export human-reviewed positive and negative decisions, with unresolved curation conflicts excluded.",
         "from_crosscheck": true,
-        "notes": "Recommended default for supervised-learning data; acceptance by the detector alone is not a reviewed decision. Source: nanoscope/gui/main_window.py, _export_training."
+        "notes": "Recommended default for supervised-learning data; acceptance by the detector alone is not a reviewed decision. Source: nanoscope/gui/main_window_exports.py, _export_training."
       },
       {
         "label": "All raw candidates",
@@ -678,7 +678,7 @@
         "group": "\"Export events for training\" dialog (raised by Analysis ▸ Export events for training…)",
         "what_it_does": "Export all rows with their provenance, including unreviewed detector decisions.",
         "from_crosscheck": true,
-        "notes": "Explicitly broader than the recommended human-reviewed export. Source: nanoscope/gui/main_window.py, _export_training."
+        "notes": "Explicitly broader than the recommended human-reviewed export. Source: nanoscope/gui/main_window_exports.py, _export_training."
       },
       {
         "label": "Close it and its <n> segment(s)",
@@ -4554,7 +4554,7 @@
         "group": "Plot ▸ Scatter",
         "what_it_does": "Numeric column on the horizontal axis.",
         "notes": "Seeded to a dwell-like column when one exists. With an overlay, only columns every ticked source carries are offered.",
-        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
+        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range, defined in plots_style_mixin.py) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
       },
       {
         "label": "Y",
@@ -4562,7 +4562,7 @@
         "group": "Plot ▸ Scatter",
         "what_it_does": "Numeric column on the vertical axis.",
         "notes": "Seeded to an amplitude-like column (amplitude, depth_pA, frac_depth, frac_amplitude, max_dev_pA) when one exists.",
-        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
+        "correction": "Not lists. Four QLineEdits, each with placeholder text \"auto\" and a QDoubleValidator, built by the loop over ((\"xmin\", \"X min\"), (\"xmax\", \"X max\"), (\"ymin\", \"Y min\"), (\"ymax\", \"Y max\")) in the \"Axis range\" group. Pressing Enter/Return in any of them applies the range immediately (returnPressed → _apply_axis_range, defined in plots_style_mixin.py) — that is the only keyboard shortcut anywhere in this file; there is no setShortcut or QKeySequence in plots_panel.py at all. Blank means auto; a pair is only honoured when BOTH ends of that axis are filled, and non-positive bounds are ignored on a log axis."
       },
       {
         "label": "Log x",
@@ -5027,7 +5027,7 @@
         "kind": "control",
         "group": "Analysis Explorer and Distributions workflow",
         "what_it_does": "Outline plotted events for selection on supported Distributions views.",
-        "notes": "Hosted location: the status line beside Mode: Pan/zoom and Reset view. Selection only: no fit, clustering, curation or numerical change. Esc/right-click cancels; the temporary outline is not exported. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plot_lasso.py."
+        "notes": "Hosted location: the status line beside Mode: Pan/zoom and Reset view. Selection only: no fit, clustering, curation or numerical change. Esc/right-click cancels; the temporary outline is not exported. Source: nanoscope/gui/analysis_explorer.py; plots_panel.py; plots_annotation_mixin.py; plot_lasso.py."
       },
       {
         "label": "Export plot data…",
@@ -5524,70 +5524,70 @@
         "kind": "control",
         "group": "Distributions ▸ Format ▸ Legend",
         "what_it_does": "Restore the default legend location.",
-        "notes": "Direct legend dragging is appearance-only and does not reset the data view. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Direct legend dragging is appearance-only and does not reset the data view. Source: nanoscope/gui/plots_panel.py; plots_annotation_mixin.py."
       },
       {
         "label": "Legend font size",
         "kind": "control",
         "group": "Distributions ▸ Format ▸ Legend",
         "what_it_does": "Set legend text size independently.",
-        "notes": "Zero uses auto (body − 3), with the supported minimum; default/body font settings remain separate. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Zero uses auto (body − 3), with the supported minimum; default/body font settings remain separate. Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py; plots_annotation_mixin.py."
       },
       {
         "label": "Legend shows (n = …)",
         "kind": "control",
         "group": "Distributions ▸ Format ▸ Legend",
         "what_it_does": "Show source/group counts in legend entries.",
-        "notes": "A displayed count is the captured plotted subset, not necessarily all acquired events. Source: nanoscope/gui/plots_panel.py."
+        "notes": "A displayed count is the captured plotted subset, not necessarily all acquired events. Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py; plots_annotation_mixin.py."
       },
       {
         "label": "Legend entries",
         "kind": "control",
         "group": "Distributions ▸ Format ▸ Legend",
         "what_it_does": "Include/exclude and edit individual captured legend entries.",
-        "notes": "Does not remove points or change their source identity; full details remain available. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Does not remove points or change their source identity; full details remain available. Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py; plots_annotation_mixin.py."
       },
       {
         "label": "Title size",
         "kind": "control",
         "group": "Distributions ▸ Format ▸ Figure",
         "what_it_does": "Set the title font size.",
-        "notes": "Appearance only; title wording is not a numerical model setting. The title's bold and italic are its Text style… (right-click the title). Source: nanoscope/gui/plots_panel.py."
+        "notes": "Appearance only; title wording is not a numerical model setting. The title's bold and italic are its Text style… (right-click the title). Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py."
       },
       {
         "label": "Axis label size / Tick label size",
         "kind": "control",
         "group": "Distributions ▸ Format ▸ Figure",
         "what_it_does": "Override axis-label and tick-label typography separately.",
-        "notes": "Zero/auto keeps the body-derived rule. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Zero/auto keeps the body-derived rule. Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py."
       },
       {
         "label": "Gridlines",
         "kind": "control",
         "group": "Distributions ▸ Format ▸ Figure",
         "what_it_does": "Toggle the plot grid.",
-        "notes": "Does not change bins, fitted values or axis ranges. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Does not change bins, fitted values or axis ranges. Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py."
       },
       {
         "label": "Confidence band",
         "kind": "control",
         "group": "Distributions ▸ Data & analysis ▸ Fit display",
         "what_it_does": "Show the available 95% pointwise band from bootstrap parameter-vector replicates.",
-        "notes": "Not a simultaneous band. Unavailable if replicates were not retained, fewer than 20 were usable, or the fitted family does not supply them. A saved frozen figure can retain its captured graphical band. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Not a simultaneous band. Unavailable if replicates were not retained, fewer than 20 were usable, or the fitted family does not supply them. A saved frozen figure can retain its captured graphical band. Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py; plots_annotation_mixin.py."
       },
       {
         "label": "Residual strip",
         "kind": "control",
         "group": "Distributions ▸ Data & analysis ▸ Fit display",
         "what_it_does": "Show observed-minus-expected residuals divided by √expected per bin.",
-        "notes": "Explicitly include this panel in Export current figure if required. The residual pattern is a diagnostic, not proof of model validity. Source: nanoscope/gui/plots_panel.py."
+        "notes": "Explicitly include this panel in Export current figure if required. The residual pattern is a diagnostic, not proof of model validity. Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py; plots_annotation_mixin.py."
       },
       {
         "label": "Provenance caption",
         "kind": "control",
         "group": "Distributions ▸ Format ▸ Caption",
         "what_it_does": "Optionally print detector/model/preprocessing provenance on the figure.",
-        "notes": "This is an explicit caption option; scientific warnings/verdicts stay in Details. Bundle metadata retains provenance whether or not it is printed. Source: nanoscope/gui/plots_panel.py."
+        "notes": "This is an explicit caption option; scientific warnings/verdicts stay in Details. Bundle metadata retains provenance whether or not it is printed. Source: nanoscope/gui/plots_panel.py; plots_style_mixin.py; plots_annotation_mixin.py."
       },
       {
         "label": "Undo / Redo",

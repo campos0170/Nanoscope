@@ -364,6 +364,16 @@ def test_the_explorer_and_home_add_no_shortcut_no_event_filter_and_no_page_impor
     assert _calls(home, {"QShortcut", "setShortcut", "installEventFilter", "itemAt"}) == {}
     pages = {"iv_panel", "voltage_dep_panel", "distribution_summary_panel", "comparison_figures_panel",
              "event_plot_panel", "psd_panel", "subpop_window", "plots_panel", "main_window"}
+    # The files main_window.py is split into (main_window_<part>.py, _shared, _seams) are the main
+    # window too, and hold what a name imported from it used to resolve to.
+    pages |= {p.stem for p in gui.glob("main_window_*.py")}
+    assert {"main_window_shared", "main_window_seams"} <= pages, pages
+    # ... and so are the files plots_panel.py is split into (plots_constants.py and the
+    # plots_<part>_mixin.py parts), for the same reason. Not ``plots_series``: a shared helper that
+    # predates the split.
+    pages |= {"plots_constants"} | {p.stem for p in gui.glob("plots_*_mixin.py")}
+    assert {"plots_constants", "plots_fit_mixin", "plots_sources_mixin"} <= pages, pages
+    assert "plots_series" not in pages, pages
     for path in (explorer, home):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.ImportFrom):

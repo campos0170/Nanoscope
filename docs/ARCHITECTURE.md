@@ -26,9 +26,10 @@ them. Everything in `analysis/`/`core/` runs headless in CI.
 
 `core/session.Session` is the **single mutable state hub**. Each GUI panel holds exactly one
 reference — to `Session` — and communicates through its mutators and Qt signals. **No panel imports
-or references another panel**; `main_window.py` is the *only* GUI module allowed to import other
-panels, and it wires them together. This keeps the panel graph a star, not a web, and is enforced by
-a test that walks the `gui/` ASTs.
+or references another panel**; `main_window.py` and the `main_window_<part>.py` mixins it is made of
+(see *The main window and the Plots window: one class in several files*) are the *only* GUI modules
+allowed to import other panels, and they wire them together. This keeps the panel graph a star, not
+a web, and is enforced by a test that walks the `gui/` ASTs.
 
 - **Documents.** `core/document.TraceDocument` is an immutable value: metadata + per-channel
   contiguous **float32** signal arrays. The time axis is **float64** (a float32 time axis is
@@ -89,7 +90,10 @@ a test that walks the `gui/` ASTs.
   **compares**.
   A mutation does not have to announce itself to be captured; announcing it only sharpens the menu
   label, and even the label is derived from the diff (`describe_change`). A forgotten announcement
-  costs a word, never a row. `main_window.py` is the only module that touches it (AST-guarded) — it
+  costs a word, never a row. `main_window.py` is the only module that makes checkpoints (AST-guarded: the
+  guard reads every other `gui/*.py`, the `main_window_*.py` parts included; the parts only clear the
+  recorders and suspend them while a project restores, in `main_window_project.py`, and ask
+  `is_applying()` in `main_window_layout.py`) — it
   is the one object that already receives every announcement of an `EventSet` mutation
   (`resultsChanged`, `eventAcceptanceChanged`, `eventFlagChanged`, the Inspector's `eventEdited` and
   `curationBatchChanged`), all routed to the one recorder. The redundancy there is deliberate and
@@ -257,6 +261,124 @@ a test that walks the `gui/` ASTs.
   manual-measurement table. Each carries its OWN detection provenance (so a per-source fit resolves
   its own `t_min`), its own Okabe-Ito colour and its own calibration fingerprint. `MainWindow` calls
   it; the windows never walk the Session themselves.
+
+## The main window and the Plots window: one class in several files
+
+`gui/main_window.py` (`MainWindow`) and `gui/plots_panel.py` (`PlotsWindow`) were each one class in
+one file, of 17,874 and 16,095 lines. Each is now one class in several files, and the original
+module is 10,015 and 9,218 lines. Methods were cut out of the class and pasted, unchanged, into
+plain-Python mixin classes in sibling modules, which the class lists before `QtWidgets.QMainWindow`
+in its bases; the module-level names the parts share went to a leaf module that the original module
+imports back name by name, so `nanoscope.gui.main_window.X` and `nanoscope.gui.plots_panel.X` still
+resolve for every name that moved. Compared as syntax trees with the two files as they were
+(imports, docstrings and the class header aside), every class-body and module-level statement is
+present, unchanged, exactly once across the new files: nothing was lost and no method changed. What
+changed is where a method is defined: its `__module__` and `__qualname__` name the mixin
+(`_ProjectMixin._open_project`), `inspect.getsource` finds it through the MRO, and the MRO lists the
+mixins.
+
+`MainWindow` has 579 callables (methods, static and class methods, properties): 316 stay in the
+class, 263 are in the seven parts.
+
+- `main_window.py` — `__init__`, the menus and `_wire`; loading, detection and batch detection;
+  selection, hand-made events and segments; the curation hosts and Signal Conditioning; the refusal
+  ledger, merge and level fit; the subpopulation run; the undo journal and the dirty state;
+  `_finalize_restore`; the close guard and teardown; every Qt override; every `@Slot`.
+- `main_window_figures.py` (1,380 lines) — the Analysis Explorer, the figure surfaces and their
+  sources, recipes and saved figures, the Figure Library, figure capture and export.
+- `main_window_exports.py` (1,577) — the level-fit reconciliation; the exports of events,
+  provenance, levels, density, training data and report figures.
+- `main_window_surfaces.py` (1,297) — the surface gates, the analytical workspace, Analysis home
+  and the guided first analysis, the openers of the Plots, Event plots, study, I-V,
+  voltage-dependence and PSD windows.
+- `main_window_subpop.py` (681) — the subpopulation report window, its assignment on the trace and
+  the gallery, the report export.
+- `main_window_project.py` (1,604) — gathering a project, Save, Save As, the write, Open and the
+  restore of each document, the recent-projects menu.
+- `main_window_layout.py` (861) — child windows with remembered geometry, the Window menu, Reset
+  window layout, saved settings, dock widths and corners.
+- `main_window_recovery.py` (475) — crash-recovery autosave: store and scheduler, snapshot
+  hand-off, health line, the offer at start-up, recover and discard.
+- `main_window_shared.py` (387) — the leaf: 51 names (constants, helpers and two classes, `_InfoBar`
+  and `_RecoverySnapshot`). Three of the seven parts import from it (layout, project, recovery).
+- `main_window_seams.py` (32) — call-time forwarders for `ask_export_path`, `locked_project_read`
+  and `_on_screen`.
+
+`PlotsWindow` has 428 callables: 186 stay in the class, 242 are in the six parts.
+
+- `plots_panel.py` — `__init__` and the construction of the widgets, the seven signals and the one
+  `@Slot` (`_on_notes_ready`), `closeEvent` and `style`, the public setters and getters, the five
+  draw methods (`_redraw_current`, `_draw_histogram`, `_draw_scatter`, `_draw_kde`, `_draw_pca`),
+  `save_image` and `export_data`, the Configuration history and the templates; at module level the
+  eleven dataclasses it defines (`PlotConfig` and its sections, `StyleSettings`,
+  `AnalysisIdentity`), `_ConfigHistory` and the JSON codec. A saved analysis workspace records a
+  dataclass as `module:qualname` (`core/analysis_workspace._type_name`), so these stay here and what
+  is written stays `nanoscope.gui.plots_panel:<Name>`.
+- `plots_constants.py` (892 lines) — the leaf: 103 names (column, plot-type, fit, normalisation,
+  colour and unit constants, `FrozenMap`, the text and legend key helpers, the quantity helpers and
+  the small value and pyqtgraph classes the window draws with). All six parts import from it.
+- `plots_fit_mixin.py` (1,942) — the fit overlays, summaries and the jobs behind them, the
+  goodness and rival-family notes, the fit range, the component-count ladder, the Nonlinear fit hook.
+- `plots_annotation_mixin.py` (1,006) — the fit label and the legend, the provenance caption, the
+  confidence band and the residual strip, the detection-floor shading, the message and Details
+  writers, click and lasso selection.
+- `plots_sources_mixin.py` (1,151) — data in (`set_data`), the source catalog, the column pickers,
+  the control-change handlers, the RUN gate and the fit-apply gate, current-frame access.
+- `plots_style_mixin.py` (915) — the Style group's handlers and helpers, axis labels and title, the
+  axis-range boxes.
+- `plots_notes_mixin.py` (805) — the histogram's bin edges and normalisation, the KDE overlay, the
+  notes about the columns and sources drawn.
+- `plots_views_mixin.py` (651) — the heatmap, the clustering and PCA runs, and the numbers behind
+  the picture (series labels, the plot data table, PCA loadings).
+
+The rules hold for both windows, and `tests/gui/test_main_window_parts.py` and
+`tests/gui/test_plots_window_parts.py` guard them.
+
+- **No `@Slot` leaves the class.** A `@Slot` in a mixin registers on the window's meta-object, but
+  `signal.connect(self.<slot>)` then goes through PySide's global receiver, which Qt does not remove
+  when the window's C++ object is deleted: with `_on_application_state_changed` in a mixin, a
+  deleted `MainWindow` was still a receiver of `QGuiApplication.applicationStateChanged`. Two rules
+  hold it: no part has a decorated slot, and every slot on the window's meta-object has its function
+  in the class itself (that one does not depend on how `Slot` is spelled).
+- **A part is a plain class**: one `*Mixin`, no base, no `__init__`, no `super()`, no `Signal`, no
+  member named like a `QMainWindow` member (a Qt override a mixin cannot supply, or a Qt method it
+  would shadow), and no name that another of the window's classes also defines. It is not
+  stateless: three of the main mixins hold ten class-level constants (`_ExportsMixin` 3,
+  `_SubpopMixin` 6, `_ProjectMixin` 1) and two of the plots mixins hold ten (`_PlotsFitMixin` 8,
+  `_PlotsAnnotationMixin` 2); they moved with the methods that read them.
+- **Imports.** A main part never imports `main_window` or another part at module scope, and holds
+  neither them nor `MainWindow` nor another part's mixin as a module-level name; a plots part never
+  imports `plots_panel` or another part, in any spelling or at any depth. A main part may import
+  `main_window_shared` and `main_window_seams`, a plots part `plots_constants`; the leaves import
+  none of the window's modules.
+- **The names tests patch.** Tests patch `ask_export_path`, `locked_project_read` and `_on_screen`
+  on `nanoscope.gui.main_window`: a main part that calls one by its bare name imports the forwarder
+  of that name from `main_window_seams`, which looks it up on `main_window` when it is called, and
+  `main_window.py` keeps all three. The names tests patch on `plots_panel` (`confirm_large_svg`,
+  `ask_export_path`, `choose_live_plot_export`, `ImageExporter`, `kde_curve`, `PLOT_CONFIG_VERSION`,
+  `_LEGACY_NORMS`, `write_live_plot_image`) are read only in `plots_panel.py`. A part that read its
+  own copy would silently stop being reached by the patch.
+- **One object, not two.** Every name a leaf defines is the same object on the original module (51
+  on `main_window`, 103 on `plots_panel`); nothing rebinds one afterwards.
+- **Order.** Every part file is a base of its window, ahead of `QMainWindow`.
+- **History.** Checkpoints are made only in `main_window.py` (see *State model*, Undo).
+  `_finalize_restore` makes one, so it stays there; `main_window_project.py` clears the recorders
+  and suspends them while a project restores.
+- **The shell guards.** The shell modules, the Explorer, Analysis home and the analysis catalog may
+  import no page module. Every `main_window_*` file, `plots_constants` and every `plots_*_mixin`
+  file is a page module for them (`plots_series`, a shared helper that predates the split, is not):
+  `test_p1_guards.py`, `test_p1_shell.py`, `test_analysis_home.py`. `test_measure_navigation.py`
+  pins what each plots part may reach: the leaf and widgetless helpers, no panel.
+- **Source-reading guards read the parts as well as the original module.** For `MainWindow`:
+  `test_fup_wiring_and_suite_green.py`, `test_clock_invariant.py` and, for the history,
+  `test_undo_events.py` (every `gui/*.py` but `main_window.py`). For `PlotsWindow`:
+  `test_plots_undo_templates_json.py`, `test_s7_fixup_plots_panel.py`, `test_subpop_views.py`,
+  `test_p1_guards.py`, `test_p0_final_seams.py`, `test_shared_invariants.py` and
+  `test_s6_plots_undo_depth_disclosure.py`. A few tests read text that must stay in
+  `main_window.py`: the connections of four `EventSet` mutation signals to a checkpoint
+  (`test_undo_events.py`), `_run_subpopulations` through `_on_subpop_finished`
+  (`test_subpop_gui.py`), and `_on_analysis_failed`, whose modal the guard records by file name
+  (`test_modal_guard.py`).
 
 ## The reader door — `io/contract.py`
 
@@ -665,8 +787,8 @@ Preserved deliberately; changing them silently corrupts the science:
 `core/project.py` is the **pure (de)serializer** for a `.nanoscope` file: no Qt, no `Session`. It
 moves a plain `ProjectState` — documents-as-references, segments, calibrations, layers, view mode,
 per-result event tables + provenance + params, manual measurements — to and from one self-contained
-file, so the GUI restore code in `main_window` stays a thin translator between `Session` and a
-dataclass. That split is what makes the format testable headless, and `tests/core/test_project.py`,
+file, so the GUI restore code in `main_window_project.py` (finished by `MainWindow._finalize_restore`)
+stays a thin translator between `Session` and a dataclass. That split is what makes the format testable headless, and `tests/core/test_project.py`,
 `test_project_segments.py` and `tests/gui/test_adversarial_project_io.py` all lean on it.
 
 **The file is a ZIP** holding `manifest.json` (everything except the bulk tables),

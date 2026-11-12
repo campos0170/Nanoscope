@@ -113,17 +113,25 @@ def test_no_setter_in_these_windows_reaches_setCurrentText_directly(qapp):
     ``gui/combos.py``, which is not scanned here.
     """
     offenders: list[str] = []
-    for label, mod in (("plots_panel", plots_mod), ("psd_panel", psd_mod),
-                       ("voltage_dep_panel", vdep_mod)):
-        tree = ast.parse(Path(mod.__file__).read_text())
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("set_"):
-                continue
-            for call in ast.walk(node):
-                if (isinstance(call, ast.Call)
-                        and isinstance(call.func, ast.Attribute)
-                        and call.func.attr == "setCurrentText"):
-                    offenders.append(f"{label}.{node.name}")
+    # The Plots window is plots_panel.py plus the plots_constants.py and plots_*_mixin.py files
+    # its constants and methods were split into (2026-11-11). Three of its ``set_*`` functions
+    # live in plots_sources_mixin.py, and a setter added to any part is this window's setter,
+    # so the rule reads all of those files.
+    plots_file = Path(plots_mod.__file__)
+    plots_files = [plots_file, plots_file.with_name("plots_constants.py"),
+                   *sorted(plots_file.parent.glob("plots_*_mixin.py"))]
+    assert {"plots_constants.py", "plots_sources_mixin.py"} <= {f.name for f in plots_files}, plots_files
+    for files in (plots_files, [Path(psd_mod.__file__)], [Path(vdep_mod.__file__)]):
+        for file in files:
+            tree = ast.parse(file.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef) or not node.name.startswith("set_"):
+                    continue
+                for call in ast.walk(node):
+                    if (isinstance(call, ast.Call)
+                            and isinstance(call.func, ast.Attribute)
+                            and call.func.attr == "setCurrentText"):
+                        offenders.append(f"{file.stem}.{node.name}")
     assert offenders == [], offenders
 
 

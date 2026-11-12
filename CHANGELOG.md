@@ -227,6 +227,23 @@ tags identify tested development baselines and do not promise a stable file or A
 
 ### Changed
 
+- **Internal: `gui/main_window.py` and `gui/plots_panel.py` are each split over several files.
+  Nothing a user sees, and nothing a saved project holds, changed.** `main_window.py` went from
+  17,874 to 10,015 lines: seven `main_window_<part>.py` mixin modules (7,875 lines: figures,
+  exports, analysis surfaces, the subpopulation report, project save/open/restore, window layout,
+  crash recovery) hold 263 of `MainWindow`'s 579 methods, `main_window_shared.py` holds 51
+  constants and helpers, and `main_window_seams.py` keeps three test-patched names reachable.
+  `plots_panel.py` went from 16,095 to 9,218 lines: six `plots_<part>_mixin.py` modules (6,470
+  lines: fit, annotation, sources, style, notes, views) hold 242 of `PlotsWindow`'s 428 methods
+  and `plots_constants.py` holds 103 constants and helpers. Methods were cut and pasted by a
+  tool, byte for byte. Checked before and after under PySide6 6.11.1 and 6.9.3: every name on
+  the two classes, the source of every method, the signals and slots, the names reachable on
+  the two modules, and every Qt signal connection of a built window (and what survives deleting
+  it). Every `@Slot`, every Qt override and `_finalize_restore` stay in `main_window.py`; the
+  saved-figure types, their JSON codec and the five draw methods stay in `plots_panel.py`. New
+  structure tests (`tests/gui/test_main_window_parts.py`, `test_plots_window_parts.py`) hold the
+  rules the split depends on, and the source-reading guards read the parts as well.
+  `docs/ARCHITECTURE.md` describes where the code lives.
 - **Run buttons show the edits they have not run, and Ctrl/⌘+Return runs the panel you are in.**
   Two rules now read the same everywhere: settings take effect on the panel's run button (Apply,
   Detect, Update plot), and curation (accept, reject, labels) is immediate and undoable.
